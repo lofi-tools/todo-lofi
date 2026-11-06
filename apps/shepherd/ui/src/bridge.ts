@@ -890,12 +890,36 @@ export function archiveReviewed(taskIds: string[]): Promise<void> {
   return invoke('archive_reviewed', { taskIds })
 }
 
-export function notificationsEnabled(): Promise<boolean> {
-  return invoke('notifications_enabled')
+export interface SettingsValues {
+  'tasks.show_archived': boolean
+  'appearance.send_accent': 'Blue' | 'Violet' | 'Teal' | 'Amber' | 'Neutral'
+  'notifications.enabled': boolean
+  'attachments.max_file_bytes': number
+  'terminal.scrollback_lines': number
 }
 
-export function setNotificationsEnabled(enabled: boolean): Promise<void> {
-  return invoke('set_notifications_enabled', { enabled })
+export type SettingKey = keyof SettingsValues
+
+export interface SettingsSnapshot {
+  app: Partial<SettingsValues>
+  projects: Record<string, Partial<SettingsValues>>
+  defaults: SettingsValues
+  warning: string | null
+}
+
+export interface SettingsEdit {
+  projectId: string | null
+  key: SettingKey
+  previous: SettingsValues[SettingKey] | null
+  value: SettingsValues[SettingKey] | null
+}
+
+export function reloadSettings(): Promise<SettingsSnapshot> {
+  return invoke('reload_settings')
+}
+
+export function setSetting(edit: SettingsEdit): Promise<SettingsSnapshot> {
+  return invoke('set_setting', { edit })
 }
 
 export function notifyTaskNeedsInput(taskId: string): Promise<void> {

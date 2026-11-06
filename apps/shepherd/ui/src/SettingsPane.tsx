@@ -1,6 +1,6 @@
 import { For, Show, createEffect, createResource, createSignal, on, type JSX } from 'solid-js'
 
-import { AGENT_LABELS, projectApprovals, resetApprovalGrant, type CommandBinding, type CommandRegistry, type KeybindingEdit, type ProjectApproval, type ProjectSnapshot, type SessionApproval } from './bridge'
+import { AGENT_LABELS, projectApprovals, resetApprovalGrant, type CommandBinding, type CommandRegistry, type KeybindingEdit, type ProjectApproval, type ProjectSnapshot, type SessionApproval, type SettingsSnapshot, type SettingsEdit, type SettingKey } from './bridge'
 import { displayChord, normalizeChord } from './keybindings'
 
 const categories = ['Workspace', 'Projects', 'Appearance', 'Keyboard shortcuts'] as const
@@ -9,6 +9,14 @@ export const SEND_ACCENTS = ['Blue', 'Violet', 'Teal', 'Amber', 'Neutral'] as co
 export type SendAccent = (typeof SEND_ACCENTS)[number]
 
 interface SettingsPaneProps {
+  preferences?: SettingsSnapshot
+  preferencesEditable: boolean
+  preferenceBusy: boolean
+  onEditPreference: (key: SettingKey, value: SettingsEdit['value'], projectId?: string | null) => Promise<void>
+  onReloadPreferences: () => void
+  settingsConflicts: Omit<SettingsEdit, 'previous'>[]
+  onRetryPreference: (edit: Omit<SettingsEdit, 'previous'>) => void
+  onDiscardConflict: (edit: Omit<SettingsEdit, 'previous'>) => void
   keybindings?: CommandRegistry
   mac: boolean
   onReloadKeybindings: () => Promise<CommandRegistry>
@@ -16,10 +24,9 @@ interface SettingsPaneProps {
   showArchived: boolean
   onShowArchived: (value: boolean) => void
   notificationsEnabled: boolean
-  savingNotifications: boolean
   onNotificationsEnabled: (enabled: boolean) => void
   sendAccent: SendAccent
-  onSendAccent: (accent: SendAccent) => void
+  onSendAccent: (accent: SendAccent) => Promise<void>
   onAddProject: () => void
   pending: boolean
   projectImports: JSX.Element
@@ -27,7 +34,7 @@ interface SettingsPaneProps {
   projectSettingsRequest?: { id: string }
   approvalChange?: { projectId: string }
   showProjectArchived: boolean
-  onShowProjectArchived: (projectId: string, visible: boolean) => void
+  onShowProjectArchived: (projectId: string, visible: boolean | null) => void
   onSavePreviewUrl: (projectId: string, url: string) => Promise<void>
 }
 
@@ -163,6 +170,84 @@ function ProjectApprovals(props: { projectId: string; change?: { projectId: stri
 function settingsError(error: unknown): string {
   if (typeof error === 'object' && error !== null && 'message' in error) return String(error.message)
   return String(error)
+}
+
+function NumberPreference(props: {
+  label: string
+  value: number
+  inherited: number
+  overridden: boolean
+  project: boolean
+  minimum: number
+  maximum: number
+  editable: boolean
+  onSave: (value: number | null) => Promise<void>
+}) {
+  const [draft, setDraft] = createSignal(String(props.value))
+  const [error, setError] = createSignal('')
+  createEffect(on(() => props.value, (value, previous) => {
+    if (previous === undefined || draft() === String(previous)) setDraft(String(value))
+    if (draft() === String(value)) setError('')
+  }))
+  const number = () => draft().trim() ? Number(draft()) : NaN
+  const valid = () => Number.isSafeInteger(number()) && number() >= props.minimum && number() <= props.maximum
+
+  async function save(value: number | null) {
+    setError('')
+    try {
+      await props.onSave(value)
+      setDraft(String(props.value))
+    } catch (failure) {
+      setError(settingsError(failure))
+    }
+  }
+
+  return (
+    <form class="settings__project" onSubmit={(event) => {
+      event.preventDefault()
+      if (props.editable && valid()) void save(number())
+    }}>
+      <label class="settings__preview-url">
+        {props.label}
+        <input type="number" min={props.minimum} max={props.maximum} step="1" value={draft()}
+          disabled={!props.editable} onInput={(event) => setDraft(event.currentTarget.value)} />
+      </label>
+      <p class="empty">{props.project ? 'Workspace value' : 'Built-in default'} {props.inherited}</p>
+      <div class="settings__shortcut-row">
+        <button type="submit" class="project-action"
+          disabled={!props.editable || !valid() || number() === props.value}>Save {props.label.toLowerCase()}</button>
+        <Show when={props.overridden}>
+          <button type="button" class="project-action" disabled={!props.editable}
+            onClick={() => void save(null)}>Reset {props.label.toLowerCase()}</button>
+        </Show>
+      </div>
+      <Show when={error()}>{(message) => <p class="entry__notice--error" role="alert">{message()}</p>}</Show>
+    </form>
+  )
+}
+
+const numberPreferences = [
+  { key: 'attachments.max_file_bytes', label: 'Attachment limit (bytes)', minimum: 1, maximum: Number.MAX_SAFE_INTEGER },
+  { key: 'terminal.scrollback_lines', label: 'Terminal scrollback (lines)', minimum: 0, maximum: 100_000 },
+] as const
+
+function NumberPreferences(props: {
+  preferences: SettingsSnapshot
+  project?: ProjectSnapshot
+  editable: boolean
+  onEdit: SettingsPaneProps['onEditPreference']
+}) {
+  return (
+    <For each={numberPreferences}>
+      {({ key, label, minimum, maximum }) => {
+        const scope = () => props.project ? props.preferences.projects[props.project.path] : props.preferences.app
+        const inherited = () => (props.project ? props.preferences.app[key] : undefined) ?? props.preferences.defaults[key]
+        return <NumberPreference label={label} minimum={minimum} maximum={maximum} editable={props.editable}
+          value={scope()?.[key] ?? inherited()} inherited={inherited()} overridden={scope()?.[key] !== undefined}
+          project={!!props.project} onSave={(value) => props.onEdit(key, value, props.project?.id)} />
+      }}
+    </For>
+  )
 }
 
 function KeyboardShortcuts(props: {
@@ -336,17 +421,35 @@ export function SettingsPane(props: SettingsPaneProps) {
         </nav>
         <section class="settings__category" aria-labelledby="settings-category-title">
           <h3 id="settings-category-title">{category()}</h3>
+          <Show when={props.settingsConflicts.length}>
+            <div class="settings__project">
+              <p class="empty">Reload configuration to review the changed value, then retry or discard your edit.</p>
+              <button type="button" class="project-action" disabled={props.preferenceBusy} onClick={props.onReloadPreferences}>Reload settings</button>
+              <For each={props.settingsConflicts}>{(edit) => (
+              <div class="settings__shortcut-row">
+                <span class="empty">{edit.key}</span>
+                <button type="button" class="project-action" disabled={!props.preferencesEditable} onClick={() => props.onRetryPreference(edit)}>Retry setting change</button>
+                <button type="button" class="project-action" disabled={props.preferenceBusy} onClick={() => props.onDiscardConflict(edit)}>Discard setting change</button>
+              </div>
+              )}</For>
+            </div>
+          </Show>
           <Show when={category() === 'Workspace'}>
             <label>
               <input
                 type="checkbox"
                 checked={props.showArchived}
-                onChange={(event) => props.onShowArchived(event.currentTarget.checked)}
+                disabled={!props.preferencesEditable}
+                onChange={(event) => {
+                  const visible = event.currentTarget.checked
+                  event.currentTarget.checked = props.showArchived
+                  props.onShowArchived(visible)
+                }}
               />
               Show archived tasks
             </label>
             <label>
-              <input type="checkbox" checked={props.notificationsEnabled} disabled={props.savingNotifications}
+              <input type="checkbox" checked={props.notificationsEnabled} disabled={!props.preferencesEditable}
                 onChange={(event) => {
                   const enabled = event.currentTarget.checked
                   event.currentTarget.checked = props.notificationsEnabled
@@ -354,6 +457,12 @@ export function SettingsPane(props: SettingsPaneProps) {
                 }} />
               Notify when tasks need input
             </label>
+            <Show when={props.preferences}>
+              {(snapshot) => <NumberPreferences preferences={snapshot()} editable={props.preferencesEditable} onEdit={props.onEditPreference} />}
+            </Show>
+            <Show when={!props.settingsConflicts.length}>
+              <button type="button" class="project-action" disabled={props.preferenceBusy} onClick={props.onReloadPreferences}>Reload settings</button>
+            </Show>
           </Show>
           <Show when={category() === 'Projects'}>
             <Show when={props.project}>
@@ -366,13 +475,26 @@ export function SettingsPane(props: SettingsPaneProps) {
                     <input
                       type="checkbox"
                       checked={props.showProjectArchived}
-                      onChange={(event) => props.onShowProjectArchived(project().id, event.currentTarget.checked)}
+                      disabled={!props.preferencesEditable}
+                      onChange={(event) => {
+                        const visible = event.currentTarget.checked
+                        event.currentTarget.checked = props.showProjectArchived
+                        props.onShowProjectArchived(project().id, visible)
+                      }}
                     />
                     Show archived tasks
                   </label>
+                  <Show when={props.preferences?.projects[project().path]?.['tasks.show_archived'] !== undefined}>
+                    <button type="button" class="project-action" disabled={!props.preferencesEditable}
+                      onClick={() => props.onShowProjectArchived(project().id, null)}>Use workspace archive visibility</button>
+                  </Show>
                   <Show when={project().id} keyed>
                     {(projectId) => <>
                       <ProjectPreviewSetting url={project().previewUrl} onSave={(url) => props.onSavePreviewUrl(projectId, url)} />
+                      <Show when={props.preferences}>
+                        {(snapshot) => <NumberPreferences preferences={snapshot()} project={project()}
+                          editable={props.preferencesEditable} onEdit={props.onEditPreference} />}
+                      </Show>
                       <ProjectApprovals projectId={projectId} change={props.approvalChange} />
                     </>}
                   </Show>
@@ -396,7 +518,14 @@ export function SettingsPane(props: SettingsPaneProps) {
                     aria-label={accent}
                     title={accent}
                     checked={props.sendAccent === accent}
-                    onChange={() => props.onSendAccent(accent)}
+                    disabled={!props.preferencesEditable}
+                    onChange={(event) => {
+                      const group = event.currentTarget.closest('fieldset')
+                      void props.onSendAccent(accent).then(() => {
+                        const saved = group?.querySelector<HTMLInputElement>(`input[data-send-accent="${props.sendAccent}"]`)
+                        if (saved) saved.checked = true
+                      })
+                    }}
                   />
                 )}
               </For>

@@ -118,6 +118,11 @@ current layout and give future changes a point of comparison.
   option. Enabling it allows system notifications for new waits outside the
   focused task workspace. Review changes only affect the in-app indicators
   and Dock count.
+- **Settings → Workspace** edits the default attachment limit and terminal
+  scrollback. **Settings → Projects** shows the workspace values and lets
+  the selected project override them. Reset removes the project override.
+  **Reload settings** reads the settings file and lets users review pending
+  changes if a value changed on disk.
 - **Settings → Keyboard shortcuts** shows the current binding for each
   command. **Edit** focuses a recorder, **Save shortcut** applies the chord
   immediately, and **Reset** restores the default. Escape cancels recording

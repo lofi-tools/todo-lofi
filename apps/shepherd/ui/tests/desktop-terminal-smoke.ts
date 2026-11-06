@@ -1087,6 +1087,13 @@ async function smoke() {
   recorder.dispatchEvent(new KeyboardEvent('keydown', { key: 'F9', bubbles: true, cancelable: true }))
   ;(await enabledButton('Save shortcut')).click()
   await waitFor('updated command binding', () => button('Command palette')?.getAttribute('aria-keyshortcuts') === 'F9')
+  ;(await enabledButton('Projects')).click()
+  const limit = await waitFor('project attachment limit', () =>
+    document.querySelector<HTMLInputElement>('.settings input[type="number"]:enabled'))
+  limit.value = '20000'
+  limit.dispatchEvent(new InputEvent('input', { bubbles: true }))
+  ;(await enabledButton('Save attachment limit (bytes)')).click()
+  await waitFor('updated project attachment limit', async () => (await bridge.attachmentLimit(project.id)).bytes === 20_000)
   ;(await enabledButton('Settings')).click()
   const { terminals: [terminal] } = await bridge.terminalList(project.id)
   if (!terminal) throw new Error('The fixture terminal was not started')
@@ -1130,7 +1137,7 @@ async function smoke() {
   await openInspectorTab('git')
   await requestQuitWithLiveTask(3)
   return { ok: true, quitWarning: true, taskSwitch: true, projectSwitch: true, roundTrip: true,
-    splitReattach: true, commandPalette: true, savedKeybinding: true,
+    splitReattach: true, commandPalette: true, savedKeybinding: true, savedProjectSettings: true,
     fishKeyBindings: __SHEPHERD_SMOKE_FISH__, bracketedPaste: true, ...windowResults }
 }
 
@@ -1139,6 +1146,9 @@ async function restore() {
   const { projects } = await bridge.projectList()
   const project = projects.find((entry) => entry.path === __SHEPHERD_SMOKE_PROJECT__)
   if (!project) throw new Error('The fixture project was not restored')
+  if ((await bridge.attachmentLimit(project.id)).bytes !== 20_000) {
+    throw new Error('The project attachment limit was not restored')
+  }
   const terminals = (await bridge.terminalList(project.id)).terminals.filter((entry) => entry.scope === 'project')
   const [first] = terminals
   if (!first || terminals.length !== 2 || terminals.some((entry) => entry.endedAt === null)) {

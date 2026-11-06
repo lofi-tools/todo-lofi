@@ -43,6 +43,7 @@ use crate::codex_harness::codex_spawn_spec;
 use crate::file_actions::{self, FileAction};
 use crate::file_watch::{FileWatchUpdate, WorkspaceWatch};
 use crate::pty_terminal::PtyTerminals;
+use crate::settings::{DEFAULT_ATTACHMENT_BYTES, DEFAULT_SCROLLBACK, SettingKey, Settings};
 use crate::terminal_screen::{Screen, SearchDirection, TerminalFrame};
 
 #[derive(Debug, thiserror::Error, Serialize)]
@@ -233,7 +234,11 @@ struct RecordedTerminal {
 }
 
 impl TerminalHost {
-    async fn prepare(&self, spec: TerminalSpec) -> Result<PreparedTerminal, BridgeError> {
+    async fn prepare(
+        &self,
+        spec: TerminalSpec,
+        scrollback: usize,
+    ) -> Result<PreparedTerminal, BridgeError> {
         let (columns, rows) = (spec.columns, spec.rows);
         let (events, output) = mpsc::channel(32);
         let mut screens = self.screens.lock().await;
@@ -243,7 +248,7 @@ impl TerminalHost {
             .await
             .spawn(spec, events)
             .map_err(|error| BridgeError::new("terminal", error.to_string()))?;
-        let screen = Screen::new(usize::from(columns), usize::from(rows));
+        let screen = Screen::with_scrollback(usize::from(columns), usize::from(rows), scrollback);
         let (frames, _) = watch::channel(Arc::new(screen.frame()));
         let slot = Arc::new(Mutex::new(ScreenSlot {
             revision: 0,
@@ -394,15 +399,18 @@ impl TerminalBackend for TerminalHost {
         events: mpsc::Sender<TerminalProcessEvent>,
     ) -> Result<(), String> {
         let terminal = self
-            .prepare(TerminalSpec {
-                id: TerminalId::new(launch.id),
-                columns: 80,
-                rows: 24,
-                cwd: launch.cwd,
-                command: launch.command,
-                args: launch.args,
-                environment: launch.environment,
-            })
+            .prepare(
+                TerminalSpec {
+                    id: TerminalId::new(launch.id),
+                    columns: 80,
+                    rows: 24,
+                    cwd: launch.cwd,
+                    command: launch.command,
+                    args: launch.args,
+                    environment: launch.environment,
+                },
+                DEFAULT_SCROLLBACK,
+            )
             .await
             .map_err(|error| error.to_string())?;
         self.observe(terminal, None, Some(events));
@@ -427,7 +435,8 @@ struct TerminalSubscription {
 pub struct ShellState {
     core: Arc<Mutex<Core>>,
     attachment_root: Option<PathBuf>,
-    pub(crate) settings: AgentSettings,
+    pub(crate) agent_settings: AgentSettings,
+    pub(crate) preferences: Settings,
     pub(crate) codex_program: Option<PathBuf>,
     pub(crate) codex_detected: bool,
     pub(crate) opencode_configured: bool,
@@ -464,7 +473,8 @@ impl ShellState {
         Self {
             core: Arc::new(Mutex::new(core)),
             attachment_root: None,
-            settings: AgentSettings::default(),
+            agent_settings: AgentSettings::default(),
+            preferences: Settings::default(),
             codex_program: None,
             codex_detected: false,
             opencode_configured: false,
@@ -624,7 +634,9 @@ impl ShellState {
         })?;
         // A draft cannot be discarded until its screenshot write finishes.
         let core = self.core.lock().await;
-        let limit = self.attachment_limit_for(&core.task_project_path(&TaskId::new(task_id))?)?;
+        let limit = self
+            .attachment_limit_for(&core.task_project_path(&TaskId::new(task_id))?)
+            .await;
         limit
             .check(bytes.len() as u64)
             .map_err(|error| BridgeError::new("preview", error.to_string()))?;
@@ -645,9 +657,20 @@ impl ShellState {
         Some(self.attachment_root.as_ref()?.join(task_id.to_string()))
     }
 
-    fn attachment_limit_for(&self, path: &Path) -> Result<AttachmentLimit, BridgeError> {
-        AttachmentLimit::resolve(&self.settings, path)
-            .map_err(|error| BridgeError::new("attachments", error))
+    async fn attachment_limit_for(&self, path: &Path) -> AttachmentLimit {
+        let value = self
+            .preferences
+            .value(Some(path), SettingKey::AttachmentBytes)
+            .await;
+        let bytes = value
+            .as_u64()
+            .and_then(|bytes| usize::try_from(bytes).ok())
+            .unwrap_or(DEFAULT_ATTACHMENT_BYTES);
+        AttachmentLimit::from_bytes(bytes)
+    }
+
+    pub(crate) async fn settings_project_path(&self, id: &str) -> Result<PathBuf, BridgeError> {
+        Ok(self.core.lock().await.project_path(&ProjectId::new(id))?)
     }
 
     async fn attachment_limit(&self, project_id: String) -> Result<AttachmentLimit, BridgeError> {
@@ -656,7 +679,7 @@ impl ShellState {
             .lock()
             .await
             .project_path(&ProjectId::new(project_id))?;
-        self.attachment_limit_for(&path)
+        Ok(self.attachment_limit_for(&path).await)
     }
 
     pub async fn save_prompt_file(
@@ -672,7 +695,9 @@ impl ShellState {
             )
         })?;
         let core = self.core.lock().await;
-        let limit = self.attachment_limit_for(&core.task_project_path(&TaskId::new(task_id))?)?;
+        let limit = self
+            .attachment_limit_for(&core.task_project_path(&TaskId::new(task_id))?)
+            .await;
         limit
             .check(bytes.len() as u64)
             .map_err(|error| BridgeError::new("attachments", error.to_string()))?;
@@ -778,7 +803,7 @@ impl ShellState {
                 .lock()
                 .await
                 .task_project_path(&TaskId::new(&task_id))?;
-            let limit = self.attachment_limit_for(&path)?;
+            let limit = self.attachment_limit_for(&path).await;
             let attachments = tokio::task::spawn_blocking(move || {
                 ids.iter()
                     .map(|id| attachments::resolve_prompt_file(&directory, id, &limit))
@@ -930,7 +955,7 @@ impl ShellState {
             return Ok(Vec::new());
         }
         let Some(executable) = self
-            .settings
+            .agent_settings
             .executable("agents.opencode.executable")
             .map_err(|error| BridgeError::new("opencode_modes", error.to_string()))?
         else {
@@ -1308,11 +1333,28 @@ impl ShellState {
         spec: TerminalSpec,
         record: Option<TerminalRecord>,
     ) -> Result<TerminalId, BridgeError> {
-        let state = self.core.lock().await.shutdown_state();
+        let (state, project) = {
+            let core = self.core.lock().await;
+            let project = record
+                .as_ref()
+                .map(|record| core.project_path(&record.project_id))
+                .transpose()?;
+            (core.shutdown_state(), project)
+        };
         if state != shepherd_core::ShutdownState::Running {
             return Err(CoreError::NotRunning { state }.into());
         }
-        let terminal = self.terminals.prepare(spec).await?;
+        let scrollback = if let Some(project) = project {
+            self.preferences
+                .value(Some(&project), SettingKey::Scrollback)
+                .await
+                .as_u64()
+                .and_then(|lines| usize::try_from(lines).ok())
+                .unwrap_or(DEFAULT_SCROLLBACK)
+        } else {
+            DEFAULT_SCROLLBACK
+        };
+        let terminal = self.terminals.prepare(spec, scrollback).await?;
         let terminal_id = terminal.id.clone();
         if let Some(record) = &record
             && let Err(error) = self.core.lock().await.record_terminal(record).await
@@ -3087,7 +3129,8 @@ mod tests {
                 "projects": {(restricted.path.clone()): {"attachments.max_file_bytes": 8}}
             }))?,
         )?;
-        state.settings = AgentSettings::read(&settings_path)?;
+        state.preferences = Settings::new(settings_path);
+        state.preferences.reload().await;
         let limit = state.attachment_limit(restricted.id.clone()).await?;
         assert_eq!(limit.bytes, 8);
         assert_eq!(limit.label, "8 bytes");

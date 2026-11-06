@@ -9,6 +9,7 @@ interface ProjectRowProps {
   expanded: boolean
   pending: boolean
   showArchived: boolean
+  archiveDisabled: boolean
   menuOpen: boolean
   onSelect: () => void
   onCompose: () => void
@@ -186,8 +187,9 @@ export function ProjectRow(props: ProjectRowProps) {
             role="menuitemcheckbox"
             class="nav-item"
             aria-checked={props.showArchived}
+            aria-disabled={props.archiveDisabled}
             tabindex={-1}
-            onClick={props.onToggleArchived}
+            onClick={() => { if (!props.archiveDisabled) props.onToggleArchived() }}
           >
             Show archived
             <span class="project-menu__switch" aria-hidden="true" />

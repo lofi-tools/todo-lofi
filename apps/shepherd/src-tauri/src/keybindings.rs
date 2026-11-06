@@ -1,6 +1,5 @@
 use std::collections::BTreeMap;
-use std::io;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -12,7 +11,7 @@ use tauri::State;
 use tokio::sync::Mutex;
 
 use crate::bridge::BridgeError;
-use crate::config_files::{encode_json, write_atomic};
+use crate::config_files::{backup_path, encode_json, read_optional, write_atomic};
 
 pub struct KeybindingSettings {
     path: PathBuf,
@@ -81,26 +80,12 @@ fn parse_document(
     Ok((document, registry))
 }
 
-async fn read_file(path: &Path) -> io::Result<Option<Vec<u8>>> {
-    match tokio::fs::read(path).await {
-        Ok(bytes) => Ok(Some(bytes)),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(error),
-    }
-}
-
 impl KeybindingSettings {
     pub fn new(path: PathBuf) -> Self {
         Self {
             path,
             edits: Mutex::new(()),
         }
-    }
-
-    fn backup_path(&self) -> PathBuf {
-        let mut path = self.path.as_os_str().to_owned();
-        path.push(".bak");
-        path.into()
     }
 
     fn message(&self, cause: impl std::fmt::Display) -> String {
@@ -113,7 +98,7 @@ impl KeybindingSettings {
 
     async fn load(&self, platform: KeyPlatform) -> Result<KeybindingSnapshot, BridgeError> {
         let _edit = self.edits.lock().await;
-        let warning = match read_file(&self.path).await {
+        let warning = match read_optional(&self.path).await {
             Ok(bytes) => match parse_document(platform, bytes.as_deref()) {
                 Ok((_, registry)) => {
                     return Ok(KeybindingSnapshot {
@@ -126,7 +111,7 @@ impl KeybindingSettings {
                     if let Some(bytes) = bytes
                         && !matches!(error, DocumentError::FutureVersion)
                     {
-                        let backup = self.backup_path();
+                        let backup = backup_path(&self.path);
                         match write_atomic(&backup, &bytes) {
                             Ok(()) => {
                                 format!("{message} A copy was saved to {}.", backup.display())
@@ -152,7 +137,7 @@ impl KeybindingSettings {
         edit: KeybindingEdit,
     ) -> Result<KeybindingSnapshot, BridgeError> {
         let _edit = self.edits.lock().await;
-        let original = read_file(&self.path)
+        let original = read_optional(&self.path)
             .await
             .map_err(|error| self.error(error))?;
         let (mut document, registry) =
@@ -195,9 +180,9 @@ impl KeybindingSettings {
             parse_document(platform, Some(&bytes)).map_err(|error| self.error(error))?;
 
         if let Some(original) = &original {
-            write_atomic(&self.backup_path(), original).map_err(|error| self.error(error))?;
+            write_atomic(&backup_path(&self.path), original).map_err(|error| self.error(error))?;
         }
-        if read_file(&self.path)
+        if read_optional(&self.path)
             .await
             .map_err(|error| self.error(error))?
             != original
@@ -269,10 +254,7 @@ mod tests {
         );
         assert_eq!(document["bindings"]["switchProject"], "F8");
         assert_eq!(document["bindings"]["commandPalette"], "F9");
-        assert_eq!(
-            std::fs::read(settings.backup_path())?,
-            encode_json(&external)?
-        );
+        assert_eq!(std::fs::read(backup_path(&path))?, encode_json(&external)?);
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -316,10 +298,7 @@ mod tests {
                 .iter()
                 .any(|command| command.id == "commandPalette" && !command.overridden)
         );
-        assert_eq!(
-            std::fs::read(reopened.backup_path())?,
-            encode_json(&document)?
-        );
+        assert_eq!(std::fs::read(backup_path(&path))?, encode_json(&document)?);
         document["bindings"]
             .as_object_mut()
             .ok_or("bindings must be an object")?
@@ -351,7 +330,7 @@ mod tests {
                 .any(|command| command.id == "commandPalette"
                     && command.chord.as_deref() == Some("Meta+K"))
         );
-        assert_eq!(std::fs::read(settings.backup_path())?, corrupt);
+        assert_eq!(std::fs::read(backup_path(&path))?, corrupt);
         assert_eq!(std::fs::read(&path)?, corrupt);
 
         let newer = encode_json(&json!({"version": 2, "bindings": {"commandPalette": "F10"}}))?;
@@ -369,7 +348,7 @@ mod tests {
                 .is_err()
         );
         assert_eq!(std::fs::read(&path)?, newer);
-        assert_eq!(std::fs::read(settings.backup_path())?, corrupt);
+        assert_eq!(std::fs::read(backup_path(&path))?, corrupt);
         Ok(())
     }
 }

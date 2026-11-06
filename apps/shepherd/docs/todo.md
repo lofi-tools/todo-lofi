@@ -1018,7 +1018,12 @@ and the task header never overstates the tier.
   binding immediately. Reset restores the platform default. The file
   preserves other edits and unknown entries, rejects a stale edit to the
   same command, and backs up invalid content while defaults remain active.
-- [ ] Settings files, project overrides, themes and accessibility.
+- [x] General settings file and project overrides.
+  Workspace and project preferences use versioned JSON with atomic writes,
+  backups and per-setting conflict checks. Workspace defaults and project
+  overrides govern archive visibility, attachment limits and terminal
+  scrollback. Notifications and the Send accent are stored at app scope.
+- [ ] Themes and accessibility.
 - [ ] Review/archive edge cases; leave the 30-day worktree collection to S7.
 - [ ] Status bar, window title and empty states.
 
@@ -1046,6 +1051,9 @@ and the task header never overstates the tier.
   a forwarded terminal chord, and scoped Send and Commit shortcuts.
   The shortcut editor fixture checks recording, conflict recovery, immediate
   dispatch, reload and reset.
+  Settings fixtures verify project overrides, reset, pending edits after
+  reload, and migration of the saved Send accent. The hidden macOS smoke
+  verifies a project attachment limit after restarting Shepherd.
   The hidden macOS WebKit smoke opens the palette with the native registry
   while the terminal is mounted, then records a shortcut in Settings and
   checks that the binding survives restart.
@@ -1069,7 +1077,9 @@ and the task header never overstates the tier.
   neighboring cache files and symlink redirects.
   Turso fixtures verify attachment metadata after reopen, rollback on an
   invalid path, and removal with the task record.
-- [ ] Corrupt settings file falls back with a banner and backup.
+- [x] Corrupt settings file falls back with a banner and backup.
+  Rust verifies the exact backup bytes and read-only fallback. Chromium
+  verifies the warning and that defaults are usable.
 - [x] Search ranking and prefix-query tests against Turso FTS, not SQLite FTS5.
   The query plan uses the FTS index. Database fixtures cover exact-term ranking,
   Unicode prefix queries, legacy rows, edits, reopen and task deletion.

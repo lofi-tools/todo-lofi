@@ -118,12 +118,12 @@ the snapshots come from `shepherd-core`, never from a second frontend model.
 
 ## Attachment limits
 
-Shepherd allows up to 50 MB per attachment by default. Set
-`attachments.max_file_bytes` to a positive whole number of bytes in
-Shepherd's `settings.json`. Put it under `app` to change the default or under
-`projects` and the project's absolute path to override that project. The same
-limit applies to composer files and preview screenshots. Restart Shepherd to
-load changes.
+Shepherd allows up to 50 MB per attachment by default. Change the default in
+**Settings → Workspace**, or set a project override in **Settings → Projects**.
+The same limit applies to composer files and preview screenshots. To edit
+`settings.json` directly, put `attachments.max_file_bytes` under `app` or under
+`projects` and the project's absolute path. Choose **Reload settings** in
+Workspace to apply a file edit.
 
 ```json
 {

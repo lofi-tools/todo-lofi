@@ -24,7 +24,6 @@ test.beforeEach(async ({ context }) => {
     let eventIndex = 0
     let cancelRequests = 0
     let screenshotSaves = 0
-    let notificationsEnabled = false
     const notifications: string[] = []
     const dockCounts: Array<number | undefined> = []
     const archiveRequests: string[][] = []
@@ -60,6 +59,18 @@ test.beforeEach(async ({ context }) => {
     let releaseTerminalWrite: (() => void) | undefined
     let expiringTerminalSubscription: string | undefined
     const options = new URLSearchParams(window.location.search)
+    function readPreferences() {
+      const defaults = {
+        'tasks.show_archived': false, 'notifications.enabled': false, 'appearance.send_accent': 'Blue',
+        'attachments.max_file_bytes': 50_000_000, 'terminal.scrollback_lines': 10_000,
+      }
+      const stored = JSON.parse(localStorage.getItem('fixture.settings') ?? '{}')
+      const projects = stored.projects ?? (options.has('attachment-cap') ? { '/tmp/demo': { 'attachments.max_file_bytes': 8 } } : {})
+      return {
+        defaults, app: stored.app ?? {}, projects,
+        warning: options.has('invalid-settings') ? 'Could not use /tmp/settings.json. A copy was saved to /tmp/settings.json.bak.' : null,
+      }
+    }
     const readKeybindings = (): Record<string, string> => JSON.parse(localStorage.getItem('fixture.keybindings') ?? '{}')
     function commandSnapshot(platform: string, overrides: Record<string, string>) {
       const reasons = {
@@ -410,11 +421,21 @@ test.beforeEach(async ({ context }) => {
             return '/tmp/home/'
           case 'project_list':
             return projectList()
-          case 'notifications_enabled':
-            return notificationsEnabled
-          case 'set_notifications_enabled':
-            notificationsEnabled = args.enabled
-            return null
+          case 'reload_settings':
+            return readPreferences()
+          case 'set_setting': {
+            const preferences = readPreferences()
+            const edit = args.edit
+            const path = projects.find((project) => project.id === edit.projectId)?.path
+            const scope = path ? preferences.projects[path] ??= {} : preferences.app
+            if ((scope[edit.key] ?? null) !== edit.previous) {
+              throw { code: 'settings_conflict', message: 'The setting changed on disk. Reload configuration before retrying.' }
+            }
+            if (edit.value === null) delete scope[edit.key]
+            else scope[edit.key] = edit.value
+            localStorage.setItem('fixture.settings', JSON.stringify({ app: preferences.app, projects: preferences.projects }))
+            return preferences
+          }
           case 'notify_task_needs_input':
             notifications.push(args.taskId)
             return null
@@ -431,10 +452,13 @@ test.beforeEach(async ({ context }) => {
           }
           case 'open_project_preview':
             throw { message: `Could not open the preview in a browser. ${args.projectId}` }
-          case 'attachment_limit':
-            return options.has('attachment-cap') && args.projectId === 'project-1'
-              ? { bytes: 8, label: '8 bytes' }
-              : { bytes: 50_000_000, label: '50 MB' }
+          case 'attachment_limit': {
+            const settings = readPreferences()
+            const path = projects.find((project) => project.id === args.projectId)?.path
+            const bytes = settings.projects[path]?.['attachments.max_file_bytes']
+              ?? settings.app['attachments.max_file_bytes'] ?? settings.defaults['attachments.max_file_bytes']
+            return { bytes, label: bytes === 50_000_000 ? '50 MB' : `${bytes} bytes` }
+          }
           case 'save_preview_screenshot':
             if (!(args instanceof ArrayBuffer) || new Uint8Array(args)[0] !== 137 || invokeOptions?.headers?.['X-Shepherd-Task'] !== 'task-1') {
               throw { message: 'Expected PNG bytes for task-1.' }
@@ -2343,7 +2367,7 @@ test('opens settings in the task pane and returns to the current chat', async ({
   await expect(page.getByRole('button', { name: 'Quit', exact: true })).toHaveCount(0)
   await page.getByLabel('Prompt').fill('keep this draft')
 
-  const settings = page.getByRole('button', { name: 'Settings' })
+  const settings = page.getByRole('button', { name: 'Settings', exact: true })
   const chat = page.getByRole('region', { name: 'Task chat' })
   await settings.click()
   await expect(chat).toBeHidden()
@@ -2372,7 +2396,8 @@ test('applies the Send accent from Appearance and restores it after reload', asy
   await settings.click()
   await appearance.click()
   await expect(blue).toBeChecked()
-  await teal.check()
+  await teal.click()
+  await expect(teal).toBeChecked()
   await settings.click()
 
   const composer = page.locator('.composer')
@@ -2391,8 +2416,59 @@ test('applies the Send accent from Appearance and restores it after reload', asy
   await nextWindow.goto('/')
   await nextWindow.getByRole('button', { name: 'Settings', exact: true }).click()
   await nextWindow.getByRole('button', { name: 'Appearance', exact: true }).click()
-  const expectedAccent = process.env.VITE_SHEPHERD_EPHEMERAL === '1' ? 'Blue' : 'Teal'
-  await expect(nextWindow.getByRole('radio', { name: expectedAccent })).toBeChecked()
+  await expect(nextWindow.getByRole('radio', { name: 'Teal' })).toBeChecked()
+})
+
+test('applies per-project limits and preserves a pending settings edit across reload', async ({ page }) => {
+  await page.goto('/')
+  await page.getByRole('button', { name: 'Settings', exact: true }).click()
+  const limit = page.getByRole('spinbutton', { name: 'Attachment limit (bytes)' })
+  const save = page.getByRole('button', { name: 'Save attachment limit (bytes)' })
+  await expect(limit).toHaveValue('50000000')
+  await limit.fill('900')
+  await page.evaluate(() => localStorage.setItem('fixture.settings', JSON.stringify({ app: { 'attachments.max_file_bytes': 350 } })))
+  await save.click()
+  await expect(page.getByRole('alert')).toContainText('changed on disk')
+  await page.getByRole('button', { name: 'Reload settings' }).click()
+  await expect(limit).toHaveValue('900')
+  await page.getByRole('button', { name: 'Retry setting change' }).click()
+  await expect(save).toBeDisabled()
+
+  await page.getByRole('navigation', { name: 'Settings categories' }).getByRole('button', { name: 'Projects' }).click()
+  await expect(limit).toHaveValue('900')
+  await limit.fill('8')
+  await save.click()
+  await expect(page.getByRole('button', { name: 'Reset attachment limit (bytes)' })).toBeVisible()
+  await page.getByRole('button', { name: 'Settings', exact: true }).click()
+  await page.getByLabel('Local attachments').setInputFiles({ name: 'oversized.txt', mimeType: 'text/plain', buffer: Buffer.from('nine-byte') })
+  await expect(page.getByRole('alert')).toContainText('Attachments must be up to 8 bytes')
+
+  await page.getByRole('button', { name: 'Settings', exact: true }).click()
+  await page.getByRole('navigation', { name: 'Settings categories' }).getByRole('button', { name: 'Projects' }).click()
+  await page.getByRole('button', { name: 'Reset attachment limit (bytes)' }).click()
+  await expect(limit).toHaveValue('900')
+})
+
+test('reports the settings backup and keeps defaults usable with a malformed file', async ({ page }) => {
+  await page.goto('/?invalid-settings')
+  await expect(page.getByRole('alert')).toContainText('/tmp/settings.json.bak')
+  await expect(page.getByLabel('Prompt')).toBeEnabled()
+  await page.getByRole('button', { name: 'Settings', exact: true }).click()
+  const limit = page.getByRole('spinbutton', { name: 'Attachment limit (bytes)' })
+  await expect(limit).toHaveValue('50000000')
+  await expect(limit).toBeDisabled()
+  await expect(page.getByRole('button', { name: 'Reload settings' })).toBeEnabled()
+})
+
+test('imports an existing Send accent into settings once', async ({ page }) => {
+  await page.addInitScript(() => {
+    localStorage.setItem('shepherd.sendAccent', 'Violet')
+    sessionStorage.setItem('shepherd.sendAccent', 'Violet')
+  })
+  await page.goto('/')
+  await expect(page.getByRole('button', { name: 'Send', exact: true })).toHaveAttribute('data-send-accent', 'Violet')
+  const saved = await page.evaluate(() => JSON.parse(localStorage.getItem('fixture.settings') ?? '{}'))
+  expect(saved.app['appearance.send_accent']).toBe('Violet')
 })
 
 test('focuses the composer card and opens the toolbar menus above it', async ({ page }) => {

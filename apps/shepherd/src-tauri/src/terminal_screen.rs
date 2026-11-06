@@ -272,11 +272,23 @@ pub struct Screen {
 }
 
 impl Screen {
+    #[cfg(test)]
     pub fn new(columns: usize, rows: usize) -> Self {
+        Self::with_scrollback(columns, rows, crate::settings::DEFAULT_SCROLLBACK)
+    }
+
+    pub fn with_scrollback(columns: usize, rows: usize, scrolling_history: usize) -> Self {
         let size = ScreenSize { columns, rows };
         let replies = PtyReplies::default();
         Self {
-            term: Term::new(Config::default(), &size, replies.clone()),
+            term: Term::new(
+                Config {
+                    scrolling_history,
+                    ..Config::default()
+                },
+                &size,
+                replies.clone(),
+            ),
             replies,
             ready_replies: Vec::new(),
             parser: Processor::new(),
@@ -975,6 +987,16 @@ mod tests {
         assert!(frame.cells[0].bold);
         assert_eq!(frame.cells[0].foreground, 0xe06a6a);
         assert!(!frame.cells[0].italic);
+    }
+
+    #[test]
+    fn custom_scrollback_bounds_the_retained_history() {
+        let mut screen = Screen::with_scrollback(12, 3, 2);
+        for _ in 0..10 {
+            screen.process(b"line\r\n");
+        }
+        screen.scroll(100);
+        assert_eq!(screen.term.grid().display_offset(), 2);
     }
 
     #[test]

@@ -15,6 +15,7 @@ mod file_actions;
 mod file_watch;
 mod keybindings;
 mod pty_terminal;
+mod settings;
 mod terminal_screen;
 
 use std::path::PathBuf;
@@ -136,8 +137,20 @@ pub fn run() -> Result<(), tauri::Error> {
                 Some(path) => PathBuf::from(path),
                 None => app.path().app_data_dir()?,
             };
-            let settings = AgentSettings::read(&app.path().app_config_dir()?.join("settings.json"));
-            if let Err(error) = &settings {
+            let config_directory = app.path().app_config_dir()?;
+            let preference_directory = if override_directory.is_some() {
+                &data_directory
+            } else {
+                &config_directory
+            };
+            let preferences = settings::Settings::new(preference_directory.join("settings.json"));
+            tauri::async_runtime::block_on(preferences.reload());
+            let agents = if override_directory.is_some() {
+                AgentSettings::read(&config_directory.join("settings.json"))
+            } else {
+                Ok(tauri::async_runtime::block_on(preferences.agent_settings()))
+            };
+            if let Err(error) = &agents {
                 tracing::warn!(%error, "could not load Shepherd configuration");
             }
             let (
@@ -150,7 +163,7 @@ pub fn run() -> Result<(), tauri::Error> {
                 Some(factory) => (factory, None, false, false, false),
                 None => {
                     let (codex, codex_program, codex_detected) = codex_factory(&data_directory);
-                    let (opencode, claude) = match &settings {
+                    let (opencode, claude) = match &agents {
                         Ok(settings) => (
                             settings.executable("agents.opencode.executable"),
                             settings.command("agents.claude"),
@@ -190,21 +203,14 @@ pub fn run() -> Result<(), tauri::Error> {
                 harness_factory,
                 terminals,
             ))?;
-            state.settings = settings.unwrap_or_default();
+            state.agent_settings = agents.unwrap_or_default();
+            state.preferences = preferences;
             state.codex_program = codex_program;
             state.codex_detected = codex_detected;
             state.opencode_configured = opencode_configured;
             state.claude_configured = claude_configured;
             state.start_event_pump();
             app.manage(state);
-            let preference_directory = if override_directory.is_some() {
-                data_directory
-            } else {
-                app.path().app_config_dir()?
-            };
-            app.manage(attention::NotificationSettings::new(
-                preference_directory.join("settings.json"),
-            ));
             app.manage(keybindings::KeybindingSettings::new(
                 preference_directory.join("keybindings.json"),
             ));
@@ -251,8 +257,8 @@ pub fn run() -> Result<(), tauri::Error> {
             bridge::commands::review_task,
             bridge::commands::review_task_lists,
             bridge::commands::archive_reviewed,
-            attention::notifications_enabled,
-            attention::set_notifications_enabled,
+            settings::reload_settings,
+            settings::set_setting,
             attention::notify_task_needs_input,
             bridge::commands::git_file_diff,
             bridge::commands::git_snapshot,

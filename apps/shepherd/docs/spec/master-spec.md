@@ -1026,8 +1026,17 @@ in-memory model is still scoped key/value pairs, serialized per scope:
   executable by absolute path. `app["agents.claude.args"]` is an optional
   array of arguments passed in order.
 - `app["notifications.enabled"]` is a boolean and defaults to false. Debug
-  launches with an isolated data directory save their notification preference
-  in a settings file there.
+  launches with an isolated data directory save user preferences in a settings
+  file there. They read the configured agent executables from the app config
+  directory.
+- **Settings → Workspace** edits the default archive visibility, attachment
+  limit, terminal scrollback, and notification preference. **Settings →
+  Projects** can override archive visibility, attachment limit and terminal
+  scrollback. **Settings → Appearance** saves the Send accent in
+  `app["appearance.send_accent"]` and imports the older webview preference
+  if this key is absent.
+- `terminal.scrollback_lines` ranges from 0 to 100,000 and defaults to 10,000.
+  Workspace terminals read it when they start or restart.
 - Resolution is per key: project > app > built-in, with whole-value replacement
   and no deep merge. Reset deletes the override.
 - `attachments.max_file_bytes` is a positive integer in bytes. It applies to
@@ -1042,7 +1051,8 @@ in-memory model is still scoped key/value pairs, serialized per scope:
   entries whose previous value still matches are replayed; entries whose previous
   value no longer matches are reported as conflicts, kept pending, and never
   silently overwritten. A backup is kept. External edits otherwise load through
-  **Reload configuration**; v1 has no filesystem watcher.
+  **Reload settings** in Workspace. Agent launch settings are read at startup.
+  v1 has no configuration watcher.
 
 ## 12. Security and privacy
 

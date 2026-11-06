@@ -19,7 +19,7 @@ import { ProjectRow } from './ProjectRow'
 import { PreviewPane, type PreviewAnnotation } from './PreviewPane'
 import { GitPane } from './GitPane'
 import { ReviewPane } from './ReviewPane'
-import { SEND_ACCENTS, SettingsPane, type SendAccent } from './SettingsPane'
+import { SEND_ACCENTS, SettingsPane } from './SettingsPane'
 import { FreebuffPane, TerminalPane, type TerminalCommands } from './TerminalPane'
 import { TaskSearch } from './TaskSearch'
 import { ReviewArchiveDialog, TaskRows } from './TaskRows'
@@ -74,15 +74,6 @@ const AGENT_OPTIONS: PickerOption[] = [
 
 function appearanceStorage() {
   return import.meta.env.VITE_SHEPHERD_EPHEMERAL === '1' ? sessionStorage : localStorage
-}
-
-function loadSendAccent(): SendAccent {
-  try {
-    const stored = appearanceStorage().getItem(SEND_ACCENT_KEY)
-    return SEND_ACCENTS.find((accent) => accent === stored) ?? SEND_ACCENTS[0]
-  } catch {
-    return SEND_ACCENTS[0]
-  }
 }
 
 function terminalArrowDestination(inspector: HTMLElement, tab: HTMLButtonElement, target: HTMLElement, key: string) {
@@ -181,23 +172,23 @@ export function App() {
     const configured = projectModel()
     return configured?.projectId === selectedProjectId() ? configured : undefined
   }
-  const [showArchived, setShowArchived] = createSignal(false)
-  const [archiveVisibility, setArchiveVisibility] = createSignal(new Map<string, boolean>())
   const [projectMenuId, setProjectMenuId] = createSignal<string>()
   const [settingsOpen, setSettingsOpen] = createSignal(false)
-  const [sendAccent, setSendAccent] = createSignal(loadSendAccent())
-  const [notificationsEnabled, setNotificationsEnabled] = createSignal(false)
-  const [savingNotifications, setSavingNotifications] = createSignal(false)
+  const [preferences, setPreferences] = createSignal<bridge.SettingsSnapshot>()
+  const [savingPreference, setSavingPreference] = createSignal(false)
+  const [settingsConflicts, setSettingsConflicts] = createSignal<Omit<bridge.SettingsEdit, 'previous'>[]>([])
+  const preferencesEditable = () => !!preferences() && !preferences()?.warning && !savingPreference()
+  const notificationsEnabled = () => preferences()?.app['notifications.enabled'] ?? false
+  const sendAccent = () => preferences()?.app['appearance.send_accent'] ?? 'Blue'
   const [projectSettingsRequest, setProjectSettingsRequest] = createSignal<{ id: string }>()
   const [approvalChange, setApprovalChange] = createSignal<{ projectId: string }>()
-  const showsArchived = (projectId: string | null) =>
-    (projectId ? archiveVisibility().get(projectId) : undefined) ?? showArchived()
+  const showsArchived = (projectId: string | null) => {
+    const path = projects().find((project) => project.id === projectId)?.path
+    return (path ? preferences()?.projects[path]?.['tasks.show_archived'] : undefined)
+      ?? preferences()?.app['tasks.show_archived'] ?? false
+  }
   const settingsProject = () => projects().find((project) => project.id === (projectSettingsRequest()?.id ?? selectedProjectId()))
   const visibleTasks = () => tasks().filter((task) => showsArchived(selectedProjectId()) || task.state !== 'done')
-
-  function setProjectArchived(projectId: string, visible: boolean) {
-    setArchiveVisibility((previous) => new Map(previous).set(projectId, visible))
-  }
 
   function openProjectSettings(projectId: string) {
     setProjectSettingsRequest({ id: projectId })
@@ -343,8 +334,13 @@ export function App() {
   const [importNote, setImportNote] = createSignal<string | null>(null)
   const [error, setError] = createSignal<string | null>(null)
   const [projectAttachmentLimit] = createResource(
-    () => selectedProjectId() ?? undefined,
-    async (projectId) => {
+    () => {
+      const project = selectedProject()
+      if (!project) return undefined
+      const snapshot = preferences()
+      return [project.id, snapshot?.projects[project.path]?.['attachments.max_file_bytes'] ?? snapshot?.app['attachments.max_file_bytes']] as const
+    },
+    async ([projectId]) => {
       try {
         return { projectId, limit: await bridge.attachmentLimit(projectId) }
       } catch (failure) {
@@ -408,26 +404,57 @@ export function App() {
     }
   }
 
-  function chooseSendAccent(accent: SendAccent) {
-    setSendAccent(accent)
+  async function reloadPreferences() {
+    if (savingPreference()) return
+    setError(null)
+    setSavingPreference(true)
     try {
-      appearanceStorage().setItem(SEND_ACCENT_KEY, accent)
-    } catch {
-      setError('Could not save the Send button accent.')
+      let snapshot = await bridge.reloadSettings()
+      if (!snapshot.warning) {
+        try {
+          const stored = appearanceStorage().getItem(SEND_ACCENT_KEY)
+          const legacy = SEND_ACCENTS.find((accent) => accent === stored)
+          if (legacy && snapshot.app['appearance.send_accent'] === undefined) {
+            snapshot = await bridge.setSetting({ projectId: null, key: 'appearance.send_accent', previous: null, value: legacy })
+          }
+          if (legacy) appearanceStorage().removeItem(SEND_ACCENT_KEY)
+        } catch (failure) {
+          setError(`Could not migrate the saved Send accent. ${describe(failure)}`)
+        }
+      }
+      setPreferences(snapshot)
+    } finally {
+      setSavingPreference(false)
     }
   }
 
-  async function chooseNotifications(enabled: boolean) {
-    setSavingNotifications(true)
+  async function editPreference(key: bridge.SettingKey, value: bridge.SettingsEdit['value'], projectId: string | null = null) {
+    if (!preferencesEditable()) throw new Error('Settings are unavailable for editing.')
+    const path = projectId ? projects().find((project) => project.id === projectId)?.path : undefined
+    const scope = path ? preferences()?.projects[path] : preferences()?.app
+    const edit = { key, projectId, value, previous: scope?.[key] ?? null }
+    setSavingPreference(true)
     setError(null)
     try {
-      await bridge.setNotificationsEnabled(enabled)
-      setNotificationsEnabled(enabled)
+      setPreferences(await bridge.setSetting(edit))
+      discardSettingsConflict(edit)
     } catch (failure) {
-      setError(describe(failure))
+      if ((failure as bridge.BridgeError | null)?.code === 'settings_conflict') {
+        discardSettingsConflict(edit)
+        setSettingsConflicts((current) => [...current, { key, projectId, value }])
+      }
+      throw failure
     } finally {
-      setSavingNotifications(false)
+      setSavingPreference(false)
     }
+  }
+
+  function discardSettingsConflict(edit: Pick<bridge.SettingsEdit, 'key' | 'projectId'>) {
+    setSettingsConflicts((current) => current.filter(({ key, projectId }) => key !== edit.key || projectId !== edit.projectId))
+  }
+
+  function requestPreference(key: bridge.SettingKey, value: bridge.SettingsEdit['value'], projectId: string | null = null) {
+    return editPreference(key, value, projectId).catch((failure) => { setError(describe(failure)) })
   }
 
   const runningCount = () => projects().reduce((count, project) => count + (project.runningTaskCount ?? 0), 0)
@@ -960,8 +987,8 @@ export function App() {
     void reloadKeybindings().catch((failure) => setError(describe(failure)))
     void bridge.opencodeConfigured().then(setOpencodeConfigured).catch((error) => console.warn('Could not read OpenCode availability', error))
     void bridge.claudeConfigured().then(setClaudeConfigured).catch((error) => console.warn('Could not read Claude Code availability', error))
-    void bridge.notificationsEnabled().then(setNotificationsEnabled).catch((failure) => setError(describe(failure)))
     void run(async () => {
+      await reloadPreferences().catch((failure) => setError(describe(failure)))
       await bridge.subscribeToEvents(handleEvent)
       const list = await bridge.projectList()
       setProjects(list.projects)
@@ -1369,6 +1396,9 @@ export function App() {
   const workspaceFooter = (
     <>
       <div class="shell__notices">
+        <Show when={preferences()?.warning}>
+          {(warning) => <div class="banner banner--error" role="alert"><span>{warning()} Default settings are active.</span></div>}
+        </Show>
         <Show when={commandRegistry()?.warning}>
           {(warning) => <div class="banner banner--error" role="alert"><span>{warning()} Default shortcuts are active.</span></div>}
         </Show>
@@ -1490,6 +1520,7 @@ export function App() {
                       expanded={listed().length > 0}
                       pending={pending()}
                       showArchived={showsArchived(project.id)}
+                      archiveDisabled={!preferencesEditable()}
                       menuOpen={projectMenuId() === project.id}
                       onSelect={() => openProject(project)}
                       onCompose={() => newTask(project.id)}
@@ -1497,7 +1528,7 @@ export function App() {
                         if (open) setProjectMenuId(project.id)
                         else if (projectMenuId() === project.id) setProjectMenuId(undefined)
                       }}
-                      onToggleArchived={() => setProjectArchived(project.id, !showsArchived(project.id))}
+                      onToggleArchived={() => requestPreference('tasks.show_archived', !showsArchived(project.id), project.id)}
                       onProjectSettings={() => openProjectSettings(project.id)}
                     />
                     <Show when={project.missing}>
@@ -1540,13 +1571,20 @@ export function App() {
             mac={mac}
             onReloadKeybindings={reloadKeybindings}
             onEditKeybinding={editKeybinding}
-            showArchived={showArchived()}
-            onShowArchived={setShowArchived}
+            preferences={preferences()}
+            preferencesEditable={preferencesEditable()}
+            preferenceBusy={savingPreference()}
+            onEditPreference={editPreference}
+            onReloadPreferences={() => void reloadPreferences().catch((failure) => setError(describe(failure)))}
+            settingsConflicts={settingsConflicts()}
+            onRetryPreference={(edit) => requestPreference(edit.key, edit.value, edit.projectId)}
+            onDiscardConflict={discardSettingsConflict}
+            showArchived={showsArchived(null)}
+            onShowArchived={(visible) => requestPreference('tasks.show_archived', visible)}
             notificationsEnabled={notificationsEnabled()}
-            savingNotifications={savingNotifications()}
-            onNotificationsEnabled={(enabled) => void chooseNotifications(enabled)}
+            onNotificationsEnabled={(enabled) => requestPreference('notifications.enabled', enabled)}
             sendAccent={sendAccent()}
-            onSendAccent={chooseSendAccent}
+            onSendAccent={(accent) => requestPreference('appearance.send_accent', accent)}
             onAddProject={openPicker}
             pending={pending()}
             projectImports={<ProjectImportSources codexDisabled={pending() || !codexAvailable()} note={importNote()} onImportCodex={importProjects} />}
@@ -1554,7 +1592,7 @@ export function App() {
             projectSettingsRequest={projectSettingsRequest()}
             approvalChange={approvalChange()}
             showProjectArchived={showsArchived(settingsProject()?.id ?? null)}
-            onShowProjectArchived={setProjectArchived}
+            onShowProjectArchived={(projectId, visible) => requestPreference('tasks.show_archived', visible, projectId)}
             onSavePreviewUrl={async (projectId, url) => {
               const { projects: updated } = await bridge.setProjectPreviewUrl(projectId, url)
               const project = updated.find((entry) => entry.id === projectId)

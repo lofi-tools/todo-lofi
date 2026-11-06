@@ -2,13 +2,9 @@ use std::fs;
 use std::io::{self, ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
 
-use agent_harness::settings::AgentSettings;
 use agent_harness::{AttachmentMetadata, PromptAttachment};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
-
-const DEFAULT_ATTACHMENT_BYTES: usize = 50_000_000;
-const ATTACHMENT_LIMIT_KEY: &str = "attachments.max_file_bytes";
 
 #[derive(Serialize)]
 pub struct AttachmentLimit {
@@ -17,16 +13,7 @@ pub struct AttachmentLimit {
 }
 
 impl AttachmentLimit {
-    pub fn resolve(settings: &AgentSettings, project: &Path) -> Result<Self, String> {
-        let bytes = settings
-            .project_value::<usize>(project, ATTACHMENT_LIMIT_KEY)
-            .map_err(|error| error.to_string())?
-            .unwrap_or(DEFAULT_ATTACHMENT_BYTES);
-        if bytes == 0 || bytes as u64 > 9_007_199_254_740_991 {
-            return Err(format!(
-                "{ATTACHMENT_LIMIT_KEY} must be a positive integer byte count within JavaScript’s safe integer range."
-            ));
-        }
+    pub fn from_bytes(bytes: usize) -> Self {
         let label = if bytes.is_multiple_of(1_000_000) {
             format!("{} MB", bytes / 1_000_000)
         } else if bytes.is_multiple_of(1_000) {
@@ -36,7 +23,7 @@ impl AttachmentLimit {
         } else {
             format!("{bytes} bytes")
         };
-        Ok(Self { bytes, label })
+        Self { bytes, label }
     }
 
     pub fn check(&self, bytes: u64) -> io::Result<()> {
@@ -214,7 +201,7 @@ mod tests {
 
     #[test]
     fn default_attachment_limit_is_fifty_megabytes() -> Result<(), Box<dyn std::error::Error>> {
-        let limit = AttachmentLimit::resolve(&AgentSettings::default(), Path::new("/project"))?;
+        let limit = AttachmentLimit::from_bytes(crate::settings::DEFAULT_ATTACHMENT_BYTES);
         assert_eq!(limit.bytes, 50_000_000);
         assert_eq!(limit.label, "50 MB");
         assert!(limit.check(50_000_000).is_ok());
@@ -246,7 +233,7 @@ mod tests {
         let root = tempfile::tempdir()?;
         let task = root.path().join("attachments/task");
         let image = include_bytes!("../icons/128x128.png");
-        let limit = AttachmentLimit::resolve(&AgentSettings::default(), &task)?;
+        let limit = AttachmentLimit::from_bytes(crate::settings::DEFAULT_ATTACHMENT_BYTES);
         let id = persist_prompt_file(&task, "clipboard.data", image)?;
         let attachment = resolve_prompt_file(&task, &id, &limit)?;
         assert_eq!(attachment.image_mime_type.as_deref(), Some("image/png"));
