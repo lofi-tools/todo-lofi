@@ -1051,6 +1051,8 @@ function TerminalCanvas(props: { terminalId: string; shown: boolean; focusReques
     const modes = frame?.modes ?? 0
     if (event.metaKey && ['c', 'v'].includes(event.key.toLowerCase())) return
     if (event.ctrlKey && event.shiftKey && event.key.toLowerCase() === 'v') return
+    // Let the macOS input source insert printable Option characters.
+    if (mac && event.altKey && !event.ctrlKey && !event.metaKey && [...event.key].length === 1) return
     const encoded = encodeKittyKey(event, modes)
     const data = encoded?.data ?? encodeLegacyKey(event, modes)
     if (data === null) return

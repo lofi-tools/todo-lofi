@@ -637,6 +637,32 @@ test('encodes typed keys into terminal input', async ({ page }) => {
     .toEqual(['a', '\u0003', '\r', '\x7f', '\x08', '\x1b\x1b[Z', '\u001bOA'])
 })
 
+for (const { name, platform, route, writes } of [
+  { name: 'macOS legacy', platform: 'MacIntel', route: '/', writes: ['#', '\x1b[1;3D'] },
+  { name: 'macOS Kitty', platform: 'MacIntel', route: '/?kitty-terminal',
+    writes: ['\x1b[0;;35u', '\x1b[57443;3u', '\x1b[1;3D', '\x1b[1;3:3D', '\x1b[57443;1:3u'] },
+  { name: 'Linux legacy', platform: 'Linux x86_64', route: '/', writes: ['\x1b#', '\x1b[1;3D'] },
+]) {
+  test(`routes printable Alt input in ${name}`, async ({ page }) => {
+    await page.addInitScript((value) => Object.defineProperty(navigator, 'platform', { value }), platform)
+    await page.goto(route)
+    await expect(page.getByLabel('Terminal output')).toHaveText('BB')
+    const input = page.getByRole('textbox', { name: 'Terminal', exact: true })
+    await input.focus()
+    await input.evaluate((element: HTMLTextAreaElement) => {
+      const key = new KeyboardEvent('keydown', {
+        key: '#', code: 'Digit3', altKey: true, bubbles: true, cancelable: true,
+      })
+      if (element.dispatchEvent(key)) {
+        element.value = '#'
+        element.dispatchEvent(new InputEvent('input', { data: '#', inputType: 'insertText', bubbles: true }))
+      }
+    })
+    await input.press('Alt+ArrowLeft')
+    await expect.poll(() => page.evaluate(() => window.__writes)).toEqual(writes)
+  })
+}
+
 test('bounds stalled terminal input and reserves room for key release', async ({ page }) => {
   await page.goto('/?kitty-terminal&blocked-terminal-write')
   const input = page.getByRole('textbox', { name: 'Terminal', exact: true })

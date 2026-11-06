@@ -43,6 +43,9 @@ current layout and give future changes a point of comparison.
   button. Arrow keys on live pane header buttons move between adjacent live
   panes. Up from a pane with no live pane above it returns to the Terminals
   tab. Arrow keys in the terminal input go to the shell.
+  On macOS, the current input source supplies printable Option characters,
+  including Option+3 for `#` on the British layout. Option with a navigation
+  key still sends a terminal chord.
   Resize the inspector at its left edge by dragging or with the arrow keys
   while the separator is focused. Save the chosen width with the task.
 - Place the status bar below the wrapper on the window background. Its

@@ -41,7 +41,8 @@ case "${1:-}" in
         phases=(macos-dead-key)
         printf '%s\n' 'Use the British layout. Wait for each IME prompt before typing.' \
           'At IME1>, press Option+E, then E and Return.' \
-          'At IME2>, press Option+U, then U and Return.'
+          'At IME2>, press Option+U, then U and Return.' \
+          'At IME3>, press Option+3 and Return.'
         ;;
       *)
         printf '%s\n' 'Usage: --macos-ime [pinyin|british]' >&2

@@ -240,7 +240,10 @@ async function reportIme(details: object) {
   if (!response.ok) throw new Error('Could not report the native IME probe')
 }
 
-async function exerciseNativeIme(commitTimeout: number, expected?: readonly [string, string]) {
+async function exerciseNativeIme(
+  commitTimeout: number,
+  expected?: readonly { text: string; event: 'compositionend' | 'input' }[],
+) {
   const project = await openFixtureProject()
   const start = await enabledButton('New shared terminal')
   start.click()
@@ -251,12 +254,18 @@ async function exerciseNativeIme(commitTimeout: number, expected?: readonly [str
   await ptyColumns(terminal.id, terminal.title, 'NATIVE_IME_SIZED')
 
   const received: string[] = []
-  for (const [attempt, row, column] of [[1, 5, 3], [2, 10, 8]]) {
+  const positions = [[5, 3], [10, 8], [6, 4]].slice(0, expected?.length ?? 2)
+  for (const [index, [row, column]] of positions.entries()) {
+    const attempt = index + 1
+    const expectedInput = expected?.[index]
+    const eventName = expectedInput?.event ?? 'compositionend'
     const commits: string[] = []
-    const onCommit = (event: CompositionEvent) => {
-      if (event.isTrusted) commits.push(event.data)
+    const onCommit = (event: Event) => {
+      if (event.isTrusted && (event instanceof CompositionEvent || event instanceof InputEvent) && event.data) {
+        commits.push(event.data)
+      }
     }
-    input.addEventListener('compositionend', onCommit)
+    input.addEventListener(eventName, onCommit)
     try {
       await bridge.terminalWrite(terminal.id, `printf '\\033[2J\\033[${row};${column}HIME%s> ' ${attempt}; IFS= read -r composed; printf '\\nS4_NATIVE_IME_RESULT_%s:%s\\n' ${attempt} "$composed"\r`)
       await waitFor(`native IME prompt ${attempt}`, () => terminalOutput().includes(`IME${attempt}>`))
@@ -271,16 +280,16 @@ async function exerciseNativeIme(commitTimeout: number, expected?: readonly [str
       const selection = await waitFor('native IME commit', () => commits[0], commitTimeout)
       await reportIme({ ime: 'committed', attempt, selection })
       const marker = `S4_NATIVE_IME_RESULT_${attempt}:`
-      const text = await waitFor('native composition reaches the PTY', () =>
+      const text = await waitFor('native text reaches the PTY', () =>
         terminalOutput().split('\n').map((line) => line.trim())
           .find((line) => line.startsWith(marker))?.slice(marker.length))
-      const validText = expected ? text === expected[attempt - 1] : /\p{Script=Han}/u.test(text)
+      const validText = expectedInput ? text === expectedInput.text : /\p{Script=Han}/u.test(text)
       if (commits.length !== 1 || selection !== text || !validText) {
-        throw new Error(`Expected one ${expected?.[attempt - 1] ?? 'Pinyin'} commit in the shell, got ${JSON.stringify({ commits, text })}`)
+        throw new Error(`Expected one ${expectedInput?.text ?? 'Pinyin'} commit in the shell, got ${JSON.stringify({ commits, text })}`)
       }
       received.push(text)
     } finally {
-      input.removeEventListener('compositionend', onCommit)
+      input.removeEventListener(eventName, onCommit)
     }
   }
   if (received[0] === received[1]) throw new Error('Both prompts received the same character')
@@ -1090,7 +1099,11 @@ void (async () => {
         result = await exerciseNativeIme(90_000)
         break
       case 'macos-dead-key':
-        result = await exerciseNativeIme(90_000, ['é', 'ü'])
+        result = await exerciseNativeIme(90_000, [
+          { text: 'é', event: 'compositionend' },
+          { text: 'ü', event: 'compositionend' },
+          { text: '#', event: 'input' },
+        ])
         break
       case 'restore':
         result = await restore()

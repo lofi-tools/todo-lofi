@@ -677,7 +677,10 @@ and focused terminal input.
 With the existing British layout, the packaged macOS test app recorded one
 trusted composition event and one matching PTY input at each of two cursor
 positions. Option+E followed by E produced `é`, and Option+U followed by U
-produced `ü`. Run this check with
+produced `ü`. At a third position, Option+3 produced one trusted text input
+event and one literal `#` in the shell. Browser regressions cover macOS legacy
+and Kitty encoding, including the Option+Left terminal chord, and Linux
+Alt encoding. Run the native check with
 `./scripts/smoke-shepherd-terminal.sh --macos-ime british` from the Nix shell.
 The British dead keys exercise character composition. Candidate selection
 and candidate-window placement still need a separate macOS check.
