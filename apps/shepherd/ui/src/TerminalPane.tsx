@@ -4,7 +4,7 @@
  * stay listed with their exit code instead of pretending to still be live.
  */
 
-import { For, Show, batch, createEffect, createMemo, createSignal, onCleanup, onMount } from 'solid-js'
+import { For, Show, batch, createEffect, createMemo, createSignal, createUniqueId, onCleanup, onMount } from 'solid-js'
 
 import * as bridge from './bridge'
 import { KITTY_REPORT_EVENTS, encodeKittyKey, encodeLegacyKey, encodeTerminalText } from './terminal_keys'
@@ -550,7 +550,8 @@ function TerminalTree(props: TerminalTreeProps) {
       }>
         {(entry) => (
           <section class="terminal-tile" classList={{ 'terminal-tile--active': entry().id === props.active }}
-            aria-label={entry().title} onFocusIn={() => props.select(entry().id)}>
+            aria-label={entry().title} aria-description={entry().scope === 'project' ? 'Shared terminal' : 'Task terminal'}
+            onFocusIn={() => props.select(entry().id)}>
             <div class="terminal-pane__bar">
               <span>{entry().title}</span>
               <button type="button" data-terminal-focus={entry().endedAt === null ? '' : undefined}
@@ -664,8 +665,10 @@ function TerminalCanvas(props: { terminalId: string; shown: boolean; focusReques
   const [error, setError] = createSignal<string | null>(null)
   let input: HTMLTextAreaElement | undefined
   const [finding, setFinding] = createSignal(false)
-  const [copying, setCopying] = createSignal(false)
+  const [copyText, setCopyText] = createSignal<string | null>(null)
   const [visibleText, setVisibleText] = createSignal('')
+  const instructionsId = createUniqueId()
+  const copyShortcut = mac ? 'Command+Shift+X' : 'Control+Shift+X'
   const [searching, setSearching] = createSignal(false)
   const [noMatch, setNoMatch] = createSignal(false)
   let searchId: number | null = null
@@ -719,7 +722,7 @@ function TerminalCanvas(props: { terminalId: string; shown: boolean; focusReques
   function syncViewVisibility() {
     if (props.shown && !document.hidden) {
       scheduleDraw()
-      if (frame && !copying()) setVisibleText(viewportText(frame))
+      if (frame) setVisibleText(viewportText(frame))
     } else {
       if (paintRequest !== undefined) window.cancelAnimationFrame(paintRequest)
       paintRequest = undefined
@@ -728,7 +731,10 @@ function TerminalCanvas(props: { terminalId: string; shown: boolean; focusReques
   }
 
   createEffect(() => {
-    if (!props.shown) leaveTerminal()
+    if (!props.shown) {
+      leaveTerminal()
+      setCopyText(null)
+    }
     syncViewVisibility()
   })
 
@@ -1108,10 +1114,9 @@ function TerminalCanvas(props: { terminalId: string; shown: boolean; focusReques
       searchInput?.focus()
       return
     }
-    if ((event.ctrlKey || event.metaKey) && event.shiftKey && event.key.toLowerCase() === 'x' && frame) {
+    if ((event.ctrlKey || event.metaKey) && event.shiftKey && !event.altKey && event.key.toLowerCase() === 'x') {
       event.preventDefault()
-      setVisibleText(viewportText(frame))
-      setCopying(true)
+      setCopyText(frame ? viewportText(frame) : '')
       copyInput?.focus()
       copyInput?.select()
       return
@@ -1246,7 +1251,7 @@ function TerminalCanvas(props: { terminalId: string; shown: boolean; focusReques
       if ((changedRows === null || changedRows.length) && mirrorTimer === undefined) {
         mirrorTimer = window.setTimeout(() => {
           mirrorTimer = undefined
-          if (frame && props.shown && !copying()) setVisibleText(viewportText(frame))
+          if (frame && props.shown) setVisibleText(viewportText(frame))
         }, 100)
       }
     }, (failure) => { if (!detached) setError(describe(failure)) }).then((dispose) => {
@@ -1316,7 +1321,7 @@ function TerminalCanvas(props: { terminalId: string; shown: boolean; focusReques
   })
 
   return (
-    <div class="terminal-view" ref={container}>
+    <div class="terminal-view" ref={container} title={`${copyShortcut} opens terminal copy mode`}>
       <canvas
         class="terminal-view__canvas"
         ref={canvas}
@@ -1335,6 +1340,9 @@ function TerminalCanvas(props: { terminalId: string; shown: boolean; focusReques
         ref={input}
         class="terminal-view__input"
         aria-label="Terminal"
+        aria-describedby={instructionsId}
+        aria-keyshortcuts={mac ? 'Meta+Shift+X' : 'Control+Shift+X'}
+        tabIndex={copyText() === null ? 0 : -1}
         autocapitalize="off"
         autocomplete="off"
         spellcheck={false}
@@ -1375,20 +1383,22 @@ function TerminalCanvas(props: { terminalId: string; shown: boolean; focusReques
           write(encodeTerminalText(value, frame?.modes ?? 0))
         }}
       />
-      <pre class="terminal-view__text" aria-label="Terminal output">{visibleText()}</pre>
-      <Show when={copying()}>
+      <span id={instructionsId} class="terminal-view__instructions">
+        Press {copyShortcut} for copy mode. From copy mode, Tab or Shift+Tab moves to another control.
+      </span>
+      <pre class="terminal-view__text" role="region" aria-label="Terminal output">{visibleText()}</pre>
+      <Show when={copyText() !== null}>
         <textarea
           ref={copyInput}
           class="terminal-view__copy"
           aria-label="Copy terminal output"
-          aria-description="Use the selection shortcuts to copy text. Escape returns to the terminal."
-          value={visibleText()}
+          aria-description="Use selection shortcuts to copy text. Escape returns to the terminal. Tab or Shift+Tab moves to another control."
+          value={copyText() ?? ''}
           readOnly
+          onBlur={() => setCopyText(null)}
           onKeyDown={(event) => {
             if (event.key !== 'Escape') return
             event.preventDefault()
-            setCopying(false)
-            if (frame) setVisibleText(viewportText(frame))
             input?.focus({ preventScroll: true })
           }}
         />

@@ -1029,7 +1029,11 @@ and the task header never overstates the tier.
   density. Shell and terminal tokens follow the active theme and increased
   contrast. Terminal palette updates preserve explicit colors. Chromium
   checks color contrast and saved appearance.
-- [ ] Accessibility.
+- [x] Accessibility.
+  Tab moves from Projects and the conversation into the selected inspector
+  tab and its named panel. Git and Review expose file change status in words
+  and let keyboard users focus the diff. Terminal copy mode keeps a selected
+  snapshot and provides a way to leave the shell by keyboard.
 - [ ] Review/archive edge cases; leave the 30-day worktree collection to S7.
 - [ ] Status bar, window title and empty states.
 
@@ -1089,8 +1093,12 @@ and the task header never overstates the tier.
 - [x] Search ranking and prefix-query tests against Turso FTS, not SQLite FTS5.
   The query plan uses the FTS index. Database fixtures cover exact-term ranking,
   Unicode prefix queries, legacy rows, edits, reopen and task deletion.
-- [ ] Accessibility: focus order, tablist labels, terminal text mirror and
+- [x] Accessibility: focus order, tablist labels, terminal text mirror and
   keyboard copy mode.
+  Chromium verifies Tab order in both directions, panel and attention
+  labels, terminal output in the accessibility tree, and clipboard copy while
+  the mirror receives fresh output. Hidden macOS WebKit verifies header
+  alignment and copy selection and focus restoration with a real PTY.
 
 ### Gate
 

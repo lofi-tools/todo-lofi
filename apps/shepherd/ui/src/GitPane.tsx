@@ -1,6 +1,7 @@
 import { For, Show, createEffect, createResource, createSignal } from 'solid-js'
 
 import { gitFileDiff, gitSnapshot, mutateGit, type GitMutation } from './bridge'
+import { GitDiffFile, GitDiffText } from './GitDiff'
 
 interface GitRequest {
   taskId: string
@@ -124,12 +125,8 @@ export function GitPane(props: {
               <ul class="git-pane__files">
                 <For each={snapshot().files}>{(file) => (
                   <li>
-                    <code>{file.index.trim() || '·'}{file.worktree.trim() || '·'}</code>{' '}
-                    <button class="git-pane__file" type="button" disabled={!file.actionable}
-                      aria-pressed={selectedFile() === file.path}
-                      onClick={() => { setDiscardRequested(null); setSelectedFile(file.path) }}>
-                      {file.originalPath ? `${file.originalPath} → ${file.path}` : file.path}
-                    </button>
+                    <GitDiffFile file={file} selected={selectedFile() === file.path}
+                      onSelect={() => { setDiscardRequested(null); setSelectedFile(file.path) }} />
                     <div class="terminal-pane__bar">
                       <Show when={file.actionable && file.worktree.trim()}>
                         <button type="button" disabled={disabled()} onClick={() => void apply({ type: 'stage', path: file.path })}>Stage</button>
@@ -154,10 +151,10 @@ export function GitPane(props: {
                     {(diff) => (
                       <section class="git-pane" aria-label={`Diff for ${name()}`}>
                         <Show when={diff().staged}>
-                          <h3>Staged</h3><pre class="git-pane__diff">{diff().staged}</pre>
+                          <h3>Staged</h3><GitDiffText label="Staged diff" text={diff().staged} />
                         </Show>
                         <Show when={diff().unstaged}>
-                          <h3>Unstaged</h3><pre class="git-pane__diff">{diff().unstaged}</pre>
+                          <h3>Unstaged</h3><GitDiffText label="Unstaged diff" text={diff().unstaged} />
                         </Show>
                         <Show when={!diff().staged && !diff().unstaged}><p class="empty">No tracked diff.</p></Show>
                         <Show when={diff().canDiscard}>

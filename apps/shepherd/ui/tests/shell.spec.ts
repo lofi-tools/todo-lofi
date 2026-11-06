@@ -1568,7 +1568,13 @@ test('focuses Files from Git and Review and opens the selected worktree file', a
   await expect(page.getByRole('region', { name: 'Task chat' }).getByText('ready to go')).toBeVisible()
   for (const tab of ['Git', 'Review']) {
     await page.getByRole('tab', { name: tab, exact: true }).click()
-    await page.getByRole('button', { name: 'src/main.rs', exact: true }).click()
+    const change = page.getByRole('button', { name: 'src/main.rs', exact: true })
+    await expect(change).toHaveAccessibleDescription('Unstaged modified')
+    await change.press('Enter')
+    const diff = page.getByRole('region', { name: tab === 'Git' ? 'Unstaged diff' : 'File diff', exact: true })
+    await expect(diff).toHaveText('fixture diff')
+    await diff.focus()
+    await expect(diff).toBeFocused()
     await page.getByRole('button', { name: 'Open in Files', exact: true }).click()
     const filesTab = page.getByRole('tab', { name: 'Files', exact: true })
     await expect(filesTab).toHaveAttribute('aria-selected', 'true')
@@ -2910,7 +2916,9 @@ test('keeps terminal find open when Escape belongs to an IME composition', async
 test('clears a terminal bell when its focused window returns', async ({ page }) => {
   await page.goto('/?scoped-terminals')
   const input = page.getByRole('region', { name: 'Task shell' }).getByRole('textbox')
-  const attention = page.locator('#inspector-tab-terminals').getByRole('img', { name: 'Terminal needs attention' })
+  await expect(page.getByRole('region', { name: 'Task shell' })).toHaveAccessibleDescription('Task terminal')
+  const tab = page.getByRole('tab', { name: 'Terminals' })
+  const attention = tab.getByRole('img', { name: 'Terminal needs attention' })
   await input.focus()
 
   await page.evaluate(() => {
@@ -2923,6 +2931,7 @@ test('clears a terminal bell when its focused window returns', async ({ page }) 
     })
   })
   await expect(attention).toBeVisible()
+  await expect(tab).toHaveAccessibleDescription('Terminal needs attention')
   await expect(input).toBeFocused()
 
   await page.evaluate(() => {
@@ -2930,7 +2939,56 @@ test('clears a terminal bell when its focused window returns', async ({ page }) 
     window.dispatchEvent(new FocusEvent('focus'))
   })
   await expect(attention).toHaveCount(0)
+  await expect(tab).not.toHaveAttribute('aria-describedby')
   await expect(input).toBeFocused()
+})
+
+test('tabs from the sidebar through chat and into the selected inspector panel', async ({ page }) => {
+  await page.goto('/')
+  const chat = page.getByRole('region', { name: 'Task chat' })
+  await expect(chat.getByPlaceholder('Send a prompt')).toBeEnabled()
+  const sidebar = page.getByRole('complementary', { name: 'Workspace navigation' })
+  const tablist = page.getByRole('tablist', { name: 'Inspector tabs' })
+  const terminals = tablist.getByRole('tab', { name: 'Terminals' })
+  await sidebar.getByRole('button', { name: 'Settings', exact: true }).focus()
+
+  const chatStops: string[] = []
+  for (let step = 0; step < 20; step++) {
+    await page.keyboard.press('Tab')
+    const stop = await chat.evaluate((pane) => pane.contains(document.activeElement) ? document.activeElement?.className : null)
+    if (typeof stop !== 'string') break
+    chatStops.push(stop)
+  }
+  expect(chatStops).toContain('composer__input')
+  await expect(terminals).toBeFocused()
+  await page.keyboard.press('Tab')
+  await expect(page.getByRole('tabpanel', { name: 'Terminals' })).toBeFocused()
+  await page.keyboard.press('Tab')
+  await expect(page.getByRole('button', { name: 'New shared terminal' })).toBeFocused()
+
+  await page.keyboard.press('Shift+Tab')
+  await page.keyboard.press('Shift+Tab')
+  await expect(terminals).toBeFocused()
+  await page.keyboard.press('Shift+Tab')
+  expect(await chat.evaluate((pane) => pane.contains(document.activeElement))).toBe(true)
+})
+
+test('gives each inspector tab a named panel and announces review attention', async ({ page }) => {
+  await page.goto('/?review-fixture')
+  const tablist = page.getByRole('tablist', { name: 'Inspector tabs' })
+  await expect(tablist.getByRole('tab', { name: 'Review', exact: true })).toHaveAccessibleDescription('Needs review')
+  await tablist.getByRole('tab', { name: 'Terminals' }).focus()
+  for (const name of ['Terminals', 'Preview', 'Review', 'Git', 'Files']) {
+    const tab = tablist.getByRole('tab', { name, exact: true })
+    await expect(tab).toBeFocused()
+    await expect(tab).toHaveAttribute('aria-selected', 'true')
+    const panel = page.getByRole('tabpanel', { name, exact: true })
+    await expect(panel).toHaveAttribute('id', `inspector-panel-${name.toLowerCase()}`)
+    await expect(tab).toHaveAttribute('aria-controls', `inspector-panel-${name.toLowerCase()}`)
+    await expect(page.getByRole('tabpanel')).toHaveCount(1)
+    await page.keyboard.press('ArrowRight')
+  }
+  await expect(tablist.getByRole('tab', { name: 'Terminals' })).toBeFocused()
 })
 
 test('preserves the other terminal when a saved pane is missing', async ({ page }) => {
@@ -3089,6 +3147,41 @@ test('reports Kitty key events and keeps a keyboard copy view', async ({ page })
   await expect(copy).toHaveValue('BB')
   await copy.press('Escape')
   await expect(input).toBeFocused()
+})
+
+test('exposes current terminal output and lets keyboard users copy or leave the terminal', async ({ page, context }) => {
+  await context.grantPermissions(['clipboard-read', 'clipboard-write'])
+  await page.goto('/?scrollback-selection')
+  const output = page.getByRole('region', { name: 'Terminal output' })
+  await expect(output).toMatchAriaSnapshot(`- region "Terminal output": BB`)
+  const input = page.getByRole('textbox', { name: 'Terminal', exact: true })
+  const mac = await page.evaluate(() => navigator.platform.startsWith('Mac'))
+  const modifier = mac ? 'Meta' : 'Control'
+  await expect(input).toHaveAccessibleDescription(`Press ${mac ? 'Command' : 'Control'}+Shift+X for copy mode. From copy mode, Tab or Shift+Tab moves to another control.`)
+  await input.press('Tab')
+  await expect.poll(() => page.evaluate(() => window.__writes)).toEqual(['\t'])
+
+  const copy = page.getByRole('textbox', { name: 'Copy terminal output' })
+  await input.press(`${modifier}+Shift+x`)
+  await expect(copy).toBeFocused()
+  await expect(copy).toHaveValue('BB')
+  await page.evaluate(() => {
+    const fixture = window as unknown as { __emitTerminalHistory: (offset: number, glyph: string) => void }
+    fixture.__emitTerminalHistory(2, 'C')
+  })
+  await expect(output).toMatchAriaSnapshot(`- region "Terminal output": CC`)
+  await expect(copy).toHaveValue('BB')
+  await page.keyboard.press(`${modifier}+c`)
+  await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe('BB')
+  await page.keyboard.press('Tab')
+  await expect(page.getByRole('separator', { name: 'Resize inspector' })).toBeFocused()
+  await expect(copy).toHaveCount(0)
+
+  await input.press(`${modifier}+Shift+x`)
+  await page.keyboard.press('Shift+Tab')
+  await expect(page.getByRole('button', { name: 'Stop process' })).toBeFocused()
+  await expect(copy).toHaveCount(0)
+  expect(await page.evaluate(() => window.__writes)).toEqual(['\t'])
 })
 
 test('reports a Kitty release after its shortcut modifier is released', async ({ page }) => {

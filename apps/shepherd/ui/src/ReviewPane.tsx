@@ -1,6 +1,7 @@
 import { For, Show, createResource, createSignal } from 'solid-js'
 
 import { reviewFileDiff, reviewSnapshot, type ReviewAction, type TaskDetail } from './bridge'
+import { GitDiffFile, GitDiffText } from './GitDiff'
 
 export function ReviewPane(props: { task: TaskDetail; queuedNote?: string; openFile: (path: string) => void; onAction: (action: ReviewAction) => Promise<void> }) {
   const [review, { refetch }] = createResource(
@@ -84,11 +85,8 @@ export function ReviewPane(props: { task: TaskDetail; queuedNote?: string; openF
               <ul class="git-pane__files">
                 <For each={snapshot().files}>{(file) => (
                   <li>
-                    <code>{file.index.trim() || '·'}{file.worktree.trim() || '·'}</code>{' '}
-                    <button class="git-pane__file" type="button" disabled={!file.actionable}
-                      aria-pressed={selectedFile() === file.path} onClick={() => setSelectedFile(file.path)}>
-                      {file.originalPath ? `${file.originalPath} → ${file.path}` : file.path}
-                    </button>
+                    <GitDiffFile file={file} selected={selectedFile() === file.path}
+                      onSelect={() => setSelectedFile(file.path)} />
                   </li>
                 )}</For>
               </ul>
@@ -101,7 +99,7 @@ export function ReviewPane(props: { task: TaskDetail; queuedNote?: string; openF
                 <Show when={diff.loading}><p role="status" class="empty">Loading diff…</p></Show>
                 <Show when={diff.error}><p role="alert">{diff.error.message ?? String(diff.error)}</p></Show>
                 <Show when={!diff.error && !diff.loading && diff() !== undefined}>
-                  <pre class="git-pane__diff" aria-label="File diff">{diff() || 'No net content change.'}</pre>
+                  <GitDiffText label="File diff" text={diff() || 'No net content change.'} />
                 </Show>
               </>}
             </Show>

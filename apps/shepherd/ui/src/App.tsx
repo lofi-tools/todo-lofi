@@ -1404,7 +1404,7 @@ export function App() {
             tabIndex={tab.id === inspectorTab() ? 0 : -1}
             onClick={() => setInspectorTab(tab.id)}
             aria-disabled={!tab.enabled}
-            aria-controls="inspector-pane"
+            aria-controls={`inspector-panel-${tab.id}`}
             disabled={!tab.enabled}
             title={tab.enabled ? tab.label : `${tab.label} arrives in a later slice`}
           >
@@ -1499,7 +1499,7 @@ export function App() {
       <WorkspaceFrame taskId={selectedTaskId()} inspectorWidth={inspectorWidth()} onInspectorWidthChange={resizeInspector}
         onSearch={openTaskSearch} searchDisabled={pending()}
         sidebarHidden={sidebarHidden()} onCommands={() => openPalette('commands')} paletteShortcut={chordFor('commandPalette')}
-        inspectorTabs={inspectorTabsHeader} footer={workspaceFooter}
+        footer={workspaceFooter}
         onBackToChat={freebuffProjectId() && !settingsOpen() ? () => setFreebuffProjectId(undefined) : undefined}>
         <aside ref={sidebar} class="sidebar" aria-label="Workspace navigation" hidden={sidebarHidden()}>
           <header class="sidebar__header">
@@ -1850,13 +1850,11 @@ export function App() {
         </section>
 
         <aside ref={inspector} class="inspector" id="workspace-inspector" aria-label="Inspector">
-          <div
-            class="inspector__pane"
-            id="inspector-pane"
-            role="tabpanel"
-            aria-labelledby={`inspector-tab-${inspectorTab()}`}
-          >
-            <div class="terminal-tab" hidden={inspectorTab() !== 'terminals'}>
+          <div class="shell__header-inspector" data-tauri-drag-region={isTauri() && mac ? '' : undefined}>
+            {inspectorTabsHeader}
+          </div>
+          <div class="inspector__pane">
+            <InspectorPanel id="terminals" active={inspectorTab()}>
               <Show when={selectedProjectId()} keyed fallback={<p class="empty">No terminals yet.</p>}>
                 {(projectId) => <TerminalPane
                   projectId={projectId} taskId={selectedTaskId()} taskHasWorktree={!!workspace()?.task.worktreePath}
@@ -1869,17 +1867,16 @@ export function App() {
                   attention={projectAttention().map((bell) => bell.terminalId)} onTerminalFocus={focusTerminal}
                 />}
               </Show>
-            </div>
-            <Show when={selectedProjectId()} keyed>
-              {(projectId) => <PreviewPane projectId={projectId} url={selectedProject()?.previewUrl}
-                shown={inspectorTab() === 'preview'} canAddToPrompt={canAddPreviewNote()}
-                attachmentLimit={attachmentLimit()}
-                onAddToPrompt={addPreviewNote} onProjectSettings={() => openProjectSettings(projectId)} />}
-            </Show>
-            <Show when={inspectorTab() === 'preview' && !selectedProjectId()}>
-              <p class="empty">Select a project to preview.</p>
-            </Show>
-            <Show when={inspectorTab() === 'review'}>
+            </InspectorPanel>
+            <InspectorPanel id="preview" active={inspectorTab()}>
+              <Show when={selectedProjectId()} keyed fallback={<p class="empty">Select a project to preview.</p>}>
+                {(projectId) => <PreviewPane projectId={projectId} url={selectedProject()?.previewUrl}
+                  shown={inspectorTab() === 'preview'} canAddToPrompt={canAddPreviewNote()}
+                  attachmentLimit={attachmentLimit()}
+                  onAddToPrompt={addPreviewNote} onProjectSettings={() => openProjectSettings(projectId)} />}
+              </Show>
+            </InspectorPanel>
+            <InspectorPanel id="review" active={inspectorTab()} lazy>
               <Show when={workspace()?.task.id} keyed fallback={<p class="empty">Select a task to review.</p>}>
                 {(taskId) => <ReviewPane
                   task={workspace()!.task}
@@ -1891,8 +1888,8 @@ export function App() {
                   }}
                 />}
               </Show>
-            </Show>
-            <Show when={inspectorTab() === 'git'}>
+            </InspectorPanel>
+            <InspectorPanel id="git" active={inspectorTab()} lazy>
               <Show when={workspace()?.task.worktreePath} fallback={<p class="empty">Select a task with a worktree.</p>}>
                 <Show when={workspace()?.task.id} keyed>
                   {(taskId) => <GitPane openTerminal={() => setInspectorTab('terminals')} openFile={openTaskFile} taskId={taskId}
@@ -1901,14 +1898,14 @@ export function App() {
                     commitShortcut={chordFor('commit')} />}
                 </Show>
               </Show>
-            </Show>
-            <Show when={inspectorTab() === 'files'}>
+            </InspectorPanel>
+            <InspectorPanel id="files" active={inspectorTab()} lazy>
               <Show when={selectedProject()?.missing === false && selectedProjectId()} keyed
                 fallback={<p class="empty">Select an available project to browse its files.</p>}>
                 {(projectId) => <FilesPane projectId={projectId} initialFile={fileRequest()}
                   worktreeTaskId={workspace()?.task.worktreePath && workspace()?.task.id === selectedTaskId() ? selectedTaskId() : null} />}
               </Show>
-            </Show>
+            </InspectorPanel>
           </div>
         </aside>
       </WorkspaceFrame>
@@ -1943,9 +1940,18 @@ const INSPECTOR_MIN_WIDTH = 240
 const INSPECTOR_MAX_WIDTH = 1600
 const CHAT_MIN_WIDTH = 220
 
+function InspectorPanel(props: { id: bridge.InspectorTab; active: bridge.InspectorTab; lazy?: boolean; children: JSX.Element }) {
+  const shown = () => props.active === props.id
+  return (
+    <div class="inspector__panel" role="tabpanel" id={`inspector-panel-${props.id}`}
+      aria-labelledby={`inspector-tab-${props.id}`} hidden={!shown()} tabIndex={0}>
+      <Show when={!props.lazy || shown()}>{props.children}</Show>
+    </div>
+  )
+}
+
 function WorkspaceFrame(props: {
   children: JSX.Element
-  inspectorTabs: JSX.Element
   footer: JSX.Element
   taskId: string | null
   inspectorWidth: number | null
@@ -2028,9 +2034,6 @@ function WorkspaceFrame(props: {
           </div>
         </div>
         <div class="shell__header-conversation" data-tauri-drag-region={dragRegion} />
-        <div class="shell__header-inspector" data-tauri-drag-region={dragRegion}>
-          {props.inspectorTabs}
-        </div>
       </header>
       <nav class="shell__rail" aria-label="Quick navigation">
         <button class="shell__icon-button" type="button" aria-label="Workspace" title="Workspace" disabled>

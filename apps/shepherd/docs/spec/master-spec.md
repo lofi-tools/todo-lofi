@@ -1101,6 +1101,9 @@ is bounded (scrollback, stderr, search results, per-task event queue).
 - Pane focus is announced and reachable without a mouse; every inspector tab and
   terminal pane header is a button target, and the pane switcher is a labelled
   tablist whose rings and badges are also exposed as text.
+  Only the selected inspector tab is in the Tab sequence. Each tab names and
+  controls its own panel. Tab from the selected tab focuses that panel, then
+  its controls.
 - Respect reduced motion, increased contrast and the system light/dark
   preference.
 - Tokens only: no literal colours in components; themes define surface, text,
@@ -1108,6 +1111,10 @@ is bounded (scrollback, stderr, search results, per-task event queue).
 - Screen-reader labels on icon buttons, task states, diff rows and pane kinds.
 - The canvas terminal keeps an off-screen text mirror in the accessibility tree
   and supports a keyboard copy mode, so reading and copying never require a mouse.
+  Command-Shift-X on macOS or Ctrl-Shift-X on Linux opens a selected snapshot
+  of the viewport. Escape returns to the shell input. Tab or Shift-Tab from
+  copy mode leaves the terminal while ordinary Tab at the shell remains PTY
+  input. The text mirror continues to reflect the viewport during copy mode.
 - Themes are built in for v1 (light, dark and the system preference); custom
   theme creation is deferred. **Settings → Appearance** saves the choice in
   `app["theme"]` and follows the system by default. Compact is the default

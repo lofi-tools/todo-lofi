@@ -188,7 +188,7 @@ textarea {
 .shell__header {
   display: grid;
   grid-row: 1;
-  grid-column: 1 / -1;
+  grid-column: rail / inspector;
   grid-template-columns: subgrid;
 }
 
@@ -215,7 +215,6 @@ textarea {
 }
 
 .shell__header-inspector {
-  grid-column: inspector;
   padding-inline: 8px;
 }
 
@@ -267,11 +266,15 @@ textarea {
 .shell__body {
   position: relative;
   display: grid;
-  grid-area: 2 / sidebar / 3 / -1;
+  grid-area: 1 / sidebar / 3 / -1;
   grid-template-columns: subgrid;
-  grid-template-rows: minmax(0, 1fr);
+  grid-template-rows: subgrid;
   margin-bottom: 4px;
-  overflow: hidden;
+}
+
+.shell__body::before {
+  content: '';
+  grid-area: 2 / 1 / 3 / -1;
   outline: 1px solid var(--border);
   outline-offset: -1px;
   border-radius: 10px;
@@ -279,17 +282,17 @@ textarea {
 }
 
 .shell__body > .sidebar {
-  grid-column: sidebar;
+  grid-area: 2 / sidebar;
 }
 
 .shell__body > .chat,
 .shell__body > .settings {
-  grid-column: conversation;
+  grid-area: 2 / conversation;
 }
 
 .workspace-divider {
   position: absolute;
-  grid-column: inspector;
+  grid-area: 2 / inspector;
   inset-block: 0;
   left: -4px;
   width: 8px;
@@ -1668,10 +1671,9 @@ textarea {
 
 .inspector {
   display: grid;
-  grid-column: inspector;
-  grid-template-rows: minmax(0, 1fr);
+  grid-area: 1 / inspector / 3;
+  grid-template-rows: subgrid;
   min-width: 0;
-  border-left: 1px solid var(--border);
 }
 
 .inspector__tabs {
@@ -1707,7 +1709,12 @@ textarea {
 
 .inspector__pane {
   padding: calc(12px + var(--density-space));
+  border-left: 1px solid var(--border);
   overflow: auto;
+}
+
+.inspector__panel {
+  height: 100%;
 }
 
 .terminal-pane {
@@ -1903,7 +1910,8 @@ textarea {
   opacity: 0;
 }
 
-.terminal-view__text {
+.terminal-view__text,
+.terminal-view__instructions {
   position: absolute;
   width: 1px;
   height: 1px;
@@ -2183,10 +2191,6 @@ textarea {
   color: var(--text-muted);
   text-align: end;
   user-select: none;
-}
-
-.terminal-tab {
-  height: 100%;
 }
 
 .terminal-pane__bar {

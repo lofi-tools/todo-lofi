@@ -47,8 +47,10 @@ current layout and give future changes a point of comparison.
   **Files**.
   Give each icon an accessible name and tooltip. Use Left and Right to switch
   between available tabs. Show terminal and review attention as dots with
-  accessible descriptions. Settings can occupy the middle pane while the
-  sidebar and inspector remain in place.
+  accessible descriptions. The tabs follow the conversation in the Tab
+  sequence, with one tab stop for the selected tab and the named panel next.
+  Settings can occupy the middle pane while the sidebar and inspector remain
+  in place.
   In Terminals, keep the selected task's read-only Codex command output
   alongside the interactive terminal panes. Follow the latest command by
   default and let the user select an earlier command without shifting focus
@@ -60,6 +62,10 @@ current layout and give future changes a point of comparison.
   button. Arrow keys on live pane header buttons move between adjacent live
   panes. Up from a pane with no live pane above it returns to the Terminals
   tab. Arrow keys in the terminal input go to the shell.
+  Command-Shift-X on macOS or Ctrl-Shift-X on Linux opens copy mode with the
+  current viewport selected. Escape returns to the shell. Tab or Shift-Tab
+  from copy mode moves to another control. The off-screen Terminal output
+  region continues to update while the copy selection stays fixed.
   On macOS, the current input source supplies printable Option characters,
   including Option+3 for `#` on the British layout. Option with a navigation
   key still sends a terminal chord.
@@ -76,6 +82,8 @@ current layout and give future changes a point of comparison.
   Put **Open in external editor** and **Reveal in file manager** above the file
   preview. **Open in Files** from a Git or Review diff selects and focuses the
   Files tab and opens the matching worktree file.
+  Git and Review file rows expose their change status in words. Diff text is
+  a named, keyboard-focusable region.
 - In Preview, offer **Project settings** when the selected project has no
   preview URL. **Settings → Projects** saves or clears that project's loopback
   URL. When it is configured, show the address, **Reload**, **Open in browser**,

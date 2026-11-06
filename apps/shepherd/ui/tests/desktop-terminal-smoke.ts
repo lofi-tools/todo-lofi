@@ -114,6 +114,32 @@ function press(input: HTMLElement, key: string) {
   input.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true }))
 }
 
+async function exerciseAccessibility(input: HTMLTextAreaElement) {
+  const tab = await waitFor('selected Terminals tab', () =>
+    document.querySelector<HTMLElement>('#inspector-tab-terminals[aria-selected="true"]'))
+  const panelId = tab.getAttribute('aria-controls')
+  const panel = panelId ? document.getElementById(panelId) : null
+  const header = tab.closest('.shell__header-inspector')?.getBoundingClientRect()
+  const windowHeader = document.querySelector('.shell__header')?.getBoundingClientRect()
+  const pane = panel?.closest('.inspector__pane')?.getBoundingClientRect()
+  if (!header || !windowHeader || !pane || header.top !== windowHeader.top ||
+    header.height !== windowHeader.height || header.x !== pane.x || header.width !== pane.width || header.bottom !== pane.top ||
+    panel?.getAttribute('aria-labelledby') !== tab.id) {
+    throw new Error('The Terminals tab does not align with its labelled inspector panel')
+  }
+
+  input.focus()
+  input.dispatchEvent(new KeyboardEvent('keydown', { key: 'X', ctrlKey: true, shiftKey: true, bubbles: true, cancelable: true }))
+  const copy = await waitFor('terminal copy mode', () =>
+    document.querySelector<HTMLTextAreaElement>('textarea[aria-label="Copy terminal output"]'))
+  if (document.activeElement !== copy || !copy.value.includes('S4_READY') ||
+    copy.selectionStart !== 0 || copy.selectionEnd !== copy.value.length) {
+    throw new Error('Copy mode did not focus and select the terminal viewport')
+  }
+  press(copy, 'Escape')
+  await waitFor('copy mode closes and restores focus', () => !copy.isConnected && document.activeElement === input)
+}
+
 async function pressPaneShortcut(title: string, key: string, shiftKey: boolean) {
   const input = await waitFor(`input in ${title}`, () =>
     terminalPane(title)?.querySelector<HTMLTextAreaElement>('.terminal-view__input'))
@@ -1106,6 +1132,7 @@ async function smoke() {
   await bridge.terminalWrite(terminal.id, "pwd; printf '\nS4_%s\n' READY\r")
   await waitFor('project cwd and PTY output in the webview', () =>
     terminalOutput().includes(project.path) && terminalOutput().includes('S4_READY'))
+  await exerciseAccessibility(input)
   await exerciseShellInterrupt(terminal.id, input)
   if (windowChecks) {
     await exerciseAlternateScreen(terminal.id, input)
@@ -1139,6 +1166,7 @@ async function smoke() {
   await requestQuitWithLiveTask(3)
   return { ok: true, quitWarning: true, taskSwitch: true, projectSwitch: true, roundTrip: true,
     splitReattach: true, commandPalette: true, savedKeybinding: true, savedProjectSettings: true, themedTerminal: true,
+    terminalAccessibility: true,
     fishKeyBindings: __SHEPHERD_SMOKE_FISH__, bracketedPaste: true, ...windowResults }
 }
 
