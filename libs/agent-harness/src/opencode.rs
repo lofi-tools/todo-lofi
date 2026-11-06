@@ -1588,22 +1588,21 @@ exec sleep 60
     #[ignore = "requires a configured OpenCode executable and loopback sockets"]
     async fn installed_harness_streams_a_turn_through_a_local_fixture()
     -> Result<(), Box<dyn std::error::Error>> {
-        installed_harness_with_fixture_provider(false).await
+        installed_harness_with_fixture_provider(FixtureModel::Text).await
     }
 
     #[tokio::test]
     #[ignore = "requires a configured OpenCode executable and loopback sockets"]
     async fn installed_harness_reports_a_provider_sign_in_failure()
     -> Result<(), Box<dyn std::error::Error>> {
-        installed_harness_with_fixture_provider(true).await
+        installed_harness_with_fixture_provider(FixtureModel::Unauthorized).await
     }
 
-    async fn installed_harness_with_fixture_provider(
-        unauthorized: bool,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        let root = tempfile::tempdir()?;
-        let mut spec = installed_fixture_spec(root.path())?;
-        let listener = TcpListener::bind("127.0.0.1:0").await?;
+    fn installed_provider_spec(
+        root: &Path,
+        listener: &TcpListener,
+    ) -> Result<SpawnSpec, Box<dyn std::error::Error>> {
+        let mut spec = installed_fixture_spec(root)?;
         let endpoint = format!("http://{}/v1", listener.local_addr()?);
         let config = spec.cwd.join("opencode.json");
         std::fs::write(
@@ -1630,7 +1629,17 @@ exec sleep 60
             "OPENCODE_CONFIG".into(),
             config.to_string_lossy().into_owned(),
         );
-        let provider = tokio::spawn(serve_fixture_model(listener, unauthorized));
+        Ok(spec)
+    }
+
+    async fn installed_harness_with_fixture_provider(
+        model: FixtureModel,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let root = tempfile::tempdir()?;
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let spec = installed_provider_spec(root.path(), &listener)?;
+        let provider = tokio::spawn(serve_fixture_model(listener, model));
+        let unauthorized = matches!(model, FixtureModel::Unauthorized);
         let outcome = async {
             let mut harness = OpenCodeHarness::default();
             harness.start(spec).await?;
@@ -1642,23 +1651,11 @@ exec sleep 60
                         text: "test local sign-in failure".into(),
                     })
                     .await?;
-                timeout(REQUEST_TIMEOUT, async {
-                    let mut transcript = crate::Transcript::default();
-                    while let Some(event) = harness.events().recv().await {
-                        transcript.apply(&event);
-                        if matches!(
-                            event,
-                            HarnessEvent::TurnFinished {
-                                reason: TurnFinishReason::Failed
-                            }
-                        ) {
-                            return Ok(transcript);
-                        }
-                    }
-                    Err(HarnessError::ChannelClosed)
-                })
-                .await
-                .map_err(|error| protocol_error("fixture turn timed out", error))??
+                let mut transcript = crate::Transcript::default();
+                for event in fixture_outcome(&mut harness, TurnFinishReason::Failed).await? {
+                    transcript.apply(&event);
+                }
+                transcript
             } else {
                 fixture_reply(&mut harness).await?
             };
@@ -1685,6 +1682,146 @@ exec sleep 60
             );
         }
         Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a configured OpenCode executable and loopback sockets"]
+    async fn installed_harness_approves_and_cancels_after_resuming()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = tempfile::tempdir()?;
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let spec = installed_provider_spec(root.path(), &listener)?;
+        let provider = tokio::spawn(serve_fixture_model(listener, FixtureModel::Shell));
+        let outcome = async {
+            let mut first = OpenCodeHarness::default();
+            assert!(first.start(spec.clone()).await?.resume);
+            let session = first.open_session(None).await?;
+            first.shutdown().await?;
+
+            let mut reopened = OpenCodeHarness::default();
+            let capabilities = reopened.start(spec).await?;
+            assert_eq!(reopened.tier(), AdapterTier::Native);
+            assert!(capabilities.approvals && capabilities.cancel);
+            assert_eq!(reopened.open_session(Some(session.clone())).await?, session);
+
+            for (decision, outcome) in [
+                (Decision::Allow, TurnFinishReason::Completed),
+                (Decision::Deny, TurnFinishReason::Interrupted),
+            ] {
+                reopened
+                    .prompt(PromptInput {
+                        text: "Run the approval fixture".into(),
+                    })
+                    .await?;
+                let approval = fixture_approval(&mut reopened).await?;
+                reopened.respond(approval.clone(), decision).await?;
+                let events = fixture_outcome(&mut reopened, outcome).await?;
+                assert!(
+                    events
+                        .iter()
+                        .any(|event| matches!(event, HarnessEvent::ApprovalResolved {
+                    approval_id, decision: resolved, ..
+                } if *approval_id == approval && *resolved == decision)),
+                    "{events:?}"
+                );
+                let marker = events.iter().any(|event| {
+                    matches!(event, HarnessEvent::ToolCall {
+                    status: ToolStatus::Completed, output: Some(output), ..
+                } if output.contains("shepherd_approval_fixture"))
+                });
+                assert_eq!(marker, decision == Decision::Allow, "{events:?}");
+            }
+
+            reopened
+                .prompt(PromptInput {
+                    text: "Run the cancellation fixture".into(),
+                })
+                .await?;
+            let pending = fixture_approval(&mut reopened).await?;
+            reopened.cancel().await?;
+            let events = fixture_outcome(&mut reopened, TurnFinishReason::Cancelled).await?;
+            assert!(
+                events
+                    .iter()
+                    .any(|event| matches!(event, HarnessEvent::ApprovalWithdrawn {
+                approval_id
+            } if *approval_id == pending)),
+                "{events:?}"
+            );
+            assert!(
+                !events.iter().any(|event| matches!(
+                    event,
+                    HarnessEvent::ToolCall {
+                        status: ToolStatus::Completed,
+                        ..
+                    }
+                )),
+                "{events:?}"
+            );
+            reopened.shutdown().await?;
+            Ok::<_, Box<dyn std::error::Error>>(())
+        }
+        .await;
+        provider.abort();
+        outcome
+    }
+
+    async fn fixture_approval(harness: &mut OpenCodeHarness) -> HarnessResult<ApprovalId> {
+        timeout(REQUEST_TIMEOUT, async {
+            while let Some(event) = harness.events().recv().await {
+                match event {
+                    HarnessEvent::ApprovalRequested { request } => {
+                        assert!(
+                            request
+                                .arguments
+                                .to_string()
+                                .contains("shepherd_approval_fixture"),
+                            "{request:?}"
+                        );
+                        return Ok(request.approval_id);
+                    }
+                    HarnessEvent::TurnFinished { .. }
+                    | HarnessEvent::ConnectionFailed { .. }
+                    | HarnessEvent::Exited { .. } => {
+                        return Err(protocol_error(
+                            "fixture ended before requesting approval",
+                            format_args!("{event:?}"),
+                        ));
+                    }
+                    _ => {}
+                }
+            }
+            Err(HarnessError::ChannelClosed)
+        })
+        .await
+        .map_err(|error| protocol_error("fixture approval timed out", error))?
+    }
+
+    async fn fixture_outcome(
+        harness: &mut OpenCodeHarness,
+        expected: TurnFinishReason,
+    ) -> HarnessResult<Vec<HarnessEvent>> {
+        let mut events = Vec::new();
+        timeout(REQUEST_TIMEOUT, async {
+            while let Some(event) = harness.events().recv().await {
+                match event {
+                    HarnessEvent::TurnFinished { reason } => {
+                        assert_eq!(reason, expected, "{events:?}");
+                        return Ok(events);
+                    }
+                    HarnessEvent::ConnectionFailed { .. } | HarnessEvent::Exited { .. } => {
+                        return Err(protocol_error(
+                            "fixture connection closed",
+                            format_args!("{event:?}"),
+                        ));
+                    }
+                    _ => events.push(event),
+                }
+            }
+            Err(HarnessError::ChannelClosed)
+        })
+        .await
+        .map_err(|error| protocol_error("fixture turn timed out", error))?
     }
 
     #[cfg(unix)]
@@ -1845,12 +1982,22 @@ done
         })
     }
 
-    async fn serve_fixture_model(listener: TcpListener, unauthorized: bool) -> std::io::Result<()> {
+    #[derive(Clone, Copy)]
+    enum FixtureModel {
+        Text,
+        Unauthorized,
+        Shell,
+    }
+
+    async fn serve_fixture_model(
+        listener: TcpListener,
+        model: FixtureModel,
+    ) -> std::io::Result<()> {
         loop {
             let (socket, _) = listener.accept().await?;
             let (reader, mut writer) = socket.into_split();
-            read_fixture_request(reader).await?;
-            if unauthorized {
+            let (_, request) = read_fixture_request(reader).await?;
+            if matches!(model, FixtureModel::Unauthorized) {
                 let body = r#"{"error":{"message":"Local fixture credential expired","type":"invalid_request_error","code":"invalid_api_key"}}"#;
                 let response = format!(
                     "HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
@@ -1860,14 +2007,27 @@ done
                 writer.shutdown().await?;
                 continue;
             }
+            let shell_call = if matches!(model, FixtureModel::Shell) {
+                fixture_shell_call(&serde_json::from_slice(&request)?)
+            } else {
+                None
+            };
+            let (reply, finish_reason) = shell_call.map_or_else(
+                || {
+                    (
+                        json!({"role":"assistant", "content":"local fixture reply"}),
+                        "stop",
+                    )
+                },
+                |call| {
+                    (
+                        json!({"role":"assistant", "tool_calls":[call]}),
+                        "tool_calls",
+                    )
+                },
+            );
             let mut body = String::new();
-            for (delta, finish) in [
-                (
-                    json!({"role":"assistant", "content":"local fixture reply"}),
-                    None,
-                ),
-                (json!({}), Some("stop")),
-            ] {
+            for (delta, finish) in [(reply, None), (json!({}), Some(finish_reason))] {
                 let chunk = json!({
                     "id":"chatcmpl-fixture", "object":"chat.completion.chunk", "created":1,
                     "model":"coder", "choices":[{"index":0,"delta":delta,"finish_reason":finish}]
@@ -1882,6 +2042,26 @@ done
             writer.write_all(response.as_bytes()).await?;
             writer.shutdown().await?;
         }
+    }
+
+    fn fixture_shell_call(request: &Value) -> Option<Value> {
+        let last_input = request["messages"]
+            .as_array()?
+            .iter()
+            .rev()
+            .find(|message| matches!(message["role"].as_str(), Some("tool" | "user")))?;
+        if last_input["role"] != "user" {
+            return None;
+        }
+        let shell = request["tools"]
+            .as_array()?
+            .iter()
+            .find(|tool| tool["function"]["name"] == "shell")?;
+        let arguments = json!({"command": "printf shepherd_approval_fixture"});
+        Some(json!({
+            "index": 0, "id": format!("call_{}", uuid::Uuid::new_v4().simple()), "type": "function",
+            "function": {"name": shell["function"]["name"], "arguments": arguments.to_string()}
+        }))
     }
 
     async fn read_fixture_request(

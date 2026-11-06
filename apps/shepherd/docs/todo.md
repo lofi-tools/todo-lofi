@@ -920,7 +920,12 @@ If Pi’s RPC probe is blocked, proceed with ACP while resolving it.
   smoke exercises its RPC dialog. The Claude ACP command can be tested through
   the same settings file as the desktop. A run on a configured CI runner and a
   live Claude Code run remain to be verified.
-- [ ] Approval, cancel, resume and failure paths where the tier supports them.
+- [x] Approval, cancel, resume and failure paths where the implemented tier
+  supports them. The installed native OpenCode smoke reloads a session, allows
+  and denies a shell call, and withdraws a pending approval on cancellation.
+  Its loopback provider also verifies sign-in failures. Codex app-server and
+  ACP fixtures exercise approval, cancel, resume and failure. The Codex exec
+  fixture verifies that a failed run reports its exit code and stderr.
 - [ ] A missing capability hides the control instead of showing a dead button.
 - [x] Mocked IPC verifies that the Freebuff terminal replaces the conversation
   pane. A local shell fixture verifies the standalone PTY path. Test suites

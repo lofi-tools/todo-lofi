@@ -1286,7 +1286,12 @@ impl AgentHarness for ExecHarness {
         };
 
         self.stderr = Arc::new(Mutex::new(VecDeque::new()));
-        self.stderr_task = Some(spawn_stderr_reader(stderr, Arc::clone(&self.stderr), None));
+        let (stderr_done, stderr_drained) = oneshot::channel();
+        self.stderr_task = Some(spawn_stderr_reader(
+            stderr,
+            Arc::clone(&self.stderr),
+            Some(stderr_done),
+        ));
 
         let turn_id = TurnId::new(format!("exec-turn-{}", self.next_turn));
         self.next_turn += 1;
@@ -1299,6 +1304,7 @@ impl AgentHarness for ExecHarness {
             kill_receiver,
             self.sender.clone(),
             Arc::clone(&self.stderr),
+            stderr_drained,
             Arc::clone(&finished),
             reader,
         );
@@ -1394,6 +1400,7 @@ fn spawn_exec_waiter(
     kill: oneshot::Receiver<()>,
     sender: mpsc::UnboundedSender<HarnessEvent>,
     stderr: Arc<Mutex<VecDeque<String>>>,
+    stderr_drained: oneshot::Receiver<()>,
     finished: Arc<AtomicBool>,
     mut reader: JoinHandle<()>,
 ) -> JoinHandle<()> {
@@ -1427,7 +1434,6 @@ fn spawn_exec_waiter(
             Ok(Err(error)) => tracing::debug!(%error, "the Codex exec reader stopped"),
             Err(_) => reader.abort(),
         }
-        finished.store(true, Ordering::Relaxed);
         let code = match &status {
             Ok(status) => status.code(),
             Err(error) => {
@@ -1443,9 +1449,19 @@ fn spawn_exec_waiter(
             TurnFinishReason::Failed
         };
         if reason == TurnFinishReason::Failed {
+            if timeout(Duration::from_millis(150), stderr_drained)
+                .await
+                .is_err()
+            {
+                tracing::debug!("codex exec stderr did not close with the process");
+            }
             let stderr = stderr_tail(&stderr);
+            let status = code.map_or_else(
+                || "exit status unavailable".into(),
+                |code| format!("exit code {code}"),
+            );
             let text = format!(
-                "Codex exec failed (exit code {code:?}){suffix}",
+                "Codex exec failed ({status}){suffix}",
                 suffix = if stderr.is_empty() {
                     String::new()
                 } else {
@@ -1458,6 +1474,7 @@ fn spawn_exec_waiter(
                 tracing::debug!("the core stopped listening to codex errors");
             }
         }
+        finished.store(true, Ordering::Relaxed);
         if sender.send(HarnessEvent::TurnFinished { reason }).is_err() {
             tracing::debug!("the core stopped listening to codex events");
         }
@@ -3289,6 +3306,39 @@ sleep 30
             }
         )));
         harness.shutdown().await.expect("the session stops");
+    }
+
+    #[tokio::test]
+    async fn a_failed_exec_turn_reports_its_exit_code_and_sign_in_error()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = TempDir::new()?;
+        let stub = write_stub(
+            &directory,
+            "codex-exec-fail",
+            "#!/bin/sh\nprintf '%s\\n' 'authentication required for this account' >&2\nexit 23\n",
+        );
+        let (mut harness, _) = start_exec(&stub, directory.path()).await;
+        harness.prompt(PromptInput { text: "go".into() }).await?;
+        let events = collect_until(&mut harness, |events| {
+            events
+                .iter()
+                .any(|event| matches!(event, HarnessEvent::TurnFinished { .. }))
+        })
+        .await;
+        assert!(
+            matches!(events.as_slice(), [..,
+            HarnessEvent::TurnError { kind: FailureKind::AuthRequired, text },
+            HarnessEvent::TurnFinished { reason: TurnFinishReason::Failed },
+        ] if text.contains("exit code 23") && text.contains("authentication required for this account")),
+            "{events:?}"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, HarnessEvent::Exited { .. }))
+        );
+        harness.shutdown().await?;
+        Ok(())
     }
 
     #[tokio::test]
