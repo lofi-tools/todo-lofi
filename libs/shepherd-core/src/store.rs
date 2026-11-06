@@ -1318,6 +1318,87 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "measures the local Turso FTS search budget with 50,000 entries"]
+    async fn turso_search_meets_the_50k_entry_latency_budget()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use std::time::{Duration, Instant};
+
+        let database = TestDatabase::new()?;
+        let store = Arc::new(TursoStore::open(&database.uri()).await?);
+        for project_number in 0..4 {
+            let project = Project::new(database.path().join(format!("Workspace {project_number}")));
+            store.save_project(&project).await?;
+            for task_number in 0..5 {
+                let task = Task::draft(
+                    project.id.clone(),
+                    &format!("Task {task_number}"),
+                    database.path(),
+                );
+                store.save_task(&task).await?;
+                let session = SessionRecord::started(task.id.clone(), "codex", None);
+                store.save_session(&session).await?;
+                let mut db = store.db.lock().await;
+                toasty::sql::statement(
+                    "WITH digits(digit) AS (VALUES (0), (1), (2), (3), (4), (5), (6), (7), (8), (9)),
+                     numbers(sequence) AS (
+                         SELECT ones.digit + 10 * tens.digit + 100 * hundreds.digit + 1000 * thousands.digit
+                         FROM digits AS ones CROSS JOIN digits AS tens CROSS JOIN digits AS hundreds
+                             CROSS JOIN digits AS thousands WHERE thousands.digit < 3
+                     ), documents(sequence, content) AS (
+                         SELECT sequence, CASE sequence % 5
+                                 WHEN 0 THEN 'Preview rendering diagnostics '
+                                 WHEN 1 THEN 'Terminal completion and reconnect '
+                                 WHEN 2 THEN 'Browser preview annotation fixture '
+                                 WHEN 3 THEN 'Review outstanding workspace files '
+                                 ELSE 'Éclair build artifact and configuration '
+                             END || sequence FROM numbers WHERE sequence < 2500
+                     )
+                     INSERT INTO entries (session_id, task_id, id, sequence, kind, payload, created_at,
+                                          entry_text, task_title, project_name)
+                     SELECT ?1, ?2, 'entry-' || sequence, sequence, 'userMessage',
+                         json_object('id', 'entry-' || sequence, 'sequence', sequence, 'kind',
+                             json_object('type', 'userMessage', 'data', json_object('text', content))),
+                         0, content, ?3, ?4 FROM documents",
+                )
+                .bind(&session.id)
+                .bind(task.id.as_str())
+                .bind(&task.title)
+                .bind(&project.name)
+                .exec(&mut *db)
+                .await?;
+            }
+        }
+        {
+            let mut db = store.db.lock().await;
+            let rows = toasty::sql::query("SELECT COUNT(*) FROM entries")
+                .column_types([Type::I64])
+                .exec(&mut *db)
+                .await?;
+            assert!(matches!(rows.first(), Some(Value::Record(fields))
+                if matches!(fields.first(), Some(Value::I64(50_000)))));
+        }
+        let search = TaskSearch(store);
+        let mut elapsed = Vec::new();
+        for query in ["preview", "pre", "browser ann", "workspace", "écl"]
+            .into_iter()
+            .cycle()
+            .take(50)
+        {
+            let start = Instant::now();
+            let hits = search.search(query).await?;
+            elapsed.push(start.elapsed());
+            assert_eq!(hits.len(), RESULT_LIMIT as usize);
+        }
+        elapsed.sort_unstable();
+        let p95 = elapsed
+            .get((elapsed.len() * 95).div_ceil(100) - 1)
+            .ok_or("missing timings")?;
+        eprintln!("50,000 entries, 50 queries, p95 {p95:?}");
+        assert!(*p95 < Duration::from_millis(250), "FTS p95 was {p95:?}");
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn turso_schema_migrates_and_persists_across_reopen()
     -> Result<(), Box<dyn std::error::Error>> {
         let database = TestDatabase::new()?;

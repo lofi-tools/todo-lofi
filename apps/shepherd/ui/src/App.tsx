@@ -18,6 +18,7 @@ import { GitPane } from './GitPane'
 import { ReviewPane } from './ReviewPane'
 import { SEND_ACCENTS, SettingsPane, type SendAccent } from './SettingsPane'
 import { FreebuffPane, TerminalPane } from './TerminalPane'
+import { TaskSearch } from './TaskSearch'
 
 type CoreEvent = bridge.Event
 type TerminalBell = Extract<CoreEvent, { type: 'terminalBell' }>['data']
@@ -144,6 +145,10 @@ export function App() {
   const [loadedTasksFor, setLoadedTasksFor] = createSignal<string>()
   const [selectedTaskId, setSelectedTaskId] = createSignal<string | null>(null)
   const [workspace, setWorkspace] = createSignal<bridge.TaskWorkspace | null>(null)
+  const [searchOpen, setSearchOpen] = createSignal(false)
+  const [searchJump, setSearchJump] = createSignal<bridge.TaskSearchHit>()
+  let searchOpener: HTMLElement | undefined
+  let transcript: HTMLDivElement | undefined
   const currentAgent = () => workspace()?.task.agent ?? newTaskAgent()
   const currentAgentName = () => bridge.AGENT_LABELS[currentAgent()]
   const composerModel = () => {
@@ -244,7 +249,7 @@ export function App() {
   const [cancelRequestTaskId, setCancelRequestTaskId] = createSignal<string>()
   const [quitRequired, setQuitRequired] = createSignal<bridge.QuitConfirmation | null>(null)
   const workspaceShortcutsEnabled = () =>
-    !settingsOpen() && !freebuffProjectId() && !pickerOpen() && !quitRequired()
+    !settingsOpen() && !freebuffProjectId() && !pickerOpen() && !searchOpen() && !quitRequired()
   const [shutdownNote, setShutdownNote] = createSignal<string | null>(null)
   let allowClose = false
 
@@ -350,14 +355,16 @@ export function App() {
   }
 
   async function selectTask(taskId: string) {
+    setSearchJump(undefined)
     setSelectedTaskId(taskId)
     setWorkspace(null)
     const next = await bridge.taskWorkspace(taskId)
     if (selectedTaskId() === taskId) setWorkspace(next)
   }
 
-  async function selectProject(project: bridge.ProjectSnapshot) {
+  async function selectProject(project: bridge.ProjectSnapshot, taskId?: string) {
     setFreebuffProjectId(undefined)
+    setSearchJump(undefined)
     if (selectedProjectId() !== project.id) setPrompt('')
     setTerminalListEvent(undefined)
     setSelectedProjectId(project.id)
@@ -367,6 +374,11 @@ export function App() {
     setLoadedTasksFor(undefined)
     const listed = await loadTasks(project.id)
     if (selectedProjectId() !== project.id) return
+    if (taskId) {
+      if (!listed.some((task) => task.id === taskId)) throw new Error('This search result’s task is no longer available.')
+      await selectTask(taskId)
+      return
+    }
     const visible = listed.filter((task) => showsArchived(project.id) || task.state !== 'done')
     const task = visible.find((entry) => entry.id === project.lastTaskId)
       ?? (visible.length === 1 ? visible[0] : undefined)
@@ -380,8 +392,48 @@ export function App() {
     })
   }
 
+  function openTaskSearch() {
+    if (pending() || pickerOpen() || quitRequired()) return
+    searchOpener = document.activeElement instanceof HTMLElement ? document.activeElement : undefined
+    setSearchOpen(true)
+  }
+
+  function closeTaskSearch() {
+    setSearchOpen(false)
+    searchOpener?.focus({ preventScroll: true })
+  }
+
+  function openSearchHit(hit: bridge.TaskSearchHit) {
+    closeTaskSearch()
+    setSettingsOpen(false)
+    setFreebuffProjectId(undefined)
+    void run(async () => {
+      const project = projects().find((candidate) => candidate.id === hit.projectId)
+      if (!project) throw new Error('This search result’s project is no longer available.')
+      if (selectedProjectId() === project.id) await selectTask(hit.taskId)
+      else await selectProject(project, hit.taskId)
+      if (selectedTaskId() !== hit.taskId || workspace()?.task.id !== hit.taskId) return
+      if (!workspace()?.transcript.some((entry) => entry.id === hit.entryId)) {
+        transcript?.focus({ preventScroll: true })
+        throw new Error('This transcript entry is no longer available.')
+      }
+      setSearchJump(hit)
+    })
+  }
+
   createEffect(() => {
-    if (pending() || firstDrafts.has(selectedProjectId() ?? '')) return
+    const jump = searchJump()
+    if (!jump || selectedTaskId() !== jump.taskId) return
+    queueMicrotask(() => {
+      if (searchJump() !== jump || selectedTaskId() !== jump.taskId) return
+      const entry = transcript?.querySelector<HTMLElement>(`[data-entry-id="${CSS.escape(jump.entryId)}"]`)
+      entry?.scrollIntoView({ block: 'center' })
+      entry?.focus({ preventScroll: true })
+    })
+  })
+
+  createEffect(() => {
+    if (pending() || firstDrafts.has(selectedProjectId() ?? '') || searchJump()?.taskId === selectedTaskId()) return
     const visible = visibleTasks()
     const [only] = visible
     if (visible.length === 1 && only && only.id !== selectedTaskId()) {
@@ -853,6 +905,7 @@ export function App() {
   return (
     <>
       <WorkspaceFrame taskId={selectedTaskId()} inspectorWidth={inspectorWidth()} onInspectorWidthChange={resizeInspector}
+        onSearch={openTaskSearch} searchDisabled={pending()}
         inspectorTabs={inspectorTabsHeader} footer={workspaceFooter}
         onBackToChat={freebuffProjectId() && !settingsOpen() ? () => setFreebuffProjectId(undefined) : undefined}>
         <aside class="sidebar" aria-label="Workspace navigation">
@@ -993,7 +1046,8 @@ export function App() {
           <Show when={workspace()}>
             {(current) => (
               <header class="pane-header">
-                <span class="chat__title">{current().task.title}</span>
+                <span class="chat__title"><SearchMark text={current().task.title}
+                  match={searchJump()?.taskId === current().task.id && searchJump()?.snippet.field === 'task' ? searchJump()?.snippet.matched : undefined} /></span>
                 <Show when={current().adapterTier}>
                   {(tier) => <span class="chat__adapter">{TIER_LABELS[tier()]}{current().diagnostics?.fallbackReason && ' · fallback'}</span>}
                 </Show>
@@ -1077,7 +1131,7 @@ export function App() {
             )}
           </Show>
 
-          <div class="chat__transcript">
+          <div class="chat__transcript" ref={transcript} tabIndex={-1} role="region" aria-label="Transcript">
             <Show when={!workspace()?.transcript.some((entry) => entry.kind.type === 'failure') && workspace()?.task.error}>
               {(error) => <p class="entry__failure-text" role="alert">{error()}</p>}
             </Show>
@@ -1115,7 +1169,17 @@ export function App() {
                 >
                   <ol class="transcript">
                     <For each={current().transcript}>
-                      {(entry) => <li class="entry">{entryBody(entry, decide, cancellingTurn, canApprove)}</li>}
+                      {(entry) => {
+                        const target = () => {
+                          const jump = searchJump()
+                          return jump?.taskId === selectedTaskId() && jump?.entryId === entry.id ? jump : undefined
+                        }
+                        return <li class="entry" classList={{ 'entry--search-hit': !!target() }}
+                          data-entry-id={entry.id} tabIndex={-1}>
+                          {entryBody(entry, decide, cancellingTurn, canApprove,
+                            () => target()?.snippet.field === 'entry' ? target()?.snippet.matched : undefined)}
+                        </li>
+                      }}
                     </For>
                   </ol>
                 </Show>
@@ -1229,6 +1293,10 @@ export function App() {
         </aside>
       </WorkspaceFrame>
 
+      <Show when={searchOpen()}>
+        <TaskSearch onClose={closeTaskSearch} onSelect={openSearchHit} />
+      </Show>
+
       <Show when={pickerOpen()}>
         <ProjectPicker
           scan={scan()}
@@ -1254,6 +1322,8 @@ function WorkspaceFrame(props: {
   taskId: string | null
   inspectorWidth: number | null
   onInspectorWidthChange: (width: number) => Promise<void>
+  onSearch: () => void
+  searchDisabled: boolean
   onBackToChat?: () => void
 }) {
   const macWindow = isTauri() && navigator.platform.startsWith('Mac')
@@ -1341,6 +1411,13 @@ function WorkspaceFrame(props: {
         <button class="shell__icon-button" type="button" aria-label="Conversations" title="Conversations" disabled>
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" aria-hidden="true">
             <path d="M6 4h12a3 3 0 0 1 3 3v8a3 3 0 0 1-3 3h-8l-5 3v-3a3 3 0 0 1-2-3V7a3 3 0 0 1 3-3Z" />
+          </svg>
+        </button>
+        <button class="shell__icon-button" type="button" aria-label="Search tasks" title="Search tasks"
+          disabled={props.searchDisabled} onClick={props.onSearch}>
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true">
+            <circle cx="10.5" cy="10.5" r="5.5" />
+            <path d="m15 15 4 4" />
           </svg>
         </button>
         <button class="shell__icon-button" type="button" aria-label="Tools" title="Tools" disabled>
@@ -1689,13 +1766,22 @@ function DiffBlock(props: { patch: bridge.FileDiff }) {
   )
 }
 
+function SearchMark(props: { text: string; match?: string }) {
+  const index = () => props.match ? props.text.indexOf(props.match) : -1
+  return <Show when={index() >= 0} fallback={props.text}>
+    {props.text.slice(0, index())}<mark class="search-mark">{props.match}</mark>{props.text.slice(index() + (props.match?.length ?? 0))}
+  </Show>
+}
+
 function entryBody(
   entry: bridge.Entry,
   decide: (approvalId: string, decision: bridge.Decision) => void,
   cancelling: () => boolean,
   canApprove: () => boolean,
+  match: () => string | undefined,
 ) {
   const kind = entry.kind
+  const text = (value: string) => <SearchMark text={value} match={match()} />
   const failureLabels: Record<string, string> = {
     missingBinary: 'Agent not installed',
     unsupportedVersion: 'Version not supported',
@@ -1706,18 +1792,18 @@ function entryBody(
   }
   switch (kind.type) {
     case 'userMessage':
-      return <p class="entry__user">{kind.data.text}</p>
+      return <p class="entry__user">{text(kind.data.text)}</p>
     case 'agentText':
-      return <p class="entry__agent">{kind.data.text}</p>
+      return <p class="entry__agent">{text(kind.data.text)}</p>
     case 'thought':
-      return <p class="entry__thought">{kind.data.text}</p>
+      return <p class="entry__thought">{text(kind.data.text)}</p>
     case 'toolCall':
       return (
         <div class="entry__tool">
-          <span class="entry__tool-title">{kind.data.title}</span>
+          <span class="entry__tool-title">{text(kind.data.title)}</span>
           <span class="entry__tool-status">{kind.data.status}</span>
           <Show when={kind.data.output}>
-            {(output) => <pre class="entry__output">{output()}</pre>}
+            {(output) => <pre class="entry__output">{text(output())}</pre>}
           </Show>
         </div>
       )
@@ -1727,7 +1813,7 @@ function entryBody(
           <For each={kind.data.rows}>
             {(row) => (
               <li>
-                <span class="entry__plan-status">{row.status}</span> {row.text}
+                <span class="entry__plan-status">{row.status}</span> {text(row.text)}
               </li>
             )}
           </For>
@@ -1744,7 +1830,7 @@ function entryBody(
         : permission.decision
       return (
         <div class="entry__permission">
-          <p class="entry__permission-title">{permission.title}</p>
+          <p class="entry__permission-title">{text(permission.title)}</p>
           <Show when={permission.paths.length > 0}>
             <p class="entry__permission-paths">{permission.paths.join(', ')}</p>
           </Show>
@@ -1784,14 +1870,14 @@ function entryBody(
       )
     }
     case 'notice':
-      return <p class={kind.data.isError ? 'entry__notice--error' : 'entry__notice'}>{kind.data.text}</p>
+      return <p class={kind.data.isError ? 'entry__notice--error' : 'entry__notice'}>{text(kind.data.text)}</p>
     case 'failure':
       return (
         <div class="entry__failure">
           <p class="entry__failure-title">
             {failureLabels[kind.data.kind] ?? kind.data.kind}
           </p>
-          <p class="entry__failure-text">{kind.data.text}</p>
+          <p class="entry__failure-text">{text(kind.data.text)}</p>
           <Show when={kind.data.detail}>
             {(detail) => <pre class="entry__failure-detail">{detail()}</pre>}
           </Show>

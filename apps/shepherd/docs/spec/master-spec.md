@@ -197,9 +197,10 @@ detailed treatment of its controls as the rest of the shell is built.
   the composer.
 - Palette commands cover terminal presets, Git actions, adapter checks and
   diagnostics, so nothing is mouse-only.
-- Cross-task search lists results with a highlighted snippet; choosing one opens
-  that task's workspace, focuses the chat, scrolls to the entry and highlights the
-  match there.
+- **Search tasks** in the icon rail lists ranked results with highlighted
+  snippets. Choosing one opens that task's workspace, focuses and scrolls to
+  the transcript entry, and highlights the match. Changing the query or
+  closing the dialog cancels the pending search and discards late results.
 - The core owns focus and input mode (chat, inspector tab, terminal split,
   composer, palette, modal), so key events carry no UI context. While a terminal
   has focus, only chords in the registry are claimed; everything else is encoded

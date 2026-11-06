@@ -433,6 +433,7 @@ pub struct ShellState {
     terminals: TerminalHost,
     scan: Arc<Mutex<Option<shepherd_core::project_scan::ProjectScan>>>,
     file_searches: Mutex<BTreeMap<String, FileSearch>>,
+    task_searches: Mutex<BTreeMap<String, TaskSearchRequest>>,
     file_watches: Arc<Mutex<BTreeMap<String, oneshot::Sender<()>>>>,
 }
 
@@ -440,6 +441,11 @@ pub struct ShellState {
 struct FileSearch {
     cancelled: Arc<AtomicBool>,
     started: bool,
+}
+
+struct TaskSearchRequest {
+    _cancel: oneshot::Sender<()>,
+    cancellation: Option<oneshot::Receiver<()>>,
 }
 
 impl ShellState {
@@ -462,6 +468,7 @@ impl ShellState {
             terminals,
             scan: Arc::new(Mutex::new(None)),
             file_searches: Mutex::new(BTreeMap::new()),
+            task_searches: Mutex::new(BTreeMap::new()),
             file_watches: Arc::new(Mutex::new(BTreeMap::new())),
         }
     }
@@ -846,6 +853,58 @@ impl ShellState {
     pub async fn task_workspace(&self, task_id: String) -> Result<TaskWorkspace, BridgeError> {
         let task_id = TaskId::new(task_id);
         Ok(self.core.lock().await.open_task_workspace(&task_id).await?)
+    }
+
+    async fn reserve_task_search(&self) -> Result<String, BridgeError> {
+        let mut searches = self.task_searches.lock().await;
+        if searches.len() >= 8 {
+            return Err(BridgeError::new(
+                "search",
+                "Too many task searches are pending.",
+            ));
+        }
+        let id = uuid::Uuid::new_v4().to_string();
+        let (cancel, cancellation) = oneshot::channel();
+        searches.insert(
+            id.clone(),
+            TaskSearchRequest {
+                _cancel: cancel,
+                cancellation: Some(cancellation),
+            },
+        );
+        Ok(id)
+    }
+
+    async fn cancel_task_search(&self, id: &str) {
+        // Dropping the sender also wakes a search waiting for the core lock.
+        self.task_searches.lock().await.remove(id);
+    }
+
+    async fn search_tasks(
+        &self,
+        id: &str,
+        query: &str,
+    ) -> Result<Vec<shepherd_core::search::SearchHit>, BridgeError> {
+        let cancelled = || BridgeError::new("search_cancelled", "Task search was cancelled.");
+        let cancellation = {
+            let mut searches = self.task_searches.lock().await;
+            searches
+                .get_mut(id)
+                .ok_or_else(cancelled)?
+                .cancellation
+                .take()
+                .ok_or_else(|| BridgeError::new("search", "This task search is already running."))?
+        };
+        let result = tokio::select! {
+            biased;
+            _ = cancellation => Err(cancelled()),
+            result = async {
+                let search = self.core.lock().await.task_search();
+                search.search(query).await
+            } => result.map_err(|error| BridgeError::new("search", format!("Could not search tasks. {error}"))),
+        };
+        self.task_searches.lock().await.remove(id);
+        result
     }
 
     async fn files_directory(
@@ -1881,6 +1940,29 @@ pub mod commands {
     }
 
     #[tauri::command]
+    pub async fn reserve_task_search(state: State<'_, ShellState>) -> Result<String, BridgeError> {
+        state.reserve_task_search().await
+    }
+
+    #[tauri::command]
+    pub async fn search_tasks(
+        state: State<'_, ShellState>,
+        search_id: String,
+        query: String,
+    ) -> Result<Vec<shepherd_core::search::SearchHit>, BridgeError> {
+        state.search_tasks(&search_id, &query).await
+    }
+
+    #[tauri::command]
+    pub async fn cancel_task_search(
+        state: State<'_, ShellState>,
+        search_id: String,
+    ) -> Result<(), BridgeError> {
+        state.cancel_task_search(&search_id).await;
+        Ok(())
+    }
+
+    #[tauri::command]
     pub async fn save_workspace_layout(
         state: State<'_, ShellState>,
         task_id: String,
@@ -2124,6 +2206,50 @@ mod tests {
     use shepherd_core::{TaskState, TaskSummary};
 
     use super::*;
+
+    #[tokio::test]
+    async fn task_search_can_be_cancelled_before_start_or_while_waiting_for_core()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let state = ShellState::new(Core::new());
+        let id = state.reserve_task_search().await?;
+        state.cancel_task_search(&id).await;
+        assert_eq!(
+            state
+                .search_tasks(&id, "preview")
+                .await
+                .err()
+                .map(|error| error.code),
+            Some("search_cancelled")
+        );
+
+        let id = state.reserve_task_search().await?;
+        let core = state.core.lock().await;
+        let (result, ()) = tokio::time::timeout(Duration::from_secs(2), async {
+            tokio::join!(state.search_tasks(&id, "preview"), async {
+                loop {
+                    if state
+                        .task_searches
+                        .lock()
+                        .await
+                        .get(&id)
+                        .is_some_and(|request| request.cancellation.is_none())
+                    {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+                state.cancel_task_search(&id).await;
+            })
+        })
+        .await?;
+        drop(core);
+        assert_eq!(
+            result.err().map(|error| error.code),
+            Some("search_cancelled")
+        );
+        assert!(state.task_searches.lock().await.is_empty());
+        Ok(())
+    }
     use crate::dev_harness::ScriptedHarnessFactory;
 
     fn state_with(core: Core) -> ShellState {

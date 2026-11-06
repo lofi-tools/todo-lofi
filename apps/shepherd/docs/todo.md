@@ -971,12 +971,15 @@ and the task header never overstates the tier.
   browser and mark a point. The composer includes the task-scoped image path,
   pixel coordinates, dimensions, URL and note. Discarding a draft removes its
   screenshot copies.
-- [ ] Cross-task search over Turso FTS.
+- [x] Cross-task search over Turso FTS.
   Task transcripts now persist admitted prompts and batch settled entries in
   Turso. Opening a task restores its saved entry IDs and order. The native FTS
   index covers entry text, task titles and project names. Ranked queries return
-  up to 50 hits with a highlighted snippet and stable entry ID. The search UI,
-  cancellation and the 50k-entry performance check remain open.
+  up to 50 hits with a highlighted snippet and stable entry ID. **Search tasks**
+  in the icon rail opens and focuses the matching transcript entry, including
+  archived entries across projects. Replacing or dismissing a search cancels
+  the pending request. A local macOS run measured 26.9 ms p95 for 50 Turso queries
+  over 50,000 entries, excluding the typing debounce and desktop rendering.
 - [ ] Attachments and images, `@file` mentions, model/mode pickers.
 - [ ] Notifications, dock/status counts and review batch actions.
 - [ ] Command palette, keybinding editor, settings files, project overrides,
@@ -987,6 +990,10 @@ and the task header never overstates the tier.
 ### Proof
 
 - [ ] Playwright flows for files, preview, search, settings and the palette.
+  The cross-task search fixture verifies cancellation, keyboard selection,
+  and focus and highlighting on a cross-project archived result.
+  A hidden macOS WebKit smoke verifies the real Turso hit through the desktop
+  bridge and confirms focus and highlighting in the restored transcript.
 - [x] Preview fixture: annotation adds URL/selector/note to the composer;
   blocked injection falls back to a screenshot note.
   Headless Chromium verifies both paths, including a page that denies framing

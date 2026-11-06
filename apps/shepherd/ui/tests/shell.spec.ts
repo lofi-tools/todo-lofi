@@ -24,6 +24,9 @@ test.beforeEach(async ({ context }) => {
     const fileSearches: Array<{ id: string; taskId: string | null; mode: string }> = []
     const cancelledFileSearches: string[] = []
     const pendingFileSearches = new Map<string, () => void>()
+    const taskSearches: Array<{ id: string; query: string }> = []
+    const cancelledTaskSearches: string[] = []
+    let nextTaskSearch = 1
     const fileWatchers = new Map<string, { taskId: string | null; channel: number; index: number }>()
     const unwatchedFiles: string[] = []
     const watchedSourceFiles = new Map<string | null, Set<string>>()
@@ -48,7 +51,7 @@ test.beforeEach(async ({ context }) => {
     }
 
     const projects = options.has('empty-projects') ? [] : [project]
-    if (options.has('two-projects')) {
+    if (options.has('two-projects') || options.has('task-search')) {
       projects.push({ ...project, id: 'project-notes', path: '/tmp/notes', name: 'notes',
         isGitRepository: false, lastTaskId: null, unfinishedTaskCount: 0 })
     }
@@ -92,6 +95,12 @@ test.beforeEach(async ({ context }) => {
     ]
     if (options.has('two-projects')) {
       tasks.push({ ...tasks[0], id: 'task-archived', title: 'Old chat', state: 'done' })
+    }
+    if (options.has('task-search')) {
+      tasks.push(
+        { ...tasks[0], id: 'task-search-archived', projectId: 'project-notes', title: 'Archived answer', state: 'done' },
+        { ...tasks[0], id: 'task-search-active', projectId: 'project-notes', title: 'Current answer', state: 'ready' },
+      )
     }
 
     const transcripts = {
@@ -260,7 +269,11 @@ test.beforeEach(async ({ context }) => {
         task: detail(task),
         layout: workspaceLayouts.get(taskId) ?? { inspectorWidth: null },
         cancelling: false,
-        transcript: transcripts[taskId] ?? [],
+        transcript: taskId === 'task-search-archived' ? [
+          ...Array.from({ length: 40 }, (_, sequence) => entry(`previous-${sequence}`, sequence,
+            { type: 'agentText', data: { text: `Earlier message ${sequence}` } })),
+          entry('entry-1', 40, { type: 'agentText', data: { text: 'The archive is ready.' } }),
+        ] : transcripts[taskId] ?? [],
         agentTerminals: agentTerminals.get(taskId) ?? [],
         adapterTier: task.state === 'draft' ? null : task.tier,
         capabilities,
@@ -376,6 +389,26 @@ test.beforeEach(async ({ context }) => {
             return { projectId: args.projectId, tasks: tasks.filter((task) => task.projectId === args.projectId) }
           case 'task_workspace':
             return workspace(args.taskId)
+          case 'reserve_task_search':
+            return `search-${nextTaskSearch++}`
+          case 'cancel_task_search':
+            cancelledTaskSearches.push(args.searchId)
+            return null
+          case 'search_tasks': {
+            taskSearches.push({ id: args.searchId, query: args.query })
+            if (args.query === 'slow') {
+              await new Promise<void>((resolve) => window.addEventListener('release-task-search', () => resolve(), { once: true }))
+              return [{ projectId: 'project-1', taskId: 'task-1', entryId: 'entry-1', projectName: 'demo',
+                taskTitle: 'Stale result', snippet: { before: '', matched: 'ready', after: '', field: 'entry' } }]
+            }
+            if (args.query === 'archive') return [
+              { projectId: 'project-1', taskId: 'task-1', entryId: 'entry-1', projectName: 'demo',
+                taskTitle: 'Ship it', snippet: { before: '', matched: 'ready', after: ' to go', field: 'entry' } },
+              { projectId: 'project-notes', taskId: 'task-search-archived', entryId: 'entry-1', projectName: 'notes',
+                taskTitle: 'Archived answer', snippet: { before: 'The ', matched: 'archive', after: ' is ready.', field: 'entry' } },
+            ]
+            return []
+          }
           case 'git_snapshot':
           case 'review_snapshot':
             return {
@@ -705,6 +738,8 @@ test.beforeEach(async ({ context }) => {
       callbacks.get(watcher.channel)?.({ index: watcher.index++, message: { type: 'changes', files } })
     }
     window.__fileSearches = fileSearches
+    window.__taskSearches = taskSearches
+    window.__cancelledTaskSearches = cancelledTaskSearches
     window.__cancelledFileSearches = cancelledFileSearches
     window.__finishFileSearch = (id: string) => pendingFileSearches.get(id)?.()
     window.__cancelRequests = () => cancelRequests
@@ -774,6 +809,47 @@ test('shows the project, drafts a task, streams a reply and switches tasks', asy
 
   await page.getByRole('button', { name: /Ship it/ }).click()
   await expect(page.getByText('ready to go')).toBeVisible()
+})
+
+test('cancels stale task searches and focuses an archived hit across projects', async ({ page }) => {
+  await page.goto('/?task-search')
+  await expect(page.getByText('ready to go', { exact: true })).toBeVisible()
+  const button = page.getByRole('button', { name: 'Search tasks', exact: true })
+  await button.click()
+  const dialog = page.getByRole('dialog', { name: 'Search tasks' })
+  const input = dialog.getByRole('combobox', { name: 'Search across tasks' })
+  await expect(input).toBeFocused()
+  await input.fill('slow')
+  await expect.poll(() => page.evaluate(() => window.__taskSearches)).toEqual([{ id: 'search-1', query: 'slow' }])
+  await input.fill('archive')
+  const archived = dialog.getByRole('option', { name: /Archived answer/ })
+  await expect(archived.locator('mark')).toHaveText('archive')
+  await expect.poll(() => page.evaluate(() => window.__cancelledTaskSearches)).toEqual(['search-1'])
+  await page.evaluate(() => window.dispatchEvent(new Event('release-task-search')))
+  await expect(dialog.getByText('Stale result')).toHaveCount(0)
+  await input.press('ArrowDown')
+  await expect(archived).toHaveAttribute('aria-selected', 'true')
+  await input.press('Enter')
+
+  const chat = page.getByRole('region', { name: 'Task chat' })
+  await expect(dialog).toHaveCount(0)
+  await expect(chat.getByText('Archived answer', { exact: true })).toBeVisible()
+  const row = chat.locator('[data-entry-id="entry-1"]')
+  await expect(row).toBeFocused()
+  await expect(row.locator('mark')).toHaveText('archive')
+  await expect.poll(() => chat.locator('.chat__transcript').evaluate((element) => element.scrollTop)).toBeGreaterThan(0)
+  await expect(page.getByRole('button', { name: 'Archived answer', exact: true })).toHaveCount(0)
+
+  await page.getByRole('button', { name: 'demo', exact: true }).click()
+  await expect(chat.getByText('ready to go', { exact: true })).toBeVisible()
+  await expect(chat.locator('mark')).toHaveCount(0)
+  await button.click()
+  await input.fill('slow')
+  await expect.poll(() => page.evaluate(() => window.__taskSearches.at(-1))).toEqual({ id: 'search-3', query: 'slow' })
+  await input.press('Escape')
+  await expect(button).toBeFocused()
+  await expect.poll(() => page.evaluate(() => window.__cancelledTaskSearches)).toEqual(['search-1', 'search-3'])
+  await page.evaluate(() => window.dispatchEvent(new Event('release-task-search')))
 })
 
 test('saves a project preview URL and loads and reloads a sandboxed page', async ({ page }) => {

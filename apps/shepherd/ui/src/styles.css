@@ -319,6 +319,39 @@ textarea {
   background: var(--surface-raised);
 }
 
+.task-search {
+  padding: 0;
+  color: var(--text);
+}
+
+.task-search::backdrop {
+  background: rgba(0, 0, 0, 0.45);
+}
+
+.task-search__hit {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 3px;
+  overflow-wrap: anywhere;
+}
+
+.task-search__project {
+  color: var(--text-muted);
+  margin-inline-start: 4px;
+}
+
+.search-mark {
+  color: var(--text);
+  background: color-mix(in srgb, var(--focus) 40%, transparent);
+  border-radius: 2px;
+}
+
+.entry--search-hit {
+  outline: 1px solid var(--focus);
+  outline-offset: 4px;
+  border-radius: 4px;
+}
+
 .picker__disclosure {
   width: 10px;
   flex: none;

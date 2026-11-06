@@ -42,6 +42,27 @@ export interface ProjectList {
   projects: ProjectSnapshot[]
 }
 
+export interface TaskSearchHit {
+  projectId: string
+  taskId: string
+  entryId: string
+  projectName: string
+  taskTitle: string
+  snippet: { before: string; matched: string; after: string; field: 'entry' | 'task' | 'project' }
+}
+
+export function reserveTaskSearch(): Promise<string> {
+  return invoke<string>('reserve_task_search')
+}
+
+export function searchTasks(searchId: string, query: string): Promise<TaskSearchHit[]> {
+  return invoke<TaskSearchHit[]>('search_tasks', { searchId, query })
+}
+
+export function cancelTaskSearch(searchId: string): Promise<void> {
+  return invoke<void>('cancel_task_search', { searchId })
+}
+
 export interface ProjectRemote {
   label: string
   forge: 'github' | 'gitlab' | 'huggingface' | null

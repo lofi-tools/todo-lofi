@@ -21,6 +21,12 @@ current layout and give future changes a point of comparison.
   rail currently has placeholder icons for Workspace, Conversations, and Tools.
   Previous and Next are placeholders for navigation history. While the
   Freebuff terminal is visible, Previous is available as **Back to chat**.
+- **Search tasks** in the icon rail opens a compact dialog with ranked matches
+  from every project. Show the task, project and a highlighted snippet in each
+  result. Up and Down move between results, Enter opens one, and Escape
+  closes the dialog and restores focus. Opening a result scrolls to and focuses
+  its transcript row and highlights the matching text. Archived tasks can open
+  directly from search while their sidebar visibility preference stays intact.
 - On macOS, show the native window controls on the app's surface, with the
   title hidden. Put Previous and Next directly to their right on the same
   horizontal line, centred vertically in a 42 px header. The free header space
