@@ -21,6 +21,7 @@ test.beforeEach(async ({ context }) => {
     let screenshotSaves = 0
     const promptFileUploads: Array<{ taskId: string; name: string; text: string }> = []
     const codexTurns: Array<{ taskId: string; model?: string; effort?: string }> = []
+    const sessionModes = new Map<string, string>()
     const fileListings: string[] = []
     const fileActions: Array<{ projectId: string; taskId: string | null; path: string; action: string }> = []
     const fileSearches: Array<{ id: string; taskId: string | null; mode: string }> = []
@@ -261,9 +262,10 @@ test.beforeEach(async ({ context }) => {
     function workspace(taskId) {
       const task = tasks.find((candidate) => candidate.id === taskId)
       const limited = options.has('limited-adapter')
+      const hasModes = options.has('session-modes') && task.agent === 'opencode' && task.state !== 'draft'
       const capabilities = task.state === 'draft' || legacySession ? null : {
         streaming: true, thoughts: true, toolCalls: true, approvals: !limited, resume: !limited,
-        cancel: !limited, modelPicker: !limited && task.agent === 'codex', modePicker: false, images: false, resourceLinks: false,
+        cancel: !limited, modelPicker: !limited && task.agent === 'codex', modePicker: hasModes, images: false, resourceLinks: false,
         usage: true, agentTerminals: !limited, patchesInApprovals: !limited,
       }
       return {
@@ -279,6 +281,13 @@ test.beforeEach(async ({ context }) => {
         agentTerminals: agentTerminals.get(taskId) ?? [],
         adapterTier: task.state === 'draft' ? null : task.tier,
         capabilities,
+        modes: hasModes ? {
+          current: sessionModes.get(taskId) ?? 'build',
+          options: [
+            { id: 'build', name: 'Build', description: null },
+            { id: 'plan', name: 'Plan', description: 'Plan before editing' },
+          ],
+        } : undefined,
         recovery: ['failed', 'interrupted'].includes(task.state) ? limited ? 'startNew' : capabilities ? 'resume' : 'reconnect' : null,
         diagnostics: options.has('acp-fallback') ? {
           command: '/existing/opencode acp', protocol: 'ACP v1 OpenCode 2.0.14',
@@ -557,6 +566,12 @@ test.beforeEach(async ({ context }) => {
             if (!task || task.state !== 'draft') throw new Error('Task is not a draft')
             task.agent = args.agent
             return workspace(task.id)
+          }
+          case 'set_session_mode': {
+            const task = tasks.find((candidate) => candidate.id === args.taskId)
+            if (task?.state !== 'ready' || args.mode !== 'plan') throw new Error('Unexpected mode change')
+            sessionModes.set(args.taskId, args.mode)
+            return workspace(args.taskId)
           }
           case 'send_prompt': {
             const task = tasks.find((candidate) => candidate.id === args.taskId)
@@ -2060,6 +2075,24 @@ test('passes the model and its advertised effort from the empty composer to the 
   await expect(page.locator('.transcript')).toContainText('Use the selected model')
   expect(await page.evaluate(() => window.__codexTurns)).toEqual([{ taskId: 'task-2', model: 'fixture-model', effort: 'high' }])
   await expect(selected).toBeVisible()
+})
+
+test('shows advertised session modes and disables changing them during a turn', async ({ page }) => {
+  await page.goto('/?acp-fallback&session-modes')
+  const composer = page.locator('.composer')
+  const menu = composer.getByRole('menu', { name: 'Mode' })
+  await composer.getByRole('button', { name: 'Mode: Build' }).click()
+  await expect(menu.getByRole('menuitemradio', { name: 'Build', checked: true })).toBeVisible()
+  await menu.getByRole('menuitemradio', { name: 'Plan' }).click()
+  const mode = composer.getByRole('button', { name: 'Mode: Plan' })
+  await expect(mode).toBeVisible()
+  await expect(composer.getByRole('button', { name: /Model \/ effort/ })).toHaveCount(0)
+  await composer.getByLabel('Prompt', { exact: true }).fill('Plan the change')
+  await composer.getByRole('button', { name: 'Send', exact: true }).click()
+  await expect(page.locator('.transcript')).toContainText('Plan the change')
+  await mode.click()
+  await expect(menu.getByRole('menuitemradio', { name: 'Build' })).toBeDisabled()
+  await expect(menu.getByRole('menuitemradio', { name: 'Plan', checked: true })).toBeDisabled()
 })
 
 test('queues removable files and uploads them only when sending the prompt', async ({ page }) => {

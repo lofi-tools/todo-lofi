@@ -622,6 +622,9 @@ impl Core {
             }
             Command::DiscardDraft { task_id } => self.discard_draft(&task_id).await,
             Command::SendPrompt { task_id, input } => self.send_prompt(&task_id, input).await,
+            Command::SetSessionMode { task_id, mode } => {
+                self.set_session_mode(&task_id, &mode).await
+            }
             Command::ResolveApproval {
                 task_id,
                 approval_id,
@@ -901,6 +904,7 @@ impl Core {
                 .filter(|session| session.session_id().is_some())
                 .map(|session| session.capabilities().clone())
                 .or_else(|| record.and_then(|record| record.capabilities.clone())),
+            modes: session.and_then(HarnessSession::modes),
             recovery,
         })
     }
@@ -1324,6 +1328,27 @@ impl Core {
         self.save_task(task_id).await?;
         let workspace = self.publish_task(task_id)?;
         Ok(CommandResult::TaskWorkspace(workspace))
+    }
+
+    async fn set_session_mode(
+        &mut self,
+        task_id: &TaskId,
+        mode: &str,
+    ) -> Result<CommandResult, CoreError> {
+        if !matches!(
+            self.task(task_id)?.state,
+            TaskState::Ready | TaskState::Review
+        ) {
+            return Err(agent_harness::HarnessError::ModeUnavailable.into());
+        }
+        let session = self
+            .sessions
+            .get_mut(task_id)
+            .ok_or(agent_harness::HarnessError::ModeUnavailable)?;
+        let events = session.set_mode(mode).await?;
+        self.apply_events(task_id, &events)?;
+        self.save_task(task_id).await?;
+        Ok(CommandResult::TaskWorkspace(self.publish_task(task_id)?))
     }
 
     async fn resolve_approval(

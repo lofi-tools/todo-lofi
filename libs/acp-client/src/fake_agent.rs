@@ -12,10 +12,10 @@ use agent_client_protocol::schema::v1::{
     Implementation, InitializeRequest, InitializeResponse, LoadSessionRequest, LoadSessionResponse,
     McpCapabilities, McpServer, NewSessionRequest, NewSessionResponse, PermissionOption,
     PromptCapabilities, PromptRequest, PromptResponse, ReadTextFileRequest, ReleaseTerminalRequest,
-    RequestPermissionRequest, SessionConfigOption, SessionNotification, SessionUpdate,
-    SetSessionConfigOptionRequest, SetSessionConfigOptionResponse, StopReason,
-    TerminalOutputRequest, TextContent, ToolCall, ToolCallUpdate, WaitForTerminalExitRequest,
-    WriteTextFileRequest,
+    RequestPermissionRequest, SessionConfigOption, SessionModeState, SessionNotification,
+    SessionUpdate, SetSessionConfigOptionRequest, SetSessionConfigOptionResponse,
+    SetSessionModeRequest, SetSessionModeResponse, StopReason, TerminalOutputRequest, TextContent,
+    ToolCall, ToolCallUpdate, WaitForTerminalExitRequest, WriteTextFileRequest,
 };
 
 #[cfg(test)]
@@ -29,6 +29,8 @@ pub struct FakeScript {
     /// Override the negotiated protocol version to test compatibility failures.
     pub protocol_version: Option<acp::schema::ProtocolVersion>,
     pub prompt_images: bool,
+    pub legacy_modes: Option<SessionModeState>,
+    pub mode_config: Option<(SessionConfigOption, SessionConfigOption)>,
     /// Text delivered as streamed agent messages.
     pub chunks: Vec<String>,
     /// A tool call announced before the prompt finishes.
@@ -61,6 +63,7 @@ pub struct FakeObservations {
     pub new_session_mcp: Vec<Vec<McpServer>>,
     /// `session/set_config_option` requests, as they went over the wire.
     pub config_changes: Vec<serde_json::Value>,
+    pub mode_changes: Vec<String>,
     pub load_attempts: Vec<String>,
     pub prompts: Vec<String>,
     pub prompt_content: Vec<Vec<ContentBlock>>,
@@ -110,6 +113,16 @@ pub fn spawn_fake_agent(script: FakeScript) -> (acp::Channel, Shared) {
     let load_session = !script.load_updates.is_empty();
     let new_session_observations = observations.clone();
     let config_observations = observations.clone();
+    let mode_observations = observations.clone();
+    let legacy_modes = script.legacy_modes.clone();
+    let initial_mode_config = script
+        .mode_config
+        .as_ref()
+        .map(|(initial, _)| initial.clone());
+    let updated_mode_config = script
+        .mode_config
+        .as_ref()
+        .map(|(_, updated)| updated.clone());
     let load_observations = observations.clone();
     let load_script = script.clone();
     let prompt_observations = observations.clone();
@@ -150,7 +163,14 @@ pub fn spawn_fake_agent(script: FakeScript) -> (acp::Channel, Shared) {
                         state.new_session_mcp.push(request.mcp_servers.clone());
                     }
                     responder.respond(
-                        NewSessionResponse::new("session-1").config_options(advertised_options()),
+                        NewSessionResponse::new("session-1")
+                            .modes(legacy_modes.clone())
+                            .config_options(
+                                advertised_options()
+                                    .into_iter()
+                                    .chain(initial_mode_config.clone())
+                                    .collect::<Vec<_>>(),
+                            ),
                     )
                 },
                 acp::on_receive_request!(),
@@ -165,7 +185,20 @@ pub fn spawn_fake_agent(script: FakeScript) -> (acp::Channel, Shared) {
                             serde_json::to_value(&request).unwrap_or(serde_json::Value::Null),
                         );
                     }
-                    responder.respond(SetSessionConfigOptionResponse::new(options_after_a_switch()))
+                    let options = options_after_a_switch()
+                        .into_iter()
+                        .chain(updated_mode_config.clone())
+                        .collect::<Vec<_>>();
+                    responder.respond(SetSessionConfigOptionResponse::new(options))
+                },
+                acp::on_receive_request!(),
+            )
+            .on_receive_request(
+                async move |request: SetSessionModeRequest, responder, _cx| {
+                    if let Ok(mut state) = mode_observations.lock() {
+                        state.mode_changes.push(request.mode_id.0.to_string());
+                    }
+                    responder.respond(SetSessionModeResponse::new())
                 },
                 acp::on_receive_request!(),
             )

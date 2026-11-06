@@ -1203,7 +1203,7 @@ the shared core from v1 — are folded into §3.2, §4.2, §10 and §11.
 ## Appendix A — ACP surface used
 
 Client → agent: `initialize`, `session/new`, `session/load`, `session/prompt`,
-`session/cancel`, `authenticate`.
+`session/cancel`, `session/set_mode`, `session/set_config_option`, `authenticate`.
 Agent → client: `session/request_permission`, `fs/read_text_file`,
 `fs/write_text_file`, `terminal/create`, `terminal/output`,
 `terminal/wait_for_exit`, `terminal/kill`, `terminal/release`.

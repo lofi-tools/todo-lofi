@@ -168,7 +168,24 @@ impl HarnessSession {
             self.restore_transcript(replay);
         }
         self.session_id = Some(session_id.clone());
+        self.capabilities.mode_picker = self.harness.modes().is_some();
         Ok(session_id)
+    }
+
+    pub fn modes(&self) -> Option<agent_harness::AgentModes> {
+        if self.closed {
+            return None;
+        }
+        self.harness.modes()
+    }
+
+    pub async fn set_mode(&mut self, mode: &str) -> Result<Vec<HarnessEvent>, CoreError> {
+        if self.closed {
+            return Err(HarnessError::ModeUnavailable.into());
+        }
+        self.harness.set_mode(mode).await?;
+        self.capabilities.mode_picker = self.modes().is_some();
+        Ok(self.pump())
     }
 
     /// Record the user's prompt, ask the adapter, then fold every event the
@@ -302,6 +319,13 @@ impl HarnessSession {
             let change = self.transcript.apply(&event);
             self.track_entry(change);
             events.push(event);
+        }
+        if self.closed
+            || events
+                .iter()
+                .any(|event| matches!(event, HarnessEvent::ModeChanged))
+        {
+            self.capabilities.mode_picker = self.modes().is_some();
         }
         events
     }

@@ -788,6 +788,16 @@ export function App() {
     })
   }
 
+  function chooseMode(mode: string) {
+    const current = workspace()
+    if (!current || pending()) return
+    const taskId = current.task.id
+    void run(async () => {
+      const updated = await bridge.setSessionMode(taskId, mode)
+      if (selectedTaskId() === taskId) setWorkspace(updated)
+    })
+  }
+
   function decide(approvalId: string, decision: bridge.Decision) {
     const current = workspace()
     if (!current || !canApprove() || cancellingTurn()) return
@@ -1327,6 +1337,10 @@ export function App() {
                 showShellApprovals={showShellApprovals()} canAttach={canCompose() && !pending() && !!attachmentLimit()}
                 onAttach={() => fileInput?.click()} />
               <div class="composer__send-actions">
+                <Show when={workspace()?.modes}>
+                  {(modes) => <ComposerModePicker modes={modes()} onChange={chooseMode}
+                    disabled={pending() || !['ready', 'review'].includes(workspace()?.task.state ?? '')} />}
+                </Show>
                 <Show when={currentAgent() === 'codex'}>
                   <ComposerModelPicker model={composerModel()} effort={composerEffort()} models={codexCatalog()?.models ?? []}
                     disabled={!canCompose() || pending() || workspace()?.capabilities?.modelPicker === false}
@@ -1636,6 +1650,21 @@ function ComposerPickers(props: { agent: bridge.Agent; agentName: string; agents
         <PickerCaret />
       </PickerMenu>
     </>
+  )
+}
+
+function ComposerModePicker(props: { modes: bridge.AgentModes; disabled: boolean; onChange: (mode: string) => void }) {
+  const label = () => props.modes.options.find((option) => option.id === props.modes.current)?.name
+    ?? props.modes.current ?? 'Default mode'
+  const options = () => props.modes.options.map((option) => ({
+    id: option.id, name: option.name, detail: option.description ?? undefined, disabled: props.disabled,
+  }))
+  return (
+    <PickerMenu label="Mode" text={label()} value={props.modes.current ?? ''} options={options()}
+      onChange={props.onChange} triggerClass="composer__picker" above>
+      <span class="composer__picker-label">{label()}</span>
+      <PickerCaret />
+    </PickerMenu>
   )
 }
 

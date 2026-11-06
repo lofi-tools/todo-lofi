@@ -994,7 +994,9 @@ and the task header never overstates the tier.
   paths from `@`, inserts a reference, and resolves it against the task
   worktree on Send. The Codex picker lists the app-server's models and
   per-model reasoning efforts and applies a choice on the next turn.
-  Adapter mode controls are still pending.
+  Connected ACP and native OpenCode sessions expose their advertised mode
+  choices beside Send and accept changes between turns. Pre-turn choices in
+  new OpenCode drafts are still pending.
 - [ ] Notifications, dock/status counts and review batch actions.
 - [ ] Command palette, keybinding editor, settings files, project overrides,
   themes and accessibility.
@@ -1010,6 +1012,9 @@ and the task header never overstates the tier.
   in the composer, and sends the reference through the desktop bridge.
   Chromium verifies a Codex model and effort choice reaches the first turn.
   The Codex wire fixture checks the catalog and outgoing turn parameters.
+  Chromium verifies the mode menu updates and disables choices during a
+  turn. Wire fixtures cover ACP configuration selectors and legacy modes.
+  The installed OpenCode smoke switches to Plan and reads it after reconnect.
   The cross-task search fixture verifies cancellation, keyboard selection,
   and focus and highlighting on a cross-project archived result.
   A hidden macOS WebKit smoke verifies the real Turso hit through the desktop

@@ -179,6 +179,7 @@ pub fn run() -> Result<(), tauri::Error> {
             bridge::commands::claude_configured,
             bridge::commands::discard_draft,
             bridge::commands::send_prompt,
+            bridge::commands::set_session_mode,
             bridge::commands::resolve_approval,
             bridge::commands::project_approvals,
             bridge::commands::reset_approval_grant,

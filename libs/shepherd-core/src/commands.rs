@@ -34,6 +34,10 @@ pub enum Command {
         task_id: TaskId,
         input: PromptInput,
     },
+    SetSessionMode {
+        task_id: TaskId,
+        mode: String,
+    },
     ResolveApproval {
         task_id: TaskId,
         approval_id: ApprovalId,

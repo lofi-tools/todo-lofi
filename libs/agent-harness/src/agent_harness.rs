@@ -49,6 +49,8 @@ pub enum HarnessError {
     NoPendingApproval,
     #[error("the agent did not offer this approval option")]
     ApprovalOptionUnavailable,
+    #[error("This session did not offer the selected mode.")]
+    ModeUnavailable,
     #[error("the harness has no scripted turn left")]
     ScriptExhausted,
     #[error("the harness event channel closed")]
@@ -342,6 +344,21 @@ pub struct Capabilities {
     pub patches_in_approvals: bool,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentModes {
+    pub current: Option<String>,
+    pub options: Vec<AgentMode>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentMode {
+    pub id: String,
+    pub name: String,
+    pub description: Option<String>,
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum AdapterTier {
     #[default]
@@ -591,9 +608,7 @@ pub enum HarnessEvent {
     ApprovalPolicyError {
         text: String,
     },
-    ModeChanged {
-        mode: String,
-    },
+    ModeChanged,
     TurnError {
         kind: FailureKind,
         text: String,
@@ -1215,6 +1230,14 @@ pub trait AgentHarness: Send {
 
     fn tier(&self) -> AdapterTier {
         AdapterTier::Native
+    }
+
+    fn modes(&self) -> Option<AgentModes> {
+        None
+    }
+
+    async fn set_mode(&mut self, _mode: &str) -> HarnessResult<()> {
+        Err(HarnessError::ModeUnavailable)
     }
 
     fn set_project_approval_policy(&mut self, _policy: Arc<dyn ProjectApprovalPolicy>) {}

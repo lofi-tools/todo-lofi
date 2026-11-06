@@ -1721,6 +1721,20 @@ pub mod commands {
     }
 
     #[tauri::command]
+    pub async fn set_session_mode(
+        state: State<'_, ShellState>,
+        task_id: String,
+        mode: String,
+    ) -> Result<TaskWorkspace, BridgeError> {
+        state
+            .workspace(Command::SetSessionMode {
+                task_id: TaskId::new(task_id),
+                mode,
+            })
+            .await
+    }
+
+    #[tauri::command]
     pub async fn resolve_approval(
         state: State<'_, ShellState>,
         task_id: String,

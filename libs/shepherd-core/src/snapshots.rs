@@ -65,6 +65,8 @@ pub struct TaskWorkspace {
     pub diagnostics: Option<AgentDiagnostics>,
     pub adapter_tier: Option<AgentTier>,
     pub capabilities: Option<Capabilities>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub modes: Option<agent_harness::AgentModes>,
     pub recovery: Option<SessionRecovery>,
 }
 

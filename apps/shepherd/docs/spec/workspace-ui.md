@@ -233,6 +233,10 @@ current layout and give future changes a point of comparison.
   choice in the composer applies to the next turn. Use **Codex default** if
   the model name is unavailable. OpenCode and Claude Code use their own
   model configuration and do not show this picker.
+- Show a Mode picker beside Send when the connected session advertises
+  choices. Display the agent's current mode and apply changes between turns.
+  Keep the choices disabled during a turn. Shepherd handles approval requests
+  through its shell approval controls.
 - Send sits inside the card, at the end of the lower row. Use the compact
   right-pointing arrowhead icon and a bright accent when enabled. The current
   button size is 32 × 30 px. The disabled state uses a muted tint of the same

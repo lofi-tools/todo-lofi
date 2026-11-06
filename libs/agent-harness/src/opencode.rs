@@ -21,10 +21,10 @@ use tokio::time::{Instant, timeout, timeout_at};
 use crate::acp::{AcpHarness, TerminalBackend};
 use crate::settings::AgentSettings;
 use crate::{
-    AdapterTier, AgentDiagnostics, AgentHarness, ApprovalId, ApprovalRequest, Capabilities,
-    Decision, DeltaKind, Entry, FailureKind, HarnessError, HarnessEvent, HarnessResult, ItemId,
-    PromptInput, SessionId, SessionState, SpawnSpec, ToolCallId, ToolStatus, TurnFinishReason,
-    TurnId, command_line,
+    AdapterTier, AgentDiagnostics, AgentHarness, AgentMode, AgentModes, ApprovalId,
+    ApprovalRequest, Capabilities, Decision, DeltaKind, Entry, FailureKind, HarnessError,
+    HarnessEvent, HarnessResult, ItemId, PromptInput, SessionId, SessionState, SpawnSpec,
+    ToolCallId, ToolStatus, TurnFinishReason, TurnId, command_line,
 };
 
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(20);
@@ -53,6 +53,7 @@ pub struct OpenCodeProbe {
     pub version: String,
     pub resume: bool,
     pub prompt_files: bool,
+    pub modes: bool,
 }
 
 #[derive(Deserialize)]
@@ -99,6 +100,9 @@ impl Api {
         Ok(OpenCodeProbe {
             version: health.version,
             resume: self.supports("get", "/api/session/{sessionID}"),
+            modes: self.supports("get", "/api/session/{sessionID}")
+                && self.supports("get", "/api/agent")
+                && self.supports("post", "/api/session/{sessionID}/agent"),
             prompt_files: self
                 .paths
                 .get("/api/session/{sessionID}/prompt")
@@ -116,6 +120,22 @@ impl Api {
 struct SessionRecord {
     id: String,
     location: SessionLocation,
+    agent: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct OpenCodeAgent {
+    id: String,
+    name: String,
+    description: Option<String>,
+    mode: String,
+    hidden: bool,
+}
+
+#[derive(Deserialize)]
+struct OpenCodeAgents {
+    location: SessionLocation,
+    data: Vec<OpenCodeAgent>,
 }
 
 #[derive(Deserialize)]
@@ -136,6 +156,7 @@ struct InterruptResponse {
 pub struct OpenCodeHarness {
     server: Option<OpenCodeServer>,
     session: Option<SessionId>,
+    modes: Option<AgentModes>,
     turn: Option<ActiveTurn>,
     sender: mpsc::UnboundedSender<HarnessEvent>,
     receiver: mpsc::UnboundedReceiver<HarnessEvent>,
@@ -151,6 +172,7 @@ impl Default for OpenCodeHarness {
         Self {
             server: None,
             session: None,
+            modes: None,
             turn: None,
             sender,
             receiver,
@@ -212,6 +234,44 @@ impl AgentHarness for OpenCodeHarness {
         } else {
             AdapterTier::Native
         }
+    }
+
+    fn modes(&self) -> Option<AgentModes> {
+        match &self.fallback {
+            Some(fallback) => fallback.modes(),
+            None => self.modes.clone(),
+        }
+    }
+
+    async fn set_mode(&mut self, mode: &str) -> HarnessResult<()> {
+        if let Some(fallback) = &mut self.fallback {
+            return fallback.set_mode(mode).await;
+        }
+        if self
+            .turn
+            .as_ref()
+            .is_some_and(|turn| !turn.finished.load(Ordering::Acquire))
+        {
+            return Err(HarnessError::ModeUnavailable);
+        }
+        let server = self.server.as_ref().ok_or(HarnessError::NotStarted)?;
+        let session = self.session.as_ref().ok_or(HarnessError::SessionMissing)?;
+        let modes = self
+            .modes
+            .as_mut()
+            .filter(|modes| modes.options.iter().any(|option| option.id == mode))
+            .ok_or(HarnessError::ModeUnavailable)?;
+        if modes.current.as_deref() != Some(mode) {
+            let path = format!("{}/agent", session_path(session)?);
+            send_request(
+                server
+                    .request(Method::POST, &path)
+                    .json(&json!({ "agent": mode })),
+            )
+            .await?;
+            modes.current = Some(mode.to_owned());
+        }
+        Ok(())
     }
 
     fn take_replayed_transcript(&mut self) -> Vec<Entry> {
@@ -312,6 +372,12 @@ impl AgentHarness for OpenCodeHarness {
             Some(session) => server.resume_session(&session).await?,
             None => server.create_session().await?,
         };
+        if server.probe.modes {
+            match server.session_modes(&session).await {
+                Ok(modes) => self.modes = modes,
+                Err(error) => tracing::warn!(%error, "could not load OpenCode session modes"),
+            }
+        }
         self.session = Some(session.clone());
         publish(
             &self.sender,
@@ -466,6 +532,7 @@ impl AgentHarness for OpenCodeHarness {
         }
         self.turn = None;
         self.session = None;
+        self.modes = None;
         if let Some(server) = self.server.take() {
             self.diagnostics.stderr_tail = server.stderr_tail();
             server.shutdown().await?;
@@ -1048,7 +1115,7 @@ impl OpenCodeServer {
                 "permissions": [{ "action": "*", "resource": "*", "effect": "ask" }]
             })))
             .await?;
-        self.session_id(response.data)
+        self.session_id(&response.data)
     }
 
     pub async fn resume_session(&self, session: &SessionId) -> HarnessResult<SessionId> {
@@ -1057,16 +1124,52 @@ impl OpenCodeServer {
                 "OpenCode server does not support session lookup".into(),
             ));
         }
-        let path = session_path(session)?;
+        self.read_session(session).await?;
+        Ok(session.clone())
+    }
+
+    async fn read_session(&self, session: &SessionId) -> HarnessResult<SessionRecord> {
         let response: ResponseData<SessionRecord> =
-            response_json(self.request(Method::GET, &path)).await?;
-        let resumed = self.session_id(response.data)?;
-        if &resumed != session {
+            response_json(self.request(Method::GET, &session_path(session)?)).await?;
+        if &self.session_id(&response.data)? != session {
             return Err(HarnessError::Protocol(
                 "OpenCode returned a different session".into(),
             ));
         }
-        Ok(resumed)
+        Ok(response.data)
+    }
+
+    async fn session_modes(&self, session: &SessionId) -> HarnessResult<Option<AgentModes>> {
+        let request = || {
+            self.request(Method::GET, "/api/agent")
+                .query(&[("location[directory]", self.directory.as_str())])
+        };
+        let mut agents: OpenCodeAgents = response_json(request()).await?;
+        if agents.data.is_empty() {
+            // OpenCode can answer the first lookup before the workspace registry is ready.
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            agents = response_json(request()).await?;
+        }
+        if agents.location.directory != Path::new(&self.directory) {
+            return Err(HarnessError::Protocol(
+                "OpenCode returned modes outside the task directory".into(),
+            ));
+        }
+        let options: Vec<_> = agents
+            .data
+            .into_iter()
+            .filter(|agent| !agent.hidden && matches!(agent.mode.as_str(), "primary" | "all"))
+            .map(|agent| AgentMode {
+                id: agent.id,
+                name: agent.name,
+                description: agent.description,
+            })
+            .collect();
+        if options.is_empty() {
+            return Ok(None);
+        }
+        let current = self.read_session(session).await?.agent;
+        Ok(Some(AgentModes { current, options }))
     }
 
     pub async fn interrupt_session(&self, session: &SessionId) -> HarnessResult<bool> {
@@ -1133,13 +1236,13 @@ impl OpenCodeServer {
             .basic_auth(USERNAME, Some(&self.password))
     }
 
-    fn session_id(&self, record: SessionRecord) -> HarnessResult<SessionId> {
+    fn session_id(&self, record: &SessionRecord) -> HarnessResult<SessionId> {
         if record.location.directory != Path::new(&self.directory) {
             return Err(HarnessError::Protocol(
                 "OpenCode returned a session outside the task directory".into(),
             ));
         }
-        let session = SessionId::new(record.id);
+        let session = SessionId::new(record.id.clone());
         session_path(&session)?;
         Ok(session)
     }
@@ -1607,6 +1710,54 @@ exec sleep 60
             }
         ));
         restarted.shutdown().await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a configured OpenCode executable and loopback sockets"]
+    async fn installed_harness_switches_mode_and_reads_it_on_reconnect()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = tempfile::tempdir()?;
+        let spec = installed_fixture_spec(root.path())?;
+        let mut harness = OpenCodeHarness::default();
+        harness.start(spec.clone()).await?;
+        assert_eq!(harness.tier(), AdapterTier::Native);
+        let session = harness.open_session(None).await?;
+        let server = harness.server.as_ref().ok_or("missing native server")?;
+        assert!(server.probe().modes);
+        let modes = harness.modes().ok_or("missing native modes")?;
+        let mode = modes
+            .options
+            .iter()
+            .find(|option| option.id == "plan")
+            .ok_or("expected the advertised Plan mode")?;
+        assert!(matches!(
+            harness.set_mode("missing-fixture-mode").await,
+            Err(HarnessError::ModeUnavailable)
+        ));
+        harness.set_mode(&mode.id).await?;
+        assert_eq!(
+            harness
+                .modes()
+                .ok_or("missing selected mode")?
+                .current
+                .as_deref(),
+            Some(mode.id.as_str())
+        );
+        harness.shutdown().await?;
+
+        let mut reopened = OpenCodeHarness::default();
+        reopened.start(spec).await?;
+        assert_eq!(reopened.open_session(Some(session.clone())).await?, session);
+        assert_eq!(
+            reopened
+                .modes()
+                .ok_or("missing restored mode")?
+                .current
+                .as_deref(),
+            Some(mode.id.as_str())
+        );
+        reopened.shutdown().await?;
         Ok(())
     }
 

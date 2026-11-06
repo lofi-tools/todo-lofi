@@ -210,6 +210,11 @@ export interface AgentCapabilities {
 
 export type SessionRecovery = 'resume' | 'reconnect' | 'startNew'
 
+export interface AgentModes {
+  current: string | null
+  options: Array<{ id: string; name: string; description: string | null }>
+}
+
 export interface WorkspaceLayout {
   inspectorWidth: number | null
 }
@@ -225,6 +230,7 @@ export interface TaskWorkspace {
   diagnostics: AgentDiagnostics | null
   adapterTier: AgentTier | null
   capabilities: AgentCapabilities | null
+  modes?: AgentModes
   recovery: SessionRecovery | null
 }
 
@@ -362,6 +368,10 @@ export interface CodexTurnOptions {
 
 export function sendPrompt(taskId: string, text: string, attachmentIds: string[] = [], codex?: CodexTurnOptions): Promise<TaskWorkspace> {
   return invoke<TaskWorkspace>('send_prompt', { taskId, text, attachmentIds, codex })
+}
+
+export function setSessionMode(taskId: string, mode: string): Promise<TaskWorkspace> {
+  return invoke('set_session_mode', { taskId, mode })
 }
 
 export async function savePromptFile(taskId: string, file: File): Promise<string> {
