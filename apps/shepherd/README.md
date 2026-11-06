@@ -78,6 +78,20 @@ the full two-launch suite under Xvfb. A push to `codex/shepherd-terminal-smoke`
 starts the run. Once the workflow is on the default branch, you can also
 dispatch it for a published ref.
 
+## App icon
+
+The [Shepherd logo](ui/public/assets/shepherd-logo.svg) also serves as the
+source for the desktop icons. Its rounded tile occupies the central 824 pixels
+of the 1024-pixel canvas to match the macOS Dock icon grid.
+
+Regenerate the desktop files after editing the SVG:
+
+```sh
+icon_output=$(mktemp -d)
+pnpm --dir apps/shepherd tauri icon "$PWD/apps/shepherd/ui/public/assets/shepherd-logo.svg" --output "$icon_output"
+cp "$icon_output"/*.{png,icns,ico} apps/shepherd/src-tauri/icons/
+```
+
 ## Import projects from the ChatGPT app
 
 When the Projects list is empty, choose **ChatGPT app** under **or import all
