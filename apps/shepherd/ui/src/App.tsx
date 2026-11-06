@@ -589,10 +589,6 @@ export function App() {
   }
   const bindingsById = createMemo(() => new Map(commandRegistry()?.commands.map((binding) => [binding.id, binding])))
   const chordFor = (id: string) => bindingsById().get(id)?.chord ?? undefined
-  const searchShortcutLabel = () => {
-    const chord = chordFor('searchTasks')
-    return chord ? displayChord(chord, mac) : undefined
-  }
   const canSend = () => canCompose() && !pending() && (!!prompt().trim() || !!promptFiles().length)
   const canUseGit = () => {
     const task = workspace()?.task
@@ -1577,7 +1573,7 @@ export function App() {
     <>
       <WorkspaceFrame taskId={selectedTaskId()} inspectorWidth={inspectorWidth()} onInspectorWidthChange={resizeInspector}
         search={<TaskSearch open={searchOpen()} disabled={pending() || !projects().length} shortcut={chordFor('searchTasks')}
-          shortcutLabel={searchShortcutLabel()}
+          mac={mac}
           inputRef={(input) => { searchInput = input }}
           onFocus={(opener) => {
             searchOpener = opener instanceof HTMLElement ? opener : undefined
@@ -2121,8 +2117,8 @@ function WorkspaceFrame(props: {
               </svg>
             </button>
           </div>
+          {props.search}
         </div>
-        <div class="shell__header-conversation" data-tauri-drag-region={dragRegion}>{props.search}</div>
       </header>
       <nav class="shell__rail" aria-label="Quick navigation">
         <button class="shell__icon-button" type="button" aria-label="Workspace" title="Workspace" disabled>

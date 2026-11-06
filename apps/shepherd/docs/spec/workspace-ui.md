@@ -21,8 +21,9 @@ current layout and give future changes a point of comparison.
   rail currently has placeholder icons for Workspace and Conversations.
   Previous and Next are placeholders for navigation history. While the
   Freebuff terminal is visible, Previous is available as **Back to chat**.
-- **Search tasks** is a compact text field in the conversation section of the
-  window header. It shows the current shortcut when collapsed and expands
+- **Search tasks** sits immediately after Previous and Next in the window
+  header. It has a magnifier inside the field and shows the current shortcut
+  as individually bordered, muted keycaps when collapsed. The field expands
   with an ease transition on focus. The default is Command-Shift-F on macOS
   or Ctrl-Alt-F on Linux. Ranked matches from every project appear underneath
   the field with the task, project and a highlighted snippet. Up and Down

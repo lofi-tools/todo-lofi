@@ -988,18 +988,25 @@ test('puts the macOS window controls and history buttons in one header row', asy
   await page.goto('/')
 
   const header = page.getByRole('banner', { name: 'Workspace header' })
-  const [windowControls, previous, next] = await Promise.all([
+  const search = header.getByRole('combobox', { name: 'Search across tasks' })
+  await expect(header.locator('.task-search__keys kbd')).toHaveText(['⇧', '⌘', 'F'])
+  await expect(header.locator('.task-search__icon')).toBeVisible()
+  const [windowControls, previous, next, searchBounds] = await Promise.all([
     header.locator('.shell__window-controls').boundingBox(),
     header.getByRole('button', { name: 'Previous' }).boundingBox(),
     header.getByRole('button', { name: 'Next' }).boundingBox(),
+    search.boundingBox(),
   ])
-  if (!windowControls || !previous || !next) throw new Error('The window and history controls should be visible')
+  if (!windowControls || !previous || !next || !searchBounds) throw new Error('The window, history, and search controls should be visible')
 
   const windowControlsCenter = windowControls.y + windowControls.height / 2
   expect(previous.y + previous.height / 2).toBeCloseTo(windowControlsCenter)
   expect(next.y + next.height / 2).toBeCloseTo(windowControlsCenter)
   expect(previous.x).toBeGreaterThanOrEqual(windowControls.x + windowControls.width)
   expect(next.x).toBeGreaterThanOrEqual(previous.x + previous.width)
+  expect(searchBounds.y + searchBounds.height / 2).toBeCloseTo(windowControlsCenter, 0)
+  expect(searchBounds.x - next.x - next.width).toBeGreaterThanOrEqual(0)
+  expect(searchBounds.x - next.x - next.width).toBeLessThanOrEqual(10)
 })
 
 test('searches app commands, explains unavailable actions, and switches workspace from the keyboard', async ({ page }) => {
@@ -1317,11 +1324,13 @@ test('cancels stale task searches and focuses an archived hit across projects', 
   const header = page.locator('.shell__header')
   const input = header.getByRole('combobox', { name: 'Search across tasks' })
   const results = header.getByRole('listbox', { name: 'Task search results' })
-  await expect(input).toHaveAttribute('placeholder', 'Ctrl+Alt+F')
+  const keys = header.locator('.task-search__keys kbd')
+  await expect(keys).toHaveText(['Ctrl', 'Alt', 'F'])
   const collapsedWidth = await input.evaluate((element) => element.getBoundingClientRect().width)
   await page.keyboard.press('Control+Alt+f')
   await expect(input).toBeFocused()
   await expect(input).toHaveAttribute('placeholder', 'Search messages, tasks, and projects')
+  await expect(keys).toHaveCount(0)
   await expect.poll(() => input.evaluate((element) => element.getBoundingClientRect().width)).toBeGreaterThan(collapsedWidth * 2)
   await input.fill('slow')
   await expect.poll(() => page.evaluate(() => window.__taskSearches)).toEqual([{ id: 'search-1', query: 'slow' }])
@@ -1354,7 +1363,7 @@ test('cancels stale task searches and focuses an archived hit across projects', 
   await expect.poll(() => page.evaluate(() => window.__taskSearches.at(-1))).toEqual({ id: 'search-3', query: 'slow' })
   await input.press('Escape')
   await expect(project).toBeFocused()
-  await expect(input).toHaveAttribute('placeholder', 'Ctrl+Alt+F')
+  await expect(keys).toHaveText(['Ctrl', 'Alt', 'F'])
   await expect.poll(() => input.evaluate((element) => element.getBoundingClientRect().width)).toBe(collapsedWidth)
   await expect.poll(() => page.evaluate(() => window.__cancelledTaskSearches)).toEqual(['search-1', 'search-3'])
   await page.evaluate(() => window.dispatchEvent(new Event('release-task-search')))

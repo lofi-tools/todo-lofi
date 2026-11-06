@@ -1099,6 +1099,12 @@ async function smoke() {
   }
   const search = await waitFor('header search with a native shortcut', () =>
     document.querySelector<HTMLInputElement>('.shell__header input[aria-keyshortcuts]:enabled'))
+  const next = button('Next')?.getBoundingClientRect()
+  const compact = search.getBoundingClientRect()
+  if (!next || compact.left < next.right || compact.left - next.right > 10 ||
+    Math.abs(compact.top + compact.height / 2 - next.top - next.height / 2) > 1) {
+    throw new Error('Header search does not sit immediately after Next')
+  }
   const searchOpener = await enabledButton('Add project')
   searchOpener.focus()
   const searchOnMac = navigator.platform.startsWith('Mac')

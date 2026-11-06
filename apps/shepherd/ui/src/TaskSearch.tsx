@@ -1,12 +1,13 @@
 import { For, Show, createEffect, createSignal, createUniqueId, on, onCleanup } from 'solid-js'
 
 import { cancelTaskSearch, reserveTaskSearch, searchTasks, type TaskSearchHit } from './bridge'
+import { displayChord } from './keybindings'
 
 export function TaskSearch(props: {
   open: boolean
   disabled: boolean
   shortcut?: string
-  shortcutLabel?: string
+  mac: boolean
   inputRef: (input: HTMLInputElement) => void
   onFocus: (opener: EventTarget | null) => void
   onBlur: () => void
@@ -20,6 +21,7 @@ export function TaskSearch(props: {
   const [active, setActive] = createSignal(0)
   const listId = createUniqueId()
   const popupOpen = () => props.open && !!query().trim()
+  const shortcutLabel = () => props.shortcut ? displayChord(props.shortcut, props.mac) : ''
 
   createEffect(on(query, (value) => {
     setHits([])
@@ -83,16 +85,28 @@ export function TaskSearch(props: {
 
   return (
     <div class="task-search">
+      <svg class="task-search__icon" width="14" height="14" viewBox="0 0 24 24" fill="none"
+        stroke="currentColor" stroke-width="1.7" stroke-linecap="round" aria-hidden="true">
+        <circle cx="10.5" cy="10.5" r="5.5" />
+        <path d="m15 15 4 4" />
+      </svg>
       <input class="task-search__input" ref={props.inputRef} role="combobox" aria-label="Search across tasks"
         aria-keyshortcuts={props.shortcut} aria-controls={popupOpen() ? listId : undefined} aria-expanded={popupOpen()}
         aria-activedescendant={popupOpen() && hits().length ? rowId(active()) : undefined} aria-autocomplete="list"
-        title={props.shortcutLabel ? `Search tasks (${props.shortcutLabel})` : 'Search tasks'}
-        placeholder={props.open ? 'Search messages, tasks, and projects' : props.shortcutLabel ?? 'Search'}
+        title={props.shortcut ? `Search tasks (${shortcutLabel()})` : 'Search tasks'}
+        placeholder={props.open ? 'Search messages, tasks, and projects' : props.shortcut ? '' : 'Search'}
         value={query()} disabled={props.disabled}
         onFocus={(event) => props.onFocus(event.relatedTarget)}
         onBlur={() => { setQuery(''); props.onBlur() }}
         onInput={(event) => { if (!event.isComposing) setQuery(event.currentTarget.value) }}
         onCompositionEnd={(event) => setQuery(event.currentTarget.value)} onKeyDown={navigate} />
+      <Show when={!props.open && props.shortcut}>
+        {(chord) => <span class="task-search__keys" aria-hidden="true">
+          <For each={chord().split('+')}>
+            {(key) => <kbd>{displayChord(key, props.mac)}</kbd>}
+          </For>
+        </span>}
+      </Show>
       <Show when={popupOpen()}>
         <div class="task-search__results">
           <Show when={error()}>
