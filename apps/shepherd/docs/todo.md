@@ -604,8 +604,11 @@ task-scoped, persistent and fast enough.
 - [x] Bound PTY queues and allow one frame in flight per webview subscription.
   Coalesce paints and defer canvas work while the inspector tab or window is
   hidden. The browser regression verifies that the terminal skips a queued
-  paint when the window hides and draws the latest frame on return. Rate-limit
-  frame delivery from the previous send so an idle pane can update immediately.
+  paint when the window hides and draws the latest frame on return. The native
+  `--macos-visibility` smoke minimizes the window, observes new PTY output
+  with zero hidden paints, then restores it and verifies the canvas paints
+  that output. Rate-limit frame delivery from the previous send so an idle
+  pane can update immediately.
   Each terminal view limits queued input to 128 operations and 1 MiB of
   payload. Kitty key presses and reported mouse buttons reserve room for their
   releases. The browser fixture stalls a write, checks the limit, and verifies

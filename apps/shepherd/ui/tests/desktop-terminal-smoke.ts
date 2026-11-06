@@ -296,6 +296,45 @@ async function exerciseNativeIme(
   return { ok: true, nativeIme: true, received }
 }
 
+async function exerciseMacosVisibility() {
+  const project = await openFixtureProject()
+  const start = await enabledButton('New shared terminal')
+  start.click()
+  const context = await waitFor('painted terminal canvas', () => {
+    const canvas = document.querySelector<HTMLCanvasElement>('.terminal-view__canvas')
+    if (canvas?.style.height) return canvas.getContext('2d')
+  })
+  const { terminals: [terminal] } = await bridge.terminalList(project.id)
+  if (!terminal) throw new Error('The fixture terminal was not started')
+
+  const appWindow = getCurrentWindow()
+  const originalFillText = context.fillText
+  let hiddenPaints = 0
+  let markerPainted = false
+  context.fillText = function (...args) {
+    if (document.hidden) hiddenPaints++
+    if (args[0] === 'Ω') markerPainted = true
+    originalFillText.apply(this, args)
+  }
+  try {
+    await appWindow.minimize()
+    try {
+      await waitFor('minimized window to hide the webview', async () => document.hidden && await appWindow.isMinimized())
+      await bridge.terminalWrite(terminal.id, "printf '\\316\\251\\n'\r")
+      await waitFor('PTY output received while minimized', () =>
+        document.hidden && terminalOutput().includes('Ω'))
+      if (markerPainted || hiddenPaints) throw new Error('The terminal painted while minimized')
+    } finally {
+      await appWindow.unminimize()
+    }
+    await waitFor('restored window to paint the received output', async () =>
+      !document.hidden && markerPainted && !(await appWindow.isMinimized()))
+    return { ok: true, macosVisibility: true, hiddenPaints }
+  } finally {
+    context.fillText = originalFillText
+  }
+}
+
 function shellQuote(value: string): string {
   return "'" + value.replaceAll("'", "'\"'\"'") + "'"
 }
@@ -1104,6 +1143,9 @@ void (async () => {
           { text: 'ü', event: 'compositionend' },
           { text: '#', event: 'input' },
         ])
+        break
+      case 'macos-visibility':
+        result = await exerciseMacosVisibility()
         break
       case 'restore':
         result = await restore()

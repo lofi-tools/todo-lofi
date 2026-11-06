@@ -53,6 +53,10 @@ direnv exec . ./scripts/smoke-shepherd-terminal.sh
 The smoke uses a separate dev server on port 1432. Set
 `SHEPHERD_DESKTOP_SMOKE_PORT` to use another port.
 
+On macOS, add `--macos-visibility` to minimize and restore the disposable
+window. The probe checks that the PTY keeps receiving output, that the canvas
+skips hidden paints, and that the restored window paints the pending output.
+
 On Ubuntu 24.04, the **Shepherd terminal smoke** GitHub Actions workflow runs
 the same two launches under Xvfb. A push to `codex/shepherd-terminal-smoke`
 starts the run. Once the workflow is on the default branch, you can also

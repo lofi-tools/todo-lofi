@@ -3,6 +3,7 @@ set -euo pipefail
 
 phases=(prepare restore)
 duration=180s
+window_config=''
 unset SHEPHERD_DEV_CODEX_SMOKE
 case "${1:-}" in
   "")
@@ -50,6 +51,26 @@ case "${1:-}" in
         ;;
     esac
     ;;
+  --macos-visibility)
+    if [[ $(uname -s) != Darwin ]]; then
+      printf '%s\n' 'The window visibility smoke requires a macOS desktop session.' >&2
+      exit 2
+    fi
+    phases=(macos-visibility)
+    window_config=$(cat <<'EOF'
+  "app": {
+    "security": {
+      "capabilities": ["default", {
+        "identifier": "terminal-visibility-smoke",
+        "windows": ["main"],
+        "permissions": ["core:window:allow-minimize", "core:window:allow-unminimize"]
+      }]
+    }
+  },
+EOF
+    )
+    export SHEPHERD_DEV_SCRIPTED_HARNESS=1
+    ;;
   --codex-approval)
     command -v python3 >/dev/null
     phases=(codex-approval)
@@ -83,7 +104,7 @@ case "${1:-}" in
     export SHEPHERD_DEV_CODEX_SMOKE=review-merge
     ;;
   *)
-    printf '%s\n' "Usage: $0 [--linux-ime|--macos-ime [pinyin|british]|--codex-approval|--codex-live|--codex-edit|--codex-restart|--codex-exit|--codex-review-merge]" >&2
+    printf '%s\n' "Usage: $0 [--linux-ime|--macos-ime [pinyin|british]|--macos-visibility|--codex-approval|--codex-live|--codex-edit|--codex-restart|--codex-exit|--codex-review-merge]" >&2
     exit 2
     ;;
 esac
@@ -142,6 +163,7 @@ fi
 cd "$repo"
 config=$(cat <<EOF
 {
+$window_config
   "build": {
     "beforeDevCommand": "pnpm --dir ui run dev --port $port",
     "devUrl": "http://localhost:$port"
