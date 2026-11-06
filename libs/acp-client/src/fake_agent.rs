@@ -46,8 +46,8 @@ pub struct FakeScript {
     /// Ask the client to run a command.
     pub terminal: Option<(String, Vec<String>)>,
     pub release_terminal: bool,
-    /// Ask the client to read this path.
-    pub read_path: Option<PathBuf>,
+    /// Ask the client to read these paths in order.
+    pub read_paths: Vec<PathBuf>,
     /// Ask the client to write this content to this path.
     pub write: Option<(PathBuf, String)>,
 }
@@ -289,7 +289,7 @@ async fn run_turn(
                 .push(format!("{:?}", response.outcome));
         }
     }
-    if let Some(path) = &script.read_path {
+    for path in &script.read_paths {
         let result = connection
             .send_request(ReadTextFileRequest::new(session_id.clone(), path.clone()))
             .block_task()
@@ -877,7 +877,7 @@ mod tests {
         let outside = std::env::temp_dir().join("acp-client-outside.txt");
         let (connection, observations, dir) = connect_to_fake(
             FakeScript {
-                read_path: Some(outside),
+                read_paths: vec![outside],
                 write: Some((target.clone(), "hello".to_string())),
                 ..Default::default()
             },

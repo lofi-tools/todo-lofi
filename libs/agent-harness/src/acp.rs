@@ -264,6 +264,7 @@ impl AgentHarness for AcpHarness {
             .ok_or(HarnessError::NotStarted)?
             .info;
         let mut content = vec![ContentBlock::Text(schema::TextContent::new(input.text))];
+        let mut readable_files = Vec::new();
         for attachment in input.attachments {
             if let Some(mime_type) = attachment
                 .image_mime_type
@@ -289,9 +290,14 @@ impl AgentHarness for AcpHarness {
                     name.to_string_lossy(),
                     attachment.file_uri()?.to_string(),
                 )));
+                readable_files.push(attachment.path);
             }
         }
-        self.control(Control::Prompt(content)).await
+        self.control(Control::Prompt {
+            content,
+            readable_files,
+        })
+        .await
     }
 
     async fn cancel(&mut self) -> HarnessResult<()> {
@@ -366,7 +372,10 @@ fn publish(sender: &mpsc::UnboundedSender<HarnessEvent>, event: HarnessEvent) ->
 }
 
 enum Control {
-    Prompt(Vec<ContentBlock>),
+    Prompt {
+        content: Vec<ContentBlock>,
+        readable_files: Vec<PathBuf>,
+    },
     Cancel,
     Respond(ApprovalId, Decision),
     ResetSessionApproval(String),
@@ -536,17 +545,18 @@ async fn drive_session(
             command = commands.recv() => {
                 let Some((command, answer)) = command else { return Ok(()); };
                 let result = match command {
-                    Control::Prompt(_) if prompt.is_some() => Err(protocol("ACP turn is already running")),
-                    Control::Prompt(_) if disconnect_deadline.is_some() => Err(protocol("the ACP connection is closing")),
-                    Control::Prompt(content) => {
-                        updates = Updates::default();
-                        publish(&sender, HarnessEvent::TurnStarted { turn_id: TurnId::new(uuid::Uuid::new_v4().to_string()) })?;
-                        prompt = Some(Box::pin({
-                            let requester = requester.clone();
-                            let session = session.clone();
-                            async move { requester.prompt_content(&session, content).await }
-                        }));
-                        Ok(())
+                    Control::Prompt { .. } if prompt.is_some() => Err(protocol("ACP turn is already running")),
+                    Control::Prompt { .. } if disconnect_deadline.is_some() => Err(protocol("the ACP connection is closing")),
+                    Control::Prompt { content, readable_files } => {
+                        match requester.start_prompt_content(&session, content, readable_files).await {
+                            Ok(turn) => {
+                                updates = Updates::default();
+                                publish(&sender, HarnessEvent::TurnStarted { turn_id: TurnId::new(uuid::Uuid::new_v4().to_string()) })?;
+                                prompt = Some(Box::pin(turn));
+                                Ok(())
+                            }
+                            Err(error) => Err(acp_error(error)),
+                        }
                     }
                     Control::Cancel if prompt.is_some() && !cancelling => {
                         let result = requester.cancel(&session).map_err(acp_error);
@@ -1143,7 +1153,13 @@ mod tests {
     async fn fake(
         script: FakeScript,
     ) -> Result<(AcpHarness, Capabilities, Shared), Box<dyn std::error::Error>> {
-        let cwd = std::env::temp_dir();
+        fake_at(script, std::env::temp_dir()).await
+    }
+
+    async fn fake_at(
+        script: FakeScript,
+        cwd: PathBuf,
+    ) -> Result<(AcpHarness, Capabilities, Shared), Box<dyn std::error::Error>> {
         let (connection, observed) = connect_fake_agent(
             script,
             ConnectOptions {
@@ -1157,14 +1173,80 @@ mod tests {
         Ok((harness, capabilities, observed))
     }
 
+    async fn complete_attachment_turn(harness: &mut AcpHarness) -> HarnessResult<()> {
+        timeout(Duration::from_secs(5), async {
+            while let Some(event) = harness.events().recv().await {
+                if let HarnessEvent::TurnFinished { reason } = event {
+                    assert_eq!(reason, TurnFinishReason::Completed);
+                    return Ok(());
+                }
+            }
+            Err(HarnessError::ChannelClosed)
+        })
+        .await
+        .map_err(|_| protocol("attachment turn did not finish"))?
+    }
+
+    #[tokio::test]
+    async fn an_acp_prompt_can_read_only_the_selected_cached_files_until_it_finishes()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let directory_path = directory.path().canonicalize()?;
+        let worktree = directory_path.join("worktree");
+        let cache = directory_path.join("cache");
+        std::fs::create_dir(&worktree)?;
+        std::fs::create_dir(&cache)?;
+        let selected = cache.join("attached.txt");
+        let neighbor = cache.join("other.txt");
+        std::fs::write(&selected, "selected attachment\n")?;
+        std::fs::write(&neighbor, "other content")?;
+        let (mut harness, _, observed) = fake_at(
+            FakeScript {
+                read_paths: vec![selected.clone(), neighbor],
+                write: Some((selected.clone(), "changed".into())),
+                ..FakeScript::default()
+            },
+            worktree,
+        )
+        .await?;
+        harness.open_session(None).await?;
+        harness
+            .prompt(PromptInput {
+                text: "Read the attachment.".into(),
+                attachments: vec![crate::PromptAttachment {
+                    path: selected.clone(),
+                    image_mime_type: None,
+                }],
+            })
+            .await?;
+        complete_attachment_turn(&mut harness).await?;
+        harness
+            .prompt(PromptInput::text("Continue without an attachment."))
+            .await?;
+        complete_attachment_turn(&mut harness).await?;
+        let observed = observed.lock().map_err(|_| "poisoned ACP observations")?;
+        let [first, neighbor, after, _] = observed.file_reads.as_slice() else {
+            return Err("expected both read attempts on both turns".into());
+        };
+        assert_eq!(first.as_deref(), Ok("selected attachment\n"));
+        assert!(neighbor.is_err());
+        assert!(after.is_err());
+        assert_eq!(observed.file_writes.len(), 2);
+        assert!(observed.file_writes.iter().all(Result::is_err));
+        assert_eq!(std::fs::read_to_string(selected)?, "selected attachment\n");
+        Ok(())
+    }
+
     #[tokio::test]
     async fn sends_image_bytes_only_when_acp_advertises_image_support()
     -> Result<(), Box<dyn std::error::Error>> {
         let directory = tempfile::tempdir()?;
-        let image_path = directory.path().join("a screenshot.png");
-        let file_path = directory.path().join("notes.txt");
+        let root = directory.path().canonicalize()?;
+        let image_path = root.join("a screenshot.png");
+        let file_path = root.join("notes.txt");
         let bytes = b"fixture image bytes";
         std::fs::write(&image_path, bytes)?;
+        std::fs::write(&file_path, "fixture text")?;
         for prompt_images in [true, false] {
             let (mut harness, capabilities, observed) = fake(FakeScript {
                 prompt_images,
@@ -1189,15 +1271,7 @@ mod tests {
                     ],
                 })
                 .await?;
-            timeout(Duration::from_secs(5), async {
-                while let Some(event) = harness.events().recv().await {
-                    if matches!(event, HarnessEvent::TurnFinished { .. }) {
-                        return Ok(());
-                    }
-                }
-                Err(HarnessError::ChannelClosed)
-            })
-            .await??;
+            complete_attachment_turn(&mut harness).await?;
             let observed = observed.lock().map_err(|_| "poisoned ACP observations")?;
             let [content] = observed.prompt_content.as_slice() else {
                 return Err("expected one prompt".into());

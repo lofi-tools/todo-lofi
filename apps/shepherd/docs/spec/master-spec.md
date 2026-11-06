@@ -1196,6 +1196,11 @@ Agent → client: `session/request_permission`, `fs/read_text_file`,
 Agent → client notifications: `session/update` (message chunks, thought chunks,
 tool calls and updates, plan, commands, mode/config changes, usage).
 
+During a prompt, `fs/read_text_file` can also read the selected cached
+attachments linked in that prompt. Shepherd holds those files open until the
+prompt ends. Other filesystem requests and terminal working directories
+follow the normal worktree scope.
+
 `libs/acp-client` owns the protocol types; Shepherd owns supervision,
 persistence and presentation.
 

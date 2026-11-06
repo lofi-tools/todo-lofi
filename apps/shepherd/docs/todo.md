@@ -985,10 +985,10 @@ and the task header never overstates the tier.
   attachment cache on Send. Prompts retain the copied paths. Codex sends local
   images through app-server or through exec when its help advertises images.
   Native OpenCode sends structured file URIs when the API advertises them.
-  ACP receives image bytes when negotiated and file links otherwise. ACP
-  reads through Shepherd's filesystem bridge are still scoped to the task
-  worktree. Attachment metadata and cap overrides, mentions, and model and
-  mode controls are still pending.
+  ACP receives image bytes when negotiated and file links otherwise. ACP can
+  read the selected linked text files through Shepherd's bridge during the
+  sending turn. Attachment metadata and cap overrides, mentions, and model
+  and mode controls are still pending.
 - [ ] Notifications, dock/status counts and review batch actions.
 - [ ] Command palette, keybinding editor, settings files, project overrides,
   themes and accessibility.
@@ -1016,6 +1016,8 @@ and the task header never overstates the tier.
   Wire fixtures cover Codex image paths and ACP image capability negotiation.
   The configured OpenCode executable delivers the image to a loopback model
   fixture with matching bytes.
+  ACP fixtures verify turn-scoped reads, write denial, and isolation from
+  neighboring cache files and symlink redirects.
 - [ ] Corrupt settings file falls back with a banner and backup.
 - [x] Search ranking and prefix-query tests against Turso FTS, not SQLite FTS5.
   The query plan uses the FTS index. Database fixtures cover exact-term ranking,

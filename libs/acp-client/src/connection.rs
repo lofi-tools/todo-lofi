@@ -36,7 +36,7 @@ use futures::io::BufReader;
 use futures::{AsyncBufReadExt as _, AsyncWriteExt as _};
 
 use crate::agent::{AgentServer, SpawnSpec};
-use crate::fs::{SessionRoots, read_text_file, write_text_file};
+use crate::fs::{PromptReads, SessionRoots, read_text_file, write_text_file};
 use crate::permissions::{
     PermissionDecision, PermissionReply, ToolPermissions, Verdict, haystack, strongest_allow,
     strongest_reject, tool_key,
@@ -75,6 +75,7 @@ impl AgentInfo {
 pub struct Requester {
     connection: ConnectionTo<Agent>,
     auth_methods: Arc<[AuthMethod]>,
+    prompt_reads: PromptReads,
 }
 
 impl Requester {
@@ -150,26 +151,49 @@ impl Requester {
         session_id: &SessionId,
         text: String,
     ) -> Result<StopReason, AcpError> {
-        self.prompt_content(
+        self.start_prompt_content(
             session_id,
             vec![schema::ContentBlock::Text(schema::TextContent::new(text))],
+            Vec::new(),
         )
+        .await?
         .await
     }
 
-    pub async fn prompt_content(
+    /// Open the selected files and enqueue the prompt before returning its result future.
+    pub async fn start_prompt_content(
         &self,
         session_id: &SessionId,
         content: Vec<schema::ContentBlock>,
-    ) -> Result<StopReason, AcpError> {
+        readable_files: Vec<PathBuf>,
+    ) -> Result<impl Future<Output = Result<StopReason, AcpError>> + Send + use<>, AcpError> {
+        let grant = if readable_files.is_empty() {
+            None
+        } else {
+            let session = session_id.clone();
+            let reads = self.prompt_reads.clone();
+            Some(
+                tokio::task::spawn_blocking(move || reads.grant(session, readable_files))
+                    .await
+                    .map_err(|error| {
+                        AcpError::Protocol(format!("attachment access worker failed: {error}"))
+                    })?
+                    .map_err(|error| {
+                        AcpError::Protocol(format!("could not open prompt attachments: {error}"))
+                    })?,
+            )
+        };
         let request = PromptRequest::new(session_id.clone(), content);
-        let response = self
-            .connection
-            .send_request(request)
-            .block_task()
-            .await
-            .map_err(|error| self.request_error(error))?;
-        Ok(response.stop_reason)
+        let pending = self.connection.send_request(request);
+        let requester = self.clone();
+        Ok(async move {
+            let _grant = grant;
+            let response = pending
+                .block_task()
+                .await
+                .map_err(|error| requester.request_error(error))?;
+            Ok(response.stop_reason)
+        })
     }
 
     /// Ask the agent to stop the current turn. Fire and forget, per protocol.
@@ -380,6 +404,8 @@ where
     let policy_for_handlers = tool_permissions.clone();
 
     let roots = options.roots.clone();
+    let prompt_reads = PromptReads::default();
+    let prompt_reads_for_handler = prompt_reads.clone();
     let roots_for_handlers = roots.clone();
     let events_for_notifications = events_tx.clone();
     let permissions = events_tx.clone();
@@ -468,20 +494,30 @@ where
         .on_receive_request(
             async move |request: ReadTextFileRequest, responder, _cx| {
                 let roots = roots_for_read.clone();
+                let prompt_reads = prompt_reads_for_handler.clone();
                 let events = reads.clone();
-                tokio::spawn(async move {
-                    let path = match roots.resolve(&request.path) {
-                        Ok(path) => path,
-                        Err(error) => {
-                            respond_with_error(responder, error, &events, "read")?;
-                            return Ok::<(), acp::Error>(());
-                        }
+                tokio::task::spawn_blocking(move || {
+                    let content = prompt_reads
+                        .read(
+                            &request.session_id,
+                            &request.path,
+                            request.line,
+                            request.limit,
+                        )
+                        .and_then(|content| match content {
+                            Some(content) => Ok(content),
+                            None => {
+                                let path = roots.resolve(&request.path)?;
+                                read_text_file(&path, request.line, request.limit)
+                            }
+                        });
+                    let reply = match content {
+                        Ok(content) => responder.respond(ReadTextFileResponse::new(content)),
+                        Err(error) => respond_with_error(responder, error, &events, "read"),
                     };
-                    match read_text_file(&path, request.line, request.limit) {
-                        Ok(content) => responder.respond(ReadTextFileResponse::new(content))?,
-                        Err(error) => respond_with_error(responder, error, &events, "read")?,
+                    if let Err(error) = reply {
+                        tracing::debug!(%error, "could not reply to ACP file read");
                     }
-                    Ok(())
                 });
                 Ok(())
             },
@@ -657,6 +693,7 @@ where
                 Requester {
                     connection,
                     auth_methods: info.auth_methods.clone().into(),
+                    prompt_reads,
                 },
                 info,
             )
