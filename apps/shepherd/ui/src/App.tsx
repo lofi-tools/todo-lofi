@@ -164,6 +164,7 @@ export function App() {
   let sidebar: HTMLElement | undefined
   let diagnostics: HTMLDetailsElement | undefined
   const [searchJump, setSearchJump] = createSignal<bridge.TaskSearchHit>()
+  let searchInput: HTMLInputElement | undefined
   let searchOpener: HTMLElement | undefined
   let transcript: HTMLDivElement | undefined
   const currentAgent = () => workspace()?.task.agent ?? newTaskAgent()
@@ -588,6 +589,10 @@ export function App() {
   }
   const bindingsById = createMemo(() => new Map(commandRegistry()?.commands.map((binding) => [binding.id, binding])))
   const chordFor = (id: string) => bindingsById().get(id)?.chord ?? undefined
+  const searchShortcutLabel = () => {
+    const chord = chordFor('searchTasks')
+    return chord ? displayChord(chord, mac) : undefined
+  }
   const canSend = () => canCompose() && !pending() && (!!prompt().trim() || !!promptFiles().length)
   const canUseGit = () => {
     const task = workspace()?.task
@@ -980,17 +985,17 @@ export function App() {
 
   function openTaskSearch() {
     if (pending() || pickerOpen() || quitRequired()) return
-    searchOpener = document.activeElement instanceof HTMLElement ? document.activeElement : undefined
-    setSearchOpen(true)
+    searchInput?.focus({ preventScroll: true })
   }
 
-  function closeTaskSearch() {
-    setSearchOpen(false)
-    searchOpener?.focus({ preventScroll: true })
+  function closeTaskSearch(restoreFocus: boolean) {
+    const opener = searchOpener
+    searchInput?.blur()
+    if (restoreFocus) opener?.focus({ preventScroll: true })
   }
 
   function openSearchHit(hit: bridge.TaskSearchHit) {
-    closeTaskSearch()
+    closeTaskSearch(false)
     setSettingsOpen(false)
     setFreebuffProjectId(undefined)
     void run(async () => {
@@ -1571,7 +1576,15 @@ export function App() {
   return (
     <>
       <WorkspaceFrame taskId={selectedTaskId()} inspectorWidth={inspectorWidth()} onInspectorWidthChange={resizeInspector}
-        onSearch={openTaskSearch} searchDisabled={pending()}
+        search={<TaskSearch open={searchOpen()} disabled={pending() || !projects().length} shortcut={chordFor('searchTasks')}
+          shortcutLabel={searchShortcutLabel()}
+          inputRef={(input) => { searchInput = input }}
+          onFocus={(opener) => {
+            searchOpener = opener instanceof HTMLElement ? opener : undefined
+            setSearchOpen(true)
+          }}
+          onBlur={() => { setSearchOpen(false); searchOpener = undefined }}
+          onEscape={() => closeTaskSearch(true)} onSelect={openSearchHit} />}
         sidebarHidden={sidebarHidden()} onCommands={() => openPalette('commands')} paletteShortcut={chordFor('commandPalette')}
         footer={workspaceFooter}
         onBackToChat={freebuffProjectId() && !settingsOpen() ? () => setFreebuffProjectId(undefined) : undefined}>
@@ -1998,9 +2011,6 @@ export function App() {
         {(selection) => <ReviewArchiveDialog count={selection().length}
           onCancel={dismissArchiveConfirmation} onConfirm={archiveSelectedTasks} />}
       </Show>
-      <Show when={searchOpen()}>
-        <TaskSearch onClose={closeTaskSearch} onSelect={openSearchHit} />
-      </Show>
 
       <Show when={pickerOpen()}>
         <ProjectPicker
@@ -2036,8 +2046,7 @@ function WorkspaceFrame(props: {
   taskId: string | null
   inspectorWidth: number | null
   onInspectorWidthChange: (width: number) => Promise<void>
-  onSearch: () => void
-  searchDisabled: boolean
+  search: JSX.Element
   sidebarHidden: boolean
   onCommands: () => void
   paletteShortcut?: string
@@ -2113,7 +2122,7 @@ function WorkspaceFrame(props: {
             </button>
           </div>
         </div>
-        <div class="shell__header-conversation" data-tauri-drag-region={dragRegion} />
+        <div class="shell__header-conversation" data-tauri-drag-region={dragRegion}>{props.search}</div>
       </header>
       <nav class="shell__rail" aria-label="Quick navigation">
         <button class="shell__icon-button" type="button" aria-label="Workspace" title="Workspace" disabled>
@@ -2125,13 +2134,6 @@ function WorkspaceFrame(props: {
         <button class="shell__icon-button" type="button" aria-label="Conversations" title="Conversations" disabled>
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" aria-hidden="true">
             <path d="M6 4h12a3 3 0 0 1 3 3v8a3 3 0 0 1-3 3h-8l-5 3v-3a3 3 0 0 1-2-3V7a3 3 0 0 1 3-3Z" />
-          </svg>
-        </button>
-        <button class="shell__icon-button" type="button" aria-label="Search tasks" title="Search tasks"
-          disabled={props.searchDisabled} onClick={props.onSearch}>
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true">
-            <circle cx="10.5" cy="10.5" r="5.5" />
-            <path d="m15 15 4 4" />
           </svg>
         </button>
         <button class="shell__icon-button" type="button" aria-label="Command palette" title="Command palette"

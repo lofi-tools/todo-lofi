@@ -21,10 +21,13 @@ current layout and give future changes a point of comparison.
   rail currently has placeholder icons for Workspace and Conversations.
   Previous and Next are placeholders for navigation history. While the
   Freebuff terminal is visible, Previous is available as **Back to chat**.
-- **Search tasks** in the icon rail opens a compact dialog with ranked matches
-  from every project. Show the task, project and a highlighted snippet in each
-  result. Up and Down move between results, Enter opens one, and Escape
-  closes the dialog and restores focus. Opening a result scrolls to and focuses
+- **Search tasks** is a compact text field in the conversation section of the
+  window header. It shows the current shortcut when collapsed and expands
+  with an ease transition on focus. The default is Command-Shift-F on macOS
+  or Ctrl-Alt-F on Linux. Ranked matches from every project appear underneath
+  the field with the task, project and a highlighted snippet. Up and Down
+  move between results, Enter opens one, and Escape collapses the field and
+  restores focus. Opening a result scrolls to and focuses
   its transcript row and highlights the matching text. Archived tasks can open
   directly from search while their sidebar visibility preference stays intact.
 - **Command palette** in the icon rail opens an app-styled search dialog.

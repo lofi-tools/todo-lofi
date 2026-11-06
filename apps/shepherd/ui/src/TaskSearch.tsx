@@ -1,22 +1,25 @@
-import { For, Show, createEffect, createSignal, createUniqueId, on, onCleanup, onMount } from 'solid-js'
+import { For, Show, createEffect, createSignal, createUniqueId, on, onCleanup } from 'solid-js'
 
 import { cancelTaskSearch, reserveTaskSearch, searchTasks, type TaskSearchHit } from './bridge'
 
-export function TaskSearch(props: { onClose: () => void; onSelect: (hit: TaskSearchHit) => void }) {
+export function TaskSearch(props: {
+  open: boolean
+  disabled: boolean
+  shortcut?: string
+  shortcutLabel?: string
+  inputRef: (input: HTMLInputElement) => void
+  onFocus: (opener: EventTarget | null) => void
+  onBlur: () => void
+  onEscape: () => void
+  onSelect: (hit: TaskSearchHit) => void
+}) {
   const [query, setQuery] = createSignal('')
   const [hits, setHits] = createSignal<TaskSearchHit[]>([])
   const [searching, setSearching] = createSignal(false)
   const [error, setError] = createSignal('')
   const [active, setActive] = createSignal(0)
   const listId = createUniqueId()
-  let dialog: HTMLDialogElement | undefined
-  let input: HTMLInputElement | undefined
-
-  onMount(() => {
-    dialog?.showModal()
-    input?.focus()
-    onCleanup(() => dialog?.close())
-  })
+  const popupOpen = () => props.open && !!query().trim()
 
   createEffect(on(query, (value) => {
     setHits([])
@@ -56,7 +59,13 @@ export function TaskSearch(props: { onClose: () => void; onSelect: (hit: TaskSea
   const rowId = (index: number) => `${listId}-${index}`
 
   function navigate(event: KeyboardEvent) {
-    if (event.isComposing || event.keyCode === 229 || !hits().length) return
+    if (event.isComposing || event.keyCode === 229) return
+    if (event.key === 'Escape') {
+      event.preventDefault()
+      props.onEscape()
+      return
+    }
+    if (!hits().length) return
     if (event.key === 'Enter') {
       const hit = hits()[active()]
       if (hit) {
@@ -73,38 +82,39 @@ export function TaskSearch(props: { onClose: () => void; onSelect: (hit: TaskSea
   }
 
   return (
-    <dialog class="picker picker-dialog task-search" aria-label="Search tasks" ref={dialog} onCancel={(event) => {
-      event.preventDefault()
-      props.onClose()
-    }}>
-      <header class="picker__header">
-        <h3>Search tasks</h3>
-        <button type="button" aria-label="Close task search" onClick={props.onClose}>Close</button>
-      </header>
-      <input class="picker__filter" ref={input} role="combobox" aria-label="Search across tasks"
-        aria-controls={listId} aria-expanded={hits().length > 0}
-        aria-activedescendant={hits().length ? rowId(active()) : undefined} aria-autocomplete="list"
-        placeholder="Search messages, tasks, and projects" value={query()}
+    <div class="task-search">
+      <input class="task-search__input" ref={props.inputRef} role="combobox" aria-label="Search across tasks"
+        aria-keyshortcuts={props.shortcut} aria-controls={popupOpen() ? listId : undefined} aria-expanded={popupOpen()}
+        aria-activedescendant={popupOpen() && hits().length ? rowId(active()) : undefined} aria-autocomplete="list"
+        title={props.shortcutLabel ? `Search tasks (${props.shortcutLabel})` : 'Search tasks'}
+        placeholder={props.open ? 'Search messages, tasks, and projects' : props.shortcutLabel ?? 'Search'}
+        value={query()} disabled={props.disabled}
+        onFocus={(event) => props.onFocus(event.relatedTarget)}
+        onBlur={() => { setQuery(''); props.onBlur() }}
         onInput={(event) => { if (!event.isComposing) setQuery(event.currentTarget.value) }}
         onCompositionEnd={(event) => setQuery(event.currentTarget.value)} onKeyDown={navigate} />
-      <Show when={error()}>
-        {(message) => <p class="picker__root" role="alert">{message()}</p>}
+      <Show when={popupOpen()}>
+        <div class="task-search__results">
+          <Show when={error()}>
+            {(message) => <p class="picker__root" role="alert">{message()}</p>}
+          </Show>
+          <Show when={searching() || (!error() && !hits().length)}>
+            <p class="picker__root" role="status">{searching() ? 'Searching tasks…' : 'No tasks match.'}</p>
+          </Show>
+          <ul class="picker__list" id={listId} role="listbox" aria-label="Task search results" aria-busy={searching()}>
+            <For each={hits()}>
+              {(hit, index) => <li role="presentation">
+                <button type="button" id={rowId(index())} class="picker__row task-search__hit" tabindex={-1}
+                  classList={{ 'picker__row--active': active() === index() }} role="option" aria-selected={active() === index()}
+                  onMouseDown={(event) => event.preventDefault()} onClick={() => props.onSelect(hit)}>
+                  <span><strong>{hit.taskTitle}</strong> <span class="task-search__project">{hit.projectName}</span></span>
+                  <span>{hit.snippet.before}<Show when={hit.snippet.matched}><mark class="search-mark">{hit.snippet.matched}</mark></Show>{hit.snippet.after}</span>
+                </button>
+              </li>}
+            </For>
+          </ul>
+        </div>
       </Show>
-      <Show when={searching() || (!!query().trim() && !error() && !hits().length)}>
-        <p class="picker__root" role="status">{searching() ? 'Searching tasks…' : 'No tasks match.'}</p>
-      </Show>
-      <ul class="picker__list" id={listId} role="listbox" aria-label="Task search results" aria-busy={searching()}>
-        <For each={hits()}>
-          {(hit, index) => <li role="presentation">
-            <button type="button" id={rowId(index())} class="picker__row task-search__hit" tabindex={-1}
-              classList={{ 'picker__row--active': active() === index() }} role="option" aria-selected={active() === index()}
-              onClick={() => props.onSelect(hit)}>
-              <span><strong>{hit.taskTitle}</strong> <span class="task-search__project">{hit.projectName}</span></span>
-              <span>{hit.snippet.before}<Show when={hit.snippet.matched}><mark class="search-mark">{hit.snippet.matched}</mark></Show>{hit.snippet.after}</span>
-            </button>
-          </li>}
-        </For>
-      </ul>
-    </dialog>
+    </div>
   )
 }

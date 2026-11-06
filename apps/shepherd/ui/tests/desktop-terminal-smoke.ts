@@ -1097,6 +1097,18 @@ async function smoke() {
       throw new Error('The project header overlaps the macOS window controls')
     }
   }
+  const search = await waitFor('header search with a native shortcut', () =>
+    document.querySelector<HTMLInputElement>('.shell__header input[aria-keyshortcuts]:enabled'))
+  const searchOpener = await enabledButton('Add project')
+  searchOpener.focus()
+  const searchOnMac = navigator.platform.startsWith('Mac')
+  searchOpener.dispatchEvent(new KeyboardEvent('keydown', {
+    key: 'F', metaKey: searchOnMac, shiftKey: searchOnMac, ctrlKey: !searchOnMac, altKey: !searchOnMac,
+    bubbles: true, cancelable: true,
+  }))
+  await waitFor('focused header search', () => document.activeElement === search && search.placeholder.startsWith('Search messages'))
+  press(search, 'Escape')
+  await waitFor('focus returns after closing header search', () => document.activeElement === searchOpener)
   const start = await waitFor('shared terminal action', () => {
     const entry = button('New shared terminal')
     return entry && !entry.disabled && entry
@@ -1175,7 +1187,7 @@ async function smoke() {
   await requestQuitWithLiveTask(3)
   return { ok: true, quitWarning: true, taskSwitch: true, projectSwitch: true, roundTrip: true,
     splitReattach: true, commandPalette: true, savedKeybinding: true, savedProjectSettings: true, themedTerminal: true,
-    terminalAccessibility: true,
+    terminalAccessibility: true, headerSearch: true,
     fishKeyBindings: __SHEPHERD_SMOKE_FISH__, bracketedPaste: true, ...windowResults }
 }
 

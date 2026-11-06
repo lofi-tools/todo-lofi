@@ -212,6 +212,11 @@ textarea {
 
 .shell__header-conversation {
   grid-column: conversation;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 0;
+  padding-inline: 8px;
 }
 
 .shell__header-inspector {
@@ -487,6 +492,55 @@ textarea {
   border-radius: 4px;
   color: var(--text-muted);
   font: inherit;
+}
+
+.task-search {
+  position: relative;
+  z-index: 5;
+  inline-size: min(6rem, 100%);
+  transition: inline-size 180ms ease;
+}
+
+.task-search:focus-within {
+  inline-size: min(28rem, 100%);
+}
+
+.task-search__input {
+  width: 100%;
+  height: 27px;
+  padding-inline: 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+  font-size: 12px;
+  text-align: center;
+}
+
+.task-search__input:focus {
+  text-align: start;
+}
+
+.task-search__input::placeholder {
+  color: var(--text-muted);
+}
+
+.task-search__input:disabled {
+  opacity: .6;
+}
+
+.task-search__results {
+  position: absolute;
+  inset: calc(100% + 6px) 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-block-size: min(50vh, 420px);
+  padding-block-start: 6px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  box-shadow: 0 6px 20px var(--menu-shadow);
 }
 
 .task-search__hit {

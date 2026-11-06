@@ -977,8 +977,9 @@ and the task header never overstates the tier.
   Turso. Opening a task restores its saved entry IDs and order. The native FTS
   index covers entry text, task titles and project names. Ranked queries return
   up to 50 hits with a highlighted snippet and stable entry ID. **Search tasks**
-  in the icon rail opens and focuses the matching transcript entry, including
-  archived entries across projects. Replacing or dismissing a search cancels
+  in the header expands on focus and shows its shortcut when collapsed.
+  Choosing a result focuses the matching transcript entry, including archived
+  entries across projects. Replacing or dismissing a search cancels
   the pending request. A local macOS run measured 26.9 ms p95 for 50 Turso queries
   over 50,000 entries, excluding the typing debounce and desktop rendering.
 - [x] Attachments and images, `@file` mentions, model/mode pickers.

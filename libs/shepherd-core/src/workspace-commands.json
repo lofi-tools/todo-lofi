@@ -2,7 +2,7 @@
   {"id":"commandPalette","label":"Command palette","category":"Workspace","mac":"Meta+K","linux":"Control+Shift+K"},
   {"id":"switchProject","label":"Switch project","category":"Workspace","mac":"Meta+P","linux":"Control+Shift+P","requires":["projects"]},
   {"id":"switchTask","label":"Switch task","category":"Workspace","mac":"Meta+O","linux":"Control+Shift+O","requires":["tasks"]},
-  {"id":"searchTasks","label":"Search tasks","category":"Workspace","requires":["projects"]},
+  {"id":"searchTasks","label":"Search tasks","category":"Workspace","mac":"Shift+Meta+F","linux":"Control+Alt+F","requires":["projects"]},
   {"id":"addProject","label":"Add project","category":"Workspace","requires":["idle"]},
   {"id":"settings","label":"Open settings","category":"Workspace"},
   {"id":"toggleSidebar","label":"Toggle Projects sidebar","category":"Workspace","mac":"Meta+B","linux":"Control+Shift+B"},
