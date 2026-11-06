@@ -625,6 +625,9 @@ task-scoped, persistent and fast enough.
   release even when the queue fills and a rejected press leaves no capture.
   Leaving the terminal during a drag releases the button at its last position.
   The browser fixture verifies that the later pointer-up adds no second release.
+  Horizontal wheel motion is reported to mouse-aware terminal programs. The
+  browser fixture covers fractional motion, both axes and Shift bypass.
+  The Ubuntu Xvfb smoke verifies left, right and down reports in the live PTY.
   If a later chunk of a bracketed paste fails, the input queue attempts to
   end the paste before sending subsequent keys and reports the write error.
 

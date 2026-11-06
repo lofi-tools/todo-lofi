@@ -629,7 +629,8 @@ function TerminalCanvas(props: { terminalId: string; shown: boolean; focusReques
   let selectionAnchor: number | undefined
   let mouseCapture: { lastEvent: PointerEvent; cell: { column: number; row: number }; button: number } | undefined
   let mousePosition = ''
-  let wheelRemainder = 0
+  let verticalWheelRemainder = 0
+  let horizontalWheelRemainder = 0
   let reportedFocus: boolean | undefined
 
   createEffect(() => {
@@ -1195,13 +1196,23 @@ function TerminalCanvas(props: { terminalId: string; shown: boolean; focusReques
     })
 
     function wheel(event: WheelEvent) {
-      if (!event.deltaY || !frame) return
+      if (!frame) return
+      const reportsHorizontal = !event.shiftKey && !frame.displayOffset && (frame.modes & MOUSE_REPORTING) !== 0
+      if (!reportsHorizontal) horizontalWheelRemainder = 0
+      if (!event.deltaY && !(event.deltaX && reportsHorizontal)) return
       event.preventDefault()
-      const scale = event.deltaMode === WheelEvent.DOM_DELTA_PAGE ? frame.rows
-        : event.deltaMode === WheelEvent.DOM_DELTA_LINE ? 1 : 1 / LINE_HEIGHT
-      wheelRemainder += event.deltaY * scale
-      const steps = Math.trunc(wheelRemainder)
-      wheelRemainder -= steps
+      const pages = event.deltaMode === WheelEvent.DOM_DELTA_PAGE
+      const lines = event.deltaMode === WheelEvent.DOM_DELTA_LINE
+      if (reportsHorizontal && event.deltaX) {
+        horizontalWheelRemainder += event.deltaX * (pages ? frame.columns : lines ? 1 : 1 / cellWidth)
+        const steps = Math.trunc(horizontalWheelRemainder)
+        horizontalWheelRemainder -= steps
+        if (steps) reportMouse(event, steps < 0 ? 66 : 67, 'press', Math.min(120, Math.abs(steps)))
+      }
+      if (!event.deltaY) return
+      verticalWheelRemainder += event.deltaY * (pages ? frame.rows : lines ? 1 : 1 / LINE_HEIGHT)
+      const steps = Math.trunc(verticalWheelRemainder)
+      verticalWheelRemainder -= steps
       const count = Math.min(120, Math.abs(steps))
       if (!count) return
       if (reportMouse(event, steps < 0 ? 64 : 65, 'press', count) !== undefined) return

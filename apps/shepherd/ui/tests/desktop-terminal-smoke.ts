@@ -449,17 +449,19 @@ os.write(1, b'\r\nS4_' + b'PASTE_PASS\r\n')
 async function exerciseMouse(terminalId: string) {
   await runPtyProbe(terminalId, String.raw`
 os.write(1, b'\x1b[?1000h\x1b[?1006h\r\nS4_' + b'MOUSE_READY\r\n')
-expect(b'\x1b[<65;1;1M')
+expect(b'\x1b[<66;1;1M\x1b[<67;1;1M\x1b[<65;1;1M')
 os.write(1, b'\r\nS4_' + b'MOUSE_PASS\r\n')
 `, '1b5b3f313030306c1b5b3f313030366c')
   await waitFor('PTY SGR mouse mode', () => terminalOutput().includes('S4_MOUSE_READY'))
   const canvas = await waitFor('terminal mouse surface', () => document.querySelector('.terminal-view__canvas'))
   const { left, top } = canvas.getBoundingClientRect()
-  canvas.dispatchEvent(new WheelEvent('wheel', {
-    bubbles: true, cancelable: true, deltaMode: WheelEvent.DOM_DELTA_LINE, deltaY: 1,
-    clientX: left + 1, clientY: top + 1,
-  }))
-  await waitFor('SGR wheel report in the PTY', () => terminalOutput().includes('S4_MOUSE_PASS'))
+  for (const delta of [{ deltaX: -1 }, { deltaX: 1 }, { deltaY: 1 }]) {
+    canvas.dispatchEvent(new WheelEvent('wheel', {
+      ...delta, bubbles: true, cancelable: true, deltaMode: WheelEvent.DOM_DELTA_LINE,
+      clientX: left + 1, clientY: top + 1,
+    }))
+  }
+  await waitFor('SGR wheel reports in the PTY', () => terminalOutput().includes('S4_MOUSE_PASS'))
 }
 
 async function exerciseHyperlink(terminalId: string) {

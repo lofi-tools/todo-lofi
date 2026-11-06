@@ -801,6 +801,33 @@ test('pairs terminal mouse presses and releases when the input queue fills', asy
   await expect.poll(async () => (await writes()).slice(128)).toEqual(['b'])
 })
 
+test('reports horizontal terminal wheel movement alongside vertical steps', async ({ page }) => {
+  await page.goto('/?mouse-terminal')
+  await expect(page.getByLabel('Terminal output')).toHaveText('BB')
+  const canvas = page.locator('.terminal-view__canvas')
+  const writes = () => page.evaluate(() => window.__writes)
+  const wheel = (deltaX: number, deltaY = 0, shiftKey = false) => canvas.evaluate((element, options) => {
+    const { left, top } = element.getBoundingClientRect()
+    return element.dispatchEvent(new WheelEvent('wheel', {
+      ...options, deltaMode: WheelEvent.DOM_DELTA_LINE, clientX: left + 2, clientY: top + 2,
+      bubbles: true, cancelable: true,
+    }))
+  }, { deltaX, deltaY, shiftKey })
+
+  expect(await wheel(-0.5)).toBe(false)
+  expect(await writes()).toEqual([])
+  await wheel(-0.5)
+  await wheel(2, -1)
+  await expect.poll(writes).toEqual(['\x1b[<66;1;1M', '\x1b[<67;1;1M\x1b[<67;1;1M', '\x1b[<64;1;1M'])
+  expect(await wheel(1, 0, true)).toBe(true)
+  expect(await writes()).toHaveLength(3)
+
+  await page.goto('/')
+  await expect(page.getByLabel('Terminal output')).toHaveText('BB')
+  expect(await wheel(1)).toBe(true)
+  expect(await writes()).toEqual([])
+})
+
 test('releases a held terminal mouse button when focus leaves', async ({ page }) => {
   await page.goto('/?mouse-terminal')
   await expect(page.getByText('BB', { exact: true })).toBeAttached()
