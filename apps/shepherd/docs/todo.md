@@ -1052,11 +1052,15 @@ and the task header never overstates the tier.
 
 ### Proof
 
-- [ ] Playwright flows for files, preview, search, settings and the palette.
+- [x] Playwright flows for files, preview, search, settings and the palette.
+  The headless Chromium suite exercises the Files tree and live Git badges,
+  Preview loading and annotation, header search, persisted settings, and
+  palette commands. Run it with `direnv exec . pnpm --dir apps/shepherd/ui test:e2e`.
   The file mention fixture verifies keyboard selection, stale search
   cancellation, and project-root search before a draft has a worktree.
-  A hidden macOS WebKit smoke selects a file from the real search, keeps focus
-  in the composer, and sends the reference through the desktop bridge.
+  The background desktop smoke selects a project file before the draft has a
+  worktree, keeps focus in the composer, and sends the reference through the
+  desktop bridge. Run it with `direnv exec . ./scripts/smoke-shepherd-terminal.sh`.
   Chromium verifies a Codex model and effort choice reaches the first turn.
   The Codex wire fixture checks the catalog and outgoing turn parameters.
   Chromium verifies the mode menu updates and disables choices during a
@@ -1068,8 +1072,9 @@ and the task header never overstates the tier.
   draft and keeping it through Send.
   The cross-task search fixture verifies cancellation, keyboard selection,
   and focus and highlighting on a cross-project archived result.
-  A hidden macOS WebKit smoke verifies the real Turso hit through the desktop
-  bridge and confirms focus and highlighting in the restored transcript.
+  After restarting with the same temporary database, the background desktop
+  smoke finds the saved prompt through header search and verifies focus and
+  highlighting in the restored transcript.
   Chromium checks fuzzy command search, disabled reasons, switcher navigation,
   a forwarded terminal chord, and scoped Send and Commit shortcuts.
   The shortcut editor fixture checks recording, conflict recovery, immediate

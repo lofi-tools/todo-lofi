@@ -156,6 +156,10 @@ trap 'rm -rf -- "$fixture"' EXIT
 fixture=$(cd "$fixture" && pwd -P)
 mkdir "$fixture/project"
 git -C "$fixture/project" -c init.templateDir= init --quiet -b main
+if [[ ${phases[0]} == prepare ]]; then
+  printf '%s\n' 'Shepherd workspace search fixture' > "$fixture/project/workspace-guide.md"
+  git -C "$fixture/project" add -- workspace-guide.md
+fi
 if [[ ${SHEPHERD_DEV_CODEX_SMOKE:-} == worktree-edit || ${SHEPHERD_DEV_CODEX_SMOKE:-} == review-merge ]]; then
   printf '%s\n' 'first line' > "$fixture/project/note.txt"
   git -C "$fixture/project" add -- note.txt

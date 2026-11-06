@@ -9,6 +9,8 @@ declare const __SHEPHERD_SMOKE_PHASE__: string
 declare const __SHEPHERD_SMOKE_BACKGROUND__: boolean
 
 const INTERRUPTED_TASK = 'Other terminal scope'
+const WORKTREE_PROMPT = 'Prepare the disposable terminal worktree'
+const WORKSPACE_FILE = 'workspace-guide.md'
 const NETWORK_PROMPT = "Run this shell command and report only the status code: curl -s -o /dev/null -w '%{http_code}' https://example.com"
 const CODEX_WAIT = 75_000
 const windowChecks = !__SHEPHERD_SMOKE_BACKGROUND__
@@ -727,7 +729,21 @@ async function prepareTask(project: bridge.ProjectSnapshot) {
     throw new Error('Creating a draft should leave its branch and worktree uncreated')
   }
 
-  await sendPrompt('Prepare the disposable terminal worktree')
+  const composer = await waitFor('active draft composer', () =>
+    document.querySelector<HTMLTextAreaElement>('textarea[aria-label="Prompt"]:enabled'))
+  composer.focus()
+  composer.value = `${WORKTREE_PROMPT} @workspace-guide`
+  composer.setSelectionRange(composer.value.length, composer.value.length)
+  composer.dispatchEvent(new InputEvent('input', { bubbles: true }))
+  await waitFor('project file found before the draft has a worktree', () =>
+    document.querySelector('[aria-label="Mention a workspace file"] [aria-selected="true"]')?.textContent?.trim() === WORKSPACE_FILE)
+  press(composer, 'Enter')
+  const mentionedPrompt = `${WORKTREE_PROMPT} @file("${WORKSPACE_FILE}")`
+  await waitFor('file mention inserted without shifting focus', () =>
+    document.activeElement === composer && composer.value.trim() === mentionedPrompt)
+  press(composer, 'Enter')
+  await waitFor('file mention sent through the native bridge', () =>
+    document.querySelector('.chat__transcript')?.textContent?.includes(mentionedPrompt))
   await waitFor('scripted text and tool row', () => chatState() === 'waiting' &&
     document.querySelector('.entry__agent')?.textContent?.includes('local fixture') &&
     document.querySelector('.entry__tool-title')?.textContent === 'Inspect the scripted workspace')
@@ -1193,7 +1209,7 @@ async function smoke() {
   await requestQuitWithLiveTask(3)
   return { ok: true, quitWarning: true, taskSwitch: true, projectSwitch: true, roundTrip: true,
     splitReattach: true, commandPalette: true, savedKeybinding: true, savedProjectSettings: true, themedTerminal: true,
-    terminalAccessibility: true, headerSearch: true,
+    terminalAccessibility: true, headerSearch: true, fileMention: true,
     fishKeyBindings: __SHEPHERD_SMOKE_FISH__, bracketedPaste: true, ...windowResults }
 }
 
@@ -1260,7 +1276,23 @@ async function restore() {
   resume.click()
   await waitFor('resumed session in the native transcript', () => chatState() === 'ready' &&
     document.querySelector('.entry__notice')?.textContent?.includes('resumed the previous agent session'))
-  return { ok: true, restoredLayout: true, restartedTerminal: true, restartedTaskTerminal: true, resumedInterruptedTask: true }
+
+  const search = await waitFor('header search after restart', () =>
+    document.querySelector<HTMLInputElement>('.shell__header input[role="combobox"]:enabled'))
+  search.focus()
+  search.value = 'disposable'
+  search.dispatchEvent(new InputEvent('input', { bubbles: true }))
+  await waitFor('persisted Turso search hit', () =>
+    Array.from(document.querySelectorAll('[aria-label="Task search results"] [role="option"]')).some((option) =>
+      option.getAttribute('aria-selected') === 'true' && option.querySelector('mark')?.textContent === search.value))
+  press(search, 'Enter')
+  await waitFor('restored search hit focused in another task', () => {
+    const entry = document.querySelector('.entry--search-hit')
+    return entry && document.activeElement === entry && entry.querySelector('mark')?.textContent === 'disposable'
+      && entry.textContent?.includes(WORKTREE_PROMPT)
+  })
+  return { ok: true, restoredLayout: true, restartedTerminal: true, restartedTaskTerminal: true,
+    resumedInterruptedTask: true, restoredTaskSearch: true }
 }
 
 async function exerciseAppearance(terminalId: string) {
