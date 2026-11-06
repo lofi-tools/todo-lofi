@@ -17,7 +17,7 @@ use agent_harness::codex::CodexTier;
 use shepherd_core::harness::HarnessFactory;
 use tauri::Manager;
 
-fn harness_factory(data_directory: &std::path::Path) -> (Box<dyn HarnessFactory>, Option<PathBuf>) {
+fn codex_factory(data_directory: &std::path::Path) -> (Box<dyn HarnessFactory>, Option<PathBuf>) {
     let probe_directory = std::env::current_dir().unwrap_or_else(|_| data_directory.to_path_buf());
     let detection =
         tauri::async_runtime::block_on(agent_harness::codex::detect(None, &probe_directory));
@@ -94,15 +94,33 @@ pub fn run() -> Result<(), tauri::Error> {
                 Some(path) => path.into(),
                 None => app.path().app_data_dir()?,
             };
-            let (harness_factory, codex_program) = match dev_factory {
-                Some(factory) => (factory, None),
-                None => harness_factory(&data_directory),
+            let (harness_factory, codex_program, opencode_configured): (
+                Box<dyn HarnessFactory>,
+                _,
+                _,
+            ) = match dev_factory {
+                Some(factory) => (factory, None, false),
+                None => {
+                    let (codex, codex_program) = codex_factory(&data_directory);
+                    let settings = app.path().app_config_dir()?.join("settings.json");
+                    let opencode = agent_harness::opencode::configured_executable(&settings);
+                    if let Err(error) = &opencode {
+                        tracing::warn!(%error, "could not load OpenCode configuration");
+                    }
+                    let configured = matches!(&opencode, Ok(Some(_)));
+                    (
+                        Box::new(codex_harness::DesktopHarnessFactory { codex, opencode }),
+                        codex_program,
+                        configured,
+                    )
+                }
             };
             let mut state = tauri::async_runtime::block_on(bridge::ShellState::load(
                 &data_directory,
                 harness_factory,
             ))?;
             state.codex_program = codex_program;
+            state.opencode_configured = opencode_configured;
             state.start_event_pump();
             app.manage(state);
             Ok(())
@@ -110,6 +128,8 @@ pub fn run() -> Result<(), tauri::Error> {
         .invoke_handler(tauri::generate_handler![
             bridge::commands::add_project,
             bridge::commands::create_draft,
+            bridge::commands::set_draft_agent,
+            bridge::commands::opencode_configured,
             bridge::commands::discard_draft,
             bridge::commands::send_prompt,
             bridge::commands::resolve_approval,

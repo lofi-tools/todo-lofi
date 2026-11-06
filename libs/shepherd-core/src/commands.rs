@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::projects::ProjectId;
 use crate::snapshots::{ProjectList, TaskList, TaskWorkspace};
-use crate::tasks::TaskId;
+use crate::tasks::{Agent, TaskId};
 
 #[derive(Clone, Debug)]
 pub enum Command {
@@ -17,6 +17,11 @@ pub enum Command {
     CreateDraft {
         project_id: ProjectId,
         title: String,
+        agent: Agent,
+    },
+    SetDraftAgent {
+        task_id: TaskId,
+        agent: Agent,
     },
     DiscardDraft {
         task_id: TaskId,

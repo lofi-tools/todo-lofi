@@ -15,7 +15,7 @@ use tokio::sync::{Mutex, RwLock};
 use crate::projects::{Project, ProjectId};
 use crate::session::SessionRecord;
 use crate::snapshots::WorkspaceLayout;
-use crate::tasks::{AgentTier, Task, TaskId, TaskState};
+use crate::tasks::{Agent, AgentTier, Task, TaskId, TaskState};
 use crate::terminal::{TerminalId, TerminalLayout, TerminalRecord, TerminalScope};
 
 #[derive(Debug, thiserror::Error)]
@@ -80,6 +80,10 @@ const MIGRATIONS: &[Migration] = &[
     Migration {
         name: "0004_branch_tip.sql",
         sql: include_str!("../toasty/migrations/0004_branch_tip.sql"),
+    },
+    Migration {
+        name: "0005_task_agent.sql",
+        sql: include_str!("../toasty/migrations/0005_task_agent.sql"),
     },
 ];
 
@@ -165,7 +169,7 @@ impl Store for TursoStore {
         let rows = toasty::sql::query(
             "SELECT id, project_id, title, state, tier, proposed_worktree_path, \
                     proposed_branch, worktree_path, branch, base_branch, error, \
-                    created_at, updated_at, branch_tip_sha \
+                    created_at, updated_at, branch_tip_sha, agent \
              FROM tasks ORDER BY created_at, id",
         )
         .column_types([
@@ -183,6 +187,7 @@ impl Store for TursoStore {
             Type::I64,
             Type::I64,
             Type::String,
+            Type::String,
         ])
         .exec(&mut *db)
         .await?;
@@ -199,10 +204,10 @@ impl Store for TursoStore {
             "INSERT INTO tasks (\
                 id, project_id, title, state, tier, proposed_worktree_path, \
                 proposed_branch, worktree_path, branch, base_branch, error, \
-                created_at, updated_at, branch_tip_sha\
+                created_at, updated_at, branch_tip_sha, agent\
              ) VALUES (\
                 ?1, ?2, ?3, ?4, ?5, ?6, ?7, \
-                NULLIF(?8, ''), NULLIF(?9, ''), NULLIF(?10, ''), NULLIF(?11, ''), ?12, ?13, NULLIF(?14, '')\
+                NULLIF(?8, ''), NULLIF(?9, ''), NULLIF(?10, ''), NULLIF(?11, ''), ?12, ?13, NULLIF(?14, ''), ?15\
              ) ON CONFLICT (id) DO UPDATE SET \
                 project_id = excluded.project_id, \
                 title = excluded.title, \
@@ -216,7 +221,8 @@ impl Store for TursoStore {
                 error = excluded.error, \
                 created_at = excluded.created_at, \
                 updated_at = excluded.updated_at, \
-                branch_tip_sha = excluded.branch_tip_sha",
+                branch_tip_sha = excluded.branch_tip_sha, \
+                agent = excluded.agent",
         )
         .bind(task.id.as_str())
         .bind(task.project_id.as_str())
@@ -232,6 +238,7 @@ impl Store for TursoStore {
         .bind(task.created_at as i64)
         .bind(task.updated_at as i64)
         .bind(task.branch_tip_sha.as_deref().unwrap_or_default())
+        .bind(task.agent.as_str())
         .exec(&mut *db)
         .await?;
         Ok(())
@@ -555,11 +562,15 @@ fn parse_task(value: Value) -> Result<Task, StoreError> {
     let tier_name = required_string(record.get(4))?;
     let tier = AgentTier::parse(&tier_name)
         .ok_or_else(|| StoreError::InvalidRow(format!("unknown agent tier: {tier_name}")))?;
+    let agent_name = required_string(record.get(14))?;
+    let agent = Agent::parse(&agent_name)
+        .ok_or_else(|| StoreError::InvalidRow(format!("unknown task agent: {agent_name}")))?;
     Ok(Task {
         id: TaskId::new(required_string(record.first())?),
         project_id: ProjectId::new(required_string(record.get(1))?),
         title: required_string(record.get(2))?,
         state,
+        agent,
         tier,
         proposed_worktree_path: PathBuf::from(required_string(record.get(5))?),
         proposed_branch: required_string(record.get(6))?,
@@ -822,11 +833,12 @@ mod tests {
         let database = TestDatabase::new()?;
         let uri = database.uri();
         let mut project = Project::new(database.path().to_path_buf());
-        let task = Task::draft(
+        let mut task = Task::draft(
             project.id.clone(),
             "Persist across restart",
             database.path(),
         );
+        task.agent = Agent::OpenCode;
         project.last_task_id = Some(task.id.clone());
 
         {
@@ -852,6 +864,7 @@ mod tests {
         assert_eq!(tasks[0].id, task.id);
         assert_eq!(tasks[0].project_id, task.project_id);
         assert_eq!(tasks[0].state, TaskState::Draft);
+        assert_eq!(tasks[0].agent, Agent::OpenCode);
         assert_eq!(tasks[0].tier, AgentTier::Native);
         assert_eq!(tasks[0].proposed_branch, task.proposed_branch);
         assert!(tasks[0].worktree_path.is_none());
@@ -932,6 +945,12 @@ mod tests {
         for statement in split_sql(first.sql) {
             toasty::sql::statement(statement).exec(&mut db).await?;
         }
+        toasty::sql::statement("INSERT INTO projects (id, path, name, created_at) VALUES ('project', '/legacy', 'Legacy', 1)")
+            .exec(&mut db)
+            .await?;
+        toasty::sql::statement("INSERT INTO tasks (id, project_id, title, state, tier, proposed_worktree_path, proposed_branch, created_at, updated_at) VALUES ('task', 'project', 'Legacy task', 'draft', 'native', '/legacy/worktree', 'shepherd/legacy', 1, 1)")
+            .exec(&mut db)
+            .await?;
         toasty::sql::statement("INSERT INTO _migrations_history (name, checksum) VALUES (?1, ?2)")
             .bind(first.name)
             .bind(&expected)
@@ -954,6 +973,9 @@ mod tests {
             .column_types([Type::String])
             .exec(&mut db)
             .await?;
+        let store = TursoStore { db: Mutex::new(db) };
+        let tasks = store.load_tasks().await?;
+        assert_eq!(tasks.first().map(|task| task.agent), Some(Agent::Codex));
         Ok(())
     }
 

@@ -11,12 +11,25 @@ use agent_harness::{
     HarnessEvent, PromptInput, SessionId, SpawnSpec, Transcript,
 };
 
-use crate::CoreError;
+use crate::{Agent, CoreError};
 
 /// Creates one adapter instance for a task. The shell or test supplies the
 /// implementation; the core never chooses a concrete CLI here.
 pub trait HarnessFactory: Send + Sync {
     fn create(&self) -> Result<Box<dyn AgentHarness>, CoreError>;
+
+    fn launch(
+        &self,
+        agent: Agent,
+        cwd: PathBuf,
+    ) -> Result<(Box<dyn AgentHarness>, SpawnSpec), CoreError> {
+        match agent {
+            Agent::Codex => Ok((self.create()?, self.spawn_spec(cwd))),
+            Agent::OpenCode => Err(CoreError::HarnessMissing {
+                report: "OpenCode executable is unavailable".into(),
+            }),
+        }
+    }
 
     /// The command to launch for a task running in `cwd`. The core stays
     /// CLI-agnostic, so a factory that wraps a specific executable supplies

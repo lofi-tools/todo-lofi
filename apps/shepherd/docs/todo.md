@@ -867,7 +867,9 @@ If Pi’s RPC probe is blocked, proceed with ACP while resolving it.
   cancellation using the installed executable with model execution disabled.
   Mapping fixtures cover streamed text and reasoning, tool rows and permission
   replies. The native harness implements prompt, cancel and permission replies.
-  Desktop agent routing and a running-turn smoke are still open.
+  The desktop routes each task by its persisted agent and enables OpenCode in
+  the existing pickers when an executable is configured. A running-turn
+  harness smoke and ACP fallback are still open.
 - [ ] Pi byte-oriented LF reader, ID correlation, `agent_settled`, extension UI
   bridge and approval bridge.
 - [ ] ACP adapter using `libs/acp-client`; no duplicate protocol client.

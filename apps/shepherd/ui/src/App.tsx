@@ -22,10 +22,10 @@ type TerminalBell = Extract<CoreEvent, { type: 'terminalBell' }>['data']
 
 const LIVE_STATES: bridge.TaskState[] = ['starting', 'queued', 'working', 'waiting']
 const SEND_ACCENT_KEY = 'shepherd.sendAccent'
-const DEFAULT_AGENT = { id: 'codex', name: 'Codex' }
+const STRUCTURED_AGENTS: Record<bridge.Agent, string> = { codex: 'Codex', opencode: 'OpenCode' }
 const AGENT_OPTIONS: PickerOption[] = [
-  DEFAULT_AGENT,
-  { id: 'opencode', name: 'OpenCode (coming soon)', disabled: true },
+  { id: 'codex', name: STRUCTURED_AGENTS.codex },
+  { id: 'opencode', name: STRUCTURED_AGENTS.opencode },
   { id: 'pi', name: 'Pi (coming soon)', disabled: true },
   { id: 'claude', name: 'Claude Code (coming soon)', disabled: true },
   { id: 'freebuff', name: 'Freebuff (terminal)' },
@@ -86,6 +86,8 @@ export function App() {
   const [homeDirectory, setHomeDirectory] = createSignal<string>()
   const [projectsLoaded, setProjectsLoaded] = createSignal(false)
   const [codexAvailable, setCodexAvailable] = createSignal(false)
+  const [opencodeConfigured, setOpencodeConfigured] = createSignal(false)
+  const [newTaskAgent, setNewTaskAgent] = createSignal<bridge.Agent>('codex')
   const [selectedProjectId, setSelectedProjectId] = createSignal<string | null>(null)
   const [freebuffProjectId, setFreebuffProjectId] = createSignal<string>()
   const selectedProject = () => projects().find((project) => project.id === selectedProjectId())
@@ -107,6 +109,8 @@ export function App() {
   const [loadedTasksFor, setLoadedTasksFor] = createSignal<string>()
   const [selectedTaskId, setSelectedTaskId] = createSignal<string | null>(null)
   const [workspace, setWorkspace] = createSignal<bridge.TaskWorkspace | null>(null)
+  const currentAgent = () => workspace()?.task.agent ?? newTaskAgent()
+  const currentAgentName = () => STRUCTURED_AGENTS[currentAgent()]
   const composerModel = () => {
     const activeModel = workspace()?.diagnostics?.model
     if (activeModel) return activeModel
@@ -196,14 +200,37 @@ export function App() {
 
   const agentOptions = () => {
     const project = selectedProject()
-    if (project && !project.missing && !pending()) return AGENT_OPTIONS
-    return AGENT_OPTIONS.map((agent) => agent.id === 'freebuff' ? { ...agent, disabled: true } : agent)
+    const task = workspace()?.task
+    const canOpen = project && !project.missing && !pending()
+    const canChange = canOpen && (!task || task.state === 'draft')
+    return AGENT_OPTIONS.map((agent) => {
+      if (agent.id === 'freebuff') return { ...agent, disabled: !canOpen }
+      if (agent.id === 'codex') return { ...agent, disabled: !canChange }
+      if (agent.id === 'opencode') return {
+        ...agent,
+        disabled: !canChange || !opencodeConfigured(),
+        detail: opencodeConfigured() ? undefined : 'Set the executable in settings.json',
+      }
+      return agent
+    })
   }
 
   function chooseAgent(agent: string) {
     const project = selectedProject()
-    if (agent === 'freebuff' && project && !project.missing && !pending()) {
+    if (!project || project.missing || pending()) return
+    if (agent === 'freebuff') {
       setFreebuffProjectId(project.id)
+      return
+    }
+    if (agent !== 'codex' && (agent !== 'opencode' || !opencodeConfigured())) return
+    const task = workspace()?.task
+    if (!task) {
+      setNewTaskAgent(agent)
+    } else if (task.state === 'draft' && task.agent !== agent) {
+      void run(async () => {
+        const updated = await bridge.setDraftAgent(task.id, agent)
+        if (selectedTaskId() === task.id) setWorkspace(updated)
+      })
     }
   }
 
@@ -340,6 +367,7 @@ export function App() {
 
   onMount(() => {
     void homeDir().then(setHomeDirectory).catch((error) => console.warn('Could not resolve the home directory', error))
+    void bridge.opencodeConfigured().then(setOpencodeConfigured).catch((error) => console.warn('Could not read OpenCode availability', error))
     void run(async () => {
       await bridge.subscribeToEvents(handleEvent)
       const list = await bridge.projectList()
@@ -432,7 +460,7 @@ export function App() {
     setFreebuffProjectId(undefined)
     setSettingsOpen(false)
     void run(async () => {
-      const draft = await bridge.createDraft(projectId, 'New task')
+      const draft = await bridge.createDraft(projectId, 'New task', newTaskAgent())
       setPrompt('')
       if (selectedProjectId() !== projectId) {
         setTerminalListEvent(undefined)
@@ -449,7 +477,7 @@ export function App() {
   function firstDraft(projectId: string) {
     const inFlight = firstDrafts.get(projectId)
     if (inFlight) return inFlight
-    const request = bridge.createDraft(projectId, 'New task').then((draft) => {
+    const request = bridge.createDraft(projectId, 'New task', newTaskAgent()).then((draft) => {
       if (selectedProjectId() === projectId && !selectedTaskId()) {
         setSelectedTaskId(draft.task.id)
         setWorkspace(draft)
@@ -928,9 +956,9 @@ export function App() {
                 <Show when={canStartTask() && selectedProject()}>
                   {(project) => (
                     <div class="chat__welcome">
-                      <h1 aria-label={`What should ${DEFAULT_AGENT.name} build in ${project().name}?`}>
+                      <h1 aria-label={`What should ${currentAgentName()} build in ${project().name}?`}>
                         What should{' '}
-                        <HeadlinePicker label="Agent" value={DEFAULT_AGENT.id} text={DEFAULT_AGENT.name} options={agentOptions()} onChange={chooseAgent} />
+                        <HeadlinePicker label="Agent" value={currentAgent()} text={currentAgentName()} options={agentOptions()} onChange={chooseAgent} />
                         {' '}build in{' '}
                         <HeadlinePicker
                           label="Project"
@@ -987,9 +1015,11 @@ export function App() {
               }}
             />
             <div class="composer__actions">
-              <ComposerPickers agents={agentOptions()} onAgentChange={chooseAgent} />
+              <ComposerPickers agent={currentAgent()} agentName={currentAgentName()} agents={agentOptions()} onAgentChange={chooseAgent} />
               <div class="composer__send-actions">
-                <ComposerModelPicker model={composerModel()} />
+                <Show when={currentAgent() === 'codex'}>
+                  <ComposerModelPicker model={composerModel()} />
+                </Show>
                 <button
                   type="button"
                   class="composer__send composer__send--icon"
@@ -1246,7 +1276,7 @@ const MODEL_OVERRIDES: PickerOption[] = [
   { id: 'effort', name: 'Choose effort (coming soon)', disabled: true },
 ]
 
-function ComposerPickers(props: { agents: PickerOption[]; onAgentChange: (value: string) => void }) {
+function ComposerPickers(props: { agent: bridge.Agent; agentName: string; agents: PickerOption[]; onAgentChange: (value: string) => void }) {
   return (
     <>
       <PickerMenu label="Attachments and commands" options={ATTACHMENT_OPTIONS} triggerClass="composer__picker" above>
@@ -1262,8 +1292,8 @@ function ComposerPickers(props: { agents: PickerOption[]; onAgentChange: (value:
           <PickerCaret />
         </PickerMenu>
       </div>
-      <PickerMenu label="Agent" text={DEFAULT_AGENT.name} value={DEFAULT_AGENT.id} options={props.agents} onChange={props.onAgentChange} triggerClass="composer__picker" above>
-        <span class="composer__picker-label">{DEFAULT_AGENT.name}</span>
+      <PickerMenu label="Agent" text={props.agentName} value={props.agent} options={props.agents} onChange={props.onAgentChange} triggerClass="composer__picker" above>
+        <span class="composer__picker-label">{props.agentName}</span>
         <PickerCaret />
       </PickerMenu>
     </>

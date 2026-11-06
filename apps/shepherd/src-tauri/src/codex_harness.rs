@@ -1,4 +1,4 @@
-//! The live agent the desktop app runs.
+//! The live agent adapters the desktop app runs.
 //!
 //! Detection happens once at startup. `shepherd-core` stays CLI-agnostic, so the
 //! core asks this factory both for the adapter and for the command it should
@@ -7,11 +7,58 @@
 use std::path::{Path, PathBuf};
 
 use agent_harness::codex::{CodexHarness, CodexInstall};
-use agent_harness::{AgentHarness, SpawnSpec};
-use shepherd_core::CoreError;
+use agent_harness::opencode::OpenCodeHarness;
+use agent_harness::{AgentHarness, HarnessError, SpawnSpec};
 use shepherd_core::harness::HarnessFactory;
+use shepherd_core::{Agent, CoreError};
 
 const DEFAULT_CODEX_MODEL: &str = "gpt-6.1-terra";
+
+pub struct DesktopHarnessFactory {
+    pub codex: Box<dyn HarnessFactory>,
+    pub opencode: Result<Option<PathBuf>, HarnessError>,
+}
+
+impl HarnessFactory for DesktopHarnessFactory {
+    fn create(&self) -> Result<Box<dyn AgentHarness>, CoreError> {
+        self.codex.create()
+    }
+
+    fn spawn_spec(&self, cwd: PathBuf) -> SpawnSpec {
+        self.codex.spawn_spec(cwd)
+    }
+
+    fn launch(
+        &self,
+        agent: Agent,
+        cwd: PathBuf,
+    ) -> Result<(Box<dyn AgentHarness>, SpawnSpec), CoreError> {
+        if agent == Agent::Codex {
+            return self.codex.launch(agent, cwd);
+        }
+        let program = match &self.opencode {
+            Ok(Some(path)) => path.to_str().ok_or_else(|| CoreError::HarnessMissing {
+                report: "OpenCode executable path must be UTF-8".into(),
+            })?,
+            Ok(None) => {
+                return Err(CoreError::HarnessMissing {
+                    report: "Set agents.opencode.executable in Shepherd's settings.json".into(),
+                });
+            }
+            Err(error) => {
+                return Err(CoreError::HarnessMissing {
+                    report: error.to_string(),
+                });
+            }
+        };
+        let spec = SpawnSpec {
+            program: program.to_owned(),
+            cwd,
+            ..SpawnSpec::default()
+        };
+        Ok((Box::new(OpenCodeHarness::default()), spec))
+    }
+}
 
 pub(crate) fn codex_spawn_spec(program: &Path, cwd: PathBuf) -> SpawnSpec {
     SpawnSpec {
@@ -72,5 +119,25 @@ impl HarnessFactory for MissingCodexFactory {
         Err(CoreError::HarnessMissing {
             report: self.report.clone(),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn launches_the_configured_opencode_independently_of_codex() -> Result<(), CoreError> {
+        let executable = PathBuf::from("/etc/profiles/per-user/me/bin/opencode");
+        let factory = DesktopHarnessFactory {
+            codex: Box::new(MissingCodexFactory::new("fixture".into())),
+            opencode: Ok(Some(executable.clone())),
+        };
+        let cwd = PathBuf::from("/tmp/worktree");
+        let (_harness, spec) = factory.launch(Agent::OpenCode, cwd.clone())?;
+        assert_eq!(Path::new(&spec.program), executable);
+        assert_eq!(spec.cwd, cwd);
+        assert!(factory.launch(Agent::Codex, cwd).is_err());
+        Ok(())
     }
 }

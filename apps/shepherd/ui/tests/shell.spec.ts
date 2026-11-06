@@ -64,6 +64,7 @@ test.beforeEach(async ({ context }) => {
         projectId: 'project-1',
         title: 'Ship it',
         state: options.has('interrupted-task') ? 'interrupted' : 'ready',
+        agent: 'codex',
         tier: 'native',
         branch: 'shepherd/ship-it',
         worktreePath: '/tmp/demo/.git/shepherd/worktrees/ship-it',
@@ -262,6 +263,8 @@ test.beforeEach(async ({ context }) => {
             return { projects: [...projects] }
           case 'codex_project_model':
             return 'gpt-6.1-terra'
+          case 'opencode_configured':
+            return options.has('configured-opencode')
           case 'project_remote':
             if (options.has('hugging-face-remote')) {
               return { label: 'datasets/example/data', forge: 'huggingface' }
@@ -336,6 +339,7 @@ test.beforeEach(async ({ context }) => {
               projectId: args.projectId,
               title: args.title,
               state: 'draft',
+              agent: args.agent,
               tier: 'native',
               branch: null,
               worktreePath: null,
@@ -344,6 +348,12 @@ test.beforeEach(async ({ context }) => {
             })
             transcripts[id] = []
             return workspace(id)
+          }
+          case 'set_draft_agent': {
+            const task = tasks.find((candidate) => candidate.id === args.taskId)
+            if (!task || task.state !== 'draft') throw new Error('Task is not a draft')
+            task.agent = args.agent
+            return workspace(task.id)
           }
           case 'send_prompt': {
             const task = tasks.find((candidate) => candidate.id === args.taskId)
@@ -626,7 +636,7 @@ test('composes the first chat in an empty project and hides its sole task row', 
   const agentMenu = welcome.getByRole('menu', { name: 'Agent' })
   const codex = agentMenu.getByRole('menuitemradio', { name: 'Codex', checked: true })
   await expect(codex).toBeFocused()
-  await expect(agentMenu.getByRole('menuitemradio', { name: 'OpenCode (coming soon)' })).toBeDisabled()
+  await expect(agentMenu.getByRole('menuitemradio', { name: 'OpenCode' })).toBeDisabled()
   await codex.press('Escape')
   await expect(agentMenu).toBeHidden()
   await expect(agent).toBeFocused()
@@ -660,6 +670,30 @@ test('composes the first chat in an empty project and hides its sole task row', 
   await expect(page.locator('.task-list')).toHaveCount(0)
   await directory.click()
   await expect(page.locator('.transcript')).toContainText('First prompt')
+})
+
+test('uses the configured OpenCode agent and keeps the choice on the draft', async ({ page }) => {
+  await page.goto('/?two-projects&configured-opencode')
+  await page.getByRole('button', { name: 'notes', exact: true }).click()
+  const welcome = page.getByRole('heading', { name: 'What should Codex build in notes?' })
+  await welcome.getByRole('button', { name: 'Agent: Codex' }).click()
+  await welcome.getByRole('menuitemradio', { name: 'OpenCode' }).click()
+  await expect(page.getByRole('heading', { name: 'What should OpenCode build in notes?' })).toBeVisible()
+
+  await page.getByLabel('Prompt').fill('Review the code')
+  const composer = page.locator('.composer')
+  await expect(page.getByRole('button', { name: 'Discard draft' })).toBeVisible()
+  await expect(composer.getByRole('button', { name: 'Agent: OpenCode' })).toBeVisible()
+  await expect(composer.getByRole('button', { name: /Model \/ effort/ })).toHaveCount(0)
+
+  await composer.getByRole('button', { name: 'Agent: OpenCode' }).click()
+  await composer.getByRole('menuitemradio', { name: 'Codex' }).click()
+  await composer.getByRole('button', { name: 'Agent: Codex' }).click()
+  await composer.getByRole('menuitemradio', { name: 'OpenCode' }).click()
+  await composer.getByRole('button', { name: 'Send' }).click()
+  await expect(page.getByText('working on it')).toBeVisible()
+  await composer.getByRole('button', { name: 'Agent: OpenCode' }).click()
+  await expect(composer.getByRole('menuitemradio', { name: 'Codex' })).toBeDisabled()
 })
 
 test('encodes typed keys into terminal input', async ({ page }) => {

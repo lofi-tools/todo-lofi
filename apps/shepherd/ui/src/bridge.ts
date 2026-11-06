@@ -19,6 +19,7 @@ export type TaskState =
   | 'interrupted'
 
 export type AgentTier = 'native' | 'acp' | 'terminal-wrapper' | 'plain-pane'
+export type Agent = 'codex' | 'opencode'
 
 export type ShutdownState = 'running' | 'draining' | 'terminating' | 'closed'
 
@@ -70,6 +71,7 @@ export interface TaskSummary {
   projectId: string
   title: string
   state: TaskState
+  agent: Agent
   tier: AgentTier
   branch: string | null
   worktreePath: string | null
@@ -87,6 +89,7 @@ export interface TaskDetail {
   projectId: string
   title: string
   state: TaskState
+  agent: Agent
   tier: AgentTier
   proposedBranch: string
   proposedWorktreePath: string
@@ -250,8 +253,16 @@ export function addProject(path: string): Promise<ProjectList> {
   return invoke<ProjectList>('add_project', { path })
 }
 
-export function createDraft(projectId: string, title: string): Promise<TaskWorkspace> {
-  return invoke<TaskWorkspace>('create_draft', { projectId, title })
+export function createDraft(projectId: string, title: string, agent: Agent = 'codex'): Promise<TaskWorkspace> {
+  return invoke<TaskWorkspace>('create_draft', { projectId, title, agent })
+}
+
+export function setDraftAgent(taskId: string, agent: Agent): Promise<TaskWorkspace> {
+  return invoke<TaskWorkspace>('set_draft_agent', { taskId, agent })
+}
+
+export function opencodeConfigured(): Promise<boolean> {
+  return invoke<boolean>('opencode_configured')
 }
 
 export function discardDraft(taskId: string): Promise<void> {

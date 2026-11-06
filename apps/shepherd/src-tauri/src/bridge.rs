@@ -24,8 +24,8 @@ use shepherd_core::terminal::{
     TerminalSpec,
 };
 use shepherd_core::{
-    Command, CommandResult, Core, CoreError, Event, ProjectId, ProjectList, QuitSummary, TaskId,
-    TaskList, TaskWorkspace, WorkspaceLayout,
+    Agent, Command, CommandResult, Core, CoreError, Event, ProjectId, ProjectList, QuitSummary,
+    TaskId, TaskList, TaskWorkspace, WorkspaceLayout,
 };
 use tokio::sync::{Mutex, broadcast, mpsc, oneshot, watch};
 use tokio::time::Instant;
@@ -199,6 +199,7 @@ struct TerminalSubscription {
 pub struct ShellState {
     core: Arc<Mutex<Core>>,
     pub(crate) codex_program: Option<PathBuf>,
+    pub(crate) opencode_configured: bool,
     events: broadcast::Sender<Event>,
     terminal_subscriptions: Arc<Mutex<BTreeMap<String, TerminalSubscription>>>,
     terminal_lifecycle: Mutex<()>,
@@ -213,6 +214,7 @@ impl ShellState {
         Self {
             core: Arc::new(Mutex::new(core)),
             codex_program: None,
+            opencode_configured: false,
             events,
             terminal_subscriptions: Arc::new(Mutex::new(BTreeMap::new())),
             terminal_lifecycle: Mutex::new(()),
@@ -333,10 +335,24 @@ impl ShellState {
         &self,
         project_id: String,
         title: String,
+        agent: Agent,
     ) -> Result<TaskWorkspace, BridgeError> {
         self.workspace(Command::CreateDraft {
             project_id: ProjectId::new(project_id),
             title,
+            agent,
+        })
+        .await
+    }
+
+    pub async fn set_draft_agent(
+        &self,
+        task_id: String,
+        agent: Agent,
+    ) -> Result<TaskWorkspace, BridgeError> {
+        self.workspace(Command::SetDraftAgent {
+            task_id: TaskId::new(task_id),
+            agent,
         })
         .await
     }
@@ -1012,8 +1028,26 @@ pub mod commands {
         state: State<'_, ShellState>,
         project_id: String,
         title: String,
+        agent: Option<Agent>,
     ) -> Result<TaskWorkspace, BridgeError> {
-        state.inner().create_draft(project_id, title).await
+        state
+            .inner()
+            .create_draft(project_id, title, agent.unwrap_or_default())
+            .await
+    }
+
+    #[tauri::command]
+    pub async fn set_draft_agent(
+        state: State<'_, ShellState>,
+        task_id: String,
+        agent: Agent,
+    ) -> Result<TaskWorkspace, BridgeError> {
+        state.inner().set_draft_agent(task_id, agent).await
+    }
+
+    #[tauri::command]
+    pub fn opencode_configured(state: State<'_, ShellState>) -> bool {
+        state.opencode_configured
     }
 
     #[tauri::command]
@@ -1577,7 +1611,7 @@ mod tests {
         );
 
         let draft = state
-            .create_draft(project_id.clone(), "Bridge draft".to_string())
+            .create_draft(project_id.clone(), "Bridge draft".to_string(), Agent::Codex)
             .await?;
         assert_eq!(draft.task.state, TaskState::Draft);
         assert!(draft.task.worktree_path.is_none());
@@ -1652,6 +1686,7 @@ mod tests {
                 project_id: "project-1".to_string(),
                 title: "Bridge".to_string(),
                 state: TaskState::Waiting,
+                agent: Agent::OpenCode,
                 tier: shepherd_core::AgentTier::Native,
                 branch: Some("shepherd/bridge".to_string()),
                 worktree_path: None,
@@ -1667,6 +1702,7 @@ mod tests {
             serde_json::Value::Null
         );
         assert_eq!(value["data"]["tasks"][0]["state"], "waiting");
+        assert_eq!(value["data"]["tasks"][0]["agent"], "opencode");
         Ok(())
     }
 
@@ -1682,7 +1718,11 @@ mod tests {
             .add_project(repository.path().display().to_string())
             .await?;
         let draft = state
-            .create_draft(projects.projects[0].id.clone(), "Approval".to_string())
+            .create_draft(
+                projects.projects[0].id.clone(),
+                "Approval".to_string(),
+                Agent::Codex,
+            )
             .await?;
         let task_id = draft.task.id.clone();
         state.send_prompt(task_id.clone(), "go".to_string()).await?;
@@ -1762,7 +1802,7 @@ mod tests {
             .await?;
         let project = projects.projects.first().ok_or("project was not added")?;
         let task = state
-            .create_draft(project.id.clone(), "terminal scope".into())
+            .create_draft(project.id.clone(), "terminal scope".into(), Agent::Codex)
             .await?;
         let task_id = task.task.id;
         let workspace = state

@@ -1,0 +1,1 @@
+ALTER TABLE tasks ADD COLUMN agent TEXT NOT NULL DEFAULT 'codex';

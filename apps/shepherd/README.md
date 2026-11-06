@@ -89,6 +89,27 @@ Every core command has one `#[tauri::command]`, and the window receives core
 events over a single Tauri channel. `ui/src/bridge.ts` holds the typed client;
 the snapshots come from `shepherd-core`, never from a second frontend model.
 
+## Use an installed OpenCode
+
+In Shepherd's `settings.json`, set `agents.opencode.executable` under `app`
+to the absolute path of your existing OpenCode executable. On macOS the file
+is `~/Library/Application Support/dev.shepherd.shell/settings.json`. On Linux
+it is `dev.shepherd.shell/settings.json` under `$XDG_CONFIG_HOME` (by default
+`~/.config`). If the file already exists, add the key to its `app` object.
+
+```json
+{
+  "version": 1,
+  "app": {
+    "agents.opencode.executable": "/etc/profiles/per-user/me/bin/opencode"
+  }
+}
+```
+
+Restart Shepherd, then select **OpenCode** from the agent picker in an empty
+conversation or a draft. Shepherd launches the configured executable and uses
+OpenCode's native 2.x HTTP API. The task keeps its agent after the first prompt.
+
 ## Live Codex tests
 
 The ignored Codex tests use the ChatGPT login with `gpt-6.1-terra` at

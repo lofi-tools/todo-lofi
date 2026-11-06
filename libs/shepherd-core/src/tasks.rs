@@ -3,7 +3,7 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::projects::{ProjectId, now_millis};
@@ -24,6 +24,31 @@ impl TaskId {
 impl fmt::Display for TaskId {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(&self.0)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Agent {
+    #[default]
+    Codex,
+    OpenCode,
+}
+
+impl Agent {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "codex" => Some(Self::Codex),
+            "opencode" => Some(Self::OpenCode),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Codex => "codex",
+            Self::OpenCode => "opencode",
+        }
     }
 }
 
@@ -142,6 +167,7 @@ pub struct Task {
     pub project_id: ProjectId,
     pub title: String,
     pub state: TaskState,
+    pub agent: Agent,
     pub tier: AgentTier,
     pub proposed_worktree_path: PathBuf,
     pub proposed_branch: String,
@@ -167,6 +193,7 @@ impl Task {
             project_id,
             title: title.to_string(),
             state: TaskState::Draft,
+            agent: Agent::default(),
             tier: AgentTier::Native,
             proposed_worktree_path: git_dir.join("shepherd").join("worktrees").join(&slug),
             proposed_branch: format!("shepherd/{slug}"),
@@ -202,6 +229,7 @@ pub struct TaskSummary {
     pub project_id: String,
     pub title: String,
     pub state: TaskState,
+    pub agent: Agent,
     pub tier: AgentTier,
     pub branch: Option<String>,
     pub worktree_path: Option<String>,
@@ -216,6 +244,7 @@ impl From<&Task> for TaskSummary {
             project_id: task.project_id.as_str().to_string(),
             title: task.title.clone(),
             state: task.state,
+            agent: task.agent,
             tier: task.tier,
             branch: task.branch.clone(),
             worktree_path: task
@@ -236,6 +265,7 @@ pub struct TaskDetail {
     pub project_id: String,
     pub title: String,
     pub state: TaskState,
+    pub agent: Agent,
     pub tier: AgentTier,
     pub proposed_branch: String,
     pub proposed_worktree_path: String,
@@ -254,6 +284,7 @@ impl From<&Task> for TaskDetail {
             project_id: task.project_id.as_str().to_string(),
             title: task.title.clone(),
             state: task.state,
+            agent: task.agent,
             tier: task.tier,
             proposed_branch: task.proposed_branch.clone(),
             proposed_worktree_path: task.proposed_worktree_path.display().to_string(),

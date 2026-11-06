@@ -32,7 +32,7 @@ pub use input::{Focus, InputMode};
 pub use project_scan::{ProjectNode, ProjectScan};
 pub use projects::{Project, ProjectId, ProjectSnapshot};
 pub use snapshots::{ProjectList, TaskList, TaskWorkspace, WorkspaceLayout};
-pub use tasks::{AgentTier, Task, TaskDetail, TaskId, TaskState, TaskSummary};
+pub use tasks::{Agent, AgentTier, Task, TaskDetail, TaskId, TaskState, TaskSummary};
 
 use crate::git::{GitError, GitService, TurnBaseline};
 use crate::harness::{HarnessFactory, HarnessSession, UnavailableHarnessFactory};
@@ -532,8 +532,13 @@ impl Core {
 
         match command {
             Command::AddProject { path } => self.add_project(path).await,
-            Command::CreateDraft { project_id, title } => {
-                self.create_draft(&project_id, title).await
+            Command::CreateDraft {
+                project_id,
+                title,
+                agent,
+            } => self.create_draft(&project_id, title, agent).await,
+            Command::SetDraftAgent { task_id, agent } => {
+                self.set_draft_agent(&task_id, agent).await
             }
             Command::DiscardDraft { task_id } => self.discard_draft(&task_id).await,
             Command::SendPrompt { task_id, text } => self.send_prompt(&task_id, text).await,
@@ -836,6 +841,7 @@ impl Core {
         &mut self,
         project_id: &ProjectId,
         title: String,
+        agent: Agent,
     ) -> Result<CommandResult, CoreError> {
         let title = title.trim().to_string();
         if title.is_empty() {
@@ -866,7 +872,8 @@ impl Core {
                 project.path.join(".git")
             }
         };
-        let task = Task::draft(project_id.clone(), &title, &git_dir);
+        let mut task = Task::draft(project_id.clone(), &title, &git_dir);
+        task.agent = agent;
         let task_id = task.id.clone();
         let mut updated_project = project.clone();
         updated_project.last_task_id = Some(task_id.clone());
@@ -882,6 +889,23 @@ impl Core {
         self.emit(Event::TaskListChanged(self.task_list(project_id)?));
         self.emit(Event::ProjectListChanged(self.project_list()));
         Ok(CommandResult::TaskWorkspace(workspace))
+    }
+
+    async fn set_draft_agent(
+        &mut self,
+        task_id: &TaskId,
+        agent: Agent,
+    ) -> Result<CommandResult, CoreError> {
+        let mut task = self.task(task_id)?.clone();
+        if task.state != TaskState::Draft {
+            return Err(CoreError::NotADraft {
+                id: task_id.as_str().to_string(),
+            });
+        }
+        task.agent = agent;
+        self.store.save_task(&task).await?;
+        self.tasks.insert(task_id.clone(), task);
+        Ok(CommandResult::TaskWorkspace(self.publish_task(task_id)?))
     }
 
     async fn discard_draft(&mut self, task_id: &TaskId) -> Result<CommandResult, CoreError> {
@@ -1317,8 +1341,7 @@ impl Core {
             Some(worktree_path) => worktree_path,
             None => self.project_path(&task.project_id)?,
         };
-        let spec = self.harness_factory.spawn_spec(cwd);
-        let harness = self.harness_factory.create()?;
+        let (harness, spec) = self.harness_factory.launch(task.agent, cwd)?;
         let mut session = HarnessSession::new(harness);
         session.restore_transcript(carried);
         let capabilities = match session.start(spec).await {
@@ -1365,7 +1388,7 @@ impl Core {
 
         let record = SessionRecord::started(
             task_id.clone(),
-            task.tier.as_str(),
+            task.agent.as_str(),
             Some(session_id.as_str().to_string()),
         );
         self.store.save_session(&record).await?;
@@ -1783,7 +1806,7 @@ mod live_exit {
     use crate::harness::HarnessFactory;
     use crate::store::TursoStore;
     use crate::test_support::{TestDatabase, TestRepository};
-    use crate::{Command, CommandResult, Core, CoreError, ProjectId, TaskId, TaskState};
+    use crate::{Agent, Command, CommandResult, Core, CoreError, ProjectId, TaskId, TaskState};
 
     /// Starts the real Codex, then kills it with SIGKILL once the test creates
     /// the marker file, so a mid-turn death is reproducible on demand.
@@ -1833,6 +1856,7 @@ mod live_exit {
         let project = projects.projects.first().ok_or("the project is listed")?;
         let CommandResult::TaskWorkspace(draft) = core
             .execute(Command::CreateDraft {
+                agent: Agent::Codex,
                 project_id: ProjectId::new(project.id.clone()),
                 title: "Kill a live turn".to_string(),
             })
@@ -1908,7 +1932,7 @@ mod live_restart {
     use crate::harness::HarnessFactory;
     use crate::store::{Store as _, TursoStore};
     use crate::test_support::{TestDatabase, TestRepository};
-    use crate::{Command, CommandResult, Core, CoreError, ProjectId, TaskId, TaskState};
+    use crate::{Agent, Command, CommandResult, Core, CoreError, ProjectId, TaskId, TaskState};
 
     struct LiveCodexFactory {
         run: LiveCodexRun,
@@ -1956,6 +1980,7 @@ mod live_restart {
         let project = projects.projects.first().ok_or("the project is listed")?;
         let CommandResult::TaskWorkspace(draft) = core
             .execute(Command::CreateDraft {
+                agent: Agent::Codex,
                 project_id: ProjectId::new(project.id.clone()),
                 title: "Restart and resume".to_string(),
             })
@@ -2066,7 +2091,9 @@ mod streaming {
     use crate::harness::HarnessFactory;
     use crate::store::TursoStore;
     use crate::test_support::{TestDatabase, TestRepository};
-    use crate::{Command, CommandResult, Core, CoreError, Event, ProjectId, TaskId, TaskState};
+    use crate::{
+        Agent, Command, CommandResult, Core, CoreError, Event, ProjectId, TaskId, TaskState,
+    };
 
     struct LateHarnessFactory {
         receiver: Mutex<Option<mpsc::UnboundedReceiver<HarnessEvent>>>,
@@ -2149,6 +2176,7 @@ mod streaming {
         let project = projects.projects.first().ok_or("the project is listed")?;
         let CommandResult::TaskWorkspace(draft) = core
             .execute(Command::CreateDraft {
+                agent: Agent::Codex,
                 project_id: ProjectId::new(project.id.clone()),
                 title: "Stream a turn".to_string(),
             })
@@ -2356,6 +2384,7 @@ mod tests {
 
         let result = core
             .execute(Command::CreateDraft {
+                agent: Agent::Codex,
                 project_id: project_id.clone(),
                 title: "Fix the parser".to_string(),
             })
@@ -2399,6 +2428,7 @@ mod tests {
             .expect("project should be added");
         let result = core
             .execute(Command::CreateDraft {
+                agent: Agent::Codex,
                 project_id: project_id.clone(),
                 title: "Temporary".to_string(),
             })
@@ -2456,6 +2486,7 @@ mod tests {
             .expect("project should be added");
         let result = core
             .execute(Command::CreateDraft {
+                agent: Agent::Codex,
                 project_id,
                 title: "Live work".to_string(),
             })
@@ -2536,6 +2567,7 @@ mod tests {
         let draft = workspace_of(
             scenario
                 .execute(Command::CreateDraft {
+                    agent: Agent::Codex,
                     project_id,
                     title: "Survive a crash".to_string(),
                 })
@@ -2594,6 +2626,7 @@ mod tests {
         let draft = workspace_of(
             scenario
                 .execute(Command::CreateDraft {
+                    agent: Agent::Codex,
                     project_id: project_id.clone(),
                     title: "Fix the parser".to_string(),
                 })
@@ -2742,6 +2775,7 @@ mod tests {
         let project_id = add_project(&mut core, repository.path().to_path_buf()).await?;
         let draft = workspace_of(
             core.execute(Command::CreateDraft {
+                agent: Agent::Codex,
                 project_id,
                 title: "Deny me".to_string(),
             })
@@ -2791,6 +2825,7 @@ mod tests {
         let project_id = add_project(&mut core, repository.path().to_path_buf()).await?;
         let draft = workspace_of(
             core.execute(Command::CreateDraft {
+                agent: Agent::Codex,
                 project_id,
                 title: "Cancel me".to_string(),
             })
@@ -2860,6 +2895,7 @@ mod tests {
         let project_id = add_project(&mut core, repository.path().to_path_buf()).await?;
         let draft = workspace_of(
             core.execute(Command::CreateDraft {
+                agent: Agent::Codex,
                 project_id,
                 title: "Try an edit".into(),
             })
@@ -2897,6 +2933,7 @@ mod tests {
         let project_id = add_project(&mut core, repository.path().to_path_buf()).await?;
         let draft = workspace_of(
             core.execute(Command::CreateDraft {
+                agent: Agent::Codex,
                 project_id,
                 title: "Iterate on an edit".into(),
             })
@@ -2940,6 +2977,7 @@ mod tests {
         let project_id = add_project(&mut core, repository.path().to_path_buf()).await?;
         let draft = workspace_of(
             core.execute(Command::CreateDraft {
+                agent: Agent::Codex,
                 project_id,
                 title: "Review notes".into(),
             })
@@ -3007,6 +3045,7 @@ mod tests {
         let project_id = add_project(&mut core, repository.path().to_path_buf()).await?;
         let draft = workspace_of(
             core.execute(Command::CreateDraft {
+                agent: Agent::Codex,
                 project_id,
                 title: "Change a file".to_string(),
             })
@@ -3063,6 +3102,7 @@ mod tests {
         let project_id = add_project(&mut core, repository.path().to_path_buf()).await?;
         let draft = workspace_of(
             core.execute(Command::CreateDraft {
+                agent: Agent::Codex,
                 project_id,
                 title: "Improve the readme".into(),
             })
@@ -3185,6 +3225,7 @@ mod tests {
         let draft = workspace_of(
             scenario
                 .execute(Command::CreateDraft {
+                    agent: Agent::Codex,
                     project_id: project_id.clone(),
                     title: "Ship the skeleton".to_string(),
                 })
@@ -3299,6 +3340,7 @@ mod tests {
         let project_id = add_project(&mut core, directory.path().to_path_buf()).await?;
         let first = workspace_of(
             core.execute(Command::CreateDraft {
+                agent: Agent::Codex,
                 project_id: project_id.clone(),
                 title: "Wide inspector".into(),
             })
@@ -3306,6 +3348,7 @@ mod tests {
         );
         let second = workspace_of(
             core.execute(Command::CreateDraft {
+                agent: Agent::Codex,
                 project_id,
                 title: "Default inspector".into(),
             })
@@ -3548,6 +3591,7 @@ mod tests {
         let draft = workspace_of(
             scenario
                 .execute(Command::CreateDraft {
+                    agent: Agent::Codex,
                     project_id,
                     title: "Resume me".to_string(),
                 })
@@ -3622,6 +3666,7 @@ mod tests {
         let draft = workspace_of(
             scenario
                 .execute(Command::CreateDraft {
+                    agent: Agent::Codex,
                     project_id,
                     title: "Resume me".to_string(),
                 })
@@ -3671,6 +3716,7 @@ mod tests {
         let draft = workspace_of(
             scenario
                 .execute(Command::CreateDraft {
+                    agent: Agent::Codex,
                     project_id,
                     title: "Install me".to_string(),
                 })
@@ -3716,6 +3762,7 @@ mod tests {
         let draft = workspace_of(
             scenario
                 .execute(Command::CreateDraft {
+                    agent: Agent::Codex,
                     project_id,
                     title: "Sign in".to_string(),
                 })
@@ -3769,6 +3816,7 @@ mod tests {
         let draft = workspace_of(
             scenario
                 .execute(Command::CreateDraft {
+                    agent: Agent::Codex,
                     project_id,
                     title: "Crash me".to_string(),
                 })
@@ -3810,6 +3858,7 @@ mod tests {
         let project_id = add_project(&mut core, repository.path().to_path_buf()).await?;
         let draft = workspace_of(
             core.execute(Command::CreateDraft {
+                agent: Agent::Codex,
                 project_id,
                 title: "Diagnose".to_string(),
             })

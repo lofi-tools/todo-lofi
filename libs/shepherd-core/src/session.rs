@@ -13,7 +13,7 @@ use crate::tasks::TaskId;
 pub struct SessionRecord {
     pub id: String,
     pub task_id: TaskId,
-    /// The adapter family this session belongs to, as the task's tier names it.
+    /// The adapter family this session belongs to.
     pub adapter: String,
     /// The handle the adapter returned from `open_session`, when it had one.
     pub adapter_session_id: Option<String>,
