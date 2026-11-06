@@ -11,11 +11,14 @@
 //! with `tokio::spawn` and responds from there.
 
 use std::collections::VecDeque;
+use std::future::Future;
 use std::path::PathBuf;
-use std::time::Duration;
 use std::process::Stdio;
 use std::sync::{Arc, Mutex, RwLock};
+use std::time::Duration;
 
+use acp::schema::ProtocolVersion;
+use acp::{Agent, Client, ConnectTo, ConnectionTo, Lines};
 use agent_client_protocol as acp;
 use agent_client_protocol::schema::v1::{
     AuthMethod, AuthenticateRequest, CancelNotification, ClientCapabilities, CloseSessionRequest,
@@ -28,8 +31,6 @@ use agent_client_protocol::schema::v1::{
     StopReason, TerminalOutputRequest, WaitForTerminalExitRequest, WriteTextFileRequest,
     WriteTextFileResponse,
 };
-use acp::schema::ProtocolVersion;
-use acp::{Agent, Client, ConnectTo, ConnectionTo, Lines};
 use futures::channel::oneshot;
 use futures::io::BufReader;
 use futures::{AsyncBufReadExt as _, AsyncWriteExt as _};
@@ -40,7 +41,7 @@ use crate::permissions::{
     PermissionDecision, PermissionReply, ToolPermissions, Verdict, haystack, strongest_allow,
     strongest_reject, tool_key,
 };
-use crate::terminal::TerminalRegistry;
+use crate::terminal::{TerminalBackend, TerminalRegistry};
 use crate::{AcpError, AcpEvent, SessionSpec, schema};
 
 /// How many stderr lines are kept for the error state.
@@ -127,7 +128,11 @@ impl Requester {
     }
 
     /// Send a prompt and wait for the turn to end.
-    pub async fn prompt(&self, session_id: &SessionId, text: String) -> Result<StopReason, AcpError> {
+    pub async fn prompt(
+        &self,
+        session_id: &SessionId,
+        text: String,
+    ) -> Result<StopReason, AcpError> {
         let request = PromptRequest::new(
             session_id.clone(),
             vec![schema::ContentBlock::Text(schema::TextContent::new(text))],
@@ -184,7 +189,10 @@ impl Requester {
             .map_err(AcpError::from)
     }
 
-    pub async fn authenticate(&self, method_id: impl Into<schema::AuthMethodId>) -> Result<(), AcpError> {
+    pub async fn authenticate(
+        &self,
+        method_id: impl Into<schema::AuthMethodId>,
+    ) -> Result<(), AcpError> {
         self.connection
             .send_request(AuthenticateRequest::new(method_id))
             .block_task()
@@ -213,6 +221,7 @@ pub struct AcpConnection {
     tool_permissions: Arc<RwLock<ToolPermissions>>,
     /// Recent agent stderr, newest last.
     stderr: Arc<Mutex<VecDeque<String>>>,
+    terminals: TerminalRegistry,
     /// Dropping this ends the connection and terminates the process group.
     shutdown: Option<oneshot::Sender<()>>,
 }
@@ -245,6 +254,11 @@ impl AcpConnection {
     /// End the connection now instead of waiting for the drop.
     pub fn close(mut self) {
         self.shutdown_now();
+    }
+
+    pub fn close_terminals(&self) -> impl Future<Output = ()> + Send + 'static {
+        let terminals = self.terminals.clone();
+        async move { terminals.shutdown().await }
     }
 
     fn shutdown_now(&mut self) {
@@ -292,6 +306,19 @@ pub async fn connect_spawn(
     .await
 }
 
+pub async fn connect_spawn_with_terminals(
+    spawn: SpawnSpec,
+    options: ConnectOptions,
+    terminals: Arc<dyn TerminalBackend>,
+) -> Result<AcpConnection, AcpError> {
+    connect_over_with_terminals(
+        move |events, stderr| ProjectAgent::new(spawn).with_stderr_reporting(events, stderr),
+        options,
+        Some(terminals),
+    )
+    .await
+}
+
 /// Connect over any transport. Used by [`connect`] with a real process, and by
 /// tests with an in-process channel.
 pub(crate) async fn connect_over<T>(
@@ -300,6 +327,20 @@ pub(crate) async fn connect_over<T>(
         Arc<Mutex<VecDeque<String>>>,
     ) -> T,
     options: ConnectOptions,
+) -> Result<AcpConnection, AcpError>
+where
+    T: ConnectTo<Client> + 'static,
+{
+    connect_over_with_terminals(build_transport, options, None).await
+}
+
+pub(crate) async fn connect_over_with_terminals<T>(
+    build_transport: impl FnOnce(
+        tokio::sync::mpsc::UnboundedSender<AcpEvent>,
+        Arc<Mutex<VecDeque<String>>>,
+    ) -> T,
+    options: ConnectOptions,
+    terminals: Option<Arc<dyn TerminalBackend>>,
 ) -> Result<AcpConnection, AcpError>
 where
     T: ConnectTo<Client> + 'static,
@@ -319,9 +360,8 @@ where
     let reads = events_tx.clone();
     let writes = events_tx.clone();
     let terminal_create = events_tx.clone();
-    let registries = events_tx.clone();
     let auto_approvals = events_tx.clone();
-    let registry = TerminalRegistry::new(roots_for_handlers.clone(), registries);
+    let registry = TerminalRegistry::new(roots_for_handlers.clone(), &events_tx, terminals);
     // One clone per handler: the `async move` closures own their captures, so a
     // single shared variable cannot be moved into several of them.
     let roots_for_read = roots.clone();
@@ -334,11 +374,9 @@ where
 
     let capabilities = ClientCapabilities::new()
         .terminal(true)
-        .fs(
-            FileSystemCapabilities::new()
-                .read_text_file(true)
-                .write_text_file(true),
-        );
+        .fs(FileSystemCapabilities::new()
+            .read_text_file(true)
+            .write_text_file(true));
 
     let connection = Client
         .builder()
@@ -348,8 +386,7 @@ where
         .on_receive_notification(
             async move |notification: SessionNotification, _cx| {
                 drop(
-                    events_for_notifications
-                        .send(AcpEvent::SessionUpdate(Box::new(notification))),
+                    events_for_notifications.send(AcpEvent::SessionUpdate(Box::new(notification))),
                 );
                 Ok(())
             },
@@ -394,9 +431,7 @@ where
                         responder.respond(permission_response(PermissionDecision::Cancelled))?;
                         return Ok::<(), acp::Error>(());
                     }
-                    let decision = decision_rx
-                        .await
-                        .unwrap_or(PermissionDecision::Cancelled);
+                    let decision = decision_rx.await.unwrap_or(PermissionDecision::Cancelled);
                     responder.respond(permission_response(decision))?;
                     Ok(())
                 });
@@ -453,7 +488,7 @@ where
                 let registry = registry_for_create.clone();
                 let events = terminal_create.clone();
                 tokio::spawn(async move {
-                    match registry.create(request) {
+                    match registry.create(request).await {
                         Ok(response) => responder.respond(response)?,
                         Err(error) => {
                             let message = format!("terminal failed to start: {error}");
@@ -497,7 +532,10 @@ where
             async move |request: KillTerminalRequest, responder, _cx| {
                 let registry = registry_for_kill.clone();
                 tokio::spawn(async move {
-                    responder.respond(registry.kill(&request.terminal_id))?;
+                    match registry.kill(&request.terminal_id).await {
+                        Ok(response) => responder.respond(response)?,
+                        Err(error) => responder.respond_with_internal_error(error)?,
+                    }
                     Ok::<(), acp::Error>(())
                 });
                 Ok(())
@@ -508,7 +546,10 @@ where
             async move |request: ReleaseTerminalRequest, responder, _cx| {
                 let registry = registry_for_release.clone();
                 tokio::spawn(async move {
-                    responder.respond(registry.release(&request.terminal_id))?;
+                    match registry.release(&request.terminal_id).await {
+                        Ok(response) => responder.respond(response)?,
+                        Err(error) => responder.respond_with_internal_error(error)?,
+                    }
                     Ok::<(), acp::Error>(())
                 });
                 Ok(())
@@ -565,10 +606,12 @@ where
 
     // The connection is driven concurrently with whatever the UI is doing; the
     // shutdown channel above is what ends it.
+    let terminals = registry.clone();
     tokio::spawn(async move {
         if let Err(error) = connection.await {
             tracing::warn!("agent connection ended: {error}");
         }
+        registry.shutdown().await;
     });
 
     let (requester, info) = match ready_rx.await {
@@ -603,17 +646,16 @@ where
         events: events_rx,
         tool_permissions,
         stderr: stderr_buffer,
+        terminals,
         shutdown: Some(shutdown_tx),
     })
 }
 
 fn permission_response(decision: PermissionDecision) -> RequestPermissionResponse {
     match decision {
-        PermissionDecision::Selected(option_id) => {
-            RequestPermissionResponse::new(RequestPermissionOutcome::Selected(
-                SelectedPermissionOutcome::new(option_id),
-            ))
-        }
+        PermissionDecision::Selected(option_id) => RequestPermissionResponse::new(
+            RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(option_id)),
+        ),
         PermissionDecision::Cancelled => {
             RequestPermissionResponse::new(RequestPermissionOutcome::Cancelled)
         }
@@ -702,13 +744,12 @@ impl ProjectAgent {
 }
 
 impl ConnectTo<Client> for ProjectAgent {
-    async fn connect_to(
-        self,
-        client: impl ConnectTo<Agent>,
-    ) -> Result<(), acp::Error> {
+    async fn connect_to(self, client: impl ConnectTo<Agent>) -> Result<(), acp::Error> {
         let mut child = self.spawn_child().map_err(|error| {
-            acp::Error::internal_error()
-                .data(format!("failed to launch {}: {error}", self.spec.command_line()))
+            acp::Error::internal_error().data(format!(
+                "failed to launch {}: {error}",
+                self.spec.command_line()
+            ))
         })?;
 
         let stdin = child

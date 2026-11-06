@@ -441,6 +441,15 @@ pub struct SessionApproval {
     pub paths: Vec<PathBuf>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentTerminal {
+    pub id: String,
+    pub title: String,
+    pub live: bool,
+    pub exit_code: Option<u32>,
+}
+
 #[async_trait]
 pub trait ProjectApprovalPolicy: Send + Sync {
     async fn allows(&self, key: &str) -> Result<bool, String>;
@@ -473,6 +482,17 @@ pub enum HarnessEvent {
     CommandOutput {
         tool_call_id: ToolCallId,
         text: String,
+    },
+    AgentTerminalStarted {
+        id: String,
+        title: String,
+    },
+    AgentTerminalExited {
+        id: String,
+        exit_code: Option<u32>,
+    },
+    AgentTerminalRemoved {
+        id: String,
     },
     Plan {
         rows: Vec<PlanRow>,

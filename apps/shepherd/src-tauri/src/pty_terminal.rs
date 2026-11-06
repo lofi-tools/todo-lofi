@@ -262,7 +262,34 @@ impl Session {
 struct TerminalSessions {
     live: BTreeMap<String, Session>,
     #[cfg(unix)]
-    exited: BTreeMap<libc::pid_t, Vec<ProcessIdentity>>,
+    exited: BTreeMap<libc::pid_t, ExitedSession>,
+}
+
+#[cfg(unix)]
+struct ExitedSession {
+    terminal_id: String,
+    members: Vec<ProcessIdentity>,
+}
+
+#[cfg(unix)]
+impl ExitedSession {
+    fn process_groups(
+        &self,
+        session: libc::pid_t,
+        processes: &[libc::pid_t],
+    ) -> Vec<TerminalProcessGroup> {
+        let known_members: Vec<_> = self
+            .members
+            .iter()
+            .filter(|member| member.is_in_session(session))
+            .map(|member| member.pid)
+            .collect();
+        // A recycled session ID alone cannot establish ownership after exit.
+        if known_members.is_empty() {
+            return Vec::new();
+        }
+        TerminalProcessGroup::for_session(session, processes.iter().copied().chain(known_members))
+    }
 }
 
 impl TerminalSessions {
@@ -274,8 +301,11 @@ impl TerminalSessions {
             && let Some(session_id) = session.session_id
             && unsafe { libc::getsid(session_id) != session_id }
         {
-            self.exited.retain(|&session, members| {
-                members.iter().any(|member| member.is_in_session(session))
+            self.exited.retain(|&session, exited| {
+                exited
+                    .members
+                    .iter()
+                    .any(|member| member.is_in_session(session))
             });
             let members: Vec<_> = session
                 .process_groups(&terminal_processes())
@@ -285,7 +315,13 @@ impl TerminalSessions {
                 .filter(|member| unsafe { libc::getsid(member.pid) == session_id })
                 .collect();
             if !members.is_empty() {
-                self.exited.insert(session_id, members);
+                self.exited.insert(
+                    session_id,
+                    ExitedSession {
+                        terminal_id: id.into(),
+                        members,
+                    },
+                );
             }
         }
         drop(session);
@@ -341,20 +377,8 @@ impl PtyTerminals {
             all_groups.extend(groups);
         }
         #[cfg(unix)]
-        for (session, members) in sessions.exited {
-            let known_members: Vec<_> = members
-                .into_iter()
-                .filter(|member| member.is_in_session(session))
-                .map(|member| member.pid)
-                .collect();
-            // A recycled session ID alone cannot establish ownership after exit.
-            if known_members.is_empty() {
-                continue;
-            }
-            let groups = TerminalProcessGroup::for_session(
-                session,
-                processes.iter().copied().chain(known_members),
-            );
+        for (session, exited) in sessions.exited {
+            let groups = exited.process_groups(session, &processes);
             for group in &groups {
                 group.signal(libc::SIGHUP);
             }
@@ -528,11 +552,14 @@ impl TerminalService for PtyTerminals {
         let sessions = Arc::clone(&self.sessions);
         let id = terminal_id.as_str().to_string();
         std::thread::spawn(move || {
-            let exit_code = match child.wait() {
-                Ok(status) => Some(status.exit_code() as i32),
+            let (exit_code, signal) = match child.wait() {
+                Ok(status) => (
+                    Some(status.exit_code() as i32),
+                    status.signal().map(str::to_owned),
+                ),
                 Err(error) => {
                     tracing::debug!(%error, "waiting for the terminal child failed");
-                    None
+                    (None, None)
                 }
             };
             match sessions.lock() {
@@ -555,7 +582,7 @@ impl TerminalService for PtyTerminals {
                 }
             }
             if events
-                .blocking_send(TerminalEvent::Exited { exit_code })
+                .blocking_send(TerminalEvent::Exited { exit_code, signal })
                 .is_err()
             {
                 tracing::debug!("terminal event receiver closed");
@@ -604,23 +631,43 @@ impl TerminalService for PtyTerminals {
 
     fn close(&mut self, terminal_id: &TerminalId) -> Result<(), TerminalError> {
         let mut sessions = self.sessions()?;
-        // The waiter owns removal so a failed signal can be retried.
-        let Some(session) = sessions
-            .live
-            .get_mut(terminal_id.as_str())
-            .filter(|session| !session.closing)
-        else {
-            return Ok(());
-        };
+        let key = terminal_id.as_str();
         #[cfg(unix)]
-        let groups = session.process_groups(&terminal_processes());
-        session
-            .hangup(
-                #[cfg(unix)]
-                &groups,
-            )
-            .map_err(|error| TerminalError::Backend(format!("kill failed: {error}")))?;
-        session.closing = true;
+        let mut groups = Vec::new();
+        // The waiter owns removal so a failed signal can be retried.
+        if let Some(session) = sessions
+            .live
+            .get_mut(key)
+            .filter(|session| !session.closing)
+        {
+            #[cfg(unix)]
+            groups.extend(session.process_groups(&terminal_processes()));
+            session
+                .hangup(
+                    #[cfg(unix)]
+                    &groups,
+                )
+                .map_err(|error| TerminalError::Backend(format!("kill failed: {error}")))?;
+            session.closing = true;
+        }
+        #[cfg(unix)]
+        if sessions
+            .exited
+            .values()
+            .any(|session| session.terminal_id == key)
+        {
+            let processes = terminal_processes();
+            for (session, exited) in sessions
+                .exited
+                .extract_if(.., |_, exited| exited.terminal_id == key)
+            {
+                let orphan_groups = exited.process_groups(session, &processes);
+                for group in &orphan_groups {
+                    group.signal(libc::SIGHUP);
+                }
+                groups.extend(orphan_groups);
+            }
+        }
         drop(sessions);
         #[cfg(unix)]
         TerminalProcessGroup::finish_hangup(groups);
@@ -661,7 +708,9 @@ mod tests {
                 Some(TerminalEvent::Output(bytes)) => {
                     output.push_str(&String::from_utf8_lossy(&bytes));
                 }
-                Some(TerminalEvent::Exited { exit_code: code }) => exit_code = Some(code),
+                Some(TerminalEvent::Exited {
+                    exit_code: code, ..
+                }) => exit_code = Some(code),
                 None => break,
             }
         }
@@ -696,7 +745,7 @@ mod tests {
             while let Some(event) = receiver.recv().await {
                 match event {
                     TerminalEvent::Output(bytes) => output.extend(bytes),
-                    TerminalEvent::Exited { exit_code } => return (output, exit_code),
+                    TerminalEvent::Exited { exit_code, .. } => return (output, exit_code),
                 }
             }
             (output, None)
@@ -812,7 +861,7 @@ mod tests {
             engine.write(&terminal_id, b"leave\r".to_vec())?.await??;
             let exit_code = tokio::time::timeout(Duration::from_secs(3), async {
                 while let Some(event) = receiver.recv().await {
-                    if let TerminalEvent::Exited { exit_code } = event {
+                    if let TerminalEvent::Exited { exit_code, .. } = event {
                         return exit_code;
                     }
                 }

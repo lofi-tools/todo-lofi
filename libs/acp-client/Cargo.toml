@@ -10,6 +10,7 @@ path = "src/acp_client.rs"
 [dependencies]
 agent-client-protocol = "2.1.0"
 async-process = "2"
+async-trait.workspace = true
 futures = "0.3"
 tokio = { workspace = true }
 serde = { workspace = true, features = ["derive"] }

@@ -15,6 +15,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use agent_harness::Decision;
+use agent_harness::acp::{
+    TerminalBackend, TerminalExitStatus, TerminalLaunch, TerminalProcessEvent,
+};
+use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use shepherd_core::git::GitService;
 use shepherd_core::harness::HarnessFactory;
@@ -188,6 +192,217 @@ impl ScreenSlot {
     }
 }
 
+#[derive(Clone)]
+pub(crate) struct TerminalHost {
+    engine: Arc<Mutex<PtyTerminals>>,
+    screens: Arc<Mutex<BTreeMap<String, Arc<Mutex<ScreenSlot>>>>>,
+}
+
+impl Default for TerminalHost {
+    fn default() -> Self {
+        Self {
+            engine: Arc::new(Mutex::new(PtyTerminals::new())),
+            screens: Arc::new(Mutex::new(BTreeMap::new())),
+        }
+    }
+}
+
+struct PreparedTerminal {
+    id: TerminalId,
+    slot: Arc<Mutex<ScreenSlot>>,
+    output: mpsc::Receiver<TerminalEvent>,
+}
+
+struct RecordedTerminal {
+    record: TerminalRecord,
+    core: Arc<Mutex<Core>>,
+    events: broadcast::Sender<Event>,
+}
+
+impl TerminalHost {
+    async fn prepare(&self, spec: TerminalSpec) -> Result<PreparedTerminal, BridgeError> {
+        let (columns, rows) = (spec.columns, spec.rows);
+        let (events, output) = mpsc::channel(32);
+        let mut screens = self.screens.lock().await;
+        let id = self
+            .engine
+            .lock()
+            .await
+            .spawn(spec, events)
+            .map_err(|error| BridgeError::new("terminal", error.to_string()))?;
+        let screen = Screen::new(usize::from(columns), usize::from(rows));
+        let (frames, _) = watch::channel(Arc::new(screen.frame()));
+        let slot = Arc::new(Mutex::new(ScreenSlot {
+            revision: 0,
+            screen,
+            frames,
+        }));
+        screens.insert(id.as_str().to_string(), slot.clone());
+        Ok(PreparedTerminal { id, slot, output })
+    }
+
+    fn observe(
+        &self,
+        terminal: PreparedTerminal,
+        recorded: Option<RecordedTerminal>,
+        protocol: Option<mpsc::Sender<TerminalProcessEvent>>,
+    ) {
+        let engine = self.engine.clone();
+        let screens = self.screens.clone();
+        let PreparedTerminal {
+            id,
+            slot,
+            mut output,
+        } = terminal;
+        tauri::async_runtime::spawn(async move {
+            let mut pending = None;
+            let mut deadline = None;
+            let mut protocol = protocol;
+            loop {
+                let event = if let Some(event) = pending.take() {
+                    Ok(Some(event))
+                } else if let Some(deadline) = deadline {
+                    tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), output.recv())
+                        .await
+                } else {
+                    Ok(output.recv().await)
+                };
+                let mut batch = Vec::new();
+                match event {
+                    Ok(Some(TerminalEvent::Output(bytes))) => {
+                        batch.push(bytes);
+                        for _ in 0..31 {
+                            match output.try_recv() {
+                                Ok(TerminalEvent::Output(bytes)) => batch.push(bytes),
+                                Ok(event) => {
+                                    pending = Some(event);
+                                    break;
+                                }
+                                Err(_) => break,
+                            }
+                        }
+                    }
+                    Ok(None) => break,
+                    Err(_) => {}
+                    Ok(Some(TerminalEvent::Exited { exit_code, signal })) => {
+                        screens.lock().await.remove(id.as_str());
+                        if let Some(protocol) = &protocol
+                            && protocol
+                                .send(TerminalProcessEvent::Exited(
+                                    TerminalExitStatus::new()
+                                        .exit_code(
+                                            exit_code
+                                                .filter(|_| signal.is_none())
+                                                .and_then(|code| u32::try_from(code).ok()),
+                                        )
+                                        .signal(signal),
+                                ))
+                                .await
+                                .is_err()
+                        {
+                            tracing::debug!("ACP terminal output listener closed before exit");
+                        }
+                        if let Some(recorded) = &recorded {
+                            let mut core = recorded.core.lock().await;
+                            if let Err(error) = core.end_terminal(&id, exit_code).await {
+                                tracing::warn!(%error, "could not mark the terminal ended");
+                            }
+                            for event in core.drain_events() {
+                                if let Err(error) = recorded.events.send(event) {
+                                    tracing::debug!(%error, "no shell is subscribed to terminal events");
+                                }
+                            }
+                        }
+                        break;
+                    }
+                }
+                let (replies, bell) = {
+                    let mut slot = slot.lock().await;
+                    if batch.is_empty() {
+                        slot.screen.finish_sync();
+                    } else {
+                        for bytes in &batch {
+                            slot.screen.process(bytes);
+                        }
+                    }
+                    deadline = slot.screen.sync_deadline();
+                    slot.publish();
+                    (slot.screen.take_replies(), slot.screen.take_bell())
+                };
+                if let Some(sender) = &protocol {
+                    for bytes in batch {
+                        if sender
+                            .send(TerminalProcessEvent::Output(bytes))
+                            .await
+                            .is_err()
+                        {
+                            protocol = None;
+                            break;
+                        }
+                    }
+                }
+                if bell
+                    && let Some(recorded) = &recorded
+                    && let Err(error) = recorded.events.send(Event::TerminalBell {
+                        project_id: recorded.record.project_id.clone(),
+                        task_id: recorded
+                            .record
+                            .task_id
+                            .as_ref()
+                            .map(|id| id.as_str().to_owned()),
+                        terminal_id: id.as_str().to_owned(),
+                    })
+                {
+                    tracing::debug!(%error, "no shell is subscribed to terminal bells");
+                }
+                if !replies.is_empty()
+                    && let Err(error) = engine.lock().await.write_reply(&id, replies)
+                {
+                    tracing::debug!(%error, "could not send terminal replies");
+                }
+            }
+        });
+    }
+
+    async fn stop_terminal_process(&self, terminal_id: TerminalId) -> Result<(), BridgeError> {
+        let engine = Arc::clone(&self.engine);
+        tokio::task::spawn_blocking(move || engine.blocking_lock().close(&terminal_id))
+            .await
+            .map_err(|error| BridgeError::new("terminal", error.to_string()))?
+            .map_err(|error| BridgeError::new("terminal", error.to_string()))
+    }
+}
+
+#[async_trait]
+impl TerminalBackend for TerminalHost {
+    async fn spawn(
+        &self,
+        launch: TerminalLaunch,
+        events: mpsc::Sender<TerminalProcessEvent>,
+    ) -> Result<(), String> {
+        let terminal = self
+            .prepare(TerminalSpec {
+                id: TerminalId::new(launch.id),
+                columns: 80,
+                rows: 24,
+                cwd: launch.cwd,
+                command: launch.command,
+                args: launch.args,
+                environment: launch.environment,
+            })
+            .await
+            .map_err(|error| error.to_string())?;
+        self.observe(terminal, None, Some(events));
+        Ok(())
+    }
+
+    async fn stop(&self, id: &str) -> Result<(), String> {
+        self.stop_terminal_process(TerminalId::new(id))
+            .await
+            .map_err(|error| error.to_string())
+    }
+}
+
 /// The state Tauri manages for the window: one core, one event broadcaster, the
 /// PTY engine, one parsed screen per live terminal, and the cached project scan
 /// shared with the startup scan task.
@@ -204,13 +419,17 @@ pub struct ShellState {
     events: broadcast::Sender<Event>,
     terminal_subscriptions: Arc<Mutex<BTreeMap<String, TerminalSubscription>>>,
     terminal_lifecycle: Mutex<()>,
-    engine: Arc<Mutex<PtyTerminals>>,
-    screens: Arc<Mutex<BTreeMap<String, Arc<Mutex<ScreenSlot>>>>>,
+    terminals: TerminalHost,
     scan: Arc<Mutex<Option<shepherd_core::project_scan::ProjectScan>>>,
 }
 
 impl ShellState {
+    #[cfg(test)]
     pub fn new(core: Core) -> Self {
+        Self::with_terminals(core, TerminalHost::default())
+    }
+
+    fn with_terminals(core: Core, terminals: TerminalHost) -> Self {
         let (events, _) = broadcast::channel(512);
         Self {
             core: Arc::new(Mutex::new(core)),
@@ -220,8 +439,7 @@ impl ShellState {
             events,
             terminal_subscriptions: Arc::new(Mutex::new(BTreeMap::new())),
             terminal_lifecycle: Mutex::new(()),
-            engine: Arc::new(Mutex::new(PtyTerminals::new())),
-            screens: Arc::new(Mutex::new(BTreeMap::new())),
+            terminals,
             scan: Arc::new(Mutex::new(None)),
         }
     }
@@ -232,6 +450,7 @@ impl ShellState {
     pub async fn load(
         data_directory: &Path,
         harness_factory: Box<dyn HarnessFactory>,
+        terminals: TerminalHost,
     ) -> Result<Self, BridgeError> {
         std::fs::create_dir_all(data_directory).map_err(|source| {
             BridgeError::new(
@@ -249,7 +468,7 @@ impl ShellState {
         let core = Core::load(Box::new(store), harness_factory)
             .await
             .map_err(BridgeError::from)?;
-        let state = Self::new(core);
+        let state = Self::with_terminals(core, terminals);
 
         // Walking the home directory can take seconds, so the scan starts with
         // the app and the picker reads whatever has landed by the time it opens.
@@ -445,7 +664,7 @@ impl ShellState {
         let _guard = self.terminal_lifecycle.lock().await;
         match self.execute(Command::Quit { force }).await? {
             CommandResult::Quit(summary) => {
-                let mut engine = std::mem::take(&mut *self.engine.lock().await);
+                let mut engine = std::mem::take(&mut *self.terminals.engine.lock().await);
                 if let Err(error) =
                     tokio::task::spawn_blocking(move || engine.terminate_all()).await
                 {
@@ -658,121 +877,33 @@ impl ShellState {
         if state != shepherd_core::ShutdownState::Running {
             return Err(CoreError::NotRunning { state }.into());
         }
-        let (columns, rows) = (spec.columns, spec.rows);
-        let (output, mut receiver) = mpsc::channel(32);
-        let terminal_id = self
-            .engine
-            .lock()
-            .await
-            .spawn(spec, output)
-            .map_err(|error| BridgeError::new("terminal", error.to_string()))?;
-
-        let screen = Screen::new(usize::from(columns), usize::from(rows));
-        let (frames, _) = watch::channel(Arc::new(screen.frame()));
-        let slot = Arc::new(Mutex::new(ScreenSlot {
-            revision: 0,
-            screen,
-            frames,
-        }));
-        self.screens
-            .lock()
-            .await
-            .insert(terminal_id.as_str().to_string(), Arc::clone(&slot));
-
+        let terminal = self.terminals.prepare(spec).await?;
+        let terminal_id = terminal.id.clone();
         if let Some(record) = &record
             && let Err(error) = self.core.lock().await.record_terminal(record).await
         {
-            self.screens.lock().await.remove(terminal_id.as_str());
-            if let Err(close_error) = self.stop_terminal_process(terminal_id).await {
+            self.terminals
+                .screens
+                .lock()
+                .await
+                .remove(terminal_id.as_str());
+            if let Err(close_error) = self.terminals.stop_terminal_process(terminal_id).await {
                 tracing::warn!(%close_error, "could not roll back terminal spawn");
             }
             return Err(error.into());
         }
-
-        let engine = Arc::clone(&self.engine);
-        let screens = Arc::clone(&self.screens);
-        let recorded = record.map(|record| (record, Arc::clone(&self.core), self.events.clone()));
-        let running_id = terminal_id.clone();
-        let id = terminal_id.as_str().to_string();
-        tauri::async_runtime::spawn(async move {
-            let mut pending = None;
-            let mut deadline = None;
-            loop {
-                let event = if let Some(event) = pending.take() {
-                    Ok(Some(event))
-                } else if let Some(deadline) = deadline {
-                    tokio::time::timeout_at(
-                        tokio::time::Instant::from_std(deadline),
-                        receiver.recv(),
-                    )
-                    .await
-                } else {
-                    Ok(receiver.recv().await)
-                };
-                let output = match event {
-                    Ok(Some(TerminalEvent::Output(bytes))) => Some(bytes),
-                    Ok(None) => break,
-                    Err(_) => None,
-                    Ok(Some(TerminalEvent::Exited { exit_code })) => {
-                        screens.lock().await.remove(&id);
-                        if let Some((_, core, shell_events)) = &recorded {
-                            let mut core = core.lock().await;
-                            if let Err(error) = core.end_terminal(&running_id, exit_code).await {
-                                tracing::warn!(%error, "could not mark the terminal ended");
-                            }
-                            for event in core.drain_events() {
-                                if let Err(error) = shell_events.send(event) {
-                                    tracing::debug!(%error, "no shell is subscribed to terminal events");
-                                }
-                            }
-                        }
-                        break;
-                    }
-                };
-                let (replies, bell) = {
-                    let mut slot = slot.lock().await;
-                    if let Some(bytes) = output {
-                        slot.screen.process(&bytes);
-                        for _ in 0..31 {
-                            match receiver.try_recv() {
-                                Ok(TerminalEvent::Output(bytes)) => slot.screen.process(&bytes),
-                                Ok(event) => {
-                                    pending = Some(event);
-                                    break;
-                                }
-                                Err(_) => break,
-                            }
-                        }
-                    } else {
-                        slot.screen.finish_sync();
-                    }
-                    deadline = slot.screen.sync_deadline();
-                    slot.publish();
-                    (slot.screen.take_replies(), slot.screen.take_bell())
-                };
-                if bell
-                    && let Some((record, _, shell_events)) = &recorded
-                    && let Err(error) = shell_events.send(Event::TerminalBell {
-                        project_id: record.project_id.clone(),
-                        task_id: record.task_id.as_ref().map(|id| id.as_str().to_owned()),
-                        terminal_id: id.clone(),
-                    })
-                {
-                    tracing::debug!(%error, "no shell is subscribed to terminal bells");
-                }
-                if !replies.is_empty()
-                    && let Err(error) = engine.lock().await.write_reply(&running_id, replies)
-                {
-                    tracing::debug!(%error, "could not send terminal replies");
-                }
-            }
+        let recorded = record.map(|record| RecordedTerminal {
+            record,
+            core: Arc::clone(&self.core),
+            events: self.events.clone(),
         });
-
+        self.terminals.observe(terminal, recorded, None);
         Ok(terminal_id)
     }
 
     async fn screen_slot(&self, terminal_id: &str) -> Result<Arc<Mutex<ScreenSlot>>, BridgeError> {
-        self.screens
+        self.terminals
+            .screens
             .lock()
             .await
             .get(terminal_id)
@@ -829,6 +960,7 @@ impl ShellState {
         follow_output: bool,
     ) -> Result<(), BridgeError> {
         let completion = self
+            .terminals
             .engine
             .lock()
             .await
@@ -903,7 +1035,8 @@ impl ShellState {
     ) -> Result<(), BridgeError> {
         let slot = self.screen_slot(&terminal_id).await?;
         let mut slot = slot.lock().await;
-        self.engine
+        self.terminals
+            .engine
             .lock()
             .await
             .resize(&TerminalId::new(terminal_id.clone()), columns, rows)
@@ -916,16 +1049,9 @@ impl ShellState {
 
     pub async fn close_terminal(&self, terminal_id: String) -> Result<(), BridgeError> {
         let _guard = self.terminal_lifecycle.lock().await;
-        self.stop_terminal_process(TerminalId::new(terminal_id))
+        self.terminals
+            .stop_terminal_process(TerminalId::new(terminal_id))
             .await
-    }
-
-    async fn stop_terminal_process(&self, terminal_id: TerminalId) -> Result<(), BridgeError> {
-        let engine = Arc::clone(&self.engine);
-        tokio::task::spawn_blocking(move || engine.blocking_lock().close(&terminal_id))
-            .await
-            .map_err(|error| BridgeError::new("terminal", error.to_string()))?
-            .map_err(|error| BridgeError::new("terminal", error.to_string()))
     }
 
     pub async fn subscribe_terminal(
@@ -1719,6 +1845,7 @@ mod tests {
         slot.publish();
         let current = receiver.borrow_and_update().revision;
         state
+            .terminals
             .screens
             .lock()
             .await
@@ -1847,6 +1974,119 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn acp_wait_and_output_follow_the_same_pty_as_the_pane()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use acp_client::fake_agent::{FakeScript, connect_fake_agent_with_terminals};
+        use acp_client::{AcpEvent, ConnectOptions, SessionRoots, ToolPermissions};
+
+        async fn next_terminal(
+            events: &mut mpsc::UnboundedReceiver<AcpEvent>,
+        ) -> Result<String, Box<dyn std::error::Error>> {
+            Ok(tokio::time::timeout(Duration::from_secs(4), async {
+                while let Some(event) = events.recv().await {
+                    if let AcpEvent::TerminalStarted { terminal_id, .. } = event {
+                        return Ok::<_, &str>(terminal_id);
+                    }
+                }
+                Err("ACP terminal never started")
+            })
+            .await??)
+        }
+
+        let directory = TestDirectory::new()?;
+        let state = state_with(Core::new());
+        let cwd = directory.path().canonicalize()?;
+        let (mut connection, observed) = connect_fake_agent_with_terminals(
+            FakeScript {
+                terminal: Some(("/bin/sh".into(), vec![
+                    "-c".into(),
+                    "test -t 0 && test -t 1 || exit 91; printf 'acp-ready\n'; IFS= read -r line; stty size; printf 'received=%s\n' \"$line\"; exit 7".into(),
+                ])),
+                release_terminal: true,
+                ..FakeScript::default()
+            },
+            ConnectOptions {
+                roots: SessionRoots::new([cwd.clone()]),
+                tool_permissions: ToolPermissions::default(),
+            },
+            Arc::new(state.terminals.clone()),
+        ).await?;
+        let (session, _, _) = connection
+            .requester
+            .new_session(cwd, Vec::new(), Vec::new())
+            .await?;
+        let mut events = connection.take_events();
+        let prompt = tokio::spawn({
+            let requester = connection.requester.clone();
+            let session = session.clone();
+            async move { requester.prompt(&session, "start the fixture".into()).await }
+        });
+        let terminal_id = next_terminal(&mut events).await?;
+        tokio::time::timeout(Duration::from_secs(4), async {
+            while state
+                .search_terminal(&terminal_id, "acp-ready", None, SearchDirection::Previous)
+                .await?
+                .is_none()
+            {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            Ok::<(), BridgeError>(())
+        })
+        .await??;
+        state.terminal_resize(terminal_id.clone(), 93, 32).await?;
+        state
+            .terminal_write(
+                terminal_id.clone(),
+                TerminalInput::Text("from-the-pane\n".into()),
+                true,
+            )
+            .await?;
+        tokio::time::timeout(Duration::from_secs(4), prompt).await???;
+        let mut released = false;
+        while let Ok(event) = events.try_recv() {
+            if let AcpEvent::TerminalReleased {
+                terminal_id: released_id,
+            } = event
+            {
+                released |= released_id == terminal_id;
+            }
+        }
+        assert!(released);
+        assert!(state.screen_slot(&terminal_id).await.is_err());
+        {
+            let observed = observed.lock().map_err(|_| "fake observations poisoned")?;
+            let output = observed
+                .terminal_output
+                .first()
+                .ok_or("ACP terminal output was empty")?;
+            assert!(output.contains("32 93"), "{output:?}");
+            assert!(output.contains("received=from-the-pane"), "{output:?}");
+            assert_eq!(observed.terminal_exit, [Some(7)]);
+        }
+
+        let requester = connection.requester.clone();
+        let prompt = tokio::spawn(async move {
+            requester
+                .prompt(&session, "leave the terminal open".into())
+                .await
+        });
+        let terminal_id = next_terminal(&mut events).await?;
+        connection.close();
+        tokio::time::timeout(Duration::from_secs(4), async {
+            while state.screen_slot(&terminal_id).await.is_ok() {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await?;
+        assert!(
+            tokio::time::timeout(Duration::from_secs(4), prompt)
+                .await??
+                .is_err()
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn restarting_a_task_terminal_reuses_its_record_and_worktree()
     -> Result<(), Box<dyn std::error::Error>> {
         let repository = TestRepository::new()?;
@@ -1895,7 +2135,14 @@ mod tests {
         assert_eq!(running.cwd, worktree);
         assert_eq!(running.command, saved.command);
         assert_eq!((running.ended_at, running.exit_code), (None, None));
-        assert!(state.screens.lock().await.contains_key(saved.id.as_str()));
+        assert!(
+            state
+                .terminals
+                .screens
+                .lock()
+                .await
+                .contains_key(saved.id.as_str())
+        );
 
         let mut events = state.subscribe();
         state
@@ -1936,7 +2183,12 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let directory = TestDirectory::new()?;
 
-        let state = ShellState::load(directory.path(), Box::new(ScriptedHarnessFactory)).await?;
+        let state = ShellState::load(
+            directory.path(),
+            Box::new(ScriptedHarnessFactory),
+            TerminalHost::default(),
+        )
+        .await?;
         let projects = state
             .add_project(directory.path().display().to_string())
             .await?;
@@ -1947,7 +2199,12 @@ mod tests {
         );
         drop(state);
 
-        let reopened = ShellState::load(directory.path(), Box::new(ScriptedHarnessFactory)).await?;
+        let reopened = ShellState::load(
+            directory.path(),
+            Box::new(ScriptedHarnessFactory),
+            TerminalHost::default(),
+        )
+        .await?;
         let projects = reopened.project_list().await;
         assert_eq!(projects.projects.len(), 1);
         assert!(!projects.projects[0].is_git_repository);

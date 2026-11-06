@@ -1,16 +1,18 @@
 //! Adapt the shared ACP client to Shepherd's harness contract.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::future::{Future, pending};
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
+pub use acp_client::schema::TerminalExitStatus;
 use acp_client::schema::{
     self, ContentBlock, ContentChunk, PermissionOptionKind, SessionUpdate, StopReason,
     ToolCallContent, ToolCallUpdateFields, ToolKind,
 };
+pub use acp_client::terminal::{TerminalBackend, TerminalLaunch, TerminalProcessEvent};
 use acp_client::{
     AcpConnection, AcpError, AcpEvent, ConnectOptions, PermissionDecision, PermissionReply,
     SessionRoots, ToolPermissions,
@@ -36,6 +38,7 @@ pub struct AcpHarness {
     diagnostics: AgentDiagnostics,
     runtime: Option<Runtime>,
     project_approvals: Option<Arc<dyn ProjectApprovalPolicy>>,
+    terminals: Option<Arc<dyn TerminalBackend>>,
     replay: Vec<Entry>,
     sender: mpsc::UnboundedSender<HarnessEvent>,
     events: mpsc::UnboundedReceiver<HarnessEvent>,
@@ -50,6 +53,7 @@ impl Default for AcpHarness {
             diagnostics: AgentDiagnostics::default(),
             runtime: None,
             project_approvals: None,
+            terminals: None,
             replay: Vec::new(),
             sender,
             events,
@@ -58,6 +62,11 @@ impl Default for AcpHarness {
 }
 
 impl AcpHarness {
+    pub fn with_terminals(mut self, terminals: Arc<dyn TerminalBackend>) -> Self {
+        self.terminals = Some(terminals);
+        self
+    }
+
     fn attach(&mut self, connection: AcpConnection, cwd: PathBuf, command: String) -> Capabilities {
         let info = &connection.info;
         self.diagnostics.command = command;
@@ -167,8 +176,16 @@ impl AgentHarness for AcpHarness {
             roots: SessionRoots::new([cwd.clone()]),
             tool_permissions: ToolPermissions::default(),
         };
-        let connection =
-            session_request("initialize", acp_client::connect_spawn(launch, options)).await?;
+        let connection = session_request("initialize", async {
+            match &self.terminals {
+                Some(terminals) => {
+                    acp_client::connect_spawn_with_terminals(launch, options, terminals.clone())
+                        .await
+                }
+                None => acp_client::connect_spawn(launch, options).await,
+            }
+        })
+        .await?;
         Ok(self.attach(connection, cwd, self.diagnostics.command.clone()))
     }
 
@@ -205,8 +222,9 @@ impl AgentHarness for AcpHarness {
         };
         self.diagnostics.model = configured_model(&config);
         let mut events = connection.take_events();
+        let mut startup_events = VecDeque::new();
         if loading {
-            self.replay = replay_history(&session, &mut events)?;
+            self.replay = replay_history(&session, &mut events, &mut startup_events)?;
         }
         if let Some(modes) = modes {
             publish(
@@ -220,9 +238,10 @@ impl AgentHarness for AcpHarness {
         self.runtime = Some(Runtime::start(
             connection.requester.clone(),
             session,
-            events,
+            (startup_events, events),
             self.sender.clone(),
             self.project_approvals.clone(),
+            connection.close_terminals(),
         ));
         publish(
             &self.sender,
@@ -248,6 +267,7 @@ impl AgentHarness for AcpHarness {
     async fn shutdown(&mut self) -> HarnessResult<()> {
         self.runtime = None;
         if let Some(connection) = self.connection.take() {
+            connection.close_terminals().await;
             connection.close();
             publish(
                 &self.sender,
@@ -307,6 +327,7 @@ enum Control {
 
 type Command = (Control, oneshot::Sender<HarnessResult<()>>);
 type Prompt = Pin<Box<dyn Future<Output = Result<StopReason, AcpError>> + Send>>;
+type AgentEvents = (VecDeque<AcpEvent>, mpsc::UnboundedReceiver<AcpEvent>);
 
 struct Runtime {
     commands: mpsc::Sender<Command>,
@@ -318,9 +339,10 @@ impl Runtime {
     fn start(
         requester: acp_client::Requester,
         session: schema::SessionId,
-        events: mpsc::UnboundedReceiver<AcpEvent>,
+        events: AgentEvents,
         sender: mpsc::UnboundedSender<HarnessEvent>,
         project_approvals: Option<Arc<dyn ProjectApprovalPolicy>>,
+        close_terminals: impl Future<Output = ()> + Send + 'static,
     ) -> Self {
         let (commands, incoming) = mpsc::channel(8);
         let (grant_changes, grants) = watch::channel(Vec::new());
@@ -338,6 +360,7 @@ impl Runtime {
             {
                 tracing::debug!(%error, "ACP harness event loop ended");
             }
+            close_terminals.await;
         });
         Self {
             commands,
@@ -356,7 +379,7 @@ impl Drop for Runtime {
 async fn drive_session(
     requester: acp_client::Requester,
     session: schema::SessionId,
-    mut events: mpsc::UnboundedReceiver<AcpEvent>,
+    (mut startup_events, mut events): AgentEvents,
     mut commands: mpsc::Receiver<Command>,
     sender: mpsc::UnboundedSender<HarnessEvent>,
     project_approvals: Option<&dyn ProjectApprovalPolicy>,
@@ -366,12 +389,19 @@ async fn drive_session(
     let mut updates = Updates::default();
     let mut approvals = VecDeque::<PendingApproval>::new();
     let mut session_grants = SessionGrants::new(grant_changes);
+    let mut terminals = HashSet::new();
+    let mut released = Vec::new();
     let mut cancelling = false;
     loop {
         tokio::select! {
             biased;
             // ACP sends its final updates before replying to session/prompt.
-            event = events.recv() => {
+            event = async {
+                match startup_events.pop_front() {
+                    Some(event) => Some(event),
+                    None => events.recv().await,
+                }
+            } => {
                 match event {
                     Some(AcpEvent::SessionUpdate(notification)) if notification.session_id == session => {
                         if let Some(event) = updates.apply(&notification.update) {
@@ -389,6 +419,23 @@ async fn drive_session(
                     }
                     Some(AcpEvent::TerminalOutput { terminal_id, chunk, .. }) if prompt.is_some() => {
                         updates.terminal_output(&sender, terminal_id, chunk)?;
+                    }
+                    Some(AcpEvent::TerminalStarted { session_id, terminal_id, title })
+                        if session_id == session => {
+                        terminals.insert(terminal_id.clone());
+                        publish(&sender, HarnessEvent::AgentTerminalStarted { id: terminal_id, title })?;
+                    }
+                    Some(AcpEvent::TerminalExited { terminal_id, exit_code, .. })
+                        if terminals.contains(&terminal_id) => {
+                        publish(&sender, HarnessEvent::AgentTerminalExited { id: terminal_id, exit_code })?;
+                    }
+                    Some(AcpEvent::TerminalReleased { terminal_id }) if terminals.remove(&terminal_id) => {
+                        if prompt.is_some() {
+                            publish(&sender, HarnessEvent::AgentTerminalExited { id: terminal_id.clone(), exit_code: None })?;
+                            released.push(terminal_id);
+                        } else {
+                            publish(&sender, HarnessEvent::AgentTerminalRemoved { id: terminal_id })?;
+                        }
                     }
                     Some(AcpEvent::Exited { code, stderr }) => {
                         withdraw_approvals(&sender, &mut approvals)?;
@@ -410,6 +457,9 @@ async fn drive_session(
                 prompt = None;
                 cancelling = false;
                 withdraw_approvals(&sender, &mut approvals)?;
+                for id in released.drain(..) {
+                    publish(&sender, HarnessEvent::AgentTerminalRemoved { id })?;
+                }
                 let reason = finish_turn(&sender, outcome)?;
                 publish(&sender, HarnessEvent::TurnFinished { reason })?;
             }
@@ -950,6 +1000,7 @@ fn tool_event(entry: &acp_client::Entry) -> Option<HarnessEvent> {
 fn replay_history(
     session: &schema::SessionId,
     events: &mut mpsc::UnboundedReceiver<AcpEvent>,
+    startup_events: &mut VecDeque<AcpEvent>,
 ) -> HarnessResult<Vec<Entry>> {
     let mut transcript = Transcript::default();
     let mut updates = Updates::default();
@@ -981,6 +1032,9 @@ fn replay_history(
                     "ACP agent exited while loading history ({code:?}): {stderr}"
                 )));
             }
+            event @ (AcpEvent::TerminalStarted { .. }
+            | AcpEvent::TerminalExited { .. }
+            | AcpEvent::TerminalReleased { .. }) => startup_events.push_back(event),
             _ => {}
         }
     }
@@ -995,7 +1049,9 @@ fn replay_history(
 
 #[cfg(test)]
 mod tests {
-    use acp_client::fake_agent::{FakeScript, Shared, connect_fake_agent};
+    use acp_client::fake_agent::{
+        FakeScript, Shared, connect_fake_agent, connect_fake_agent_with_terminals,
+    };
     use acp_client::schema::{
         Diff, PermissionOption, TextContent, ToolCall, ToolCallStatus, ToolCallUpdate,
         ToolCallUpdateFields, ToolKind,
@@ -1018,6 +1074,84 @@ mod tests {
         let mut harness = AcpHarness::default();
         let capabilities = harness.attach(connection, cwd, "fake-acp".into());
         Ok((harness, capabilities, observed))
+    }
+
+    struct ExitingTerminal;
+
+    #[async_trait]
+    impl TerminalBackend for ExitingTerminal {
+        async fn spawn(
+            &self,
+            _: TerminalLaunch,
+            events: mpsc::Sender<TerminalProcessEvent>,
+        ) -> Result<(), String> {
+            events
+                .send(TerminalProcessEvent::Exited(
+                    TerminalExitStatus::new().exit_code(7),
+                ))
+                .await
+                .map_err(|error| error.to_string())
+        }
+
+        async fn stop(&self, _: &str) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn a_released_pty_pane_is_removed_when_the_acp_turn_settles()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let cwd = std::env::temp_dir();
+        let (connection, _) = connect_fake_agent_with_terminals(
+            FakeScript {
+                terminal: Some(("fixture".into(), Vec::new())),
+                release_terminal: true,
+                ..FakeScript::default()
+            },
+            ConnectOptions {
+                roots: SessionRoots::new([cwd.clone()]),
+                tool_permissions: ToolPermissions::default(),
+            },
+            Arc::new(ExitingTerminal),
+        )
+        .await?;
+        let mut harness = AcpHarness::default();
+        harness.attach(connection, cwd, "fake-acp".into());
+        harness.open_session(None).await?;
+        harness
+            .prompt(PromptInput {
+                text: "run a terminal".into(),
+            })
+            .await?;
+        let mut terminal = None;
+        let mut exited = false;
+        let mut removed = false;
+        loop {
+            match next(&mut harness).await? {
+                HarnessEvent::AgentTerminalStarted { id, title } => {
+                    assert_eq!(title, "fixture");
+                    terminal = Some(id);
+                }
+                HarnessEvent::AgentTerminalExited {
+                    id,
+                    exit_code: Some(7),
+                } => {
+                    assert_eq!(terminal.as_deref(), Some(id.as_str()));
+                    exited = true;
+                }
+                HarnessEvent::AgentTerminalRemoved { id } => {
+                    assert_eq!(terminal.as_deref(), Some(id.as_str()));
+                    removed = true;
+                }
+                HarnessEvent::TurnFinished { reason } => {
+                    assert_eq!(reason, TurnFinishReason::Completed);
+                    assert!(exited && removed);
+                    break;
+                }
+                _ => {}
+            }
+        }
+        Ok(())
     }
 
     async fn next(harness: &mut AcpHarness) -> Result<HarnessEvent, Box<dyn std::error::Error>> {

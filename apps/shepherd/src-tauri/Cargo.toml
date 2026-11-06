@@ -20,6 +20,7 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 agent-harness = { path = "../../../libs/agent-harness" }
+async-trait.workspace = true
 # Keep the upstream per-cell combining-mark cap until a release includes it.
 alacritty_terminal = { git = "https://github.com/alacritty/alacritty", rev = "ede2ac144da4dec4c075bfa803aacf3b3739bce6" }
 compact_str = { version = "0.8", features = ["serde"] }
@@ -37,4 +38,5 @@ uuid.workspace = true
 libc = "0.2"
 
 [dev-dependencies]
+acp-client = { path = "../../../libs/acp-client", features = ["test-support"] }
 shepherd-core = { path = "../../../libs/shepherd-core", features = ["test-support"] }

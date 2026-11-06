@@ -99,6 +99,7 @@ dependencies = [
  "agent-client-protocol",
  "anyhow",
  "async-process",
+ "async-trait",
  "dirs 6.0.0",
  "futures",
  "libc",
@@ -10125,8 +10126,10 @@ dependencies = [
 name = "shepherd"
 version = "0.1.0"
 dependencies = [
+ "acp-client",
  "agent-harness",
  "alacritty_terminal",
+ "async-trait",
  "compact_str",
  "libc",
  "portable-pty",

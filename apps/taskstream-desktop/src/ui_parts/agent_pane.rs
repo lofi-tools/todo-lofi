@@ -1621,6 +1621,7 @@ impl AgentPane {
                     row.exit_code = Some(exit_code);
                     changed.extend(index);
                 }
+                AcpEvent::TerminalStarted { .. } | AcpEvent::TerminalReleased { .. } => {}
                 AcpEvent::Stderr(line) => {
                     tracing::debug!("agent stderr: {line}");
                 }

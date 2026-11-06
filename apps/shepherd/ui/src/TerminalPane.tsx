@@ -58,6 +58,7 @@ interface TerminalPaneProps {
   taskId: string | null
   taskHasWorktree: boolean
   transcript: bridge.Entry[] | undefined
+  agentTerminals?: bridge.AgentTerminal[]
   shown: boolean
   shortcutsEnabled: boolean
   onShow: () => void
@@ -78,6 +79,18 @@ export function TerminalPane(props: TerminalPaneProps) {
   const [focusRequest, setFocusRequest] = createSignal<{ id: string }>()
   const [pending, setPending] = createSignal(false)
   const [error, setError] = createSignal<string | null>(null)
+  const [hiddenAgentTerminals, setHiddenAgentTerminals] = createSignal(new Set<string>())
+  const agentTerminalIds = createMemo(() => (props.agentTerminals ?? []).map((terminal) => terminal.id))
+  const agentTerminal = (id: string) => props.agentTerminals?.find((terminal) => terminal.id === id)
+  const agentPaneVisible = (id: string) => !hiddenAgentTerminals().has(id)
+  const setAgentPaneVisible = (id: string, visible: boolean) => {
+    setHiddenAgentTerminals((hidden) => {
+      const next = new Set(hidden)
+      if (visible) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }
   const mac = navigator.platform.startsWith('Mac')
   const commands = createMemo(() => {
     const commands = new Map<string, bridge.ToolCallEntry>()
@@ -240,6 +253,7 @@ export function TerminalPane(props: TerminalPaneProps) {
         !props.shortcutsEnabled || !hasPaneModifier(event)) return
     const target = event.target
     if (!(target instanceof HTMLElement) || !target.matches('.terminal-view__input')) return
+    if (target.closest('[data-agent-terminal]')) return
     const id = active()
     if (!id) return
     const letter = event.key.toLowerCase()
@@ -313,6 +327,19 @@ export function TerminalPane(props: TerminalPaneProps) {
             </li>
           )}
         </For>
+        <For each={props.agentTerminals}>
+          {(entry) => (
+            <li>
+              <button type="button" class="terminal-list__item" onClick={() => {
+                setAgentPaneVisible(entry.id, true)
+                if (entry.live) setFocusRequest({ id: entry.id })
+              }}>
+                <span>agent: {entry.title}</span>
+                <span class="terminal-list__state">task · {entry.live ? 'live' : 'ended'}{agentPaneVisible(entry.id) ? '' : ' · hidden'}</span>
+              </button>
+            </li>
+          )}
+        </For>
         </ul>
       </details>
       <Show when={props.taskId} keyed>
@@ -320,8 +347,31 @@ export function TerminalPane(props: TerminalPaneProps) {
           <CommandTerminals commands={commands()} shown={props.shown} />
         </Show>
       </Show>
+      <For each={agentTerminalIds()}>
+        {(id) => (
+          <Show when={agentPaneVisible(id) && agentTerminal(id)}>
+            {(entry) => (
+              <section class="terminal-tile" data-agent-terminal aria-label={`agent: ${entry().title}`}>
+                <div class="terminal-pane__bar">
+                  <span>agent: {entry().title}</span>
+                  <button type="button" data-terminal-focus={entry().live ? '' : undefined}
+                    onClick={() => setAgentPaneVisible(id, false)}>Hide pane</button>
+                  <Show when={entry().live}>
+                    <button type="button" onClick={() => void run(() => bridge.closeTerminal(id))} disabled={pending()}>Stop process</button>
+                  </Show>
+                </div>
+                <Show when={entry().live} fallback={
+                  <div class="terminal-ended"><p>Process ended{formatExit(entry().exitCode)}</p></div>
+                }>
+                  <TerminalCanvas terminalId={id} shown={props.shown} focusRequest={focusRequest()} onFocus={props.onTerminalFocus} />
+                </Show>
+              </section>
+            )}
+          </Show>
+        )}
+      </For>
       <Show when={firstMatchingPane(root(), paneVisible)} fallback={
-        <Show when={commands().size === 0}><p class="empty">Open an instance or start a terminal.</p></Show>
+        <Show when={commands().size === 0 && !agentTerminalIds().some(agentPaneVisible)}><p class="empty">Open an instance or start a terminal.</p></Show>
       }>
         <TerminalTree node={root()!} terminal={terminal} paneVisible={paneVisible} active={active()} shown={props.shown} select={setSelectedId} focusRequest={focusRequest()} onTerminalFocus={props.onTerminalFocus}
           restart={restart} measure={(id, size) => measuredSizes.set(id, size)}

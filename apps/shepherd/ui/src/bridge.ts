@@ -177,7 +177,15 @@ export interface TaskWorkspace {
   task: TaskDetail
   layout: WorkspaceLayout
   transcript: Entry[]
+  agentTerminals: AgentTerminal[]
   diagnostics: AgentDiagnostics | null
+}
+
+export interface AgentTerminal {
+  id: string
+  title: string
+  live: boolean
+  exitCode: number | null
 }
 
 export interface QuitSummary {

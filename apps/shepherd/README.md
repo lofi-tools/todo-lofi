@@ -147,6 +147,10 @@ connected, and labels those decisions in the transcript.
 agent in that project. Open **Settings → Projects** to review or reset saved
 grants and live session grants for the selected project. Each live grant
 shows its task and expires when its ACP connection closes.
+When an ACP agent opens a terminal, its **agent:** pane appears in the
+selected task's Terminals tab. You can type into it, resize it, hide it, or
+stop the process. Shepherd closes unreleased terminals with their ACP
+session.
 
 ## Live Codex tests
 

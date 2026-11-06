@@ -8,9 +8,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use agent_harness::{
-    AdapterTier, AgentDiagnostics, AgentHarness, ApprovalId, ApprovalRequest, Capabilities,
-    Decision, Entry, FailureKind, HarnessError, HarnessEvent, ProjectApprovalPolicy, PromptInput,
-    SessionApproval, SessionId, SpawnSpec, Transcript,
+    AdapterTier, AgentDiagnostics, AgentHarness, AgentTerminal, ApprovalId, ApprovalRequest,
+    Capabilities, Decision, Entry, FailureKind, HarnessError, HarnessEvent, ProjectApprovalPolicy,
+    PromptInput, SessionApproval, SessionId, SpawnSpec, Transcript,
 };
 use async_trait::async_trait;
 
@@ -121,6 +121,7 @@ pub struct HarnessSession {
     capabilities: Capabilities,
     session_id: Option<SessionId>,
     transcript: Transcript,
+    agent_terminals: Vec<AgentTerminal>,
     pending_approval: Option<ApprovalId>,
     cancelling: bool,
     failed: bool,
@@ -134,6 +135,7 @@ impl HarnessSession {
             capabilities: Capabilities::default(),
             session_id: None,
             transcript: Transcript::default(),
+            agent_terminals: Vec::new(),
             pending_approval: None,
             cancelling: false,
             failed: false,
@@ -202,6 +204,7 @@ impl HarnessSession {
         self.harness.shutdown().await?;
         self.closed = true;
         self.pending_approval = None;
+        self.agent_terminals.clear();
         Ok(self.pump())
     }
 
@@ -211,6 +214,40 @@ impl HarnessSession {
         let mut events = Vec::new();
         while let Ok(event) = self.harness.events().try_recv() {
             match &event {
+                HarnessEvent::AgentTerminalStarted { id, title } => {
+                    self.agent_terminals.push(AgentTerminal {
+                        id: id.clone(),
+                        title: title.clone(),
+                        live: true,
+                        exit_code: None,
+                    });
+                }
+                HarnessEvent::AgentTerminalExited { id, exit_code } => {
+                    if let Some(terminal) = self
+                        .agent_terminals
+                        .iter_mut()
+                        .find(|terminal| terminal.id == *id)
+                    {
+                        terminal.live = false;
+                        terminal.exit_code = exit_code.or(terminal.exit_code);
+                    }
+                }
+                HarnessEvent::AgentTerminalRemoved { id } => {
+                    self.agent_terminals.retain(|terminal| terminal.id != *id);
+                }
+                HarnessEvent::ToolCall {
+                    terminal_id: Some(id),
+                    title,
+                    ..
+                } => {
+                    if let Some(terminal) = self
+                        .agent_terminals
+                        .iter_mut()
+                        .find(|terminal| terminal.id == *id)
+                    {
+                        terminal.title.clone_from(title);
+                    }
+                }
                 HarnessEvent::ApprovalRequested { request } => {
                     self.pending_approval = Some(request.approval_id.clone());
                 }
@@ -228,6 +265,7 @@ impl HarnessSession {
                     self.cancelling = false;
                     self.pending_approval = None;
                     self.closed = true;
+                    self.agent_terminals.clear();
                 }
                 _ => {}
             }
@@ -239,6 +277,10 @@ impl HarnessSession {
 
     pub fn transcript(&self) -> &Transcript {
         &self.transcript
+    }
+
+    pub fn agent_terminals(&self) -> &[AgentTerminal] {
+        &self.agent_terminals
     }
 
     /// Record a core-owned observation. Used when the core has to tell the user

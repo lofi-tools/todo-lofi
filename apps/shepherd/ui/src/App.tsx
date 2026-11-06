@@ -1067,6 +1067,7 @@ export function App() {
                 {(projectId) => <TerminalPane
                   projectId={projectId} taskId={selectedTaskId()} taskHasWorktree={!!workspace()?.task.worktreePath}
                   transcript={workspace()?.transcript}
+                  agentTerminals={workspace()?.task.id === selectedTaskId() ? workspace()?.agentTerminals : undefined}
                   listEvent={terminalListEvent()} shown={inspectorTab() === 'terminals'}
                   shortcutsEnabled={workspaceShortcutsEnabled()} onShow={() => setInspectorTab('terminals')}
                   onLayoutLoaded={(layout) => restoreInspectorTab(projectId, layout.inspectorTab)}

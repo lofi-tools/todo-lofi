@@ -6,7 +6,7 @@
 
 import { expect, test } from '@playwright/test'
 
-import type { Entry, Event as ShepherdEvent, InspectorTab, TerminalLayout, TerminalSnapshot, TerminalSplit, WorkspaceLayout } from '../src/bridge'
+import type { AgentTerminal, Entry, Event as ShepherdEvent, InspectorTab, TerminalLayout, TerminalSnapshot, TerminalSplit, WorkspaceLayout } from '../src/bridge'
 
 test.beforeEach(async ({ context }) => {
   await context.addInitScript(() => {
@@ -21,6 +21,7 @@ test.beforeEach(async ({ context }) => {
     const options = new URLSearchParams(window.location.search)
     let projectGrants = []
     let sessionGrants = []
+    const agentTerminals = new Map<string, AgentTerminal[]>()
 
     const project = {
       id: 'project-1',
@@ -233,6 +234,7 @@ test.beforeEach(async ({ context }) => {
         layout: workspaceLayouts.get(taskId) ?? { inspectorWidth: null },
         cancelling: false,
         transcript: transcripts[taskId] ?? [],
+        agentTerminals: agentTerminals.get(taskId) ?? [],
         diagnostics: task.state === 'waiting' ? { command: 'codex app-server', protocol: 'app-server', model: 'session-model', stderrTail: '' } : null,
       }
     }
@@ -574,6 +576,10 @@ test.beforeEach(async ({ context }) => {
     })
     window.__setCommandEntries = (taskId: string, entries: Entry[]) => {
       transcripts[taskId] = [...(transcripts[taskId] ?? []).filter((row) => row.kind.type !== 'toolCall'), ...entries]
+      window.__emitCoreEvent({ type: 'taskWorkspaceChanged', data: workspace(taskId) })
+    }
+    window.__setAgentTerminals = (taskId: string, terminals: AgentTerminal[]) => {
+      agentTerminals.set(taskId, terminals)
       window.__emitCoreEvent({ type: 'taskWorkspaceChanged', data: workspace(taskId) })
     }
   })
@@ -1537,6 +1543,39 @@ test('streams read-only Codex command output beside a live shell', async ({ page
   await expect(shared).toBeVisible()
   await page.getByRole('button', { name: /Ship it/ }).click()
   await expect(output).toHaveText('On branch main clean')
+})
+
+test('shows an interactive ACP terminal only for its owning task', async ({ page }) => {
+  await page.goto('/?scoped-terminals')
+  const shared = page.getByRole('region', { name: 'Terminal 1', exact: true })
+  await expect(shared).toBeVisible()
+  const terminal: AgentTerminal = { id: 'agent-fixture', title: 'Run tests', live: true, exitCode: null }
+  const publish = (terminals: AgentTerminal[]) => page.evaluate((rows) => {
+    const fixture = window as unknown as { __setAgentTerminals: (taskId: string, terminals: AgentTerminal[]) => void }
+    fixture.__setAgentTerminals('task-1', rows)
+  }, terminals)
+  await publish([terminal])
+  const pane = page.getByRole('region', { name: 'agent: Run tests', exact: true })
+  await expect(pane.getByLabel('Terminal output')).toHaveText('BB')
+  const input = pane.getByRole('textbox', { name: 'Terminal', exact: true })
+  await input.press('x')
+  await expect.poll(() => page.evaluate(() => window.__writes)).toContain('x')
+
+  await pane.getByRole('button', { name: 'Hide pane' }).click()
+  await expect(pane).toHaveCount(0)
+  await page.getByRole('button', { name: /agent: Run tests.*hidden/ }).click()
+  await expect(input).toBeFocused()
+
+  await page.getByRole('button', { name: /Other task/ }).click()
+  await expect(pane).toHaveCount(0)
+  await expect(shared).toBeVisible()
+  await page.getByRole('button', { name: /Ship it/ }).click()
+  await pane.getByRole('button', { name: 'Stop process' }).click()
+  await expect.poll(() => page.evaluate(() => window.__closedTerminals)).toContain(terminal.id)
+  await publish([{ ...terminal, live: false, exitCode: 7 }])
+  await expect(pane).toContainText('Process ended with exit code 7')
+  await publish([])
+  await expect(pane).toHaveCount(0)
 })
 
 test('forwards browser IME commits once and discards cancelled preedit', async ({ page }) => {

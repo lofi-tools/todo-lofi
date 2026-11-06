@@ -39,6 +39,9 @@ current layout and give future changes a point of comparison.
   alongside the interactive terminal panes. Follow the latest command by
   default and let the user select an earlier command without shifting focus
   when new output arrives.
+  Show ACP terminals for the selected task as interactive **agent: <title>**
+  panes. Use the same terminal input, resize, and hide controls as task
+  shells. Released agent panes disappear when the turn settles.
   Down from the Terminals tab focuses the first live pane's **Hide pane**
   button. Arrow keys on live pane header buttons move between adjacent live
   panes. Up from a pane with no live pane above it returns to the Terminals

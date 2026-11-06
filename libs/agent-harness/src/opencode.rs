@@ -18,7 +18,7 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio::time::{Instant, timeout, timeout_at};
 
-use crate::acp::AcpHarness;
+use crate::acp::{AcpHarness, TerminalBackend};
 use crate::settings::AgentSettings;
 use crate::{
     AdapterTier, AgentDiagnostics, AgentHarness, ApprovalId, ApprovalRequest, Capabilities,
@@ -132,6 +132,7 @@ pub struct OpenCodeHarness {
     diagnostics: AgentDiagnostics,
     fallback: Option<AcpHarness>,
     project_approvals: Option<Arc<dyn crate::ProjectApprovalPolicy>>,
+    terminals: Option<Arc<dyn TerminalBackend>>,
 }
 
 impl Default for OpenCodeHarness {
@@ -146,7 +147,15 @@ impl Default for OpenCodeHarness {
             diagnostics: AgentDiagnostics::default(),
             fallback: None,
             project_approvals: None,
+            terminals: None,
         }
+    }
+}
+
+impl OpenCodeHarness {
+    pub fn with_terminals(mut self, terminals: Arc<dyn TerminalBackend>) -> Self {
+        self.terminals = Some(terminals);
+        self
     }
 }
 
@@ -234,6 +243,9 @@ impl AgentHarness for OpenCodeHarness {
                 spec.environment
                     .insert("OPENCODE_DISABLE_AUTOUPDATE".into(), "1".into());
                 let mut fallback = AcpHarness::default();
+                if let Some(terminals) = self.terminals.take() {
+                    fallback = fallback.with_terminals(terminals);
+                }
                 if let Some(policy) = self.project_approvals.take() {
                     fallback.set_project_approval_policy(policy);
                 }

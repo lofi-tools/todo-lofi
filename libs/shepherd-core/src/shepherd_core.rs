@@ -843,6 +843,9 @@ impl Core {
             transcript: session
                 .map(|session| session.transcript().entries().to_vec())
                 .unwrap_or_default(),
+            agent_terminals: session
+                .map(|session| session.agent_terminals().to_vec())
+                .unwrap_or_default(),
             diagnostics: session.map(HarnessSession::diagnostics),
         })
     }

@@ -26,7 +26,10 @@ pub use acp::schema::v1 as schema;
 use agent_client_protocol as acp;
 
 pub use agent::{AgentServer, OpenCodeAgent, OpencodeVersion, SpawnSpec, detect_opencode_version};
-pub use connection::{AcpConnection, AgentInfo, ConnectOptions, Requester, connect, connect_spawn};
+pub use connection::{
+    AcpConnection, AgentInfo, ConnectOptions, Requester, connect, connect_spawn,
+    connect_spawn_with_terminals,
+};
 pub use fs::SessionRoots;
 pub use permissions::{
     PatternRule, PermissionDecision, PermissionReply, PermissionRule, ToolPermissions, ToolRule,
@@ -81,6 +84,14 @@ pub enum AcpEvent {
         tool_call: ToolCallUpdate,
         choice: thread::PermissionChoice,
     },
+    TerminalStarted {
+        session_id: schema::SessionId,
+        terminal_id: String,
+        title: String,
+    },
+    TerminalReleased {
+        terminal_id: String,
+    },
     /// A terminal started by the agent produced output.
     TerminalOutput {
         terminal_id: String,
@@ -96,7 +107,10 @@ pub enum AcpEvent {
     /// A line captured from the agent's stderr.
     Stderr(String),
     /// The agent process exited.
-    Exited { code: Option<i32>, stderr: String },
+    Exited {
+        code: Option<i32>,
+        stderr: String,
+    },
 }
 
 impl std::fmt::Debug for AcpEvent {
@@ -119,6 +133,19 @@ impl std::fmt::Debug for AcpEvent {
                 .debug_struct("TerminalOutput")
                 .field("terminal_id", terminal_id)
                 .field("bytes", &chunk.len())
+                .finish(),
+            Self::TerminalStarted {
+                session_id,
+                terminal_id,
+                ..
+            } => f
+                .debug_struct("TerminalStarted")
+                .field("session_id", session_id)
+                .field("terminal_id", terminal_id)
+                .finish(),
+            Self::TerminalReleased { terminal_id } => f
+                .debug_tuple("TerminalReleased")
+                .field(terminal_id)
                 .finish(),
             Self::TerminalExited {
                 terminal_id,

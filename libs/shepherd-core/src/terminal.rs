@@ -249,7 +249,10 @@ pub fn validate_size(columns: u16, rows: u16) -> Result<(), TerminalError> {
 #[derive(Debug)]
 pub enum TerminalEvent {
     Output(Vec<u8>),
-    Exited { exit_code: Option<i32> },
+    Exited {
+        exit_code: Option<i32>,
+        signal: Option<String>,
+    },
 }
 
 pub type TerminalWrite = oneshot::Receiver<Result<(), TerminalError>>;

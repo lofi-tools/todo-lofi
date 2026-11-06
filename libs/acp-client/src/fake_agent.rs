@@ -11,10 +11,11 @@ use agent_client_protocol::schema::v1::{
     AgentCapabilities, CancelNotification, ContentBlock, ContentChunk, CreateTerminalRequest,
     Implementation, InitializeRequest, InitializeResponse, LoadSessionRequest, LoadSessionResponse,
     McpCapabilities, McpServer, NewSessionRequest, NewSessionResponse, PermissionOption,
-    PromptRequest, PromptResponse, ReadTextFileRequest, RequestPermissionRequest,
-    SessionConfigOption, SessionNotification, SessionUpdate, SetSessionConfigOptionRequest,
-    SetSessionConfigOptionResponse, StopReason, TerminalOutputRequest, TextContent, ToolCall,
-    ToolCallUpdate, WaitForTerminalExitRequest, WriteTextFileRequest,
+    PromptRequest, PromptResponse, ReadTextFileRequest, ReleaseTerminalRequest,
+    RequestPermissionRequest, SessionConfigOption, SessionNotification, SessionUpdate,
+    SetSessionConfigOptionRequest, SetSessionConfigOptionResponse, StopReason,
+    TerminalOutputRequest, TextContent, ToolCall, ToolCallUpdate, WaitForTerminalExitRequest,
+    WriteTextFileRequest,
 };
 
 #[cfg(test)]
@@ -43,6 +44,7 @@ pub struct FakeScript {
     pub load_updates: Vec<SessionUpdate>,
     /// Ask the client to run a command.
     pub terminal: Option<(String, Vec<String>)>,
+    pub release_terminal: bool,
     /// Ask the client to read this path.
     pub read_path: Option<PathBuf>,
     /// Ask the client to write this content to this path.
@@ -76,6 +78,21 @@ pub async fn connect_fake_agent(
 ) -> Result<(crate::AcpConnection, Shared), crate::AcpError> {
     let (transport, observations) = spawn_fake_agent(script);
     let connection = crate::connection::connect_over(move |_, _| transport, options).await?;
+    Ok((connection, observations))
+}
+
+pub async fn connect_fake_agent_with_terminals(
+    script: FakeScript,
+    options: crate::ConnectOptions,
+    terminals: Arc<dyn crate::terminal::TerminalBackend>,
+) -> Result<(crate::AcpConnection, Shared), crate::AcpError> {
+    let (transport, observations) = spawn_fake_agent(script);
+    let connection = crate::connection::connect_over_with_terminals(
+        move |_, _| transport,
+        options,
+        Some(terminals),
+    )
+    .await?;
     Ok((connection, observations))
 }
 
@@ -319,6 +336,15 @@ async fn run_turn(
         if let Ok(mut state) = observations.lock() {
             state.terminal_output.push(output.output.clone());
             state.terminal_exit.push(exit.exit_status.exit_code);
+        }
+        if script.release_terminal {
+            connection
+                .send_request(ReleaseTerminalRequest::new(
+                    session_id.clone(),
+                    created.terminal_id,
+                ))
+                .block_task()
+                .await?;
         }
     }
     let cancelled = cancel_count() > initial_cancels;

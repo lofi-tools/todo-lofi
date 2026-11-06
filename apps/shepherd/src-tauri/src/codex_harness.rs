@@ -5,8 +5,9 @@
 //! launch inside each task's directory.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
-use agent_harness::acp::AcpHarness;
+use agent_harness::acp::{AcpHarness, TerminalBackend};
 use agent_harness::codex::{CodexHarness, CodexInstall};
 use agent_harness::opencode::OpenCodeHarness;
 use agent_harness::settings::ConfiguredCommand;
@@ -20,6 +21,7 @@ pub struct DesktopHarnessFactory {
     pub codex: Box<dyn HarnessFactory>,
     pub opencode: Result<Option<PathBuf>, HarnessError>,
     pub claude: Result<Option<ConfiguredCommand>, HarnessError>,
+    pub terminals: Arc<dyn TerminalBackend>,
 }
 
 impl HarnessFactory for DesktopHarnessFactory {
@@ -39,14 +41,14 @@ impl HarnessFactory for DesktopHarnessFactory {
         let (harness, executable, args): (Box<dyn AgentHarness>, &Path, Vec<String>) = match agent {
             Agent::Codex => return self.codex.launch(agent, cwd),
             Agent::OpenCode => (
-                Box::new(OpenCodeHarness::default()),
+                Box::new(OpenCodeHarness::default().with_terminals(self.terminals.clone())),
                 require_configured(&self.opencode, "agents.opencode.executable")?,
                 Vec::new(),
             ),
             Agent::Claude => {
                 let command = require_configured(&self.claude, "agents.claude.executable")?;
                 (
-                    Box::new(AcpHarness::default()),
+                    Box::new(AcpHarness::default().with_terminals(self.terminals.clone())),
                     &command.executable,
                     command.args.clone(),
                 )
@@ -155,6 +157,7 @@ mod tests {
             codex: Box::new(MissingCodexFactory::new("fixture".into())),
             opencode: Ok(Some(executable.clone())),
             claude: Ok(None),
+            terminals: Arc::new(crate::bridge::TerminalHost::default()),
         };
         let cwd = PathBuf::from("/tmp/worktree");
         let (_harness, spec) = factory.launch(Agent::OpenCode, cwd.clone())?;
@@ -174,6 +177,7 @@ mod tests {
                 executable: executable.clone(),
                 args: vec!["--flag".into(), "value with spaces".into()],
             })),
+            terminals: Arc::new(crate::bridge::TerminalHost::default()),
         };
         let cwd = PathBuf::from("/tmp/worktree");
         let (harness, spec) = factory.launch(Agent::Claude, cwd.clone())?;

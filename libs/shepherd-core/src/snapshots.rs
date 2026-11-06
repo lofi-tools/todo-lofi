@@ -1,6 +1,6 @@
 //! Snapshots returned by commands and included in change events.
 
-use agent_harness::{AgentDiagnostics, Entry, SessionApproval};
+use agent_harness::{AgentDiagnostics, AgentTerminal, Entry, SessionApproval};
 use serde::{Deserialize, Serialize};
 
 use crate::projects::{ProjectId, ProjectSnapshot};
@@ -58,6 +58,7 @@ pub struct TaskWorkspace {
     pub layout: WorkspaceLayout,
     pub cancelling: bool,
     pub transcript: Vec<Entry>,
+    pub agent_terminals: Vec<AgentTerminal>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub queued_review_note: Option<String>,
     /// What the adapter launched and speaks, once a session exists.
