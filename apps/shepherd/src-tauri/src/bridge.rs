@@ -18,8 +18,9 @@ use std::time::Duration;
 use agent_harness::acp::{
     TerminalBackend, TerminalExitStatus, TerminalLaunch, TerminalProcessEvent,
 };
+use agent_harness::codex::CodexProjectModels;
 use agent_harness::settings::AgentSettings;
-use agent_harness::{Decision, PromptInput};
+use agent_harness::{CodexTurnOptions, Decision, PromptInput};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use shepherd_core::files::{self, DirectoryListing, FileSearchQuery, FileSearchResult, TextFile};
@@ -749,16 +750,14 @@ impl ShellState {
         }
     }
 
-    pub async fn send_prompt(
+    #[cfg(test)]
+    async fn send_prompt(
         &self,
         task_id: String,
         text: String,
     ) -> Result<TaskWorkspace, BridgeError> {
-        self.workspace(Command::SendPrompt {
-            task_id: TaskId::new(task_id),
-            input: PromptInput::text(text),
-        })
-        .await
+        self.send_prompt_with_files(task_id, text, Vec::new(), CodexTurnOptions::default())
+            .await
     }
 
     pub async fn send_prompt_with_files(
@@ -766,56 +765,60 @@ impl ShellState {
         task_id: String,
         text: String,
         ids: Vec<String>,
+        codex: CodexTurnOptions,
     ) -> Result<TaskWorkspace, BridgeError> {
-        if ids.is_empty() {
-            return self.send_prompt(task_id, text).await;
-        }
-        let directory = self.task_attachment_directory(&task_id).ok_or_else(|| {
-            BridgeError::new(
-                "attachments",
-                "Could not locate this task's attachment directory.",
-            )
-        })?;
-        let path = self
-            .core
-            .lock()
-            .await
-            .task_project_path(&TaskId::new(&task_id))?;
-        let limit = self.attachment_limit_for(&path)?;
-        let attachments = tokio::task::spawn_blocking(move || {
-            ids.iter()
-                .map(|id| attachments::resolve_prompt_file(&directory, id, &limit))
-                .collect::<std::io::Result<Vec<_>>>()
-        })
-        .await
-        .map_err(|error| BridgeError::new("attachments", error.to_string()))?
-        .map_err(|error| {
-            BridgeError::new(
-                "attachments",
-                format!("Could not read an attached file. {error}"),
-            )
-        })?;
-        let paths = attachments
-            .iter()
-            .map(|file| &file.path)
-            .collect::<Vec<_>>();
-        let references = serde_json::to_string_pretty(&paths).map_err(|error| {
-            BridgeError::new(
-                "attachments",
-                format!("Could not encode the attached paths. {error}"),
-            )
-        })?;
-        let text = if text.trim().is_empty() {
-            "Use the attached files."
-        } else {
-            text.trim_end()
+        let mut input = PromptInput {
+            text,
+            codex,
+            ..PromptInput::default()
         };
+        if !ids.is_empty() {
+            let directory = self.task_attachment_directory(&task_id).ok_or_else(|| {
+                BridgeError::new(
+                    "attachments",
+                    "Could not locate this task's attachment directory.",
+                )
+            })?;
+            let path = self
+                .core
+                .lock()
+                .await
+                .task_project_path(&TaskId::new(&task_id))?;
+            let limit = self.attachment_limit_for(&path)?;
+            let attachments = tokio::task::spawn_blocking(move || {
+                ids.iter()
+                    .map(|id| attachments::resolve_prompt_file(&directory, id, &limit))
+                    .collect::<std::io::Result<Vec<_>>>()
+            })
+            .await
+            .map_err(|error| BridgeError::new("attachments", error.to_string()))?
+            .map_err(|error| {
+                BridgeError::new(
+                    "attachments",
+                    format!("Could not read an attached file. {error}"),
+                )
+            })?;
+            let paths = attachments
+                .iter()
+                .map(|file| &file.path)
+                .collect::<Vec<_>>();
+            let references = serde_json::to_string_pretty(&paths).map_err(|error| {
+                BridgeError::new(
+                    "attachments",
+                    format!("Could not encode the attached paths. {error}"),
+                )
+            })?;
+            let text = if input.text.trim().is_empty() {
+                "Use the attached files."
+            } else {
+                input.text.trim_end()
+            };
+            input.text = format!("{text}\n\nAttached files\n{references}");
+            input.attachments = attachments;
+        }
         self.workspace(Command::SendPrompt {
             task_id: TaskId::new(task_id),
-            input: PromptInput {
-                text: format!("{text}\n\nAttached files\n{references}"),
-                attachments,
-            },
+            input,
         })
         .await
     }
@@ -899,19 +902,19 @@ impl ShellState {
         self.core.lock().await.project_list()
     }
 
-    pub async fn codex_project_model(
+    pub async fn codex_project_models(
         &self,
         project_id: String,
-    ) -> Result<Option<String>, BridgeError> {
+    ) -> Result<CodexProjectModels, BridgeError> {
         let Some(program) = &self.codex_program else {
-            return Ok(None);
+            return Ok(CodexProjectModels::default());
         };
         let directory = self
             .core
             .lock()
             .await
             .project_path(&ProjectId::new(project_id))?;
-        agent_harness::codex::project_model(codex_spawn_spec(program, directory))
+        agent_harness::codex::project_models(codex_spawn_spec(program, directory))
             .await
             .map_err(|error| BridgeError::new("codex_model", error.to_string()))
     }
@@ -1704,10 +1707,16 @@ pub mod commands {
         task_id: String,
         text: String,
         attachment_ids: Option<Vec<String>>,
+        codex: Option<CodexTurnOptions>,
     ) -> Result<TaskWorkspace, BridgeError> {
         state
             .inner()
-            .send_prompt_with_files(task_id, text, attachment_ids.unwrap_or_default())
+            .send_prompt_with_files(
+                task_id,
+                text,
+                attachment_ids.unwrap_or_default(),
+                codex.unwrap_or_default(),
+            )
             .await
     }
 
@@ -1796,11 +1805,11 @@ pub mod commands {
     }
 
     #[tauri::command]
-    pub async fn codex_project_model(
+    pub async fn codex_project_models(
         state: State<'_, ShellState>,
         project_id: String,
-    ) -> Result<Option<String>, BridgeError> {
-        state.codex_project_model(project_id).await
+    ) -> Result<CodexProjectModels, BridgeError> {
+        state.codex_project_models(project_id).await
     }
 
     #[tauri::command]
@@ -3033,7 +3042,8 @@ mod tests {
                 .send_prompt_with_files(
                     restricted_task,
                     "Read the old attachment".into(),
-                    vec![old_id]
+                    vec![old_id],
+                    CodexTurnOptions::default()
                 )
                 .await
                 .err()
@@ -3077,7 +3087,8 @@ mod tests {
                 .send_prompt_with_files(
                     other.task.id.as_str().into(),
                     String::new(),
-                    vec![id.clone()]
+                    vec![id.clone()],
+                    CodexTurnOptions::default()
                 )
                 .await
                 .err()
@@ -3085,7 +3096,12 @@ mod tests {
             Some("attachments")
         );
         let sent = state
-            .send_prompt_with_files(task.clone(), String::new(), vec![id.clone()])
+            .send_prompt_with_files(
+                task.clone(),
+                String::new(),
+                vec![id.clone()],
+                CodexTurnOptions::default(),
+            )
             .await?;
         let entry = sent
             .transcript

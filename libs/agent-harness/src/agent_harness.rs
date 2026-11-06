@@ -288,6 +288,8 @@ pub struct AgentDiagnostics {
     pub fallback_reason: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
     /// The child's stderr, newest last.
     pub stderr_tail: String,
 }
@@ -367,6 +369,14 @@ impl Capabilities {
 pub struct PromptInput {
     pub text: String,
     pub attachments: Vec<PromptAttachment>,
+    pub codex: CodexTurnOptions,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(default)]
+pub struct CodexTurnOptions {
+    pub model: Option<String>,
+    pub effort: Option<String>,
 }
 
 impl PromptInput {

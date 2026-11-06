@@ -20,6 +20,7 @@ test.beforeEach(async ({ context }) => {
     let cancelRequests = 0
     let screenshotSaves = 0
     const promptFileUploads: Array<{ taskId: string; name: string; text: string }> = []
+    const codexTurns: Array<{ taskId: string; model?: string; effort?: string }> = []
     const fileListings: string[] = []
     const fileActions: Array<{ projectId: string; taskId: string | null; path: string; action: string }> = []
     const fileSearches: Array<{ id: string; taskId: string | null; mode: string }> = []
@@ -262,7 +263,7 @@ test.beforeEach(async ({ context }) => {
       const limited = options.has('limited-adapter')
       const capabilities = task.state === 'draft' || legacySession ? null : {
         streaming: true, thoughts: true, toolCalls: true, approvals: !limited, resume: !limited,
-        cancel: !limited, modelPicker: false, modePicker: false, images: false, resourceLinks: false,
+        cancel: !limited, modelPicker: !limited && task.agent === 'codex', modePicker: false, images: false, resourceLinks: false,
         usage: true, agentTerminals: !limited, patchesInApprovals: !limited,
       }
       return {
@@ -282,7 +283,12 @@ test.beforeEach(async ({ context }) => {
         diagnostics: options.has('acp-fallback') ? {
           command: '/existing/opencode acp', protocol: 'ACP v1 OpenCode 2.0.14',
           fallbackReason: 'OpenCode native server unavailable: no loopback server', stderrTail: 'agent stderr',
-        } : task.state === 'waiting' ? { command: 'codex app-server', protocol: 'app-server', model: 'session-model', stderrTail: '' } : null,
+        } : task.state === 'waiting' ? {
+          command: 'codex app-server', protocol: 'app-server',
+          model: codexTurns.findLast((turn) => turn.taskId === task.id && turn.model)?.model ?? 'session-model',
+          reasoningEffort: codexTurns.findLast((turn) => turn.taskId === task.id && turn.effort)?.effort,
+          stderrTail: '',
+        } : null,
       }
     }
 
@@ -355,8 +361,14 @@ test.beforeEach(async ({ context }) => {
               }
             }
             return null
-          case 'codex_project_model':
-            return 'gpt-6.1-terra'
+          case 'codex_project_models':
+            return { model: 'gpt-6.1-terra', effort: 'low', models: [
+              { model: 'gpt-6.1-terra', displayName: 'GPT-6.1 Terra', defaultReasoningEffort: 'low',
+                supportedReasoningEfforts: [{ reasoningEffort: 'low', description: 'Low effort' }] },
+              { model: 'fixture-model', displayName: 'Fixture model', defaultReasoningEffort: 'medium',
+                supportedReasoningEfforts: [{ reasoningEffort: 'medium', description: 'Default effort' },
+                  { reasoningEffort: 'high', description: 'High effort' }] },
+            ] }
           case 'opencode_configured':
             return options.has('configured-opencode')
           case 'claude_configured':
@@ -548,6 +560,7 @@ test.beforeEach(async ({ context }) => {
           }
           case 'send_prompt': {
             const task = tasks.find((candidate) => candidate.id === args.taskId)
+            if (args.codex) codexTurns.push({ taskId: args.taskId, ...args.codex })
             const text = args.attachmentIds?.length ? `Attachments: ${args.attachmentIds.join(', ')}` : args.text
             task.state = 'waiting'
             transcripts[task.id] = [
@@ -758,6 +771,7 @@ test.beforeEach(async ({ context }) => {
     }
     window.__fileSearches = fileSearches
     window.__promptFileUploads = promptFileUploads
+    window.__codexTurns = codexTurns
     window.__taskSearches = taskSearches
     window.__cancelledTaskSearches = cancelledTaskSearches
     window.__cancelledFileSearches = cancelledFileSearches
@@ -2024,7 +2038,28 @@ test('focuses the composer card and opens the toolbar menus above it', async ({ 
   await composer.getByRole('button', { name: 'Model / effort: gpt-6.1-terra' }).click()
   const model = composer.getByRole('menu', { name: 'Model / effort' })
   await expect(model.getByRole('menuitemradio', { name: 'gpt-6.1-terra', checked: true })).toBeVisible()
-  await expect(model.getByRole('menuitemradio', { name: 'Choose effort (coming soon)' })).toBeDisabled()
+  await expect(model.getByRole('menuitemradio', { name: 'Low', checked: true })).toBeVisible()
+})
+
+test('passes the model and its advertised effort from the empty composer to the first turn', async ({ page }) => {
+  await page.goto('/?two-projects')
+  await page.getByRole('button', { name: 'notes', exact: true }).click()
+  const composer = page.locator('.composer')
+  const menu = composer.getByRole('menu', { name: 'Model / effort' })
+  await composer.getByRole('button', { name: 'Model / effort: gpt-6.1-terra' }).click()
+  await menu.getByRole('group', { name: 'Model', exact: true }).getByRole('menuitemradio', { name: 'fixture-model' }).click()
+  const selected = composer.getByRole('button', { name: 'Model / effort: fixture-model' })
+  await selected.click()
+  const effort = menu.getByRole('group', { name: 'Reasoning effort' })
+  await expect(effort.getByRole('menuitemradio', { name: 'Medium', checked: true })).toBeVisible()
+  await expect(effort.getByRole('menuitemradio', { name: 'Low' })).toHaveCount(0)
+  await effort.getByRole('menuitemradio', { name: 'High' }).click()
+
+  await composer.getByLabel('Prompt', { exact: true }).fill('Use the selected model')
+  await composer.getByRole('button', { name: 'Send', exact: true }).click()
+  await expect(page.locator('.transcript')).toContainText('Use the selected model')
+  expect(await page.evaluate(() => window.__codexTurns)).toEqual([{ taskId: 'task-2', model: 'fixture-model', effort: 'high' }])
+  await expect(selected).toBeVisible()
 })
 
 test('queues removable files and uploads them only when sending the prompt', async ({ page }) => {

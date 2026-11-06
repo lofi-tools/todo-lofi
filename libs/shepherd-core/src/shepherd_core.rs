@@ -81,6 +81,8 @@ pub enum CoreError {
     EmptyTitle,
     #[error("the prompt is empty")]
     EmptyPrompt,
+    #[error("Codex model and effort options require a Codex task.")]
+    CodexOptionsForOtherAgent,
     #[error("Could not resolve mentioned file {path}. {source}")]
     FileMention {
         path: String,
@@ -1219,6 +1221,9 @@ impl Core {
         input.text = input.text.trim().to_owned();
         if input.text.is_empty() {
             return Err(CoreError::EmptyPrompt);
+        }
+        if input.codex != Default::default() && self.task(task_id)?.agent != Agent::Codex {
+            return Err(CoreError::CodexOptionsForOtherAgent);
         }
 
         match self.task(task_id)?.state {

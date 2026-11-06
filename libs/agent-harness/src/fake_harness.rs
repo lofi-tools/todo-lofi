@@ -303,6 +303,7 @@ impl AgentHarness for FakeHarness {
             protocol: "fake-harness".to_string(),
             fallback_reason: None,
             model: None,
+            reasoning_effort: None,
             stderr_tail: String::new(),
         }
     }

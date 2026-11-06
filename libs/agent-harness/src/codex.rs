@@ -32,11 +32,12 @@ use crate::{
 /// Protocol methods Shepherd knows how to drive. A build that advertises fewer
 /// methods gets the intersection, so a control is never shown for a method the
 /// server does not implement.
-pub const SUPPORTED_METHODS: [&str; 6] = [
+pub const SUPPORTED_METHODS: [&str; 7] = [
     "thread/start",
     "thread/resume",
     "turn/start",
     "turn/interrupt",
+    "model/list",
     "item/commandExecution/requestApproval",
     "item/fileChange/requestApproval",
 ];
@@ -607,52 +608,80 @@ async fn list_projects(spec: SpawnSpec) -> HarnessResult<Vec<CodexProject>> {
     Ok(projects)
 }
 
-pub async fn project_model(spec: SpawnSpec) -> HarnessResult<Option<String>> {
+#[derive(Default, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexProjectModels {
+    pub model: Option<String>,
+    pub effort: Option<String>,
+    pub models: Vec<CodexModel>,
+}
+
+#[derive(Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexModel {
+    pub model: String,
+    #[serde(default)]
+    display_name: String,
+    #[serde(default)]
+    hidden: bool,
+    #[serde(default)]
+    is_default: bool,
+    #[serde(default)]
+    supported_reasoning_efforts: Vec<CodexEffort>,
+    default_reasoning_effort: Option<String>,
+}
+
+#[derive(Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CodexEffort {
+    reasoning_effort: String,
+    #[serde(default)]
+    description: String,
+}
+
+pub async fn project_models(spec: SpawnSpec) -> HarnessResult<CodexProjectModels> {
     let mut harness = CodexHarness::new();
     let result = async {
         let directory = spec.cwd.display().to_string();
-        harness.start(spec).await?;
+        let capabilities = harness.start(spec).await?;
         let config = harness
             .request("config/read", json!({ "cwd": directory }))
-            .await?;
-        if let Some(model) = config.pointer("/config/model").and_then(Value::as_str) {
-            return Ok(Some(model.to_owned()));
-        }
-
-        let mut cursor = None;
-        let mut seen_cursors = BTreeSet::new();
-        loop {
-            let response = harness
-                .request("model/list", json!({ "cursor": cursor }))
-                .await?;
-            let models = response
-                .get("data")
-                .and_then(Value::as_array)
-                .ok_or_else(|| {
-                    HarnessError::Protocol("the Codex model list did not include data".into())
-                })?;
-            if let Some(model) = models.iter().find(|model| model["isDefault"] == true) {
-                return Ok(model
-                    .get("model")
+            .await;
+        let mut settings = CodexProjectModels::default();
+        match config {
+            Ok(config) => {
+                settings.model = config
+                    .pointer("/config/model")
                     .and_then(Value::as_str)
-                    .map(str::to_owned));
+                    .map(str::to_owned);
+                settings.effort = config
+                    .pointer("/config/model_reasoning_effort")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned);
             }
-            let Some(next) = response.get("nextCursor").and_then(Value::as_str) else {
-                return Ok(None);
-            };
-            if !seen_cursors.insert(next.to_owned()) {
-                return Err(HarnessError::Protocol(
-                    "Codex repeated a model list cursor".into(),
-                ));
-            }
-            cursor = Some(next.to_owned());
+            Err(error) => tracing::debug!(%error, "could not read Codex project defaults"),
         }
+        if capabilities.model_picker {
+            match harness.model_catalog().await {
+                Ok(models) => settings.models = models,
+                Err(error) => tracing::warn!(%error, "could not list Codex models"),
+            }
+        }
+        if settings.model.is_none() {
+            settings.model = settings
+                .models
+                .iter()
+                .find(|model| model.is_default)
+                .map(|model| model.model.clone());
+        }
+        settings.models.retain(|model| !model.hidden);
+        Ok::<_, HarnessError>(settings)
     }
     .await;
     let shutdown = harness.shutdown().await;
-    let model = result?;
+    let settings = result?;
     shutdown?;
-    Ok(model)
+    Ok(settings)
 }
 
 #[derive(Default)]
@@ -687,6 +716,7 @@ pub struct CodexHarness {
     cwd: PathBuf,
     session_id: Option<SessionId>,
     model: Option<String>,
+    reasoning_effort: Option<String>,
     command: String,
     protocol: String,
     version: Option<String>,
@@ -718,6 +748,7 @@ impl CodexHarness {
             cwd: PathBuf::new(),
             session_id: None,
             model: None,
+            reasoning_effort: None,
             command: String::new(),
             protocol: "app-server".to_string(),
             version: None,
@@ -752,8 +783,34 @@ impl CodexHarness {
             patches_in_approvals: self.supports("item/fileChange/requestApproval"),
             resume: self.supports("thread/resume"),
             cancel: self.supports("turn/interrupt"),
+            model_picker: self.supports("model/list") && self.supports("turn/start"),
             images: true,
             ..Capabilities::default()
+        }
+    }
+
+    async fn model_catalog(&mut self) -> HarnessResult<Vec<CodexModel>> {
+        let mut models = Vec::new();
+        let mut cursor = None;
+        let mut seen_cursors = BTreeSet::new();
+        loop {
+            let response = self
+                .request("model/list", json!({ "cursor": cursor }))
+                .await?;
+            let page: Vec<CodexModel> =
+                serde_json::from_value(response["data"].clone()).map_err(|error| {
+                    HarnessError::Protocol(format!("invalid Codex model list: {error}"))
+                })?;
+            models.extend(page);
+            let Some(next) = response.get("nextCursor").and_then(Value::as_str) else {
+                return Ok(models);
+            };
+            if !seen_cursors.insert(next.to_owned()) {
+                return Err(HarnessError::Protocol(
+                    "Codex repeated a model list cursor".into(),
+                ));
+            }
+            cursor = Some(next.to_owned());
         }
     }
 
@@ -925,6 +982,7 @@ impl AgentHarness for CodexHarness {
             protocol: self.protocol.clone(),
             fallback_reason: None,
             model: self.model.clone(),
+            reasoning_effort: self.reasoning_effort.clone(),
             stderr_tail: stderr_tail(&self.stderr),
         }
     }
@@ -977,6 +1035,10 @@ impl AgentHarness for CodexHarness {
             .get("model")
             .and_then(Value::as_str)
             .map(str::to_owned);
+        self.reasoning_effort = response
+            .get("reasoningEffort")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
         Ok(session_id)
     }
 
@@ -987,6 +1049,11 @@ impl AgentHarness for CodexHarness {
             .ok_or(HarnessError::SessionMissing)?;
         if !self.pending.lock().await.approvals.is_empty() {
             return Err(HarnessError::ApprovalPending);
+        }
+        if input.codex != Default::default() && !self.capabilities().model_picker {
+            return Err(HarnessError::Protocol(
+                "This Codex session does not support model or effort selection.".into(),
+            ));
         }
 
         let cwd = self.cwd.display().to_string();
@@ -1002,10 +1069,7 @@ impl AgentHarness for CodexHarness {
                 .ok_or_else(|| HarnessError::Protocol("a Codex image path must be UTF-8".into()))?;
             items.push(json!({ "type": "localImage", "path": path }));
         }
-        let response = self
-            .request(
-                "turn/start",
-                json!({
+        let mut params = json!({
                     "threadId": session_id.as_str(),
                     "input": items,
                     "cwd": cwd,
@@ -1015,13 +1079,20 @@ impl AgentHarness for CodexHarness {
                         "writableRoots": [cwd],
                         "networkAccess": false,
                     },
-                }),
-            )
-            .await?;
+        });
+        if let Some(model) = &input.codex.model {
+            params["model"] = json!(model);
+        }
+        if let Some(effort) = &input.codex.effort {
+            params["effort"] = json!(effort);
+        }
+        let response = self.request("turn/start", params).await?;
 
         let turn_id = read_turn_id(&response).ok_or_else(|| {
             HarnessError::Protocol("the turn response did not include turn.id".to_string())
         })?;
+        self.model = input.codex.model.or(self.model.take());
+        self.reasoning_effort = input.codex.effort.or(self.reasoning_effort.take());
         self.pending.lock().await.turn_id = Some(turn_id.clone());
         self.sender
             .send(HarnessEvent::TurnStarted {
@@ -1222,6 +1293,7 @@ impl AgentHarness for ExecHarness {
             protocol: self.version.as_ref().map_or_else(|| "codex exec --json".into(), |version| format!("codex exec --json ({version})")),
             fallback_reason: Some("Codex app-server did not complete the initialize handshake. Each prompt starts a separate Codex process.".into()),
             model: None,
+            reasoning_effort: None,
             stderr_tail: stderr_tail(&self.stderr),
         }
     }
@@ -1271,6 +1343,12 @@ impl AgentHarness for ExecHarness {
         }
         if self.session_id.is_none() {
             return Err(HarnessError::SessionMissing);
+        }
+        if input.codex != Default::default() {
+            return Err(HarnessError::Protocol(
+                "This Codex build does not support model or effort selection through Shepherd."
+                    .into(),
+            ));
         }
         if self
             .run
@@ -2399,18 +2477,18 @@ while IFS= read -r line; do
   id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')
   case "$line" in
     *'"method":"initialize"'*)
-      printf '{"id":%s,"result":{"capabilities":{"methods":["thread/start","thread/resume","turn/start","turn/interrupt","item/commandExecution/requestApproval"]}}}\n' "$id"
+      printf '{"id":%s,"result":{"capabilities":{"methods":["thread/start","thread/resume","turn/start","turn/interrupt","model/list","item/commandExecution/requestApproval"]}}}\n' "$id"
       ;;
     *'"method":"config/read"'*)
       case "$line" in
         *'/configured"'*) model='"project-model"' ;;
         *) model=null ;;
       esac
-      printf '{"id":%s,"result":{"config":{"model":%s}}}\n' "$id" "$model"
+      printf '{"id":%s,"result":{"config":{"model":%s,"model_reasoning_effort":"low"}}}\n' "$id" "$model"
       ;;
     *'"method":"model/list"'*)
       case "$line" in
-        *'"cursor":"next"'*) printf '{"id":%s,"result":{"data":[{"model":"catalog-default","isDefault":true}],"nextCursor":null}}\n' "$id" ;;
+        *'"cursor":"next"'*) printf '{"id":%s,"result":{"data":[{"model":"catalog-default","isDefault":true,"defaultReasoningEffort":"low","supportedReasoningEfforts":[{"reasoningEffort":"low","description":"Fixture"}]},{"model":"hidden","hidden":true}],"nextCursor":null}}\n' "$id" ;;
         *) printf '{"id":%s,"result":{"data":[{"model":"another-model","isDefault":false}],"nextCursor":"next"}}\n' "$id" ;;
       esac
       ;;
@@ -2566,7 +2644,7 @@ done
     }
 
     #[tokio::test]
-    async fn app_server_receives_the_cached_image_path_as_a_local_image()
+    async fn app_server_receives_the_cached_image_and_selected_turn_options()
     -> Result<(), Box<dyn std::error::Error>> {
         let directory = TempDir::new()?;
         let script = PROTOCOL_STUB.replace(
@@ -2576,6 +2654,7 @@ done
         let stub = write_stub(&directory, "codex-images", &script);
         let (mut harness, capabilities) = start_session(&stub, directory.path()).await;
         assert!(capabilities.images);
+        assert!(capabilities.model_picker);
         let path = directory.path().join("a screenshot.png");
         harness
             .prompt(PromptInput {
@@ -2585,6 +2664,10 @@ done
                     image_mime_type: Some("image/png".into()),
                     metadata: None,
                 }],
+                codex: crate::CodexTurnOptions {
+                    model: Some("catalog-default".into()),
+                    effort: Some("low".into()),
+                },
             })
             .await?;
         let request: Value =
@@ -2595,6 +2678,16 @@ done
                 {"type": "text", "text": "Review this screenshot."},
                 {"type": "localImage", "path": path},
             ])
+        );
+        assert_eq!(request["params"]["model"], "catalog-default");
+        assert_eq!(request["params"]["effort"], "low");
+        assert_eq!(
+            harness.diagnostics().model.as_deref(),
+            Some("catalog-default")
+        );
+        assert_eq!(
+            harness.diagnostics().reasoning_effort.as_deref(),
+            Some("low")
         );
         harness.shutdown().await?;
         Ok(())
@@ -2878,13 +2971,31 @@ done
         let configured = directory.path().join("configured");
         std::fs::create_dir(&configured)?;
 
+        let settings = project_models(spec(&stub, &configured)).await?;
+        assert_eq!(settings.model.as_deref(), Some("project-model"));
+        assert_eq!(settings.effort.as_deref(), Some("low"));
         assert_eq!(
-            project_model(spec(&stub, &configured)).await?.as_deref(),
-            Some("project-model")
+            settings
+                .models
+                .iter()
+                .map(|model| model.model.as_str())
+                .collect::<Vec<_>>(),
+            ["another-model", "catalog-default"]
+        );
+        let model = settings.models.last().ok_or("missing catalog default")?;
+        assert_eq!(model.default_reasoning_effort.as_deref(), Some("low"));
+        assert_eq!(
+            model
+                .supported_reasoning_efforts
+                .first()
+                .ok_or("missing advertised effort")?
+                .reasoning_effort,
+            "low"
         );
         assert_eq!(
-            project_model(spec(&stub, directory.path()))
+            project_models(spec(&stub, directory.path()))
                 .await?
+                .model
                 .as_deref(),
             Some("catalog-default")
         );
@@ -3388,6 +3499,7 @@ sleep 30
                     image_mime_type: Some("image/png".into()),
                     metadata: None,
                 }],
+                ..PromptInput::default()
             })
             .await?;
         collect_until(&mut harness, |events| {

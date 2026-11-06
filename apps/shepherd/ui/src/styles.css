@@ -977,6 +977,21 @@ textarea {
   text-overflow: ellipsis;
 }
 
+.picker-menu__group {
+  display: block;
+}
+
+.picker-menu__group + .picker-menu__group {
+  border-top: 1px solid var(--border);
+}
+
+.picker-menu__label {
+  display: block;
+  padding: 5px 8px 2px;
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
 .picker-menu .nav-item svg {
   flex-shrink: 0;
   margin-inline-start: auto;

@@ -1642,6 +1642,7 @@ exec sleep 60
                         image_mime_type: Some("image/png".into()),
                         metadata: None,
                     }],
+                    ..PromptInput::default()
                 })
                 .await?;
             let events = fixture_outcome(&mut harness, TurnFinishReason::Completed).await?;

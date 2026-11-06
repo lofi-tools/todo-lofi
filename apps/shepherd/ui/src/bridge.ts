@@ -188,6 +188,7 @@ export interface AgentDiagnostics {
   protocol: string
   fallbackReason?: string
   model?: string
+  reasoningEffort?: string
   stderrTail: string
 }
 
@@ -354,8 +355,13 @@ export function discardDraft(taskId: string): Promise<void> {
   return invoke<void>('discard_draft', { taskId })
 }
 
-export function sendPrompt(taskId: string, text: string, attachmentIds: string[] = []): Promise<TaskWorkspace> {
-  return invoke<TaskWorkspace>('send_prompt', { taskId, text, attachmentIds })
+export interface CodexTurnOptions {
+  model?: string
+  effort?: string
+}
+
+export function sendPrompt(taskId: string, text: string, attachmentIds: string[] = [], codex?: CodexTurnOptions): Promise<TaskWorkspace> {
+  return invoke<TaskWorkspace>('send_prompt', { taskId, text, attachmentIds, codex })
 }
 
 export async function savePromptFile(taskId: string, file: File): Promise<string> {
@@ -418,8 +424,21 @@ export function projectRemote(projectId: string): Promise<ProjectRemote | null> 
   return invoke('project_remote', { projectId })
 }
 
-export function codexProjectModel(projectId: string): Promise<string | null> {
-  return invoke('codex_project_model', { projectId })
+export interface CodexModel {
+  model: string
+  displayName: string
+  supportedReasoningEfforts: Array<{ reasoningEffort: string; description: string }>
+  defaultReasoningEffort: string | null
+}
+
+export interface CodexProjectModels {
+  model: string | null
+  effort: string | null
+  models: CodexModel[]
+}
+
+export function codexProjectModels(projectId: string): Promise<CodexProjectModels> {
+  return invoke('codex_project_models', { projectId })
 }
 
 export function scanProjects(rescan: boolean): Promise<ProjectScan> {

@@ -227,9 +227,12 @@ current layout and give future changes a point of comparison.
 - Show the selected model name on the model and effort trigger. Shepherd's
   Codex default is GPT-6.1 Terra (`gpt-6.1-terra`). Before a session, display
   the model resolved from Shepherd's launch configuration. Once a session
-  starts, use the model reported by that session. Use **Codex default** if
-  the model name is unavailable. OpenCode and Claude Code use their own model
-  configuration and do not show this picker.
+  starts, use the model reported by that session. List the visible models
+  advertised by Codex and the reasoning efforts available for the chosen
+  model. Choosing a model also selects its advertised default effort. A
+  choice in the composer applies to the next turn. Use **Codex default** if
+  the model name is unavailable. OpenCode and Claude Code use their own
+  model configuration and do not show this picker.
 - Send sits inside the card, at the end of the lower row. Use the compact
   right-pointing arrowhead icon and a bright accent when enabled. The current
   button size is 32 × 30 px. The disabled state uses a muted tint of the same

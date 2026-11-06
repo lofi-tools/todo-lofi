@@ -135,10 +135,10 @@ export function App() {
     },
     async (projectId) => {
       try {
-        return { projectId, model: await bridge.codexProjectModel(projectId) }
+        return { projectId, ...await bridge.codexProjectModels(projectId) }
       } catch (error) {
         console.warn('Could not read the Codex model', error)
-        return { projectId, model: null }
+        return { projectId, model: null, effort: null, models: [] }
       }
     },
   )
@@ -152,11 +152,9 @@ export function App() {
   let transcript: HTMLDivElement | undefined
   const currentAgent = () => workspace()?.task.agent ?? newTaskAgent()
   const currentAgentName = () => bridge.AGENT_LABELS[currentAgent()]
-  const composerModel = () => {
-    const activeModel = workspace()?.diagnostics?.model
-    if (activeModel) return activeModel
+  const codexCatalog = () => {
     const configured = projectModel()
-    return configured?.projectId === selectedProjectId() ? configured.model : null
+    return configured?.projectId === selectedProjectId() ? configured : undefined
   }
   const [showArchived, setShowArchived] = createSignal(false)
   const [archiveVisibility, setArchiveVisibility] = createSignal(new Map<string, boolean>())
@@ -245,6 +243,42 @@ export function App() {
     return task ? `task:${task}` : project ? `project:${project}` : undefined
   }
   const promptFiles = () => queuedFiles().get(fileQueueKey() ?? '') ?? []
+  const [queuedCodexOptions, setQueuedCodexOptions] = createSignal(new Map<string, bridge.CodexTurnOptions>())
+  const codexOptions = () => queuedCodexOptions().get(fileQueueKey() ?? '')
+  const composerModel = () => codexOptions()?.model ?? workspace()?.diagnostics?.model ?? codexCatalog()?.model ?? null
+  const composerEffort = () => {
+    const queued = codexOptions()
+    if (queued?.effort || queued?.model) return queued.effort
+    const catalog = codexCatalog()
+    return workspace()?.diagnostics?.reasoningEffort
+      ?? (catalog?.model === composerModel() ? catalog?.effort : undefined)
+  }
+
+  function setCodexOptions(options: bridge.CodexTurnOptions) {
+    const key = fileQueueKey()
+    if (key) setQueuedCodexOptions((queued) => new Map(queued).set(key, options))
+  }
+
+  function clearCodexOptions(taskId: string) {
+    setQueuedCodexOptions((queued) => {
+      const key = `task:${taskId}`
+      if (!queued.has(key)) return queued
+      const next = new Map(queued)
+      next.delete(key)
+      return next
+    })
+  }
+
+  function moveCodexOptionsToDraft(projectId: string, taskId: string) {
+    setQueuedCodexOptions((queued) => {
+      const key = `project:${projectId}`
+      const options = queued.get(key)
+      if (!options) return queued
+      const next = new Map(queued)
+      next.delete(key)
+      return next.set(`task:${taskId}`, options)
+    })
+  }
   let fileInput: HTMLInputElement | undefined
   let promptInput: HTMLTextAreaElement | undefined
   const firstDrafts = new Map<string, Promise<bridge.TaskWorkspace>>()
@@ -607,6 +641,7 @@ export function App() {
     setSettingsOpen(false)
     void run(async () => {
       const draft = await bridge.createDraft(projectId, 'New task', newTaskAgent())
+      moveCodexOptionsToDraft(projectId, draft.task.id)
       setPrompt('')
       if (selectedProjectId() !== projectId) {
         setTerminalListEvent(undefined)
@@ -624,6 +659,7 @@ export function App() {
     const inFlight = firstDrafts.get(projectId)
     if (inFlight) return inFlight
     const request = bridge.createDraft(projectId, 'New task', newTaskAgent()).then((draft) => {
+      moveCodexOptionsToDraft(projectId, draft.task.id)
       setQueuedFiles((queues) => {
         const files = queues.get(`project:${projectId}`)
         if (!files) return queues
@@ -721,6 +757,7 @@ export function App() {
     if (!current) return
     void run(async () => {
       await bridge.discardDraft(current.task.id)
+      clearCodexOptions(current.task.id)
       clearPromptFiles(current.task.id)
       setWorkspace(null)
       setSelectedTaskId(null)
@@ -734,13 +771,15 @@ export function App() {
     const current = workspace()
     const text = prompt().trim()
     const files = promptFiles()
+    const codex = currentAgent() === 'codex' ? codexOptions() : undefined
     if (!projectId || (!text && !files.length) || !canCompose() || pending()) return
     void run(async () => {
       const task = current?.task ?? (await firstDraft(projectId)).task
       const attachmentIds: string[] = []
       for (const file of files) attachmentIds.push(await bridge.savePromptFile(task.id, file))
-      const updated = await bridge.sendPrompt(task.id, text, attachmentIds)
+      const updated = await bridge.sendPrompt(task.id, text, attachmentIds, codex)
       clearPromptFiles(task.id)
+      clearCodexOptions(task.id)
       if (selectedTaskId() === task.id) {
         setPrompt((value) => value.trim() === text ? '' : value)
         setWorkspace(updated)
@@ -1289,7 +1328,9 @@ export function App() {
                 onAttach={() => fileInput?.click()} />
               <div class="composer__send-actions">
                 <Show when={currentAgent() === 'codex'}>
-                  <ComposerModelPicker model={composerModel()} />
+                  <ComposerModelPicker model={composerModel()} effort={composerEffort()} models={codexCatalog()?.models ?? []}
+                    disabled={!canCompose() || pending() || workspace()?.capabilities?.modelPicker === false}
+                    options={codexOptions()} onChange={setCodexOptions} />
                 </Show>
                 <button
                   type="button"
@@ -1558,7 +1599,8 @@ interface PickerMenuProps {
   label: string
   text?: string
   value?: string
-  options: PickerOption[]
+  options?: PickerOption[]
+  groups?: Array<{ label: string; value: string; options: PickerOption[] }>
   onChange?: (value: string) => void
 }
 
@@ -1566,11 +1608,6 @@ const DEFAULT_APPROVAL = { id: 'ask', name: 'Ask me' }
 const APPROVAL_OPTIONS: PickerOption[] = [
   DEFAULT_APPROVAL,
   { id: 'automatic', name: 'Approve for me (coming soon)', disabled: true },
-]
-
-const MODEL_OVERRIDES: PickerOption[] = [
-  { id: 'model', name: 'Choose model (coming soon)', disabled: true },
-  { id: 'effort', name: 'Choose effort (coming soon)', disabled: true },
 ]
 
 function ComposerPickers(props: { agent: bridge.Agent; agentName: string; agents: PickerOption[]; onAgentChange: (value: string) => void; showShellApprovals: boolean; canAttach: boolean; onAttach: () => void }) {
@@ -1602,10 +1639,49 @@ function ComposerPickers(props: { agent: bridge.Agent; agentName: string; agents
   )
 }
 
-function ComposerModelPicker(props: { model: string | null }) {
+function ComposerModelPicker(props: {
+  model: string | null
+  effort?: string | null
+  models: bridge.CodexModel[]
+  options?: bridge.CodexTurnOptions
+  disabled: boolean
+  onChange: (options: bridge.CodexTurnOptions) => void
+}) {
   const modelLabel = () => props.model ?? 'Codex default'
+  const modelInfo = () => props.models.find((model) => model.model === props.model)
+  const modelOptions = () => [
+    ...(!modelInfo() ? [{ id: `model:${modelLabel()}`, name: modelLabel(), disabled: true }] : []),
+    ...props.models.map((model) => ({
+      id: `model:${model.model}`, name: model.model, detail: model.displayName, disabled: props.disabled,
+    })),
+  ]
+  const effortOptions = () => modelInfo()?.supportedReasoningEfforts.map(({ reasoningEffort, description }) => ({
+    id: `effort:${reasoningEffort}`,
+    name: reasoningEffort.charAt(0).toUpperCase() + reasoningEffort.slice(1),
+    detail: description,
+    disabled: props.disabled,
+  })) ?? []
+  const groups = () => {
+    const efforts = effortOptions()
+    return [
+      { label: 'Model', value: `model:${modelLabel()}`, options: modelOptions() },
+      {
+        label: 'Reasoning effort',
+        value: `effort:${props.effort ?? modelInfo()?.defaultReasoningEffort ?? ''}`,
+        options: efforts.length ? efforts : [{ id: 'unavailable', name: 'Effort unavailable', disabled: true }],
+      },
+    ]
+  }
+  function choose(id: string) {
+    if (id.startsWith('model:')) {
+      const model = props.models.find((item) => item.model === id.slice(6))
+      if (model) props.onChange({ model: model.model, effort: model.defaultReasoningEffort ?? undefined })
+    } else if (id.startsWith('effort:')) {
+      props.onChange({ ...props.options, effort: id.slice(7) })
+    }
+  }
   return (
-    <PickerMenu label="Model / effort" text={modelLabel()} value="default" options={[{ id: 'default', name: modelLabel() }, ...MODEL_OVERRIDES]} triggerClass="composer__picker" above>
+    <PickerMenu label="Model / effort" text={modelLabel()} groups={groups()} onChange={choose} triggerClass="composer__picker" above>
       <span class="composer__picker-label">{modelLabel()}</span>
       <PickerCaret />
     </PickerMenu>
@@ -1635,6 +1711,7 @@ function PickerMenu(props: PickerMenuProps & { triggerClass: string; above?: boo
   const triggerLabel = () => props.text ? `${props.label}: ${props.text}` : props.label
   let trigger!: HTMLButtonElement
   let menu!: HTMLSpanElement
+  const groups = () => props.groups ?? [{ label: undefined, value: props.value, options: props.options ?? [] }]
 
   function positionMenu() {
     const bounds = trigger.getBoundingClientRect()
@@ -1722,30 +1799,33 @@ function PickerMenu(props: PickerMenuProps & { triggerClass: string; above?: boo
           items[next]?.focus()
         }}
       >
-        <For each={props.options}>
-          {(option) => (
-            <button
-              type="button"
-              class="nav-item"
-              role={props.value === undefined ? 'menuitem' : 'menuitemradio'}
-              tabindex={-1}
-              aria-checked={props.value === undefined ? undefined : props.value === option.id}
-              title={option.detail}
-              disabled={option.disabled}
-              onClick={() => {
-                closeMenu()
-                if (option.id !== props.value) props.onChange?.(option.id)
-              }}
-            >
-              <span>{option.name}</span>
-              <Show when={props.value === option.id}>
-                <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                  <path d="m3.5 8 3 3 6-6" />
-                </svg>
-              </Show>
-            </button>
-          )}
-        </For>
+        <For each={groups()}>{(group) =>
+          <span class="picker-menu__group" role={group.label ? 'group' : undefined} aria-label={group.label}>
+            <Show when={group.label}><span class="picker-menu__label" aria-hidden="true">{group.label}</span></Show>
+            <For each={group.options}>{(option) => (
+              <button
+                type="button"
+                class="nav-item"
+                role={group.value === undefined ? 'menuitem' : 'menuitemradio'}
+                tabindex={-1}
+                aria-checked={group.value === undefined ? undefined : group.value === option.id}
+                title={option.detail}
+                disabled={option.disabled}
+                onClick={() => {
+                  closeMenu()
+                  if (option.id !== group.value) props.onChange?.(option.id)
+                }}
+              >
+                <span>{option.name}</span>
+                <Show when={group.value === option.id}>
+                  <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <path d="m3.5 8 3 3 6-6" />
+                  </svg>
+                </Show>
+              </button>
+            )}</For>
+          </span>
+        }</For>
       </span>
     </>
   )

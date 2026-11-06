@@ -1218,6 +1218,7 @@ mod tests {
                     image_mime_type: None,
                     metadata: None,
                 }],
+                ..PromptInput::default()
             })
             .await?;
         complete_attachment_turn(&mut harness).await?;
@@ -1272,6 +1273,7 @@ mod tests {
                             metadata: None,
                         },
                     ],
+                    ..PromptInput::default()
                 })
                 .await?;
             complete_attachment_turn(&mut harness).await?;

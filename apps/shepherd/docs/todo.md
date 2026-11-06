@@ -992,7 +992,9 @@ and the task header never overstates the tier.
   `attachments.max_file_bytes` supports app defaults and project overrides
   for composer files and preview screenshots. The composer searches workspace
   paths from `@`, inserts a reference, and resolves it against the task
-  worktree on Send. Model and mode controls are still pending.
+  worktree on Send. The Codex picker lists the app-server's models and
+  per-model reasoning efforts and applies a choice on the next turn.
+  Adapter mode controls are still pending.
 - [ ] Notifications, dock/status counts and review batch actions.
 - [ ] Command palette, keybinding editor, settings files, project overrides,
   themes and accessibility.
@@ -1006,6 +1008,8 @@ and the task header never overstates the tier.
   cancellation, and project-root search before a draft has a worktree.
   A hidden macOS WebKit smoke selects a file from the real search, keeps focus
   in the composer, and sends the reference through the desktop bridge.
+  Chromium verifies a Codex model and effort choice reaches the first turn.
+  The Codex wire fixture checks the catalog and outgoing turn parameters.
   The cross-task search fixture verifies cancellation, keyboard selection,
   and focus and highlighting on a cross-project archived result.
   A hidden macOS WebKit smoke verifies the real Turso hit through the desktop
