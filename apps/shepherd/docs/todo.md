@@ -980,7 +980,7 @@ and the task header never overstates the tier.
   archived entries across projects. Replacing or dismissing a search cancels
   the pending request. A local macOS run measured 26.9 ms p95 for 50 Turso queries
   over 50,000 entries, excluding the typing debounce and desktop rendering.
-- [ ] Attachments and images, `@file` mentions, model/mode pickers.
+- [x] Attachments and images, `@file` mentions, model/mode pickers.
   The composer queues removable local files and copies them into the task
   attachment cache on Send. Prompts retain the copied paths. Codex sends local
   images through app-server or through exec when its help advertises images.
@@ -995,8 +995,9 @@ and the task header never overstates the tier.
   worktree on Send. The Codex picker lists the app-server's models and
   per-model reasoning efforts and applies a choice on the next turn.
   Connected ACP and native OpenCode sessions expose their advertised mode
-  choices beside Send and accept changes between turns. Pre-turn choices in
-  new OpenCode drafts are still pending.
+  choices beside Send and accept changes between turns. Native OpenCode
+  drafts load the project mode catalog before creating the worktree and
+  apply a selection before sending the first prompt.
 - [ ] Notifications, dock/status counts and review batch actions.
 - [ ] Command palette, keybinding editor, settings files, project overrides,
   themes and accessibility.
@@ -1015,6 +1016,10 @@ and the task header never overstates the tier.
   Chromium verifies the mode menu updates and disables choices during a
   turn. Wire fixtures cover ACP configuration selectors and legacy modes.
   The installed OpenCode smoke switches to Plan and reads it after reconnect.
+  It also discovers Plan before creating an OpenCode session. A core fixture
+  verifies mode selection precedes the prompt and a rejected mode leaves
+  the transcript unchanged. Chromium covers choosing a mode before the first
+  draft and keeping it through Send.
   The cross-task search fixture verifies cancellation, keyboard selection,
   and focus and highlighting on a cross-project archived result.
   A hidden macOS WebKit smoke verifies the real Turso hit through the desktop

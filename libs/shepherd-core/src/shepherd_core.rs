@@ -2484,7 +2484,7 @@ mod streaming {
 
     struct LateHarnessFactory {
         receiver: Mutex<Option<mpsc::UnboundedReceiver<HarnessEvent>>>,
-        prompts: mpsc::UnboundedSender<PromptInput>,
+        prompts: mpsc::UnboundedSender<(Option<String>, PromptInput)>,
     }
 
     impl HarnessFactory for LateHarnessFactory {
@@ -2499,6 +2499,7 @@ mod streaming {
                 events: receiver,
                 approvals: Vec::new(),
                 prompts: Some(self.prompts.clone()),
+                mode: None,
             }))
         }
     }
@@ -2508,7 +2509,8 @@ mod streaming {
     struct LateHarness {
         events: mpsc::UnboundedReceiver<HarnessEvent>,
         approvals: Vec<SessionApproval>,
-        prompts: Option<mpsc::UnboundedSender<PromptInput>>,
+        prompts: Option<mpsc::UnboundedSender<(Option<String>, PromptInput)>>,
+        mode: Option<String>,
     }
 
     #[async_trait]
@@ -2540,9 +2542,17 @@ mod streaming {
         async fn prompt(&mut self, input: PromptInput) -> HarnessResult<()> {
             if let Some(prompts) = &self.prompts {
                 prompts
-                    .send(input)
+                    .send((self.mode.clone(), input))
                     .map_err(|_| agent_harness::HarnessError::ChannelClosed)?;
             }
+            Ok(())
+        }
+
+        async fn set_mode(&mut self, mode: &str) -> HarnessResult<()> {
+            if mode != "plan" {
+                return Err(agent_harness::HarnessError::ModeUnavailable);
+            }
+            self.mode = Some(mode.to_owned());
             Ok(())
         }
 
@@ -2591,6 +2601,7 @@ mod streaming {
                     events,
                     approvals: vec![approval.clone()],
                     prompts: None,
+                    mode: None,
                 })),
             );
             (task_id, sender)
@@ -2685,7 +2696,10 @@ mod streaming {
         let CommandResult::TaskWorkspace(workspace) = core
             .execute(Command::SendPrompt {
                 task_id: task_id.clone(),
-                input: PromptInput::text(prompt),
+                input: PromptInput {
+                    mode: Some("plan".into()),
+                    ..PromptInput::text(prompt)
+                },
             })
             .await?
         else {
@@ -2693,7 +2707,8 @@ mod streaming {
         };
         assert_eq!(workspace.task.state, TaskState::Working);
         assert_eq!(workspace.transcript.len(), 1);
-        let input = sent.try_recv()?;
+        let (mode, input) = sent.try_recv()?;
+        assert_eq!(mode.as_deref(), Some("plan"));
         assert_eq!(input.text, prompt);
         let [file] = input.attachments.as_slice() else {
             return Err("expected one referenced file".into());
@@ -2734,6 +2749,24 @@ mod streaming {
         assert_eq!(workspace.task.state, TaskState::Ready);
         assert_eq!(workspace.transcript.len(), 2);
         assert_eq!(workspace.transcript[1].summary(), "agent: streamed");
+        assert_eq!(store.load_transcript(&task_id).await?, workspace.transcript);
+        let rejected = core
+            .execute(Command::SendPrompt {
+                task_id: task_id.clone(),
+                input: PromptInput {
+                    mode: Some("unavailable".into()),
+                    ..PromptInput::text("Do not send this prompt")
+                },
+            })
+            .await;
+        assert!(matches!(
+            rejected,
+            Err(CoreError::Harness(
+                agent_harness::HarnessError::ModeUnavailable
+            ))
+        ));
+        assert!(sent.try_recv().is_err());
+        assert_eq!(core.task_workspace(&task_id)?.task.state, TaskState::Ready);
         assert_eq!(store.load_transcript(&task_id).await?, workspace.transcript);
         let invalid = core
             .execute(Command::SendPrompt {

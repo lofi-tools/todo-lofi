@@ -387,6 +387,7 @@ pub struct PromptInput {
     pub text: String,
     pub attachments: Vec<PromptAttachment>,
     pub codex: CodexTurnOptions,
+    pub mode: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]

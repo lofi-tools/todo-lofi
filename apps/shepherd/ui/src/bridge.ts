@@ -366,8 +366,12 @@ export interface CodexTurnOptions {
   effort?: string
 }
 
-export function sendPrompt(taskId: string, text: string, attachmentIds: string[] = [], codex?: CodexTurnOptions): Promise<TaskWorkspace> {
-  return invoke<TaskWorkspace>('send_prompt', { taskId, text, attachmentIds, codex })
+export function sendPrompt(taskId: string, text: string, attachmentIds: string[] = [], codex?: CodexTurnOptions, mode?: string): Promise<TaskWorkspace> {
+  return invoke<TaskWorkspace>('send_prompt', { taskId, text, attachmentIds, codex, mode })
+}
+
+export function opencodeProjectModes(projectId: string): Promise<AgentModes['options']> {
+  return invoke('opencode_project_modes', { projectId })
 }
 
 export function setSessionMode(taskId: string, mode: string): Promise<TaskWorkspace> {

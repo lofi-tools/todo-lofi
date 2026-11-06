@@ -699,7 +699,9 @@ offers transcript replay with a new session instead of pretending to continue.
    from the project layout are available from the start. The draft also appears
    in the sidebar when the project has multiple visible tasks.
 2. Show the proposed worktree path and branch; neither exists yet.
-3. Optionally pick model/mode if the adapter advertises them.
+3. Optionally pick model or mode from the adapter's advertised choices. A
+   native OpenCode draft can read the project mode catalog without opening a
+   task session. ACP modes are available after session negotiation.
 4. Send the first prompt. Creating the worktree, branch and task starts on send;
    a draft discarded before send leaves no Git trace.
 

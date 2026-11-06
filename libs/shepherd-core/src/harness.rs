@@ -190,7 +190,11 @@ impl HarnessSession {
 
     /// Record the user's prompt, ask the adapter, then fold every event the
     /// adapter has already produced into the transcript.
-    pub async fn prompt(&mut self, input: PromptInput) -> Result<Vec<HarnessEvent>, CoreError> {
+    pub async fn prompt(&mut self, mut input: PromptInput) -> Result<Vec<HarnessEvent>, CoreError> {
+        if let Some(mode) = input.mode.take() {
+            self.harness.set_mode(&mode).await?;
+            self.capabilities.mode_picker = self.modes().is_some();
+        }
         // Completed messages stay separate even if the adapter reuses an item ID.
         self.transcript.clear_streaming_row_keys();
         let attachments = input

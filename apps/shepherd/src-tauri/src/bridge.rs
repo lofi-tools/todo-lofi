@@ -20,7 +20,7 @@ use agent_harness::acp::{
 };
 use agent_harness::codex::CodexProjectModels;
 use agent_harness::settings::AgentSettings;
-use agent_harness::{CodexTurnOptions, Decision, PromptInput};
+use agent_harness::{AgentMode, CodexTurnOptions, Decision, PromptInput, SpawnSpec};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use shepherd_core::files::{self, DirectoryListing, FileSearchQuery, FileSearchResult, TextFile};
@@ -756,7 +756,7 @@ impl ShellState {
         task_id: String,
         text: String,
     ) -> Result<TaskWorkspace, BridgeError> {
-        self.send_prompt_with_files(task_id, text, Vec::new(), CodexTurnOptions::default())
+        self.send_prompt_with_files(task_id, text, Vec::new(), CodexTurnOptions::default(), None)
             .await
     }
 
@@ -766,10 +766,12 @@ impl ShellState {
         text: String,
         ids: Vec<String>,
         codex: CodexTurnOptions,
+        mode: Option<String>,
     ) -> Result<TaskWorkspace, BridgeError> {
         let mut input = PromptInput {
             text,
             codex,
+            mode,
             ..PromptInput::default()
         };
         if !ids.is_empty() {
@@ -917,6 +919,40 @@ impl ShellState {
         agent_harness::codex::project_models(codex_spawn_spec(program, directory))
             .await
             .map_err(|error| BridgeError::new("codex_model", error.to_string()))
+    }
+
+    async fn opencode_project_modes(
+        &self,
+        project_id: String,
+    ) -> Result<Vec<AgentMode>, BridgeError> {
+        if !self.opencode_configured {
+            return Ok(Vec::new());
+        }
+        let Some(executable) = self
+            .settings
+            .executable("agents.opencode.executable")
+            .map_err(|error| BridgeError::new("opencode_modes", error.to_string()))?
+        else {
+            return Ok(Vec::new());
+        };
+        let program = executable.into_os_string().into_string().map_err(|_| {
+            BridgeError::new(
+                "opencode_modes",
+                "OpenCode requires a UTF-8 executable path.",
+            )
+        })?;
+        let cwd = self
+            .core
+            .lock()
+            .await
+            .project_path(&ProjectId::new(project_id))?;
+        agent_harness::opencode::project_modes(&SpawnSpec {
+            program,
+            cwd,
+            ..SpawnSpec::default()
+        })
+        .await
+        .map_err(|error| BridgeError::new("opencode_modes", error.to_string()))
     }
 
     pub async fn project_remote(
@@ -1708,6 +1744,7 @@ pub mod commands {
         text: String,
         attachment_ids: Option<Vec<String>>,
         codex: Option<CodexTurnOptions>,
+        mode: Option<String>,
     ) -> Result<TaskWorkspace, BridgeError> {
         state
             .inner()
@@ -1716,6 +1753,7 @@ pub mod commands {
                 text,
                 attachment_ids.unwrap_or_default(),
                 codex.unwrap_or_default(),
+                mode,
             )
             .await
     }
@@ -1824,6 +1862,14 @@ pub mod commands {
         project_id: String,
     ) -> Result<CodexProjectModels, BridgeError> {
         state.codex_project_models(project_id).await
+    }
+
+    #[tauri::command]
+    pub async fn opencode_project_modes(
+        state: State<'_, ShellState>,
+        project_id: String,
+    ) -> Result<Vec<AgentMode>, BridgeError> {
+        state.opencode_project_modes(project_id).await
     }
 
     #[tauri::command]
@@ -3057,7 +3103,8 @@ mod tests {
                     restricted_task,
                     "Read the old attachment".into(),
                     vec![old_id],
-                    CodexTurnOptions::default()
+                    CodexTurnOptions::default(),
+                    None,
                 )
                 .await
                 .err()
@@ -3102,7 +3149,8 @@ mod tests {
                     other.task.id.as_str().into(),
                     String::new(),
                     vec![id.clone()],
-                    CodexTurnOptions::default()
+                    CodexTurnOptions::default(),
+                    None,
                 )
                 .await
                 .err()
@@ -3115,6 +3163,7 @@ mod tests {
                 String::new(),
                 vec![id.clone()],
                 CodexTurnOptions::default(),
+                None,
             )
             .await?;
         let entry = sent

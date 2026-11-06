@@ -2668,6 +2668,7 @@ done
                     model: Some("catalog-default".into()),
                     effort: Some("low".into()),
                 },
+                ..PromptInput::default()
             })
             .await?;
         let request: Value =

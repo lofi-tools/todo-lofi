@@ -23,6 +23,7 @@ import { TaskSearch } from './TaskSearch'
 
 type CoreEvent = bridge.Event
 type TerminalBell = Extract<CoreEvent, { type: 'terminalBell' }>['data']
+type TurnSelection = { codex?: bridge.CodexTurnOptions; mode?: string }
 
 const LIVE_STATES: bridge.TaskState[] = ['starting', 'queued', 'working', 'waiting']
 const TIER_LABELS: Record<bridge.AgentTier, string> = {
@@ -243,8 +244,35 @@ export function App() {
     return task ? `task:${task}` : project ? `project:${project}` : undefined
   }
   const promptFiles = () => queuedFiles().get(fileQueueKey() ?? '') ?? []
-  const [queuedCodexOptions, setQueuedCodexOptions] = createSignal(new Map<string, bridge.CodexTurnOptions>())
-  const codexOptions = () => queuedCodexOptions().get(fileQueueKey() ?? '')
+  const [queuedTurnOptions, setQueuedTurnOptions] = createSignal(new Map<string, TurnSelection>())
+  const turnOptions = () => queuedTurnOptions().get(fileQueueKey() ?? '')
+  const codexOptions = () => turnOptions()?.codex
+  const pendingMode = () => currentAgent() === 'opencode' ? turnOptions()?.mode : undefined
+  const [projectModes] = createResource(
+    () => {
+      const project = selectedProject()
+      const task = workspace()?.task
+      return opencodeConfigured() && currentAgent() === 'opencode' && project && !project.missing
+        && (!task || task.state === 'draft') ? project.id : false
+    },
+    async (projectId) => {
+      try {
+        return { projectId, options: await bridge.opencodeProjectModes(projectId) }
+      } catch (error) {
+        console.warn('Could not read OpenCode project modes', error)
+        return { projectId, options: [] }
+      }
+    },
+  )
+  const composerModes = (): bridge.AgentModes | undefined => {
+    const current = workspace()
+    const selected = pendingMode()
+    if (current?.modes) return selected ? { ...current.modes, current: selected } : current.modes
+    if (currentAgent() !== 'opencode' || (current && current.task.state !== 'draft' && !selected)) return
+    const catalog = projectModes()
+    const options = catalog && catalog.projectId === selectedProjectId() ? catalog.options : []
+    if (options.length || selected) return { current: selected ?? null, options }
+  }
   const composerModel = () => codexOptions()?.model ?? workspace()?.diagnostics?.model ?? codexCatalog()?.model ?? null
   const composerEffort = () => {
     const queued = codexOptions()
@@ -254,13 +282,13 @@ export function App() {
       ?? (catalog?.model === composerModel() ? catalog?.effort : undefined)
   }
 
-  function setCodexOptions(options: bridge.CodexTurnOptions) {
+  function setTurnOptions(options: TurnSelection) {
     const key = fileQueueKey()
-    if (key) setQueuedCodexOptions((queued) => new Map(queued).set(key, options))
+    if (key) setQueuedTurnOptions((queued) => new Map(queued).set(key, options))
   }
 
-  function clearCodexOptions(taskId: string) {
-    setQueuedCodexOptions((queued) => {
+  function clearTurnOptions(taskId: string) {
+    setQueuedTurnOptions((queued) => {
       const key = `task:${taskId}`
       if (!queued.has(key)) return queued
       const next = new Map(queued)
@@ -269,8 +297,8 @@ export function App() {
     })
   }
 
-  function moveCodexOptionsToDraft(projectId: string, taskId: string) {
-    setQueuedCodexOptions((queued) => {
+  function moveTurnOptionsToDraft(projectId: string, taskId: string) {
+    setQueuedTurnOptions((queued) => {
       const key = `project:${projectId}`
       const options = queued.get(key)
       if (!options) return queued
@@ -641,7 +669,7 @@ export function App() {
     setSettingsOpen(false)
     void run(async () => {
       const draft = await bridge.createDraft(projectId, 'New task', newTaskAgent())
-      moveCodexOptionsToDraft(projectId, draft.task.id)
+      moveTurnOptionsToDraft(projectId, draft.task.id)
       setPrompt('')
       if (selectedProjectId() !== projectId) {
         setTerminalListEvent(undefined)
@@ -659,7 +687,7 @@ export function App() {
     const inFlight = firstDrafts.get(projectId)
     if (inFlight) return inFlight
     const request = bridge.createDraft(projectId, 'New task', newTaskAgent()).then((draft) => {
-      moveCodexOptionsToDraft(projectId, draft.task.id)
+      moveTurnOptionsToDraft(projectId, draft.task.id)
       setQueuedFiles((queues) => {
         const files = queues.get(`project:${projectId}`)
         if (!files) return queues
@@ -757,7 +785,7 @@ export function App() {
     if (!current) return
     void run(async () => {
       await bridge.discardDraft(current.task.id)
-      clearCodexOptions(current.task.id)
+      clearTurnOptions(current.task.id)
       clearPromptFiles(current.task.id)
       setWorkspace(null)
       setSelectedTaskId(null)
@@ -772,14 +800,15 @@ export function App() {
     const text = prompt().trim()
     const files = promptFiles()
     const codex = currentAgent() === 'codex' ? codexOptions() : undefined
+    const mode = pendingMode()
     if (!projectId || (!text && !files.length) || !canCompose() || pending()) return
     void run(async () => {
       const task = current?.task ?? (await firstDraft(projectId)).task
       const attachmentIds: string[] = []
       for (const file of files) attachmentIds.push(await bridge.savePromptFile(task.id, file))
-      const updated = await bridge.sendPrompt(task.id, text, attachmentIds, codex)
+      const updated = await bridge.sendPrompt(task.id, text, attachmentIds, codex, mode)
       clearPromptFiles(task.id)
-      clearCodexOptions(task.id)
+      clearTurnOptions(task.id)
       if (selectedTaskId() === task.id) {
         setPrompt((value) => value.trim() === text ? '' : value)
         setWorkspace(updated)
@@ -790,10 +819,19 @@ export function App() {
 
   function chooseMode(mode: string) {
     const current = workspace()
-    if (!current || pending()) return
+    if (pending()) return
+    if (!current?.modes) {
+      setTurnOptions({ mode: mode || undefined })
+      return
+    }
     const taskId = current.task.id
+    if (!mode) {
+      clearTurnOptions(taskId)
+      return
+    }
     void run(async () => {
       const updated = await bridge.setSessionMode(taskId, mode)
+      clearTurnOptions(taskId)
       if (selectedTaskId() === taskId) setWorkspace(updated)
     })
   }
@@ -1337,14 +1375,15 @@ export function App() {
                 showShellApprovals={showShellApprovals()} canAttach={canCompose() && !pending() && !!attachmentLimit()}
                 onAttach={() => fileInput?.click()} />
               <div class="composer__send-actions">
-                <Show when={workspace()?.modes}>
+                <Show when={composerModes()}>
                   {(modes) => <ComposerModePicker modes={modes()} onChange={chooseMode}
-                    disabled={pending() || !['ready', 'review'].includes(workspace()?.task.state ?? '')} />}
+                    defaultOption={workspace()?.modes ? pendingMode() ? 'Use session mode' : undefined : 'Default mode'}
+                    disabled={pending() || (!canCompose() && workspace()?.task.state !== 'review')} />}
                 </Show>
                 <Show when={currentAgent() === 'codex'}>
                   <ComposerModelPicker model={composerModel()} effort={composerEffort()} models={codexCatalog()?.models ?? []}
                     disabled={!canCompose() || pending() || workspace()?.capabilities?.modelPicker === false}
-                    options={codexOptions()} onChange={setCodexOptions} />
+                    options={codexOptions()} onChange={(codex) => setTurnOptions({ codex })} />
                 </Show>
                 <button
                   type="button"
@@ -1653,12 +1692,15 @@ function ComposerPickers(props: { agent: bridge.Agent; agentName: string; agents
   )
 }
 
-function ComposerModePicker(props: { modes: bridge.AgentModes; disabled: boolean; onChange: (mode: string) => void }) {
+function ComposerModePicker(props: { modes: bridge.AgentModes; disabled: boolean; defaultOption?: string; onChange: (mode: string) => void }) {
   const label = () => props.modes.options.find((option) => option.id === props.modes.current)?.name
     ?? props.modes.current ?? 'Default mode'
-  const options = () => props.modes.options.map((option) => ({
-    id: option.id, name: option.name, detail: option.description ?? undefined, disabled: props.disabled,
-  }))
+  const options = () => [
+    ...(props.defaultOption ? [{ id: '', name: props.defaultOption, disabled: props.disabled }] : []),
+    ...props.modes.options.map((option) => ({
+      id: option.id, name: option.name, detail: option.description ?? undefined, disabled: props.disabled,
+    })),
+  ]
   return (
     <PickerMenu label="Mode" text={label()} value={props.modes.current ?? ''} options={options()}
       onChange={props.onChange} triggerClass="composer__picker" above>

@@ -22,6 +22,10 @@ test.beforeEach(async ({ context }) => {
     const promptFileUploads: Array<{ taskId: string; name: string; text: string }> = []
     const codexTurns: Array<{ taskId: string; model?: string; effort?: string }> = []
     const sessionModes = new Map<string, string>()
+    const advertisedModes = [
+      { id: 'build', name: 'Build', description: null },
+      { id: 'plan', name: 'Plan', description: 'Plan before editing' },
+    ]
     const fileListings: string[] = []
     const fileActions: Array<{ projectId: string; taskId: string | null; path: string; action: string }> = []
     const fileSearches: Array<{ id: string; taskId: string | null; mode: string }> = []
@@ -262,7 +266,8 @@ test.beforeEach(async ({ context }) => {
     function workspace(taskId) {
       const task = tasks.find((candidate) => candidate.id === taskId)
       const limited = options.has('limited-adapter')
-      const hasModes = options.has('session-modes') && task.agent === 'opencode' && task.state !== 'draft'
+      const hasModes = (options.has('session-modes') || options.has('draft-modes'))
+        && task.agent === 'opencode' && task.state !== 'draft'
       const capabilities = task.state === 'draft' || legacySession ? null : {
         streaming: true, thoughts: true, toolCalls: true, approvals: !limited, resume: !limited,
         cancel: !limited, modelPicker: !limited && task.agent === 'codex', modePicker: hasModes, images: false, resourceLinks: false,
@@ -283,10 +288,7 @@ test.beforeEach(async ({ context }) => {
         capabilities,
         modes: hasModes ? {
           current: sessionModes.get(taskId) ?? 'build',
-          options: [
-            { id: 'build', name: 'Build', description: null },
-            { id: 'plan', name: 'Plan', description: 'Plan before editing' },
-          ],
+          options: advertisedModes,
         } : undefined,
         recovery: ['failed', 'interrupted'].includes(task.state) ? limited ? 'startNew' : capabilities ? 'resume' : 'reconnect' : null,
         diagnostics: options.has('acp-fallback') ? {
@@ -380,6 +382,8 @@ test.beforeEach(async ({ context }) => {
             ] }
           case 'opencode_configured':
             return options.has('configured-opencode')
+          case 'opencode_project_modes':
+            return options.has('draft-modes') && args.projectId === 'project-notes' ? advertisedModes : []
           case 'claude_configured':
             return options.has('configured-claude')
           case 'project_remote':
@@ -576,6 +580,7 @@ test.beforeEach(async ({ context }) => {
           case 'send_prompt': {
             const task = tasks.find((candidate) => candidate.id === args.taskId)
             if (args.codex) codexTurns.push({ taskId: args.taskId, ...args.codex })
+            if (args.mode) sessionModes.set(args.taskId, args.mode)
             const text = args.attachmentIds?.length ? `Attachments: ${args.attachmentIds.join(', ')}` : args.text
             task.state = 'waiting'
             transcripts[task.id] = [
@@ -2093,6 +2098,26 @@ test('shows advertised session modes and disables changing them during a turn', 
   await mode.click()
   await expect(menu.getByRole('menuitemradio', { name: 'Build' })).toBeDisabled()
   await expect(menu.getByRole('menuitemradio', { name: 'Plan', checked: true })).toBeDisabled()
+})
+
+test('uses the selected OpenCode draft mode on the first turn', async ({ page }) => {
+  await page.goto('/?two-projects&configured-opencode&draft-modes')
+  await page.getByRole('button', { name: 'notes', exact: true }).click()
+  const composer = page.locator('.composer')
+  await composer.getByRole('button', { name: 'Agent: Codex' }).click()
+  await composer.getByRole('menuitemradio', { name: 'OpenCode', exact: true }).click()
+  await composer.getByRole('button', { name: 'Mode: Default mode' }).click()
+  const menu = composer.getByRole('menu', { name: 'Mode' })
+  await expect(menu.getByRole('menuitemradio', { name: 'Default mode', checked: true })).toBeVisible()
+  await menu.getByRole('menuitemradio', { name: 'Plan' }).click()
+  await expect(composer.getByRole('button', { name: 'Mode: Plan' })).toBeVisible()
+
+  await composer.getByLabel('Prompt', { exact: true }).fill('Plan the first turn')
+  await expect(page.getByRole('button', { name: 'Discard draft' })).toBeVisible()
+  await expect(composer.getByRole('button', { name: 'Mode: Plan' })).toBeVisible()
+  await composer.getByRole('button', { name: 'Send', exact: true }).click()
+  await expect(page.locator('.transcript')).toContainText('Plan the first turn')
+  await expect(composer.getByRole('button', { name: 'Mode: Plan' })).toBeVisible()
 })
 
 test('queues removable files and uploads them only when sending the prompt', async ({ page }) => {

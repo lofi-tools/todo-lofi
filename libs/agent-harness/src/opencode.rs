@@ -39,6 +39,19 @@ pub fn configured_executable(settings_path: &Path) -> HarnessResult<Option<PathB
     AgentSettings::read(settings_path)?.executable("agents.opencode.executable")
 }
 
+pub async fn project_modes(spec: &SpawnSpec) -> HarnessResult<Vec<AgentMode>> {
+    let server = OpenCodeServer::start(spec).await?;
+    let modes = if server.probe.modes {
+        server.mode_catalog().await
+    } else {
+        Ok(Vec::new())
+    };
+    let shutdown = server.shutdown().await;
+    let modes = modes?;
+    shutdown?;
+    Ok(modes)
+}
+
 fn require_absolute_executable(path: &Path) -> HarnessResult<()> {
     if !path.is_absolute() {
         return Err(HarnessError::Protocol(
@@ -1140,6 +1153,15 @@ impl OpenCodeServer {
     }
 
     async fn session_modes(&self, session: &SessionId) -> HarnessResult<Option<AgentModes>> {
+        let options = self.mode_catalog().await?;
+        if options.is_empty() {
+            return Ok(None);
+        }
+        let current = self.read_session(session).await?.agent;
+        Ok(Some(AgentModes { current, options }))
+    }
+
+    async fn mode_catalog(&self) -> HarnessResult<Vec<AgentMode>> {
         let request = || {
             self.request(Method::GET, "/api/agent")
                 .query(&[("location[directory]", self.directory.as_str())])
@@ -1155,7 +1177,7 @@ impl OpenCodeServer {
                 "OpenCode returned modes outside the task directory".into(),
             ));
         }
-        let options: Vec<_> = agents
+        Ok(agents
             .data
             .into_iter()
             .filter(|agent| !agent.hidden && matches!(agent.mode.as_str(), "primary" | "all"))
@@ -1164,12 +1186,7 @@ impl OpenCodeServer {
                 name: agent.name,
                 description: agent.description,
             })
-            .collect();
-        if options.is_empty() {
-            return Ok(None);
-        }
-        let current = self.read_session(session).await?.agent;
-        Ok(Some(AgentModes { current, options }))
+            .collect())
     }
 
     pub async fn interrupt_session(&self, session: &SessionId) -> HarnessResult<bool> {
@@ -1719,18 +1736,24 @@ exec sleep 60
     -> Result<(), Box<dyn std::error::Error>> {
         let root = tempfile::tempdir()?;
         let spec = installed_fixture_spec(root.path())?;
+        let draft_modes = project_modes(&spec).await?;
+        let mode = draft_modes
+            .iter()
+            .find(|option| option.id == "plan")
+            .ok_or("expected Plan before creating a session")?;
         let mut harness = OpenCodeHarness::default();
         harness.start(spec.clone()).await?;
         assert_eq!(harness.tier(), AdapterTier::Native);
         let session = harness.open_session(None).await?;
         let server = harness.server.as_ref().ok_or("missing native server")?;
         assert!(server.probe().modes);
-        let modes = harness.modes().ok_or("missing native modes")?;
-        let mode = modes
-            .options
-            .iter()
-            .find(|option| option.id == "plan")
-            .ok_or("expected the advertised Plan mode")?;
+        assert!(
+            harness
+                .modes()
+                .ok_or("missing native modes")?
+                .options
+                .contains(mode)
+        );
         assert!(matches!(
             harness.set_mode("missing-fixture-mode").await,
             Err(HarnessError::ModeUnavailable)
