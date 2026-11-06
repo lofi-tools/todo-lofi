@@ -1011,6 +1011,14 @@ in-memory model is still scoped key/value pairs, serialized per scope:
 - Project overrides are keyed by absolute path, so the file stays readable; a
   moved project loses its overrides. Keybindings are app-scoped, one chord per
   command; sequences are rejected.
+- `keybindings.json` uses `{"version":1,"bindings":{"commandPalette":"F9"}}`.
+  The keys in `bindings` are command IDs from the registry. Settings records
+  and saves one chord at a time. Reset removes the entry, restoring the
+  platform default. Chords conflict only when their input scopes overlap.
+  Debug launches with an isolated data directory store keybindings there.
+- When the keybindings file cannot be read, Shepherd uses the default
+  registry and reports the path. Repair the file and use **Reload configuration**
+  in Keyboard shortcuts to re-enable editing. A newer version stays intact.
 - `app["agents.opencode.executable"]` points to an existing OpenCode executable
   by absolute path. A stable profile symlink such as
   `/etc/profiles/per-user/me/bin/opencode` can follow Nix profile updates.

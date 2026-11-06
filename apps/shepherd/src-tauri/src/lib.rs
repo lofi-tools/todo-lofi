@@ -8,10 +8,12 @@ mod attachments;
 mod attention;
 mod bridge;
 mod codex_harness;
+mod config_files;
 #[cfg(any(test, debug_assertions))]
 mod dev_harness;
 mod file_actions;
 mod file_watch;
+mod keybindings;
 mod pty_terminal;
 mod terminal_screen;
 
@@ -195,18 +197,22 @@ pub fn run() -> Result<(), tauri::Error> {
             state.claude_configured = claude_configured;
             state.start_event_pump();
             app.manage(state);
-            let notification_directory = if override_directory.is_some() {
+            let preference_directory = if override_directory.is_some() {
                 data_directory
             } else {
                 app.path().app_config_dir()?
             };
             app.manage(attention::NotificationSettings::new(
-                notification_directory.join("settings.json"),
+                preference_directory.join("settings.json"),
+            ));
+            app.manage(keybindings::KeybindingSettings::new(
+                preference_directory.join("keybindings.json"),
             ));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            bridge::commands::command_registry,
+            keybindings::command_registry,
+            keybindings::set_keybinding,
             bridge::commands::agent_availability,
             bridge::commands::add_project,
             bridge::commands::set_project_preview_url,

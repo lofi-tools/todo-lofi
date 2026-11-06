@@ -36,6 +36,8 @@ export interface CommandBinding {
   label: string
   category: string
   chord: string | null
+  defaultChord: string | null
+  overridden: boolean
   scope: ShortcutScope
   requirements: { condition: CommandCondition; reason: string }[]
 }
@@ -43,10 +45,23 @@ export interface CommandBinding {
 export interface CommandRegistry {
   commands: CommandBinding[]
   chords: Record<ShortcutScope, Record<string, string>>
+  warning: string | null
 }
 
-export function commandRegistry(platform: 'mac' | 'linux'): Promise<CommandRegistry> {
+export type KeyPlatform = 'mac' | 'linux'
+
+export interface KeybindingEdit {
+  command: string
+  previous: string | null
+  chord: string | null
+}
+
+export function commandRegistry(platform: KeyPlatform): Promise<CommandRegistry> {
   return invoke('command_registry', { platform })
+}
+
+export function setKeybinding(platform: KeyPlatform, edit: KeybindingEdit): Promise<CommandRegistry> {
+  return invoke('set_keybinding', { platform, edit })
 }
 
 export function agentAvailability(): Promise<Record<Agent, boolean>> {

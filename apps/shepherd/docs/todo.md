@@ -1013,8 +1013,12 @@ and the task header never overstates the tier.
   Terminal focus keeps unclaimed chords, and the palette can forward one
   claimed chord to the focused terminal. Existing terminal layout, Git
   staging, composer and diagnostics actions are available from the palette.
-- [ ] Keybinding editor, settings files, project overrides, themes and
-  accessibility.
+- [x] Keybinding editor and versioned keybindings file.
+  Settings records a chord, validates overlapping scopes and applies a saved
+  binding immediately. Reset restores the platform default. The file
+  preserves other edits and unknown entries, rejects a stale edit to the
+  same command, and backs up invalid content while defaults remain active.
+- [ ] Settings files, project overrides, themes and accessibility.
 - [ ] Review/archive edge cases; leave the 30-day worktree collection to S7.
 - [ ] Status bar, window title and empty states.
 
@@ -1040,8 +1044,11 @@ and the task header never overstates the tier.
   bridge and confirms focus and highlighting in the restored transcript.
   Chromium checks fuzzy command search, disabled reasons, switcher navigation,
   a forwarded terminal chord, and scoped Send and Commit shortcuts.
+  The shortcut editor fixture checks recording, conflict recovery, immediate
+  dispatch, reload and reset.
   The hidden macOS WebKit smoke opens the palette with the native registry
-  while the terminal is mounted.
+  while the terminal is mounted, then records a shortcut in Settings and
+  checks that the binding survives restart.
 - [x] Preview fixture: annotation adds URL/selector/note to the composer;
   blocked injection falls back to a screenshot note.
   Headless Chromium verifies both paths, including a page that denies framing

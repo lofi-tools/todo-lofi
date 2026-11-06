@@ -1079,6 +1079,15 @@ async function smoke() {
   if (!palette.textContent?.includes('Send next key to terminal')) throw new Error('The palette did not receive the core command catalog')
   palette.querySelector<HTMLButtonElement>('header button')?.click()
   await waitFor('closed command palette', () => !palette.isConnected)
+  ;(await enabledButton('Settings')).click()
+  ;(await enabledButton('Keyboard shortcuts')).click()
+  ;(await enabledButton('Edit Command palette shortcut')).click()
+  const recorder = await waitFor('keybinding recorder', () =>
+    document.querySelector<HTMLInputElement>('input[data-shortcut-capture]'))
+  recorder.dispatchEvent(new KeyboardEvent('keydown', { key: 'F9', bubbles: true, cancelable: true }))
+  ;(await enabledButton('Save shortcut')).click()
+  await waitFor('updated command binding', () => button('Command palette')?.getAttribute('aria-keyshortcuts') === 'F9')
+  ;(await enabledButton('Settings')).click()
   const { terminals: [terminal] } = await bridge.terminalList(project.id)
   if (!terminal) throw new Error('The fixture terminal was not started')
   if (windowChecks) {
@@ -1121,10 +1130,12 @@ async function smoke() {
   await openInspectorTab('git')
   await requestQuitWithLiveTask(3)
   return { ok: true, quitWarning: true, taskSwitch: true, projectSwitch: true, roundTrip: true,
-    splitReattach: true, commandPalette: true, fishKeyBindings: __SHEPHERD_SMOKE_FISH__, bracketedPaste: true, ...windowResults }
+    splitReattach: true, commandPalette: true, savedKeybinding: true,
+    fishKeyBindings: __SHEPHERD_SMOKE_FISH__, bracketedPaste: true, ...windowResults }
 }
 
 async function restore() {
+  await waitFor('persisted command binding', () => button('Command palette')?.getAttribute('aria-keyshortcuts') === 'F9')
   const { projects } = await bridge.projectList()
   const project = projects.find((entry) => entry.path === __SHEPHERD_SMOKE_PROJECT__)
   if (!project) throw new Error('The fixture project was not restored')

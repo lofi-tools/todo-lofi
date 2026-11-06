@@ -60,6 +60,27 @@ test.beforeEach(async ({ context }) => {
     let releaseTerminalWrite: (() => void) | undefined
     let expiringTerminalSubscription: string | undefined
     const options = new URLSearchParams(window.location.search)
+    const readKeybindings = (): Record<string, string> => JSON.parse(localStorage.getItem('fixture.keybindings') ?? '{}')
+    function commandSnapshot(platform: string, overrides: Record<string, string>) {
+      const reasons = {
+        cancel: 'No cancellable turn is active.',
+        focusedTerminal: 'Focus a terminal input before opening the palette.',
+      }
+      const commands = registry.map(({ id, label, category, scope, mac, linux, requires }) => {
+        const defaultChord = (platform === 'mac' ? mac : linux) ?? null
+        return {
+          id, label, category, scope: scope ?? 'window', chord: overrides[id] ?? defaultChord,
+          defaultChord, overridden: Object.hasOwn(overrides, id),
+          requirements: (requires ?? []).map((condition) => ({ condition, reason: reasons[condition] ?? `Requires ${condition}.` })),
+        }
+      })
+      const chords = Object.fromEntries(['window', 'composer', 'workspaceTerminal', 'commitForm'].map((scope) => [
+        scope, Object.fromEntries(commands.filter((command) => command.chord && (command.scope === 'window' || command.scope === scope))
+          .map((command) => [command.chord, command.id])),
+      ]))
+      const warning = options.has('invalid-keybindings') ? 'Could not use /tmp/keybindings.json. A copy was saved to /tmp/keybindings.json.bak.' : null
+      return { commands, chords, warning }
+    }
     let legacySession = options.has('legacy-session')
     let projectGrants = []
     let sessionGrants = []
@@ -362,20 +383,23 @@ test.beforeEach(async ({ context }) => {
       },
       invoke: async (command, args, invokeOptions) => {
         switch (command) {
-          case 'command_registry': {
-            const reasons = {
-              cancel: 'No cancellable turn is active.',
-              focusedTerminal: 'Focus a terminal input before opening the palette.',
+          case 'command_registry':
+            return commandSnapshot(args.platform, readKeybindings())
+          case 'set_keybinding': {
+            const overrides = readKeybindings()
+            const edit = args.edit
+            if ((overrides[edit.command] ?? null) !== edit.previous) {
+              throw { message: 'The shortcut changed on disk. Reload configuration before saving this edit.' }
             }
-            const commands = registry.map(({ id, label, category, scope, mac, linux, requires }) => ({
-              id, label, category, scope: scope ?? 'window', chord: (args.platform === 'mac' ? mac : linux) ?? null,
-              requirements: (requires ?? []).map((condition) => ({ condition, reason: reasons[condition] ?? `Requires ${condition}.` })),
-            }))
-            const chords = Object.fromEntries(['window', 'composer', 'workspaceTerminal', 'commitForm'].map((scope) => [
-              scope, Object.fromEntries(commands.filter((command) => command.chord && (command.scope === 'window' || command.scope === scope))
-                .map((command) => [command.chord, command.id])),
-            ]))
-            return { commands, chords }
+            if (edit.chord) overrides[edit.command] = edit.chord
+            else delete overrides[edit.command]
+            const result = commandSnapshot(args.platform, overrides)
+            const updated = result.commands.find((command) => command.id === edit.command)
+            const conflict = result.commands.find((command) => command.id !== edit.command && command.chord && command.chord === updated?.chord &&
+              (command.scope === 'window' || updated.scope === 'window' || command.scope === updated.scope))
+            if (conflict) throw { message: `Shortcut conflicts with ${conflict.label}.` }
+            localStorage.setItem('fixture.keybindings', JSON.stringify(overrides))
+            return result
           }
           case 'agent_availability':
             return { codex: true, opencode: false, claude: false }
@@ -998,6 +1022,74 @@ test('forwards one claimed shortcut to a terminal and keeps ordinary readline sh
   await expect(palette).toBeVisible()
   await filter.press('Escape')
   await expect(terminal).toBeFocused()
+  await page.evaluate(() => localStorage.setItem('fixture.keybindings', JSON.stringify({ forwardKey: 'F9' })))
+  await page.reload()
+  await expect(page.getByRole('button', { name: 'Command palette' })).toHaveAttribute('aria-keyshortcuts', 'Control+Shift+K')
+  await terminal.press('F9')
+  await terminal.press('Control+Shift+K')
+  await expect.poll(() => page.evaluate(() => window.__writes)).toEqual(['\x0b'])
+  await expect(palette).toHaveCount(0)
+})
+
+test('records, validates, reloads and resets an app shortcut', async ({ page }) => {
+  await page.addInitScript(() => Object.defineProperty(navigator, 'platform', { value: 'Linux x86_64' }))
+  await page.goto('/')
+  const paletteButton = page.getByRole('button', { name: 'Command palette', exact: true })
+  const settings = page.getByRole('button', { name: 'Settings', exact: true })
+  const category = page.getByRole('button', { name: 'Keyboard shortcuts', exact: true })
+  const edit = page.getByRole('button', { name: 'Edit Command palette shortcut' })
+  const recorder = page.getByRole('textbox', { name: 'Record shortcut for Command palette' })
+  const save = page.getByRole('button', { name: 'Save shortcut' })
+  await settings.click()
+  await category.click()
+  await edit.click()
+  await expect(recorder).toBeFocused()
+  await recorder.press('Control+Shift+K')
+  await expect(recorder).toHaveValue('Ctrl+Shift+K')
+  await expect(page.getByRole('dialog', { name: 'Command palette' })).toHaveCount(0)
+  await recorder.press('Control+Shift+P')
+  await save.click()
+  await expect(page.getByRole('alert')).toContainText('conflicts with Switch project')
+  await expect(recorder).toHaveValue('Ctrl+Shift+P')
+  await recorder.press('F9')
+  await save.click()
+  await expect(edit).toBeFocused()
+  await expect(paletteButton).toHaveAttribute('aria-keyshortcuts', 'F9')
+
+  await edit.click()
+  await recorder.press('Control+Alt+K')
+  await page.evaluate(() => localStorage.setItem('fixture.keybindings', JSON.stringify({ commandPalette: 'F10' })))
+  await save.click()
+  await expect(page.getByRole('alert')).toContainText('changed on disk')
+  await page.getByRole('button', { name: 'Reload configuration' }).click()
+  await expect(paletteButton).toHaveAttribute('aria-keyshortcuts', 'F10')
+  await expect(recorder).toHaveValue('Ctrl+Alt+K')
+  await save.click()
+  await expect(paletteButton).toHaveAttribute('aria-keyshortcuts', 'Control+Alt+K')
+  await page.keyboard.press('Control+Alt+K')
+  const palette = page.getByRole('dialog', { name: 'Command palette' })
+  await expect(palette.getByRole('option', { name: /^Command palette/ }).locator('kbd')).toHaveText('Ctrl+Alt+K')
+  await page.keyboard.press('Escape')
+
+  await page.reload()
+  await expect(paletteButton).toHaveAttribute('aria-keyshortcuts', 'Control+Alt+K')
+  await settings.click()
+  await category.click()
+  await page.getByRole('button', { name: 'Reset Command palette shortcut' }).click()
+  await expect(edit).toBeFocused()
+  await expect(paletteButton).toHaveAttribute('aria-keyshortcuts', 'Control+Shift+K')
+})
+
+test('keeps default shortcuts active when the keybindings file cannot be loaded', async ({ page }) => {
+  await page.addInitScript(() => Object.defineProperty(navigator, 'platform', { value: 'Linux x86_64' }))
+  await page.goto('/?invalid-keybindings')
+  await expect(page.getByRole('alert')).toContainText('/tmp/keybindings.json.bak')
+  await page.keyboard.press('Control+Shift+K')
+  await expect(page.getByRole('dialog', { name: 'Command palette' })).toBeVisible()
+  await page.keyboard.press('Escape')
+  await page.getByRole('button', { name: 'Settings', exact: true }).click()
+  await page.getByRole('button', { name: 'Keyboard shortcuts', exact: true }).click()
+  await expect(page.getByRole('button', { name: 'Edit Command palette shortcut' })).toBeDisabled()
 })
 
 test('stages through the palette and routes Control Enter to the active Git or composer input', async ({ page }) => {

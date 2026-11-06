@@ -110,13 +110,19 @@ current layout and give future changes a point of comparison.
 - Anchor **Settings** at the bottom of the Projects sidebar. The gear and label
   are muted, with a transparent, borderless resting state and a hover highlight.
   Opening Settings replaces the conversation pane. The settings subnavigation
-  groups controls under **Workspace**, **Projects**, and **Appearance**.
+  groups controls under **Workspace**, **Projects**, **Appearance**, and
+  **Keyboard shortcuts**.
   **Settings → Projects** offers the same per-source import buttons even when
   the sidebar already contains projects.
 - **Settings → Workspace** has an unchecked **Notify when tasks need input**
   option. Enabling it allows system notifications for new waits outside the
   focused task workspace. Review changes only affect the in-app indicators
   and Dock count.
+- **Settings → Keyboard shortcuts** shows the current binding for each
+  command. **Edit** focuses a recorder, **Save shortcut** applies the chord
+  immediately, and **Reset** restores the default. Escape cancels recording
+  and returns focus to the Edit button. A conflict leaves the recorded chord
+  visible. **Reload configuration** reads external keybinding edits.
 
 ### Add project picker
 

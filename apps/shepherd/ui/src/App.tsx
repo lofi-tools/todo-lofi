@@ -11,6 +11,7 @@ import { getCurrentWindow } from '@tauri-apps/api/window'
 
 import * as bridge from './bridge'
 import { CommandPalette, type PaletteEntry } from './CommandPalette'
+import { displayChord, normalizeChord } from './keybindings'
 import { ComposerInput } from './ComposerInput'
 import { FilesPane } from './FilesPane'
 import { ProjectImportSources, ProjectPicker } from './ProjectPicker'
@@ -70,22 +71,6 @@ const AGENT_OPTIONS: PickerOption[] = [
   { id: 'claude', name: bridge.AGENT_LABELS.claude },
   { id: 'freebuff', name: 'Freebuff (terminal)' },
 ]
-
-function normalizeChord(event: KeyboardEvent): string | undefined {
-  if (event.isComposing || event.keyCode === 229 || event.getModifierState('AltGraph') ||
-      ['Alt', 'AltGraph', 'Control', 'Meta', 'Shift', 'Dead', 'Unidentified'].includes(event.key)) return
-  const key = event.code === 'Backquote' && (event.ctrlKey || event.metaKey) ? '`'
-    : event.key === ' ' ? 'Space' : event.key.length === 1 ? event.key.toUpperCase() : event.key
-  return [event.ctrlKey && 'Control', event.altKey && 'Alt', event.shiftKey && 'Shift', event.metaKey && 'Meta', key]
-    .filter(Boolean).join('+')
-}
-
-function displayChord(chord: string, mac: boolean) {
-  const labels: Record<string, string> = mac
-    ? { Control: '⌃', Alt: '⌥', Shift: '⇧', Meta: '⌘', Enter: '↵' }
-    : { Control: 'Ctrl' }
-  return chord.split('+').map((key) => labels[key] ?? key).join(mac ? '' : '+')
-}
 
 function appearanceStorage() {
   return import.meta.env.VITE_SHEPHERD_EPHEMERAL === '1' ? sessionStorage : localStorage
@@ -482,6 +467,18 @@ export function App() {
     return !!current && (current.cancelling || cancelRequestTaskId() === current.task.id)
   }
   const mac = navigator.platform.startsWith('Mac')
+  const keyPlatform = mac ? 'mac' : 'linux'
+
+  async function reloadKeybindings() {
+    const registry = await bridge.commandRegistry(keyPlatform)
+    setCommandRegistry(registry)
+    return registry
+  }
+
+  async function editKeybinding(edit: bridge.KeybindingEdit) {
+    const registry = await bridge.setKeybinding(keyPlatform, edit)
+    setCommandRegistry(registry)
+  }
   const bindingsById = createMemo(() => new Map(commandRegistry()?.commands.map((binding) => [binding.id, binding])))
   const chordFor = (id: string) => bindingsById().get(id)?.chord ?? undefined
   const canSend = () => canCompose() && !pending() && (!!prompt().trim() || !!promptFiles().length)
@@ -494,7 +491,7 @@ export function App() {
     return target instanceof HTMLTextAreaElement && target.matches('.inspector .terminal-view__input')
   }
 
-  const commandConditions = (): Record<bridge.CommandCondition, boolean> => {
+  const commandConditions = (focus: unknown = paletteOpener): Record<bridge.CommandCondition, boolean> => {
     const project = selectedProject()
     const current = workspace()
     const terminal = terminalCommands()?.available()
@@ -511,7 +508,7 @@ export function App() {
       terminalPane: !!terminal?.terminalPane,
       terminalMultiple: !!terminal?.terminalMultiple,
       terminalFour: !!terminal?.terminalFour,
-      focusedTerminal: workspaceTerminal(paletteOpener) && paletteOpener.isConnected,
+      focusedTerminal: workspaceTerminal(focus) && focus.isConnected,
       gitWritable: canUseGit(),
       diagnostics: !!current?.diagnostics,
     }
@@ -674,7 +671,7 @@ export function App() {
   }
 
   function onWorkspaceKeyDown(event: KeyboardEvent) {
-    if (event.defaultPrevented) return
+    if (event.defaultPrevented || (event.target instanceof HTMLElement && event.target.hasAttribute('data-shortcut-capture'))) return
     const chord = normalizeChord(event)
     if (!chord) return
     const key = event.code || event.key
@@ -701,7 +698,7 @@ export function App() {
         : target instanceof HTMLElement && target.closest('[data-git-commit]') ? 'commitForm' : 'window'
     const id = commandRegistry()?.chords[scope][chord]
     const binding = id ? bindingsById().get(id) : undefined
-    if (!binding || disabledReason(binding, commandConditions())) return
+    if (!binding || disabledReason(binding, commandConditions(target))) return
     event.preventDefault()
     if (!event.repeat) runWorkspaceCommand(binding.id, target, true)
   }
@@ -960,7 +957,7 @@ export function App() {
 
   onMount(() => {
     void homeDir().then(setHomeDirectory).catch((error) => console.warn('Could not resolve the home directory', error))
-    void bridge.commandRegistry(mac ? 'mac' : 'linux').then(setCommandRegistry).catch((failure) => setError(describe(failure)))
+    void reloadKeybindings().catch((failure) => setError(describe(failure)))
     void bridge.opencodeConfigured().then(setOpencodeConfigured).catch((error) => console.warn('Could not read OpenCode availability', error))
     void bridge.claudeConfigured().then(setClaudeConfigured).catch((error) => console.warn('Could not read Claude Code availability', error))
     void bridge.notificationsEnabled().then(setNotificationsEnabled).catch((failure) => setError(describe(failure)))
@@ -1372,6 +1369,9 @@ export function App() {
   const workspaceFooter = (
     <>
       <div class="shell__notices">
+        <Show when={commandRegistry()?.warning}>
+          {(warning) => <div class="banner banner--error" role="alert"><span>{warning()} Default shortcuts are active.</span></div>}
+        </Show>
         <Show when={commandNotice()}>
           {(notice) => <div class="banner" role="status">
             <span>{notice()}</span>
@@ -1536,6 +1536,10 @@ export function App() {
 
         <Show when={settingsOpen()}>
           <SettingsPane
+            keybindings={commandRegistry()}
+            mac={mac}
+            onReloadKeybindings={reloadKeybindings}
+            onEditKeybinding={editKeybinding}
             showArchived={showArchived()}
             onShowArchived={setShowArchived}
             notificationsEnabled={notificationsEnabled()}

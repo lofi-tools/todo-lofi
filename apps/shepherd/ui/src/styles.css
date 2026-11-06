@@ -352,7 +352,8 @@ textarea {
   color: var(--text-muted);
 }
 
-.picker__row > kbd {
+.picker__row > kbd,
+.settings__shortcut-row kbd {
   flex: none;
   padding: 1px 4px;
   border: 1px solid var(--border);
@@ -884,13 +885,45 @@ textarea {
   gap: 4px;
 }
 
-.settings__preview-url input {
+.settings__preview-url input,
+.settings__shortcut-row input {
   min-width: 0;
   padding: 4px 8px;
   border: 1px solid var(--border);
   border-radius: 6px;
   background: var(--surface-raised);
   color: var(--text);
+}
+
+.settings__shortcut-list {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.settings__shortcut-list > li {
+  padding-block: 6px;
+  border-block-end: 1px solid var(--border);
+}
+
+.settings__shortcut-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.settings__shortcut-label,
+.settings__shortcut-row input {
+  flex: 1;
+  min-width: 8rem;
+}
+
+.settings__shortcut-label,
+.settings__shortcut-row small {
+  display: grid;
 }
 
 .settings__approval {

@@ -1620,14 +1620,6 @@ pub mod commands {
     }
 
     #[tauri::command]
-    pub fn command_registry(
-        platform: shepherd_core::input::KeyPlatform,
-    ) -> Result<shepherd_core::input::CommandRegistry, BridgeError> {
-        shepherd_core::input::command_registry(platform)
-            .map_err(|error| BridgeError::new("commands", error.to_string()))
-    }
-
-    #[tauri::command]
     pub async fn add_project(
         state: State<'_, ShellState>,
         path: String,

@@ -1,13 +1,18 @@
 import { For, Show, createEffect, createResource, createSignal, on, type JSX } from 'solid-js'
 
-import { AGENT_LABELS, projectApprovals, resetApprovalGrant, type ProjectApproval, type ProjectSnapshot, type SessionApproval } from './bridge'
+import { AGENT_LABELS, projectApprovals, resetApprovalGrant, type CommandBinding, type CommandRegistry, type KeybindingEdit, type ProjectApproval, type ProjectSnapshot, type SessionApproval } from './bridge'
+import { displayChord, normalizeChord } from './keybindings'
 
-const categories = ['Workspace', 'Projects', 'Appearance'] as const
+const categories = ['Workspace', 'Projects', 'Appearance', 'Keyboard shortcuts'] as const
 
 export const SEND_ACCENTS = ['Blue', 'Violet', 'Teal', 'Amber', 'Neutral'] as const
 export type SendAccent = (typeof SEND_ACCENTS)[number]
 
 interface SettingsPaneProps {
+  keybindings?: CommandRegistry
+  mac: boolean
+  onReloadKeybindings: () => Promise<CommandRegistry>
+  onEditKeybinding: (edit: KeybindingEdit) => Promise<void>
   showArchived: boolean
   onShowArchived: (value: boolean) => void
   notificationsEnabled: boolean
@@ -160,6 +165,149 @@ function settingsError(error: unknown): string {
   return String(error)
 }
 
+function KeyboardShortcuts(props: {
+  registry?: CommandRegistry
+  mac: boolean
+  onReload: () => Promise<CommandRegistry>
+  onEdit: (edit: KeybindingEdit) => Promise<void>
+}) {
+  const [editing, setEditing] = createSignal<{ id: string; previous: string | null }>()
+  const [chord, setChord] = createSignal<string | null>(null)
+  const [pending, setPending] = createSignal(false)
+  const [error, setError] = createSignal('')
+  const [status, setStatus] = createSignal('')
+  let opener: HTMLButtonElement | undefined
+  let recorder: HTMLInputElement | undefined
+
+  const commands = () => props.registry?.commands ?? []
+  const editable = () => !!props.registry && !props.registry.warning && !pending()
+  const previous = (command: CommandBinding) => command.overridden ? command.chord : null
+  const format = (chord: string | null | undefined) => chord ? displayChord(chord, props.mac) : 'Unassigned'
+
+  function begin(command: CommandBinding, button: HTMLButtonElement) {
+    opener = button
+    setError('')
+    setStatus('')
+    setChord(null)
+    setEditing({ id: command.id, previous: previous(command) })
+    recorder?.focus()
+  }
+
+  function finish() {
+    setEditing(undefined)
+    setChord(null)
+    opener?.focus()
+    opener = undefined
+  }
+
+  function record(event: KeyboardEvent) {
+    if (event.isComposing || event.keyCode === 229) return
+    const unmodified = !event.ctrlKey && !event.altKey && !event.metaKey
+    if (unmodified && event.key === 'Tab') return
+    event.preventDefault()
+    if (event.repeat) return
+    if (unmodified && event.key === 'Escape') {
+      setError('')
+      finish()
+      return
+    }
+    const next = normalizeChord(event)
+    if (next) setChord(next)
+  }
+
+  async function apply(edit: KeybindingEdit) {
+    if (!editable()) return
+    setPending(true)
+    setError('')
+    setStatus('')
+    try {
+      await props.onEdit(edit)
+      setStatus(edit.chord ? 'Shortcut saved.' : 'Default shortcut restored.')
+      setPending(false)
+      finish()
+    } catch (failure) {
+      setError(settingsError(failure))
+    } finally {
+      setPending(false)
+    }
+  }
+
+  async function reload() {
+    if (pending()) return
+    setPending(true)
+    setError('')
+    setStatus('')
+    try {
+      const registry = await props.onReload()
+      const active = editing()
+      const command = registry.commands.find(({ id }) => id === active?.id)
+      if (command) setEditing({ id: command.id, previous: previous(command) })
+      if (!registry.warning) setStatus('Shortcuts reloaded.')
+    } catch (failure) {
+      setError(settingsError(failure))
+    } finally {
+      setPending(false)
+    }
+  }
+
+  return (
+    <div class="settings__project">
+      <div class="settings__shortcut-row">
+        <p class="empty">Record one chord per command.</p>
+        <button class="project-action" type="button" disabled={pending()} onClick={() => void reload()}>Reload configuration</button>
+      </div>
+      <Show when={props.registry?.warning}>
+        <p class="empty">Repair the keybindings file, then reload configuration to edit shortcuts.</p>
+      </Show>
+      <Show when={error()}>{(message) => <p class="entry__notice--error" role="alert">{message()}</p>}</Show>
+      <Show when={status()}>{(message) => <p class="empty" role="status">{message()}</p>}</Show>
+      <ul class="settings__shortcut-list" aria-label="Command shortcuts">
+        <For each={commands().map(({ id }) => id)}>
+          {(id) => {
+            const command = () => commands().find((command) => command.id === id)
+            let editButton: HTMLButtonElement | undefined
+            return <Show when={command()}>{(binding) => (
+              <li class="settings__project">
+                <div class="settings__shortcut-row">
+                  <div class="settings__shortcut-label">
+                    <span>{binding().label}</span>
+                    <span class="empty">{binding().category}</span>
+                  </div>
+                  <span>
+                    <kbd>{format(binding().chord)}</kbd>
+                    <Show when={binding().overridden}><small class="empty">Default {format(binding().defaultChord)}</small></Show>
+                  </span>
+                  <button ref={editButton} type="button" class="project-action" disabled={!editable() || !!editing()}
+                    aria-label={`Edit ${binding().label} shortcut`} onClick={(event) => begin(binding(), event.currentTarget)}>Edit</button>
+                  <Show when={binding().overridden}>
+                    <button type="button" class="project-action" disabled={!editable() || !!editing()}
+                      aria-label={`Reset ${binding().label} shortcut`} onClick={() => {
+                        opener = editButton
+                        void apply({ command: id, previous: previous(binding()), chord: null })
+                      }}>Reset</button>
+                  </Show>
+                </div>
+                <Show when={editing()?.id === id}>
+                  <form class="settings__shortcut-row" onSubmit={(event) => {
+                    event.preventDefault()
+                    const edit = editing()
+                    if (edit && chord()) void apply({ command: edit.id, previous: edit.previous, chord: chord() })
+                  }}>
+                    <input data-shortcut-capture ref={recorder} aria-label={`Record shortcut for ${binding().label}`}
+                      placeholder="Press a shortcut" value={chord() ? format(chord()) : ''} readonly disabled={pending()} onKeyDown={record} />
+                    <button type="submit" class="project-action" disabled={!editable() || !chord()}>Save shortcut</button>
+                    <button type="button" class="project-action" disabled={pending()} onClick={() => { setError(''); finish() }}>Cancel</button>
+                  </form>
+                </Show>
+              </li>
+            )}</Show>
+          }}
+        </For>
+      </ul>
+    </div>
+  )
+}
+
 export function SettingsPane(props: SettingsPaneProps) {
   const [category, setCategory] = createSignal<(typeof categories)[number]>('Workspace')
   createEffect(on(() => props.projectSettingsRequest, (request) => {
@@ -253,6 +401,10 @@ export function SettingsPane(props: SettingsPaneProps) {
                 )}
               </For>
             </fieldset>
+          </Show>
+          <Show when={category() === 'Keyboard shortcuts'}>
+            <KeyboardShortcuts registry={props.keybindings} mac={props.mac}
+              onReload={props.onReloadKeybindings} onEdit={props.onEditKeybinding} />
           </Show>
         </section>
       </div>

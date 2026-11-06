@@ -1,4 +1,4 @@
-use std::io::{self, Write};
+use std::io;
 use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
@@ -7,6 +7,7 @@ use tauri::State;
 use tokio::sync::Mutex;
 
 use crate::bridge::{BridgeError, ShellState};
+use crate::config_files::{encode_json, write_atomic};
 
 const NOTIFICATIONS_KEY: &str = "notifications.enabled";
 
@@ -71,16 +72,7 @@ impl NotificationSettings {
 }
 
 fn write_settings(path: &Path, settings: &Value) -> io::Result<()> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| io::Error::other("Missing settings directory."))?;
-    std::fs::create_dir_all(parent)?;
-    let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
-    serde_json::to_writer_pretty(temporary.as_file_mut(), settings)?;
-    writeln!(temporary)?;
-    temporary.as_file().sync_all()?;
-    temporary.persist(path)?;
-    Ok(())
+    write_atomic(path, &encode_json(settings)?)
 }
 
 #[tauri::command]
