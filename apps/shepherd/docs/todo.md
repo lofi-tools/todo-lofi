@@ -766,6 +766,16 @@ job shutdown, search during new output and the terminal hyperlink opener.
 It painted the burst tail in 438 ms under QEMU and showed all 24 paced
 markers. The optional fish probe was skipped.
 
+At `4e75638`, a fresh Ubuntu 24.04.5 x86-64 checkout passed all 35 regular
+Rust tests, both desktop launches and the native IBus probe under QEMU.
+The Rust regression confirmed that Quit stops a background job after its
+shell exits. The desktop run exercised independent Kitty mode replies
+through a synchronized screen switch and restarted both terminal scopes
+using the versioned terminal list. IBus committed `你` and `尼` once each,
+with the candidate popup by the caret at both positions. The 1 MiB burst
+tail painted in 307 ms and all 24 paced markers appeared. The optional fish
+probe was skipped. The hosted run remains pending.
+
 ### Gate
 
 **Pass:** a developer can use Shepherd’s terminals for a normal workday without
