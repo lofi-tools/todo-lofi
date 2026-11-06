@@ -19,7 +19,7 @@ export type TaskState =
   | 'interrupted'
 
 export type AgentTier = 'native' | 'acp' | 'terminal-wrapper' | 'plain-pane'
-export type Agent = 'codex' | 'opencode'
+export type Agent = 'codex' | 'opencode' | 'claude'
 
 export type ShutdownState = 'running' | 'draining' | 'terminating' | 'closed'
 
@@ -263,6 +263,10 @@ export function setDraftAgent(taskId: string, agent: Agent): Promise<TaskWorkspa
 
 export function opencodeConfigured(): Promise<boolean> {
   return invoke<boolean>('opencode_configured')
+}
+
+export function claudeConfigured(): Promise<boolean> {
+  return invoke<boolean>('claude_configured')
 }
 
 export function discardDraft(taskId: string): Promise<void> {

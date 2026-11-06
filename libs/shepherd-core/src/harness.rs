@@ -28,6 +28,9 @@ pub trait HarnessFactory: Send + Sync {
             Agent::OpenCode => Err(CoreError::HarnessMissing {
                 report: "OpenCode executable is unavailable".into(),
             }),
+            Agent::Claude => Err(CoreError::HarnessMissing {
+                report: "Claude Code ACP executable is unavailable".into(),
+            }),
         }
     }
 

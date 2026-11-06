@@ -874,6 +874,7 @@ impl Core {
         };
         let mut task = Task::draft(project_id.clone(), &title, &git_dir);
         task.agent = agent;
+        task.tier = agent.default_tier();
         let task_id = task.id.clone();
         let mut updated_project = project.clone();
         updated_project.last_task_id = Some(task_id.clone());
@@ -903,6 +904,7 @@ impl Core {
             });
         }
         task.agent = agent;
+        task.tier = agent.default_tier();
         self.store.save_task(&task).await?;
         self.tasks.insert(task_id.clone(), task);
         Ok(CommandResult::TaskWorkspace(self.publish_task(task_id)?))

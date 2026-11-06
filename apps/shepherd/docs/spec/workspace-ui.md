@@ -130,7 +130,8 @@ current layout and give future changes a point of comparison.
   a standalone terminal that fills the conversation pane. Use **Back to chat**
   in the window header to close it. Other unavailable agents are disabled until
   their integrations are ready.
-- OpenCode is available when its executable is configured in `settings.json`.
+- OpenCode and Claude Code are available when their executables are configured
+  in `settings.json`.
   The selection applies to the new draft. The composer can change a draft's
   agent until its first prompt. The task then keeps its agent across restarts.
 
@@ -171,8 +172,8 @@ current layout and give future changes a point of comparison.
   Codex default is GPT-6.1 Terra (`gpt-6.1-terra`). Before a session, display
   the model resolved from Shepherd's launch configuration. Once a session
   starts, use the model reported by that session. Use **Codex default** if
-  the model name is unavailable. OpenCode uses its own model configuration
-  and does not show this picker.
+  the model name is unavailable. OpenCode and Claude Code use their own model
+  configuration and do not show this picker.
 - Send sits inside the card, at the end of the lower row. Use the compact
   right-pointing arrowhead icon and a bright accent when enabled. The current
   button size is 32 × 30 px. The disabled state uses a muted tint of the same

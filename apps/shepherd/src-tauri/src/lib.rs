@@ -14,6 +14,7 @@ mod terminal_screen;
 use std::path::PathBuf;
 
 use agent_harness::codex::CodexTier;
+use agent_harness::settings::AgentSettings;
 use shepherd_core::harness::HarnessFactory;
 use tauri::Manager;
 
@@ -94,24 +95,46 @@ pub fn run() -> Result<(), tauri::Error> {
                 Some(path) => path.into(),
                 None => app.path().app_data_dir()?,
             };
-            let (harness_factory, codex_program, opencode_configured): (
+            let (harness_factory, codex_program, opencode_configured, claude_configured): (
                 Box<dyn HarnessFactory>,
                 _,
                 _,
+                _,
             ) = match dev_factory {
-                Some(factory) => (factory, None, false),
+                Some(factory) => (factory, None, false, false),
                 None => {
                     let (codex, codex_program) = codex_factory(&data_directory);
                     let settings = app.path().app_config_dir()?.join("settings.json");
-                    let opencode = agent_harness::opencode::configured_executable(&settings);
+                    let (opencode, claude) = match AgentSettings::read(&settings) {
+                        Ok(settings) => (
+                            settings.executable("agents.opencode.executable"),
+                            settings.command("agents.claude"),
+                        ),
+                        Err(error) => {
+                            let report = error.to_string();
+                            (
+                                Err(error),
+                                Err(agent_harness::HarnessError::Protocol(report)),
+                            )
+                        }
+                    };
                     if let Err(error) = &opencode {
                         tracing::warn!(%error, "could not load OpenCode configuration");
                     }
-                    let configured = matches!(&opencode, Ok(Some(_)));
+                    if let Err(error) = &claude {
+                        tracing::warn!(%error, "could not load Claude Code configuration");
+                    }
+                    let opencode_configured = matches!(&opencode, Ok(Some(_)));
+                    let claude_configured = matches!(&claude, Ok(Some(_)));
                     (
-                        Box::new(codex_harness::DesktopHarnessFactory { codex, opencode }),
+                        Box::new(codex_harness::DesktopHarnessFactory {
+                            codex,
+                            opencode,
+                            claude,
+                        }),
                         codex_program,
-                        configured,
+                        opencode_configured,
+                        claude_configured,
                     )
                 }
             };
@@ -121,6 +144,7 @@ pub fn run() -> Result<(), tauri::Error> {
             ))?;
             state.codex_program = codex_program;
             state.opencode_configured = opencode_configured;
+            state.claude_configured = claude_configured;
             state.start_event_pump();
             app.manage(state);
             Ok(())
@@ -130,6 +154,7 @@ pub fn run() -> Result<(), tauri::Error> {
             bridge::commands::create_draft,
             bridge::commands::set_draft_agent,
             bridge::commands::opencode_configured,
+            bridge::commands::claude_configured,
             bridge::commands::discard_draft,
             bridge::commands::send_prompt,
             bridge::commands::resolve_approval,

@@ -884,8 +884,9 @@ If Pi’s RPC probe is blocked, proceed with ACP while resolving it.
   cancellation and worktree-confined atomic writes. OpenCode uses its configured
   executable for both tiers and records ACP when the native probe fails. The
   installed fallback smoke opens and reloads a session, and a subprocess
-  fixture verifies a complete fallback turn. Claude Code configuration and
-  scoped approval choices remain open.
+  fixture verifies a complete fallback turn. Claude Code uses the same adapter
+  through its configured executable and arguments. Scoped approval choices,
+  interactive agent terminal panes and a live Claude Code smoke remain open.
 - [x] Freebuff runs in a standalone PTY in place of the conversation pane.
 - [ ] Tier downgrade UI, capability gates and diagnostics per adapter.
 - [ ] Missing binary, auth failure, protocol failure and mid-turn exit all have

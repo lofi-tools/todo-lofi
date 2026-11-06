@@ -6,8 +6,10 @@
 
 use std::path::{Path, PathBuf};
 
+use agent_harness::acp::AcpHarness;
 use agent_harness::codex::{CodexHarness, CodexInstall};
 use agent_harness::opencode::OpenCodeHarness;
+use agent_harness::settings::ConfiguredCommand;
 use agent_harness::{AgentHarness, HarnessError, SpawnSpec};
 use shepherd_core::harness::HarnessFactory;
 use shepherd_core::{Agent, CoreError};
@@ -17,6 +19,7 @@ const DEFAULT_CODEX_MODEL: &str = "gpt-6.1-terra";
 pub struct DesktopHarnessFactory {
     pub codex: Box<dyn HarnessFactory>,
     pub opencode: Result<Option<PathBuf>, HarnessError>,
+    pub claude: Result<Option<ConfiguredCommand>, HarnessError>,
 }
 
 impl HarnessFactory for DesktopHarnessFactory {
@@ -33,30 +36,49 @@ impl HarnessFactory for DesktopHarnessFactory {
         agent: Agent,
         cwd: PathBuf,
     ) -> Result<(Box<dyn AgentHarness>, SpawnSpec), CoreError> {
-        if agent == Agent::Codex {
-            return self.codex.launch(agent, cwd);
-        }
-        let program = match &self.opencode {
-            Ok(Some(path)) => path.to_str().ok_or_else(|| CoreError::HarnessMissing {
-                report: "OpenCode executable path must be UTF-8".into(),
-            })?,
-            Ok(None) => {
-                return Err(CoreError::HarnessMissing {
-                    report: "Set agents.opencode.executable in Shepherd's settings.json".into(),
-                });
-            }
-            Err(error) => {
-                return Err(CoreError::HarnessMissing {
-                    report: error.to_string(),
-                });
+        let (harness, executable, args): (Box<dyn AgentHarness>, &Path, Vec<String>) = match agent {
+            Agent::Codex => return self.codex.launch(agent, cwd),
+            Agent::OpenCode => (
+                Box::new(OpenCodeHarness::default()),
+                require_configured(&self.opencode, "agents.opencode.executable")?,
+                Vec::new(),
+            ),
+            Agent::Claude => {
+                let command = require_configured(&self.claude, "agents.claude.executable")?;
+                (
+                    Box::new(AcpHarness::default()),
+                    &command.executable,
+                    command.args.clone(),
+                )
             }
         };
+        let program = executable
+            .to_str()
+            .ok_or_else(|| CoreError::HarnessMissing {
+                report: format!("{} executable path must be UTF-8", agent.as_str()),
+            })?;
         let spec = SpawnSpec {
             program: program.to_owned(),
+            args,
             cwd,
             ..SpawnSpec::default()
         };
-        Ok((Box::new(OpenCodeHarness::default()), spec))
+        Ok((harness, spec))
+    }
+}
+
+fn require_configured<'a, T>(
+    setting: &'a Result<Option<T>, HarnessError>,
+    key: &str,
+) -> Result<&'a T, CoreError> {
+    match setting {
+        Ok(Some(value)) => Ok(value),
+        Ok(None) => Err(CoreError::HarnessMissing {
+            report: format!("Set {key} in Shepherd's settings.json"),
+        }),
+        Err(error) => Err(CoreError::HarnessMissing {
+            report: error.to_string(),
+        }),
     }
 }
 
@@ -132,12 +154,33 @@ mod tests {
         let factory = DesktopHarnessFactory {
             codex: Box::new(MissingCodexFactory::new("fixture".into())),
             opencode: Ok(Some(executable.clone())),
+            claude: Ok(None),
         };
         let cwd = PathBuf::from("/tmp/worktree");
         let (_harness, spec) = factory.launch(Agent::OpenCode, cwd.clone())?;
         assert_eq!(Path::new(&spec.program), executable);
         assert_eq!(spec.cwd, cwd);
         assert!(factory.launch(Agent::Codex, cwd).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn launches_claude_through_the_configured_acp_command() -> Result<(), CoreError> {
+        let executable = PathBuf::from("/tmp/claude-code-acp");
+        let factory = DesktopHarnessFactory {
+            codex: Box::new(MissingCodexFactory::new("fixture".into())),
+            opencode: Ok(None),
+            claude: Ok(Some(ConfiguredCommand {
+                executable: executable.clone(),
+                args: vec!["--flag".into(), "value with spaces".into()],
+            })),
+        };
+        let cwd = PathBuf::from("/tmp/worktree");
+        let (harness, spec) = factory.launch(Agent::Claude, cwd.clone())?;
+        assert_eq!(harness.tier(), agent_harness::AdapterTier::Acp);
+        assert_eq!(Path::new(&spec.program), executable);
+        assert_eq!(spec.args, ["--flag", "value with spaces"]);
+        assert_eq!(spec.cwd, cwd);
         Ok(())
     }
 }

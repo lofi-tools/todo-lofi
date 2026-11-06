@@ -121,6 +121,26 @@ the installed ACP fallback smoke checks session creation and reload.
 direnv exec . cargo test -p agent-harness opencode::tests::installed_ -- --ignored
 ```
 
+## Use an installed Claude Code ACP adapter
+
+In the same `settings.json`, set `agents.claude.executable` under `app` to the
+absolute path of your Claude Code ACP executable. The optional
+`agents.claude.args` array supplies arguments as separate values.
+
+```json
+{
+  "version": 1,
+  "app": {
+    "agents.claude.executable": "/path/to/claude-code-acp",
+    "agents.claude.args": []
+  }
+}
+```
+
+Restart Shepherd and select **Claude Code** in an empty conversation or a
+draft. The ACP agent selects its model and sends permission requests to
+Shepherd. Approval cards support one-time allow and denial.
+
 ## Live Codex tests
 
 The ignored Codex tests use the ChatGPT login with `gpt-6.1-terra` at

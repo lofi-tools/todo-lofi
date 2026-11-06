@@ -12,6 +12,7 @@ pub mod fake_harness;
 pub mod live_codex;
 pub mod opencode;
 pub mod pi;
+pub mod settings;
 
 use std::collections::BTreeMap;
 use std::fmt;

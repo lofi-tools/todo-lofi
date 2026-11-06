@@ -265,6 +265,8 @@ test.beforeEach(async ({ context }) => {
             return 'gpt-6.1-terra'
           case 'opencode_configured':
             return options.has('configured-opencode')
+          case 'claude_configured':
+            return options.has('configured-claude')
           case 'project_remote':
             if (options.has('hugging-face-remote')) {
               return { label: 'datasets/example/data', forge: 'huggingface' }
@@ -637,6 +639,7 @@ test('composes the first chat in an empty project and hides its sole task row', 
   const codex = agentMenu.getByRole('menuitemradio', { name: 'Codex', checked: true })
   await expect(codex).toBeFocused()
   await expect(agentMenu.getByRole('menuitemradio', { name: 'OpenCode' })).toBeDisabled()
+  await expect(agentMenu.getByRole('menuitemradio', { name: 'Claude Code' })).toBeDisabled()
   await codex.press('Escape')
   await expect(agentMenu).toBeHidden()
   await expect(agent).toBeFocused()
@@ -694,6 +697,20 @@ test('uses the configured OpenCode agent and keeps the choice on the draft', asy
   await expect(page.getByText('working on it')).toBeVisible()
   await composer.getByRole('button', { name: 'Agent: OpenCode' }).click()
   await expect(composer.getByRole('menuitemradio', { name: 'Codex' })).toBeDisabled()
+})
+
+test('selects a configured Claude Code ACP agent for a new draft', async ({ page }) => {
+  await page.goto('/?two-projects&configured-claude')
+  await page.getByRole('button', { name: 'notes', exact: true }).click()
+  const welcome = page.getByRole('heading', { name: 'What should Codex build in notes?' })
+  await welcome.getByRole('button', { name: 'Agent: Codex' }).click()
+  await welcome.getByRole('menuitemradio', { name: 'Claude Code' }).click()
+  await expect(page.getByRole('heading', { name: 'What should Claude Code build in notes?' })).toBeVisible()
+  await page.getByLabel('Prompt').fill('Review the code')
+  await expect(page.getByRole('button', { name: 'Discard draft' })).toBeVisible()
+  const composer = page.locator('.composer')
+  await expect(composer.getByRole('button', { name: 'Agent: Claude Code' })).toBeVisible()
+  await expect(composer.getByRole('button', { name: /Model \/ effort/ })).toHaveCount(0)
 })
 
 test('encodes typed keys into terminal input', async ({ page }) => {

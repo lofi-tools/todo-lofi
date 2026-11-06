@@ -1,7 +1,6 @@
 //! OpenCode's private HTTP server and session control.
 
 use std::collections::{BTreeMap, HashSet, VecDeque};
-use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
@@ -20,6 +19,7 @@ use tokio::task::JoinHandle;
 use tokio::time::{Instant, timeout, timeout_at};
 
 use crate::acp::AcpHarness;
+use crate::settings::AgentSettings;
 use crate::{
     AdapterTier, AgentDiagnostics, AgentHarness, ApprovalId, ApprovalRequest, Capabilities,
     Decision, DeltaKind, Entry, HarnessError, HarnessEvent, HarnessResult, ItemId, PromptInput,
@@ -33,41 +33,10 @@ const MAX_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 const USERNAME: &str = "opencode";
 const SERVER_ARGS: [&str; 5] = ["serve", "--hostname", "127.0.0.1", "--port", "0"];
 
-#[derive(Deserialize)]
-struct Settings {
-    #[serde(default)]
-    app: AppSettings,
-}
-
-#[derive(Default, Deserialize)]
-struct AppSettings {
-    #[serde(rename = "agents.opencode.executable")]
-    executable: Option<PathBuf>,
-}
-
 /// Read the configured executable without resolving aliases, modifying the
 /// settings file, or installing a binary.
 pub fn configured_executable(settings_path: &Path) -> HarnessResult<Option<PathBuf>> {
-    let bytes = match std::fs::read(settings_path) {
-        Ok(bytes) => bytes,
-        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
-        Err(error) => {
-            return Err(HarnessError::Protocol(format!(
-                "could not read OpenCode settings at {}: {error}",
-                settings_path.display()
-            )));
-        }
-    };
-    let settings: Settings = serde_json::from_slice(&bytes).map_err(|error| {
-        HarnessError::Protocol(format!(
-            "could not parse OpenCode settings at {}: {error}",
-            settings_path.display()
-        ))
-    })?;
-    if let Some(executable) = &settings.app.executable {
-        require_absolute_executable(executable)?;
-    }
-    Ok(settings.app.executable)
+    AgentSettings::read(settings_path)?.executable("agents.opencode.executable")
 }
 
 fn require_absolute_executable(path: &Path) -> HarnessResult<()> {

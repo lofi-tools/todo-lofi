@@ -33,6 +33,7 @@ pub enum Agent {
     #[default]
     Codex,
     OpenCode,
+    Claude,
 }
 
 impl Agent {
@@ -40,6 +41,7 @@ impl Agent {
         match value {
             "codex" => Some(Self::Codex),
             "opencode" => Some(Self::OpenCode),
+            "claude" => Some(Self::Claude),
             _ => None,
         }
     }
@@ -48,6 +50,14 @@ impl Agent {
         match self {
             Self::Codex => "codex",
             Self::OpenCode => "opencode",
+            Self::Claude => "claude",
+        }
+    }
+
+    pub fn default_tier(self) -> AgentTier {
+        match self {
+            Self::Claude => AgentTier::Acp,
+            Self::Codex | Self::OpenCode => AgentTier::Native,
         }
     }
 }

@@ -968,6 +968,9 @@ in-memory model is still scoped key/value pairs, serialized per scope:
 - `app["agents.opencode.executable"]` points to an existing OpenCode executable
   by absolute path. A stable profile symlink such as
   `/etc/profiles/per-user/me/bin/opencode` can follow Nix profile updates.
+- `app["agents.claude.executable"]` points to an existing Claude Code ACP
+  executable by absolute path. `app["agents.claude.args"]` is an optional
+  array of arguments passed in order.
 - Resolution is per key: project > app > built-in, with whole-value replacement
   and no deep merge. Reset deletes the override.
 - Unknown keys are preserved on rewrite. A missing file means defaults; a

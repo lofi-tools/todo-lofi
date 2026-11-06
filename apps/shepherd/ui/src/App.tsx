@@ -22,12 +22,12 @@ type TerminalBell = Extract<CoreEvent, { type: 'terminalBell' }>['data']
 
 const LIVE_STATES: bridge.TaskState[] = ['starting', 'queued', 'working', 'waiting']
 const SEND_ACCENT_KEY = 'shepherd.sendAccent'
-const STRUCTURED_AGENTS: Record<bridge.Agent, string> = { codex: 'Codex', opencode: 'OpenCode' }
+const STRUCTURED_AGENTS: Record<bridge.Agent, string> = { codex: 'Codex', opencode: 'OpenCode', claude: 'Claude Code' }
 const AGENT_OPTIONS: PickerOption[] = [
   { id: 'codex', name: STRUCTURED_AGENTS.codex },
   { id: 'opencode', name: STRUCTURED_AGENTS.opencode },
   { id: 'pi', name: 'Pi (coming soon)', disabled: true },
-  { id: 'claude', name: 'Claude Code (coming soon)', disabled: true },
+  { id: 'claude', name: STRUCTURED_AGENTS.claude },
   { id: 'freebuff', name: 'Freebuff (terminal)' },
 ]
 
@@ -87,6 +87,7 @@ export function App() {
   const [projectsLoaded, setProjectsLoaded] = createSignal(false)
   const [codexAvailable, setCodexAvailable] = createSignal(false)
   const [opencodeConfigured, setOpencodeConfigured] = createSignal(false)
+  const [claudeConfigured, setClaudeConfigured] = createSignal(false)
   const [newTaskAgent, setNewTaskAgent] = createSignal<bridge.Agent>('codex')
   const [selectedProjectId, setSelectedProjectId] = createSignal<string | null>(null)
   const [freebuffProjectId, setFreebuffProjectId] = createSignal<string>()
@@ -198,6 +199,9 @@ export function App() {
   const [shutdownNote, setShutdownNote] = createSignal<string | null>(null)
   let allowClose = false
 
+  const agentConfigured = (agent: bridge.Agent) =>
+    agent === 'codex' || (agent === 'opencode' ? opencodeConfigured() : claudeConfigured())
+
   const agentOptions = () => {
     const project = selectedProject()
     const task = workspace()?.task
@@ -206,10 +210,10 @@ export function App() {
     return AGENT_OPTIONS.map((agent) => {
       if (agent.id === 'freebuff') return { ...agent, disabled: !canOpen }
       if (agent.id === 'codex') return { ...agent, disabled: !canChange }
-      if (agent.id === 'opencode') return {
+      if (agent.id === 'opencode' || agent.id === 'claude') return {
         ...agent,
-        disabled: !canChange || !opencodeConfigured(),
-        detail: opencodeConfigured() ? undefined : 'Set the executable in settings.json',
+        disabled: !canChange || !agentConfigured(agent.id),
+        detail: agentConfigured(agent.id) ? undefined : 'Set the executable in settings.json',
       }
       return agent
     })
@@ -222,7 +226,8 @@ export function App() {
       setFreebuffProjectId(project.id)
       return
     }
-    if (agent !== 'codex' && (agent !== 'opencode' || !opencodeConfigured())) return
+    if (agent !== 'codex' && agent !== 'opencode' && agent !== 'claude') return
+    if (!agentConfigured(agent)) return
     const task = workspace()?.task
     if (!task) {
       setNewTaskAgent(agent)
@@ -368,6 +373,7 @@ export function App() {
   onMount(() => {
     void homeDir().then(setHomeDirectory).catch((error) => console.warn('Could not resolve the home directory', error))
     void bridge.opencodeConfigured().then(setOpencodeConfigured).catch((error) => console.warn('Could not read OpenCode availability', error))
+    void bridge.claudeConfigured().then(setClaudeConfigured).catch((error) => console.warn('Could not read Claude Code availability', error))
     void run(async () => {
       await bridge.subscribeToEvents(handleEvent)
       const list = await bridge.projectList()

@@ -200,6 +200,7 @@ pub struct ShellState {
     core: Arc<Mutex<Core>>,
     pub(crate) codex_program: Option<PathBuf>,
     pub(crate) opencode_configured: bool,
+    pub(crate) claude_configured: bool,
     events: broadcast::Sender<Event>,
     terminal_subscriptions: Arc<Mutex<BTreeMap<String, TerminalSubscription>>>,
     terminal_lifecycle: Mutex<()>,
@@ -215,6 +216,7 @@ impl ShellState {
             core: Arc::new(Mutex::new(core)),
             codex_program: None,
             opencode_configured: false,
+            claude_configured: false,
             events,
             terminal_subscriptions: Arc::new(Mutex::new(BTreeMap::new())),
             terminal_lifecycle: Mutex::new(()),
@@ -1048,6 +1050,11 @@ pub mod commands {
     #[tauri::command]
     pub fn opencode_configured(state: State<'_, ShellState>) -> bool {
         state.opencode_configured
+    }
+
+    #[tauri::command]
+    pub fn claude_configured(state: State<'_, ShellState>) -> bool {
+        state.claude_configured
     }
 
     #[tauri::command]
