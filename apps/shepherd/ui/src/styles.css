@@ -11,7 +11,7 @@
 
   --sidebar-width: 240px;
   --inspector-width: 360px;
-  --status-height: 28px;
+  --status-height: 24px;
 
   color-scheme: dark;
   font-family: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
@@ -1557,7 +1557,7 @@ textarea {
   gap: 8px;
   height: var(--status-height);
   padding: 0 12px;
-  color: var(--text-muted);
+  color: color-mix(in srgb, var(--text-muted) 75%, var(--text-disabled));
   font-size: 12px;
 }
 
