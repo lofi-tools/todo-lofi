@@ -647,6 +647,13 @@ anchor. At two cursor positions, the panel opened within one row of the current
 caret. Space committed `你`. Down then Space chose `尼` on the second attempt.
 The shell received each selection once, matching the webview's trusted
 composition events.
+Run the repeatable check with `./scripts/smoke-shepherd-terminal.sh --linux-ime`
+inside the Nix development shell on Ubuntu. The
+[terminal smoke workflow](../../../.github/workflows/shepherd-terminal-smoke.yml)
+sets the Mesa and GTK module paths and installs the required packages. This
+mode starts its own Xvfb display, session bus, and IBus daemon with disposable
+settings. Removing the caret refresh reproduces the misplaced popup and fails
+the check.
 
 The native smoke waits for the composition prompt's cursor row to paint before
 scrolling back. It starts synthetic composition from scrollback and checks

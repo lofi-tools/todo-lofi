@@ -14,6 +14,14 @@ case "${1:-}" in
     done
     export SHEPHERD_DEV_SCRIPTED_HARNESS=1
     ;;
+  --linux-ime)
+    if [[ $(uname -s) != Linux || ! -r ${SHEPHERD_SMOKE_IBUS_MODULE:-} ]]; then
+      printf '%s\n' 'The native IME smoke requires Linux and SHEPHERD_SMOKE_IBUS_MODULE pointing to the GTK 3 IBus module.' >&2
+      exit 2
+    fi
+    phases=(linux-ime)
+    export SHEPHERD_DEV_SCRIPTED_HARNESS=1
+    ;;
   --codex-approval)
     command -v python3 >/dev/null
     phases=(codex-approval)
@@ -47,7 +55,7 @@ case "${1:-}" in
     export SHEPHERD_DEV_CODEX_SMOKE=review-merge
     ;;
   *)
-    printf '%s\n' "Usage: $0 [--codex-approval|--codex-live|--codex-edit|--codex-restart|--codex-exit|--codex-review-merge]" >&2
+    printf '%s\n' "Usage: $0 [--linux-ime|--codex-approval|--codex-live|--codex-edit|--codex-restart|--codex-exit|--codex-review-merge]" >&2
     exit 2
     ;;
 esac
@@ -90,7 +98,7 @@ if fish_version=$(fish --version 2>/dev/null) && [[ $fish_version =~ ^fish,\ ver
 fi
 export SHELL=/bin/sh
 export CARGO_NET_OFFLINE=true
-if [[ -z ${SHEPHERD_DEV_CODEX_SMOKE:-} ]]; then
+if [[ ${phases[0]} == prepare ]]; then
   mkdir "$fixture/second-project"
   mkdir "$fixture/bin"
   cat > "$fixture/bin/open" <<'EOF'
@@ -118,6 +126,12 @@ if [[ -n ${SHEPHERD_DEV_CODEX_SMOKE:-} ]]; then
   launch+=(--features desktop-codex-smoke)
 fi
 for phase in "${phases[@]}"; do
+  if [[ $phase == linux-ime ]]; then
+    SHEPHERD_DESKTOP_SMOKE_PHASE="$phase" XDG_DATA_DIRS=/usr/share:/usr/local/share \
+      /usr/bin/dbus-run-session --dbus-daemon=/usr/bin/dbus-daemon -- \
+      xvfb-run -a -s '-screen 0 1600x1000x24' /usr/bin/python3 "$repo/scripts/smoke-shepherd-ime.py" "$fixture" "${launch[@]}"
+    continue
+  fi
   SHEPHERD_DESKTOP_SMOKE_PHASE="$phase" timeout --signal=INT --kill-after=10s "$duration" "${launch[@]}" 2>&1 | tee "$fixture/$phase.log"
   rg -q 'SHEPHERD_TERMINAL_SMOKE \{"ok":true' "$fixture/$phase.log"
   if [[ $phase == prepare ]]; then
@@ -147,7 +161,7 @@ for phase in "${phases[@]}"; do
     [[ ! -e $task_worktree && $(git -C "$fixture/project" rev-parse "$task_branch") == "$task_tip" ]]
   fi
 done
-if [[ -z ${SHEPHERD_DEV_CODEX_SMOKE:-} ]]; then
+if [[ ${phases[0]} == prepare ]]; then
   [[ $(cat "$SHEPHERD_SMOKE_OPEN_LOG") == 'https://example.invalid/shepherd-terminal' ]]
 fi
 if [[ ${SHEPHERD_DEV_CODEX_SMOKE:-} == review-merge ]]; then

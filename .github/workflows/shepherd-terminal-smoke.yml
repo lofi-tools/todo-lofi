@@ -23,12 +23,14 @@ jobs:
       - name: Install display and terminal fixtures
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends dbus-daemon fontconfig fonts-dejavu-core fzf less python3 ripgrep vim xauth xvfb
+          sudo apt-get install -y --no-install-recommends \
+            dbus-daemon fontconfig fonts-dejavu-core fonts-noto-cjk fzf gir1.2-ibus-1.0 \
+            ibus ibus-libpinyin less python3 python3-gi ripgrep vim x11-utils xauth xdotool xvfb
       - name: Build the debug app
         run: |
           nix develop --impure -c pnpm --filter shepherd-app --filter shepherd-ui install --frozen-lockfile
           nix develop --impure -c cargo build --locked -p shepherd --no-default-features
-      - name: Exercise both native launches
+      - name: Exercise native terminals and system IME
         run: |
           # Xvfb needs an explicit EGL provider for the Nix WebKit build.
           mesa=$(nix build --inputs-from . --no-link --print-out-paths nixpkgs#mesa)
@@ -36,3 +38,6 @@ jobs:
           export LIBGL_DRIVERS_PATH="$mesa/lib/dri"
           /usr/bin/dbus-run-session --dbus-daemon=/usr/bin/dbus-daemon -- \
             nix develop --impure -c xvfb-run -a -s '-screen 0 1600x1000x24' ./scripts/smoke-shepherd-terminal.sh
+          ibus=$(nix build --inputs-from . --no-link --print-out-paths nixpkgs#ibus)
+          export SHEPHERD_SMOKE_IBUS_MODULE="$ibus/lib/gtk-3.0/3.0.0/immodules/im-ibus.so"
+          nix develop --impure -c ./scripts/smoke-shepherd-terminal.sh --linux-ime

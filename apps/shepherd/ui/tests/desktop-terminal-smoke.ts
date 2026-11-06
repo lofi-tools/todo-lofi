@@ -227,6 +227,55 @@ async function exerciseComposition(terminalId: string, input: HTMLTextAreaElemen
   await waitFor('composed text delivered once', () => terminalOutput().split('\n').some((line) => line.trim() === 'S4_IME:かな'))
 }
 
+async function reportIme(details: object) {
+  const response = await fetch('/__shepherd-terminal-smoke', {
+    method: 'POST', body: JSON.stringify(details),
+  })
+  if (!response.ok) throw new Error('Could not report the native IME probe')
+}
+
+async function exerciseLinuxIme() {
+  const project = await openFixtureProject()
+  const start = await enabledButton('New shared terminal')
+  start.click()
+  const input = await waitFor('terminal input', () => document.querySelector<HTMLTextAreaElement>('.terminal-view__input'))
+  const [terminal] = await bridge.terminalList(project.id)
+  if (!terminal) throw new Error('The fixture terminal was not started')
+  await waitFor('initial terminal frame', () => document.querySelector<HTMLCanvasElement>('.terminal-view__canvas')?.style.height)
+  await ptyColumns(terminal.id, terminal.title, 'NATIVE_IME_SIZED')
+
+  const received: string[] = []
+  for (const [attempt, row, column] of [[1, 5, 3], [2, 10, 8]]) {
+    await bridge.terminalWrite(terminal.id, `printf '\\033[2J\\033[${row};${column}HIME%s> ' ${attempt}; IFS= read -r composed; printf '\\nS4_NATIVE_IME_RESULT_%s:%s\\n' ${attempt} "$composed"\r`)
+    await waitFor(`native IME prompt ${attempt}`, () =>
+      terminalOutput().includes(`IME${attempt}>`) && parseFloat(input.style.top) === 8 + (row - 1) * 17)
+    input.focus({ preventScroll: true })
+    const commits: string[] = []
+    const onCommit = (event: CompositionEvent) => {
+      if (event.isTrusted) commits.push(event.data)
+    }
+    input.addEventListener('compositionend', onCommit)
+    try {
+      const { left, top } = input.getBoundingClientRect()
+      await reportIme({ ime: 'ready', attempt, cursor: [left, top], devicePixelRatio })
+      const selection = await waitFor('native IME commit', () => commits[0], 30_000)
+      await reportIme({ ime: 'committed', attempt, selection })
+      const marker = `S4_NATIVE_IME_RESULT_${attempt}:`
+      const text = await waitFor('native composition reaches the PTY', () =>
+        terminalOutput().split('\n').map((line) => line.trim())
+          .find((line) => line.startsWith(marker))?.slice(marker.length))
+      if (commits.length !== 1 || selection !== text || !/\p{Script=Han}/u.test(text)) {
+        throw new Error(`Expected one Pinyin commit in the shell, got ${JSON.stringify({ commits, text })}`)
+      }
+      received.push(text)
+    } finally {
+      input.removeEventListener('compositionend', onCommit)
+    }
+  }
+  if (received[0] === received[1]) throw new Error('Down did not select a different Pinyin candidate')
+  return { ok: true, nativeIme: true, received }
+}
+
 function shellQuote(value: string): string {
   return "'" + value.replaceAll("'", "'\"'\"'") + "'"
 }
@@ -948,6 +997,9 @@ void (async () => {
   let result
   try {
     switch (__SHEPHERD_SMOKE_PHASE__) {
+      case 'linux-ime':
+        result = await exerciseLinuxIme()
+        break
       case 'restore':
         result = await restore()
         break
