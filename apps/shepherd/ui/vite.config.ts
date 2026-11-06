@@ -1,3 +1,4 @@
+import { readFile } from 'node:fs/promises'
 import { defineConfig, type Plugin } from 'vite'
 import solid from 'vite-plugin-solid'
 
@@ -18,6 +19,20 @@ function desktopSmoke(project: string): Plugin {
       { tag: 'script', attrs: { type: 'module', src: '/tests/desktop-terminal-smoke.ts' }, injectTo: 'body' },
     ],
     configureServer(server) {
+      const openerLog = process.env.SHEPHERD_SMOKE_OPEN_LOG
+      if (openerLog) {
+        server.middlewares.use('/__shepherd-terminal-smoke/opener', (request, response) => {
+          if (request.method !== 'GET') {
+            response.writeHead(405).end()
+            return
+          }
+          response.setHeader('Cache-Control', 'no-store')
+          void readFile(openerLog, 'utf8').then(
+            (url) => response.writeHead(200, { 'Content-Type': 'text/plain' }).end(url),
+            (error: NodeJS.ErrnoException) => response.writeHead(error.code === 'ENOENT' ? 404 : 500).end(),
+          )
+        })
+      }
       server.middlewares.use('/__shepherd-terminal-smoke', (request, response) => {
         if (request.method !== 'POST') {
           response.writeHead(405).end()

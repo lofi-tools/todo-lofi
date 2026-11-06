@@ -616,8 +616,9 @@ Automated:
   restored the task as interrupted and the terminal as ended on relaunch.
   Command+Q closed directly when only an idle terminal was running.
   Switching projects preserves the original PTY's shell
-  state and output received while hidden. The hyperlink check verifies the
-  exact URL passed to a test-only desktop opener.
+  state and output received while hidden. The hyperlink check waits for the
+  test-only desktop opener to record the exact URL before sending the next
+  terminal command. It reports any link error at that step.
   The find bar navigates literal matches in both directions and returns
   keyboard focus to the shell when dismissed. The browser smoke checks that
   Escape during IME composition leaves the find bar open.

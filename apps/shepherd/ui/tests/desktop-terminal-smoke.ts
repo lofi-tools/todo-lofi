@@ -16,10 +16,15 @@ export function button(label: string): HTMLButtonElement | undefined {
     .find((entry) => (entry.getAttribute('aria-label') ?? entry.textContent?.trim()) === label)
 }
 
-export async function waitFor<T>(label: string, read: () => T | null | undefined | false, timeout = 12_000): Promise<T> {
+export async function waitFor<T>(
+  label: string,
+  read: () => T | null | undefined | false | Promise<T | null | undefined | false>,
+  timeout = 12_000,
+): Promise<T> {
   const until = performance.now() + timeout
   while (performance.now() < until) {
-    const value = read()
+    const result = read()
+    const value = result instanceof Promise ? await result : result
     if (value) return value
     await new Promise((resolve) => window.setTimeout(resolve, 25))
   }
@@ -405,6 +410,17 @@ async function exerciseHyperlink(terminalId: string) {
     bubbles: true, cancelable: true, button: 0, metaKey: mac, ctrlKey: !mac,
     clientX: left + 1, clientY: top + 1,
   }))
+  const url = await waitFor('the terminal hyperlink to reach the desktop opener', async () => {
+    const error = canvas.closest('.terminal-view')?.querySelector('.terminal-view__error')?.textContent
+    if (error) throw new Error(`Opening the terminal hyperlink failed: ${error}`)
+    const response = await fetch('/__shepherd-terminal-smoke/opener')
+    if (response.status === 404) return false
+    if (!response.ok) throw new Error(`Reading the smoke opener log failed with HTTP ${response.status}`)
+    return response.text()
+  })
+  if (url !== 'https://example.invalid/shepherd-terminal\n') {
+    throw new Error(`The terminal opener received ${JSON.stringify(url)}`)
+  }
 }
 
 function paneWidth(title: string): number {
@@ -958,7 +974,7 @@ async function smoke() {
   await startHangupResistantJob(terminal, 'quit')
   await openInspectorTab('git')
   await requestQuitWithLiveTask(3)
-  return { ok: true, quitWarning: true, taskSwitch: true, projectSwitch: true, roundTrip: true, splitReattach: true, ptyResize: true, scrollbackSearch: true, pacing, alternateScreen: true, fuzzyFinder: true, compositionEvents: true, kittyRoundTrip: true, fishKeyBindings: __SHEPHERD_SMOKE_FISH__, bracketedPaste: true, sgrMouse: true, burstPaintMs }
+  return { ok: true, quitWarning: true, taskSwitch: true, projectSwitch: true, roundTrip: true, splitReattach: true, ptyResize: true, scrollbackSearch: true, pacing, alternateScreen: true, fuzzyFinder: true, compositionEvents: true, kittyRoundTrip: true, fishKeyBindings: __SHEPHERD_SMOKE_FISH__, bracketedPaste: true, sgrMouse: true, hyperlinkOpened: true, burstPaintMs }
 }
 
 async function restore() {
