@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024" role="img" aria-labelledby="title">
+  <title id="title">Shepherd</title>
+  <g transform="translate(512 512) scale(2.2) translate(-128 -130)">
+    <path d="M239.184 106.203a64.716 64.716 0 0 0-5.576-53.103C219.452 28.459 191 15.784 163.213 21.74A65.586 65.586 0 0 0 52.096 45.22a64.716 64.716 0 0 0-43.23 31.36c-14.31 24.602-11.061 55.634 8.033 76.74a64.665 64.665 0 0 0 5.525 53.102c14.174 24.65 42.644 37.324 70.446 31.36a64.72 64.72 0 0 0 48.754 21.744c28.481.025 53.714-18.361 62.414-45.481a64.767 64.767 0 0 0 43.229-31.36c14.137-24.558 10.875-55.423-8.083-76.483Z"
+          fill="#fff"/>
+    <defs>
+      <mask id="terminal-eyes" maskUnits="userSpaceOnUse" x="80" y="165" width="340" height="265">
+        <rect x="80" y="165" width="340" height="265" fill="white"/>
+        <path d="m202 268 25 17-25 17m59 0h35"
+              fill="none" stroke="black" stroke-width="16" stroke-linecap="round" stroke-linejoin="round"/>
+      </mask>
+    </defs>
+    <g fill="#1a1a1a" transform="translate(-12 -52) scale(.56)" mask="url(#terminal-eyes)">
+      <path d="M 160 260 C 90 260, 80 340, 135 340 C 165 340, 175 295, 175 270 Z"/>
+      <path d="M 340 260 C 410 260, 420 340, 365 340 C 335 340, 325 295, 325 270 Z"/>
+      <path d="M 170 250 C 160 360, 180 430, 250 430 C 320 430, 340 360, 330 250 Z"/>
+      <path d="M 160 240
+               C 155 195, 195 165, 250 165
+               C 305 165, 345 195, 340 240
+               C 345 262, 320 268, 290 258
+               C 270 265, 230 265, 210 258
+               C 180 268, 155 262, 160 240 Z"/>
+    </g>
+  </g>
+</svg>
