@@ -743,6 +743,10 @@ passed on the hosted x86-64 runner. The popup followed the caret at both
 positions, and each selection reached the shell once. The 1 MiB burst tail
 painted in 105 ms, and all 24 paced markers appeared. The optional fish
 probe was skipped. [Hosted smoke run](https://github.com/lofi-tools/todo-lofi/actions/runs/42213055757)
+The hosted rerun at `505ffe6` passed both desktop launches and the IBus
+check. The 1 MiB burst tail painted in 79 ms, under the 100 ms budget, and
+all 24 paced markers appeared. The optional fish probe was skipped.
+[Hosted rerun](https://github.com/lofi-tools/todo-lofi/actions/runs/42215694509)
 The locked Nix shell evaluates for Ubuntu and macOS without a local checkout
 override. On a minimal Ubuntu 24.04 guest, the debug build succeeded. Start
 the session bus with Ubuntu's D-Bus binaries so the daemon reads the distro's
@@ -970,6 +974,7 @@ Record every gate result here. Do not silently mark a gate passed.
 | 2026-11-06 | S4 | Partial | Both scripted native launches passed on Ubuntu 24.04.5 ARM64 with Xvfb. The hosted x86-64 smoke, system IME candidate selection and placement, and the workday trial remain open. |
 | 2026-11-06 | S4 | Partial | Native IBus Pinyin passed after correcting the WebKitGTK caret position. The hosted x86-64 smoke, candidate-based input on macOS, and the workday trial remain open. |
 | 2026-11-06 | S4 | Partial | Both native desktop launches and the IBus candidate check passed on hosted Ubuntu x86-64 at `4e75638`. Candidate-based input on macOS and the workday trial remain open. [Hosted smoke run](https://github.com/lofi-tools/todo-lofi/actions/runs/42213055757) |
+| 2026-11-06 | S4 | Partial | The hosted Ubuntu x86-64 rerun at `505ffe6` passed both launches and IBus. The 1 MiB burst painted in 79 ms. [Hosted rerun](https://github.com/lofi-tools/todo-lofi/actions/runs/42215694509) |
 |  | S5 |  |  |
 |  | S6 |  |  |
 |  | S7 |  |  |
