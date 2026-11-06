@@ -716,6 +716,10 @@ and candidate-window placement still need a separate macOS check.
 With the same layout, holding `e` for 1.5 seconds in the disposable Shepherd
 terminal sent a plain `e` to the shell without showing a candidate panel.
 
+Headless Chromium drives trusted preedit updates through the DevTools input
+API. The regression checks that the terminal writes only the committed text,
+once, and discards a cancelled composition before the next ordinary key.
+
 Run the candidate check from the Nix shell with
 `./scripts/smoke-shepherd-terminal.sh --macos-ime`. Use the system
 **Pinyin - Simplified** input source. At each of the two prompts, type

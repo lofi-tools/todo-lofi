@@ -1363,6 +1363,42 @@ test('streams read-only Codex command output beside a live shell', async ({ page
   await expect(output).toHaveText('On branch main clean')
 })
 
+test('forwards browser IME commits once and discards cancelled preedit', async ({ page }) => {
+  await page.goto('/')
+  await expect(page.getByLabel('Terminal output')).toHaveText('BB')
+  const input = page.getByRole('textbox', { name: 'Terminal', exact: true })
+  await input.focus()
+  const browser = await page.context().newCDPSession(page)
+  const compose = (text: string) => browser.send('Input.imeSetComposition', {
+    text, selectionStart: text.length, selectionEnd: text.length,
+  })
+  const writes = () => page.evaluate(() => window.__writes)
+  const trustedUpdates = await input.evaluateHandle((element) => {
+    const updates: string[] = []
+    element.addEventListener('compositionupdate', (event) => {
+      if (event.isTrusted) updates.push((event as CompositionEvent).data)
+    })
+    return updates
+  })
+
+  await compose('ni')
+  await expect(input).toHaveValue('ni')
+  await compose('拟')
+  await expect(input).toHaveValue('拟')
+  expect(await trustedUpdates.jsonValue()).toEqual(['ni', '拟'])
+  expect(await writes()).toEqual([])
+  await browser.send('Input.insertText', { text: '你' })
+  await expect.poll(writes).toEqual(['你'])
+  await expect(input).toHaveValue('')
+
+  await compose('hao')
+  await expect(input).toHaveValue('hao')
+  await compose('')
+  await expect(input).toHaveValue('')
+  await input.press('a')
+  await expect.poll(writes).toEqual(['你', 'a'])
+})
+
 test('keeps terminal find open when Escape belongs to an IME composition', async ({ page }) => {
   await page.goto('/')
   const terminal = page.getByRole('textbox', { name: 'Terminal', exact: true })
