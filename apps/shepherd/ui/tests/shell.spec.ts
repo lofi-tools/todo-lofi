@@ -1321,6 +1321,34 @@ test('saves Quad and Single layouts while keeping the terminal instances', async
   await expect(page.getByRole('region', { name: 'Other shell' }).getByRole('textbox')).toBeVisible()
 })
 
+test('moves focus by direction between the Terminals tab and live splits', async ({ page }) => {
+  await page.goto('/?terminal-presets')
+  await page.getByRole('button', { name: 'Quad', exact: true }).click()
+
+  const pane = (number: number) => page.getByRole('region', { name: `Terminal ${number}` })
+  const header = (number: number) => pane(number).getByRole('button', { name: 'Hide pane' })
+  const tab = page.getByRole('tab', { name: 'Terminals' })
+  await tab.press('ArrowDown')
+  await expect(header(1)).toBeFocused()
+  await page.keyboard.press('ArrowRight')
+  await expect(header(1)).toBeFocused()
+  await page.keyboard.press('ArrowDown')
+  await expect(header(3)).toBeFocused()
+  await page.keyboard.press('ArrowRight')
+  await expect(header(4)).toBeFocused()
+  await page.keyboard.press('ArrowLeft')
+  await expect(header(3)).toBeFocused()
+  await page.keyboard.press('ArrowUp')
+  await expect(header(1)).toBeFocused()
+  await page.keyboard.press('ArrowUp')
+  await expect(tab).toBeFocused()
+
+  const input = pane(1).getByRole('textbox')
+  await input.press('ArrowDown')
+  await expect(input).toBeFocused()
+  await expect.poll(() => page.evaluate(() => window.__writes)).toEqual(['\x1bOB'])
+})
+
 test('reports Kitty key events and keeps a keyboard copy view', async ({ page }) => {
   await page.goto('/?kitty-terminal')
 

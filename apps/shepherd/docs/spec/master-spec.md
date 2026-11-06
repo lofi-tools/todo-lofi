@@ -181,8 +181,11 @@ detailed treatment of its controls as the rest of the shell is built.
 - `⌘P` / `Ctrl Shift P` project switcher, restoring that project's last task
   workspace; `⌘O` / `Ctrl Shift O` task switcher, which swaps the chat and
   task-specific terminal slots; the inspector tab stays where it is.
-- `⌘\`` / `Ctrl \`` focus next pane; `⌘⇧\`` / `Ctrl Shift \`` focus previous;
-  arrow keys move focus geometrically between tabs and terminal splits.
+- `⌘\`` / `Ctrl \`` focus next pane; `⌘⇧\`` / `Ctrl Shift \`` focus previous.
+  Left and Right switch inspector tabs. Down from the Terminals tab focuses
+  the first live split's header. Arrow keys on a live split's header move
+  focus to the adjacent split or back to the Terminals tab above the splits.
+  With the terminal input focused, arrow keys go to the PTY.
 - `⌘T` / `Ctrl Shift T` new task; `⌘⇧T` / `Ctrl Shift N` new task terminal in the
   active task; **New shared terminal** in the palette creates a project-scoped
   terminal.

@@ -494,7 +494,8 @@ function TerminalTree(props: TerminalTreeProps) {
             aria-label={entry().title} onFocusIn={() => props.select(entry().id)}>
             <div class="terminal-pane__bar">
               <span>{entry().title}</span>
-              <button type="button" onClick={() => props.detach(entry().id)} disabled={props.pending}>Hide pane</button>
+              <button type="button" data-terminal-focus={entry().endedAt === null ? '' : undefined}
+                onClick={() => props.detach(entry().id)} disabled={props.pending}>Hide pane</button>
               <Show when={entry().endedAt === null}>
                 <button type="button" onClick={() => props.stop(entry().id)} disabled={props.pending}>Stop process</button>
               </Show>

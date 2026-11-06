@@ -44,6 +44,43 @@ function loadSendAccent(): SendAccent {
   }
 }
 
+function terminalArrowDestination(inspector: HTMLElement, tab: HTMLButtonElement, target: HTMLElement, key: string) {
+  const selector = 'button[data-terminal-focus]:enabled'
+  if (target === tab) {
+    return key === 'ArrowDown' ? inspector.querySelector<HTMLButtonElement>(selector) : null
+  }
+  const header = target.closest('.terminal-pane__bar')
+  const current = header?.closest('.terminal-tile')
+  if (!current || !header?.querySelector(selector)) return null
+
+  const horizontal = key === 'ArrowLeft' || key === 'ArrowRight'
+  const forward = key === 'ArrowRight' || key === 'ArrowDown'
+  const origin = current.getBoundingClientRect()
+  const originStart = horizontal ? origin.top : origin.left
+  const originEnd = horizontal ? origin.bottom : origin.right
+  const crossCenter = (originStart + originEnd) / 2
+  let closest: HTMLButtonElement | null = null
+  let shortest = Infinity
+  for (const button of inspector.querySelectorAll<HTMLButtonElement>(selector)) {
+    const pane = button.closest('.terminal-tile')
+    if (!pane || pane === current) continue
+    const bounds = pane.getBoundingClientRect()
+    const gap = horizontal
+      ? (forward ? bounds.left - origin.right : origin.left - bounds.right)
+      : (forward ? bounds.top - origin.bottom : origin.top - bounds.bottom)
+    if (gap < 0) continue
+    const crossStart = horizontal ? bounds.top : bounds.left
+    const crossEnd = horizontal ? bounds.bottom : bounds.right
+    if (crossEnd <= originStart || crossStart >= originEnd) continue
+    const distance = Math.hypot(gap, Math.max(0, crossStart - crossCenter, crossCenter - crossEnd))
+    if (distance < shortest) {
+      closest = button
+      shortest = distance
+    }
+  }
+  return closest ?? (key === 'ArrowUp' ? tab : null)
+}
+
 export function App() {
   const [projects, setProjects] = createSignal<bridge.ProjectSnapshot[]>([])
   const [homeDirectory, setHomeDirectory] = createSignal<string>()
@@ -493,13 +530,23 @@ export function App() {
   }
 
   function onInspectorFocusShortcut(event: KeyboardEvent) {
-    const modifier = mac ? event.metaKey && !event.ctrlKey : event.ctrlKey && !event.metaKey
     if (event.defaultPrevented || event.isComposing || event.keyCode === 229 || event.altKey ||
-        !modifier || event.code !== 'Backquote' || !workspaceShortcutsEnabled() ||
+        !workspaceShortcutsEnabled() ||
         inspectorTab() !== 'terminals' || !inspector) return
     const tab = inspectorTabList?.querySelector<HTMLButtonElement>('#inspector-tab-terminals')
     const target = event.target
     if (!tab || !(target instanceof HTMLElement) || (target !== tab && !inspector.contains(target))) return
+    if (!event.ctrlKey && !event.metaKey && !event.shiftKey &&
+        ['ArrowDown', 'ArrowUp', 'ArrowLeft', 'ArrowRight'].includes(event.key)) {
+      const destination = terminalArrowDestination(inspector, tab, target, event.key)
+      if (destination) {
+        event.preventDefault()
+        destination.focus()
+      }
+      return
+    }
+    const modifier = mac ? event.metaKey && !event.ctrlKey : event.ctrlKey && !event.metaKey
+    if (!modifier || event.code !== 'Backquote') return
     const terminals = Array.from(inspector.querySelectorAll<HTMLTextAreaElement>('.terminal-view__input'))
     if (!terminals.length) return
     const stops = [tab, ...terminals]

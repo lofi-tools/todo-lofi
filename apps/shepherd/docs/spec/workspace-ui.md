@@ -39,6 +39,10 @@ current layout and give future changes a point of comparison.
   alongside the interactive terminal panes. Follow the latest command by
   default and let the user select an earlier command without shifting focus
   when new output arrives.
+  Down from the Terminals tab focuses the first live pane's **Hide pane**
+  button. Arrow keys on live pane header buttons move between adjacent live
+  panes. Up from a pane with no live pane above it returns to the Terminals
+  tab. Arrow keys in the terminal input go to the shell.
   Resize the inspector at its left edge by dragging or with the arrow keys
   while the separator is focused. Save the chosen width with the task.
 - Place the status bar below the wrapper on the window background. Its

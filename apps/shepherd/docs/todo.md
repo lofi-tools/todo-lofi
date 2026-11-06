@@ -565,8 +565,11 @@ task-scoped, persistent and fast enough.
   Command+Shift+T on macOS and Ctrl+Shift+N on Linux open and focus a new
   terminal in the selected task's worktree.
   Command+Backquote on macOS and Ctrl+Backquote on Linux cycle through the
-  Terminals tab and live splits. Shift reverses the cycle. Up and Down move
-  between enabled inspector tabs.
+  Terminals tab and live splits. Shift reverses the cycle. Left and Right move
+  between enabled inspector tabs. Down from the Terminals tab enters the
+  live split headers, where the arrow keys follow the split geometry. The
+  Quad browser regression skips ended panes and checks that Down in the
+  terminal input still reaches the PTY.
   The split and hide shortcuts use the platform's documented modifier. The
   native smoke checks those actions and reads an unclaimed control chord
   directly from the PTY.
