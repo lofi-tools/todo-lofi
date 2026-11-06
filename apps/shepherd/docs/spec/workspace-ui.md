@@ -70,6 +70,9 @@ current layout and give future changes a point of comparison.
   **Annotate** pauses interaction with the page so a click selects an element.
   Write a note and queue it in Preview. **Add to prompt** appends the queued
   annotations as editable text in the active composer and clears the queue.
+  If element selection is unavailable, show that status and offer a screenshot
+  picker. **Screenshot note** also opens the picker directly. Choose an image
+  captured in the browser and mark a point, then use the same note queue.
 - Place the status bar below the wrapper on the window background. Its
   transparent, borderless surface keeps it visually separate from the panes.
 

@@ -297,6 +297,12 @@ export function openProjectPreview(projectId: string): Promise<void> {
   return invoke<void>('open_project_preview', { projectId })
 }
 
+export async function savePreviewScreenshot(taskId: string, file: File): Promise<string> {
+  return invoke<string>('save_preview_screenshot', await file.arrayBuffer(), {
+    headers: { 'X-Shepherd-Task': taskId },
+  })
+}
+
 export function createDraft(projectId: string, title: string, agent: Agent = 'codex'): Promise<TaskWorkspace> {
   return invoke<TaskWorkspace>('create_draft', { projectId, title, agent })
 }

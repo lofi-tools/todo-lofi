@@ -13,7 +13,7 @@ import * as bridge from './bridge'
 import { FilesPane } from './FilesPane'
 import { ProjectImportSources, ProjectPicker } from './ProjectPicker'
 import { ProjectRow } from './ProjectRow'
-import { PreviewPane } from './PreviewPane'
+import { PreviewPane, type PreviewAnnotation } from './PreviewPane'
 import { GitPane } from './GitPane'
 import { ReviewPane } from './ReviewPane'
 import { SEND_ACCENTS, SettingsPane, type SendAccent } from './SettingsPane'
@@ -564,11 +564,41 @@ export function App() {
     })
   }
 
-  function addPreviewNote(text: string) {
-    if (!canAddPreviewNote()) return
+  function appendPreviewAnnotations(annotations: unknown[]) {
+    const text = `Preview annotations\n${JSON.stringify(annotations, null, 2)}`
     const current = prompt().trimEnd()
     updatePrompt(current ? `${current}\n\n${text}` : text)
     promptInput?.focus()
+  }
+
+  async function addPreviewNote(annotations: PreviewAnnotation[]) {
+    const projectId = selectedProjectId()
+    if (!projectId || !canAddPreviewNote()) throw new Error('Select a draft or ready task to add annotations.')
+    if (!annotations.some((annotation) => 'screenshot' in annotation)) {
+      appendPreviewAnnotations(annotations)
+      return
+    }
+
+    const context: unknown[] = []
+    setPending(true)
+    try {
+      const task = workspace()?.task ?? (await firstDraft(projectId)).task
+      for (const annotation of annotations) {
+        if ('screenshot' in annotation) {
+          const { file, ...coordinates } = annotation.screenshot
+          const path = await bridge.savePreviewScreenshot(task.id, file)
+          context.push({ url: annotation.url, screenshot: { path, ...coordinates }, note: annotation.note })
+        } else {
+          context.push(annotation)
+        }
+      }
+      if (selectedProjectId() !== projectId || selectedTaskId() !== task.id) {
+        throw new Error('The selected task changed. Add the annotations again from the intended task.')
+      }
+    } finally {
+      setPending(false)
+    }
+    appendPreviewAnnotations(context)
   }
 
   function discardDraft() {

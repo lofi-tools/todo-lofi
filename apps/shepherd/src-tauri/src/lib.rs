@@ -165,6 +165,7 @@ pub fn run() -> Result<(), tauri::Error> {
             bridge::commands::add_project,
             bridge::commands::set_project_preview_url,
             bridge::commands::open_project_preview,
+            bridge::commands::save_preview_screenshot,
             bridge::commands::create_draft,
             bridge::commands::set_draft_agent,
             bridge::commands::opencode_configured,

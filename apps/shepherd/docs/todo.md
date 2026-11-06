@@ -961,13 +961,16 @@ and the task header never overstates the tier.
   separate list shows deleted paths. The preview opens files in the default
   desktop text editor and reveals them in the file manager. Git and Review
   diffs can focus the Files tab and open the selected worktree file.
-- [ ] Preview tab: project URL, element annotation, structured prompt context,
+- [x] Preview tab: project URL, element annotation, structured prompt context,
   screenshot fallback when framing or injection is blocked.
   Settings → Projects saves a loopback URL per project. The Preview tab loads
   it in a sandboxed frame with explicit reload and browser actions. The
   injected element picker queues notes with the URL, selector, text excerpt
   and bounds, and **Add to prompt** appends them as editable context.
-  Screenshot fallback remains open.
+  When the element picker is unavailable, choose a screenshot taken in the
+  browser and mark a point. The composer includes the task-scoped image path,
+  pixel coordinates, dimensions, URL and note. Discarding a draft removes its
+  screenshot copies.
 - [ ] Cross-task search over Turso FTS.
 - [ ] Attachments and images, `@file` mentions, model/mode pickers.
 - [ ] Notifications, dock/status counts and review batch actions.
@@ -979,10 +982,12 @@ and the task header never overstates the tier.
 ### Proof
 
 - [ ] Playwright flows for files, preview, search, settings and the palette.
-- [ ] Preview fixture: annotation adds URL/selector/note to the composer;
+- [x] Preview fixture: annotation adds URL/selector/note to the composer;
   blocked injection falls back to a screenshot note.
-  The element-to-composer path passed in headless Chromium and a hidden
-  macOS WebKit smoke. The screenshot path remains open.
+  Headless Chromium verifies both paths, including a page that denies framing
+  and a failed screenshot save that preserves the queue for retry.
+  Hidden macOS WebKit smokes verify element injection and saving a screenshot
+  from the blocked-frame fallback through the desktop bridge.
 - [ ] Attachment cap, redirect and deletion tests.
 - [ ] Corrupt settings file falls back with a banner and backup.
 - [ ] Search ranking and prefix-query tests against Turso FTS, not SQLite FTS5.

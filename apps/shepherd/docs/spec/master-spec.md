@@ -842,10 +842,14 @@ State comes from adapter events and process exit, never polling.
 - Annotations queue in the tab; **Add to prompt** inserts them into the composer as
   structured context (URL, selector, note) and clears the queue. The agent sees
   them as editable text, not an image-only blob.
-- Element annotation requires script injection. If the page is cross-origin,
-  refuses framing, uses a CSP that blocks injection, or is not HTML, the tab
-  falls back to screenshot annotation with coordinates and says so; it never
-  pretends to have a selector.
+- Element annotation requires script injection. If the preview navigates away
+  from its configured origin, refuses framing, blocks injection, or is not
+  HTML, the tab offers screenshot annotation and reports that element
+  selection is unavailable.
+  Open the page in a browser and choose a PNG or JPEG screenshot up to 50 MB.
+  Mark a point on the image. **Add to prompt** saves the image in the task's
+  attachment directory and inserts its local path, pixel coordinates, image
+  dimensions, page URL, and note as editable text.
 - Reload and open-in-browser are explicit; the preview never navigates the app
   shell.
 

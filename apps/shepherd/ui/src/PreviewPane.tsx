@@ -2,14 +2,16 @@ import { For, Show, createEffect, createSignal, onCleanup } from 'solid-js'
 
 import { openProjectPreview } from './bridge'
 
-export function PreviewPane(props: {
+interface PreviewPaneProps {
   projectId: string
   url?: string | null
   shown: boolean
   canAddToPrompt: boolean
-  onAddToPrompt: (text: string) => void
+  onAddToPrompt: (annotations: PreviewAnnotation[]) => Promise<void>
   onProjectSettings: () => void
-}) {
+}
+
+export function PreviewPane(props: PreviewPaneProps) {
   const [opened, setOpened] = createSignal(false)
   createEffect(() => { if (props.shown) setOpened(true) })
 
@@ -36,6 +38,19 @@ interface ElementSelection {
   bounds: { x: number; y: number; width: number; height: number }
 }
 
+interface ScreenshotSelection {
+  url: string
+  screenshot: { file: File; x: number; y: number; width: number; height: number }
+}
+
+type PreviewSelection = ElementSelection | ScreenshotSelection
+export type PreviewAnnotation = PreviewSelection & { note: string }
+
+function selectionLabel(selection: PreviewSelection) {
+  if ('selector' in selection) return selection.selector
+  return `Screenshot at (${selection.screenshot.x}, ${selection.screenshot.y})`
+}
+
 function readSelection(data: unknown, origin: string): ElementSelection | undefined {
   if (typeof data !== 'object' || data === null) return
   const { url, selector, excerpt, bounds } = data as Partial<ElementSelection>
@@ -49,22 +64,17 @@ function readSelection(data: unknown, origin: string): ElementSelection | undefi
   return { url: address.href, selector, excerpt, bounds: { x, y, width, height } }
 }
 
-function ProjectPreview(props: {
-  url: string
-  projectId: string
-  shown: boolean
-  canAddToPrompt: boolean
-  onAddToPrompt: (text: string) => void
-  onProjectSettings: () => void
-}) {
+function ProjectPreview(props: PreviewPaneProps & { url: string }) {
   const [revision, setRevision] = createSignal(1)
   const [opening, setOpening] = createSignal(false)
   const [error, setError] = createSignal('')
   const [annotationError, setAnnotationError] = createSignal('')
   const [selecting, setSelecting] = createSignal<'waiting' | 'ready'>()
-  const [element, setElement] = createSignal<ElementSelection>()
+  const [selection, setSelection] = createSignal<PreviewSelection>()
+  const [screenshotMode, setScreenshotMode] = createSignal(false)
+  const [adding, setAdding] = createSignal(false)
   const [note, setNote] = createSignal('')
-  const [annotations, setAnnotations] = createSignal<(ElementSelection & { note: string })[]>([])
+  const [annotations, setAnnotations] = createSignal<PreviewAnnotation[]>([])
   const origin = new URL(props.url).origin
   const canFrame = origin !== window.location.origin
   let frame: HTMLIFrameElement | undefined
@@ -81,8 +91,14 @@ function ProjectPreview(props: {
   }
 
   createEffect(() => { if (!props.shown) stopSelection() })
-  createEffect(() => { if (element()) noteInput?.focus() })
+  createEffect(() => { if (selection()) noteInput?.focus() })
   onCleanup(stopSelection)
+
+  function useScreenshot(message = '') {
+    stopSelection()
+    setAnnotationError(message)
+    setScreenshotMode(true)
+  }
 
   function selectElement() {
     const target = frame?.contentWindow
@@ -92,8 +108,7 @@ function ProjectPreview(props: {
     setAnnotationError('')
     setSelecting('waiting')
     responseTimer = window.setTimeout(() => {
-      stopSelection()
-      setAnnotationError('Element selection is unavailable for this page.')
+      useScreenshot('Element selection is unavailable for this page.')
     }, 1500)
     port1.onmessage = ({ data }) => {
       if (selectionPort !== port1) return
@@ -107,9 +122,9 @@ function ProjectPreview(props: {
       const selected = data?.type === 'selected' && readSelection(data, origin)
       if (selected) {
         setNote('')
-        setElement(selected)
+        setSelection(selected)
       } else {
-        setAnnotationError('Could not identify this element.')
+        useScreenshot('Could not identify this element.')
       }
     }
     target.postMessage('shepherd:annotate-preview', origin, [port2])
@@ -117,17 +132,26 @@ function ProjectPreview(props: {
 
   function queueNote(event: SubmitEvent) {
     event.preventDefault()
-    const selected = element()
+    const selected = selection()
     const text = note().trim()
     if (!selected || !text) return
     setAnnotations((queued) => [...queued, { ...selected, note: text }])
-    setElement(undefined)
+    setSelection(undefined)
   }
 
-  function addToPrompt() {
-    if (!props.canAddToPrompt || !annotations().length) return
-    props.onAddToPrompt(`Preview annotations\n${JSON.stringify(annotations(), null, 2)}`)
-    setAnnotations([])
+  async function addToPrompt() {
+    const queued = annotations()
+    if (adding() || !props.canAddToPrompt || !queued.length) return
+    setAdding(true)
+    setAnnotationError('')
+    try {
+      await props.onAddToPrompt(queued)
+      setAnnotations((current) => current.filter((annotation) => !queued.includes(annotation)))
+    } catch (failure) {
+      setAnnotationError(messageFor(failure))
+    } finally {
+      setAdding(false)
+    }
   }
 
   async function open() {
@@ -136,7 +160,7 @@ function ProjectPreview(props: {
     try {
       await openProjectPreview(props.projectId)
     } catch (failure) {
-      setError(failure && typeof failure === 'object' && 'message' in failure ? String(failure.message) : String(failure))
+      setError(messageFor(failure))
     } finally {
       setOpening(false)
     }
@@ -149,29 +173,31 @@ function ProjectPreview(props: {
         <button type="button" onClick={() => {
           stopSelection()
           setAnnotationError('')
+          setScreenshotMode(false)
           setRevision((value) => value + 1)
         }}>Reload</button>
         <button type="button" onClick={open} disabled={opening()}>Open in browser</button>
         <button type="button" onClick={props.onProjectSettings}>Project settings</button>
         <Show when={selecting()} fallback={
-          <button type="button" disabled={!canFrame || !!element()} onClick={selectElement}>Annotate</button>
+          <button type="button" disabled={!canFrame || !!selection() || screenshotMode()} onClick={selectElement}>Annotate</button>
         }>
           <button type="button" onClick={stopSelection}>Cancel selection</button>
           <span role="status">{selecting() === 'ready' ? 'Click an element or press Escape.' : 'Waiting for the preview…'}</span>
         </Show>
+        <button type="button" disabled={!!selection() || screenshotMode()} onClick={() => useScreenshot()}>Screenshot note</button>
       </div>
       <Show when={error()}>{(message) => <p class="entry__notice--error" role="alert">{message()}</p>}</Show>
       <Show when={annotationError()}>{(message) => <p class="entry__notice--error" role="alert">{message()}</p>}</Show>
-      <Show when={element()}>
-        {(selection) => <form class="preview-pane__note" onSubmit={queueNote}>
-          <p><code>{selection().selector}</code></p>
+      <Show when={selection()}>
+        {(selected) => <form class="preview-pane__note" onSubmit={queueNote}>
+          <p><code>{selectionLabel(selected())}</code></p>
           <label>
             Annotation note
             <textarea ref={noteInput} rows={2} maxLength={4000} value={note()} onInput={(event) => setNote(event.currentTarget.value)} />
           </label>
           <div class="terminal-pane__bar">
             <button type="submit" disabled={!note().trim()}>Queue annotation</button>
-            <button type="button" onClick={() => setElement(undefined)}>Discard note</button>
+            <button type="button" onClick={() => setSelection(undefined)}>Discard note</button>
           </div>
         </form>}
       </Show>
@@ -179,20 +205,30 @@ function ProjectPreview(props: {
         <div class="preview-pane__note">
           <ul aria-label="Queued annotations">
             <For each={annotations()}>{(annotation) => <li>
+              <p><code>{selectionLabel(annotation)}</code></p>
               <p>{annotation.note}</p>
-              <div class="terminal-pane__bar"><button type="button" onClick={() =>
+              <div class="terminal-pane__bar"><button type="button" disabled={adding()} onClick={() =>
                 setAnnotations((queued) => queued.filter((entry) => entry !== annotation))}>Remove annotation</button></div>
             </li>}</For>
           </ul>
           <div class="terminal-pane__bar">
-            <button type="button" onClick={addToPrompt} disabled={!props.canAddToPrompt}>Add to prompt</button>
+            <button type="button" onClick={addToPrompt} disabled={adding() || !props.canAddToPrompt}>Add to prompt</button>
           </div>
         </div>
+      </Show>
+      <Show when={screenshotMode()}>
+        <ScreenshotPicker url={props.url} onCancel={() => setScreenshotMode(false)} onSelect={(selected) => {
+          setScreenshotMode(false)
+          setAnnotationError('')
+          setNote('')
+          setSelection(selected)
+        }} />
       </Show>
       <Show when={canFrame}
         fallback={<p class="entry__notice--error" role="alert">Choose a preview URL on a different origin from Shepherd.</p>}>
         <Show when={revision()} keyed>
           {(_revision) => <iframe ref={frame} title="Project website" src={props.url}
+            hidden={screenshotMode()}
             sandbox="allow-scripts allow-same-origin" referrerpolicy="no-referrer" onLoad={() => {
               if (!selectionPort) return
               stopSelection()
@@ -202,4 +238,63 @@ function ProjectPreview(props: {
       </Show>
     </section>
   )
+}
+
+function ScreenshotPicker(props: { url: string; onSelect: (selection: ScreenshotSelection) => void; onCancel: () => void }) {
+  const [image, setImage] = createSignal<{ file: File; source: string }>()
+  const [error, setError] = createSignal('')
+  let picture: HTMLImageElement | undefined
+
+  createEffect(() => {
+    const current = image()
+    if (current) onCleanup(() => URL.revokeObjectURL(current.source))
+  })
+
+  function choose(file: File | undefined) {
+    if (!file) return
+    setImage(undefined)
+    if (!['image/png', 'image/jpeg'].includes(file.type) || file.size === 0 || file.size > 50_000_000) {
+      setError('Choose a PNG or JPEG screenshot up to 50 MB.')
+      return
+    }
+    setError('')
+    setImage({ file, source: URL.createObjectURL(file) })
+  }
+
+  function pickPoint(event: MouseEvent) {
+    const current = image()
+    if (!current || !picture?.naturalWidth || !picture.naturalHeight) return
+    const { naturalWidth: width, naturalHeight: height } = picture
+    const rectangle = picture.getBoundingClientRect()
+    if (!rectangle.width || !rectangle.height) return
+    const relativeX = event.detail ? (event.clientX - rectangle.left) / rectangle.width : 0.5
+    const relativeY = event.detail ? (event.clientY - rectangle.top) / rectangle.height : 0.5
+    const x = Math.min(width - 1, Math.max(0, Math.floor(relativeX * width)))
+    const y = Math.min(height - 1, Math.max(0, Math.floor(relativeY * height)))
+    props.onSelect({ url: props.url, screenshot: { file: current.file, x, y, width, height } })
+  }
+
+  return (
+    <div class="preview-pane__note">
+      <p>Take a screenshot of the page in your browser, then choose the image and mark a point.</p>
+      <label>
+        Choose screenshot
+        <input type="file" accept="image/png,image/jpeg" onChange={(event) => choose(event.currentTarget.files?.[0])} />
+      </label>
+      <Show when={error()}>{(message) => <p role="alert" class="entry__notice--error">{message()}</p>}</Show>
+      <Show when={image()}>
+        {(current) => <button type="button" class="preview-pane__screenshot" aria-label="Mark a point on the screenshot" onClick={pickPoint}>
+          <img ref={picture} src={current().source} alt="Screenshot to annotate" onError={() => {
+            setImage(undefined)
+            setError('Could not read the screenshot image.')
+          }} />
+        </button>}
+      </Show>
+      <div class="terminal-pane__bar"><button type="button" onClick={props.onCancel}>Cancel screenshot</button></div>
+    </div>
+  )
+}
+
+function messageFor(failure: unknown): string {
+  return failure && typeof failure === 'object' && 'message' in failure ? String(failure.message) : String(failure)
 }

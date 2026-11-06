@@ -28,8 +28,10 @@ notify = "8.2"
 portable-pty = "0.9.0"
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 shepherd-core = { path = "../../../libs/shepherd-core" }
 tauri = { version = "2", features = [] }
+tempfile = "3"
 thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true

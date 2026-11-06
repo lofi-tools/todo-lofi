@@ -18,6 +18,7 @@ test.beforeEach(async ({ context }) => {
     let eventChannel
     let eventIndex = 0
     let cancelRequests = 0
+    let screenshotSaves = 0
     const fileListings: string[] = []
     const fileActions: Array<{ projectId: string; taskId: string | null; path: string; action: string }> = []
     const fileSearches: Array<{ id: string; taskId: string | null; mode: string }> = []
@@ -290,7 +291,7 @@ test.beforeEach(async ({ context }) => {
         currentWindow: { label: 'main' },
         currentWebview: { windowLabel: 'main', label: 'main' },
       },
-      invoke: async (command, args) => {
+      invoke: async (command, args, invokeOptions) => {
         switch (command) {
           case 'subscribe':
             eventChannel = args.channel.id
@@ -309,6 +310,13 @@ test.beforeEach(async ({ context }) => {
           }
           case 'open_project_preview':
             throw { message: `Could not open the preview in a browser. ${args.projectId}` }
+          case 'save_preview_screenshot':
+            if (!(args instanceof ArrayBuffer) || new Uint8Array(args)[0] !== 137 || invokeOptions?.headers?.['X-Shepherd-Task'] !== 'task-1') {
+              throw { message: 'Expected PNG bytes for task-1.' }
+            }
+            screenshotSaves += 1
+            if (options.has('screenshot-save-retry') && screenshotSaves === 1) throw { message: 'Could not save the screenshot.' }
+            return '/tmp/shepherd-data/attachments/task-1/preview.png'
           case 'project_approvals':
             return args.projectId === project.id
               ? { saved: [...projectGrants], sessions: [...sessionGrants] }
@@ -864,6 +872,45 @@ test('selects a preview element without activating it and adds an editable note 
   await expect(page.getByRole('list', { name: 'Queued annotations' })).toHaveCount(0)
   await button.click()
   await expect(page.frameLocator('iframe[title="Project website"]').getByRole('button', { name: 'Activated' })).toBeVisible()
+})
+
+test('adds a screenshot note with image coordinates when the page blocks framing', async ({ page }) => {
+  const url = 'http://localhost:1431/blocked-preview'
+  await page.route(url, (route) => route.fulfill({
+    contentType: 'text/html', headers: { 'X-Frame-Options': 'DENY' }, body: '<p>Protected page</p>',
+  }))
+  await page.goto('/?screenshot-save-retry')
+  await page.getByRole('tab', { name: 'Preview' }).click()
+  await page.getByRole('button', { name: 'Project settings', exact: true }).click()
+  await page.getByRole('textbox', { name: 'Preview URL' }).fill(url)
+  const blockedFrame = page.waitForEvent('requestfailed', (request) => request.url() === url && request.isNavigationRequest())
+  await page.getByRole('button', { name: 'Save preview URL' }).click()
+  await blockedFrame
+  await page.getByRole('button', { name: 'Settings', exact: true }).click()
+  await page.getByRole('button', { name: 'Annotate', exact: true }).click()
+  await expect(page.getByRole('alert')).toContainText('Element selection is unavailable for this page.')
+  const screenshot = fileURLToPath(new URL('../../src-tauri/icons/128x128.png', import.meta.url))
+  await page.getByLabel('Choose screenshot').setInputFiles(screenshot)
+  const image = page.getByRole('img', { name: 'Screenshot to annotate' })
+  await expect.poll(() => image.evaluate((entry: HTMLImageElement) => entry.naturalWidth)).toBe(128)
+  await page.getByRole('button', { name: 'Mark a point on the screenshot' }).press('Enter')
+  await expect(page.getByText('Screenshot at (64, 64)', { exact: true })).toBeVisible()
+  await page.getByRole('textbox', { name: 'Annotation note' }).fill('Align the icon here.')
+  await page.getByRole('button', { name: 'Queue annotation' }).click()
+  const add = page.getByRole('button', { name: 'Add to prompt' })
+  const prompt = page.getByRole('textbox', { name: 'Prompt', exact: true })
+  await add.click()
+  await expect(page.getByRole('alert')).toContainText('Could not save the screenshot.')
+  await expect(prompt).toHaveValue('')
+  await expect(page.getByRole('list', { name: 'Queued annotations' })).toContainText('Align the icon here.')
+  await add.click()
+  await expect(prompt).toBeFocused()
+  const text = await prompt.inputValue()
+  expect(JSON.parse(text.slice('Preview annotations\n'.length))).toEqual([{
+    url, note: 'Align the icon here.',
+    screenshot: { path: '/tmp/shepherd-data/attachments/task-1/preview.png', x: 64, y: 64, width: 128, height: 128 },
+  }])
+  await expect(page.getByRole('list', { name: 'Queued annotations' })).toHaveCount(0)
 })
 
 test('browses a worktree and project root with lazy folders and read-only previews', async ({ page }) => {

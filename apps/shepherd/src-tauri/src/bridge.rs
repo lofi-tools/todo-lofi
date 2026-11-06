@@ -423,6 +423,7 @@ struct TerminalSubscription {
 
 pub struct ShellState {
     core: Arc<Mutex<Core>>,
+    attachment_root: Option<PathBuf>,
     pub(crate) codex_program: Option<PathBuf>,
     pub(crate) opencode_configured: bool,
     pub(crate) claude_configured: bool,
@@ -451,6 +452,7 @@ impl ShellState {
         let (events, _) = broadcast::channel(512);
         Self {
             core: Arc::new(Mutex::new(core)),
+            attachment_root: None,
             codex_program: None,
             opencode_configured: false,
             claude_configured: false,
@@ -488,7 +490,8 @@ impl ShellState {
         let core = Core::load(Box::new(store), harness_factory)
             .await
             .map_err(BridgeError::from)?;
-        let state = Self::with_terminals(core, terminals);
+        let mut state = Self::with_terminals(core, terminals);
+        state.attachment_root = Some(data_directory.join("attachments"));
 
         // Walking the home directory can take seconds, so the scan starts with
         // the app and the picker reads whatever has landed by the time it opens.
@@ -604,6 +607,35 @@ impl ShellState {
         })
     }
 
+    pub async fn save_preview_screenshot(
+        &self,
+        task_id: String,
+        bytes: Vec<u8>,
+    ) -> Result<PathBuf, BridgeError> {
+        let directory = self.task_attachment_directory(&task_id).ok_or_else(|| {
+            BridgeError::new(
+                "preview",
+                "Could not locate this task's attachment directory.",
+            )
+        })?;
+        // A draft cannot be discarded until its screenshot write finishes.
+        let core = self.core.lock().await;
+        core.task_workspace(&TaskId::new(task_id))?;
+        let result =
+            tokio::task::spawn_blocking(move || persist_preview_screenshot(&directory, &bytes))
+                .await
+                .map_err(|error| BridgeError::new("preview", error.to_string()))?;
+        drop(core);
+        result.map_err(|error| {
+            BridgeError::new("preview", format!("Could not save the screenshot. {error}"))
+        })
+    }
+
+    fn task_attachment_directory(&self, task_id: &str) -> Option<PathBuf> {
+        let task_id = uuid::Uuid::parse_str(task_id).ok()?;
+        Some(self.attachment_root.as_ref()?.join(task_id.to_string()))
+    }
+
     pub async fn create_draft(
         &self,
         project_id: String,
@@ -631,13 +663,22 @@ impl ShellState {
     }
 
     pub async fn discard_draft(&self, task_id: String) -> Result<(), BridgeError> {
+        let attachments = self.task_attachment_directory(&task_id);
         match self
             .execute(Command::DiscardDraft {
                 task_id: TaskId::new(task_id),
             })
             .await?
         {
-            CommandResult::Ack => Ok(()),
+            CommandResult::Ack => {
+                if let Some(path) = attachments
+                    && let Err(error) = tokio::fs::remove_dir_all(&path).await
+                    && error.kind() != std::io::ErrorKind::NotFound
+                {
+                    tracing::warn!(%error, directory = %path.display(), "could not remove discarded draft attachments");
+                }
+                Ok(())
+            }
             other => Err(unexpected(&other)),
         }
     }
@@ -1308,6 +1349,51 @@ impl ShellState {
     }
 }
 
+const MAX_SCREENSHOT_BYTES: usize = 50_000_000;
+
+fn persist_preview_screenshot(directory: &Path, bytes: &[u8]) -> std::io::Result<PathBuf> {
+    use sha2::{Digest, Sha256};
+    use std::io::{Error, ErrorKind, Write};
+
+    if bytes.len() > MAX_SCREENSHOT_BYTES {
+        return Err(Error::new(
+            ErrorKind::InvalidData,
+            "Choose a screenshot up to 50 MB.",
+        ));
+    }
+    let extension = if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        "png"
+    } else if bytes.starts_with(b"\xff\xd8\xff") {
+        "jpg"
+    } else {
+        return Err(Error::new(
+            ErrorKind::InvalidData,
+            "Choose a PNG or JPEG screenshot.",
+        ));
+    };
+    std::fs::create_dir_all(directory)?;
+    let directory = directory.canonicalize()?;
+    let digest: String = Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    let path = directory.join(format!("preview-{digest}.{extension}"));
+    let regular_file = || {
+        path.symlink_metadata()
+            .is_ok_and(|metadata| metadata.is_file())
+    };
+    if !regular_file() {
+        let mut temporary = tempfile::NamedTempFile::new_in(directory)?;
+        temporary.write_all(bytes)?;
+        if let Err(error) = temporary.persist_noclobber(&path)
+            && (error.error.kind() != ErrorKind::AlreadyExists || !regular_file())
+        {
+            return Err(error.error);
+        }
+    }
+    Ok(path)
+}
+
 async fn open_in_browser(url: tauri::Url) -> std::io::Result<()> {
     let program = match std::env::consts::OS {
         "macos" => "open",
@@ -1377,6 +1463,34 @@ pub mod commands {
         project_id: String,
     ) -> Result<(), BridgeError> {
         state.inner().open_project_preview(project_id).await
+    }
+
+    #[tauri::command]
+    pub async fn save_preview_screenshot(
+        state: State<'_, ShellState>,
+        request: tauri::ipc::Request<'_>,
+    ) -> Result<PathBuf, BridgeError> {
+        let task_id = request
+            .headers()
+            .get("x-shepherd-task")
+            .and_then(|header| header.to_str().ok())
+            .ok_or_else(|| BridgeError::new("preview", "Select a task for the screenshot."))?;
+        let tauri::ipc::InvokeBody::Raw(bytes) = request.body() else {
+            return Err(BridgeError::new(
+                "preview",
+                "The screenshot did not contain image bytes.",
+            ));
+        };
+        if bytes.len() > MAX_SCREENSHOT_BYTES {
+            return Err(BridgeError::new(
+                "preview",
+                "Choose a screenshot up to 50 MB.",
+            ));
+        }
+        state
+            .inner()
+            .save_preview_screenshot(task_id.to_owned(), bytes.clone())
+            .await
     }
 
     #[tauri::command]
@@ -2526,6 +2640,70 @@ mod tests {
             ended.revision
         );
         state.quit(true).await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn screenshots_are_task_scoped_and_removed_with_a_discarded_draft()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = TestDirectory::new()?;
+        let repository = TestRepository::new()?;
+        let state = ShellState::load(
+            directory.path(),
+            Box::new(ScriptedHarnessFactory),
+            TerminalHost::default(),
+        )
+        .await?;
+        let list = state
+            .add_project(repository.path().display().to_string())
+            .await?;
+        let project = list.projects.first().ok_or("missing project")?;
+        let workspace = state
+            .create_draft(project.id.clone(), "Preview".into(), Agent::Codex)
+            .await?;
+        let task = workspace.task.id.as_str().to_owned();
+        let image = include_bytes!("../icons/128x128.png");
+        assert!(
+            state
+                .save_preview_screenshot(task.clone(), b"invalid image".to_vec())
+                .await
+                .is_err()
+        );
+        assert!(
+            state
+                .save_preview_screenshot(uuid::Uuid::new_v4().to_string(), image.to_vec())
+                .await
+                .is_err()
+        );
+        let path = state
+            .save_preview_screenshot(task.clone(), image.to_vec())
+            .await?;
+        assert_eq!(
+            path.parent(),
+            Some(
+                directory
+                    .path()
+                    .canonicalize()?
+                    .join("attachments")
+                    .join(&task)
+                    .as_path()
+            )
+        );
+        assert_eq!(std::fs::read(&path)?, image);
+        assert_eq!(
+            state
+                .save_preview_screenshot(task.clone(), image.to_vec())
+                .await?,
+            path
+        );
+        state.discard_draft(task.clone()).await?;
+        assert!(!path.exists());
+        assert!(
+            state
+                .save_preview_screenshot(task, image.to_vec())
+                .await
+                .is_err()
+        );
         Ok(())
     }
 
