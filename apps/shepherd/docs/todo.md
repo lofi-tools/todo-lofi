@@ -645,13 +645,16 @@ that the input anchor returns to the live cursor before committing text once.
 
 The **Shepherd terminal smoke** workflow uses an Ubuntu 24.04 runner and Xvfb
 for the same two native launches. A push to `codex/shepherd-terminal-smoke`
-starts the run. The Ubuntu result remains pending.
+starts the run. The hosted x86-64 result remains pending.
 The locked Nix shell evaluates for Ubuntu and macOS without a local checkout
 override. On a minimal Ubuntu 24.04 guest, the debug build succeeded. Start
 the session bus with Ubuntu's D-Bus binaries so the daemon reads the distro's
 session configuration before entering the Nix shell. Use the locked Nix Mesa
-EGL provider under Xvfb. With that provider, WebKit launched and the ARM64
-smoke reached the scrollback search check.
+EGL provider under Xvfb. Both native launches passed on Ubuntu 24.04.5 ARM64.
+The search fixture starts its first marker on a new line because `/bin/sh`
+can leave its prompt immediately before the marker. The guest painted the
+tail of the 1 MiB burst in 119 ms and all 24 paced markers. The optional
+interactive fish probe was skipped on this guest.
 
 ### Gate
 
@@ -829,6 +832,7 @@ Record every gate result here. Do not silently mark a gate passed.
 | 2026-11-05 | S2 | Pass | The native macOS window ran the installed Codex CLI at GPT-6.1 Terra low effort on disposable repositories. It streamed a one-file edit into Review, allowed an approval, interrupted a running command, accepted a follow-up, rendered the failure row and stderr after a mid-turn SIGKILL, and resumed the same thread and worktree after relaunch. All four native scenarios replayed their captures in fresh disposable data. The headless adapter and core suites also cover protocol probing, tool mapping, fallback, failure, and session recovery. |
 | 2026-11-05 | S3 | Pass | The live desktop reviewed two files, applied a review note in a second turn, staged and committed, and confirmed the squash merge in the Git pane. The cached replay covered the same steps, archived the task, and reopened it in a second native launch after the fixture removed the clean worktree. Git verified the base contents, single parent, retained task branch, and the recreated worktree at the original task commit. |
 | 2026-11-05 | S4 | Partial | The two-launch macOS smoke drove Vim, less and fzf, distinguished Ctrl+I from Tab in interactive fish, and checked composition from scrollback, bracketed paste, SGR mouse reports, and OSC 8 hyperlink dispatch. It verified PTY size changes from both the inspector and split dividers, preserved a shared terminal across task and project switches, and restarted both shared and task terminals after relaunch. After removing the fixed delay on idle frame delivery, a debug run painted the tail of a 1 MiB burst in 102 ms and all 24 paced markers, with a 74 ms maximum gap between first paints. Run it with `direnv exec . ./scripts/smoke-shepherd-terminal.sh`. Native dead-key input passed in the packaged app. IME candidate selection and placement, Ubuntu, and the manual workday gate remain open. |
+| 2026-11-06 | S4 | Partial | Both scripted native launches passed on Ubuntu 24.04.5 ARM64 with Xvfb. The hosted x86-64 smoke, system IME candidate selection and placement, and the workday trial remain open. |
 |  | S5 |  |  |
 |  | S6 |  |  |
 |  | S7 |  |  |

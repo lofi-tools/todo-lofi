@@ -425,7 +425,7 @@ async function exerciseSplit(projectId: string, terminalId: string, title: strin
 
 async function exerciseSearch(terminal: bridge.TerminalSnapshot, input: HTMLTextAreaElement) {
   const query = 'S4_SEARCH[.]'
-  const command = "for match in first second; do printf 'S4_%s[.]:%s\\n' SEARCH \"$match\"; awk 'BEGIN {for (line=1; line<=80; line++) print line}'; done; printf 'S4_%s\\n' SEARCH_END"
+  const command = "printf '\\n'; for match in first second; do printf 'S4_%s[.]:%s\\n' SEARCH \"$match\"; awk 'BEGIN {for (line=1; line<=80; line++) print line}'; done; printf 'S4_%s\\n' SEARCH_END"
   await bridge.terminalWrite(terminal.id, command + '\r')
   await waitFor('search markers have moved into scrollback', () =>
     terminalOutput().includes('S4_SEARCH_END') && !terminalOutput().includes(query))
