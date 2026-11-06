@@ -1054,6 +1054,7 @@ textarea {
 
 .entry__actions {
   display: flex;
+  flex-wrap: wrap;
   gap: 8px;
   margin-top: 8px;
 }
@@ -1066,7 +1067,7 @@ textarea {
   color: var(--text);
 }
 
-.entry__actions button:first-child {
+.entry__actions button[data-decision="allow"] {
   border-color: #4a6b4f;
 }
 

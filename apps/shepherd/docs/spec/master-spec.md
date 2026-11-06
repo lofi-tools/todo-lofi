@@ -748,6 +748,9 @@ Default policy is **agent-judged**:
 4. Sticky decisions (allow for session, always allow for project) are per project
    and profile, listed with a reset. Every decision is written to the transcript
    with its source (safe list, agent, user).
+   For ACP, session grants match the reported operation and input within the
+   live connection. Shepherd uses the agent's one-time option for each match,
+   keeping the grant lifetime under Shepherd's control.
 
 - Project overrides may only tighten this policy: they can remove commands from
   the safe list or require approval where the global default auto-allows. Adding

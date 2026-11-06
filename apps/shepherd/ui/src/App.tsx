@@ -22,6 +22,12 @@ type TerminalBell = Extract<CoreEvent, { type: 'terminalBell' }>['data']
 
 const LIVE_STATES: bridge.TaskState[] = ['starting', 'queued', 'working', 'waiting']
 const SEND_ACCENT_KEY = 'shepherd.sendAccent'
+const APPROVAL_LABELS: Record<bridge.Decision, string> = {
+  allow: 'Allow once',
+  allowSession: 'Allow for session',
+  deny: 'Deny',
+}
+const DEFAULT_APPROVAL_CHOICES: bridge.Decision[] = ['allow', 'deny']
 const STRUCTURED_AGENTS: Record<bridge.Agent, string> = { codex: 'Codex', opencode: 'OpenCode', claude: 'Claude Code' }
 const AGENT_OPTIONS: PickerOption[] = [
   { id: 'codex', name: STRUCTURED_AGENTS.codex },
@@ -1589,6 +1595,10 @@ function entryBody(
     case 'permission': {
       const permission = kind.data
       const argumentsText = formatArguments(permission.arguments)
+      const decisionText = permission.withdrawn ? 'withdrawn'
+        : permission.source === 'sessionGrant' ? 'allowed by session grant'
+        : permission.decision === 'allowSession' ? 'allowed for session'
+        : permission.decision
       return (
         <div class="entry__permission">
           <p class="entry__permission-title">{permission.title}</p>
@@ -1610,15 +1620,21 @@ function entryBody(
           </Show>
           <Show
             when={!permission.withdrawn && permission.decision === null}
-            fallback={<span class="entry__permission-decision">{permission.withdrawn ? 'withdrawn' : permission.decision}</span>}
+            fallback={<span class="entry__permission-decision">{decisionText}</span>}
           >
             <div class="entry__actions">
-              <button type="button" disabled={cancelling()} onClick={() => decide(permission.approvalId, 'allow')}>
-                Allow
-              </button>
-              <button type="button" disabled={cancelling()} onClick={() => decide(permission.approvalId, 'deny')}>
-                Deny
-              </button>
+              <For each={permission.choices ?? DEFAULT_APPROVAL_CHOICES}>
+                {(choice) => (
+                  <button
+                    type="button"
+                    data-decision={choice}
+                    disabled={cancelling()}
+                    onClick={() => decide(permission.approvalId, choice)}
+                  >
+                    {choice === 'allow' && !permission.choices ? 'Allow' : APPROVAL_LABELS[choice]}
+                  </button>
+                )}
+              </For>
             </div>
           </Show>
         </div>

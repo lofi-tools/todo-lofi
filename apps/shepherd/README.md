@@ -139,7 +139,10 @@ absolute path of your Claude Code ACP executable. The optional
 
 Restart Shepherd and select **Claude Code** in an empty conversation or a
 draft. The ACP agent selects its model and sends permission requests to
-Shepherd. Approval cards support one-time allow and denial.
+Shepherd. ACP approval cards offer **Allow once** when supported and
+**Allow for session** when the request identifies the operation and its input.
+Shepherd reuses the latter for identical requests while the ACP session is
+connected, and labels those decisions in the transcript.
 
 ## Live Codex tests
 

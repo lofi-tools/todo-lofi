@@ -99,6 +99,7 @@ test.beforeEach(async ({ context }) => {
                 newText: 'const answer = 42;',
               },
               decision: null,
+              choices: options.has('scoped-approval') ? ['allow', 'allowSession', 'deny'] : undefined,
             },
           },
         },
@@ -383,6 +384,30 @@ test.beforeEach(async ({ context }) => {
             }
             return workspace(task.id)
           }
+          case 'resolve_approval': {
+            const rows = transcripts[args.taskId]
+            const request = rows.find((row) => row.kind.type === 'permission' && row.kind.data.approvalId === args.approvalId)
+            if (!request || request.kind.type !== 'permission' || args.decision !== 'allowSession') {
+              throw new Error('Expected a session approval')
+            }
+            const settled = entry(request.id, request.sequence, {
+              type: 'permission',
+              data: { ...request.kind.data, decision: args.decision, source: 'user' },
+            })
+            const repeated = entry('auto-approval', 4, {
+              type: 'permission',
+              data: {
+                ...request.kind.data,
+                approvalId: 'auto-approval',
+                title: 'Run tests again',
+                decision: 'allow',
+                source: 'sessionGrant',
+                withdrawn: false,
+              },
+            })
+            transcripts[args.taskId] = [...rows.map((row) => row === request ? settled : row), repeated]
+            return workspace(args.taskId)
+          }
           case 'terminal_layout':
             return args.projectId === project.id ? terminalLayout
               : { revision: 0, root: null, inspectorTab: otherInspectorTabs.get(args.projectId) ?? 'terminals' }
@@ -624,6 +649,17 @@ test('shows an approval with its tool, arguments and diff', async ({ page }) => 
     .locator('.entry__permission')
     .filter({ hasText: 'Delete scratch file' })
   await expect(withoutDiff).toContainText('diff not available')
+})
+
+test('sends a scoped approval and identifies an automatic session grant', async ({ page }) => {
+  await page.goto('/?scoped-approval')
+  const request = page.locator('.entry__permission').filter({ hasText: 'Run tests' }).first()
+  await expect(request.getByRole('button', { name: 'Allow once' })).toBeVisible()
+  await request.getByRole('button', { name: 'Allow for session' }).click()
+  await expect(request.locator('.entry__permission-decision')).toHaveText('allowed for session')
+  const repeated = page.locator('.entry__permission').filter({ hasText: 'Run tests again' })
+  await expect(repeated.locator('.entry__permission-decision')).toHaveText('allowed by session grant')
+  await expect(repeated.getByRole('button')).toHaveCount(0)
 })
 
 test('composes the first chat in an empty project and hides its sole task row', async ({ page }) => {

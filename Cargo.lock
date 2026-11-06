@@ -262,6 +262,7 @@ version = "0.1.0"
 dependencies = [
  "acp-client",
  "async-trait",
+ "futures-channel",
  "libc",
  "reqwest 0.13.4",
  "serde",

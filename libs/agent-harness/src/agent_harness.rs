@@ -349,7 +349,16 @@ pub struct PromptInput {
 #[serde(rename_all = "camelCase")]
 pub enum Decision {
     Allow,
+    AllowSession,
     Deny,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ApprovalSource {
+    User,
+    Agent,
+    SessionGrant,
 }
 
 /// The result of one turn, as reported by the adapter.
@@ -417,6 +426,7 @@ pub struct ApprovalRequest {
     pub arguments: Value,
     pub paths: Vec<PathBuf>,
     pub patch: Option<FileDiff>,
+    pub choices: Option<Vec<Decision>>,
 }
 
 /// Everything an adapter reports to the core, in one ordered stream.
@@ -460,6 +470,12 @@ pub enum HarnessEvent {
     ApprovalResolved {
         approval_id: ApprovalId,
         decision: Decision,
+        source: ApprovalSource,
+    },
+    ApprovalAutomaticallyResolved {
+        request: ApprovalRequest,
+        decision: Decision,
+        source: ApprovalSource,
     },
     ApprovalWithdrawn {
         approval_id: ApprovalId,
@@ -532,6 +548,10 @@ pub enum EntryKind {
         paths: Vec<String>,
         patch: Option<FileDiff>,
         decision: Option<Decision>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        choices: Option<Vec<Decision>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source: Option<ApprovalSource>,
         #[serde(default)]
         withdrawn: bool,
     },
@@ -739,11 +759,19 @@ impl Transcript {
             }
             HarnessEvent::Plan { rows } => self.upsert_plan(rows.clone()),
             HarnessEvent::Usage { used, size, cost } => self.upsert_usage(*used, *size, *cost),
-            HarnessEvent::ApprovalRequested { request } => self.push_approval(request.clone()),
+            HarnessEvent::ApprovalRequested { request } => {
+                self.push_approval(request.clone(), None)
+            }
             HarnessEvent::ApprovalResolved {
                 approval_id,
                 decision,
-            } => self.settle_approval(approval_id.as_str(), Some(*decision)),
+                source,
+            } => self.settle_approval(approval_id.as_str(), Some((*decision, *source))),
+            HarnessEvent::ApprovalAutomaticallyResolved {
+                request,
+                decision,
+                source,
+            } => self.push_approval(request.clone(), Some((*decision, *source))),
             HarnessEvent::ApprovalWithdrawn { approval_id } => {
                 self.settle_approval(approval_id.as_str(), None)
             }
@@ -933,23 +961,30 @@ impl Transcript {
         change
     }
 
-    fn push_approval(&mut self, request: ApprovalRequest) -> TranscriptChange {
+    fn push_approval(
+        &mut self,
+        request: ApprovalRequest,
+        resolution: Option<(Decision, ApprovalSource)>,
+    ) -> TranscriptChange {
         let key = request.approval_id.as_str().to_string();
+        let kind = EntryKind::Permission {
+            approval_id: key.clone(),
+            title: request.title,
+            arguments: request.arguments,
+            paths: request
+                .paths
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect(),
+            patch: request.patch,
+            choices: request.choices,
+            decision: resolution.map(|(decision, _)| decision),
+            source: resolution.map(|(_, source)| source),
+            withdrawn: false,
+        };
         if let Some(index) = self.approval_rows.get(&key).copied() {
             if let Some(entry) = self.entries.get_mut(index) {
-                entry.kind = EntryKind::Permission {
-                    approval_id: key.clone(),
-                    title: request.title,
-                    arguments: request.arguments,
-                    paths: request
-                        .paths
-                        .iter()
-                        .map(|path| path.display().to_string())
-                        .collect(),
-                    patch: request.patch,
-                    decision: None,
-                    withdrawn: false,
-                };
+                entry.kind = kind;
             }
             return TranscriptChange {
                 appended: false,
@@ -957,22 +992,7 @@ impl Transcript {
             };
         }
 
-        let change = self.append_from(
-            EntryKind::Permission {
-                approval_id: key.clone(),
-                title: request.title,
-                arguments: request.arguments,
-                paths: request
-                    .paths
-                    .iter()
-                    .map(|path| path.display().to_string())
-                    .collect(),
-                patch: request.patch,
-                decision: None,
-                withdrawn: false,
-            },
-            Some(key.clone()),
-        );
+        let change = self.append_from(kind, Some(key.clone()));
         if let Some(index) = change.changed {
             self.approval_rows.insert(key, index);
         }
@@ -982,7 +1002,7 @@ impl Transcript {
     fn settle_approval(
         &mut self,
         approval_id: &str,
-        decision: Option<Decision>,
+        resolution: Option<(Decision, ApprovalSource)>,
     ) -> TranscriptChange {
         let Some(index) = self.approval_rows.get(approval_id).copied() else {
             return TranscriptChange::default();
@@ -990,13 +1010,15 @@ impl Transcript {
         if let Some(entry) = self.entries.get_mut(index)
             && let EntryKind::Permission {
                 decision: slot,
+                source,
                 withdrawn,
                 ..
             } = &mut entry.kind
-            && (decision.is_some() || slot.is_none())
+            && (resolution.is_some() || slot.is_none())
         {
-            *slot = decision;
-            *withdrawn = decision.is_none();
+            *slot = resolution.map(|(decision, _)| decision);
+            *source = resolution.map(|(_, source)| source);
+            *withdrawn = resolution.is_none();
         }
         TranscriptChange {
             appended: false,
@@ -1227,11 +1249,13 @@ mod tests {
                 arguments: serde_json::json!({"command": "cargo test"}),
                 paths: Vec::new(),
                 patch: None,
+                choices: None,
             },
         });
         transcript.apply(&HarnessEvent::ApprovalResolved {
             approval_id: ApprovalId::new("approval-1"),
             decision: Decision::Allow,
+            source: ApprovalSource::User,
         });
 
         assert_eq!(transcript.len(), 1);

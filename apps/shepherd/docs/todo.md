@@ -885,8 +885,10 @@ If Pi’s RPC probe is blocked, proceed with ACP while resolving it.
   executable for both tiers and records ACP when the native probe fails. The
   installed fallback smoke opens and reloads a session, and a subprocess
   fixture verifies a complete fallback turn. Claude Code uses the same adapter
-  through its configured executable and arguments. Scoped approval choices,
-  interactive agent terminal panes and a live Claude Code smoke remain open.
+  through its configured executable and arguments. ACP approvals can remember
+  an exact request for the live session and record when they reuse a grant.
+  Project-scoped approvals, grant settings, interactive agent terminal panes
+  and a live Claude Code smoke remain open.
 - [x] Freebuff runs in a standalone PTY in place of the conversation pane.
 - [ ] Tier downgrade UI, capability gates and diagnostics per adapter.
 - [ ] Missing binary, auth failure, protocol failure and mid-turn exit all have

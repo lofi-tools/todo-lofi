@@ -368,6 +368,7 @@ impl AgentHarness for OpenCodeHarness {
         let reply = match decision {
             Decision::Allow => "once",
             Decision::Deny => "reject",
+            Decision::AllowSession => return Err(HarnessError::ApprovalOptionUnavailable),
         };
         send_request(
             server
@@ -525,6 +526,7 @@ impl OpenCodeTranscript {
                         OpenCodeDecision::Once | OpenCodeDecision::Always => Decision::Allow,
                         OpenCodeDecision::Reject => Decision::Deny,
                     },
+                    source: crate::ApprovalSource::Agent,
                 }
             }
             "session.execution.succeeded" => HarnessEvent::TurnFinished {
@@ -688,6 +690,7 @@ impl PermissionRequest {
             arguments: json!({"resources": self.resources, "metadata": self.metadata}),
             paths: Vec::new(),
             patch: None,
+            choices: None,
         }
     }
 }

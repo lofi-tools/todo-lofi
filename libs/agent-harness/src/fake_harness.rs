@@ -56,6 +56,7 @@ impl FakeStep {
             arguments: Value::Null,
             paths: Vec::new(),
             patch: None,
+            choices: None,
         })
     }
 }
@@ -364,12 +365,18 @@ impl AgentHarness for FakeHarness {
             self.send(HarnessEvent::ApprovalResolved {
                 approval_id: pending.request.approval_id,
                 decision: Decision::Deny,
+                source: crate::ApprovalSource::Agent,
             })?;
         }
         self.finish_turn(TurnFinishReason::Cancelled)
     }
 
     async fn respond(&mut self, approval_id: ApprovalId, decision: Decision) -> HarnessResult<()> {
+        let allow = match decision {
+            Decision::Allow => true,
+            Decision::Deny => false,
+            Decision::AllowSession => return Err(HarnessError::ApprovalOptionUnavailable),
+        };
         let pending = self.pending.take().ok_or(HarnessError::NoPendingApproval)?;
         if pending.request.approval_id != approval_id {
             self.pending = Some(pending);
@@ -378,12 +385,12 @@ impl AgentHarness for FakeHarness {
         self.send(HarnessEvent::ApprovalResolved {
             approval_id,
             decision,
+            source: crate::ApprovalSource::User,
         })?;
-        match decision {
-            Decision::Allow => {
-                self.emit_steps(&pending.remaining, pending.next_offset, pending.finish)
-            }
-            Decision::Deny => self.finish_turn(TurnFinishReason::Cancelled),
+        if allow {
+            self.emit_steps(&pending.remaining, pending.next_offset, pending.finish)
+        } else {
+            self.finish_turn(TurnFinishReason::Cancelled)
         }
     }
 

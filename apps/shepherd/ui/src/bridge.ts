@@ -23,7 +23,7 @@ export type Agent = 'codex' | 'opencode' | 'claude'
 
 export type ShutdownState = 'running' | 'draining' | 'terminating' | 'closed'
 
-export type Decision = 'allow' | 'deny'
+export type Decision = 'allow' | 'allowSession' | 'deny'
 
 export interface ProjectSnapshot {
   id: string
@@ -129,6 +129,8 @@ export interface PermissionEntry {
   paths: string[]
   patch: FileDiff | null
   decision: Decision | null
+  choices?: Decision[]
+  source?: 'user' | 'agent' | 'sessionGrant'
   withdrawn: boolean
 }
 

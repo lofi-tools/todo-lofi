@@ -978,6 +978,11 @@ impl AgentHarness for CodexHarness {
     }
 
     async fn respond(&mut self, approval_id: ApprovalId, decision: Decision) -> HarnessResult<()> {
+        let answer = match decision {
+            Decision::Allow => "accept",
+            Decision::Deny => "decline",
+            Decision::AllowSession => return Err(HarnessError::ApprovalOptionUnavailable),
+        };
         let request_id = self
             .pending
             .lock()
@@ -985,15 +990,12 @@ impl AgentHarness for CodexHarness {
             .approvals
             .remove(approval_id.as_str())
             .ok_or(HarnessError::NoPendingApproval)?;
-        let answer = match decision {
-            Decision::Allow => "accept",
-            Decision::Deny => "decline",
-        };
         self.send(json!({ "id": request_id, "result": { "decision": answer } }))?;
         self.sender
             .send(HarnessEvent::ApprovalResolved {
                 approval_id,
                 decision,
+                source: crate::ApprovalSource::User,
             })
             .map_err(|_| HarnessError::ChannelClosed)?;
         Ok(())
@@ -1878,6 +1880,7 @@ async fn handle_server_request(
         arguments: params.clone(),
         paths: approval_paths(&params),
         patch: approval_patch(&method, &params),
+        choices: None,
     };
     pending
         .lock()
@@ -3453,6 +3456,7 @@ mod live {
                 HarnessEvent::ApprovalResolved {
                     approval_id,
                     decision,
+                    ..
                 } => {
                     assert_eq!(approval_id.as_str(), request.approval_id.as_str());
                     assert_eq!(decision, Decision::Deny);
