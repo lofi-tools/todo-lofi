@@ -868,6 +868,12 @@ If Pi’s RPC probe is blocked, proceed with ACP while resolving it.
   cover text, reasoning, tool rows and permission replies.
 - [ ] Pi byte-oriented LF reader, ID correlation, `agent_settled`, extension UI
   bridge and approval bridge.
+  The stdio transport and ID-based command and dialog replies are implemented.
+  The installed Nix-profile Pi 0.75.4 passed the isolated dialog smoke, but its
+  prompt reply omitted `disposition` and its shipped RPC/session code lacks
+  `agent_settled`. Continue with ACP while the Pi lifecycle probe is blocked.
+  The Pi reference checkout documents the required contract in
+  `packages/coding-agent/docs/rpc.md` at `a7a75a9dc6891281eed58906c07c55929e7b6c13`.
 - [ ] ACP adapter using `libs/acp-client`; no duplicate protocol client.
   Use this adapter for OpenCode when its native protocol is unavailable.
 - [x] Freebuff runs in a standalone PTY in place of the conversation pane.
