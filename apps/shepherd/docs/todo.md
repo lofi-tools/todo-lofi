@@ -672,6 +672,11 @@ can leave its prompt immediately before the marker. The guest painted the
 tail of the 1 MiB burst in 119 ms and all 24 paced markers. The optional
 interactive fish probe was skipped on this guest.
 
+The local Ubuntu 24.04.5 amd64 guest used OrbStack's QEMU user-mode emulation.
+Creating a private user and mount namespace failed with `Invalid argument`,
+and Nix stopped before compiling Shepherd. The hosted workflow is still
+needed for the x86-64 result.
+
 ### Gate
 
 **Pass:** a developer can use Shepherd’s terminals for a normal workday without
