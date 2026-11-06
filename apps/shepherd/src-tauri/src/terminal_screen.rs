@@ -976,6 +976,27 @@ mod tests {
     }
 
     #[test]
+    fn bounds_combining_marks_in_grid_cells_and_frames() {
+        let mut screen = Screen::new(10, 3);
+        screen.process(b"e");
+        let marks = "\u{301}".repeat(4096);
+        for _ in 0..4 {
+            screen.process(marks.as_bytes());
+        }
+        screen.process("界".as_bytes());
+
+        let cell = &screen.term.grid()[Line(0)][Column(0)];
+        assert_eq!(cell.zerowidth().map(<[char]>::len), Some(9));
+        let frame = screen.frame();
+        let expected = format!("e{}", "\u{301}".repeat(9));
+        assert_eq!(
+            frame.cells.first().map(|cell| cell.text.as_str()),
+            Some(expected.as_str())
+        );
+        assert_eq!(frame.cells.get(1).map(|cell| cell.width), Some(2));
+    }
+
+    #[test]
     fn resizing_reflows_a_wrapped_line_with_a_wide_glyph() {
         let mut screen = Screen::new(12, 4);
         screen.process("abc界defghij".as_bytes());

@@ -20,7 +20,8 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 agent-harness = { path = "../../../libs/agent-harness" }
-alacritty_terminal = "0.26.0"
+# Keep the upstream per-cell combining-mark cap until a release includes it.
+alacritty_terminal = { git = "https://github.com/alacritty/alacritty", rev = "ede2ac144da4dec4c075bfa803aacf3b3739bce6" }
 portable-pty = "0.9.0"
 serde.workspace = true
 serde_json.workspace = true

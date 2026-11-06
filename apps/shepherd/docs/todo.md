@@ -535,6 +535,12 @@ task-scoped, persistent and fast enough.
   Terminal search follows the matched text while output scrolls. The native
   smoke checks the canvas highlight and searches in both directions after a
   100-line PTY burst.
+  The [pinned Alacritty fix](https://github.com/alacritty/alacritty/commit/ede2ac144da4dec4c075bfa803aacf3b3739bce6)
+  caps combining marks at nine per grid cell. The regression feeds 16,384
+  marks in separate chunks and checks the grid, the frame and the following
+  wide glyph. The pinned parser passed all 36 regular Rust tests and both
+  desktop launches on macOS and emulated Ubuntu x86-64. The Ubuntu run also
+  passed the native IBus probe.
 - [x] Add the binary frame protocol, dirty-row rendering and a frame smoke test.
 - [x] Build the Terminals tab split tree, resize, focus and presets.
   Single and Quad save through the project layout, preserve slots for other

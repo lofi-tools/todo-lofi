@@ -306,10 +306,10 @@ dependencies = [
 
 [[package]]
 name = "alacritty_terminal"
-version = "0.26.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bda177466b9524d59f1b12f0dd30b68696788e9992a7e959021c4a0ed96fcf59"
+version = "0.26.1-dev"
+source = "git+https://github.com/alacritty/alacritty?rev=ede2ac144da4dec4c075bfa803aacf3b3739bce6#ede2ac144da4dec4c075bfa803aacf3b3739bce6"
 dependencies = [
+ "arrayvec",
  "base64 0.22.1",
  "bitflags 2.12.1",
  "home",
@@ -539,6 +539,9 @@ name = "arrayvec"
 version = "0.7.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7c02d123df017efcdfbd739ef81735b36c5ba83ec3c59c80a9d7ecc718f92e50"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "as-slice"
