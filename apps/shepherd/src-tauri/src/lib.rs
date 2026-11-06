@@ -79,7 +79,7 @@ pub fn run() -> Result<(), tauri::Error> {
             })
     };
 
-    builder
+    let builder = builder
         .setup(|app| {
             let override_directory = cfg!(debug_assertions)
                 .then(|| std::env::var_os("SHEPHERD_DEV_DATA_DIR"))
@@ -153,6 +153,28 @@ pub fn run() -> Result<(), tauri::Error> {
             dev_harness::finish_codex_smoke,
             #[cfg(all(debug_assertions, feature = "desktop-codex-smoke"))]
             dev_harness::trigger_codex_smoke_exit,
-        ])
-        .run(tauri::generate_context!())
+        ]);
+
+    let context = tauri::generate_context!();
+    #[cfg(all(target_os = "macos", debug_assertions))]
+    if std::env::var("SHEPHERD_DEV_BACKGROUND_SMOKE").as_deref() == Ok("1") {
+        if !std::env::var_os("SHEPHERD_DEV_DATA_DIR").is_some_and(|path| !path.is_empty()) {
+            return Err(std::io::Error::other("Background smoke requires isolated data").into());
+        }
+        if context
+            .config()
+            .app
+            .windows
+            .iter()
+            .any(|window| window.visible || window.focus || window.focusable)
+        {
+            return Err(std::io::Error::other("Background smoke requires hidden windows").into());
+        }
+        let mut app = builder.build(context)?;
+        // Tao activates regular apps before Tauri runs setup.
+        app.set_activation_policy(tauri::ActivationPolicy::Prohibited);
+        app.run(|_, _| {});
+        return Ok(());
+    }
+    builder.run(context)
 }

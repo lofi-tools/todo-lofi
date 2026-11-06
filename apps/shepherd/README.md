@@ -35,30 +35,35 @@ with a separate project list and database. Set `SHEPHERD_DEV_PROJECT_ROOT`
 to point the debug project picker at a fixture directory.
 
 The native terminal smoke uses a disposable Git project, database and scripted
-agent in a temporary directory under `.cache/test-db/`. The first launch saves
-a Vim edit, pages through less, selects a result in full-screen fzf, and
-exercises Kitty key reports, bracketed paste,
-mouse reports, scrollback search, PTY resizing, output bursts and terminal
-continuity while switching tasks or projects. It also checks distinct Ctrl+I and Tab
-bindings when fish 4 or later is installed. The second launch checks the saved
-inspector tab and split layout, then restarts a shared terminal and a task
-terminal in its worktree.
-Run it from an active desktop session with `vim`, `less`, `fzf` and `python3`
-on your path. Keep the smoke window visible so the webview can paint frames.
+agent in a temporary directory under `.cache/test-db/`. It requires `python3`.
+The full suite also requires `vim`, `less` and `fzf`.
 
 ```sh
 direnv exec . ./scripts/smoke-shepherd-terminal.sh
 ```
 
+On macOS the default smoke and the `--codex-*` modes launch a hidden window
+without activating Shepherd. The terminal smoke checks shell input and output,
+bracketed paste, and terminal continuity while switching tasks or projects.
+The second launch checks the saved split and inspector tab,
+restarts shared and task terminals, and resumes the interrupted task.
+
+Use the macOS window tests when the change affects the behavior they exercise.
+
+- `--macos-window` runs the full native suite for changes to window layout,
+  terminal focus, keyboard shortcuts, mouse interaction, resizing, search
+  highlights, clipboard selection or canvas painting. It also drives Vim,
+  less and fzf. Keep its window visible during the run.
+- `--macos-visibility` checks PTY output and painting across a real minimize
+  and restore. Use it for changes to window or webview visibility handling.
+- `--macos-ime` checks native candidate selection and placement with Pinyin.
+  Use `--macos-ime british` for the British layout's dead keys and Option input.
+
 The smoke uses a separate dev server on port 1432. Set
 `SHEPHERD_DESKTOP_SMOKE_PORT` to use another port.
 
-On macOS, add `--macos-visibility` to minimize and restore the disposable
-window. The probe checks that the PTY keeps receiving output, that the canvas
-skips hidden paints, and that the restored window paints the pending output.
-
 On Ubuntu 24.04, the **Shepherd terminal smoke** GitHub Actions workflow runs
-the same two launches under Xvfb. A push to `codex/shepherd-terminal-smoke`
+the full two-launch suite under Xvfb. A push to `codex/shepherd-terminal-smoke`
 starts the run. Once the workflow is on the default branch, you can also
 dispatch it for a published ref.
 

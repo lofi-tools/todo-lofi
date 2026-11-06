@@ -234,3 +234,9 @@ substantial change to a documented element's layout, visual hierarchy, controls,
 or default behaviour, describe the proposed change and ask the user before
 implementing it, unless the user has already requested that specific change.
 Update the spec when the agreed behaviour changes.
+
+Use the background macOS smoke for routine native checks. Run a visible
+macOS smoke only when the current change affects the behavior that check
+exercises or the user requests it. Keep test windows at the
+normal desktop level. The [Shepherd README](apps/shepherd/README.md) lists
+the flags for window, visibility and IME checks.

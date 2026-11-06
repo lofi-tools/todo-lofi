@@ -626,6 +626,11 @@ task-scoped, persistent and fast enough.
   If a later chunk of a bracketed paste fails, the input queue attempts to
   end the paste before sending subsequent keys and reports the write error.
 
+The default macOS native smoke runs with a hidden, unfocused window. It checks
+PTY I/O, switching, shutdown and restore. Use `--macos-window` for the full
+window and canvas checks, `--macos-visibility` for minimize and restore, and
+`--macos-ime` for the system candidate picker when a change affects them.
+
 ### Proof
 
 Automated:
@@ -782,9 +787,9 @@ shortcut modifier was lifted and after the terminal lost focus.
 At `7fe0b13`, Ubuntu 24.04 ARM64 passed all 33 regular Rust tests, both
 desktop smoke launches and the IBus Pinyin probe. Stop and Quit each ended
 the foreground and background fixture jobs that ignored SIGHUP. The search
-smoke preserved its match through a 100-line burst. The shutdown fixture
-emits each readiness line with one write to avoid interleaving the two
-markers. The optional fish probe was skipped on this guest.
+smoke preserved its match through a 100-line burst. The optional fish probe
+was skipped on this guest. The shutdown fixture now waits for both process
+groups before emitting one readiness marker so it fits in a small viewport.
 
 Both terminal launches and the IBus Pinyin probe passed on an Ubuntu 24.04.5
 amd64 guest under OrbStack's QEMU user-mode emulation. QEMU rejected Nix's
@@ -995,12 +1000,13 @@ Record every gate result here. Do not silently mark a gate passed.
 | 2026-11-05 | S1 | Pass | The two-launch macOS smoke added the repository through the picker, created a draft with no branch or worktree, displayed scripted text and a tool row, ran `pwd` and `printf`, and sent Ctrl+C to a foreground command. Task switching preserved the draft, transcript, and shared terminal. Closing the window warned about one waiting task. After confirming and relaunching, the task was interrupted, terminal records were ended, and **Resume** reattached the scripted session. The 18-test browser suite also passed. |
 | 2026-11-05 | S2 | Pass | The native macOS window ran the installed Codex CLI at GPT-6.1 Terra low effort on disposable repositories. It streamed a one-file edit into Review, allowed an approval, interrupted a running command, accepted a follow-up, rendered the failure row and stderr after a mid-turn SIGKILL, and resumed the same thread and worktree after relaunch. All four native scenarios replayed their captures in fresh disposable data. The headless adapter and core suites also cover protocol probing, tool mapping, fallback, failure, and session recovery. |
 | 2026-11-05 | S3 | Pass | The live desktop reviewed two files, applied a review note in a second turn, staged and committed, and confirmed the squash merge in the Git pane. The cached replay covered the same steps, archived the task, and reopened it in a second native launch after the fixture removed the clean worktree. Git verified the base contents, single parent, retained task branch, and the recreated worktree at the original task commit. |
-| 2026-11-05 | S4 | Partial | The two-launch macOS smoke drove Vim, less and fzf, distinguished Ctrl+I from Tab in interactive fish, and checked composition from scrollback, bracketed paste, SGR mouse reports, and OSC 8 hyperlink dispatch. It verified PTY size changes from both the inspector and split dividers, preserved a shared terminal across task and project switches, and restarted both shared and task terminals after relaunch. After removing the fixed delay on idle frame delivery, a debug run painted the tail of a 1 MiB burst in 102 ms and all 24 paced markers, with a 74 ms maximum gap between first paints. Run it with `direnv exec . ./scripts/smoke-shepherd-terminal.sh`. Native dead-key input passed in the packaged app. IME candidate selection and placement, Ubuntu, and the manual workday gate remain open. |
+| 2026-11-05 | S4 | Partial | The two-launch macOS smoke drove Vim, less and fzf, distinguished Ctrl+I from Tab in interactive fish, and checked composition from scrollback, bracketed paste, SGR mouse reports, and OSC 8 hyperlink dispatch. It verified PTY size changes from both the inspector and split dividers, preserved a shared terminal across task and project switches, and restarted both shared and task terminals after relaunch. After removing the fixed delay on idle frame delivery, a debug run painted the tail of a 1 MiB burst in 102 ms and all 24 paced markers, with a 74 ms maximum gap between first paints. Run it with `direnv exec . ./scripts/smoke-shepherd-terminal.sh --macos-window`. Native dead-key input passed in the packaged app. IME candidate selection and placement, Ubuntu, and the manual workday gate remain open. |
 | 2026-11-06 | S4 | Partial | Both scripted native launches passed on Ubuntu 24.04.5 ARM64 with Xvfb. The hosted x86-64 smoke, system IME candidate selection and placement, and the workday trial remain open. |
 | 2026-11-06 | S4 | Partial | Native IBus Pinyin passed after correcting the WebKitGTK caret position. The hosted x86-64 smoke, candidate-based input on macOS, and the workday trial remain open. |
 | 2026-11-06 | S4 | Partial | Both native desktop launches and the IBus candidate check passed on hosted Ubuntu x86-64 at `4e75638`. Candidate-based input on macOS and the workday trial remain open. [Hosted smoke run](https://github.com/lofi-tools/todo-lofi/actions/runs/42213055757) |
 | 2026-11-06 | S4 | Partial | The hosted Ubuntu x86-64 rerun at `505ffe6` passed both launches and IBus. The 1 MiB burst painted in 79 ms. [Hosted rerun](https://github.com/lofi-tools/todo-lofi/actions/runs/42215694509) |
 | 2026-11-06 | S4 | Partial | The exact tree at `a1c7964` passed both native launches and IBus Pinyin on Ubuntu 24.04 ARM64 under Xvfb in a disposable guest. The 1 MiB burst painted in 51 ms and all 24 paced markers appeared. The candidate panel followed the caret at both positions, and `你` and `尼` each reached the shell once. Fish was skipped. |
+| 2026-11-06 | S4 | Partial | Both launches of the default macOS smoke and the cached Codex approval replay passed with the window hidden and unfocused. The full Linux suite still passed both launches under Xvfb. The macOS window and candidate checks are opt-in. |
 |  | S5 |  |  |
 |  | S6 |  |  |
 |  | S7 |  |  |

@@ -6,10 +6,12 @@ import * as bridge from '../src/bridge'
 declare const __SHEPHERD_SMOKE_FISH__: boolean
 declare const __SHEPHERD_SMOKE_PROJECT__: string
 declare const __SHEPHERD_SMOKE_PHASE__: string
+declare const __SHEPHERD_SMOKE_BACKGROUND__: boolean
 
 const INTERRUPTED_TASK = 'Other terminal scope'
 const NETWORK_PROMPT = "Run this shell command and report only the status code: curl -s -o /dev/null -w '%{http_code}' https://example.com"
 const CODEX_WAIT = 75_000
+const windowChecks = !__SHEPHERD_SMOKE_BACKGROUND__
 
 export function button(label: string): HTMLButtonElement | undefined {
   return Array.from(document.querySelectorAll('button'))
@@ -28,7 +30,7 @@ export async function waitFor<T>(
     if (value) return value
     await new Promise((resolve) => window.setTimeout(resolve, 25))
   }
-  const visibility = document.hidden ? ' The webview is hidden. Keep the smoke window visible.' : ''
+  const visibility = windowChecks && document.hidden ? ' The webview is hidden. Keep the smoke window visible.' : ''
   throw new Error(`Timed out waiting for ${label}.${visibility}`)
 }
 
@@ -122,11 +124,15 @@ async function pressPaneShortcut(title: string, key: string, shiftKey: boolean) 
   }))
 }
 
-async function typeIntoFocusedTerminal(title: string, command: string) {
-  const input = await waitFor(`focused input in ${title}`, () => {
-    const field = terminalPane(title)?.querySelector<HTMLTextAreaElement>('.terminal-view__input')
-    return field && document.activeElement === field && field
+async function typeIntoTerminal(terminal: bridge.TerminalSnapshot, command: string) {
+  const input = await waitFor(`terminal input in ${terminal.title}`, () => {
+    const field = terminalPane(terminal.title)?.querySelector<HTMLTextAreaElement>('.terminal-view__input')
+    return field && (!windowChecks || document.activeElement === field) && field
   })
+  if (!windowChecks) {
+    await bridge.terminalWrite(terminal.id, command + '\r')
+    return
+  }
   for (const key of command) press(input, key)
   press(input, 'Enter')
 }
@@ -530,24 +536,27 @@ async function exerciseInspectorResize(terminal: bridge.TerminalSnapshot) {
 }
 
 async function exerciseSplit(projectId: string, terminalId: string, title: string) {
-  const initialWidth = await waitFor('painted terminal before splitting', () => paneWidth(title))
-  const initialColumns = await ptyColumns(terminalId, title, 'INITIAL_SIZE')
-  await enabledButton('Split right')
-  await pressPaneShortcut(title, 'D', true)
-  const divider = await waitFor('live split divider', () => document.querySelector<HTMLElement>('.terminal-divider'))
+  const initialWidth = windowChecks ? await waitFor('painted terminal before splitting', () => paneWidth(title)) : 0
+  const initialColumns = windowChecks ? await ptyColumns(terminalId, title, 'INITIAL_SIZE') : 0
+  const split = await enabledButton('Split right')
+  if (windowChecks) await pressPaneShortcut(title, 'D', true)
+  else split.click()
   await waitFor('both canvases in the split', () => document.querySelectorAll('.terminal-view__canvas').length === 2)
   await waitFor('split layout save', () => !button('Split right')?.disabled)
-  const splitWidth = await waitFor('narrower PTY frame after split', () => {
-    const width = paneWidth(title)
-    return width > 0 && width < initialWidth && width
-  })
-  const splitColumns = await ptyColumns(terminalId, title, 'SPLIT_SIZE')
-  press(divider, 'ArrowRight')
-  await waitFor('persisted resize', () => divider.getAttribute('aria-valuenow') === '55')
-  await waitFor('wider PTY frame after resize', () => paneWidth(title) > splitWidth)
-  const resizedColumns = await ptyColumns(terminalId, title, 'RESIZED_SIZE')
-  if (!(splitColumns < resizedColumns && resizedColumns < initialColumns)) {
-    throw new Error('The shell should see the terminal columns change when splitting and resizing')
+  if (windowChecks) {
+    const divider = await waitFor('live split divider', () => document.querySelector<HTMLElement>('.terminal-divider'))
+    const splitWidth = await waitFor('narrower PTY frame after split', () => {
+      const width = paneWidth(title)
+      return width > 0 && width < initialWidth && width
+    })
+    const splitColumns = await ptyColumns(terminalId, title, 'SPLIT_SIZE')
+    press(divider, 'ArrowRight')
+    await waitFor('persisted resize', () => divider.getAttribute('aria-valuenow') === '55')
+    await waitFor('wider PTY frame after resize', () => paneWidth(title) > splitWidth)
+    const resizedColumns = await ptyColumns(terminalId, title, 'RESIZED_SIZE')
+    if (!(splitColumns < resizedColumns && resizedColumns < initialColumns)) {
+      throw new Error('The shell should see the terminal columns change when splitting and resizing')
+    }
   }
 
   await bridge.terminalWrite(terminalId, "printf 'S4_%s:%s\\n' VIEW \"$$\"\r")
@@ -555,8 +564,15 @@ async function exerciseSplit(projectId: string, terminalId: string, title: strin
     const pane = terminalPane(title)
     return pane && terminalOutput(pane).match(/S4_VIEW:\d+/)?.[0]
   })
-  const mac = navigator.platform.startsWith('Mac')
-  await pressPaneShortcut(title, mac ? 'w' : 'W', !mac)
+  if (windowChecks) {
+    const mac = navigator.platform.startsWith('Mac')
+    await pressPaneShortcut(title, mac ? 'w' : 'W', !mac)
+  } else {
+    const hide = await waitFor('hide action in the shared terminal', () =>
+      Array.from(terminalPane(title)?.querySelectorAll('button') ?? [])
+        .find((entry) => entry.textContent === 'Hide pane' && !entry.disabled))
+    hide.click()
+  }
   await waitFor('first pane detached', () => !terminalPane(title))
   const reopen = await waitFor('hidden terminal instance', () => Array.from(document.querySelectorAll<HTMLButtonElement>('.terminal-list__item'))
     .find((entry) => !entry.disabled && entry.querySelector('span')?.textContent === title))
@@ -626,7 +642,7 @@ async function exerciseSearch(terminal: bridge.TerminalSnapshot, input: HTMLText
   press(search, 'Escape')
   await waitFor('find closes and returns terminal focus', () =>
     !search.isConnected && document.activeElement === input)
-  await typeIntoFocusedTerminal(terminal.title, "printf 'S4_%s\\n' SEARCH_RETURN")
+  await typeIntoTerminal(terminal, "printf 'S4_%s\\n' SEARCH_RETURN")
   await waitFor('typing after search shows live shell output', () =>
     terminalOutput().split('\n').some((line) => line.trim() === 'S4_SEARCH_RETURN'))
 }
@@ -697,26 +713,32 @@ async function prepareTask(project: bridge.ProjectSnapshot) {
 
 async function exerciseTaskSwitch(project: bridge.ProjectSnapshot, shared: bridge.TerminalSnapshot) {
   const task = await prepareTask(project)
-  await openInspectorTab('review')
-  const composer = await waitFor('active conversation input', () =>
-    document.querySelector<HTMLTextAreaElement>('textarea[aria-label="Prompt"]:enabled'))
-  composer.focus()
-  const mac = navigator.platform.startsWith('Mac')
-  composer.dispatchEvent(new KeyboardEvent('keydown', {
-    key: mac ? 'T' : 'N', metaKey: mac, ctrlKey: !mac, shiftKey: true,
-    bubbles: true, cancelable: true,
-  }))
-  await waitFor('shortcut opens the Terminals tab', () => {
-    const tab = document.querySelector('#inspector-tab-terminals')
-    return tab?.getAttribute('aria-selected') === 'true'
-  })
+  if (windowChecks) {
+    await openInspectorTab('review')
+    const composer = await waitFor('active conversation input', () =>
+      document.querySelector<HTMLTextAreaElement>('textarea[aria-label="Prompt"]:enabled'))
+    composer.focus()
+    const mac = navigator.platform.startsWith('Mac')
+    composer.dispatchEvent(new KeyboardEvent('keydown', {
+      key: mac ? 'T' : 'N', metaKey: mac, ctrlKey: !mac, shiftKey: true,
+      bubbles: true, cancelable: true,
+    }))
+    await waitFor('shortcut opens the Terminals tab', () => {
+      const tab = document.querySelector('#inspector-tab-terminals')
+      return tab?.getAttribute('aria-selected') === 'true'
+    })
+  } else {
+    await openInspectorTab('terminals')
+    const start = await enabledButton('New task terminal')
+    start.click()
+  }
   await waitFor('three terminal canvases', () => document.querySelectorAll('.terminal-view__canvas').length === 3)
   const scoped = (await bridge.terminalList(project.id)).terminals.find((entry) => entry.taskId === task.id)
   if (scoped?.scope !== 'task' || scoped.cwd !== task.worktree) {
     throw new Error('The task terminal should run in the task worktree')
   }
 
-  await typeIntoFocusedTerminal(scoped.title, "printf 'S4_%s:%s\\n' TASK \"${PWD##*/}\"")
+  await typeIntoTerminal(scoped, "printf 'S4_%s:%s\\n' TASK \"${PWD##*/}\"")
   const marker = 'S4_TASK:' + task.worktree.split('/').at(-1)
   await waitFor('worktree output in the task pane', () => {
     const pane = terminalPane(scoped.title)
@@ -936,22 +958,31 @@ async function requestQuitWithLiveTask(liveTerminals = 0) {
 }
 
 async function startHangupResistantJobs(terminal: bridge.TerminalSnapshot, action: 'stop' | 'quit') {
-  const job = (scope: 'foreground' | 'background') => {
-    const separateGroup = scope === 'background' ? 'os.setpgid(0, 0); ' : ''
-    const program = `import os, signal, sys, time; from pathlib import Path; ${separateGroup}signal.signal(signal.SIGHUP, signal.SIG_IGN); Path(sys.argv[1]).write_text(str(os.getpid())); os.write(1, b"\\nS4_" + b"${scope.toUpperCase()}_READY\\n"); time.sleep(60)`
-    const pidFile = `${__SHEPHERD_SMOKE_PROJECT__}/../${action}-${scope}.pid`
-    return `python3 -u -c ${shellQuote(program)} ${shellQuote(pidFile)}`
-  }
-  await bridge.terminalWrite(terminal.id, `${job('background')} & ${job('foreground')}\r`)
+  const pidFile = (scope: 'foreground' | 'background') => `${__SHEPHERD_SMOKE_PROJECT__}/../${action}-${scope}.pid`
+  const program = String.raw`import os, signal, sys, time
+from pathlib import Path
+signal.signal(signal.SIGHUP, signal.SIG_IGN)
+if os.fork() == 0:
+    os.setpgid(0, 0)
+    Path(sys.argv[2]).write_text(str(os.getpid()))
+else:
+    Path(sys.argv[1]).write_text(str(os.getpid()))
+    deadline = time.monotonic() + 5
+    while not Path(sys.argv[2]).is_file():
+        if time.monotonic() >= deadline:
+            raise RuntimeError('Background PTY fixture did not start')
+        time.sleep(0.02)
+    os.write(1, b'\nS4_' + b'JOBS_READY')
+time.sleep(60)`
+  const command = `python3 -u -c ${shellQuote(`exec(${JSON.stringify(program)})`)} ${shellQuote(pidFile('foreground'))} ${shellQuote(pidFile('background'))}`
+  await bridge.terminalWrite(terminal.id, command + '\r')
   const output = () => {
     const pane = terminalPane(terminal.title)
     return pane ? terminalOutput(pane) : ''
   }
   try {
-    await waitFor(`foreground and background jobs ready before ${action}`, () => {
-      const lines = output().split('\n').map((line) => line.trim())
-      return lines.includes('S4_FOREGROUND_READY') && lines.includes('S4_BACKGROUND_READY')
-    })
+    await waitFor(`foreground and background jobs ready before ${action}`, () =>
+      output().split('\n').some((line) => line.trim() === 'S4_JOBS_READY'))
   } catch (failure) {
     throw new Error(`${String(failure)} Terminal output: ${JSON.stringify(output().slice(-1000))}`)
   }
@@ -966,7 +997,7 @@ async function exerciseStopProcess(terminal: bridge.TerminalSnapshot) {
   stop.click()
   const restart = await paneButton('Restart')
   restart.click()
-  await typeIntoFocusedTerminal(terminal.title, "printf 'S4_%s\\n' STOP_RESTARTED")
+  await typeIntoTerminal(terminal, "printf 'S4_%s\\n' STOP_RESTARTED")
   await waitFor('fresh output after stopping and restarting the task terminal', () => {
     const pane = terminalPane(terminal.title)
     return pane && terminalOutput(pane).split('\n').some((line) => line.trim() === 'S4_STOP_RESTARTED')
@@ -1022,7 +1053,7 @@ async function exerciseCodexExit() {
 
 async function smoke() {
   const project = await openFixtureProject()
-  if (navigator.platform.startsWith('Mac')) {
+  if (windowChecks && navigator.platform.startsWith('Mac')) {
     const dragRegion = document.querySelector('[data-tauri-drag-region]')?.getBoundingClientRect()
     const projectHeading = document.querySelector('.sidebar__header')?.getBoundingClientRect()
     if (!dragRegion?.height || !projectHeading || projectHeading.top < dragRegion.bottom) {
@@ -1035,28 +1066,38 @@ async function smoke() {
   })
   start.click()
   const input = await waitFor('terminal input', () => document.querySelector<HTMLTextAreaElement>('.terminal-view__input'))
-  await waitFor('terminal canvas frame', () => document.querySelector<HTMLCanvasElement>('.terminal-view__canvas')?.style.height)
   const { terminals: [terminal] } = await bridge.terminalList(project.id)
   if (!terminal) throw new Error('The fixture terminal was not started')
-  await exerciseInspectorResize(terminal)
-  input.focus()
+  if (windowChecks) {
+    await waitFor('terminal canvas frame', () => document.querySelector<HTMLCanvasElement>('.terminal-view__canvas')?.style.height)
+    await exerciseInspectorResize(terminal)
+    input.focus()
+  }
   await bridge.terminalWrite(terminal.id, "pwd; printf '\nS4_%s\n' READY\r")
   await waitFor('project cwd and PTY output in the webview', () =>
     terminalOutput().includes(project.path) && terminalOutput().includes('S4_READY'))
   await exerciseShellInterrupt(terminal.id, input)
-  await exerciseAlternateScreen(terminal.id, input)
-  await exerciseFuzzyFinder(terminal.id, input)
-  await exerciseUnclaimedControlKey(terminal.id, input)
-  await exerciseComposition(terminal.id, input)
-  await exerciseKitty(terminal.id, input)
+  if (windowChecks) {
+    await exerciseAlternateScreen(terminal.id, input)
+    await exerciseFuzzyFinder(terminal.id, input)
+    await exerciseUnclaimedControlKey(terminal.id, input)
+    await exerciseComposition(terminal.id, input)
+    await exerciseKitty(terminal.id, input)
+  }
   if (__SHEPHERD_SMOKE_FISH__) await exerciseFish(terminal.id, input)
   await exerciseBracketedPaste(terminal.id, input)
-  await exerciseMouse(terminal.id)
-  await exerciseHyperlink(terminal.id)
-  const burstPaintMs = await measureBurst(terminal.id)
-  const pacing = await measurePacing(terminal.id)
-  await exerciseSearch(terminal, input)
-  await exerciseWideCopy(terminal.id, input)
+  let windowResults = {}
+  if (windowChecks) {
+    await exerciseMouse(terminal.id)
+    await exerciseHyperlink(terminal.id)
+    const burstPaintMs = await measureBurst(terminal.id)
+    const pacing = await measurePacing(terminal.id)
+    await exerciseSearch(terminal, input)
+    await exerciseWideCopy(terminal.id, input)
+    windowResults = { ptyResize: true, scrollbackSearch: true, pacing, alternateScreen: true,
+      fuzzyFinder: true, compositionEvents: true,
+      kittyRoundTrip: true, sgrMouse: true, hyperlinkOpened: true, burstPaintMs }
+  }
   await exerciseProjectSwitch(project, terminal)
   await exerciseSplit(project.id, terminal.id, terminal.title)
   await exerciseTaskSwitch(project, terminal)
@@ -1066,7 +1107,8 @@ async function smoke() {
   await startHangupResistantJobs(terminal, 'quit')
   await openInspectorTab('git')
   await requestQuitWithLiveTask(3)
-  return { ok: true, quitWarning: true, taskSwitch: true, projectSwitch: true, roundTrip: true, splitReattach: true, ptyResize: true, scrollbackSearch: true, pacing, alternateScreen: true, fuzzyFinder: true, compositionEvents: true, kittyRoundTrip: true, fishKeyBindings: __SHEPHERD_SMOKE_FISH__, bracketedPaste: true, sgrMouse: true, hyperlinkOpened: true, burstPaintMs }
+  return { ok: true, quitWarning: true, taskSwitch: true, projectSwitch: true, roundTrip: true,
+    splitReattach: true, fishKeyBindings: __SHEPHERD_SMOKE_FISH__, bracketedPaste: true, ...windowResults }
 }
 
 async function restore() {
@@ -1089,12 +1131,14 @@ async function restore() {
     return pane && Array.from(pane.querySelectorAll('button')).find((entry) => entry.textContent === 'Restart' && !entry.disabled)
   })
   restart.click()
-  await waitFor('restarted terminal frame', () => terminalPane(first.title)?.querySelector<HTMLCanvasElement>('canvas')?.style.height)
+  if (windowChecks) {
+    await waitFor('restarted terminal frame', () => terminalPane(first.title)?.querySelector<HTMLCanvasElement>('canvas')?.style.height)
+  }
+  await typeIntoTerminal(first, 'echo S4_RESTORED')
   const { terminals: reopened } = await bridge.terminalList(project.id)
   if (!reopened.some((entry) => entry.id === first.id && entry.endedAt === null)) {
     throw new Error('Restart should reuse the restored terminal ID')
   }
-  await typeIntoFocusedTerminal(first.title, 'echo S4_RESTORED')
   await waitFor('fresh PTY output after restore', () => {
     const pane = terminalPane(first.title)
     return pane && terminalOutput(pane).split('\n').some((line) => line.trim() === 'S4_RESTORED')
@@ -1110,8 +1154,10 @@ async function restore() {
     return pane && Array.from(pane.querySelectorAll('button')).find((entry) => entry.textContent === 'Restart' && !entry.disabled)
   })
   restartTask.click()
-  await waitFor('restarted task terminal frame', () => terminalPane(scoped.title)?.querySelector<HTMLCanvasElement>('canvas')?.style.height)
-  await typeIntoFocusedTerminal(scoped.title, "printf 'S4_%s:%s\\n' TASK_RESTORED \"${PWD##*/}\"")
+  if (windowChecks) {
+    await waitFor('restarted task terminal frame', () => terminalPane(scoped.title)?.querySelector<HTMLCanvasElement>('canvas')?.style.height)
+  }
+  await typeIntoTerminal(scoped, "printf 'S4_%s:%s\\n' TASK_RESTORED \"${PWD##*/}\"")
   const marker = 'S4_TASK_RESTORED:' + task.worktreePath.split('/').at(-1)
   await waitFor('worktree output after task terminal restart', () => {
     const pane = terminalPane(scoped.title)
@@ -1126,10 +1172,18 @@ async function restore() {
   return { ok: true, restoredLayout: true, restartedTerminal: true, restartedTaskTerminal: true, resumedInterruptedTask: true }
 }
 
+async function verifyBackgroundWindow() {
+  const appWindow = getCurrentWindow()
+  if (!document.hidden || await appWindow.isVisible() || await appWindow.isFocused()) {
+    throw new Error('The background smoke window became visible or focused')
+  }
+}
+
 void (async () => {
   let result
   try {
-    await waitFor('the smoke window to become visible', () => !document.hidden)
+    if (windowChecks) await waitFor('the smoke window to become visible', () => !document.hidden)
+    else await verifyBackgroundWindow()
     switch (__SHEPHERD_SMOKE_PHASE__) {
       case 'linux-ime':
         result = await exerciseNativeIme(30_000)
@@ -1176,6 +1230,10 @@ void (async () => {
         break
       default:
         result = await smoke()
+    }
+    if (!windowChecks) {
+      await verifyBackgroundWindow()
+      result = { ...result, background: true }
     }
   } catch (error) {
     const message = typeof error === 'object' && error !== null && 'message' in error

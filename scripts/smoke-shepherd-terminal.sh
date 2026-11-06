@@ -4,10 +4,19 @@ set -euo pipefail
 phases=(prepare restore)
 duration=180s
 window_config=''
-unset SHEPHERD_DEV_CODEX_SMOKE
+platform=$(uname -s)
+unset SHEPHERD_DEV_CODEX_SMOKE SHEPHERD_DEV_BACKGROUND_SMOKE
 case "${1:-}" in
-  "")
-    for tool in vim less fzf python3; do
+  ""|--macos-window)
+    if [[ ${1:-} == --macos-window && $platform != Darwin ]]; then
+      printf '%s\n' 'The macOS window smoke requires a macOS desktop session.' >&2
+      exit 2
+    fi
+    required_tools=(python3)
+    if [[ $platform != Darwin || ${1:-} == --macos-window ]]; then
+      required_tools+=(vim less fzf)
+    fi
+    for tool in "${required_tools[@]}"; do
       if ! command -v "$tool" >/dev/null; then
         printf 'Shepherd terminal smoke requires %s on PATH\n' "$tool" >&2
         exit 1
@@ -16,7 +25,7 @@ case "${1:-}" in
     export SHEPHERD_DEV_SCRIPTED_HARNESS=1
     ;;
   --linux-ime)
-    if [[ $(uname -s) != Linux || ! -r ${SHEPHERD_SMOKE_IBUS_MODULE:-} ]]; then
+    if [[ $platform != Linux || ! -r ${SHEPHERD_SMOKE_IBUS_MODULE:-} ]]; then
       printf '%s\n' 'The native IME smoke requires Linux and SHEPHERD_SMOKE_IBUS_MODULE pointing to the GTK 3 IBus module.' >&2
       exit 2
     fi
@@ -24,7 +33,7 @@ case "${1:-}" in
     export SHEPHERD_DEV_SCRIPTED_HARNESS=1
     ;;
   --macos-ime)
-    if [[ $(uname -s) != Darwin ]]; then
+    if [[ $platform != Darwin ]]; then
       printf '%s\n' 'The macOS IME smoke requires a macOS desktop session.' >&2
       exit 2
     fi
@@ -52,7 +61,7 @@ case "${1:-}" in
     esac
     ;;
   --macos-visibility)
-    if [[ $(uname -s) != Darwin ]]; then
+    if [[ $platform != Darwin ]]; then
       printf '%s\n' 'The window visibility smoke requires a macOS desktop session.' >&2
       exit 2
     fi
@@ -104,10 +113,26 @@ EOF
     export SHEPHERD_DEV_CODEX_SMOKE=review-merge
     ;;
   *)
-    printf '%s\n' "Usage: $0 [--linux-ime|--macos-ime [pinyin|british]|--macos-visibility|--codex-approval|--codex-live|--codex-edit|--codex-restart|--codex-exit|--codex-review-merge]" >&2
+    printf '%s\n' "Usage: $0 [--macos-window|--linux-ime|--macos-ime [pinyin|british]|--macos-visibility|--codex-approval|--codex-live|--codex-edit|--codex-restart|--codex-exit|--codex-review-merge]" >&2
     exit 2
     ;;
 esac
+
+if [[ $platform == Darwin && ( -z ${1:-} || ${1:-} == --codex-* ) ]]; then
+  export SHEPHERD_DEV_BACKGROUND_SMOKE=1
+  window_config=$(cat <<'EOF'
+  "app": {
+    "windows": [{
+      "label": "main",
+      "visible": false,
+      "focus": false,
+      "focusable": false,
+      "backgroundThrottling": "disabled"
+    }]
+  },
+EOF
+  )
+fi
 
 port=${SHEPHERD_DESKTOP_SMOKE_PORT:-1432}
 if [[ ! $port =~ ^[1-9][0-9]{3,4}$ ]] || (( port < 1024 || port > 65535 )); then
@@ -149,6 +174,8 @@ export SHELL=/bin/sh
 export CARGO_NET_OFFLINE=true
 if [[ ${phases[0]} == prepare ]]; then
   mkdir "$fixture/second-project"
+fi
+if [[ ${phases[0]} == prepare && ${SHEPHERD_DEV_BACKGROUND_SMOKE:-} != 1 ]]; then
   mkdir "$fixture/bin"
   cat > "$fixture/bin/open" <<'EOF'
 #!/bin/sh
@@ -211,7 +238,7 @@ for phase in "${phases[@]}"; do
     [[ ! -e $task_worktree && $(git -C "$fixture/project" rev-parse "$task_branch") == "$task_tip" ]]
   fi
 done
-if [[ ${phases[0]} == prepare ]]; then
+if [[ ${phases[0]} == prepare && ${SHEPHERD_DEV_BACKGROUND_SMOKE:-} != 1 ]]; then
   [[ $(cat "$SHEPHERD_SMOKE_OPEN_LOG") == 'https://example.invalid/shepherd-terminal' ]]
 fi
 if [[ ${SHEPHERD_DEV_CODEX_SMOKE:-} == review-merge ]]; then
