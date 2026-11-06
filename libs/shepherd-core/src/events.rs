@@ -32,6 +32,9 @@ pub enum Event {
     },
     TaskListChanged(TaskList),
     TaskChanged(TaskSummary),
+    TaskNeedsInput {
+        task_id: String,
+    },
     TaskWorkspaceChanged(TaskWorkspace),
     ShutdownStateChanged(ShutdownState),
     Error {

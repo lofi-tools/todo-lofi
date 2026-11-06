@@ -36,6 +36,7 @@ export interface ProjectSnapshot {
   previewUrl: string | null
   unfinishedTaskCount: number
   reviewTaskCount: number
+  runningTaskCount: number
 }
 
 export interface ProjectList {
@@ -304,6 +305,7 @@ export type Event =
   | { type: 'terminalListChanged'; data: TerminalList }
   | { type: 'taskListChanged'; data: TaskList }
   | { type: 'taskChanged'; data: TaskSummary }
+  | { type: 'taskNeedsInput'; data: { taskId: string } }
   | { type: 'taskWorkspaceChanged'; data: TaskWorkspace }
   | { type: 'shutdownStateChanged'; data: ShutdownState }
   | { type: 'error'; data: { taskId: string | null; message: string } }
@@ -836,4 +838,24 @@ export type ReviewAction =
 
 export function reviewTask(taskId: string, action: ReviewAction): Promise<TaskWorkspace> {
   return invoke('review_task', { taskId, action })
+}
+
+export function reviewTaskLists(): Promise<TaskList[]> {
+  return invoke('review_task_lists')
+}
+
+export function archiveReviewed(taskIds: string[]): Promise<void> {
+  return invoke('archive_reviewed', { taskIds })
+}
+
+export function notificationsEnabled(): Promise<boolean> {
+  return invoke('notifications_enabled')
+}
+
+export function setNotificationsEnabled(enabled: boolean): Promise<void> {
+  return invoke('set_notifications_enabled', { enabled })
+}
+
+export function notifyTaskNeedsInput(taskId: string): Promise<void> {
+  return invoke('notify_task_needs_input', { taskId })
 }

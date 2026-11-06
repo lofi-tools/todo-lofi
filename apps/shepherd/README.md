@@ -26,6 +26,13 @@ Choose the Send button color under **Settings → Appearance**. The choice is
 saved between launches for `shep` and lasts for the window session in
 `shep --test`.
 
+Enable **Notify when tasks need input** in **Settings → Workspace** to receive
+system notifications when an agent needs input outside the focused task. On
+macOS, enable it from the bundled Shepherd app and grant notification
+permission. The status bar shows running and review totals across projects.
+Click the review count to filter the sidebar and archive selected review
+tasks together.
+
 Tauri reloads the app when the shell, its local Rust dependencies, or the frontend
 changes. Vite keeps running during those reloads. Non-interactive runners can use
 `direnv exec . shep` or `direnv exec . shep --test`.

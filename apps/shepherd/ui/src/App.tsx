@@ -4,7 +4,7 @@
  * frontend model.
  */
 
-import { For, Show, createEffect, createResource, createSignal, createUniqueId, onCleanup, onMount, type JSX } from 'solid-js'
+import { For, Show, createEffect, createMemo, createResource, createSignal, createUniqueId, onCleanup, onMount, type JSX } from 'solid-js'
 import { isTauri } from '@tauri-apps/api/core'
 import { homeDir } from '@tauri-apps/api/path'
 import { getCurrentWindow } from '@tauri-apps/api/window'
@@ -20,6 +20,7 @@ import { ReviewPane } from './ReviewPane'
 import { SEND_ACCENTS, SettingsPane, type SendAccent } from './SettingsPane'
 import { FreebuffPane, TerminalPane } from './TerminalPane'
 import { TaskSearch } from './TaskSearch'
+import { ReviewArchiveDialog, TaskRows } from './TaskRows'
 
 type CoreEvent = bridge.Event
 type TerminalBell = Extract<CoreEvent, { type: 'terminalBell' }>['data']
@@ -144,6 +145,15 @@ export function App() {
     },
   )
   const [tasks, setTasks] = createSignal<bridge.TaskSummary[]>([])
+  const [reviewOnly, setReviewOnly] = createSignal(false)
+  const [reviewLists, setReviewLists] = createSignal(new Map<string, bridge.TaskSummary[]>())
+  const [loadingReview, setLoadingReview] = createSignal(false)
+  const [reviewSelection, setReviewSelection] = createSignal(new Set<string>())
+  const [archiveConfirmation, setArchiveConfirmation] = createSignal<string[]>()
+  let reviewLoad: Map<string, bridge.TaskSummary[]> | undefined
+  let reviewAnchor: string | undefined
+  let archiveSelectedButton: HTMLButtonElement | undefined
+  let reviewCountButton: HTMLButtonElement | undefined
   const [loadedTasksFor, setLoadedTasksFor] = createSignal<string>()
   const [selectedTaskId, setSelectedTaskId] = createSignal<string | null>(null)
   const [workspace, setWorkspace] = createSignal<bridge.TaskWorkspace | null>(null)
@@ -162,6 +172,8 @@ export function App() {
   const [projectMenuId, setProjectMenuId] = createSignal<string>()
   const [settingsOpen, setSettingsOpen] = createSignal(false)
   const [sendAccent, setSendAccent] = createSignal(loadSendAccent())
+  const [notificationsEnabled, setNotificationsEnabled] = createSignal(false)
+  const [savingNotifications, setSavingNotifications] = createSignal(false)
   const [projectSettingsRequest, setProjectSettingsRequest] = createSignal<{ id: string }>()
   const [approvalChange, setApprovalChange] = createSignal<{ projectId: string }>()
   const showsArchived = (projectId: string | null) =>
@@ -391,8 +403,28 @@ export function App() {
     }
   }
 
-  const runningCount = () => tasks().filter((task) => LIVE_STATES.includes(task.state)).length
-  const reviewCount = () => projects().reduce((count, project) => count + (project.reviewTaskCount ?? 0), 0)
+  async function chooseNotifications(enabled: boolean) {
+    setSavingNotifications(true)
+    setError(null)
+    try {
+      await bridge.setNotificationsEnabled(enabled)
+      setNotificationsEnabled(enabled)
+    } catch (failure) {
+      setError(describe(failure))
+    } finally {
+      setSavingNotifications(false)
+    }
+  }
+
+  const runningCount = () => projects().reduce((count, project) => count + (project.runningTaskCount ?? 0), 0)
+  const reviewCount = createMemo(() => projects().reduce((count, project) => count + (project.reviewTaskCount ?? 0), 0))
+  const filteredReviewTasks = (projectId: string) => reviewLists().get(projectId) ?? []
+  const reviewRows = () => projects().flatMap((project) => filteredReviewTasks(project.id))
+  const selectedReviewIds = () => reviewRows().filter((task) => reviewSelection().has(task.id)).map((task) => task.id)
+  const sidebarSelection = () => reviewOnly() ? reviewSelection() : undefined
+  const sidebarProjects = () => reviewOnly()
+    ? projects().filter((project) => filteredReviewTasks(project.id).length > 0)
+    : projects()
   const canStartTask = () => {
     const project = selectedProject()
     return !!project && !project.missing && loadedTasksFor() === project.id
@@ -422,6 +454,12 @@ export function App() {
   }
   const mac = navigator.platform.startsWith('Mac')
 
+  createEffect(() => {
+    if (!mac || !isTauri() || !projectsLoaded()) return
+    void getCurrentWindow().setBadgeCount(reviewCount() || undefined).catch((failure) =>
+      console.warn('Could not update the Dock review count', failure))
+  })
+
   async function run(action: () => Promise<void>) {
     setPending(true)
     setError(null)
@@ -441,6 +479,69 @@ export function App() {
       setLoadedTasksFor(projectId)
     }
     return list.tasks
+  }
+
+  async function toggleReviewFilter() {
+    const enable = !reviewOnly()
+    setReviewOnly(enable)
+    setReviewSelection(new Set<string>())
+    setReviewLists(new Map())
+    reviewAnchor = undefined
+    reviewLoad = undefined
+    setLoadingReview(enable)
+    if (!enable) return
+
+    const updates = new Map<string, bridge.TaskSummary[]>()
+    reviewLoad = updates
+    try {
+      const lists = await bridge.reviewTaskLists()
+      if (reviewLoad !== updates) return
+      setReviewLists(new Map([
+        ...lists.map(({ projectId, tasks }) => [projectId, tasks] as const),
+        ...updates,
+      ]))
+    } catch (failure) {
+      if (reviewLoad !== updates) return
+      setReviewOnly(false)
+      setError(describe(failure))
+    } finally {
+      if (reviewLoad === updates) {
+        reviewLoad = undefined
+        setLoadingReview(false)
+      }
+    }
+  }
+
+  function selectReviewTask(taskId: string, extend: boolean) {
+    const ordered = reviewRows().map((task) => task.id)
+    const anchor = reviewAnchor ? ordered.indexOf(reviewAnchor) : -1
+    const target = ordered.indexOf(taskId)
+    if (target < 0) return
+    const selection = new Set(reviewSelection())
+    if (extend && anchor >= 0) {
+      for (const id of ordered.slice(Math.min(anchor, target), Math.max(anchor, target) + 1)) selection.add(id)
+    } else {
+      if (!selection.delete(taskId)) selection.add(taskId)
+      reviewAnchor = taskId
+    }
+    setReviewSelection(selection)
+  }
+
+  function dismissArchiveConfirmation() {
+    setArchiveConfirmation(undefined)
+    archiveSelectedButton?.focus({ preventScroll: true })
+  }
+
+  function archiveSelectedTasks() {
+    const ids = archiveConfirmation()
+    setArchiveConfirmation(undefined)
+    reviewCountButton?.focus({ preventScroll: true })
+    if (!ids?.length) return
+    void run(async () => {
+      await bridge.archiveReviewed(ids)
+      setReviewSelection(new Set<string>())
+      reviewAnchor = undefined
+    })
   }
 
   async function selectTask(taskId: string) {
@@ -464,7 +565,7 @@ export function App() {
     const listed = await loadTasks(project.id)
     if (selectedProjectId() !== project.id) return
     if (taskId) {
-      if (!listed.some((task) => task.id === taskId)) throw new Error('This search result’s task is no longer available.')
+      if (!listed.some((task) => task.id === taskId)) throw new Error('This task is no longer available.')
       await selectTask(taskId)
       return
     }
@@ -476,8 +577,23 @@ export function App() {
 
   function openProject(project: bridge.ProjectSnapshot) {
     setSettingsOpen(false)
-    void run(() => selectProject(project)).then(() => {
+    const reviewed = reviewOnly() ? filteredReviewTasks(project.id) : []
+    const target = reviewed.find((task) => task.id === project.lastTaskId) ?? reviewed[0]
+    void run(() => selectProject(project, target?.id)).then(() => {
       if (selectedProjectId() === project.id && canStartTask()) promptInput?.focus()
+    })
+  }
+
+  function openTaskRow(task: bridge.TaskSummary) {
+    setSettingsOpen(false)
+    setFreebuffProjectId(undefined)
+    void run(async () => {
+      if (task.projectId === selectedProjectId()) {
+        await selectTask(task.id)
+      } else {
+        const project = projects().find((candidate) => candidate.id === task.projectId)
+        if (project) await selectProject(project, task.id)
+      }
     })
   }
 
@@ -538,18 +654,32 @@ export function App() {
       case 'projectApprovalsChanged':
         setApprovalChange(event.data)
         break
-      case 'taskListChanged':
-        if (event.data.projectId === selectedProjectId()) setTasks(event.data.tasks)
+      case 'taskListChanged': {
+        const { projectId, tasks } = event.data
+        if (projectId === selectedProjectId()) setTasks(tasks)
+        if (reviewOnly()) {
+          const reviewed = tasks.filter((task) => task.state === 'review')
+          reviewLoad?.set(projectId, reviewed)
+          setReviewLists((lists) => new Map(lists).set(projectId, reviewed))
+          const ids = new Set(reviewed.map((task) => task.id))
+          const dropped = tasks.filter((task) => !ids.has(task.id) && reviewSelection().has(task.id))
+          if (dropped.length) {
+            const selection = new Set(reviewSelection())
+            for (const task of dropped) selection.delete(task.id)
+            setReviewSelection(selection)
+          }
+        }
         break
+      }
       case 'taskWorkspaceChanged':
         if (event.data.task.id === selectedTaskId()) setWorkspace(event.data)
         break
-      case 'taskChanged': {
-        const projectId = selectedProjectId()
-        if (projectId) {
-          void run(async () => {
-            await loadTasks(projectId)
-          })
+      case 'taskNeedsInput': {
+        const { taskId } = event.data
+        const focused = taskId === selectedTaskId() && document.hasFocus()
+          && !settingsOpen() && !freebuffProjectId() && !searchOpen() && !pickerOpen()
+        if (notificationsEnabled() && !focused) {
+          void bridge.notifyTaskNeedsInput(taskId).catch((failure) => setError(describe(failure)))
         }
         break
       }
@@ -576,6 +706,7 @@ export function App() {
     void homeDir().then(setHomeDirectory).catch((error) => console.warn('Could not resolve the home directory', error))
     void bridge.opencodeConfigured().then(setOpencodeConfigured).catch((error) => console.warn('Could not read OpenCode availability', error))
     void bridge.claudeConfigured().then(setClaudeConfigured).catch((error) => console.warn('Could not read Claude Code availability', error))
+    void bridge.notificationsEnabled().then(setNotificationsEnabled).catch((failure) => setError(describe(failure)))
     void run(async () => {
       await bridge.subscribeToEvents(handleEvent)
       const list = await bridge.projectList()
@@ -1038,9 +1169,12 @@ export function App() {
       <footer class="status-bar" aria-label="Status">
         <span>{agentActivity(workspace())}</span>
         <Dot />
-        <span>{runningCount()} tasks running</span>
+        <span>{runningCount()} {runningCount() === 1 ? 'task' : 'tasks'} running</span>
         <Dot />
-        <span>{reviewCount()} in review</span>
+        <button type="button" class="status-bar__filter" ref={reviewCountButton} aria-pressed={reviewOnly()}
+          title="Filter projects to tasks awaiting review" onClick={() => void toggleReviewFilter()}>
+          {reviewCount()} in review
+        </button>
         <Dot />
         <span>branch {workspace()?.task.branch ?? '—'}</span>
         <Dot />
@@ -1078,8 +1212,18 @@ export function App() {
             </button>
           </header>
 
+          <Show when={reviewOnly()}>
+            <div class="review-selection">
+              <span role="status">{loadingReview() ? 'Loading review tasks…' : selectedReviewIds().length
+                ? `${selectedReviewIds().length} selected` : sidebarProjects().length ? 'Needs review' : 'No tasks in review'}</span>
+              <button type="button" class="project-action" ref={archiveSelectedButton}
+                disabled={pending() || loadingReview() || !selectedReviewIds().length}
+                onClick={() => setArchiveConfirmation(selectedReviewIds())}>Archive selected</button>
+            </div>
+          </Show>
+
           <ul class="projects">
-            <Show when={projectsLoaded() && projects().length === 0}>
+            <Show when={!reviewOnly() && projectsLoaded() && projects().length === 0}>
               <li class="projects__empty">
                 <button type="button" class="project-action projects__new" onClick={openPicker} disabled={pending()}>
                   <PlusIcon />
@@ -1089,63 +1233,42 @@ export function App() {
                 <ProjectImportSources codexDisabled={pending() || !codexAvailable()} note={importNote()} onImportCodex={importProjects} />
               </li>
             </Show>
-            <For each={projects()}>
-              {(project) => (
-                <li>
-                  <ProjectRow
-                    project={project}
-                    homeDirectory={homeDirectory()}
-                    selected={project.id === selectedProjectId()}
-                    expanded={project.id === selectedProjectId() && visibleTasks().length > 1}
-                    pending={pending()}
-                    showArchived={showsArchived(project.id)}
-                    menuOpen={projectMenuId() === project.id}
-                    onSelect={() => openProject(project)}
-                    onCompose={() => newTask(project.id)}
-                    onMenuOpenChange={(open) => {
-                      if (open) setProjectMenuId(project.id)
-                      else if (projectMenuId() === project.id) setProjectMenuId(undefined)
-                    }}
-                    onToggleArchived={() => setProjectArchived(project.id, !showsArchived(project.id))}
-                    onProjectSettings={() => openProjectSettings(project.id)}
-                  />
-                  <Show when={project.missing}>
-                    <p class="project__missing">path is missing</p>
-                  </Show>
+            <For each={sidebarProjects()}>
+              {(project) => {
+                const listed = () => reviewOnly() ? filteredReviewTasks(project.id)
+                  : project.id === selectedProjectId() && visibleTasks().length > 1 ? visibleTasks() : []
+                return (
+                  <li>
+                    <ProjectRow
+                      project={project}
+                      homeDirectory={homeDirectory()}
+                      selected={project.id === selectedProjectId()}
+                      expanded={listed().length > 0}
+                      pending={pending()}
+                      showArchived={showsArchived(project.id)}
+                      menuOpen={projectMenuId() === project.id}
+                      onSelect={() => openProject(project)}
+                      onCompose={() => newTask(project.id)}
+                      onMenuOpenChange={(open) => {
+                        if (open) setProjectMenuId(project.id)
+                        else if (projectMenuId() === project.id) setProjectMenuId(undefined)
+                      }}
+                      onToggleArchived={() => setProjectArchived(project.id, !showsArchived(project.id))}
+                      onProjectSettings={() => openProjectSettings(project.id)}
+                    />
+                    <Show when={project.missing}>
+                      <p class="project__missing">path is missing</p>
+                    </Show>
 
-                  <Show when={project.id === selectedProjectId() && visibleTasks().length > 1}>
-                    <div class="tasks">
-                      <ul class="task-list">
-                        <For each={visibleTasks()}>
-                          {(task) => (
-                            <li>
-                              <button
-                                type="button"
-                                class={`task task--${task.state}`}
-                                aria-current={task.id === selectedTaskId() ? 'true' : undefined}
-                                onClick={() => {
-                                  setSettingsOpen(false)
-                                  setFreebuffProjectId(undefined)
-                                  void run(() => selectTask(task.id))
-                                }}
-                              >
-                                <span class="task__state" aria-hidden="true" />
-                                <span class="task__title">{task.title}</span>
-                                <Show when={projectAttention().some((bell) => bell.taskId === task.id)}>
-                                  <span class="terminal-attention" role="img" aria-label="Terminal needs attention" />
-                                </Show>
-                                <Show when={task.state === 'review'} fallback={<span class="task__state-label">{task.state}</span>}>
-                                  <ReviewBadge />
-                                </Show>
-                              </button>
-                            </li>
-                          )}
-                        </For>
-                      </ul>
-                    </div>
-                  </Show>
-                </li>
-              )}
+                    <Show when={listed().length}>
+                      <TaskRows tasks={listed()} currentTaskId={selectedTaskId()} mac={mac} disabled={pending()}
+                        selection={sidebarSelection}
+                        needsTerminalAttention={(id) => terminalAttention().some((bell) => bell.taskId === id)}
+                        onOpen={openTaskRow} onSelect={selectReviewTask} />
+                    </Show>
+                  </li>
+                )
+              }}
             </For>
           </ul>
           <div class="sidebar__footer">
@@ -1171,6 +1294,9 @@ export function App() {
           <SettingsPane
             showArchived={showArchived()}
             onShowArchived={setShowArchived}
+            notificationsEnabled={notificationsEnabled()}
+            savingNotifications={savingNotifications()}
+            onNotificationsEnabled={(enabled) => void chooseNotifications(enabled)}
             sendAccent={sendAccent()}
             onSendAccent={chooseSendAccent}
             onAddProject={openPicker}
@@ -1343,6 +1469,9 @@ export function App() {
           </div>
 
           <div class="composer">
+            <Show when={workspace()?.task.state === 'waiting'}>
+              <span class="terminal-attention composer__attention" role="img" aria-label="Task needs input" />
+            </Show>
             <input type="file" ref={fileInput} aria-label="Local attachments" hidden multiple
               onChange={(event) => {
                 if (event.currentTarget.files) queuePromptFiles(event.currentTarget.files)
@@ -1463,6 +1592,10 @@ export function App() {
         </aside>
       </WorkspaceFrame>
 
+      <Show when={archiveConfirmation()}>
+        {(selection) => <ReviewArchiveDialog count={selection().length}
+          onCancel={dismissArchiveConfirmation} onConfirm={archiveSelectedTasks} />}
+      </Show>
       <Show when={searchOpen()}>
         <TaskSearch onClose={closeTaskSearch} onSelect={openSearchHit} />
       </Show>
@@ -1934,10 +2067,6 @@ const INSPECTOR_TABS: InspectorTabOption[] = [
   { id: 'git', label: 'Git', enabled: true, icon: 'M6 6a2 2 0 1 0 0-4 2 2 0 0 0 0 4Zm0 16a2 2 0 1 0 0-4 2 2 0 0 0 0 4ZM6 6v12M18 9a2 2 0 1 0 0-4 2 2 0 0 0 0 4Zm0 0c0 4-4 6-12 6' },
   { id: 'files', label: 'Files', enabled: true, icon: 'M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z' },
 ]
-
-function ReviewBadge() {
-  return <span class="review-badge">Needs review</span>
-}
 
 function Dot() {
   return (

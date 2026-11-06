@@ -81,6 +81,8 @@ current layout and give future changes a point of comparison.
   captured in the browser and mark a point, then use the same note queue.
 - Place the status bar below the wrapper on the window background. Its
   transparent, borderless surface keeps it visually separate from the panes.
+  Show the running and review counts across projects. The review count toggles
+  the sidebar filter and the macOS Dock badge mirrors the count.
 
 ## Projects sidebar and settings
 
@@ -103,6 +105,10 @@ current layout and give future changes a point of comparison.
   groups controls under **Workspace**, **Projects**, and **Appearance**.
   **Settings → Projects** offers the same per-source import buttons even when
   the sidebar already contains projects.
+- **Settings → Workspace** has an unchecked **Notify when tasks need input**
+  option. Enabling it allows system notifications for new waits outside the
+  focused task workspace. Review changes only affect the in-app indicators
+  and Dock count.
 
 ### Add project picker
 
@@ -131,6 +137,10 @@ current layout and give future changes a point of comparison.
   visible after applying the archive filter. A sole visible task opens directly
   in the conversation pane. Reserve the expanded area for task rows. Compose
   stays on the project row and the archive switch stays in the context card.
+- While the status-bar review filter is active, show waiting-for-review tasks
+  under each matching project, including a sole review task. Checkboxes and
+  modifier-clicks select rows across projects. **Archive selected** shows the
+  number of selected tasks in a confirmation dialog.
 - Highlight a row on hover and open a compact context card directly to its
   right. The pointer can move onto the card. Right-click and Shift+F10 open the
   same card. The row uses hover and these context actions as its menu entry
@@ -168,6 +178,8 @@ current layout and give future changes a point of comparison.
 
 ## Conversation lifecycle
 
+- Show **Needs input** on waiting task rows and an attention dot on the
+  selected task's composer. Review rows have a ring and **Needs review** badge.
 - Show the negotiated adapter tier in the conversation header after a session
   opens. When a fallback is used, show its reason and keep the command,
   protocol, capabilities and stderr in **Diagnostics**.

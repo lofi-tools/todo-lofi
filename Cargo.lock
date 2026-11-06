@@ -6491,9 +6491,9 @@ dependencies = [
 
 [[package]]
 name = "log"
-version = "0.4.31"
+version = "0.4.32"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "113b30b4cd05f7c06868fdb2854f66a7b9fece9a48425351cd532e810d74024f"
+checksum = "953f07c43838f8e6f9758cab68bf5bed85465e7587ebe0b823f1bcd81978ad3a"
 dependencies = [
  "serde_core",
  "value-bag",
@@ -6649,6 +6649,24 @@ dependencies = [
  "objc2-foundation 0.3.2",
  "time",
  "uuid",
+]
+
+[[package]]
+name = "mac-usernotifications"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "08adbb1b9e11709f9ce628dd7471208e5dd3ad35a245dbc81e59a36dce3f3780"
+dependencies = [
+ "block2 0.6.2",
+ "futures-channel",
+ "futures-lite",
+ "futures-timer",
+ "log",
+ "objc2 0.6.4",
+ "objc2-core-foundation",
+ "objc2-foundation 0.3.2",
+ "objc2-user-notifications",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -7236,6 +7254,7 @@ dependencies = [
  "futures-lite",
  "log",
  "mac-notification-sys",
+ "mac-usernotifications",
  "serde",
  "tauri-winrt-notification",
  "zbus",
@@ -7542,7 +7561,9 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2a180dd8642fa45cdb7dd721cd4c11b1cadd4929ce112ebd8b9f5803cc79d536"
 dependencies = [
  "bitflags 2.12.1",
+ "block2 0.6.2",
  "dispatch2",
+ "libc",
  "objc2 0.6.4",
 ]
 
@@ -10185,6 +10206,7 @@ dependencies = [
  "libc",
  "mime_guess",
  "notify 8.2.1",
+ "notify-rust",
  "percent-encoding",
  "portable-pty",
  "serde",

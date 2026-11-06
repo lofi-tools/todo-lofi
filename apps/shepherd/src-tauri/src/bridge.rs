@@ -535,39 +535,29 @@ impl ShellState {
         tauri::async_runtime::spawn(async move {
             loop {
                 tokio::time::sleep(Duration::from_millis(100)).await;
-                let drained = {
-                    let mut core = core.lock().await;
-                    if let Err(error) = core.pump().await {
-                        tracing::warn!(%error, "could not fold agent activity");
-                    }
-                    core.drain_events()
-                };
-                for event in drained {
-                    if let Err(error) = events.send(event) {
-                        tracing::debug!(%error, "no shell is subscribed to core events");
-                    }
+                let mut core = core.lock().await;
+                if let Err(error) = core.pump().await {
+                    tracing::warn!(%error, "could not fold agent activity");
                 }
+                Self::broadcast_core_events(&mut core, &events);
             }
         });
     }
 
     async fn execute(&self, command: Command) -> Result<CommandResult, BridgeError> {
-        let (result, events) = {
-            let mut core = self.core.lock().await;
-            let result = core.execute(command).await;
-            let events = core.drain_events();
-            (result, events)
-        };
+        let mut core = self.core.lock().await;
+        let result = core.execute(command).await;
+        Self::broadcast_core_events(&mut core, &self.events);
+        result.map_err(BridgeError::from)
+    }
 
-        for event in events {
-            if let Err(error) = self.events.send(event) {
-                // A window may not have subscribed yet; the snapshot returned by
-                // the command is enough to paint a fresh shell.
+    fn broadcast_core_events(core: &mut Core, events: &broadcast::Sender<Event>) {
+        // Keep snapshots in core mutation order across the pump and commands.
+        for event in core.drain_events() {
+            if let Err(error) = events.send(event) {
                 tracing::debug!(%error, "no shell is subscribed to core events");
             }
         }
-
-        result.map_err(BridgeError::from)
     }
 
     async fn workspace(&self, command: Command) -> Result<TaskWorkspace, BridgeError> {
@@ -902,6 +892,15 @@ impl ShellState {
 
     pub async fn project_list(&self) -> ProjectList {
         self.core.lock().await.project_list()
+    }
+
+    pub async fn waiting_task_title(&self, task_id: TaskId) -> Result<Option<String>, BridgeError> {
+        Ok(self
+            .core
+            .lock()
+            .await
+            .waiting_task_title(&task_id)?
+            .map(str::to_owned))
     }
 
     pub async fn codex_project_models(
@@ -1921,6 +1920,26 @@ pub mod commands {
         project_id: String,
     ) -> Result<TaskList, BridgeError> {
         state.inner().task_list(project_id).await
+    }
+
+    #[tauri::command]
+    pub async fn review_task_lists(
+        state: State<'_, ShellState>,
+    ) -> Result<Vec<TaskList>, BridgeError> {
+        Ok(state.core.lock().await.review_task_lists())
+    }
+
+    #[tauri::command]
+    pub async fn archive_reviewed(
+        state: State<'_, ShellState>,
+        task_ids: Vec<String>,
+    ) -> Result<(), BridgeError> {
+        state
+            .execute(Command::ArchiveReviewed {
+                task_ids: task_ids.into_iter().map(TaskId::new).collect(),
+            })
+            .await?;
+        Ok(())
     }
 
     #[tauri::command]

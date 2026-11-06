@@ -53,6 +53,9 @@ pub enum Command {
         task_id: TaskId,
         action: ReviewAction,
     },
+    ArchiveReviewed {
+        task_ids: Vec<TaskId>,
+    },
     Quit {
         force: bool,
     },

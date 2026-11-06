@@ -7,7 +7,7 @@
 import { fileURLToPath } from 'node:url'
 import { expect, test } from '@playwright/test'
 
-import type { AgentTerminal, Entry, Event as ShepherdEvent, FileChange, InspectorTab, TerminalLayout, TerminalSnapshot, TerminalSplit, WorkspaceLayout } from '../src/bridge'
+import type { AgentTerminal, Entry, Event as ShepherdEvent, FileChange, InspectorTab, TaskState, TerminalLayout, TerminalSnapshot, TerminalSplit, WorkspaceLayout } from '../src/bridge'
 
 test.beforeEach(async ({ context }) => {
   await context.addInitScript(() => {
@@ -19,6 +19,10 @@ test.beforeEach(async ({ context }) => {
     let eventIndex = 0
     let cancelRequests = 0
     let screenshotSaves = 0
+    let notificationsEnabled = false
+    const notifications: string[] = []
+    const dockCounts: Array<number | undefined> = []
+    const archiveRequests: string[][] = []
     const promptFileUploads: Array<{ taskId: string; name: string; text: string }> = []
     const codexTurns: Array<{ taskId: string; model?: string; effort?: string }> = []
     const sessionModes = new Map<string, string>()
@@ -58,7 +62,7 @@ test.beforeEach(async ({ context }) => {
     }
 
     const projects = options.has('empty-projects') ? [] : [project]
-    if (options.has('two-projects') || options.has('task-search')) {
+    if (options.has('two-projects') || options.has('task-search') || options.has('review-fixture')) {
       projects.push({ ...project, id: 'project-notes', path: '/tmp/notes', name: 'notes',
         isGitRepository: false, lastTaskId: null, unfinishedTaskCount: 0 })
     }
@@ -109,6 +113,25 @@ test.beforeEach(async ({ context }) => {
         { ...tasks[0], id: 'task-search-active', projectId: 'project-notes', title: 'Current answer', state: 'ready' },
       )
     }
+    if (options.has('review-fixture')) {
+      tasks[0].state = 'review'
+      tasks.push(
+        { ...tasks[0], id: 'task-review-tests', title: 'Add tests' },
+        { ...tasks[0], id: 'task-review-notes', projectId: 'project-notes', title: 'Update notes' },
+        { ...tasks[0], id: 'task-live-notes', projectId: 'project-notes', title: 'Read notes', state: 'working' },
+        { ...tasks[0], id: 'task-ready', title: 'Ready chat', state: 'ready' },
+      )
+    }
+
+    const taskList = (projectId: string) => ({ projectId, tasks: tasks.filter((task) => task.projectId === projectId) })
+    const projectList = () => ({ projects: projects.map((project) => {
+      const projectTasks = taskList(project.id).tasks
+      return {
+        ...project,
+        reviewTaskCount: projectTasks.filter((task) => task.state === 'review').length,
+        runningTaskCount: projectTasks.filter((task) => ['starting', 'queued', 'working', 'waiting'].includes(task.state)).length,
+      }
+    }) })
 
     const transcripts = {
       'task-1': [
@@ -330,7 +353,18 @@ test.beforeEach(async ({ context }) => {
           case 'plugin:path|resolve_directory':
             return '/tmp/home/'
           case 'project_list':
-            return { projects: [...projects] }
+            return projectList()
+          case 'notifications_enabled':
+            return notificationsEnabled
+          case 'set_notifications_enabled':
+            notificationsEnabled = args.enabled
+            return null
+          case 'notify_task_needs_input':
+            notifications.push(args.taskId)
+            return null
+          case 'plugin:window|set_badge_count':
+            dockCounts.push(args.value)
+            return null
           case 'set_project_preview_url': {
             const selected = projects.findIndex((candidate) => candidate.id === args.projectId)
             if (args.url && !args.url.startsWith('http://localhost:')) {
@@ -423,7 +457,24 @@ test.beforeEach(async ({ context }) => {
           case 'task_list':
             // A fresh array each call: real IPC serializes, and Solid skips a
             // setter handed the identical reference.
-            return { projectId: args.projectId, tasks: tasks.filter((task) => task.projectId === args.projectId) }
+            return taskList(args.projectId)
+          case 'review_task_lists':
+            return projects.map(({ id }) => ({
+              projectId: id, tasks: taskList(id).tasks.filter((task) => task.state === 'review'),
+            }))
+          case 'archive_reviewed': {
+            archiveRequests.push(args.taskIds)
+            const affected = new Set<string>()
+            for (const id of args.taskIds) {
+              const index = tasks.findIndex((task) => task.id === id)
+              tasks[index] = { ...tasks[index], state: 'done' }
+              affected.add(tasks[index].projectId)
+              window.__emitCoreEvent({ type: 'taskWorkspaceChanged', data: workspace(id) })
+            }
+            for (const projectId of affected) window.__emitCoreEvent({ type: 'taskListChanged', data: taskList(projectId) })
+            window.__emitCoreEvent({ type: 'projectListChanged', data: projectList() })
+            return null
+          }
           case 'task_workspace':
             return workspace(args.taskId)
           case 'reserve_task_search':
@@ -798,8 +849,23 @@ test.beforeEach(async ({ context }) => {
     window.__finishFileSearch = (id: string) => pendingFileSearches.get(id)?.()
     window.__cancelRequests = () => cancelRequests
     window.__terminalLayout = () => terminalLayout
+    window.__notifications = notifications
+    window.__dockCounts = dockCounts
+    window.__archiveRequests = archiveRequests
     window.__emitCoreEvent = (event: ShepherdEvent) =>
       callbacks.get(eventChannel)?.({ index: eventIndex++, message: event })
+    window.__setTaskState = (taskId: string, state: TaskState) => {
+      const index = tasks.findIndex((task) => task.id === taskId)
+      if (index < 0) throw new Error(`Unknown fixture task ${taskId}`)
+      const previous = tasks[index]
+      tasks[index] = { ...previous, state }
+      if (state === 'waiting' && previous.state !== state) {
+        window.__emitCoreEvent({ type: 'taskNeedsInput', data: { taskId } })
+      }
+      window.__emitCoreEvent({ type: 'taskWorkspaceChanged', data: workspace(taskId) })
+      window.__emitCoreEvent({ type: 'taskListChanged', data: taskList(previous.projectId) })
+      window.__emitCoreEvent({ type: 'projectListChanged', data: projectList() })
+    }
     window.addEventListener('test-approval-session-exited', () => {
       sessionGrants = []
       window.__emitCoreEvent({ type: 'projectApprovalsChanged', data: { projectId: project.id } })
@@ -835,6 +901,94 @@ test('puts the macOS window controls and history buttons in one header row', asy
   expect(next.y + next.height / 2).toBeCloseTo(windowControlsCenter)
   expect(previous.x).toBeGreaterThanOrEqual(windowControls.x + windowControls.width)
   expect(next.x).toBeGreaterThanOrEqual(previous.x + previous.width)
+})
+
+test('filters review tasks across projects and archives the confirmed selection', async ({ page }) => {
+  await page.addInitScript(() => {
+    Object.defineProperty(window, 'isTauri', { value: true })
+    Object.defineProperty(navigator, 'platform', { value: 'MacIntel' })
+  })
+  await page.goto('/?review-fixture')
+  const navigation = page.getByRole('complementary', { name: 'Workspace navigation' })
+  const reviewCount = page.getByRole('button', { name: '3 in review' })
+  await expect(page.getByText('1 task running')).toBeVisible()
+  await expect.poll(() => page.evaluate(() => window.__dockCounts.at(-1))).toBe(3)
+  await expect(navigation.getByRole('button', { name: /Ready chat/ })).toBeVisible()
+  await expect(navigation.getByRole('button', { name: /Update notes/ })).toHaveCount(0)
+  await reviewCount.click()
+  await expect(reviewCount).toHaveAttribute('aria-pressed', 'true')
+  await expect(navigation.getByRole('button', { name: /Ready chat/ })).toHaveCount(0)
+  await expect(navigation.getByRole('button', { name: /Read notes/ })).toHaveCount(0)
+  await navigation.getByRole('button', { name: /Ship it Needs review/ }).click({ modifiers: ['Meta'] })
+  await navigation.getByRole('button', { name: /Update notes Needs review/ }).click({ modifiers: ['Shift'] })
+  await expect(navigation.getByRole('status')).toHaveText('3 selected')
+
+  const batch = navigation.getByRole('button', { name: 'Archive selected' })
+  await batch.click()
+  const confirmation = page.getByRole('dialog', { name: 'Archive selected tasks' })
+  await expect(confirmation.getByRole('heading')).toHaveText('Archive 3 selected tasks?')
+  await expect(confirmation.getByRole('button', { name: 'Cancel' })).toBeFocused()
+  await page.keyboard.press('Escape')
+  await expect(confirmation).toHaveCount(0)
+  await expect(batch).toBeFocused()
+  expect(await page.evaluate(() => window.__archiveRequests)).toEqual([])
+
+  await batch.click()
+  await confirmation.getByRole('button', { name: 'Archive', exact: true }).click()
+  const emptyCount = page.getByRole('button', { name: '0 in review' })
+  await expect(emptyCount).toBeFocused()
+  await expect(navigation.getByRole('status')).toHaveText('No tasks in review')
+  await expect(batch).toBeDisabled()
+  await expect.poll(() => page.evaluate(() => window.__dockCounts)).toEqual([3, undefined])
+  expect(await page.evaluate(() => window.__archiveRequests)).toEqual([['task-1', 'task-review-tests', 'task-review-notes']])
+  await emptyCount.click()
+  await expect(navigation.getByRole('button', { name: 'demo', exact: true })).toBeVisible()
+  await expect(page.getByRole('region', { name: 'Task chat' }).getByText('Ready chat')).toBeVisible()
+})
+
+test('opts in to notifications for unfocused waits and shows waiting attention', async ({ page }) => {
+  await page.goto('/?review-fixture')
+  const navigation = page.getByRole('complementary', { name: 'Workspace navigation' })
+  await expect(navigation.getByRole('button', { name: /Ship it/ })).toBeVisible()
+  await page.evaluate(() => window.__setTaskState('task-live-notes', 'waiting'))
+  expect(await page.evaluate(() => window.__notifications)).toEqual([])
+
+  await navigation.getByRole('button', { name: 'Settings' }).click()
+  const setting = page.getByRole('checkbox', { name: 'Notify when tasks need input' })
+  await expect(setting).not.toBeChecked()
+  await setting.check()
+  await expect(setting).toBeChecked()
+  await navigation.getByRole('button', { name: 'Settings' }).click()
+  await page.evaluate(() => {
+    Object.defineProperty(document, 'hasFocus', { value: () => true, configurable: true })
+    window.__setTaskState('task-1', 'waiting')
+  })
+  await expect(navigation.getByRole('button', { name: /Ship it Needs input/ })).toBeVisible()
+  await expect(page.getByRole('img', { name: 'Task needs input', exact: true })).toBeVisible()
+  expect(await page.evaluate(() => window.__notifications)).toEqual([])
+
+  await page.evaluate(() => {
+    window.__setTaskState('task-live-notes', 'working')
+    window.__setTaskState('task-live-notes', 'waiting')
+    window.__setTaskState('task-live-notes', 'waiting')
+    window.__setTaskState('task-1', 'review')
+  })
+  await expect(page.getByRole('img', { name: 'Task needs input', exact: true })).toHaveCount(0)
+  await expect.poll(() => page.evaluate(() => window.__notifications)).toEqual(['task-live-notes'])
+
+  await page.evaluate(() => {
+    Object.defineProperty(document, 'hasFocus', { value: () => false, configurable: true })
+    window.__setTaskState('task-1', 'waiting')
+  })
+  await expect.poll(() => page.evaluate(() => window.__notifications)).toEqual(['task-live-notes', 'task-1'])
+  await navigation.getByRole('button', { name: 'Settings' }).click()
+  await setting.uncheck()
+  await expect(setting).not.toBeChecked()
+  await page.evaluate(() => {
+    window.__setTaskState('task-1', 'working')
+    window.__setTaskState('task-1', 'waiting')
+  })
+  expect(await page.evaluate(() => window.__notifications)).toEqual(['task-live-notes', 'task-1'])
 })
 
 test('shows the project, drafts a task, streams a reply and switches tasks', async ({ page }) => {

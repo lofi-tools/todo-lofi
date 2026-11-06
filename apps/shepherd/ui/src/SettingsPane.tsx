@@ -10,6 +10,9 @@ export type SendAccent = (typeof SEND_ACCENTS)[number]
 interface SettingsPaneProps {
   showArchived: boolean
   onShowArchived: (value: boolean) => void
+  notificationsEnabled: boolean
+  savingNotifications: boolean
+  onNotificationsEnabled: (enabled: boolean) => void
   sendAccent: SendAccent
   onSendAccent: (accent: SendAccent) => void
   onAddProject: () => void
@@ -193,6 +196,15 @@ export function SettingsPane(props: SettingsPaneProps) {
                 onChange={(event) => props.onShowArchived(event.currentTarget.checked)}
               />
               Show archived tasks
+            </label>
+            <label>
+              <input type="checkbox" checked={props.notificationsEnabled} disabled={props.savingNotifications}
+                onChange={(event) => {
+                  const enabled = event.currentTarget.checked
+                  event.currentTarget.checked = props.notificationsEnabled
+                  props.onNotificationsEnabled(enabled)
+                }} />
+              Notify when tasks need input
             </label>
           </Show>
           <Show when={category() === 'Projects'}>

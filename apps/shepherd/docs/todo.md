@@ -998,7 +998,14 @@ and the task header never overstates the tier.
   choices beside Send and accept changes between turns. Native OpenCode
   drafts load the project mode catalog before creating the worktree and
   apply a selection before sending the first prompt.
-- [ ] Notifications, dock/status counts and review batch actions.
+- [x] Notifications, dock/status counts and review batch actions.
+  Workspace settings opt in to system notifications for newly waiting tasks
+  outside the focused task. The status bar shows running and review totals
+  across projects, and macOS mirrors the review total in the Dock.
+  The review count filters the Projects sidebar. Users can select rows across
+  projects and confirm **Archive selected**. The core validates the selection
+  and persists the archived states in one transaction. Headless fixtures
+  cover the notification gate, Dock count requests and batch selection.
 - [ ] Command palette, keybinding editor, settings files, project overrides,
   themes and accessibility.
 - [ ] Review/archive edge cases; leave the 30-day worktree collection to S7.

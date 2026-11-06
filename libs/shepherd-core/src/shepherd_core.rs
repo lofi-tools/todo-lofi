@@ -22,7 +22,7 @@ pub mod terminal;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -633,6 +633,7 @@ impl Core {
             Command::CancelTask { task_id } => self.cancel_task(&task_id).await,
             Command::ResumeTask { task_id } => self.resume_task(&task_id).await,
             Command::ReviewTask { task_id, action } => self.review_task(&task_id, action).await,
+            Command::ArchiveReviewed { task_ids } => self.archive_reviewed(task_ids).await,
             Command::Quit { force } => self.quit(force).await,
         }
     }
@@ -725,10 +726,18 @@ impl Core {
             });
         }
 
+        Ok(self.task_list_matching(project_id, |_| true))
+    }
+
+    fn task_list_matching(
+        &self,
+        project_id: &ProjectId,
+        matches: impl Fn(TaskState) -> bool,
+    ) -> TaskList {
         let mut tasks: Vec<TaskSummary> = self
             .tasks
             .values()
-            .filter(|task| &task.project_id == project_id)
+            .filter(|task| &task.project_id == project_id && matches(task.state))
             .map(TaskSummary::from)
             .collect();
         tasks.sort_by(|left, right| {
@@ -737,10 +746,25 @@ impl Core {
                 .then_with(|| left.id.cmp(&right.id))
         });
 
-        Ok(TaskList {
+        TaskList {
             project_id: project_id.clone(),
             tasks,
-        })
+        }
+    }
+
+    pub fn review_task_lists(&self) -> Vec<TaskList> {
+        self.project_order
+            .iter()
+            .map(|project_id| {
+                self.task_list_matching(project_id, |state| state == TaskState::Review)
+            })
+            .filter(|list| !list.tasks.is_empty())
+            .collect()
+    }
+
+    pub fn waiting_task_title(&self, task_id: &TaskId) -> Result<Option<&str>, CoreError> {
+        let task = self.task(task_id)?;
+        Ok((task.state == TaskState::Waiting).then_some(task.title.as_str()))
     }
 
     fn task_git_worktree(
@@ -1107,8 +1131,6 @@ impl Core {
         Ok(CommandResult::Ack)
     }
 
-    /// The first prompt creates the worktree and the agent session; later
-    /// prompts reuse both.
     async fn review_task(
         &mut self,
         task_id: &TaskId,
@@ -1117,13 +1139,8 @@ impl Core {
         let mut task = self.task(task_id)?.clone();
         match action {
             ReviewAction::Archive => {
-                task.set_state(TaskState::Done)?;
-                if let Some(session) = self.sessions.get_mut(task_id)
-                    && !session.is_closed()
-                {
-                    let events = session.shutdown().await?;
-                    self.end_session_record(task_id, &events).await?;
-                }
+                self.archive_reviewed(vec![task_id.clone()]).await?;
+                return Ok(CommandResult::TaskWorkspace(self.task_workspace(task_id)?));
             }
             ReviewAction::Reopen => {
                 task.set_state(TaskState::Review)?;
@@ -1161,11 +1178,53 @@ impl Core {
             }
         }
         self.store.save_task(&task).await?;
-        if task.state == TaskState::Done {
-            self.review_notes.remove(task_id);
-        }
         self.tasks.insert(task_id.clone(), task);
         Ok(CommandResult::TaskWorkspace(self.publish_task(task_id)?))
+    }
+
+    async fn archive_reviewed(
+        &mut self,
+        task_ids: Vec<TaskId>,
+    ) -> Result<CommandResult, CoreError> {
+        let archived = task_ids
+            .into_iter()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .map(|task_id| {
+                let mut task = self.task(&task_id)?.clone();
+                task.set_state(TaskState::Done)?;
+                Ok(task)
+            })
+            .collect::<Result<Vec<_>, CoreError>>()?;
+        if archived.is_empty() {
+            return Ok(CommandResult::Ack);
+        }
+        for task in &archived {
+            if let Some(session) = self.sessions.get_mut(&task.id)
+                && !session.is_closed()
+            {
+                let events = session.shutdown().await?;
+                self.end_session_record(&task.id, &events).await?;
+            }
+        }
+        self.store.archive_tasks(&archived).await?;
+        let mut projects = BTreeSet::new();
+        let mut task_ids = Vec::new();
+        for task in archived {
+            self.review_notes.remove(&task.id);
+            projects.insert(task.project_id.clone());
+            task_ids.push(task.id.clone());
+            self.tasks.insert(task.id.clone(), task);
+        }
+        for task_id in task_ids {
+            self.emit(Event::TaskChanged(TaskSummary::from(self.task(&task_id)?)));
+            self.emit(Event::TaskWorkspaceChanged(self.task_workspace(&task_id)?));
+        }
+        for project_id in projects {
+            self.emit(Event::TaskListChanged(self.task_list(&project_id)?));
+        }
+        self.emit(Event::ProjectListChanged(self.project_list()));
+        Ok(CommandResult::Ack)
     }
 
     async fn send_queued_review_note(
@@ -1816,6 +1875,11 @@ impl Core {
                 })?;
             if task.state != state {
                 task.set_state(state)?;
+                if state == TaskState::Waiting {
+                    self.emit(Event::TaskNeedsInput {
+                        task_id: task_id.to_string(),
+                    });
+                }
             }
         }
         if let Some(task) = self.tasks.get_mut(task_id) {
@@ -2102,14 +2166,21 @@ impl Core {
     }
 
     fn project_snapshot(&self, project: &Project) -> ProjectSnapshot {
-        let unfinished_task_count = self
+        let mut unfinished_task_count = 0;
+        let mut review_task_count = 0;
+        let mut running_task_count = 0;
+        for task in self
             .tasks
             .values()
-            .filter(|task| {
-                task.project_id == project.id
-                    && !matches!(task.state, TaskState::Done | TaskState::Cancelled)
-            })
-            .count();
+            .filter(|task| task.project_id == project.id)
+        {
+            unfinished_task_count += usize::from(!matches!(
+                task.state,
+                TaskState::Done | TaskState::Cancelled
+            ));
+            review_task_count += usize::from(task.state == TaskState::Review);
+            running_task_count += usize::from(task.state.is_live());
+        }
         ProjectSnapshot {
             id: project.id.as_str().to_string(),
             path: project.path.display().to_string(),
@@ -2126,11 +2197,8 @@ impl Core {
                 .map(|task_id| task_id.as_str().to_string()),
             preview_url: project.preview_url.as_ref().map(ToString::to_string),
             unfinished_task_count,
-            review_task_count: self
-                .tasks
-                .values()
-                .filter(|task| task.project_id == project.id && task.state == TaskState::Review)
-                .count(),
+            review_task_count,
+            running_task_count,
         }
     }
 
@@ -2860,7 +2928,7 @@ mod tests {
         };
         let project = projects
             .projects
-            .first()
+            .last()
             .ok_or("the project list should contain the added project")?;
         Ok(ProjectId::new(project.id.clone()))
     }
@@ -3210,6 +3278,26 @@ mod tests {
                 .await?,
         );
         assert_eq!(workspace.task.state, TaskState::Waiting);
+        assert_eq!(scenario.trace().matches("event: TaskNeedsInput").count(), 1);
+        scenario.core_mut().pump().await?;
+        assert!(
+            !scenario
+                .core_mut()
+                .drain_events()
+                .iter()
+                .any(|event| matches!(event, Event::TaskNeedsInput { .. }))
+        );
+        assert_eq!(
+            scenario.core().waiting_task_title(&task_id)?,
+            Some("Fix the parser")
+        );
+        assert_eq!(
+            scenario
+                .core()
+                .project_snapshot(scenario.core().project(&project_id)?)
+                .running_task_count,
+            1
+        );
         assert_eq!(
             workspace.task.branch.as_deref(),
             Some("shepherd/fix-the-parser")
@@ -3244,6 +3332,7 @@ mod tests {
                 .await?,
         );
         assert_eq!(workspace.task.state, TaskState::Ready);
+        assert_eq!(scenario.core().waiting_task_title(&task_id)?, None);
         assert_eq!(
             summaries(&workspace),
             vec![
@@ -3263,6 +3352,7 @@ mod tests {
                 .await?,
         );
         assert_eq!(workspace.task.state, TaskState::Waiting);
+        assert_eq!(scenario.trace().matches("event: TaskNeedsInput").count(), 2);
 
         let refused = scenario.execute(Command::Quit { force: false }).await;
         assert!(matches!(
@@ -3655,6 +3745,134 @@ mod tests {
         );
         assert!(worktree_path.join("notes.txt").is_file());
         assert!(!repository.path().join("notes.txt").exists());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn batch_archives_review_tasks_across_projects_and_rejects_a_stale_selection()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let first_repository = TestRepository::new()?;
+        let second_repository = TestRepository::new()?;
+        let database = TestDatabase::new()?;
+        let uri = database.uri();
+        let changing_turn = || {
+            vec![FakeTurn::new(vec![FakeStep::WriteFile {
+                path: "notes.txt".into(),
+                contents: "A change under review\n".into(),
+            }])]
+        };
+        let mut core = Core::with_services(
+            Box::new(TursoStore::open(&uri).await?),
+            Box::new(FakeHarnessFactory::new(vec![
+                changing_turn(),
+                changing_turn(),
+            ])),
+        );
+        let first_project = add_project(&mut core, first_repository.path().into()).await?;
+        let second_project = add_project(&mut core, second_repository.path().into()).await?;
+        let mut review_ids = Vec::new();
+        for project_id in [first_project.clone(), second_project] {
+            let draft = workspace_of(
+                core.execute(Command::CreateDraft {
+                    project_id,
+                    title: "Edit notes".into(),
+                    agent: Agent::Codex,
+                })
+                .await?,
+            );
+            let task_id = TaskId::new(draft.task.id);
+            let completed = workspace_of(
+                core.execute(Command::SendPrompt {
+                    task_id: task_id.clone(),
+                    input: PromptInput::text("Edit notes"),
+                })
+                .await?,
+            );
+            assert_eq!(completed.task.state, TaskState::Review);
+            review_ids.push(task_id);
+        }
+        assert_eq!(core.review_task_lists().len(), 2);
+
+        let draft = workspace_of(
+            core.execute(Command::CreateDraft {
+                project_id: first_project,
+                title: "Unsaved work".into(),
+                agent: Agent::Codex,
+            })
+            .await?,
+        );
+        let mut stale_selection = review_ids.clone();
+        stale_selection.push(TaskId::new(draft.task.id));
+        assert!(
+            core.execute(Command::ArchiveReviewed {
+                task_ids: stale_selection
+            })
+            .await
+            .is_err()
+        );
+        for task_id in &review_ids {
+            assert_eq!(core.task(task_id)?.state, TaskState::Review);
+            assert!(
+                core.sessions
+                    .get(task_id)
+                    .is_some_and(|session| !session.is_closed())
+            );
+        }
+        assert_eq!(
+            core.store
+                .load_tasks()
+                .await?
+                .iter()
+                .filter(|task| task.state == TaskState::Review)
+                .count(),
+            2
+        );
+
+        core.drain_events();
+        assert!(matches!(
+            core.execute(Command::ArchiveReviewed {
+                task_ids: review_ids.clone()
+            })
+            .await?,
+            CommandResult::Ack
+        ));
+        assert!(core.review_task_lists().is_empty());
+        assert!(
+            core.project_list()
+                .projects
+                .iter()
+                .all(|project| project.review_task_count == 0)
+        );
+        assert_eq!(
+            core.drain_events()
+                .iter()
+                .filter(|event| matches!(event, Event::TaskListChanged(_)))
+                .count(),
+            2
+        );
+        for task_id in &review_ids {
+            let task = core.task(task_id)?;
+            assert_eq!(task.state, TaskState::Done);
+            assert!(
+                task.worktree_path
+                    .as_ref()
+                    .is_some_and(|path| path.join("notes.txt").is_file())
+            );
+            assert!(
+                core.sessions
+                    .get(task_id)
+                    .is_some_and(HarnessSession::is_closed)
+            );
+        }
+        drop(core);
+        let reopened = Core::load(
+            Box::new(TursoStore::open(&uri).await?),
+            Box::new(UnavailableHarnessFactory),
+        )
+        .await?;
+        for task_id in review_ids {
+            assert_eq!(reopened.task(&task_id)?.state, TaskState::Done);
+        }
         Ok(())
     }
 

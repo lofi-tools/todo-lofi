@@ -5,6 +5,7 @@
 //! of the state model.
 
 mod attachments;
+mod attention;
 mod bridge;
 mod codex_harness;
 #[cfg(any(test, debug_assertions))]
@@ -102,8 +103,8 @@ pub fn run() -> Result<(), tauri::Error> {
                 dev_harness::factory(app, override_directory.as_deref().map(std::path::Path::new))?;
             #[cfg(not(debug_assertions))]
             let dev_factory: Option<Box<dyn HarnessFactory>> = None;
-            let data_directory = match override_directory {
-                Some(path) => path.into(),
+            let data_directory = match &override_directory {
+                Some(path) => PathBuf::from(path),
                 None => app.path().app_data_dir()?,
             };
             let settings = AgentSettings::read(&app.path().app_config_dir()?.join("settings.json"));
@@ -164,6 +165,14 @@ pub fn run() -> Result<(), tauri::Error> {
             state.claude_configured = claude_configured;
             state.start_event_pump();
             app.manage(state);
+            let notification_directory = if override_directory.is_some() {
+                data_directory
+            } else {
+                app.path().app_config_dir()?
+            };
+            app.manage(attention::NotificationSettings::new(
+                notification_directory.join("settings.json"),
+            ));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -202,6 +211,11 @@ pub fn run() -> Result<(), tauri::Error> {
             bridge::commands::review_file_diff,
             bridge::commands::review_snapshot,
             bridge::commands::review_task,
+            bridge::commands::review_task_lists,
+            bridge::commands::archive_reviewed,
+            attention::notifications_enabled,
+            attention::set_notifications_enabled,
+            attention::notify_task_needs_input,
             bridge::commands::git_file_diff,
             bridge::commands::git_snapshot,
             bridge::commands::list_files,

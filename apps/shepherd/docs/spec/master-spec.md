@@ -212,10 +212,10 @@ detailed treatment of its controls as the rest of the shell is built.
   means waiting, a dot means unread output, and a text badge names `needs input`
   or `review`. Chat has no tab, so its attention stays on the task row and
   composer; shared-terminal attention stays on the Terminals tab.
-- The status-bar review count filters the sidebar task list to tasks awaiting
-  review. Multi-select (shift/⌘-click on macOS, shift/Ctrl-click on Linux) plus
-  **Archive selected** archives several at once; there is no separate review view
-  or inbox.
+- The status-bar review count filters the Projects sidebar to tasks awaiting
+  review across all projects. While the filter is active, a project can show a
+  single review row. Checkboxes, Shift-click for a range, and Command-click on
+  macOS or Ctrl-click on Linux select tasks for **Archive selected**.
 
 ### 2.4 First run
 
@@ -791,6 +791,10 @@ attention lives on the task row and composer. Attention from a shared terminal
 appears on the Terminals tab, not on a single task row. The dock badge is used
 where the platform supports it (macOS); Linux relies on the status-bar count.
 State comes from adapter events and process exit, never polling.
+The running and review counts both cover all registered projects. Enable
+system notifications under **Settings → Workspace**. macOS delivers them
+through the Shepherd app bundle and asks for permission at opt-in. Linux
+uses the desktop notification service.
 
 ### 7.6 Review
 
@@ -808,8 +812,10 @@ State comes from adapter events and process exit, never polling.
   **Reopen** returns it to `review` and recreates a collected worktree.
 - **Squash-merge into base** is available from the Git tab; it is the only merge
   action and records the branch tip for recreation.
-- **Archive selected** in the task list handles several tasks at once after a
-  confirmation; review notes stay per task.
+- **Archive selected** asks for confirmation with the number of selected tasks.
+  The core validates every selected task is still in review before closing
+  their sessions and writes the archive state changes in one transaction.
+  Review notes stay per task.
 - Archiving keeps the branch; an archived worktree unused for 30 days is removed
   automatically (§7.2), and reopening recreates it from the branch or recorded
   tip. Dirty worktrees are skipped.
@@ -1005,6 +1011,9 @@ in-memory model is still scoped key/value pairs, serialized per scope:
 - `app["agents.claude.executable"]` points to an existing Claude Code ACP
   executable by absolute path. `app["agents.claude.args"]` is an optional
   array of arguments passed in order.
+- `app["notifications.enabled"]` is a boolean and defaults to false. Debug
+  launches with an isolated data directory save their notification preference
+  in a settings file there.
 - Resolution is per key: project > app > built-in, with whole-value replacement
   and no deep merge. Reset deletes the override.
 - `attachments.max_file_bytes` is a positive integer in bytes. It applies to

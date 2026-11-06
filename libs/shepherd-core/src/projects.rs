@@ -69,6 +69,7 @@ pub struct ProjectSnapshot {
     pub preview_url: Option<String>,
     pub unfinished_task_count: usize,
     pub review_task_count: usize,
+    pub running_task_count: usize,
 }
 
 pub(crate) fn parse_preview_url(input: &str) -> Option<Url> {

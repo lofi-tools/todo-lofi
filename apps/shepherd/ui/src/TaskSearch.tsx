@@ -73,7 +73,7 @@ export function TaskSearch(props: { onClose: () => void; onSelect: (hit: TaskSea
   }
 
   return (
-    <dialog class="picker task-search" aria-label="Search tasks" ref={dialog} onCancel={(event) => {
+    <dialog class="picker picker-dialog task-search" aria-label="Search tasks" ref={dialog} onCancel={(event) => {
       event.preventDefault()
       props.onClose()
     }}>

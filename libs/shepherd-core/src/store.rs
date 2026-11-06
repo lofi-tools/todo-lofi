@@ -53,6 +53,7 @@ pub trait Store: Send + Sync {
     async fn save_project(&self, project: &Project) -> Result<(), StoreError>;
     async fn load_tasks(&self) -> Result<Vec<Task>, StoreError>;
     async fn save_task(&self, task: &Task) -> Result<(), StoreError>;
+    async fn archive_tasks(&self, tasks: &[Task]) -> Result<(), StoreError>;
     async fn delete_task(&self, task_id: &TaskId) -> Result<(), StoreError>;
     async fn load_workspace_layouts(&self) -> Result<Vec<(TaskId, WorkspaceLayout)>, StoreError>;
     async fn save_workspace_layout(
@@ -597,6 +598,22 @@ impl Store for TursoStore {
         .bind(task.agent.as_str())
         .exec(&mut *db)
         .await?;
+        Ok(())
+    }
+
+    async fn archive_tasks(&self, tasks: &[Task]) -> Result<(), StoreError> {
+        let mut db = self.db.lock().await;
+        let mut transaction = db.transaction().await?;
+        for task in tasks {
+            toasty::sql::statement(
+                "UPDATE tasks SET state = 'done', updated_at = ?2 WHERE id = ?1",
+            )
+            .bind(task.id.as_str())
+            .bind(task.updated_at as i64)
+            .exec(&mut transaction)
+            .await?;
+        }
+        transaction.commit().await?;
         Ok(())
     }
 
@@ -1186,6 +1203,14 @@ impl Store for MemoryStore {
     async fn save_task(&self, task: &Task) -> Result<(), StoreError> {
         let mut tasks = self.tasks.write().await;
         tasks.insert(task.id.as_str().to_string(), task.clone());
+        Ok(())
+    }
+
+    async fn archive_tasks(&self, archived: &[Task]) -> Result<(), StoreError> {
+        let mut tasks = self.tasks.write().await;
+        for task in archived {
+            tasks.insert(task.id.as_str().to_string(), task.clone());
+        }
         Ok(())
     }
 
