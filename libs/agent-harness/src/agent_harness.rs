@@ -19,6 +19,16 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::mpsc;
 
+const MAX_COMMAND_OUTPUT_BYTES: usize = 64 * 1024;
+const COMMAND_OUTPUT_OMITTED: &str = "[… earlier command output omitted …]\n";
+
+fn limit_command_output(output: &mut String) {
+    if output.len() > MAX_COMMAND_OUTPUT_BYTES {
+        let start = output.len() - MAX_COMMAND_OUTPUT_BYTES + COMMAND_OUTPUT_OMITTED.len();
+        output.replace_range(..output.ceil_char_boundary(start), COMMAND_OUTPUT_OMITTED);
+    }
+}
+
 /// Errors an adapter may report to the core.
 #[derive(Debug, thiserror::Error)]
 pub enum HarnessError {
@@ -364,6 +374,7 @@ pub enum ToolStatus {
     Running,
     Completed,
     Failed,
+    Stopped,
 }
 
 /// A file change reported by a tool call or an approval request.
@@ -417,6 +428,10 @@ pub enum HarnessEvent {
         output: Option<String>,
         diffs: Vec<FileDiff>,
         terminal_id: Option<String>,
+    },
+    CommandOutput {
+        tool_call_id: ToolCallId,
+        text: String,
     },
     Plan {
         rows: Vec<PlanRow>,
@@ -699,6 +714,12 @@ impl Transcript {
                 diffs.clone(),
                 terminal_id.clone(),
             ),
+            HarnessEvent::CommandOutput { tool_call_id, text } => {
+                self.append_command_output(tool_call_id.as_str(), text)
+            }
+            HarnessEvent::TurnFinished { .. } | HarnessEvent::Exited { .. } => {
+                self.stop_unfinished_commands()
+            }
             HarnessEvent::Plan { rows } => self.upsert_plan(rows.clone()),
             HarnessEvent::Usage { used, size, cost } => self.upsert_usage(*used, *size, *cost),
             HarnessEvent::ApprovalRequested { request } => self.push_approval(request.clone()),
@@ -755,18 +776,73 @@ impl Transcript {
         change
     }
 
+    fn append_command_output(&mut self, tool_call_id: &str, text: &str) -> TranscriptChange {
+        let Some(index) = self.tool_rows.get(tool_call_id).copied() else {
+            return TranscriptChange::default();
+        };
+        let Some(EntryKind::ToolCall {
+            kind,
+            status: ToolStatus::Pending | ToolStatus::Running,
+            output,
+            ..
+        }) = self.entries.get_mut(index).map(|entry| &mut entry.kind)
+        else {
+            return TranscriptChange::default();
+        };
+        if kind != "command" || text.is_empty() {
+            return TranscriptChange::default();
+        }
+        let output = output.get_or_insert_with(String::new);
+        output.push_str(text);
+        limit_command_output(output);
+        TranscriptChange {
+            appended: false,
+            changed: Some(index),
+        }
+    }
+
+    fn stop_unfinished_commands(&mut self) -> TranscriptChange {
+        let mut change = TranscriptChange::default();
+        for (index, entry) in self.entries.iter_mut().enumerate() {
+            if let EntryKind::ToolCall { kind, status, .. } = &mut entry.kind
+                && kind == "command"
+                && matches!(status, ToolStatus::Pending | ToolStatus::Running)
+            {
+                *status = ToolStatus::Stopped;
+                change.changed.get_or_insert(index);
+            }
+        }
+        change
+    }
+
     fn upsert_tool_call(
         &mut self,
         tool_call_id: &str,
         title: &str,
         kind: &str,
         status: ToolStatus,
-        output: Option<String>,
+        mut output: Option<String>,
         diffs: Vec<FileDiff>,
         terminal_id: Option<String>,
     ) -> TranscriptChange {
+        if kind == "command"
+            && let Some(output) = &mut output
+        {
+            limit_command_output(output);
+        }
         if let Some(index) = self.tool_rows.get(tool_call_id).copied() {
             if let Some(entry) = self.entries.get_mut(index) {
+                if kind == "command"
+                    && output.is_none()
+                    && let EntryKind::ToolCall {
+                        kind: previous_kind,
+                        output: previous_output,
+                        ..
+                    } = &mut entry.kind
+                    && previous_kind == "command"
+                {
+                    output = previous_output.take();
+                }
                 entry.kind = EntryKind::ToolCall {
                     tool_call_id: tool_call_id.to_string(),
                     title: title.to_string(),
@@ -1005,6 +1081,48 @@ mod tests {
             transcript.entry(0).map(Entry::summary),
             Some("Edit file (Completed)".to_string())
         );
+    }
+
+    #[test]
+    fn command_output_keeps_a_utf8_tail_when_the_turn_stops() {
+        let mut transcript = Transcript::default();
+        let call = HarnessEvent::ToolCall {
+            tool_call_id: ToolCallId::new("command-1"),
+            title: "run".to_string(),
+            kind: "command".to_string(),
+            status: ToolStatus::Running,
+            output: None,
+            diffs: Vec::new(),
+            terminal_id: None,
+        };
+        transcript.apply(&call);
+        transcript.apply(&HarnessEvent::CommandOutput {
+            tool_call_id: ToolCallId::new("command-1"),
+            text: "界".repeat(MAX_COMMAND_OUTPUT_BYTES),
+        });
+        transcript.apply(&HarnessEvent::CommandOutput {
+            tool_call_id: ToolCallId::new("command-1"),
+            text: "\nlast line\n".to_string(),
+        });
+        transcript.apply(&HarnessEvent::TurnFinished {
+            reason: TurnFinishReason::Cancelled,
+        });
+        assert!(
+            transcript
+                .apply(&HarnessEvent::CommandOutput {
+                    tool_call_id: ToolCallId::new("command-1"),
+                    text: "late output".to_string(),
+                })
+                .is_empty()
+        );
+
+        assert!(matches!(
+            transcript.entry(0).map(|entry| &entry.kind),
+            Some(EntryKind::ToolCall { status: ToolStatus::Stopped, output: Some(output), .. })
+                if output.len() <= MAX_COMMAND_OUTPUT_BYTES
+                    && output.starts_with(COMMAND_OUTPUT_OMITTED)
+                    && output.ends_with("\nlast line\n")
+        ));
     }
 
     #[test]

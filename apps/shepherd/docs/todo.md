@@ -537,6 +537,11 @@ task-scoped, persistent and fast enough.
   before resizing, after widening and after restoring the original width.
 - [x] Implement shared terminals (one PTY across tasks) and task terminals
   (swap with the active task; keep running while hidden).
+- [x] Show tracked Codex commands alongside interactive terminals in the
+  Terminals tab as read-only terminals. Stream stdout and stderr live so users
+  can follow each app-server command as it runs. The protocol stub covers
+  ordered chunks and final output, and the browser fixture verifies the live
+  pane alongside a shared shell across task switches.
 - [x] Add **New task terminal**, **New shared terminal**, the instance menu,
   ended-terminal restart and close/reopen.
 - [x] Save the selected inspector tab with the project layout. Shared terminals

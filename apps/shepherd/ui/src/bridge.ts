@@ -113,7 +113,7 @@ export interface ToolCallEntry {
   toolCallId: string
   title: string
   kind: string
-  status: 'pending' | 'running' | 'completed' | 'failed'
+  status: 'pending' | 'running' | 'completed' | 'failed' | 'stopped'
   output: string | null
   diffs: FileDiff[]
   terminalId: string | null

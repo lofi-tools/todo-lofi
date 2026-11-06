@@ -4,7 +4,7 @@
  * stay listed with their exit code instead of pretending to still be live.
  */
 
-import { For, Show, batch, createEffect, createSignal, onCleanup, onMount } from 'solid-js'
+import { For, Show, batch, createEffect, createMemo, createSignal, onCleanup, onMount } from 'solid-js'
 
 import * as bridge from './bridge'
 import { KITTY_REPORT_EVENTS, encodeKittyKey, encodeLegacyKey, encodeTerminalText } from './terminal_keys'
@@ -57,6 +57,7 @@ interface TerminalPaneProps {
   projectId: string
   taskId: string | null
   taskHasWorktree: boolean
+  transcript: bridge.Entry[] | undefined
   shown: boolean
   shortcutsEnabled: boolean
   onShow: () => void
@@ -77,6 +78,15 @@ export function TerminalPane(props: TerminalPaneProps) {
   const [pending, setPending] = createSignal(false)
   const [error, setError] = createSignal<string | null>(null)
   const mac = navigator.platform.startsWith('Mac')
+  const commands = createMemo(() => {
+    const commands = new Map<string, bridge.ToolCallEntry>()
+    for (const entry of props.transcript ?? []) {
+      if (entry.kind.type === 'toolCall' && entry.kind.data.kind === 'command') {
+        commands.set(entry.id, entry.kind.data)
+      }
+    }
+    return commands
+  })
 
   const visible = () => terminals().filter((terminal) =>
     terminal.scope === 'project' || terminal.taskId === props.taskId)
@@ -300,12 +310,71 @@ export function TerminalPane(props: TerminalPaneProps) {
         </For>
         </ul>
       </details>
-      <Show when={firstMatchingPane(root(), paneVisible)} fallback={<p class="empty">Open an instance or start a terminal.</p>}>
+      <Show when={props.taskId} keyed>
+        <Show when={commands().size > 0}>
+          <CommandTerminals commands={commands()} shown={props.shown} />
+        </Show>
+      </Show>
+      <Show when={firstMatchingPane(root(), paneVisible)} fallback={
+        <Show when={commands().size === 0}><p class="empty">Open an instance or start a terminal.</p></Show>
+      }>
         <TerminalTree node={root()!} terminal={terminal} paneVisible={paneVisible} active={active()} shown={props.shown} select={setSelectedId} focusRequest={focusRequest()} onTerminalFocus={props.onTerminalFocus}
           restart={restart} measure={(id, size) => measuredSizes.set(id, size)}
           path={[]} resize={resizeSplit} detach={detach} stop={(id) => void run(() => bridge.closeTerminal(id))} pending={pending()} />
       </Show>
     </div>
+  )
+}
+
+function CommandTerminals(props: { commands: ReadonlyMap<string, bridge.ToolCallEntry>; shown: boolean }) {
+  const [selection, setSelection] = createSignal<string>()
+  const ids = createMemo(() => Array.from(props.commands.keys()))
+  const selectedId = () => {
+    const id = selection()
+    return id && props.commands.has(id) ? id : ids().at(-1)
+  }
+
+  return (
+    <section class="terminal-tile terminal-tile--commands" aria-label="Codex command terminals">
+      <div class="terminal-pane__bar">
+        <span>Codex commands</span>
+        <span class="terminal-list__state">Read-only</span>
+      </div>
+      <ul class="terminal-list" aria-label="Codex commands">
+        <For each={ids()}>
+          {(id) => (
+            <li>
+              <button type="button" class="terminal-list__item" aria-current={id === selectedId() ? 'true' : undefined}
+                onClick={() => setSelection(id)}>
+                <span>{props.commands.get(id)?.title}</span>
+                <span class="terminal-list__state">{props.commands.get(id)?.status}</span>
+              </button>
+            </li>
+          )}
+        </For>
+      </ul>
+      <Show when={selectedId()} keyed>
+        {(id) => <CommandOutput text={props.commands.get(id)?.output} shown={props.shown} />}
+      </Show>
+    </section>
+  )
+}
+
+function CommandOutput(props: { text: string | null | undefined; shown: boolean }) {
+  let output: HTMLPreElement | undefined
+  let follow = true
+
+  createEffect(() => {
+    const text = props.text
+    if (output && text && props.shown && follow) output.scrollTop = output.scrollHeight
+  })
+
+  return (
+    <pre class="terminal-command-output" ref={output} tabIndex={0} aria-label="Command output"
+      onScroll={(event) => {
+        const { scrollHeight, scrollTop, clientHeight } = event.currentTarget
+        follow = scrollHeight - scrollTop - clientHeight <= 1
+      }}>{props.text ?? 'No output yet.'}</pre>
   )
 }
 

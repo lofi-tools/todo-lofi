@@ -6,7 +6,7 @@
 
 import { expect, test } from '@playwright/test'
 
-import type { Event as ShepherdEvent, InspectorTab, TerminalLayout, TerminalSnapshot, TerminalSplit, WorkspaceLayout } from '../src/bridge'
+import type { Entry, Event as ShepherdEvent, InspectorTab, TerminalLayout, TerminalSnapshot, TerminalSplit, WorkspaceLayout } from '../src/bridge'
 
 test.beforeEach(async ({ context }) => {
   await context.addInitScript(() => {
@@ -455,6 +455,10 @@ test.beforeEach(async ({ context }) => {
     window.__terminalLayout = () => terminalLayout
     window.__emitCoreEvent = (event: ShepherdEvent) =>
       callbacks.get(eventChannel)?.({ index: eventIndex++, message: event })
+    window.__setCommandEntries = (taskId: string, entries: Entry[]) => {
+      transcripts[taskId] = [...(transcripts[taskId] ?? []).filter((row) => row.kind.type !== 'toolCall'), ...entries]
+      window.__emitCoreEvent({ type: 'taskWorkspaceChanged', data: workspace(taskId) })
+    }
   })
 })
 
@@ -1071,6 +1075,51 @@ test('keeps the shared terminal attached while switching task terminals', async 
   )
   expect(subscriptions.filter((id) => id === 'terminal-1')).toHaveLength(1)
   expect(subscriptions.filter((id) => id === 'terminal-task')).toHaveLength(2)
+})
+
+test('streams read-only Codex command output beside a live shell', async ({ page }) => {
+  await page.goto('/?scoped-terminals')
+  const shared = page.getByRole('region', { name: 'Terminal 1' }).getByRole('textbox')
+  const commands = page.getByRole('region', { name: 'Codex command terminals' })
+  const output = commands.getByLabel('Command output')
+  await shared.focus()
+
+  const command = (sequence: number, title: string, status: 'running' | 'completed', output: string | null): Entry => ({
+    id: `command-${sequence}`,
+    sequence,
+    kind: {
+      type: 'toolCall',
+      data: { toolCallId: `item-${sequence}`, title, kind: 'command', status, output, diffs: [], terminalId: null },
+    },
+  })
+  const publish = (entries: Entry[]) => page.evaluate((rows) => {
+    const fixture = window as unknown as { __setCommandEntries: (taskId: string, entries: Entry[]) => void }
+    fixture.__setCommandEntries('task-1', rows)
+  }, entries)
+
+  await publish([command(4, 'cargo test', 'running', null)])
+  await expect(commands.getByRole('button', { name: 'cargo test running' })).toBeVisible()
+  await expect(output).toHaveText('No output yet.')
+  await publish([command(4, 'cargo test', 'running', 'running tests\n')])
+  await expect(output).toContainText('running tests')
+  await publish([command(4, 'cargo test', 'running', 'running tests\nwarning: unused import\n')])
+  await expect(output).toContainText('warning: unused import')
+  await expect(shared).toBeFocused()
+  await expect(commands.getByRole('textbox')).toHaveCount(0)
+
+  const completed = command(4, 'cargo test', 'completed', 'running tests\nwarning: unused import\nok\n')
+  await publish([completed, command(5, 'git status', 'running', 'On branch main')])
+  await expect(output).toHaveText('On branch main')
+  await commands.getByRole('button', { name: 'cargo test completed' }).click()
+  await expect(output).toHaveText('running tests warning: unused import ok')
+  await publish([completed, command(5, 'git status', 'completed', 'On branch main\nclean')])
+  await expect(output).toContainText('unused import')
+
+  await page.getByRole('button', { name: /Other task/ }).click()
+  await expect(commands).toHaveCount(0)
+  await expect(shared).toBeVisible()
+  await page.getByRole('button', { name: /Ship it/ }).click()
+  await expect(output).toHaveText('On branch main clean')
 })
 
 test('keeps terminal find open when Escape belongs to an IME composition', async ({ page }) => {

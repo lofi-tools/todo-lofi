@@ -1929,6 +1929,17 @@ async fn handle_notification(
                 });
             }
         }
+        "item/commandExecution/outputDelta" => {
+            if let (Some(id), Some(delta)) = (
+                params.get("itemId").and_then(Value::as_str),
+                params.get("delta").and_then(Value::as_str),
+            ) {
+                events.push(HarnessEvent::CommandOutput {
+                    tool_call_id: ToolCallId::new(id),
+                    text: delta.to_string(),
+                });
+            }
+        }
         "item/started" | "item/completed" => {
             if let Some(item) = params.get("item")
                 && let Some(event) = tool_call_from_item(item)
@@ -2153,7 +2164,7 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
-    use crate::{Entry, Transcript};
+    use crate::{Entry, EntryKind, Transcript};
 
     /// Answers the handshake, starts a thread, streams a delta and a tool item,
     /// completes the turn, and records a resume so the test can see the method.
@@ -2190,7 +2201,10 @@ while IFS= read -r line; do
       printf '{"id":%s,"result":{"turn":{"id":"turn_1","status":"inProgress"}}}\n' "$id"
       printf '{"method":"turn/started","params":{"turn":{"id":"turn_1"}}}\n'
       printf '{"method":"item/agentMessage/delta","params":{"itemId":"item_1","delta":"working"}}\n'
-      printf '{"method":"item/completed","params":{"item":{"id":"item_2","type":"commandExecution","command":"cargo test","status":"completed","aggregatedOutput":"ok"}}}\n'
+      printf '{"method":"item/started","params":{"item":{"id":"item_2","type":"commandExecution","command":"cargo test","status":"inProgress"}}}\n'
+      printf '%s\n' '{"method":"item/commandExecution/outputDelta","params":{"itemId":"item_2","delta":"running tests\n"}}'
+      printf '%s\n' '{"method":"item/commandExecution/outputDelta","params":{"itemId":"item_2","delta":"warning: unused import\n"}}'
+      printf '%s\n' '{"method":"item/completed","params":{"item":{"id":"item_2","type":"commandExecution","command":"cargo test","status":"completed","aggregatedOutput":"running tests\nwarning: unused import\nok\n"}}}'
       printf '{"method":"turn/completed","params":{"turn":{"id":"turn_1","status":"completed"}}}\n'
       ;;
     *) : ;;
@@ -2611,6 +2625,30 @@ done
                 reason: TurnFinishReason::Completed
             }
         )));
+        let mut transcript = Transcript::default();
+        let mut live_output = Vec::new();
+        for event in &events {
+            transcript.apply(event);
+            if matches!(event, HarnessEvent::CommandOutput { .. })
+                && let Some(EntryKind::ToolCall {
+                    status: ToolStatus::Running,
+                    output: Some(output),
+                    ..
+                }) = transcript.entry(1).map(|entry| &entry.kind)
+            {
+                live_output.push(output.clone());
+            }
+        }
+        assert_eq!(
+            live_output,
+            ["running tests\n", "running tests\nwarning: unused import\n"]
+        );
+        assert_eq!(transcript.len(), 2);
+        assert!(matches!(
+            transcript.entry(1).map(|entry| &entry.kind),
+            Some(EntryKind::ToolCall { status: ToolStatus::Completed, output: Some(output), .. })
+                if output == "running tests\nwarning: unused import\nok\n"
+        ));
         harness.shutdown().await.expect("the session stops");
     }
 

@@ -969,6 +969,7 @@ export function App() {
               <Show when={selectedProjectId()} keyed fallback={<p class="empty">No terminals yet.</p>}>
                 {(projectId) => <TerminalPane
                   projectId={projectId} taskId={selectedTaskId()} taskHasWorktree={!!workspace()?.task.worktreePath}
+                  transcript={workspace()?.transcript}
                   listEvent={terminalListEvent()} shown={inspectorTab() === 'terminals'}
                   shortcutsEnabled={workspaceShortcutsEnabled()} onShow={() => setInspectorTab('terminals')}
                   onLayoutLoaded={(layout) => restoreInspectorTab(projectId, layout.inspectorTab)}

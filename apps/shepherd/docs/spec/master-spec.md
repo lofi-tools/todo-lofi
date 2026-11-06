@@ -605,6 +605,14 @@ project-shared or task-specific. Splits, focus and resize follow §2.2 and §2.3
 no terminal is shown outside this tab. A pane whose terminal has exited shows the
 code, last command, scope and a restart action.
 
+The selected task's Codex commands have a read-only section beside the
+interactive terminals. It shows command status and streams the combined stdout
+and stderr from Codex app-server in order. The exec fallback shows the output
+it reports when a command ends. The section opens the latest command by default
+and keeps a manually selected command visible while new output arrives. It
+retains the last 64 KiB per command and marks omitted output. Command views
+have no PTY, input, restart action, or slot in the saved layout.
+
 ### 5.5 Persistence and restart
 
 - Terminal metadata (cwd, command, profile, project, task, scope, title,

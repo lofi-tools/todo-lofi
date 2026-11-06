@@ -35,6 +35,10 @@ current layout and give future changes a point of comparison.
   between available tabs. Show terminal and review attention as dots with
   accessible descriptions. Settings can occupy the middle pane while the
   sidebar and inspector remain in place.
+  In Terminals, keep the selected task's read-only Codex command output
+  alongside the interactive terminal panes. Follow the latest command by
+  default and let the user select an earlier command without shifting focus
+  when new output arrives.
   Resize the inspector at its left edge by dragging or with the arrow keys
   while the separator is focused. Save the chosen width with the task.
 - Place the status bar below the wrapper on the window background. Its
