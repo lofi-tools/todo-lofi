@@ -301,6 +301,10 @@ export function App() {
     const current = workspace()
     return !!current?.capabilities?.approvals && current.task.state === 'waiting'
   }
+  const showShellApprovals = () => {
+    const current = workspace()
+    return current ? current.task.state === 'draft' || current.capabilities?.approvals === true : !selectedTaskId()
+  }
   const cancellingTurn = () => {
     const current = workspace()
     return !!current && (current.cancelling || cancelRequestTaskId() === current.task.id)
@@ -1085,7 +1089,7 @@ export function App() {
             />
             <div class="composer__actions">
               <ComposerPickers agent={currentAgent()} agentName={currentAgentName()} agents={agentOptions()} onAgentChange={chooseAgent}
-                showShellApprovals={workspace()?.capabilities?.approvals !== false} />
+                showShellApprovals={showShellApprovals()} />
               <div class="composer__send-actions">
                 <Show when={currentAgent() === 'codex'}>
                   <ComposerModelPicker model={composerModel()} />

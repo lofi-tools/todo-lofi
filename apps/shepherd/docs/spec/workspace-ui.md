@@ -182,7 +182,9 @@ current layout and give future changes a point of comparison.
   slot wide enough for **Approve for me** so changes to the value leave sibling
   positions stable. Inside that slot, fit the button and its hover and click
   areas to the shield, label, and caret. **Ask me** is the default. **Approve for
-  me** is a disabled upcoming option.
+  me** is a disabled upcoming option. Show the picker in an empty chat or
+  draft. For an existing session, show it when the adapter reports approval
+  support. A legacy session can report its capabilities after reconnecting.
 - Show the selected model name on the model and effort trigger. Shepherd's
   Codex default is GPT-6.1 Terra (`gpt-6.1-terra`). Before a session, display
   the model resolved from Shepherd's launch configuration. Once a session

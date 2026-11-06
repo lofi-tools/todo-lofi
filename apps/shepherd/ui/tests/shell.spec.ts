@@ -16,9 +16,11 @@ test.beforeEach(async ({ context }) => {
     let desktopProjectReads = 0
     let eventChannel
     let eventIndex = 0
+    let cancelRequests = 0
     let releaseTerminalWrite: (() => void) | undefined
     let expiringTerminalSubscription: string | undefined
     const options = new URLSearchParams(window.location.search)
+    let legacySession = options.has('legacy-session')
     let projectGrants = []
     let sessionGrants = []
     const agentTerminals = new Map<string, AgentTerminal[]>()
@@ -236,7 +238,7 @@ test.beforeEach(async ({ context }) => {
     function workspace(taskId) {
       const task = tasks.find((candidate) => candidate.id === taskId)
       const limited = options.has('limited-adapter')
-      const capabilities = task.state === 'draft' || options.has('legacy-session') ? null : {
+      const capabilities = task.state === 'draft' || legacySession ? null : {
         streaming: true, thoughts: true, toolCalls: true, approvals: !limited, resume: !limited,
         cancel: !limited, modelPicker: false, modePicker: false, images: false, resourceLinks: false,
         usage: true, agentTerminals: !limited, patchesInApprovals: !limited,
@@ -348,6 +350,7 @@ test.beforeEach(async ({ context }) => {
             workspaceLayouts.set(args.taskId, args.layout)
             return args.layout
           case 'cancel_task': {
+            cancelRequests += 1
             const task = tasks.find((candidate) => candidate.id === args.taskId)
             if (!task || task.state !== 'waiting') throw new Error('No active turn to cancel')
             window.addEventListener('test-cancel-finished', () => {
@@ -366,6 +369,7 @@ test.beforeEach(async ({ context }) => {
             const task = tasks.find((candidate) => candidate.id === args.taskId)
             if (!task || task.state !== 'interrupted') throw new Error('Task cannot be resumed')
             task.state = 'ready'
+            legacySession = false
             transcripts[task.id] = [
               entry('resumed', 1, {
                 type: 'notice',
@@ -592,6 +596,7 @@ test.beforeEach(async ({ context }) => {
     window.__releaseTerminalWrite = () => releaseTerminalWrite?.()
     window.__closedTerminals = closedTerminals
     window.__subscriptions = subscriptions
+    window.__cancelRequests = () => cancelRequests
     window.__terminalLayout = () => terminalLayout
     window.__emitCoreEvent = (event: ShepherdEvent) =>
       callbacks.get(eventChannel)?.({ index: eventIndex++, message: event })
@@ -730,8 +735,28 @@ test('hides actions the connected adapter cannot perform', async ({ page }) => {
   const chat = page.getByRole('region', { name: 'Task chat' })
   await expect(chat.locator('.chat__state')).toHaveText('waiting')
   await expect(chat.getByRole('button', { name: 'Cancel turn' })).toHaveCount(0)
-  await expect(chat.getByRole('button', { name: 'Allow', exact: true })).toHaveCount(0)
+  await expect(chat.locator('.entry__permission').getByRole('button')).toHaveCount(0)
   await expect(chat.getByRole('button', { name: 'Shell approvals: Ask me' })).toHaveCount(0)
+  await page.keyboard.press('ControlOrMeta+.')
+  expect(await page.evaluate(() => window.__cancelRequests())).toBe(0)
+
+  await page.evaluate(() => window.__setAgentTerminals('task-1', [
+    { id: 'agent-unsupported', title: 'Unsupported terminal', live: true, exitCode: null },
+  ]))
+  const inspector = page.getByRole('complementary', { name: 'Inspector' })
+  await expect(inspector.getByLabel('Terminal output').first()).toBeVisible()
+  await expect(inspector.getByText('agent: Unsupported terminal')).toHaveCount(0)
+  expect(await page.evaluate(() => window.__subscriptions)).not.toContain('agent-unsupported')
+})
+
+test('shows shell approvals only after a legacy session reconnects and reports support', async ({ page }) => {
+  await page.goto('/?interrupted-task&legacy-session')
+  const chat = page.getByRole('region', { name: 'Task chat' })
+  const approvals = chat.getByRole('button', { name: 'Shell approvals: Ask me' })
+  await expect(chat.locator('.chat__state')).toHaveText('interrupted')
+  await expect(approvals).toHaveCount(0)
+  await chat.getByRole('button', { name: 'Reconnect', exact: true }).click()
+  await expect(approvals).toBeVisible()
 })
 
 test('opens a fresh session when the last adapter could not resume', async ({ page }) => {

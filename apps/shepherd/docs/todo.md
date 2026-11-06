@@ -926,7 +926,11 @@ If Pi’s RPC probe is blocked, proceed with ACP while resolving it.
   Its loopback provider also verifies sign-in failures. Codex app-server and
   ACP fixtures exercise approval, cancel, resume and failure. The Codex exec
   fixture verifies that a failed run reports its exit code and stderr.
-- [ ] A missing capability hides the control instead of showing a dead button.
+- [x] A missing capability hides the corresponding session action. Headless
+  tests verify approval and cancellation controls, the cancel shortcut,
+  interactive agent terminals, and recovery for unsupported or unknown
+  capabilities. The shell approval picker appears after a legacy session
+  reconnects and reports support.
 - [x] Mocked IPC verifies that the Freebuff terminal replaces the conversation
   pane. A local shell fixture verifies the standalone PTY path. Test suites
   must never launch Freebuff.
