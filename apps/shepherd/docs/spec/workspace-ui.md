@@ -99,6 +99,9 @@ current layout and give future changes a point of comparison.
   transparent, borderless surface keeps it visually separate from the panes.
   Show the running and review counts across projects. The review count toggles
   the sidebar filter and the macOS Dock badge mirrors the count.
+  For a task worktree, show its current branch and changed file count as Git
+  reports them. Show **Detached HEAD** when detached. The native title names
+  the active project and adds a working-count suffix while any task is live.
 
 ## Projects sidebar and settings
 
@@ -192,6 +195,9 @@ current layout and give future changes a point of comparison.
 
 ## Empty conversation
 
+- With an empty Projects list, show **Add a project to start** in the main
+  pane. An unavailable folder keeps an existing transcript readable and
+  disables the composer. If the remembered task was deleted, open a draft.
 - In a project with no visible tasks, show the bold 30 px prompt **What should
   {agent} build in {project}?** centred both horizontally and vertically in
   the area above the composer. Keep the composer ready for input when the

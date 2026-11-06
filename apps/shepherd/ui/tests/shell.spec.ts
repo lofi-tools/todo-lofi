@@ -26,6 +26,7 @@ test.beforeEach(async ({ context }) => {
     let screenshotSaves = 0
     const notifications: string[] = []
     const dockCounts: Array<number | undefined> = []
+    const windowTitles: string[] = []
     const terminalAppearances: Array<{ light: boolean; moreContrast: boolean }> = []
     const archiveRequests: string[][] = []
     const gitMutations: GitMutation[] = []
@@ -103,9 +104,9 @@ test.beforeEach(async ({ context }) => {
       id: 'project-1',
       path: '/tmp/demo',
       name: 'demo',
-      missing: false,
+      missing: options.has('missing-project'),
       isGitRepository: true,
-      lastTaskId: 'task-1',
+      lastTaskId: options.has('missing-last-task') ? 'deleted-task' : 'task-1',
       previewUrl: null as string | null,
       unfinishedTaskCount: 1,
     }
@@ -447,6 +448,9 @@ test.beforeEach(async ({ context }) => {
           case 'plugin:window|set_badge_count':
             dockCounts.push(args.value)
             return null
+          case 'plugin:window|set_title':
+            windowTitles.push(args.value)
+            return null
           case 'set_project_preview_url': {
             const selected = projects.findIndex((candidate) => candidate.id === args.projectId)
             if (args.url && !args.url.startsWith('http://localhost:')) {
@@ -625,6 +629,7 @@ test.beforeEach(async ({ context }) => {
           case 'watch_workspace_files': {
             const id = `file-watch-${fileWatchers.size + 1}`
             fileWatchers.set(id, { taskId: args.taskId, channel: args.channel.id, index: 0 })
+            window.__publishFileChanges(id, [])
             return id
           }
           case 'unwatch_workspace_files':
@@ -916,7 +921,7 @@ test.beforeEach(async ({ context }) => {
     window.__fileActions = fileActions
     window.__unwatchedFiles = unwatchedFiles
     window.__fileWatchIds = () => [...fileWatchers.keys()]
-    window.__publishFileChanges = (id: string, files: FileChange[]) => {
+    window.__publishFileChanges = (id: string, files: FileChange[], branch?: string | null) => {
       const watcher = fileWatchers.get(id)
       if (!watcher) throw new Error(`Unknown fixture watcher ${id}`)
       const paths = watchedSourceFiles.get(watcher.taskId) ?? new Set(['src/main.rs'])
@@ -928,7 +933,8 @@ test.beforeEach(async ({ context }) => {
         }
       }
       watchedSourceFiles.set(watcher.taskId, paths)
-      callbacks.get(watcher.channel)?.({ index: watcher.index++, message: { type: 'changes', files } })
+      const git = { branch: branch === undefined ? watcher.taskId ? 'shepherd/ship-it' : 'main' : branch, changeCount: files.length }
+      callbacks.get(watcher.channel)?.({ index: watcher.index++, message: { type: 'changes', files, git } })
     }
     window.__fileSearches = fileSearches
     window.__promptFileUploads = promptFileUploads
@@ -942,6 +948,7 @@ test.beforeEach(async ({ context }) => {
     window.__notifications = notifications
     window.__terminalAppearances = terminalAppearances
     window.__dockCounts = dockCounts
+    Object.assign(window, { __windowTitles: windowTitles })
     window.__archiveRequests = archiveRequests
     window.__gitMutations = gitMutations
     window.__emitCoreEvent = (event: ShepherdEvent) =>
@@ -1561,17 +1568,19 @@ test('filters by name, cancels content searches, and opens matches at their line
   expect((await searches()).at(-1)).toMatchObject({ taskId: null, mode: 'name' })
 })
 
-test('refreshes Git badges and open folders and stops watching the old root', async ({ page }) => {
+test('shares worktree status with Files and stops watching unused roots', async ({ page }) => {
   await page.goto('/')
   await expect(page.getByRole('region', { name: 'Task chat' }).getByText('ready to go')).toBeVisible()
   await page.getByRole('tab', { name: 'Files' }).click()
   const files = page.getByRole('region', { name: 'Workspace files' })
   const root = files.getByLabel('File root')
   const folder = files.getByRole('button', { name: 'src', exact: true })
+  const status = page.locator('.status-bar')
   const watchIds = () => page.evaluate(() => window.__fileWatchIds())
   const unwatched = () => page.evaluate(() => window.__unwatchedFiles)
   const publish = (id: string, changes: FileChange[]) => page.evaluate(({ id, changes }) => window.__publishFileChanges(id, changes), { id, changes })
   await expect.poll(watchIds).toEqual(['file-watch-1'])
+  await expect(status).toContainText('0 changed files')
   await folder.click()
   await expect(files.getByRole('button', { name: 'main.rs' })).toBeVisible()
   await folder.focus()
@@ -1587,6 +1596,7 @@ test('refreshes Git badges and open folders and stops watching the old root', as
   await expect(files.getByRole('button', { name: /renamed\.rs/ }).getByRole('img', { name: 'Renamed from src/old.rs' })).toBeVisible()
   await expect(files.getByText('retired.md')).toBeVisible()
   await expect(files.getByRole('img', { name: 'Deleted', exact: true })).toBeVisible()
+  await expect(status).toContainText('4 changed files')
   await expect(folder).toBeFocused()
   await expect(folder).toHaveAttribute('aria-expanded', 'true')
 
@@ -1594,12 +1604,46 @@ test('refreshes Git badges and open folders and stops watching the old root', as
   await expect(files.getByRole('img')).toHaveCount(0)
   await expect(files.getByRole('button', { name: 'added.rs' })).toBeVisible()
   await root.selectOption('project')
-  await expect.poll(unwatched).toContain('file-watch-1')
   await expect.poll(watchIds).toContain('file-watch-2')
+  expect(await unwatched()).not.toContain('file-watch-1')
   await publish('file-watch-1', [{ path: 'retired.md', kind: 'deleted', originalPath: null }])
+  await expect(status).toContainText('1 changed file')
   await expect(files.getByText('retired.md')).toHaveCount(0)
   await page.getByRole('tab', { name: 'Terminals' }).click()
   await expect.poll(unwatched).toContain('file-watch-2')
+})
+
+test('updates the native title and clears worktree status when switching projects', async ({ page }) => {
+  await page.addInitScript(() => Object.defineProperty(window, 'isTauri', { value: true }))
+  await page.goto('/?review-fixture')
+  await expect(page).toHaveTitle('demo — Shepherd (1 working)')
+  const nativeTitle = () => page.evaluate(() => (window as unknown as { __windowTitles: string[] }).__windowTitles.at(-1))
+  await expect.poll(nativeTitle).toBe('demo — Shepherd (1 working)')
+  const status = page.locator('.status-bar')
+  await expect(status).toContainText('branch shepherd/ship-it')
+  await page.evaluate(() => {
+    const fixture = window as unknown as { __publishFileChanges: (id: string, files: FileChange[], branch: null) => void }
+    fixture.__publishFileChanges('file-watch-1', [], null)
+    window.__setTaskState('task-live-notes', 'ready')
+  })
+  await expect(status).toContainText('Detached HEAD')
+  await expect.poll(nativeTitle).toBe('demo — Shepherd')
+  await page.getByRole('button', { name: 'notes', exact: true }).click()
+  await expect.poll(nativeTitle).toBe('notes — Shepherd')
+  await expect(status).not.toContainText('Detached HEAD')
+  await expect.poll(() => page.evaluate(() => window.__unwatchedFiles)).toContain('file-watch-1')
+})
+
+test('distinguishes unavailable projects from a missing saved task', async ({ page }) => {
+  await page.goto('/?missing-project')
+  const chat = page.getByRole('region', { name: 'Task chat' })
+  await expect(chat.getByRole('status')).toHaveText('The project folder is unavailable.')
+  await expect(chat.getByRole('textbox', { name: 'Prompt' })).toBeDisabled()
+
+  await page.goto('/?missing-last-task')
+  await expect(chat.getByText('New task', { exact: true })).toBeVisible()
+  await expect(chat.getByRole('textbox', { name: 'Prompt' })).toBeEnabled()
+  await expect(chat.getByText('ready to go')).toHaveCount(0)
 })
 
 test('focuses Files from Git and Review and opens the selected worktree file', async ({ page }) => {

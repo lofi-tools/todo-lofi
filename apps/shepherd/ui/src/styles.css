@@ -2005,6 +2005,13 @@ textarea {
   color: var(--text-disabled);
 }
 
+.status-bar__branch {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .status-bar__filter {
   padding: 1px 3px;
   border: 0;

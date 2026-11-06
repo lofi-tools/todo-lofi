@@ -487,7 +487,47 @@ export function App() {
     return editPreference(key, value, projectId).catch((failure) => { setError(describe(failure)) })
   }
 
-  const runningCount = () => projects().reduce((count, project) => count + (project.runningTaskCount ?? 0), 0)
+  const runningCount = createMemo(() => projects().reduce((count, project) => count + (project.runningTaskCount ?? 0), 0))
+  const windowTitle = createMemo(() => {
+    const project = selectedProject()?.name
+    const title = project ? `${project} — Shepherd` : 'Shepherd'
+    return runningCount() ? `${title} (${runningCount()} working)` : title
+  })
+  let pendingWindowTitle = Promise.resolve()
+  createEffect(() => {
+    const title = windowTitle()
+    document.title = title
+    if (isTauri()) pendingWindowTitle = pendingWindowTitle.then(() => getCurrentWindow().setTitle(title))
+      .catch((failure) => console.warn('Could not set the Shepherd window title', failure))
+  })
+
+  const worktreePath = createMemo(() => {
+    const task = workspace()?.task
+    return task && task.id === selectedTaskId() && task.projectId === selectedProjectId() && !selectedProject()?.missing
+      ? task.worktreePath : null
+  })
+  const [worktreeGit, setWorktreeGit] = createSignal<bridge.WorkspaceGitStatus>()
+  const [gitStatusError, setGitStatusError] = createSignal<string>()
+  createEffect(() => {
+    const path = worktreePath()
+    const taskId = selectedTaskId()
+    const projectId = selectedProjectId()
+    setWorktreeGit(undefined)
+    setGitStatusError(undefined)
+    if (!path || !taskId || !projectId) return
+    let closed = false
+    const watch = bridge.watchWorkspaceFiles(projectId, taskId, (update) => {
+      if (closed) return
+      setWorktreeGit(update.type === 'changes' ? update.git ?? undefined : undefined)
+      setGitStatusError(update.type === 'error' ? update.message : update.git ? undefined : 'The task worktree has no Git metadata.')
+    })
+    void watch.catch((failure) => { if (!closed) setGitStatusError(describe(failure)) })
+    onCleanup(() => {
+      closed = true
+      void watch.then((dispose) => dispose(), () => undefined)
+        .catch((failure) => console.warn('Could not stop the worktree status watcher', failure))
+    })
+  })
   const reviewCount = createMemo(() => projects().reduce((count, project) => count + (project.reviewTaskCount ?? 0), 0))
   const filteredReviewTasks = (projectId: string) => reviewLists().get(projectId) ?? []
   const reviewRows = () => projects().flatMap((project) => filteredReviewTasks(project.id))
@@ -502,9 +542,19 @@ export function App() {
       && !selectedTaskId() && visibleTasks().length === 0
   }
   const canCompose = () => {
+    if (selectedProject()?.missing) return false
     const state = workspace()?.task.state
     return state === 'draft' || state === 'ready' || canStartTask()
       || (!selectedTaskId() && firstDrafts.has(selectedProjectId() ?? ''))
+  }
+  const emptyChatMessage = () => {
+    if (!projectsLoaded()) return pending() ? 'Loading projects…' : 'Projects are unavailable.'
+    const project = selectedProject()
+    if (!project) return 'Add a project to start.'
+    if (project.missing) return 'The project folder is unavailable.'
+    if (selectedTaskId()) return pending() ? 'Opening task…' : 'This task could not be opened.'
+    if (loadedTasksFor() !== project.id) return pending() ? 'Loading project tasks…' : 'Project tasks are unavailable.'
+    return 'Choose a task from Projects or use Compose to start a new one.'
   }
   const canAddPreviewNote = () => canCompose() && !pending() && !settingsOpen() && !freebuffProjectId()
   const canCancel = () => {
@@ -893,6 +943,11 @@ export function App() {
     if (taskId) {
       if (!listed.some((task) => task.id === taskId)) throw new Error('This task is no longer available.')
       await selectTask(taskId)
+      return
+    }
+    if (!project.missing && project.lastTaskId && !listed.some((task) => task.id === project.lastTaskId)) {
+      await firstDraft(project.id)
+      await loadTasks(project.id)
       return
     }
     const visible = listed.filter((task) => showsArchived(project.id) || task.state !== 'done')
@@ -1489,10 +1544,18 @@ export function App() {
           title="Filter projects to tasks awaiting review" onClick={() => void toggleReviewFilter()}>
           {reviewCount()} in review
         </button>
-        <Dot />
-        <span>branch {workspace()?.task.branch ?? '—'}</span>
-        <Dot />
-        <span>changes —</span>
+        <Show when={worktreePath()}>
+          <Dot />
+          <Show when={worktreeGit()} fallback={<span title={gitStatusError()}>{gitStatusError() ? 'Git status unavailable' : 'Reading Git status…'}</span>}>
+            {(git) => <>
+              <span class="status-bar__branch" title={git().branch ?? 'Detached HEAD'}>
+                {git().branch ? `branch ${git().branch}` : 'Detached HEAD'}
+              </span>
+              <Dot />
+              <span>{git().changeCount} {git().changeCount === 1 ? 'changed file' : 'changed files'}</span>
+            </>}
+          </Show>
+        </Show>
         <Show when={shutdownNote()}>
           {(note) => (
             <>
@@ -1740,13 +1803,18 @@ export function App() {
           </Show>
 
           <div class="chat__transcript" ref={transcript} tabIndex={-1} role="region" aria-label="Transcript">
+            <Show when={workspace() && selectedProject()?.missing}>
+              <p class="empty" role="status">The project folder is unavailable.</p>
+            </Show>
             <Show when={!workspace()?.transcript.some((entry) => entry.kind.type === 'failure') && workspace()?.task.error}>
               {(error) => <p class="entry__failure-text" role="alert">{error()}</p>}
             </Show>
             <Show
               when={workspace()}
               fallback={
-                <Show when={canStartTask() && selectedProject()}>
+                <Show when={canStartTask() && selectedProject()} fallback={
+                  <div class="chat__welcome"><p class="empty" role="status">{emptyChatMessage()}</p></div>
+                }>
                   {(project) => (
                     <div class="chat__welcome">
                       <h1 aria-label={`What should ${currentAgentName()} build in ${project().name}?`}>
@@ -2428,6 +2496,22 @@ function agentActivity(workspace: bridge.TaskWorkspace | null): string {
       return 'waiting for you'
     case 'starting':
       return 'agent starting'
+    case 'queued':
+      return 'agent queued'
+    case 'ready':
+      return 'agent idle'
+    case 'review':
+      return 'ready for review'
+    case 'failed':
+      return 'agent failed'
+    case 'interrupted':
+      return 'task interrupted'
+    case 'cancelled':
+      return 'task cancelled'
+    case 'done':
+      return 'task archived'
+    case 'draft':
+      return 'draft'
     default:
       return 'no agent'
   }

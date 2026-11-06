@@ -83,13 +83,21 @@ enum FileChangeKind {
     Renamed,
 }
 
-pub fn git_changes(root: &Path) -> Result<Vec<FileChange>, FileError> {
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceGitStatus {
+    pub branch: Option<String>,
+    pub change_count: usize,
+}
+
+pub fn git_file_status(root: &Path) -> Result<(WorkspaceGitStatus, Vec<FileChange>), FileError> {
+    let (branch, status) = GitService.status_with_branch(root)?;
+    let git = WorkspaceGitStatus {
+        branch,
+        change_count: status.len(),
+    };
     let mut changes = BTreeMap::new();
-    for file in GitService
-        .status(root)?
-        .into_iter()
-        .filter(|file| file.actionable)
-    {
+    for file in status.into_iter().filter(|file| file.actionable) {
         let has = |code: &str| file.index == code || file.worktree == code;
         let kind = if has("D") {
             FileChangeKind::Deleted
@@ -113,7 +121,7 @@ pub fn git_changes(root: &Path) -> Result<Vec<FileChange>, FileError> {
             },
         );
     }
-    Ok(changes.into_values().collect())
+    Ok((git, changes.into_values().collect()))
 }
 
 fn removed_path_is_ignored(root: &Path, relative: &Path) -> Result<bool, FileError> {
@@ -747,8 +755,11 @@ mod tests {
         fs::write(root.join("added.txt"), "untracked")?;
         fs::remove_file(root.join("removed.txt"))?;
         fs::remove_file(root.join("ignored.txt"))?;
+        let (git, files) = git_file_status(root)?;
+        assert_eq!(git.branch.as_deref(), Some("main"));
+        assert_eq!(git.change_count, 5);
         assert_eq!(
-            serde_json::to_value(git_changes(root)?)?,
+            serde_json::to_value(files)?,
             serde_json::json!([
                 {"path": "added.txt", "kind": "added", "originalPath": null},
                 {"path": "changed.txt", "kind": "modified", "originalPath": null},
@@ -756,6 +767,8 @@ mod tests {
                 {"path": "renamed.md", "kind": "renamed", "originalPath": "README.md"},
             ])
         );
+        run_git(root, &["checkout", "--detach"])?;
+        assert_eq!(git_file_status(root)?.0.branch, None);
         Ok(())
     }
 

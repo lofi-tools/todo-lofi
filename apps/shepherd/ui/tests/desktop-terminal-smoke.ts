@@ -731,12 +731,14 @@ async function prepareTask(project: bridge.ProjectSnapshot) {
   await waitFor('scripted text and tool row', () => chatState() === 'waiting' &&
     document.querySelector('.entry__agent')?.textContent?.includes('local fixture') &&
     document.querySelector('.entry__tool-title')?.textContent === 'Inspect the scripted workspace')
+  await waitFor('working count in the native window title', async () =>
+    await getCurrentWindow().title() === `${project.name} — Shepherd (1 working)`)
   const allow = await enabledButton('Allow')
   allow.click()
   await waitFor('ready after the scripted approval', () => chatState() === 'ready')
   const { task } = await bridge.taskWorkspace(draft.id)
   if (!task.worktreePath) throw new Error('Sending the first prompt should create a worktree')
-  return { id: task.id, title: task.title, worktree: task.worktreePath }
+  return { id: task.id, title: task.title, worktree: task.worktreePath, branch: task.branch }
 }
 
 async function exerciseTaskSwitch(project: bridge.ProjectSnapshot, shared: bridge.TerminalSnapshot) {
@@ -765,6 +767,13 @@ async function exerciseTaskSwitch(project: bridge.ProjectSnapshot, shared: bridg
   if (scoped?.scope !== 'task' || scoped.cwd !== task.worktree) {
     throw new Error('The task terminal should run in the task worktree')
   }
+  const status = () => document.querySelector('.status-bar')?.textContent ?? ''
+  await waitFor('current branch and clean worktree', () =>
+    status().includes(`branch ${task.branch}`) && status().includes('0 changed files'))
+  await bridge.terminalWrite(scoped.id, "printf 'status fixture\\n' > shepherd-status.txt\r")
+  await waitFor('dirty worktree in the status bar', () => status().includes('1 changed file'))
+  await bridge.terminalWrite(scoped.id, 'rm -- shepherd-status.txt\r')
+  await waitFor('clean worktree after removing the change', () => status().includes('0 changed files'))
 
   await typeIntoTerminal(scoped, "printf 'S4_%s:%s\\n' TASK \"${PWD##*/}\"")
   const marker = 'S4_TASK:' + task.worktree.split('/').at(-1)

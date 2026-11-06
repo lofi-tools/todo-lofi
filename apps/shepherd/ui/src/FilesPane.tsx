@@ -58,14 +58,14 @@ function FileBrowser(props: FileLocation & { showDotfiles: boolean; initialPath?
 
   onMount(() => {
     let closed = false
-    const watcher = watchWorkspaceFiles(props.projectId, props.taskId, (update) => {
+    const watcher = watchWorkspaceFiles(props.projectId, props.taskId, (update, replayed) => {
       if (closed) return
       if (update.type === 'error') {
         setWatchError(update.message)
       } else {
         setWatchError(undefined)
         setChanges(update.files)
-        setTreeRevision((revision) => revision + 1)
+        if (!replayed) setTreeRevision((revision) => revision + 1)
       }
     })
     void watcher.catch((failure) => { if (!closed) setWatchError(failureMessage(failure)) })

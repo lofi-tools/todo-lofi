@@ -667,12 +667,21 @@ impl GitService {
     }
 
     pub(crate) fn status(&self, path: &Path) -> Result<Vec<GitFile>, GitError> {
+        Ok(self.status_with_branch(path)?.1)
+    }
+
+    pub(crate) fn status_with_branch(
+        &self,
+        path: &Path,
+    ) -> Result<(Option<String>, Vec<GitFile>), GitError> {
         let bytes = git_bytes(
             path,
             &[
                 "--no-optional-locks",
                 "status",
                 "--porcelain=v2",
+                "--branch",
+                "--no-ahead-behind",
                 "-z",
                 "--renames",
                 "--untracked-files=all",
@@ -682,8 +691,17 @@ impl GitService {
             .split(|byte| *byte == 0)
             .filter(|record| !record.is_empty());
         let mut files = Vec::new();
+        let mut branch = None;
         while let Some(record) = records.next() {
             let (columns, original) = match record.first() {
+                Some(b'#') => {
+                    if let Some(head) = record.strip_prefix(b"# branch.head ")
+                        && head != b"(detached)"
+                    {
+                        branch = Some(String::from_utf8_lossy(head).into_owned());
+                    }
+                    continue;
+                }
                 Some(b'1') => (9, None),
                 Some(b'2') => (10, Some(records.next().ok_or(GitError::InvalidStatus)?)),
                 Some(b'u') => (11, None),
@@ -700,7 +718,7 @@ impl GitService {
             let path = fields.nth(columns - 3).ok_or(GitError::InvalidStatus)?;
             files.push(GitFile::from_status(path, original, codes)?);
         }
-        Ok(files)
+        Ok((branch, files))
     }
 
     /// True when the worktree has staged, unstaged or untracked changes.

@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use serde::Serialize;
-use shepherd_core::files::{self, FileChange};
+use shepherd_core::files::{self, FileChange, WorkspaceGitStatus};
 use shepherd_core::git::{GitError, GitService};
 use tokio::sync::watch;
 use tokio::time::{Instant, sleep_until};
@@ -33,8 +33,13 @@ pub(crate) enum WatchError {
 #[derive(Serialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum FileWatchUpdate {
-    Changes { files: Vec<FileChange> },
-    Error { message: String },
+    Changes {
+        files: Vec<FileChange>,
+        git: Option<WorkspaceGitStatus>,
+    },
+    Error {
+        message: String,
+    },
 }
 
 pub(crate) struct WorkspaceWatch {
@@ -96,13 +101,20 @@ impl WorkspaceWatch {
         })
     }
 
-    pub(crate) async fn snapshot(&self) -> Result<Vec<FileChange>, WatchError> {
+    pub(crate) async fn snapshot(&self) -> Result<FileWatchUpdate, WatchError> {
         let root = self.root.clone();
         tokio::task::spawn_blocking(move || {
             if has_git_marker(&root)? {
-                Ok(files::git_changes(&root)?)
+                let (git, files) = files::git_file_status(&root)?;
+                Ok(FileWatchUpdate::Changes {
+                    files,
+                    git: Some(git),
+                })
             } else {
-                Ok(Vec::new())
+                Ok(FileWatchUpdate::Changes {
+                    files: Vec::new(),
+                    git: None,
+                })
             }
         })
         .await?
@@ -187,15 +199,21 @@ mod tests {
         let worktree = repository.git_dir.join("shepherd/worktrees/files");
         GitService.create_worktree(repository, &worktree, "shepherd/files", "main")?;
         let mut watcher = WorkspaceWatch::start(worktree.clone())?;
-        assert!(watcher.snapshot().await?.is_empty());
+        assert_eq!(
+            serde_json::to_value(watcher.snapshot().await?)?,
+            serde_json::json!({
+                "type": "changes", "files": [], "git": { "branch": "shepherd/files", "changeCount": 0 },
+            })
+        );
 
         std::fs::write(worktree.join("new.txt"), "fixture\n")?;
         tokio::time::timeout(Duration::from_secs(6), watcher.next_refresh()).await??;
         assert_eq!(
             serde_json::to_value(watcher.snapshot().await?)?,
-            serde_json::json!([
-                {"path": "new.txt", "kind": "added", "originalPath": null},
-            ])
+            serde_json::json!({
+                "type": "changes", "files": [{"path": "new.txt", "kind": "added", "originalPath": null}],
+                "git": {"branch": "shepherd/files", "changeCount": 1},
+            })
         );
         for arguments in [
             &["add", "--", "new.txt"][..],
@@ -213,7 +231,30 @@ mod tests {
             );
         }
         tokio::time::timeout(Duration::from_secs(6), watcher.next_refresh()).await??;
-        assert!(watcher.snapshot().await?.is_empty());
+        assert_eq!(
+            serde_json::to_value(watcher.snapshot().await?)?,
+            serde_json::json!({
+                "type": "changes", "files": [], "git": { "branch": "shepherd/files", "changeCount": 0 },
+            })
+        );
+
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(&worktree)
+            .args(["checkout", "--detach"])
+            .output()?;
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        tokio::time::timeout(Duration::from_secs(6), watcher.next_refresh()).await??;
+        assert_eq!(
+            serde_json::to_value(watcher.snapshot().await?)?,
+            serde_json::json!({
+                "type": "changes", "files": [], "git": { "branch": null, "changeCount": 0 },
+            })
+        );
         Ok(())
     }
 

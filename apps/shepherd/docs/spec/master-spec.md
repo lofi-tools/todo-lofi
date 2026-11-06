@@ -130,8 +130,10 @@ detailed treatment of its controls as the rest of the shell is built.
 - Regions are fixed: panes are resized inside their region but never dragged
   between chat, inspector and terminal splits. Terminal panes split only inside
   the Terminals tab.
-- Bottom: status bar — agent activity, running task count, review count, branch,
-  change count. No connection indicator: there is nothing to connect to.
+- The status bar shows agent activity, running and review counts across
+  projects, and the selected worktree's current branch and changed file count.
+  The worktree and Files pane share one event-driven subscription when they
+  show the same path.
 - Density: compact sidebar, toolbar, tab strip and status bar; the transcript
   keeps a readable measure and line height.
 - The window title shows the active project and a working-count suffix, so the

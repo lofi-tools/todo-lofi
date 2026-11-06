@@ -1130,12 +1130,12 @@ impl ShellState {
                 let update = tokio::select! {
                     _ = &mut cancelled => break,
                     snapshot = watcher.snapshot() => match snapshot {
-                        Ok(files) => FileWatchUpdate::Changes { files },
+                        Ok(update) => update,
                         Err(error) => FileWatchUpdate::Error { message: format!("Could not refresh Git changes: {error}") },
                     }
                 };
                 if let Err(error) = channel.send(update) {
-                    tracing::debug!(%error, "the Files tab detached");
+                    tracing::debug!(%error, "the workspace file watch detached");
                     break;
                 }
                 tokio::select! {
@@ -1143,7 +1143,7 @@ impl ShellState {
                     refresh = watcher.next_refresh() => if let Err(error) = refresh {
                         let update = FileWatchUpdate::Error { message: format!("Could not watch workspace files: {error}") };
                         if let Err(error) = channel.send(update) {
-                            tracing::debug!(%error, "the Files tab detached");
+                            tracing::debug!(%error, "the workspace file watch detached");
                         }
                         break;
                     },

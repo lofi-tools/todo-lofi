@@ -806,12 +806,52 @@ export interface FileChange {
   originalPath: string | null
 }
 
-export type FileWatchUpdate = { type: 'changes'; files: FileChange[] } | { type: 'error'; message: string }
+export interface WorkspaceGitStatus {
+  branch: string | null
+  changeCount: number
+}
 
-export async function watchWorkspaceFiles(projectId: string, taskId: string | null, onUpdate: (update: FileWatchUpdate) => void): Promise<() => Promise<void>> {
-  const channel = new Channel<FileWatchUpdate>(onUpdate)
-  const watchId = await invoke<string>('watch_workspace_files', { projectId, taskId, channel })
-  return () => invoke('unwatch_workspace_files', { watchId })
+export type FileWatchUpdate = { type: 'changes'; files: FileChange[]; git: WorkspaceGitStatus | null } | { type: 'error'; message: string }
+
+interface WorkspaceFileWatch {
+  listeners: Set<(update: FileWatchUpdate) => void>
+  ready: Promise<string>
+  latest?: FileWatchUpdate
+}
+
+const workspaceFileWatches = new Map<string, WorkspaceFileWatch>()
+
+export async function watchWorkspaceFiles(projectId: string, taskId: string | null, onUpdate: (update: FileWatchUpdate, replayed: boolean) => void): Promise<() => Promise<void>> {
+  const key = JSON.stringify([projectId, taskId])
+  let watch = workspaceFileWatches.get(key)
+  if (!watch) {
+    const subscription: WorkspaceFileWatch = {
+      listeners: new Set(),
+      ready: Promise.resolve().then(() => {
+        const channel = new Channel<FileWatchUpdate>((update) => {
+          subscription.latest = update
+          for (const listener of subscription.listeners) listener(update)
+        })
+        return invoke<string>('watch_workspace_files', { projectId, taskId, channel })
+      }),
+    }
+    workspaceFileWatches.set(key, subscription)
+    watch = subscription
+  }
+  const listener = (update: FileWatchUpdate) => onUpdate(update, false)
+  watch.listeners.add(listener)
+  if (watch.latest) onUpdate(watch.latest, true)
+  try {
+    const watchId = await watch.ready
+    return async () => {
+      if (!watch.listeners.delete(listener) || watch.listeners.size) return
+      workspaceFileWatches.delete(key)
+      await invoke('unwatch_workspace_files', { watchId })
+    }
+  } catch (error) {
+    if (workspaceFileWatches.get(key) === watch) workspaceFileWatches.delete(key)
+    throw error
+  }
 }
 
 export interface TextFile {

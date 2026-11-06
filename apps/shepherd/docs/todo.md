@@ -1039,7 +1039,12 @@ and the task header never overstates the tier.
   eligible rows selected. Turso tests reject stale batches, roll back partial
   writes and verify that retry preserves session exit information. Reopen
   only accepts archived tasks. The 30-day worktree collection is tracked in S7.
-- [ ] Status bar, window title and empty states.
+- [x] Status bar, window title and empty states.
+  The footer shares the Files watcher for the current worktree's branch and
+  changed file count. The native title follows the selected project and
+  working count. Missing folders keep the transcript readable with input
+  disabled. A deleted last task opens a draft, and empty projects keep their
+  first-prompt headline.
 
 ### Proof
 
