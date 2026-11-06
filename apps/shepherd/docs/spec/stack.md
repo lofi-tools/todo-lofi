@@ -226,6 +226,10 @@ rows affected by cursor movement.
   behaviour, not FTS5's.
 - Tokenizer: the Unicode-aware default with prefix queries, decided. `ngram` is
   available for substring matching and is not enabled in v1.
+  Search treats a trailing word as a prefix and earlier words as complete
+  terms. On the pinned Tantivy release, `search.rs` expresses a one-word prefix
+  as a lexical range and boosts an exact match. Search results carry text
+  segments for safe rendering and stable task and transcript entry IDs.
 - No `libsql` remote, sync or embedded replica in v1 or v2. The database is a
   local file, full stop.
 

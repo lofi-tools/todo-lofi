@@ -15,6 +15,7 @@ use toasty_driver_turso::Turso;
 use tokio::sync::{Mutex, RwLock};
 
 use crate::projects::{Project, ProjectId, parse_preview_url};
+use crate::search::{RESULT_LIMIT, SearchHit, SearchQuery, entry_text};
 use crate::session::SessionRecord;
 use crate::snapshots::WorkspaceLayout;
 use crate::tasks::{Agent, AgentTier, Task, TaskId, TaskState};
@@ -70,6 +71,11 @@ pub trait Store: Send + Sync {
     async fn load_sessions(&self) -> Result<Vec<SessionRecord>, StoreError>;
     async fn save_session(&self, session: &SessionRecord) -> Result<(), StoreError>;
     async fn load_transcript(&self, task_id: &TaskId) -> Result<Vec<Entry>, StoreError>;
+    async fn search_entries(&self, _query: &SearchQuery) -> Result<Vec<SearchHit>, StoreError> {
+        Err(StoreError::Backend(
+            "Task search needs a durable Turso database.".into(),
+        ))
+    }
     async fn save_transcript_entries(
         &self,
         session: &SessionRecord,
@@ -94,6 +100,12 @@ struct Migration {
     name: &'static str,
     sql: &'static str,
 }
+
+const SEARCH_SQL: &str = "SELECT (SELECT project_id FROM tasks WHERE tasks.id = entries.task_id),
+        task_id, id, project_name, task_title, entry_text,
+        fts_score(entry_text, task_title, project_name, ?1) AS score
+     FROM entries WHERE fts_match(entry_text, task_title, project_name, ?1)
+     ORDER BY score DESC LIMIT ?2";
 
 const MIGRATIONS: &[Migration] = &[
     Migration {
@@ -132,6 +144,10 @@ const MIGRATIONS: &[Migration] = &[
         name: "0009_transcript_entries.sql",
         sql: include_str!("../toasty/migrations/0009_transcript_entries.sql"),
     },
+    Migration {
+        name: "0010_entries_search.sql",
+        sql: include_str!("../toasty/migrations/0010_entries_search.sql"),
+    },
 ];
 
 /// The durable store used by the application. The database handle is guarded
@@ -156,7 +172,9 @@ impl TursoStore {
     }
 
     async fn open_driver(driver: Turso) -> Result<Self, StoreError> {
-        let mut db = toasty::Db::builder().build(driver).await?;
+        let mut db = toasty::Db::builder()
+            .build(driver.experimental_index_method(true))
+            .await?;
         apply_migrations(&mut db).await?;
         Ok(Self { db: Mutex::new(db) })
     }
@@ -164,6 +182,55 @@ impl TursoStore {
 
 #[async_trait]
 impl Store for TursoStore {
+    async fn search_entries(&self, query: &SearchQuery) -> Result<Vec<SearchHit>, StoreError> {
+        let mut db = self.db.lock().await;
+        let rows = toasty::sql::query(SEARCH_SQL)
+            .column_types([
+                Type::String,
+                Type::String,
+                Type::String,
+                Type::String,
+                Type::String,
+                Type::String,
+                Type::F64,
+            ])
+            .bind(query.fts())
+            .bind(RESULT_LIMIT)
+            .exec(&mut *db)
+            .await?;
+        drop(db);
+        rows.into_iter()
+            .map(|row| {
+                let Value::Record(fields) = row else {
+                    return Err(StoreError::InvalidRow(
+                        "expected a search result record".into(),
+                    ));
+                };
+                let project_id = optional_string(fields.first())?
+                    .ok_or_else(|| StoreError::InvalidRow("search result has no project".into()))?;
+                let task_id = required_string(fields.get(1))?;
+                let entry_id = required_string(fields.get(2))?;
+                let project_name = required_string(fields.get(3))?;
+                let task_title = required_string(fields.get(4))?;
+                let entry = required_string(fields.get(5))?;
+                let Some(Value::F64(score)) = fields.get(6) else {
+                    return Err(StoreError::InvalidRow(
+                        "expected a full-text search score".into(),
+                    ));
+                };
+                Ok(SearchHit {
+                    project_id,
+                    task_id,
+                    entry_id,
+                    snippet: query.snippet(&entry, &task_title, &project_name),
+                    project_name,
+                    task_title,
+                    score: *score,
+                })
+            })
+            .collect()
+    }
+
     async fn load_transcript(&self, task_id: &TaskId) -> Result<Vec<Entry>, StoreError> {
         let mut db = self.db.lock().await;
         let rows =
@@ -207,9 +274,12 @@ impl Store for TursoStore {
                 .and_then(serde_json::Value::as_str)
                 .ok_or_else(|| StoreError::InvalidRow("missing transcript entry kind".into()))?;
             toasty::sql::statement(
-                "INSERT INTO entries (session_id, task_id, id, sequence, kind, payload, created_at) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) \
-                 ON CONFLICT(task_id, id) DO UPDATE SET kind = excluded.kind, payload = excluded.payload",
+                "INSERT INTO entries (session_id, task_id, id, sequence, kind, payload, created_at,
+                                      entry_text, task_title, project_name)
+                 SELECT ?1, tasks.id, ?3, ?4, ?5, ?6, ?7, ?8, tasks.title, projects.name
+                 FROM tasks JOIN projects ON projects.id = tasks.project_id WHERE tasks.id = ?2
+                 ON CONFLICT(task_id, id) DO UPDATE SET kind = excluded.kind, payload = excluded.payload,
+                     entry_text = excluded.entry_text, task_title = excluded.task_title, project_name = excluded.project_name",
             )
             .bind(&session.id)
             .bind(session.task_id.as_str())
@@ -218,6 +288,7 @@ impl Store for TursoStore {
             .bind(kind)
             .bind(payload.to_string())
             .bind(created_at)
+            .bind(entry_text(&entry.kind))
             .exec(&mut transaction)
             .await?;
         }
@@ -441,10 +512,18 @@ impl Store for TursoStore {
 
     async fn delete_task(&self, task_id: &TaskId) -> Result<(), StoreError> {
         let mut db = self.db.lock().await;
-        toasty::sql::statement("DELETE FROM tasks WHERE id = ?1")
-            .bind(task_id.as_str())
-            .exec(&mut *db)
-            .await?;
+        let mut transaction = db.transaction().await?;
+        for statement in [
+            "DELETE FROM entries WHERE task_id = ?1",
+            "DELETE FROM sessions WHERE task_id = ?1",
+            "DELETE FROM tasks WHERE id = ?1",
+        ] {
+            toasty::sql::statement(statement)
+                .bind(task_id.as_str())
+                .exec(&mut transaction)
+                .await?;
+        }
+        transaction.commit().await?;
         Ok(())
     }
 
@@ -1102,8 +1181,10 @@ impl Store for MemoryStore {
 #[cfg(test)]
 mod tests {
     use std::path::Path;
+    use std::sync::Arc;
 
     use super::*;
+    use crate::search::{SearchField, TaskSearch};
     use crate::test_support::{TestDatabase, TestDirectory};
 
     async fn table_names(store: &TursoStore) -> Result<Vec<String>, StoreError> {
@@ -1123,6 +1204,117 @@ mod tests {
                 required_string(record.first())
             })
             .collect()
+    }
+
+    #[tokio::test]
+    async fn turso_search_ranks_exact_and_prefix_matches_and_tracks_entry_changes()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database = TestDatabase::new()?;
+        let uri = database.uri();
+        let store = Arc::new(TursoStore::open(&uri).await?);
+        let search = TaskSearch(store.clone());
+        let first_project = Project::new(database.path().join("Starlight"));
+        let other_project = Project::new(database.path().join("North"));
+        store.save_project(&first_project).await?;
+        store.save_project(&other_project).await?;
+        let exact = Task::draft(first_project.id.clone(), "Renderer", database.path());
+        let completion = Task::draft(other_project.id.clone(), "Editor", database.path());
+        store.save_task(&exact).await?;
+        store.save_task(&completion).await?;
+        let exact_session = SessionRecord::started(exact.id.clone(), "codex", None);
+        let completion_session = SessionRecord::started(completion.id.clone(), "codex", None);
+        store.save_session(&exact_session).await?;
+        store.save_session(&completion_session).await?;
+        let mut transcript = agent_harness::Transcript::default();
+        transcript.push_user_message("Open the preview browser and show the Éclair.");
+        let entry = transcript.entry(0).ok_or("missing prompt")?;
+        store
+            .save_transcript_entries(&exact_session, &[entry])
+            .await?;
+        let mut completion_transcript = agent_harness::Transcript::default();
+        completion_transcript.push_user_message("We are previewing a file.");
+        let completion_entry = completion_transcript.entry(0).ok_or("missing completion")?;
+        store
+            .save_transcript_entries(&completion_session, &[completion_entry])
+            .await?;
+
+        let hits = search.search("preview").await?;
+        {
+            let mut db = store.db.lock().await;
+            let plan = toasty::sql::query(format!("EXPLAIN QUERY PLAN {SEARCH_SQL}"))
+                .column_types([Type::I64, Type::I64, Type::I64, Type::String])
+                .bind("preview")
+                .bind(RESULT_LIMIT)
+                .exec(&mut *db)
+                .await?;
+            assert!(plan.iter().any(|row| matches!(row, Value::Record(fields)
+                if matches!(fields.get(3), Some(Value::String(detail)) if detail == "QUERY INDEX METHOD fts"))), "{plan:?}");
+        }
+        assert_eq!(
+            hits.iter()
+                .map(|hit| hit.task_id.as_str())
+                .collect::<Vec<_>>(),
+            [exact.id.as_str(), completion.id.as_str()]
+        );
+        let [first, second] = hits.as_slice() else {
+            return Err("expected two ranked hits".into());
+        };
+        assert!(first.score > second.score);
+        assert_eq!(first.entry_id, entry.id);
+        assert_eq!(first.project_id, first_project.id.as_str());
+        assert_eq!(first.snippet.matched, "preview");
+        assert_eq!(second.snippet.matched, "previewing");
+        assert_eq!(search.search("preview ").await?.len(), 1);
+        assert_eq!(search.search("preview bro").await?.len(), 1);
+        let unicode = search.search("ÉCL").await?;
+        assert_eq!(
+            unicode.first().map(|hit| hit.snippet.matched.as_str()),
+            Some("Éclair")
+        );
+        assert_eq!(
+            search
+                .search("Render")
+                .await?
+                .first()
+                .map(|hit| hit.snippet.field),
+            Some(SearchField::Task)
+        );
+        assert_eq!(
+            search
+                .search("STARL")
+                .await?
+                .first()
+                .map(|hit| hit.snippet.field),
+            Some(SearchField::Project)
+        );
+        assert!(search.search("\"*").await?.is_empty());
+        assert!(search.search(&"x".repeat(40)).await?.is_empty());
+
+        let updated = Entry {
+            kind: agent_harness::EntryKind::UserMessage {
+                text: "Index the replacement.".into(),
+            },
+            ..entry.clone()
+        };
+        store
+            .save_transcript_entries(&exact_session, &[&updated])
+            .await?;
+        assert!(search.search("ÉCL").await?.is_empty());
+        drop(search);
+        drop(store);
+        let reopened = Arc::new(TursoStore::open(&uri).await?);
+        let search = TaskSearch(reopened.clone());
+        assert_eq!(
+            search
+                .search("replac")
+                .await?
+                .first()
+                .map(|hit| hit.entry_id.as_str()),
+            Some(entry.id.as_str())
+        );
+        reopened.delete_task(&exact.id).await?;
+        assert!(search.search("replac").await?.is_empty());
+        Ok(())
     }
 
     #[tokio::test]
@@ -1227,7 +1419,7 @@ mod tests {
     #[tokio::test]
     async fn an_existing_database_gains_the_workspace_migration()
     -> Result<(), Box<dyn std::error::Error>> {
-        let driver = Turso::new("turso::memory:")?;
+        let driver = Turso::new("turso::memory:")?.experimental_index_method(true);
         let mut db = toasty::Db::builder().build(driver).await?;
         let first = &MIGRATIONS[0];
         let expected = checksum(first.sql);
@@ -1300,6 +1492,11 @@ mod tests {
         assert_eq!(
             store.load_transcript(&TaskId::new("task")).await?,
             transcript.entries()
+        );
+        let hits = TaskSearch(Arc::new(store)).search("legacy pro").await?;
+        assert_eq!(
+            hits.first().map(|hit| hit.entry_id.as_str()),
+            Some(entry.id.as_str())
         );
         Ok(())
     }

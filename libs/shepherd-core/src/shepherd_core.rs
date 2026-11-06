@@ -12,6 +12,7 @@ pub mod harness;
 pub mod input;
 pub mod project_scan;
 pub mod projects;
+pub mod search;
 pub mod session;
 pub mod snapshots;
 pub mod store;
@@ -698,6 +699,10 @@ impl Core {
                 .map(|project| self.project_snapshot(project))
                 .collect(),
         }
+    }
+
+    pub fn task_search(&self) -> search::TaskSearch {
+        search::TaskSearch(self.store.clone())
     }
 
     pub fn task_list(&self, project_id: &ProjectId) -> Result<TaskList, CoreError> {

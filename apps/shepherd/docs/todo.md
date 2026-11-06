@@ -973,8 +973,10 @@ and the task header never overstates the tier.
   screenshot copies.
 - [ ] Cross-task search over Turso FTS.
   Task transcripts now persist admitted prompts and batch settled entries in
-  Turso. Opening a task restores its saved entry IDs and order. The full-text
-  index, ranked queries and search UI remain open.
+  Turso. Opening a task restores its saved entry IDs and order. The native FTS
+  index covers entry text, task titles and project names. Ranked queries return
+  up to 50 hits with a highlighted snippet and stable entry ID. The search UI,
+  cancellation and the 50k-entry performance check remain open.
 - [ ] Attachments and images, `@file` mentions, model/mode pickers.
 - [ ] Notifications, dock/status counts and review batch actions.
 - [ ] Command palette, keybinding editor, settings files, project overrides,
@@ -993,7 +995,9 @@ and the task header never overstates the tier.
   from the blocked-frame fallback through the desktop bridge.
 - [ ] Attachment cap, redirect and deletion tests.
 - [ ] Corrupt settings file falls back with a banner and backup.
-- [ ] Search ranking and prefix-query tests against Turso FTS, not SQLite FTS5.
+- [x] Search ranking and prefix-query tests against Turso FTS, not SQLite FTS5.
+  The query plan uses the FTS index. Database fixtures cover exact-term ranking,
+  Unicode prefix queries, legacy rows, edits, reopen and task deletion.
 - [ ] Accessibility: focus order, tablist labels, terminal text mirror and
   keyboard copy mode.
 
