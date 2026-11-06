@@ -80,16 +80,19 @@ dispatch it for a published ref.
 
 ## App icon
 
-The [Shepherd logo](ui/public/assets/shepherd-logo.svg) also serves as the
-source for the desktop icons. Its rounded tile occupies the central 824 pixels
-of the 1024-pixel canvas to match the macOS Dock icon grid.
+The [Shepherd logo](ui/public/assets/shepherd-logo.svg) is the source for the
+PNG and Windows icons. macOS uses the [borderless white mark](ui/public/assets/shepherd-logo-white.svg).
+Its silhouette fits the central 824 × 824 area of the 1024-pixel canvas, with
+transparency around the shape.
 
 Regenerate the desktop files after editing the SVG:
 
 ```sh
 icon_output=$(mktemp -d)
 pnpm --dir apps/shepherd tauri icon "$PWD/apps/shepherd/ui/public/assets/shepherd-logo.svg" --output "$icon_output"
-cp "$icon_output"/*.{png,icns,ico} apps/shepherd/src-tauri/icons/
+cp "$icon_output"/*.{png,ico} apps/shepherd/src-tauri/icons/
+pnpm --dir apps/shepherd tauri icon "$PWD/apps/shepherd/ui/public/assets/shepherd-logo-white.svg" --output "$icon_output"
+cp "$icon_output/icon.icns" apps/shepherd/src-tauri/icons/
 ```
 
 ## Import projects from the ChatGPT app
