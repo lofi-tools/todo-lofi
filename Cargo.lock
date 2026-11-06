@@ -10183,6 +10183,7 @@ dependencies = [
  "gio",
  "libc",
  "notify 8.2.1",
+ "percent-encoding",
  "portable-pty",
  "serde",
  "serde_json",

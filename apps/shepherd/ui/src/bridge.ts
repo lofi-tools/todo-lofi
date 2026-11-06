@@ -344,8 +344,14 @@ export function discardDraft(taskId: string): Promise<void> {
   return invoke<void>('discard_draft', { taskId })
 }
 
-export function sendPrompt(taskId: string, text: string): Promise<TaskWorkspace> {
-  return invoke<TaskWorkspace>('send_prompt', { taskId, text })
+export function sendPrompt(taskId: string, text: string, attachmentIds: string[] = []): Promise<TaskWorkspace> {
+  return invoke<TaskWorkspace>('send_prompt', { taskId, text, attachmentIds })
+}
+
+export async function savePromptFile(taskId: string, file: File): Promise<string> {
+  return invoke<string>('save_prompt_file', await file.arrayBuffer(), {
+    headers: { 'X-Shepherd-Task': taskId, 'X-Shepherd-Filename': encodeURIComponent(file.name) },
+  })
 }
 
 export function resolveApproval(

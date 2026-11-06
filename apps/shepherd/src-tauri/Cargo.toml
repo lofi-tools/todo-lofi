@@ -25,6 +25,7 @@ async-trait.workspace = true
 alacritty_terminal = { git = "https://github.com/alacritty/alacritty", rev = "ede2ac144da4dec4c075bfa803aacf3b3739bce6" }
 compact_str = { version = "0.8", features = ["serde"] }
 notify = "8.2"
+percent-encoding = "2"
 portable-pty = "0.9.0"
 serde.workspace = true
 serde_json.workspace = true

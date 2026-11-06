@@ -237,6 +237,14 @@ export function App() {
     if (id) setTerminalAttention((bells) => bells.filter((bell) => bell.terminalId !== id))
   }
   const [prompt, setPrompt] = createSignal('')
+  const [queuedFiles, setQueuedFiles] = createSignal(new Map<string, File[]>())
+  const fileQueueKey = () => {
+    const task = selectedTaskId()
+    const project = selectedProjectId()
+    return task ? `task:${task}` : project ? `project:${project}` : undefined
+  }
+  const promptFiles = () => queuedFiles().get(fileQueueKey() ?? '') ?? []
+  let fileInput: HTMLInputElement | undefined
   let promptInput: HTMLTextAreaElement | undefined
   const firstDrafts = new Map<string, Promise<bridge.TaskWorkspace>>()
   const [pickerOpen, setPickerOpen] = createSignal(false)
@@ -597,6 +605,13 @@ export function App() {
     const inFlight = firstDrafts.get(projectId)
     if (inFlight) return inFlight
     const request = bridge.createDraft(projectId, 'New task', newTaskAgent()).then((draft) => {
+      setQueuedFiles((queues) => {
+        const files = queues.get(`project:${projectId}`)
+        if (!files) return queues
+        const next = new Map(queues)
+        next.delete(`project:${projectId}`)
+        return next.set(`task:${draft.task.id}`, files)
+      })
       if (selectedProjectId() === projectId && !selectedTaskId()) {
         setSelectedTaskId(draft.task.id)
         setWorkspace(draft)
@@ -613,6 +628,34 @@ export function App() {
     if (!projectId || !text.trim() || pending() || !canStartTask() || firstDrafts.has(projectId)) return
     void firstDraft(projectId).then(() => loadTasks(projectId)).catch((failure) => {
       if (selectedProjectId() === projectId) setError(describe(failure))
+    })
+  }
+
+  function queuePromptFiles(files: FileList) {
+    const key = fileQueueKey()
+    if (!key || !canCompose() || pending()) return
+    const accepted: File[] = []
+    const oversized: string[] = []
+    for (const file of files) {
+      if (file.size > 50_000_000) oversized.push(file.name)
+      else accepted.push(file)
+    }
+    if (accepted.length) {
+      setQueuedFiles((queues) => new Map(queues).set(key, [...(queues.get(key) ?? []), ...accepted]))
+    }
+    setError(oversized.length ? `Attachments must be up to 50 MB each. ${oversized.join(', ')}` : null)
+  }
+
+  function removePromptFile(file: File) {
+    const key = fileQueueKey()
+    if (key) setQueuedFiles((queues) => new Map(queues).set(key, (queues.get(key) ?? []).filter((queued) => queued !== file)))
+  }
+
+  function clearPromptFiles(taskId: string) {
+    setQueuedFiles((queues) => {
+      const next = new Map(queues)
+      next.delete(`task:${taskId}`)
+      return next
     })
   }
 
@@ -658,6 +701,7 @@ export function App() {
     if (!current) return
     void run(async () => {
       await bridge.discardDraft(current.task.id)
+      clearPromptFiles(current.task.id)
       setWorkspace(null)
       setSelectedTaskId(null)
       const projectId = selectedProjectId()
@@ -669,10 +713,14 @@ export function App() {
     const projectId = selectedProjectId()
     const current = workspace()
     const text = prompt().trim()
-    if (!projectId || !text || !canCompose() || pending()) return
+    const files = promptFiles()
+    if (!projectId || (!text && !files.length) || !canCompose() || pending()) return
     void run(async () => {
       const task = current?.task ?? (await firstDraft(projectId)).task
-      const updated = await bridge.sendPrompt(task.id, text)
+      const attachmentIds: string[] = []
+      for (const file of files) attachmentIds.push(await bridge.savePromptFile(task.id, file))
+      const updated = await bridge.sendPrompt(task.id, text, attachmentIds)
+      clearPromptFiles(task.id)
       if (selectedTaskId() === task.id) {
         setPrompt((value) => value.trim() === text ? '' : value)
         setWorkspace(updated)
@@ -1188,6 +1236,20 @@ export function App() {
           </div>
 
           <div class="composer">
+            <input type="file" ref={fileInput} aria-label="Local attachments" hidden multiple
+              onChange={(event) => {
+                if (event.currentTarget.files) queuePromptFiles(event.currentTarget.files)
+                event.currentTarget.value = ''
+              }} />
+            <Show when={promptFiles().length > 0}>
+              <ul class="composer__files" aria-label="Queued attachments">
+                <For each={promptFiles()}>{(file) => <li>
+                  <span>{file.name}</span>
+                  <button type="button" aria-label={`Remove attachment ${file.name}`} disabled={pending()}
+                    onClick={() => removePromptFile(file)}>×</button>
+                </li>}</For>
+              </ul>
+            </Show>
             <textarea
               ref={promptInput}
               class="composer__input"
@@ -1211,7 +1273,8 @@ export function App() {
             />
             <div class="composer__actions">
               <ComposerPickers agent={currentAgent()} agentName={currentAgentName()} agents={agentOptions()} onAgentChange={chooseAgent}
-                showShellApprovals={showShellApprovals()} />
+                showShellApprovals={showShellApprovals()} canAttach={canCompose() && !pending()}
+                onAttach={() => fileInput?.click()} />
               <div class="composer__send-actions">
                 <Show when={currentAgent() === 'codex'}>
                   <ComposerModelPicker model={composerModel()} />
@@ -1223,7 +1286,7 @@ export function App() {
                   aria-label="Send"
                   title="Send"
                   onClick={sendPrompt}
-                  disabled={!canCompose() || pending() || !prompt().trim()}
+                  disabled={!canCompose() || pending() || (!prompt().trim() && !promptFiles().length)}
                 >
                   <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                     <path d="M3 4.5 21 12 3 19.5l3.6-7.5L3 4.5Z M6.6 12H14" />
@@ -1486,11 +1549,6 @@ interface PickerMenuProps {
   onChange?: (value: string) => void
 }
 
-const ATTACHMENT_OPTIONS: PickerOption[] = [
-  { id: 'attach', name: 'Attach files (coming soon)', disabled: true },
-  { id: 'commands', name: 'Commands (coming soon)', disabled: true },
-]
-
 const DEFAULT_APPROVAL = { id: 'ask', name: 'Ask me' }
 const APPROVAL_OPTIONS: PickerOption[] = [
   DEFAULT_APPROVAL,
@@ -1502,10 +1560,13 @@ const MODEL_OVERRIDES: PickerOption[] = [
   { id: 'effort', name: 'Choose effort (coming soon)', disabled: true },
 ]
 
-function ComposerPickers(props: { agent: bridge.Agent; agentName: string; agents: PickerOption[]; onAgentChange: (value: string) => void; showShellApprovals: boolean }) {
+function ComposerPickers(props: { agent: bridge.Agent; agentName: string; agents: PickerOption[]; onAgentChange: (value: string) => void; showShellApprovals: boolean; canAttach: boolean; onAttach: () => void }) {
   return (
     <>
-      <PickerMenu label="Attachments and commands" options={ATTACHMENT_OPTIONS} triggerClass="composer__picker" above>
+      <PickerMenu label="Attachments and commands" options={[
+        { id: 'attach', name: 'Attach files', disabled: !props.canAttach },
+        { id: 'commands', name: 'Commands (coming soon)', disabled: true },
+      ]} onChange={(value) => { if (value === 'attach') props.onAttach() }} triggerClass="composer__picker" above>
         <PlusIcon />
       </PickerMenu>
       <Show when={props.showShellApprovals}>

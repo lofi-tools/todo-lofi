@@ -1245,6 +1245,46 @@ textarea {
   border-color: var(--focus);
 }
 
+.composer__files {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.composer__files li {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  padding: 2px 6px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface-raised);
+  font-size: 12px;
+}
+
+.composer__files span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.composer__files button {
+  padding: 0 2px;
+  border: 0;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--text-muted);
+}
+
+.composer__files button:hover:enabled {
+  background: var(--border);
+  color: var(--text);
+}
+
 .composer > .composer__input {
   padding: var(--composer-control-inset) var(--composer-control-inset) 0;
   border: 0;

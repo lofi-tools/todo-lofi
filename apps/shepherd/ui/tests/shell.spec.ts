@@ -19,6 +19,7 @@ test.beforeEach(async ({ context }) => {
     let eventIndex = 0
     let cancelRequests = 0
     let screenshotSaves = 0
+    const promptFileUploads: Array<{ taskId: string; name: string; text: string }> = []
     const fileListings: string[] = []
     const fileActions: Array<{ projectId: string; taskId: string | null; path: string; action: string }> = []
     const fileSearches: Array<{ id: string; taskId: string | null; mode: string }> = []
@@ -330,6 +331,13 @@ test.beforeEach(async ({ context }) => {
             screenshotSaves += 1
             if (options.has('screenshot-save-retry') && screenshotSaves === 1) throw { message: 'Could not save the screenshot.' }
             return '/tmp/shepherd-data/attachments/task-1/preview.png'
+          case 'save_prompt_file': {
+            const taskId = invokeOptions?.headers?.['X-Shepherd-Task']
+            const name = invokeOptions?.headers?.['X-Shepherd-Filename']
+            if (!(args instanceof ArrayBuffer) || !taskId || !name) throw new Error('Expected a task, filename and file bytes')
+            promptFileUploads.push({ taskId, name: decodeURIComponent(name), text: new TextDecoder().decode(args) })
+            return `file-${promptFileUploads.length}`
+          }
           case 'project_approvals':
             return args.projectId === project.id
               ? { saved: [...projectGrants], sessions: [...sessionGrants] }
@@ -530,9 +538,10 @@ test.beforeEach(async ({ context }) => {
           }
           case 'send_prompt': {
             const task = tasks.find((candidate) => candidate.id === args.taskId)
+            const text = args.attachmentIds?.length ? `Attachments: ${args.attachmentIds.join(', ')}` : args.text
             task.state = 'waiting'
             transcripts[task.id] = [
-              entry(`entry-${task.id}-1`, 1, { type: 'userMessage', data: { text: args.text } }),
+              entry(`entry-${task.id}-1`, 1, { type: 'userMessage', data: { text } }),
               entry(`entry-${task.id}-2`, 2, {
                 type: 'agentText',
                 data: { text: 'working on it' },
@@ -738,6 +747,7 @@ test.beforeEach(async ({ context }) => {
       callbacks.get(watcher.channel)?.({ index: watcher.index++, message: { type: 'changes', files } })
     }
     window.__fileSearches = fileSearches
+    window.__promptFileUploads = promptFileUploads
     window.__taskSearches = taskSearches
     window.__cancelledTaskSearches = cancelledTaskSearches
     window.__cancelledFileSearches = cancelledFileSearches
@@ -1984,7 +1994,7 @@ test('focuses the composer card and opens the toolbar menus above it', async ({ 
 
   await composer.getByRole('button', { name: 'Attachments and commands' }).click()
   const attachments = composer.getByRole('menu', { name: 'Attachments and commands' })
-  await expect(attachments.getByRole('menuitem', { name: 'Attach files (coming soon)' })).toBeDisabled()
+  await expect(attachments.getByRole('menuitem', { name: 'Attach files', exact: true })).toBeEnabled()
   await expect(attachments.getByRole('menuitem', { name: 'Commands (coming soon)' })).toBeDisabled()
 
   const shell = composer.getByRole('button', { name: 'Shell approvals: Ask me' })
@@ -2005,6 +2015,32 @@ test('focuses the composer card and opens the toolbar menus above it', async ({ 
   const model = composer.getByRole('menu', { name: 'Model / effort' })
   await expect(model.getByRole('menuitemradio', { name: 'gpt-6.1-terra', checked: true })).toBeVisible()
   await expect(model.getByRole('menuitemradio', { name: 'Choose effort (coming soon)' })).toBeDisabled()
+})
+
+test('queues removable files and uploads them only when sending the prompt', async ({ page }) => {
+  await page.goto('/')
+  const composer = page.locator('.composer')
+  await expect(composer.getByLabel('Prompt')).toBeEnabled()
+  await composer.getByRole('button', { name: 'Attachments and commands' }).click()
+  const chooserReady = page.waitForEvent('filechooser')
+  await composer.getByRole('menuitem', { name: 'Attach files', exact: true }).click()
+  const chooser = await chooserReady
+  await chooser.setFiles([
+    { name: 'Résumé 1.txt', mimeType: 'text/plain', buffer: Buffer.from('keep this') },
+    { name: 'remove.txt', mimeType: 'text/plain', buffer: Buffer.from('skip this') },
+  ])
+  const queue = composer.getByRole('list', { name: 'Queued attachments' })
+  await expect(queue.getByRole('listitem')).toHaveCount(2)
+  await queue.getByRole('button', { name: 'Remove attachment remove.txt' }).click()
+  await expect(queue.getByRole('listitem')).toHaveCount(1)
+  expect(await page.evaluate(() => window.__promptFileUploads)).toEqual([])
+
+  await composer.getByRole('button', { name: 'Send', exact: true }).click()
+  await expect(page.getByText('Attachments: file-1', { exact: true })).toBeVisible()
+  await expect(queue).toBeHidden()
+  expect(await page.evaluate(() => window.__promptFileUploads)).toEqual([
+    { taskId: 'task-1', name: 'Résumé 1.txt', text: 'keep this' },
+  ])
 })
 
 test('shows the agent exit and resume action, including after reopening', async ({ page }) => {
