@@ -733,7 +733,11 @@ webview.
 
 The **Shepherd terminal smoke** workflow uses an Ubuntu 24.04 runner and Xvfb
 for the same two native launches. A push to `codex/shepherd-terminal-smoke`
-starts the run. The hosted x86-64 result remains pending.
+starts the run. At `4e75638`, both launches and the native IBus Pinyin check
+passed on the hosted x86-64 runner. The popup followed the caret at both
+positions, and each selection reached the shell once. The 1 MiB burst tail
+painted in 105 ms, and all 24 paced markers appeared. The optional fish
+probe was skipped. [Hosted smoke run](https://github.com/lofi-tools/todo-lofi/actions/runs/42213055757)
 The locked Nix shell evaluates for Ubuntu and macOS without a local checkout
 override. On a minimal Ubuntu 24.04 guest, the debug build succeeded. Start
 the session bus with Ubuntu's D-Bus binaries so the daemon reads the distro's
@@ -763,7 +767,7 @@ the locked shell build Shepherd as an x86-64 executable. The guest's Nix
 `stty` rejected a PTY that Ubuntu's `stty` could read, so the smoke now reads
 the dimensions with Python's `os.get_terminal_size`. Both Pinyin candidates
 appeared by the caret and reached the shell once each. The 554 ms burst
-result measures the emulated guest. The hosted x86-64 run remains pending.
+result measures the emulated guest.
 
 At `5075c5c`, the Ubuntu 24.04.5 x86-64 guest passed all 33 regular Rust
 tests, both desktop smoke phases and the IBus candidate probe. The tested
@@ -780,7 +784,7 @@ through a synchronized screen switch and restarted both terminal scopes
 using the versioned terminal list. IBus committed `你` and `尼` once each,
 with the candidate popup by the caret at both positions. The 1 MiB burst
 tail painted in 307 ms and all 24 paced markers appeared. The optional fish
-probe was skipped. The hosted run remains pending.
+probe was skipped.
 
 ### Gate
 
@@ -960,6 +964,7 @@ Record every gate result here. Do not silently mark a gate passed.
 | 2026-11-05 | S4 | Partial | The two-launch macOS smoke drove Vim, less and fzf, distinguished Ctrl+I from Tab in interactive fish, and checked composition from scrollback, bracketed paste, SGR mouse reports, and OSC 8 hyperlink dispatch. It verified PTY size changes from both the inspector and split dividers, preserved a shared terminal across task and project switches, and restarted both shared and task terminals after relaunch. After removing the fixed delay on idle frame delivery, a debug run painted the tail of a 1 MiB burst in 102 ms and all 24 paced markers, with a 74 ms maximum gap between first paints. Run it with `direnv exec . ./scripts/smoke-shepherd-terminal.sh`. Native dead-key input passed in the packaged app. IME candidate selection and placement, Ubuntu, and the manual workday gate remain open. |
 | 2026-11-06 | S4 | Partial | Both scripted native launches passed on Ubuntu 24.04.5 ARM64 with Xvfb. The hosted x86-64 smoke, system IME candidate selection and placement, and the workday trial remain open. |
 | 2026-11-06 | S4 | Partial | Native IBus Pinyin passed after correcting the WebKitGTK caret position. The hosted x86-64 smoke, candidate-based input on macOS, and the workday trial remain open. |
+| 2026-11-06 | S4 | Partial | Both native desktop launches and the IBus candidate check passed on hosted Ubuntu x86-64 at `4e75638`. Candidate-based input on macOS and the workday trial remain open. [Hosted smoke run](https://github.com/lofi-tools/todo-lofi/actions/runs/42213055757) |
 |  | S5 |  |  |
 |  | S6 |  |  |
 |  | S7 |  |  |
