@@ -462,9 +462,13 @@ test('puts the macOS window controls and history buttons in one header row', asy
 test('shows the project, drafts a task, streams a reply and switches tasks', async ({ page }) => {
   await page.goto('/')
 
-  await expect(page.getByRole('button', { name: 'demo', exact: true })).toBeVisible()
-
-  await page.getByRole('button', { name: 'New chat in demo' }).click()
+  const project = page.getByRole('button', { name: 'demo', exact: true })
+  await expect(project).toBeVisible()
+  await project.press('Tab')
+  const compose = page.getByRole('button', { name: 'New chat in demo' })
+  await expect(compose).toBeFocused()
+  await expect(compose).toHaveCSS('opacity', '1')
+  await compose.press('Enter')
   await expect(page.locator('.task', { hasText: 'New task' })).toBeVisible()
   await expect(page.getByText('Proposed branch')).toBeVisible()
   await expect(page.getByText('shepherd/new-task')).toBeVisible()
@@ -741,7 +745,10 @@ test('shows project icons, opens archive controls on hover, and composes in anot
   await expect(directory.locator('.project-icon')).toBeVisible()
   await expect(directory.locator('.project-icon__git')).toHaveCount(0)
   await expect(page.getByRole('button', { name: /Old chat/ })).toHaveCount(0)
+  const compose = page.getByRole('button', { name: 'New chat in demo' })
+  await expect(compose).toHaveCSS('opacity', '0')
   await repository.hover()
+  await expect(compose).toHaveCSS('opacity', '1')
   const card = page.getByRole('menu', { name: 'demo' })
   await expect(card).toBeVisible()
   await expect(card.getByText('/tmp/demo', { exact: true })).toBeVisible()
@@ -760,6 +767,7 @@ test('shows project icons, opens archive controls on hover, and composes in anot
   expect(cardBounds.y).toBeCloseTo(rowBounds.y, 0)
   await page.mouse.move(cardBounds.x + 12, rowBounds.y + rowBounds.height / 2, { steps: 20 })
   await expect(card).toBeVisible()
+  await expect(compose).toHaveCSS('opacity', '0')
   const archive = page.getByRole('menuitemcheckbox', { name: 'Show archived' })
   await expect(archive).toHaveAttribute('aria-checked', 'false')
   await archive.locator('.project-menu__switch').click()
@@ -788,6 +796,7 @@ test('shows project icons, opens archive controls on hover, and composes in anot
   await projectSettings.click()
   await expect(settings.getByRole('heading', { name: 'Project settings' })).toBeVisible()
 
+  await directory.hover()
   await page.getByRole('button', { name: 'New chat in notes' }).click()
   await expect(directory).toHaveAttribute('aria-current', 'true')
   await expect(page.locator('.chat__title')).toHaveText('New task')

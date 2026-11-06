@@ -462,6 +462,19 @@ textarea {
   background: var(--background);
 }
 
+@media (hover: hover) {
+  .project-row__action {
+    opacity: 0;
+    pointer-events: none;
+  }
+
+  .project-row:hover:not(:has(> .project-menu:hover)) > .project-row__action,
+  .project-row:has(> button:focus-visible) > .project-row__action {
+    opacity: 1;
+    pointer-events: auto;
+  }
+}
+
 .project-icon {
   position: relative;
   flex: 0 0 18px;

@@ -81,8 +81,9 @@ current layout and give future changes a point of comparison.
   icons with light strokes. The text and icons share a colour. Use muted text
   for unselected projects and slightly brighter text for the selected project.
   Unselected rows rest on the sidebar's background with a transparent fill.
-  The selected row has a raised fill and no visible border. Compose opens a
-  draft in that project.
+  The selected row has a raised fill and no visible border. On devices with
+  hover, reveal Compose when the pointer is over the row or a row button has
+  keyboard focus. Compose opens a draft in that project.
 - Show task rows beneath the selected project only when more than one task is
   visible after applying the archive filter. A sole visible task opens directly
   in the conversation pane. Reserve the expanded area for task rows. Compose
