@@ -395,6 +395,22 @@ function KeyboardShortcuts(props: {
 
 export function SettingsPane(props: SettingsPaneProps) {
   const [category, setCategory] = createSignal<(typeof categories)[number]>('Workspace')
+  const [appearanceError, setAppearanceError] = createSignal('')
+  const theme = () => props.preferences?.app.theme ?? 'system'
+  const density = () => props.preferences?.app['appearance.density'] ?? 'compact'
+
+  async function chooseAppearance(key: 'theme' | 'appearance.density', input: HTMLSelectElement) {
+    setAppearanceError('')
+    const value = input.value
+    if (value !== 'system' && value !== 'light' && value !== 'dark' && value !== 'compact' && value !== 'comfortable') return
+    try {
+      await props.onEditPreference(key, value)
+    } catch (failure) {
+      setAppearanceError(settingsError(failure))
+    } finally {
+      input.value = key === 'theme' ? theme() : density()
+    }
+  }
   createEffect(on(() => props.projectSettingsRequest, (request) => {
     if (request) setCategory('Projects')
   }))
@@ -506,6 +522,26 @@ export function SettingsPane(props: SettingsPaneProps) {
             {props.projectImports}
           </Show>
           <Show when={category() === 'Appearance'}>
+            <label>
+              <span id="appearance-theme-label">Theme</span>
+              <select class="project-action" disabled={!props.preferencesEditable}
+                aria-labelledby="appearance-theme-label" value={theme()}
+                onChange={(event) => void chooseAppearance('theme', event.currentTarget)}>
+                <option value="system">System</option>
+                <option value="light">Light</option>
+                <option value="dark">Dark</option>
+              </select>
+            </label>
+            <label>
+              <span id="appearance-density-label">Density</span>
+              <select class="project-action" disabled={!props.preferencesEditable}
+                aria-labelledby="appearance-density-label" value={density()}
+                onChange={(event) => void chooseAppearance('appearance.density', event.currentTarget)}>
+                <option value="compact">Compact</option>
+                <option value="comfortable">Comfortable</option>
+              </select>
+            </label>
+            <Show when={appearanceError()}>{(message) => <p class="entry__notice--error" role="alert">{message()}</p>}</Show>
             <fieldset class="settings__accent-picker">
               <legend>Send button accent</legend>
               <For each={SEND_ACCENTS}>

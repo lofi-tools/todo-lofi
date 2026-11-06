@@ -891,6 +891,8 @@ export function archiveReviewed(taskIds: string[]): Promise<void> {
 }
 
 export interface SettingsValues {
+  theme: 'system' | 'light' | 'dark'
+  'appearance.density': 'compact' | 'comfortable'
   'tasks.show_archived': boolean
   'appearance.send_accent': 'Blue' | 'Violet' | 'Teal' | 'Amber' | 'Neutral'
   'notifications.enabled': boolean
@@ -920,6 +922,10 @@ export function reloadSettings(): Promise<SettingsSnapshot> {
 
 export function setSetting(edit: SettingsEdit): Promise<SettingsSnapshot> {
   return invoke('set_setting', { edit })
+}
+
+export function setTerminalAppearance(light: boolean, moreContrast: boolean): Promise<void> {
+  return invoke('set_terminal_appearance', { appearance: { light, moreContrast } })
 }
 
 export function notifyTaskNeedsInput(taskId: string): Promise<void> {

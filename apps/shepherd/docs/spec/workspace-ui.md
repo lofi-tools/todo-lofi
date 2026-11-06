@@ -123,6 +123,10 @@ current layout and give future changes a point of comparison.
   the selected project override them. Reset removes the project override.
   **Reload settings** reads the settings file and lets users review pending
   changes if a value changed on disk.
+- **Settings → Appearance** offers System, Light, and Dark, with System as the
+  default. Compact density keeps the default spacing. Comfortable adds space
+  between task rows and transcript entries and around inspector content.
+  The terminal follows the active theme without a restart.
 - **Settings → Keyboard shortcuts** shows the current binding for each
   command. **Edit** focuses a recorder, **Save shortcut** applies the chord
   immediately, and **Reset** restores the default. Escape cancels recording
@@ -184,7 +188,7 @@ current layout and give future changes a point of comparison.
   prompt starts the chat.
 - The agent and project names are inline pickers. Keep the surrounding
   headline typography, underline each name, and add a small down caret. The
-  triggers have transparent backgrounds and no borders. Use Shepherd's dark
+  triggers have transparent backgrounds and no borders. Use Shepherd's themed
   popover styling for the expanded menus. The project picker switches the
   selected project. Codex is the default agent. **Freebuff (terminal)** opens
   a standalone terminal that fills the conversation pane. Use **Back to chat**

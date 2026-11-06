@@ -259,6 +259,7 @@ pub fn run() -> Result<(), tauri::Error> {
             bridge::commands::archive_reviewed,
             settings::reload_settings,
             settings::set_setting,
+            bridge::commands::set_terminal_appearance,
             attention::notify_task_needs_input,
             bridge::commands::git_file_diff,
             bridge::commands::git_snapshot,

@@ -1023,7 +1023,12 @@ and the task header never overstates the tier.
   backups and per-setting conflict checks. Workspace defaults and project
   overrides govern archive visibility, attachment limits and terminal
   scrollback. Notifications and the Send accent are stored at app scope.
-- [ ] Themes and accessibility.
+- [x] Built-in themes and density.
+  Appearance saves System, Light or Dark, plus Compact or Comfortable
+  density. Shell and terminal tokens follow the active theme and increased
+  contrast. Terminal palette updates preserve explicit colors. Chromium
+  checks color contrast and saved appearance.
+- [ ] Accessibility.
 - [ ] Review/archive edge cases; leave the 30-day worktree collection to S7.
 - [ ] Status bar, window title and empty states.
 

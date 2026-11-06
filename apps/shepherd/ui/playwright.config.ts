@@ -7,6 +7,7 @@ export default defineConfig({
   reporter: process.env.CI ? 'github' : 'list',
   use: {
     baseURL: 'http://localhost:1421',
+    colorScheme: 'dark',
     trace: 'on-first-retry',
   },
   // Uses the locally installed Chrome, like the other suites here, so no

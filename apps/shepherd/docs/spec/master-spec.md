@@ -1106,7 +1106,12 @@ is bounded (scrollback, stderr, search results, per-task event queue).
 - The canvas terminal keeps an off-screen text mirror in the accessibility tree
   and supports a keyboard copy mode, so reading and copying never require a mouse.
 - Themes are built in for v1 (light, dark and the system preference); custom
-  theme creation is deferred. Keybindings are edited in-app; invalid values,
+  theme creation is deferred. **Settings → Appearance** saves the choice in
+  `app["theme"]` and follows the system by default. Compact is the default
+  density. Comfortable adds space to task rows, the transcript and inspector
+  content. The terminal updates its default and ANSI colors while open and
+  preserves colors set explicitly by terminal applications.
+  Keybindings are edited in-app; invalid values,
   conflicting chords and multi-chord sequences are rejected with a reason and
   cannot prevent startup.
 

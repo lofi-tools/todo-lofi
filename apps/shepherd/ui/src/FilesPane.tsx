@@ -298,7 +298,8 @@ function FileViewer(props: FileLocation & FileSelection) {
                     })
                   }}>
                   <span class="files-viewer__number" aria-hidden="true">{current().firstLine + index()}</span>
-                  <span><For each={line}>{(part) => <span style={{ color: part.color ?? undefined }}>{part.text}</span>}</For></span>
+                  <span><For each={line}>{(part) => <span classList={{ 'files-viewer__syntax': !!part.color }}
+                    style={{ '--syntax-color': part.color ?? undefined }}>{part.text}</span>}</For></span>
                 </span>
               )}</For>
             </code></pre>

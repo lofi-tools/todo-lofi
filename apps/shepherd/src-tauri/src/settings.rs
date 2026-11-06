@@ -16,6 +16,10 @@ const MAX_SCROLLBACK: u64 = 100_000;
 
 #[derive(Clone, Copy, Deserialize)]
 pub enum SettingKey {
+    #[serde(rename = "theme")]
+    Theme,
+    #[serde(rename = "appearance.density")]
+    Density,
     #[serde(rename = "tasks.show_archived")]
     ShowArchived,
     #[serde(rename = "appearance.send_accent")]
@@ -29,7 +33,9 @@ pub enum SettingKey {
 }
 
 impl SettingKey {
-    const ALL: [Self; 5] = [
+    const ALL: [Self; 7] = [
+        Self::Theme,
+        Self::Density,
         Self::ShowArchived,
         Self::SendAccent,
         Self::Notifications,
@@ -39,6 +45,8 @@ impl SettingKey {
 
     fn name(self) -> &'static str {
         match self {
+            Self::Theme => "theme",
+            Self::Density => "appearance.density",
             Self::ShowArchived => "tasks.show_archived",
             Self::SendAccent => "appearance.send_accent",
             Self::Notifications => "notifications.enabled",
@@ -49,6 +57,8 @@ impl SettingKey {
 
     fn default_value(self) -> Value {
         match self {
+            Self::Theme => json!("system"),
+            Self::Density => json!("compact"),
             Self::ShowArchived | Self::Notifications => json!(false),
             Self::SendAccent => json!("Blue"),
             Self::AttachmentBytes => json!(DEFAULT_ATTACHMENT_BYTES),
@@ -65,6 +75,12 @@ impl SettingKey {
 
     fn validate(self, value: &Value) -> Result<(), String> {
         let reason = match self {
+            Self::Theme if !matches!(value.as_str(), Some("system" | "light" | "dark")) => {
+                "Choose system, light, or dark."
+            }
+            Self::Density if !matches!(value.as_str(), Some("compact" | "comfortable")) => {
+                "Choose compact or comfortable."
+            }
             Self::ShowArchived | Self::Notifications if !value.is_boolean() => {
                 "Enter true or false."
             }

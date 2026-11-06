@@ -24,6 +24,46 @@ use alacritty_terminal::vte::{Params, Parser, Perform};
 use compact_str::CompactString;
 use serde::{Deserialize, Serialize};
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TerminalAppearance {
+    light: bool,
+    more_contrast: bool,
+}
+
+impl TerminalAppearance {
+    fn foreground(self) -> u32 {
+        match (self.light, self.more_contrast) {
+            (true, true) => 0x000000,
+            (true, false) => 0x242633,
+            (false, true) => 0xffffff,
+            (false, false) => 0xe6e6ea,
+        }
+    }
+
+    fn background(self) -> u32 {
+        match (self.light, self.more_contrast) {
+            (true, _) => 0xffffff,
+            (false, true) => 0x08080a,
+            (false, false) => 0x131316,
+        }
+    }
+
+    fn ansi(self) -> &'static [u32; 16] {
+        if self.light {
+            &[
+                0x21232b, 0x963539, 0x35602f, 0x76500f, 0x304d9c, 0x653c9b, 0x206367, 0x525565,
+                0x53596a, 0xa32c45, 0x286541, 0x805309, 0x344eaf, 0x7345a2, 0x236675, 0x333747,
+            ]
+        } else {
+            &[
+                0x1d1d22, 0xe06a6a, 0x7fb37f, 0xd9b06a, 0x6f8fdc, 0xb48cff, 0x6fbfc0, 0xd6d6de,
+                0x888897, 0xf08a8a, 0x9fd39f, 0xf0cc8a, 0x8faff0, 0xccb3ff, 0x8fd6d6, 0xffffff,
+            ]
+        }
+    }
+}
+
 #[derive(Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TerminalFrame {
@@ -257,6 +297,7 @@ impl Perform for KeyboardSequence {
 }
 
 pub struct Screen {
+    appearance: TerminalAppearance,
     term: Term<PtyReplies>,
     replies: PtyReplies,
     ready_replies: Vec<u8>,
@@ -281,6 +322,7 @@ impl Screen {
         let size = ScreenSize { columns, rows };
         let replies = PtyReplies::default();
         Self {
+            appearance: TerminalAppearance::default(),
             term: Term::new(
                 Config {
                     scrolling_history,
@@ -301,6 +343,14 @@ impl Screen {
             columns,
             rows,
         }
+    }
+
+    pub fn set_appearance(&mut self, appearance: TerminalAppearance) -> bool {
+        if self.appearance == appearance {
+            return false;
+        }
+        self.appearance = appearance;
+        true
     }
 
     pub fn process(&mut self, mut bytes: &[u8]) {
@@ -392,7 +442,7 @@ impl Screen {
                         258 => Color::Named(NamedColor::Cursor),
                         _ => continue,
                     };
-                    let value = color_to_rgb(self.term.colors(), color);
+                    let value = color_to_rgb(self.term.colors(), color, self.appearance);
                     format(Rgb {
                         r: (value >> 16) as u8,
                         g: (value >> 8) as u8,
@@ -553,8 +603,8 @@ impl Screen {
 
         for indexed in grid.display_iter() {
             let cell = indexed.cell;
-            let mut foreground = color_to_rgb(self.term.colors(), cell.fg);
-            let mut background = color_to_rgb(self.term.colors(), cell.bg);
+            let mut foreground = color_to_rgb(self.term.colors(), cell.fg, self.appearance);
+            let mut background = color_to_rgb(self.term.colors(), cell.bg, self.appearance);
             if cell.flags.contains(Flags::INVERSE) {
                 std::mem::swap(&mut foreground, &mut background);
             }
@@ -613,16 +663,16 @@ impl Screen {
     }
 }
 
-fn color_to_rgb(colors: &Colors, color: Color) -> u32 {
+fn color_to_rgb(colors: &Colors, color: Color, appearance: TerminalAppearance) -> u32 {
     let value = match color {
         Color::Spec(value) => value,
         Color::Indexed(index) => match colors[usize::from(index)] {
             Some(value) => value,
-            None => return indexed(index),
+            None => return indexed(index, appearance),
         },
         Color::Named(named) => match colors[named] {
             Some(value) => value,
-            None => return named_color(named),
+            None => return named_color(named, appearance),
         },
     };
     rgb(value.r, value.g, value.b)
@@ -632,13 +682,9 @@ fn rgb(r: u8, g: u8, b: u8) -> u32 {
     (u32::from(r) << 16) | (u32::from(g) << 8) | u32::from(b)
 }
 
-fn indexed(index: u8) -> u32 {
-    const BASE: [u32; 16] = [
-        0x1d1d22, 0xe06a6a, 0x7fb37f, 0xd9b06a, 0x6f8fdc, 0xb48cff, 0x6fbfc0, 0xd6d6de, 0x5f5f6b,
-        0xf08a8a, 0x9fd39f, 0xf0cc8a, 0x8faff0, 0xccb3ff, 0x8fd6d6, 0xffffff,
-    ];
-    if index < 16 {
-        return BASE[index as usize];
+fn indexed(index: u8, appearance: TerminalAppearance) -> u32 {
+    if let Some(color) = appearance.ansi().get(usize::from(index)) {
+        return *color;
     }
     if index < 232 {
         let cube = index - 16;
@@ -652,26 +698,23 @@ fn indexed(index: u8) -> u32 {
     rgb(level, level, level)
 }
 
-fn named_color(color: NamedColor) -> u32 {
+fn named_color(color: NamedColor, appearance: TerminalAppearance) -> u32 {
+    if let Some(color) = appearance.ansi().get(color as usize) {
+        return *color;
+    }
     match color {
-        NamedColor::Foreground | NamedColor::BrightWhite => 0xe6e6ea,
-        NamedColor::Background => 0x131316,
-        NamedColor::Cursor => 0xe6e6ea,
-        NamedColor::Black => 0x1d1d22,
-        NamedColor::Red => 0xe06a6a,
-        NamedColor::Green => 0x7fb37f,
-        NamedColor::Yellow => 0xd9b06a,
-        NamedColor::Blue => 0x6f8fdc,
-        NamedColor::Magenta => 0xb48cff,
-        NamedColor::Cyan => 0x6fbfc0,
-        NamedColor::White => 0xd6d6de,
-        NamedColor::BrightBlack => 0x5f5f6b,
-        NamedColor::BrightRed => 0xf08a8a,
-        NamedColor::BrightGreen => 0x9fd39f,
-        NamedColor::BrightYellow => 0xf0cc8a,
-        NamedColor::BrightBlue => 0x8faff0,
-        NamedColor::BrightMagenta => 0xccb3ff,
-        NamedColor::BrightCyan => 0x8fd6d6,
+        NamedColor::Background => appearance.background(),
+        NamedColor::Foreground | NamedColor::BrightForeground | NamedColor::Cursor => {
+            appearance.foreground()
+        }
+        NamedColor::DimForeground | NamedColor::DimWhite => appearance.ansi()[7],
+        NamedColor::DimBlack if appearance.light => appearance.ansi()[8],
+        NamedColor::DimRed if appearance.light => appearance.ansi()[1],
+        NamedColor::DimGreen if appearance.light => appearance.ansi()[2],
+        NamedColor::DimYellow if appearance.light => appearance.ansi()[3],
+        NamedColor::DimBlue if appearance.light => appearance.ansi()[4],
+        NamedColor::DimMagenta if appearance.light => appearance.ansi()[5],
+        NamedColor::DimCyan if appearance.light => appearance.ansi()[6],
         NamedColor::DimBlack => 0x17171b,
         NamedColor::DimRed => 0xa85555,
         NamedColor::DimGreen => 0x628a62,
@@ -679,9 +722,7 @@ fn named_color(color: NamedColor) -> u32 {
         NamedColor::DimBlue => 0x5570b0,
         NamedColor::DimMagenta => 0x8a6bc4,
         NamedColor::DimCyan => 0x559394,
-        NamedColor::DimWhite => 0xa5a5ad,
-        NamedColor::BrightForeground => 0xffffff,
-        NamedColor::DimForeground => 0xa5a5ad,
+        _ => appearance.foreground(),
     }
 }
 
@@ -953,6 +994,53 @@ mod tests {
         let replies = screen.take_replies();
         assert!(String::from_utf8_lossy(&replies).contains("rgb:1212/3434/5656"));
         assert!(screen.take_replies().is_empty());
+    }
+
+    #[test]
+    fn switching_appearance_recolors_the_viewport_and_keeps_explicit_colors() {
+        let mut screen = Screen::new(10, 3);
+        screen.process(b"D\x1b[31mR\x1b[38;2;18;52;86mT\x1b[0m");
+        assert_eq!(
+            screen.frame().cells.first().map(|cell| cell.background),
+            Some(0x131316)
+        );
+        let appearance = TerminalAppearance {
+            light: true,
+            more_contrast: false,
+        };
+        assert!(screen.set_appearance(appearance));
+        assert!(!screen.set_appearance(appearance));
+        let frame = screen.frame();
+        assert_eq!(
+            frame
+                .cells
+                .first()
+                .map(|cell| (cell.foreground, cell.background)),
+            Some((0x242633, 0xffffff))
+        );
+        assert_eq!(
+            frame.cells.get(1).map(|cell| cell.foreground),
+            Some(0x963539)
+        );
+        assert_eq!(
+            frame.cells.get(2).map(|cell| cell.foreground),
+            Some(0x123456)
+        );
+        screen.process(b"\x1b]11;?\x07\x1b]4;1;#2a4c6e\x07");
+        assert!(String::from_utf8_lossy(&screen.take_replies()).contains("rgb:ffff/ffff/ffff"));
+        screen.set_appearance(TerminalAppearance {
+            light: false,
+            more_contrast: true,
+        });
+        let frame = screen.frame();
+        assert_eq!(
+            frame.cells.first().map(|cell| cell.background),
+            Some(0x08080a)
+        );
+        assert_eq!(
+            frame.cells.get(1).map(|cell| cell.foreground),
+            Some(0x2a4c6e)
+        );
     }
 
     #[test]

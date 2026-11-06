@@ -44,7 +44,7 @@ use crate::file_actions::{self, FileAction};
 use crate::file_watch::{FileWatchUpdate, WorkspaceWatch};
 use crate::pty_terminal::PtyTerminals;
 use crate::settings::{DEFAULT_ATTACHMENT_BYTES, DEFAULT_SCROLLBACK, SettingKey, Settings};
-use crate::terminal_screen::{Screen, SearchDirection, TerminalFrame};
+use crate::terminal_screen::{Screen, SearchDirection, TerminalAppearance, TerminalFrame};
 
 #[derive(Debug, thiserror::Error, Serialize)]
 #[error("{message}")]
@@ -210,6 +210,7 @@ impl ScreenSlot {
 pub(crate) struct TerminalHost {
     engine: Arc<Mutex<PtyTerminals>>,
     screens: Arc<Mutex<BTreeMap<String, Arc<Mutex<ScreenSlot>>>>>,
+    appearance: Arc<Mutex<TerminalAppearance>>,
 }
 
 impl Default for TerminalHost {
@@ -217,6 +218,7 @@ impl Default for TerminalHost {
         Self {
             engine: Arc::new(Mutex::new(PtyTerminals::new())),
             screens: Arc::new(Mutex::new(BTreeMap::new())),
+            appearance: Arc::new(Mutex::new(TerminalAppearance::default())),
         }
     }
 }
@@ -248,7 +250,9 @@ impl TerminalHost {
             .await
             .spawn(spec, events)
             .map_err(|error| BridgeError::new("terminal", error.to_string()))?;
-        let screen = Screen::with_scrollback(usize::from(columns), usize::from(rows), scrollback);
+        let mut screen =
+            Screen::with_scrollback(usize::from(columns), usize::from(rows), scrollback);
+        screen.set_appearance(*self.appearance.lock().await);
         let (frames, _) = watch::channel(Arc::new(screen.frame()));
         let slot = Arc::new(Mutex::new(ScreenSlot {
             revision: 0,
@@ -257,6 +261,17 @@ impl TerminalHost {
         }));
         screens.insert(id.as_str().to_string(), slot.clone());
         Ok(PreparedTerminal { id, slot, output })
+    }
+
+    async fn set_appearance(&self, appearance: TerminalAppearance) {
+        let screens = self.screens.lock().await;
+        *self.appearance.lock().await = appearance;
+        for slot in screens.values() {
+            let mut slot = slot.lock().await;
+            if slot.screen.set_appearance(appearance) {
+                slot.publish();
+            }
+        }
     }
 
     fn observe(
@@ -1651,6 +1666,15 @@ pub mod commands {
     use tauri::State;
 
     use super::*;
+
+    #[tauri::command]
+    pub async fn set_terminal_appearance(
+        state: State<'_, ShellState>,
+        appearance: TerminalAppearance,
+    ) -> Result<(), BridgeError> {
+        state.terminals.set_appearance(appearance).await;
+        Ok(())
+    }
 
     #[tauri::command]
     pub fn agent_availability(state: State<'_, ShellState>) -> BTreeMap<&'static str, bool> {

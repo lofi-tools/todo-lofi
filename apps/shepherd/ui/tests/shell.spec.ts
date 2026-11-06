@@ -26,6 +26,7 @@ test.beforeEach(async ({ context }) => {
     let screenshotSaves = 0
     const notifications: string[] = []
     const dockCounts: Array<number | undefined> = []
+    const terminalAppearances: Array<{ light: boolean; moreContrast: boolean }> = []
     const archiveRequests: string[][] = []
     const gitMutations: GitMutation[] = []
     const gitState = () => {
@@ -61,6 +62,7 @@ test.beforeEach(async ({ context }) => {
     const options = new URLSearchParams(window.location.search)
     function readPreferences() {
       const defaults = {
+        theme: 'system', 'appearance.density': 'compact',
         'tasks.show_archived': false, 'notifications.enabled': false, 'appearance.send_accent': 'Blue',
         'attachments.max_file_bytes': 50_000_000, 'terminal.scrollback_lines': 10_000,
       }
@@ -438,6 +440,9 @@ test.beforeEach(async ({ context }) => {
           }
           case 'notify_task_needs_input':
             notifications.push(args.taskId)
+            return null
+          case 'set_terminal_appearance':
+            terminalAppearances.push(args.appearance)
             return null
           case 'plugin:window|set_badge_count':
             dockCounts.push(args.value)
@@ -929,6 +934,7 @@ test.beforeEach(async ({ context }) => {
     window.__cancelRequests = () => cancelRequests
     window.__terminalLayout = () => terminalLayout
     window.__notifications = notifications
+    window.__terminalAppearances = terminalAppearances
     window.__dockCounts = dockCounts
     window.__archiveRequests = archiveRequests
     window.__gitMutations = gitMutations
@@ -2469,6 +2475,69 @@ test('imports an existing Send accent into settings once', async ({ page }) => {
   await expect(page.getByRole('button', { name: 'Send', exact: true })).toHaveAttribute('data-send-accent', 'Violet')
   const saved = await page.evaluate(() => JSON.parse(localStorage.getItem('fixture.settings') ?? '{}'))
   expect(saved.app['appearance.send_accent']).toBe('Violet')
+})
+
+test('follows system appearance, persists theme and density, and keeps shell tokens readable', async ({ page }) => {
+  await page.emulateMedia({ colorScheme: 'light' })
+  await page.goto('/')
+  const root = page.locator('html')
+  await expect(root).toHaveAttribute('data-theme', 'light')
+  await expect.poll(() => page.evaluate(() => window.__terminalAppearances.at(-1))).toEqual({ light: true, moreContrast: false })
+
+  async function expectReadableColors() {
+    const ratios = await page.evaluate(() => {
+      const style = getComputedStyle(document.documentElement)
+      const luminance = (token: string) => {
+        const hex = style.getPropertyValue(token).trim().slice(1)
+        const channels = [0, 2, 4].map((offset) => parseInt(hex.slice(offset, offset + 2), 16) / 255)
+          .map((channel) => channel <= 0.04045 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4)
+        return 0.2126 * channels[0] + 0.7152 * channels[1] + 0.0722 * channels[2]
+      }
+      const contrast = (first: string, second: string) => {
+        const lightness = [luminance(first), luminance(second)].sort((left, right) => right - left)
+        return (lightness[0] + 0.05) / (lightness[1] + 0.05)
+      }
+      return {
+        text: ['--text', '--text-secondary', '--text-muted', '--error-text', '--success-text']
+          .flatMap((ink) => ['--surface', '--surface-raised'].map((surface) => contrast(ink, surface))),
+        send: ['--send-blue', '--send-violet', '--send-teal', '--send-amber', '--send-neutral']
+          .map((background) => contrast('--on-send-accent', background)),
+        indicators: ['--focus', '--status-working', '--status-waiting', '--status-review', '--status-failed']
+          .map((ink) => contrast(ink, '--surface-raised')),
+      }
+    })
+    expect(Math.min(...ratios.text, ...ratios.send)).toBeGreaterThanOrEqual(4.5)
+    expect(Math.min(...ratios.indicators)).toBeGreaterThanOrEqual(3)
+  }
+
+  await expectReadableColors()
+  const settings = page.getByRole('button', { name: 'Settings', exact: true })
+  const appearance = page.getByRole('button', { name: 'Appearance', exact: true })
+  const theme = page.getByLabel('Theme', { exact: true })
+  const density = page.getByLabel('Density', { exact: true })
+  await settings.click()
+  await appearance.click()
+  await expect(theme).toHaveValue('system')
+  await theme.selectOption('dark')
+  await expect(root).toHaveAttribute('data-theme', 'dark')
+  await density.selectOption('comfortable')
+  await expect(root).toHaveAttribute('data-density', 'comfortable')
+  await expectReadableColors()
+  await page.reload()
+  await expect(root).toHaveAttribute('data-theme', 'dark')
+  await expect(root).toHaveAttribute('data-density', 'comfortable')
+  await page.emulateMedia({ contrast: 'more', reducedMotion: 'reduce' })
+  await expect(root).toHaveAttribute('data-contrast', 'more')
+  await expect.poll(() => page.evaluate(() => window.__terminalAppearances.at(-1))).toEqual({ light: false, moreContrast: true })
+  await expectReadableColors()
+  await settings.click()
+  await appearance.click()
+  await theme.selectOption('system')
+  await expect(root).toHaveAttribute('data-theme', 'light')
+  await expectReadableColors()
+  await page.emulateMedia({ colorScheme: 'dark' })
+  await expect(root).toHaveAttribute('data-theme', 'dark')
+  await expect.poll(() => page.evaluate(() => window.__terminalAppearances.at(-1))).toEqual({ light: false, moreContrast: true })
 })
 
 test('focuses the composer card and opens the toolbar menus above it', async ({ page }) => {

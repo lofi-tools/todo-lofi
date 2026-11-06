@@ -629,7 +629,6 @@ function formatExit(exitCode: number | null): string {
 
 const FONT = '13px ui-monospace, SFMono-Regular, Menlo, monospace'
 const LINE_HEIGHT = 17
-const DEFAULT_BACKGROUND = 0x131316
 const APP_CURSOR = 1 << 1
 const ALT_SCREEN = 1 << 12
 const ALTERNATE_SCROLL = 1 << 15
@@ -645,6 +644,19 @@ const MOUSE_REPORTING = MOUSE_CLICK | MOUSE_MOTION | MOUSE_DRAG
 const MAX_PENDING_INPUT_WRITES = 128
 const MAX_PENDING_INPUT_BYTES = 1024 * 1024
 const INPUT_RELEASE_BUDGET = 128
+
+function terminalPaintColors() {
+  const style = getComputedStyle(document.documentElement)
+  const background = style.getPropertyValue('--terminal-background').trim()
+  return {
+    background,
+    backgroundValue: Number.parseInt(background.slice(1), 16),
+    search: style.getPropertyValue('--terminal-search').trim(),
+    selection: style.getPropertyValue('--terminal-selection').trim(),
+    cursor: style.getPropertyValue('--terminal-cursor').trim(),
+    blockCursor: style.getPropertyValue('--terminal-block-cursor').trim(),
+  }
+}
 
 function TerminalCanvas(props: { terminalId: string; shown: boolean; focusRequest: { id: string } | undefined; onFocus?: (id: string | null) => void; onMeasure?: (size: TerminalSize) => void }) {
   const mac = navigator.platform.startsWith('Mac')
@@ -686,6 +698,7 @@ function TerminalCanvas(props: { terminalId: string; shown: boolean; focusReques
   let verticalWheelRemainder = 0
   let horizontalWheelRemainder = 0
   let reportedFocus: boolean | undefined
+  let paintColors = terminalPaintColors()
 
   createEffect(() => {
     if (props.focusRequest?.id === props.terminalId) input?.focus({ preventScroll: true })
@@ -760,15 +773,15 @@ function TerminalCanvas(props: { terminalId: string; shown: boolean; focusReques
     for (const row of rows) {
       const y = row * LINE_HEIGHT
       const start = row * columns
-      context.fillStyle = hex(DEFAULT_BACKGROUND)
+      context.fillStyle = paintColors.background
       context.fillRect(0, y, width, LINE_HEIGHT)
       for (let column = 0; column < columns; column++) {
         const cell = current.cells[start + column]
-        if (cell.background === DEFAULT_BACKGROUND) continue
+        if (cell.background === paintColors.backgroundValue) continue
         context.fillStyle = hex(cell.background)
         context.fillRect(column * cellWidth, y, cellWidth, LINE_HEIGHT)
       }
-      for (const [range, color] of [[highlight, 'rgba(217, 176, 106, 0.45)'], [selected, 'rgba(111, 143, 220, 0.5)']] as const) {
+      for (const [range, color] of [[highlight, paintColors.search], [selected, paintColors.selection]] as const) {
         if (!range) continue
         const first = Math.max(0, range[0] - start)
         const last = Math.min(columns - 1, range[1] - start)
@@ -792,14 +805,14 @@ function TerminalCanvas(props: { terminalId: string; shown: boolean; focusReques
       }
       if (current.cursorVisible && row === current.cursorRow) {
         const x = current.cursorColumn * cellWidth
-        context.fillStyle = 'rgba(230, 230, 234, 0.6)'
+        context.fillStyle = paintColors.cursor
         if (current.cursorStyle === 1) context.fillRect(x, y + LINE_HEIGHT - 2, cellWidth, 2)
         else if (current.cursorStyle === 2) context.fillRect(x, y, 2, LINE_HEIGHT)
         else if (current.cursorStyle === 3) {
           context.strokeStyle = context.fillStyle
           context.strokeRect(x + 0.5, y + 0.5, cellWidth - 1, LINE_HEIGHT - 1)
         } else {
-          context.fillStyle = 'rgba(230, 230, 234, 0.35)'
+          context.fillStyle = paintColors.blockCursor
           context.fillRect(x, y, cellWidth, LINE_HEIGHT)
         }
       }
@@ -1173,11 +1186,18 @@ function TerminalCanvas(props: { terminalId: string; shown: boolean; focusReques
   }
 
   onMount(() => {
+    const appearance = new MutationObserver(() => {
+      paintColors = terminalPaintColors()
+      scheduleDraw()
+    })
+    appearance.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme', 'data-contrast'] })
+    onCleanup(() => appearance.disconnect())
+    paintColors = terminalPaintColors()
     const context = canvas?.getContext('2d')
     if (context) {
       context.font = FONT
       cellWidth = Math.max(6, context.measureText('M').width)
-      context.fillStyle = '#131316'
+      context.fillStyle = paintColors.background
       context.fillRect(0, 0, canvas?.width ?? 0, canvas?.height ?? 0)
     }
 

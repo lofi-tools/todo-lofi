@@ -1097,6 +1097,7 @@ async function smoke() {
   ;(await enabledButton('Settings')).click()
   const { terminals: [terminal] } = await bridge.terminalList(project.id)
   if (!terminal) throw new Error('The fixture terminal was not started')
+  await exerciseAppearance(terminal.id)
   if (windowChecks) {
     await waitFor('terminal canvas frame', () => document.querySelector<HTMLCanvasElement>('.terminal-view__canvas')?.style.height)
     await exerciseInspectorResize(terminal)
@@ -1137,12 +1138,13 @@ async function smoke() {
   await openInspectorTab('git')
   await requestQuitWithLiveTask(3)
   return { ok: true, quitWarning: true, taskSwitch: true, projectSwitch: true, roundTrip: true,
-    splitReattach: true, commandPalette: true, savedKeybinding: true, savedProjectSettings: true,
+    splitReattach: true, commandPalette: true, savedKeybinding: true, savedProjectSettings: true, themedTerminal: true,
     fishKeyBindings: __SHEPHERD_SMOKE_FISH__, bracketedPaste: true, ...windowResults }
 }
 
 async function restore() {
   await waitFor('persisted command binding', () => button('Command palette')?.getAttribute('aria-keyshortcuts') === 'F9')
+  await waitFor('persisted light theme', () => document.documentElement.dataset.theme === 'light')
   const { projects } = await bridge.projectList()
   const project = projects.find((entry) => entry.path === __SHEPHERD_SMOKE_PROJECT__)
   if (!project) throw new Error('The fixture project was not restored')
@@ -1204,6 +1206,37 @@ async function restore() {
   await waitFor('resumed session in the native transcript', () => chatState() === 'ready' &&
     document.querySelector('.entry__notice')?.textContent?.includes('resumed the previous agent session'))
   return { ok: true, restoredLayout: true, restartedTerminal: true, restartedTaskTerminal: true, resumedInterruptedTask: true }
+}
+
+async function exerciseAppearance(terminalId: string) {
+  let frame: bridge.TerminalFrame | undefined
+  let subscriptionFailure: unknown
+  const close = await bridge.subscribeTerminal(terminalId, (next) => { frame = next }, (failure) => { subscriptionFailure = failure })
+  try {
+    ;(await enabledButton('Settings')).click()
+    ;(await enabledButton('Appearance')).click()
+    const setTheme = async (theme: string) => {
+      const select = await waitFor('theme choice', () =>
+        document.querySelector<HTMLSelectElement>('.settings label select:enabled'))
+      select.value = theme
+      select.dispatchEvent(new Event('change', { bubbles: true }))
+      await waitFor(`saved ${theme} theme`, () => document.documentElement.dataset.theme === theme && !select.disabled)
+    }
+    await setTheme('dark')
+    await waitFor('dark terminal frame', () => {
+      if (subscriptionFailure) throw subscriptionFailure
+      const background = frame?.cells.at(-1)?.background
+      return background === 0x131316 || background === 0x08080a
+    })
+    await setTheme('light')
+    await waitFor('repainted light terminal frame', () => {
+      if (subscriptionFailure) throw subscriptionFailure
+      return frame?.cells.at(-1)?.background === 0xffffff
+    })
+    ;(await enabledButton('Settings')).click()
+  } finally {
+    await close()
+  }
 }
 
 async function verifyBackgroundWindow() {

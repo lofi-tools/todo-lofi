@@ -175,6 +175,36 @@ export function App() {
   const [projectMenuId, setProjectMenuId] = createSignal<string>()
   const [settingsOpen, setSettingsOpen] = createSignal(false)
   const [preferences, setPreferences] = createSignal<bridge.SettingsSnapshot>()
+  const prefersLight = window.matchMedia('(prefers-color-scheme: light)')
+  const prefersContrast = window.matchMedia('(prefers-contrast: more)')
+  const [systemLight, setSystemLight] = createSignal(prefersLight.matches)
+  const [moreContrast, setMoreContrast] = createSignal(prefersContrast.matches)
+  const lightTheme = createMemo(() => {
+    const selected = preferences()?.app.theme ?? 'system'
+    return selected === 'light' || (selected === 'system' && systemLight())
+  })
+  const density = createMemo(() => preferences()?.app['appearance.density'] ?? 'compact')
+  let pendingTerminalAppearance = Promise.resolve()
+  onMount(() => {
+    const light = (event: MediaQueryListEvent) => setSystemLight(event.matches)
+    const contrast = (event: MediaQueryListEvent) => setMoreContrast(event.matches)
+    prefersLight.addEventListener('change', light)
+    prefersContrast.addEventListener('change', contrast)
+    onCleanup(() => {
+      prefersLight.removeEventListener('change', light)
+      prefersContrast.removeEventListener('change', contrast)
+    })
+  })
+  createEffect(() => {
+    const light = lightTheme()
+    const contrast = moreContrast()
+    document.documentElement.dataset.theme = light ? 'light' : 'dark'
+    document.documentElement.dataset.contrast = contrast ? 'more' : 'normal'
+    pendingTerminalAppearance = pendingTerminalAppearance
+      .then(() => bridge.setTerminalAppearance(light, contrast))
+      .catch((failure) => { setError(describe(failure)) })
+  })
+  createEffect(() => { document.documentElement.dataset.density = density() })
   const [savingPreference, setSavingPreference] = createSignal(false)
   const [settingsConflicts, setSettingsConflicts] = createSignal<Omit<bridge.SettingsEdit, 'previous'>[]>([])
   const preferencesEditable = () => !!preferences() && !preferences()?.warning && !savingPreference()
