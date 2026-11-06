@@ -906,7 +906,13 @@ If Pi’s RPC probe is blocked, proceed with ACP while resolving it.
 
 ### Proof
 
-- [ ] Contract fixtures per adapter.
+- [x] Contract fixtures for the implemented Codex, OpenCode and ACP adapters
+  and Pi RPC transport. The OpenCode fixture negotiates the native HTTP API
+  and admits only the matching prompt before streaming its session events. The
+  Pi subprocess fixture verifies the startup probe, dialog reply correlation,
+  handled command disposition, and process exit with stderr kept off the wire.
+- [ ] Pi lifecycle and approval bridge contract fixtures when those paths are
+  implemented.
 - [ ] One live smoke per installed OpenCode, Pi and Claude/ACP integration,
   gated in CI.
 - [ ] Approval, cancel, resume and failure paths where the tier supports them.

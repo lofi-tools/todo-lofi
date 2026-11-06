@@ -1215,8 +1215,18 @@ fn protocol_error(context: &str, error: impl std::fmt::Display) -> HarnessError 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::io::AsyncWriteExt;
+    use tokio::io::{AsyncRead, AsyncWriteExt};
     use tokio::net::TcpListener;
+
+    const NATIVE_API: &str = r#"{"paths":{
+        "/api/event": {"get": {}},
+        "/api/session": {"post": {}},
+        "/api/session/{sessionID}": {"get": {}},
+        "/api/session/{sessionID}/prompt": {"post": {}},
+        "/api/session/{sessionID}/inbox/{inboxID}": {"delete": {}},
+        "/api/session/{sessionID}/interrupt": {"post": {}},
+        "/api/session/{sessionID}/permission/{requestID}/reply": {"post": {}}
+    }}"#;
 
     #[test]
     fn reads_an_explicit_opencode_executable() -> Result<(), Box<dyn std::error::Error>> {
@@ -1243,13 +1253,17 @@ mod tests {
     #[test]
     fn requires_the_server_to_advertise_permission_replies()
     -> Result<(), Box<dyn std::error::Error>> {
-        let mut api: Api = serde_json::from_value(json!({"paths": {
-            "/api/event": {"get": {}},
-            "/api/session": {"post": {}},
-            "/api/session/{sessionID}/prompt": {"post": {}},
-            "/api/session/{sessionID}/inbox/{inboxID}": {"delete": {}},
-            "/api/session/{sessionID}/interrupt": {"post": {}}
-        }}))?;
+        let mut api: Api = serde_json::from_str(NATIVE_API)?;
+        let permission_path = "/api/session/{sessionID}/permission/{requestID}/reply";
+        let permission = api
+            .paths
+            .remove(permission_path)
+            .ok_or("expected permission API")?;
+        let session_path = "/api/session/{sessionID}";
+        let session = api
+            .paths
+            .remove(session_path)
+            .ok_or("expected session lookup API")?;
         let health = || Health {
             version: "fixture".into(),
         };
@@ -1257,16 +1271,136 @@ mod tests {
             .probe(health())
             .expect_err("permission handling is required");
         assert!(error.to_string().contains("/permission/{requestID}/reply"));
-        api.paths.insert(
-            "/api/session/{sessionID}/permission/{requestID}/reply".into(),
-            BTreeMap::from([("post".into(), json!({}))]),
-        );
+        api.paths.insert(permission_path.into(), permission);
         assert!(!api.probe(health())?.resume);
-        api.paths.insert(
-            "/api/session/{sessionID}".into(),
-            BTreeMap::from([("get".into(), json!({}))]),
-        );
+        api.paths.insert(session_path.into(), session);
         assert!(api.probe(health())?.resume);
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn native_http_contract_requires_prompt_admission_before_streaming()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = tempfile::tempdir()?;
+        let directory = root.path().canonicalize()?;
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let program = fixture_launcher(
+            &directory,
+            r#"#!/bin/sh
+[ "$*" = "serve --hostname 127.0.0.1 --port 0" ] || exit 2
+printf 'opencode server listening on %s\n' "$SHEPHERD_TEST_OPENCODE_URL"
+exec sleep 60
+"#,
+        )?;
+        let spec = SpawnSpec {
+            program,
+            cwd: directory.clone(),
+            environment: BTreeMap::from([(
+                "SHEPHERD_TEST_OPENCODE_URL".into(),
+                format!("http://{}", listener.local_addr()?),
+            )]),
+            ..SpawnSpec::default()
+        };
+        let fixture = serve_native_fixture(listener, &directory);
+        let client = async {
+            let mut harness = OpenCodeHarness::default();
+            let capabilities = harness.start(spec).await?;
+            assert_eq!(harness.tier(), AdapterTier::Native);
+            assert!(capabilities.streaming && capabilities.resume);
+            assert_eq!(harness.open_session(None).await?.as_str(), "ses_fixture");
+            let transcript = fixture_reply(&mut harness).await?;
+            assert_eq!(transcript.len(), 1);
+            assert_eq!(
+                transcript.entry(0).map(Entry::summary).as_deref(),
+                Some("agent: native fixture reply")
+            );
+            harness.shutdown().await?;
+            Ok::<_, Box<dyn std::error::Error>>(())
+        };
+        timeout(REQUEST_TIMEOUT, async { tokio::try_join!(fixture, client) }).await??;
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    async fn serve_native_fixture(
+        listener: TcpListener,
+        directory: &Path,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut stream = None;
+        for expected in [
+            "GET /api/info",
+            "GET /openapi.json",
+            "GET /api/event",
+            "POST /api/session",
+            "GET /api/event",
+            "POST /api/session/ses_fixture/prompt",
+        ] {
+            let (socket, _) = listener.accept().await?;
+            let (reader, mut writer) = socket.into_split();
+            let (request, body) = read_fixture_request(reader).await?;
+            assert_eq!(request, format!("{expected} HTTP/1.1"));
+            let response = match expected {
+                "GET /api/info" => json!({"version": "fixture"}).to_string(),
+                "GET /openapi.json" => NATIVE_API.to_owned(),
+                "GET /api/event" => {
+                    writer.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\ndata: {\"type\":\"server.connected\",\"data\":{}}\n\n").await?;
+                    stream = Some(writer);
+                    continue;
+                }
+                "POST /api/session" => {
+                    let body: Value = serde_json::from_slice(&body)?;
+                    assert_eq!(
+                        body,
+                        json!({"location": {"directory": directory}, "permissions": [{"action": "*", "resource": "*", "effect": "ask"}]})
+                    );
+                    json!({"data": {"id": "ses_fixture", "location": {"directory": directory}}})
+                        .to_string()
+                }
+                "POST /api/session/ses_fixture/prompt" => {
+                    let body: Value = serde_json::from_slice(&body)?;
+                    let prompt_id = body["id"].as_str().ok_or("expected prompt ID")?;
+                    assert_eq!(body["text"], "Reply with local fixture text only");
+                    assert_eq!(body["resume"], true);
+                    let stream = stream.as_mut().ok_or("expected an event stream")?;
+                    let delta = |session, delta| json!({"sessionID": session, "assistantMessageID": "msg_fixture", "ordinal": 0, "delta": delta});
+                    for (kind, data) in [
+                        (
+                            "session.inbox.enqueued",
+                            json!({"sessionID": "ses_fixture", "inboxID": "msg_previous"}),
+                        ),
+                        ("session.text.delta", delta("ses_fixture", "prior turn")),
+                        (
+                            "session.inbox.enqueued",
+                            json!({"sessionID": "ses_fixture", "inboxID": prompt_id}),
+                        ),
+                        ("session.text.delta", delta("ses_other", "other session")),
+                        (
+                            "session.text.delta",
+                            delta("ses_fixture", "native fixture reply"),
+                        ),
+                        (
+                            "session.execution.succeeded",
+                            json!({"sessionID": "ses_fixture"}),
+                        ),
+                    ] {
+                        let event = json!({"type": kind, "data": data});
+                        stream
+                            .write_all(format!("data: {event}\n\n").as_bytes())
+                            .await?;
+                    }
+                    json!({"data": {"id": prompt_id, "sessionID": "ses_fixture"}}).to_string()
+                }
+                _ => return Err("unexpected fixture request".into()),
+            };
+            let header = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                response.len()
+            );
+            writer.write_all(header.as_bytes()).await?;
+            writer.write_all(response.as_bytes()).await?;
+            writer.shutdown().await?;
+        }
         Ok(())
     }
 
@@ -1667,7 +1801,7 @@ done
     #[cfg(unix)]
     fn fixture_launcher(directory: &Path, script: &str) -> std::io::Result<String> {
         use std::os::unix::fs::PermissionsExt;
-        let path = directory.join("opencode-acp-fixture");
+        let path = directory.join("opencode-fixture");
         std::fs::write(&path, script)?;
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))?;
         Ok(path.to_string_lossy().into_owned())
@@ -1715,16 +1849,7 @@ done
         loop {
             let (socket, _) = listener.accept().await?;
             let (reader, mut writer) = socket.into_split();
-            let mut reader = BufReader::new(reader);
-            let mut line = String::new();
-            let mut length = 0;
-            while reader.read_line(&mut line).await? > 0 && line != "\r\n" {
-                if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
-                    length = value.trim().parse::<u64>().map_err(std::io::Error::other)?;
-                }
-                line.clear();
-            }
-            tokio::io::copy(&mut reader.take(length), &mut tokio::io::sink()).await?;
+            read_fixture_request(reader).await?;
             if unauthorized {
                 let body = r#"{"error":{"message":"Local fixture credential expired","type":"invalid_request_error","code":"invalid_api_key"}}"#;
                 let response = format!(
@@ -1757,5 +1882,31 @@ done
             writer.write_all(response.as_bytes()).await?;
             writer.shutdown().await?;
         }
+    }
+
+    async fn read_fixture_request(
+        reader: impl AsyncRead + Unpin,
+    ) -> std::io::Result<(String, Vec<u8>)> {
+        let mut reader = BufReader::new(reader);
+        let mut request = String::new();
+        reader.read_line(&mut request).await?;
+        request.truncate(request.trim_end().len());
+        let mut line = String::new();
+        let mut length = 0;
+        while reader.read_line(&mut line).await? > 0 && line != "\r\n" {
+            if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                length = value
+                    .trim()
+                    .parse::<usize>()
+                    .map_err(std::io::Error::other)?;
+            }
+            line.clear();
+        }
+        if length > MAX_RESPONSE_BYTES {
+            return Err(std::io::Error::other("fixture request is too large"));
+        }
+        let mut body = vec![0; length];
+        reader.read_exact(&mut body).await?;
+        Ok((request, body))
     }
 }

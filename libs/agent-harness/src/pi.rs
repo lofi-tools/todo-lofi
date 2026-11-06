@@ -470,6 +470,72 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn subprocess_routes_an_extension_dialog_and_keeps_stderr_off_the_wire()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let script = directory.path().join("pi-rpc-fixture.sh");
+        std::fs::write(
+            &script,
+            r#"
+[ "$1" = --mode ] && [ "$2" = rpc ] || exit 2
+IFS= read -r state || exit 3
+state_id=$(printf '%s\n' "$state" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
+printf '{"type":"response","id":"%s","command":"get_state","success":true,"data":{"sessionId":"pi-fixture","sessionFile":null,"isStreaming":false,"isCompacting":false,"pendingMessageCount":0}}\r\n' "$state_id"
+IFS= read -r prompt || exit 4
+case "$prompt" in *'"type":"prompt"'*) ;; *) exit 5;; esac
+case "$prompt" in *'"message":"/fixture"'*) ;; *) exit 5;; esac
+prompt_id=$(printf '%s\n' "$prompt" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
+printf '%s\n' '{"type":"extension_ui_request","id":"dialog-1","method":"confirm","title":"Fixture","message":"Continue?"}'
+IFS= read -r reply || exit 6
+case "$reply" in *'"confirmed":true'*) ;; *) exit 7;; esac
+case "$reply" in *'"id":"dialog-1"'*) ;; *) exit 7;; esac
+case "$reply" in *'"type":"extension_ui_response"'*) ;; *) exit 7;; esac
+printf '{"type":"response","id":"%s","command":"prompt","success":true,"data":{"disposition":"handled"}}\n' "$prompt_id"
+printf '%s\n' '{"type":"diagnostic","text":"fixture stderr"}' >&2
+exit 23
+"#,
+        )?;
+        let spec = SpawnSpec {
+            program: "/bin/sh".into(),
+            args: vec![script.to_string_lossy().into_owned()],
+            cwd: directory.path().to_owned(),
+            ..SpawnSpec::default()
+        };
+        let (rpc, state) = PiRpc::start(&spec).await?;
+        assert_eq!(state.session_id, "pi-fixture");
+        let prompt = rpc.request(
+            "prompt",
+            Map::from_iter([("message".into(), json!("/fixture"))]),
+        );
+        let answer = async {
+            let Some(PiRpcEvent::Record(request)) = rpc.next_event().await else {
+                return Err(protocol("expected an extension dialog"));
+            };
+            assert_eq!(request["type"], "extension_ui_request");
+            assert_eq!(request["method"], "confirm");
+            let id = request["id"]
+                .as_str()
+                .ok_or_else(|| protocol("dialog lacked an ID"))?;
+            rpc.reply_to_extension(id, Map::from_iter([("confirmed".into(), json!(true))]))
+                .await
+        };
+        let (reply, ()) =
+            timeout(PROBE_TIMEOUT, async { tokio::try_join!(prompt, answer) }).await??;
+        assert_eq!(
+            PromptDisposition::from_reply(reply)?,
+            PromptDisposition::Handled
+        );
+        assert!(
+            matches!(timeout(PROBE_TIMEOUT, rpc.next_event()).await?, Some(PiRpcEvent::Exited {
+            code: Some(23), stderr, protocol_error: None,
+        }) if stderr.contains("fixture stderr"))
+        );
+        rpc.shutdown().await?;
+        Ok(())
+    }
+
     #[tokio::test]
     #[ignore = "requires an installed Pi executable"]
     async fn installed_pi_exchanges_extension_dialog_records()
