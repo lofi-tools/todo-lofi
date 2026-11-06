@@ -520,6 +520,10 @@ task-scoped, persistent and fast enough.
   The native PTY probe checks Kitty releases after lifting a shortcut modifier
   and after leaving the terminal. A browser regression checks that focus loss
   releases every reported key once.
+  The PTY probe verifies that enhanced Kitty mode preserves modifiers and
+  reports releases for Enter, Tab and Backspace shortcuts. Their unmodified
+  forms still send the legacy bytes when all-key reporting is off. The browser
+  checks Ctrl+Backspace and Alt+Shift+Tab in legacy mode.
   A browser regression checks that new output preserves a scrollback selection
   while its visible cells stay in place, and clears it when those cells change.
 - [x] Add the binary frame protocol, dirty-row rendering and a frame smoke test.

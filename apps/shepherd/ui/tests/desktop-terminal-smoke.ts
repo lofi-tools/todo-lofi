@@ -315,7 +315,9 @@ async function exerciseKitty(terminalId: string, input: HTMLTextAreaElement) {
 os.write(1, b'\x1b[>3u\x1b[?u')
 expect(b'\x1b[?3u')
 os.write(1, b'\r\nS4_' + b'KITTY_READY\r\n')
-expect(b'\x1b[97;5u\x1b[97;1:3u\x1b[27u\x1b[27;1:3u')
+expect(b'\x1b[97;5u\x1b[97;1:3u\r\t\x7f'
+       b'\x1b[13;3u\x1b[13;3:3u\x1b[9;6u\x1b[9;6:3u\x1b[127;5u\x1b[127;5:3u'
+       b'\x1b[27u\x1b[27;1:3u')
 os.write(1, b'\r\nS4_' + b'KITTY_PASS\r\n')
 `, '1b5b3c75')
   await waitFor('Kitty negotiation reply in the PTY', () => terminalOutput().includes('S4_KITTY_READY'))
@@ -324,6 +326,16 @@ os.write(1, b'\r\nS4_' + b'KITTY_PASS\r\n')
     input.dispatchEvent(new KeyboardEvent(type, {
       key: 'a', code: 'KeyA', ctrlKey: type === 'keydown', bubbles: true, cancelable: true,
     }))
+  }
+  for (const key of [
+    { key: 'Enter' }, { key: 'Tab' }, { key: 'Backspace' },
+    { key: 'Enter', altKey: true },
+    { key: 'Tab', ctrlKey: true, shiftKey: true },
+    { key: 'Backspace', ctrlKey: true },
+  ]) {
+    for (const type of ['keydown', 'keyup']) {
+      input.dispatchEvent(new KeyboardEvent(type, { code: key.key, ...key, bubbles: true, cancelable: true }))
+    }
   }
   input.dispatchEvent(new KeyboardEvent('keydown', {
     key: 'Escape', code: 'Escape', bubbles: true, cancelable: true,

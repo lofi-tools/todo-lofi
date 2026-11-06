@@ -625,13 +625,16 @@ test('encodes typed keys into terminal input', async ({ page }) => {
   await input.press('a')
   await input.press('Control+c')
   await input.press('Enter')
+  await input.press('Backspace')
+  await input.press('Control+Backspace')
+  await input.press('Alt+Shift+Tab')
   await input.press('ArrowUp')
 
   await expect
     .poll(() =>
       page.evaluate(() => (window as unknown as { __writes: string[] }).__writes ?? []),
     )
-    .toEqual(['a', '\u0003', '\r', '\u001bOA'])
+    .toEqual(['a', '\u0003', '\r', '\x7f', '\x08', '\x1b\x1b[Z', '\u001bOA'])
 })
 
 test('bounds stalled terminal input and reserves room for key release', async ({ page }) => {
@@ -1306,9 +1309,10 @@ test('reports a Kitty release after its shortcut modifier is released', async ({
   await page.keyboard.down('a')
   await page.keyboard.up('Control')
   await page.keyboard.up('a')
+  await input.press('Control+Shift+Tab')
 
   await expect.poll(() => page.evaluate(() => window.__writes))
-    .toEqual(['\x1b[97;5u', '\x1b[97;1:3u'])
+    .toEqual(['\x1b[97;5u', '\x1b[97;1:3u', '\x1b[9;6u', '\x1b[9;6:3u'])
 })
 
 test('releases reported Kitty keys when focus leaves a terminal', async ({ page }) => {

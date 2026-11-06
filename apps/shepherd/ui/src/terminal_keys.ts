@@ -33,9 +33,11 @@ export function encodeLegacyKey(event: KeyboardEvent, modes: number): string | n
     const modifier = modifiers === 1 ? '' : `;${modifiers}`
     return `\x1b[${numbered[key]}${modifier}~`
   }
-  if (key === 'Tab' && event.shiftKey) return '\x1b[Z'
   const controls: Record<string, string> = {
-    Enter: '\r', Backspace: '\x7f', Tab: '\t', Escape: '\x1b',
+    Enter: '\r',
+    Backspace: event.ctrlKey ? '\x08' : '\x7f',
+    Tab: event.shiftKey ? '\x1b[Z' : '\t',
+    Escape: '\x1b',
   }
   let data = controls[key]
   if (!data && [...key].length === 1) {
@@ -129,7 +131,7 @@ export function encodeKittyKey(event: KeyboardEvent, modes: number): KittyKeyPre
     if (number !== undefined) code = `${number}u`
   }
   if (all && MODIFIER_KEYS[event.code]) code = `${MODIFIER_KEYS[event.code]}u`
-  if (!all && ['Enter', 'Tab', 'Backspace'].includes(key) && code === FUNCTIONAL_KEYS[key]) return null
+  if (!all && !modified && !event.shiftKey && ['Enter', 'Tab', 'Backspace'].includes(key) && code === FUNCTIONAL_KEYS[key]) return null
   if (!all && key === 'Escape' && !(modes & (DISAMBIGUATE | KITTY_REPORT_EVENTS))) return null
   if (!all && code && !(modes & (DISAMBIGUATE | KITTY_REPORT_EVENTS))) return null
   if (!code) {
