@@ -965,6 +965,9 @@ in-memory model is still scoped key/value pairs, serialized per scope:
 - Project overrides are keyed by absolute path, so the file stays readable; a
   moved project loses its overrides. Keybindings are app-scoped, one chord per
   command; sequences are rejected.
+- `app["agents.opencode.executable"]` points to an existing OpenCode executable
+  by absolute path. A stable profile symlink such as
+  `/etc/profiles/per-user/me/bin/opencode` can follow Nix profile updates.
 - Resolution is per key: project > app > built-in, with whole-value replacement
   and no deep merge. Reset deletes the override.
 - Unknown keys are preserved on rewrite. A missing file means defaults; a

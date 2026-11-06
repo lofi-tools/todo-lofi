@@ -9,6 +9,7 @@ pub mod codex;
 pub mod fake_harness;
 #[cfg(any(test, feature = "live-test-support"))]
 pub mod live_codex;
+pub mod opencode;
 
 use std::collections::BTreeMap;
 use std::fmt;

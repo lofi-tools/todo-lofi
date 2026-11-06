@@ -260,12 +260,14 @@ name = "agent-harness"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "reqwest 0.13.4",
  "serde",
  "serde_json",
  "tempfile",
  "thiserror 1.0.69",
  "tokio",
  "tracing",
+ "uuid",
 ]
 
 [[package]]
