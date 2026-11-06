@@ -316,6 +316,16 @@ finally:
 }
 
 async function exerciseKitty(terminalId: string, input: HTMLTextAreaElement) {
+  // Separate shell commands fit within macOS's canonical PTY input limit.
+  await runPtyProbe(terminalId, String.raw`
+os.write(1, b'\x1b[>3u\x1b[?2026h\x1b[?1049h\x1b[=0u\x1b[?u\x1b[>1u\x1b[?u'
+            b'\x1b[<u\x1b[?1049l\x1b[?u\x1b[?2026l')
+expect(b'\x1b[?0u\x1b[?1u\x1b[?3u')
+os.write(1, b'\r\nS4_' + b'KITTY_SCREEN_PASS\r\n')
+`, '1b5b3f323032366c1b5b3f313034396c1b5b3c75')
+  await waitFor('independent Kitty modes across synchronized screen switches', () =>
+    terminalOutput().includes('S4_KITTY_SCREEN_PASS'))
+
   await runPtyProbe(terminalId, String.raw`
 os.write(1, b'\x1b[>3u\x1b[?u')
 expect(b'\x1b[?3u')

@@ -510,10 +510,12 @@ task-scoped, persistent and fast enough.
 
 - [ ] Complete `TerminalEngine`: scrollback, alternate screen, wide characters,
   reflow, Kitty keyboard protocol, selection, copy/paste, search, mouse and
-  hyperlinks. Kitty modes negotiate independently for each screen. Fixtures
-  cover reflow and key encoding. The native smoke drives Vim, less and
+  hyperlinks. Kitty modes negotiate independently for each screen, including
+  when the screen switch is part of a synchronized update. Fixtures cover
+  reflow and key encoding. The native smoke drives Vim, less and
   composition events. Native PTY probes verify Kitty negotiation and key
-  reports, bracketed paste and SGR mouse reports. Interactive fish verifies
+  reports, including the distinct replies on each side of a synchronized
+  screen switch, plus bracketed paste and SGR mouse reports. Interactive fish verifies
   distinct Ctrl+I and Tab bindings. Native IBus Pinyin verifies candidate
   selection and placement on Ubuntu. A candidate-based input source still
   needs a pass on macOS.

@@ -17,7 +17,9 @@ use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::color::Colors;
 use alacritty_terminal::term::search::{BuildError, RegexSearch};
 use alacritty_terminal::term::{Config, Term, TermMode};
-use alacritty_terminal::vte::ansi::{Color, CursorShape, NamedColor, Processor, Rgb};
+use alacritty_terminal::vte::ansi::{
+    Color, CursorShape, NamedColor, NamedPrivateMode, Processor, Rgb,
+};
 use alacritty_terminal::vte::{Params, Parser, Perform};
 use serde::{Deserialize, Serialize};
 
@@ -196,6 +198,7 @@ enum KeyboardCommand {
     Set { flags: u16, operation: u16 },
     Push(u16),
     Pop(u16),
+    AlternateScreen(bool),
     Reset,
     ColorQuery,
 }
@@ -205,10 +208,19 @@ struct KeyboardSequence(Option<KeyboardCommand>);
 
 impl Perform for KeyboardSequence {
     fn csi_dispatch(&mut self, params: &Params, intermediates: &[u8], ignore: bool, action: char) {
-        if ignore || action != 'u' {
+        if ignore {
             return;
         }
         let mut params = params.iter().filter_map(|param| param.first().copied());
+        if matches!(action, 'h' | 'l')
+            && intermediates == b"?"
+            && params.any(|mode| mode == NamedPrivateMode::SwapScreenAndSetRestoreCursor as u16)
+        {
+            self.0 = Some(KeyboardCommand::AlternateScreen(action == 'h'));
+        }
+        if action != 'u' {
+            return;
+        }
         let first = params.next().unwrap_or(0);
         self.0 = match intermediates {
             b"?" => Some(KeyboardCommand::Query),
@@ -249,6 +261,7 @@ pub struct Screen {
     parser: Processor,
     keyboard_parser: Parser,
     keyboards: [KeyboardModes; 2],
+    keyboard_alternate_screen: bool,
     search_id: u32,
     search_text: String,
     search_span: i32,
@@ -267,6 +280,7 @@ impl Screen {
             parser: Processor::new(),
             keyboard_parser: Parser::new(),
             keyboards: Default::default(),
+            keyboard_alternate_screen: false,
             search_id: 0,
             search_text: String::new(),
             search_span: 0,
@@ -300,13 +314,10 @@ impl Screen {
         self.parser.stop_sync(&mut self.term);
     }
 
-    fn keyboard_index(&self) -> usize {
-        usize::from(self.term.mode().contains(TermMode::ALT_SCREEN))
-    }
-
     fn apply_keyboard_command(&mut self, command: KeyboardCommand) {
-        let index = self.keyboard_index();
-        let keyboard = &mut self.keyboards[index];
+        // VTE can defer applying a screen switch during synchronized output.
+        // Keyboard commands still need the screen selected by the byte stream.
+        let keyboard = &mut self.keyboards[usize::from(self.keyboard_alternate_screen)];
         match command {
             KeyboardCommand::Query => {
                 self.replies
@@ -335,7 +346,13 @@ impl Screen {
                     }
                 }
             }
-            KeyboardCommand::Reset => self.keyboards = Default::default(),
+            KeyboardCommand::AlternateScreen(alternate) => {
+                self.keyboard_alternate_screen = alternate
+            }
+            KeyboardCommand::Reset => {
+                self.keyboard_alternate_screen = false;
+                self.keyboards = Default::default();
+            }
             KeyboardCommand::ColorQuery => self.resolve_replies(),
         }
     }
@@ -556,6 +573,8 @@ impl Screen {
             });
         }
 
+        let keyboard =
+            &self.keyboards[usize::from(self.term.mode().contains(TermMode::ALT_SCREEN))];
         TerminalFrame {
             revision: 0,
             columns: self.columns,
@@ -565,8 +584,7 @@ impl Screen {
             cursor_visible,
             cursor_style,
             display_offset,
-            modes: self.term.mode().bits()
-                | (u32::from(self.keyboards[self.keyboard_index()].flags) << 18),
+            modes: self.term.mode().bits() | (u32::from(keyboard.flags) << 18),
             cells,
             search_highlight: self.search_highlight(display_offset),
         }
@@ -832,6 +850,29 @@ mod tests {
 
         screen.process(b"\x1b[=2;2u\x1b[?u\x1b[=1;3u\x1b[?u\x1b[<u\x1b[?u");
         assert_eq!(screen.take_replies(), b"\x1b[?3u\x1b[?2u\x1b[?0u");
+    }
+
+    #[test]
+    fn synchronized_screen_switches_keep_kitty_modes_separate() {
+        let mut screen = Screen::new(10, 3);
+        screen.process(b"\x1b[>1umain\x1b[?2026h\x1b[?25;1049");
+        screen.process(b"h\x1b[Halt\x1b[>31u\x1b[?u");
+        let buffered = screen.frame();
+        assert!(row(&buffered, 0).starts_with("main"));
+        assert_eq!(buffered.modes >> 18, 1);
+        assert_eq!(screen.take_replies(), b"\x1b[?31u");
+
+        screen.process(b"\x1b[?2026l");
+        let alternate = screen.frame();
+        assert!(row(&alternate, 0).starts_with("alt"));
+        assert_eq!(alternate.modes >> 18, 31);
+
+        screen.process(b"\x1b[?2026h\x1b[?1049l\x1b[?u");
+        assert_eq!(screen.take_replies(), b"\x1b[?1u");
+        screen.finish_sync();
+        let main = screen.frame();
+        assert!(row(&main, 0).starts_with("main"));
+        assert_eq!(main.modes >> 18, 1);
     }
 
     #[test]
