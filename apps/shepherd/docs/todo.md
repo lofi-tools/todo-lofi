@@ -887,9 +887,9 @@ If Pi’s RPC probe is blocked, proceed with ACP while resolving it.
   fixture verifies a complete fallback turn. Claude Code uses the same adapter
   through its configured executable and arguments. ACP approvals can remember
   an exact request for the live session and record when they reuse a grant.
-  Project-scoped grants persist per configured agent and can be reviewed and
-  reset in Settings → Projects. Live session grant settings, interactive
-  agent terminal panes and a live Claude Code smoke remain open.
+  Project-scoped grants persist per configured agent. Settings → Projects
+  lists saved grants and live session grants by task and can reset either.
+  Interactive agent terminal panes and a live Claude Code smoke remain open.
 - [x] Freebuff runs in a standalone PTY in place of the conversation pane.
 - [ ] Tier downgrade UI, capability gates and diagnostics per adapter.
 - [ ] Missing binary, auth failure, protocol failure and mid-turn exit all have

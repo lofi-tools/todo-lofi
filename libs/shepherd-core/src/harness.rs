@@ -10,7 +10,7 @@ use std::sync::Arc;
 use agent_harness::{
     AdapterTier, AgentDiagnostics, AgentHarness, ApprovalId, ApprovalRequest, Capabilities,
     Decision, Entry, FailureKind, HarnessError, HarnessEvent, ProjectApprovalPolicy, PromptInput,
-    SessionId, SpawnSpec, Transcript,
+    SessionApproval, SessionId, SpawnSpec, Transcript,
 };
 use async_trait::async_trait;
 
@@ -182,6 +182,20 @@ impl HarnessSession {
     ) -> Result<Vec<HarnessEvent>, CoreError> {
         self.harness.respond(approval_id, decision).await?;
         Ok(self.pump())
+    }
+
+    pub fn session_approvals(&self) -> Vec<SessionApproval> {
+        if self.closed {
+            return Vec::new();
+        }
+        self.harness.session_approvals()
+    }
+
+    pub async fn reset_session_approval(&mut self, id: &str) -> Result<(), CoreError> {
+        if !self.closed {
+            self.harness.reset_session_approval(id).await?;
+        }
+        Ok(())
     }
 
     pub async fn shutdown(&mut self) -> Result<Vec<HarnessEvent>, CoreError> {

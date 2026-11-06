@@ -145,7 +145,9 @@ current layout and give future changes a point of comparison.
 - For eligible ACP requests, offer **Allow once**, **Allow for session** and
   **Always allow for project** on the inline card. Identify reused grants on
   the resolved card. In Settings → Projects, show the selected project's
-  saved approvals with a reset action for each grant.
+  saved approvals and live session approvals in separate lists. Label each
+  session grant with its task, remove it when its session ends, and show a
+  reset action for each grant.
 - Show **Resume** beside the state in the conversation header when the task is
   interrupted. Enable the composer when the core reports the task is ready.
 

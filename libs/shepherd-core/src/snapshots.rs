@@ -1,10 +1,28 @@
 //! Snapshots returned by commands and included in change events.
 
-use agent_harness::{AgentDiagnostics, Entry};
+use agent_harness::{AgentDiagnostics, Entry, SessionApproval};
 use serde::{Deserialize, Serialize};
 
 use crate::projects::{ProjectId, ProjectSnapshot};
-use crate::tasks::{TaskDetail, TaskSummary};
+use crate::store::ProjectApproval;
+use crate::tasks::{Agent, TaskDetail, TaskSummary};
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectApprovalsSnapshot {
+    pub saved: Vec<ProjectApproval>,
+    pub sessions: Vec<TaskApproval>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskApproval {
+    pub task_id: String,
+    pub task_title: String,
+    pub agent: Agent,
+    #[serde(flatten)]
+    pub approval: SessionApproval,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]

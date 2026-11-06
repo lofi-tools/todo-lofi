@@ -130,6 +130,7 @@ export function App() {
   const [settingsOpen, setSettingsOpen] = createSignal(false)
   const [sendAccent, setSendAccent] = createSignal(loadSendAccent())
   const [projectSettingsRequest, setProjectSettingsRequest] = createSignal<{ id: string }>()
+  const [approvalChange, setApprovalChange] = createSignal<{ projectId: string }>()
   const showsArchived = (projectId: string | null) =>
     (projectId ? archiveVisibility().get(projectId) : undefined) ?? showArchived()
   const settingsProject = () => projects().find((project) => project.id === (projectSettingsRequest()?.id ?? selectedProjectId()))
@@ -341,6 +342,9 @@ export function App() {
     switch (event.type) {
       case 'projectListChanged':
         setProjects(event.data.projects)
+        break
+      case 'projectApprovalsChanged':
+        setApprovalChange(event.data)
         break
       case 'taskListChanged':
         if (event.data.projectId === selectedProjectId()) setTasks(event.data.tasks)
@@ -880,6 +884,7 @@ export function App() {
             projectImports={<ProjectImportSources codexDisabled={pending() || !codexAvailable()} note={importNote()} onImportCodex={importProjects} />}
             project={settingsProject()}
             projectSettingsRequest={projectSettingsRequest()}
+            approvalChange={approvalChange()}
             showProjectArchived={showsArchived(settingsProject()?.id ?? null)}
             onShowProjectArchived={setProjectArchived}
           />

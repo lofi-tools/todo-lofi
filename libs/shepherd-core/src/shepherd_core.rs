@@ -24,7 +24,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use agent_harness::{FailureKind, HarnessEvent, SessionId, TurnFinishReason};
+use agent_harness::{Decision, FailureKind, HarnessEvent, SessionId, TurnFinishReason};
 use tokio::sync::mpsc;
 
 pub use commands::{Command, CommandResult, QuitSummary, ReviewAction};
@@ -32,13 +32,16 @@ pub use events::{Event, ShutdownState};
 pub use input::{Focus, InputMode};
 pub use project_scan::{ProjectNode, ProjectScan};
 pub use projects::{Project, ProjectId, ProjectSnapshot};
-pub use snapshots::{ProjectList, TaskList, TaskWorkspace, WorkspaceLayout};
+pub use snapshots::{
+    ProjectApprovalsSnapshot, ProjectList, TaskList, TaskWorkspace, WorkspaceLayout,
+};
 pub use tasks::{Agent, AgentTier, Task, TaskDetail, TaskId, TaskState, TaskSummary};
 
 use crate::git::{GitError, GitService, TurnBaseline};
 use crate::harness::{HarnessFactory, HarnessSession, ProjectApprovals, UnavailableHarnessFactory};
 use crate::session::SessionRecord;
-use crate::store::{MemoryStore, ProjectApproval, Store, StoreError};
+use crate::snapshots::TaskApproval;
+use crate::store::{MemoryStore, Store, StoreError};
 use crate::terminal::{
     InspectorTab, TerminalId, TerminalLayout, TerminalList, TerminalRecord, TerminalSnapshot,
 };
@@ -524,18 +527,56 @@ impl Core {
     pub async fn project_approvals(
         &mut self,
         project: &ProjectId,
-    ) -> Result<Vec<ProjectApproval>, CoreError> {
+    ) -> Result<ProjectApprovalsSnapshot, CoreError> {
         self.project_path(project)?;
-        Ok(self.store.project_approvals(project).await?)
+        let saved = self.store.project_approvals(project).await?;
+        let mut sessions = Vec::new();
+        for (task_id, session) in &self.sessions {
+            let Some(task) = self
+                .tasks
+                .get(task_id)
+                .filter(|task| task.project_id == *project)
+            else {
+                continue;
+            };
+            sessions.extend(
+                session
+                    .session_approvals()
+                    .into_iter()
+                    .map(|approval| TaskApproval {
+                        task_id: task_id.to_string(),
+                        task_title: task.title.clone(),
+                        agent: task.agent,
+                        approval,
+                    }),
+            );
+        }
+        Ok(ProjectApprovalsSnapshot { saved, sessions })
     }
 
-    pub async fn reset_project_approval(
+    pub async fn reset_approval_grant(
         &mut self,
         project: &ProjectId,
         id: &str,
+        task_id: Option<&TaskId>,
     ) -> Result<(), CoreError> {
         self.project_path(project)?;
-        Ok(self.store.reset_project_approval(project, id).await?)
+        if let Some(task_id) = task_id {
+            if self.task(task_id)?.project_id != *project {
+                return Err(CoreError::TaskNotFound {
+                    id: task_id.to_string(),
+                });
+            }
+            if let Some(session) = self.sessions.get_mut(task_id) {
+                session.reset_session_approval(id).await?;
+            }
+        } else {
+            self.store.reset_project_approval(project, id).await?;
+        }
+        self.emit(Event::ProjectApprovalsChanged {
+            project_id: project.clone(),
+        });
+        Ok(())
     }
 
     /// Execute one command. A shell should send exactly this enum over its
@@ -1283,6 +1324,9 @@ impl Core {
             if missing && let Some(session) = self.sessions.get_mut(task_id) {
                 session.shutdown().await?;
                 self.sessions.remove(task_id);
+                self.emit(Event::ProjectApprovalsChanged {
+                    project_id: task.project_id.clone(),
+                });
             }
             GitService.restore_worktree(
                 &repository,
@@ -1353,11 +1397,15 @@ impl Core {
             Some(session) if !session.has_failed() && !session.is_closed() => {
                 return Ok(SessionOpened::Fresh);
             }
-            Some(_) => self
-                .sessions
-                .remove(task_id)
-                .map(|session| session.transcript().entries().to_vec())
-                .unwrap_or_default(),
+            Some(_) => {
+                self.emit(Event::ProjectApprovalsChanged {
+                    project_id: self.task(task_id)?.project_id.clone(),
+                });
+                self.sessions
+                    .remove(task_id)
+                    .map(|session| session.transcript().entries().to_vec())
+                    .unwrap_or_default()
+            }
             None => Vec::new(),
         };
 
@@ -1435,7 +1483,21 @@ impl Core {
     /// Fold adapter activity into the task state. The transcript itself is
     /// updated by [`HarnessSession`] as it pumps the same events.
     fn apply_events(&mut self, task_id: &TaskId, events: &[HarnessEvent]) -> Result<(), CoreError> {
-        let initial_state = self.task(task_id)?.state;
+        let task = self.task(task_id)?;
+        if events.iter().any(|event| {
+            matches!(
+                event,
+                HarnessEvent::ApprovalResolved {
+                    decision: Decision::AllowSession | Decision::AllowProject,
+                    ..
+                } | HarnessEvent::Exited { .. }
+            )
+        }) {
+            self.emit(Event::ProjectApprovalsChanged {
+                project_id: task.project_id.clone(),
+            });
+        }
+        let initial_state = task.state;
         let started_live = initial_state.is_live();
         let mut next_state = None;
         let mut turn_completed = false;
@@ -1609,6 +1671,9 @@ impl Core {
         task_id: &TaskId,
         events: &[HarnessEvent],
     ) -> Result<(), CoreError> {
+        self.emit(Event::ProjectApprovalsChanged {
+            project_id: self.task(task_id)?.project_id.clone(),
+        });
         let Some(mut record) = self.session_records.remove(task_id) else {
             return Ok(());
         };
@@ -2121,16 +2186,17 @@ mod streaming {
 
     use agent_harness::{
         AgentHarness, ApprovalId, Capabilities, Decision, DeltaKind, HarnessEvent, HarnessResult,
-        ItemId, PromptInput, SessionId, SpawnSpec, TurnFinishReason,
+        ItemId, PromptInput, SessionApproval, SessionId, SpawnSpec, TurnFinishReason,
     };
     use async_trait::async_trait;
     use tokio::sync::mpsc;
 
-    use crate::harness::HarnessFactory;
+    use crate::harness::{HarnessFactory, HarnessSession};
     use crate::store::TursoStore;
     use crate::test_support::{TestDatabase, TestRepository};
     use crate::{
-        Agent, Command, CommandResult, Core, CoreError, Event, ProjectId, TaskId, TaskState,
+        Agent, Command, CommandResult, Core, CoreError, Event, Project, ProjectId, Task, TaskId,
+        TaskState,
     };
 
     struct LateHarnessFactory {
@@ -2145,7 +2211,10 @@ mod streaming {
                 .expect("the test holds the receiver lock")
                 .take()
                 .expect("the factory creates one harness per test");
-            Ok(Box::new(LateHarness { events: receiver }))
+            Ok(Box::new(LateHarness {
+                events: receiver,
+                approvals: Vec::new(),
+            }))
         }
     }
 
@@ -2153,12 +2222,22 @@ mod streaming {
     /// the way a real adapter streams them between commands.
     struct LateHarness {
         events: mpsc::UnboundedReceiver<HarnessEvent>,
+        approvals: Vec<SessionApproval>,
     }
 
     #[async_trait]
     impl AgentHarness for LateHarness {
         fn events(&mut self) -> &mut mpsc::UnboundedReceiver<HarnessEvent> {
             &mut self.events
+        }
+
+        fn session_approvals(&self) -> Vec<SessionApproval> {
+            self.approvals.clone()
+        }
+
+        async fn reset_session_approval(&mut self, id: &str) -> HarnessResult<()> {
+            self.approvals.retain(|approval| approval.id != id);
+            Ok(())
         }
 
         async fn start(&mut self, _spec: SpawnSpec) -> HarnessResult<Capabilities> {
@@ -2188,6 +2267,88 @@ mod streaming {
         async fn shutdown(&mut self) -> HarnessResult<()> {
             Ok(())
         }
+    }
+
+    #[tokio::test]
+    async fn live_grants_are_listed_and_reset_by_project_and_task()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = TestRepository::new()?;
+        let project = Project::new(directory.path().join("project"));
+        let other_project = Project::new(directory.path().join("other"));
+        let mut core = Core::new();
+        core.projects.insert(project.id.clone(), project.clone());
+        core.projects
+            .insert(other_project.id.clone(), other_project.clone());
+        let approval = SessionApproval {
+            id: "grant".into(),
+            title: "Run tests".into(),
+            arguments: serde_json::json!({"command": "cargo test"}),
+            paths: Vec::new(),
+        };
+        let mut launch = |project: &Project, title: &str| {
+            let mut task = Task::draft(project.id.clone(), title, &project.path);
+            task.agent = Agent::Claude;
+            let task_id = task.id.clone();
+            let (sender, events) = mpsc::unbounded_channel();
+            core.tasks.insert(task_id.clone(), task);
+            core.sessions.insert(
+                task_id.clone(),
+                HarnessSession::new(Box::new(LateHarness {
+                    events,
+                    approvals: vec![approval.clone()],
+                })),
+            );
+            (task_id, sender)
+        };
+        let (first, _first_events) = launch(&project, "First chat");
+        let (second, second_events) = launch(&project, "Second chat");
+        let (other, _other_events) = launch(&other_project, "Other project chat");
+
+        let grants = core.project_approvals(&project.id).await?;
+        assert_eq!(grants.sessions.len(), 2);
+        assert!(
+            grants
+                .sessions
+                .iter()
+                .any(|grant| grant.task_id == first.as_str() && grant.task_title == "First chat")
+        );
+        assert!(matches!(
+            core.reset_approval_grant(&project.id, "grant", Some(&other))
+                .await,
+            Err(CoreError::TaskNotFound { .. })
+        ));
+        core.reset_approval_grant(&project.id, "grant", Some(&first))
+            .await?;
+        let grants = core.project_approvals(&project.id).await?;
+        assert_eq!(
+            grants.sessions.first().map(|grant| grant.task_id.as_str()),
+            Some(second.as_str())
+        );
+        assert_eq!(grants.sessions.len(), 1);
+        assert_eq!(
+            core.project_approvals(&other_project.id)
+                .await?
+                .sessions
+                .len(),
+            1
+        );
+        core.drain_events();
+
+        second_events.send(HarnessEvent::Exited {
+            code: Some(0),
+            stderr: String::new(),
+        })?;
+        core.pump().await?;
+        assert!(
+            core.project_approvals(&project.id)
+                .await?
+                .sessions
+                .is_empty()
+        );
+        assert!(core.drain_events().iter().any(|event| matches!(
+            event, Event::ProjectApprovalsChanged { project_id } if *project_id == project.id
+        )));
+        Ok(())
     }
 
     #[tokio::test]

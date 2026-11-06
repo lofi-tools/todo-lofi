@@ -145,7 +145,8 @@ Shepherd reuses the latter for identical requests while the ACP session is
 connected, and labels those decisions in the transcript.
 **Always allow for project** saves a matching grant for the configured ACP
 agent in that project. Open **Settings → Projects** to review or reset saved
-grants for the selected project.
+grants and live session grants for the selected project. Each live grant
+shows its task and expires when its ACP connection closes.
 
 ## Live Codex tests
 

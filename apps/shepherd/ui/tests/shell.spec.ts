@@ -20,6 +20,7 @@ test.beforeEach(async ({ context }) => {
     let expiringTerminalSubscription: string | undefined
     const options = new URLSearchParams(window.location.search)
     let projectGrants = []
+    let sessionGrants = []
 
     const project = {
       id: 'project-1',
@@ -265,10 +266,16 @@ test.beforeEach(async ({ context }) => {
           case 'project_list':
             return { projects: [...projects] }
           case 'project_approvals':
-            return args.projectId === project.id ? [...projectGrants] : []
-          case 'reset_project_approval':
+            return args.projectId === project.id
+              ? { saved: [...projectGrants], sessions: [...sessionGrants] }
+              : { saved: [], sessions: [] }
+          case 'reset_approval_grant':
             if (args.projectId === project.id) {
-              projectGrants = projectGrants.filter((grant) => grant.id !== args.approvalId)
+              if (args.taskId) {
+                sessionGrants = sessionGrants.filter((grant) => grant.id !== args.approvalId || grant.taskId !== args.taskId)
+              } else {
+                projectGrants = projectGrants.filter((grant) => grant.id !== args.approvalId)
+              }
             }
             return null
           case 'codex_project_model':
@@ -400,15 +407,15 @@ test.beforeEach(async ({ context }) => {
             if (!request || request.kind.type !== 'permission' || args.decision !== (projectGrant ? 'allowProject' : 'allowSession')) {
               throw new Error('Expected a scoped approval')
             }
-            if (projectGrant) {
-              projectGrants.push({
-                id: 'grant-1',
-                agent: 'claude',
-                title: request.kind.data.title,
-                arguments: request.kind.data.arguments,
-                paths: request.kind.data.paths,
-              })
+            const grant = {
+              id: 'grant-1',
+              agent: 'claude',
+              title: request.kind.data.title,
+              arguments: request.kind.data.arguments,
+              paths: request.kind.data.paths,
             }
+            if (projectGrant) projectGrants.push(grant)
+            else sessionGrants.push({ ...grant, taskId: args.taskId, taskTitle: 'Ship it' })
             const settled = entry(request.id, request.sequence, {
               type: 'permission',
               data: { ...request.kind.data, decision: args.decision, source: 'user' },
@@ -561,6 +568,10 @@ test.beforeEach(async ({ context }) => {
     window.__terminalLayout = () => terminalLayout
     window.__emitCoreEvent = (event: ShepherdEvent) =>
       callbacks.get(eventChannel)?.({ index: eventIndex++, message: event })
+    window.addEventListener('test-approval-session-exited', () => {
+      sessionGrants = []
+      window.__emitCoreEvent({ type: 'projectApprovalsChanged', data: { projectId: project.id } })
+    })
     window.__setCommandEntries = (taskId: string, entries: Entry[]) => {
       transcripts[taskId] = [...(transcripts[taskId] ?? []).filter((row) => row.kind.type !== 'toolCall'), ...entries]
       window.__emitCoreEvent({ type: 'taskWorkspaceChanged', data: workspace(taskId) })
@@ -693,6 +704,25 @@ test('lists and resets a saved ACP project grant from Settings', async ({ page }
   await approvals.getByRole('button', { name: 'Reset approval for Run tests' }).click()
   await expect(approvals).toContainText('No saved project approvals.')
 })
+
+for (const action of ['reset', 'session exit']) {
+  test(`removes a live ACP approval after ${action}`, async ({ page }) => {
+    await page.goto('/?scoped-approval')
+    await page.getByRole('button', { name: 'Allow for session' }).click()
+    await expect(page.getByText('allowed for session', { exact: true })).toBeVisible()
+    await page.getByRole('button', { name: 'Settings', exact: true }).click()
+    await page.getByRole('navigation', { name: 'Settings categories' }).getByRole('button', { name: 'Projects' }).click()
+    const approvals = page.getByRole('region', { name: 'Live session approvals' })
+    await expect(approvals).toContainText('Claude Code · Ship it')
+    await expect(approvals).toContainText('cargo test')
+    if (action === 'reset') {
+      await approvals.getByRole('button', { name: 'Reset approval for Run tests in Ship it' }).click()
+    } else {
+      await page.evaluate(() => window.dispatchEvent(new Event('test-approval-session-exited')))
+    }
+    await expect(approvals).toContainText('No live session approvals.')
+  })
+}
 
 test('composes the first chat in an empty project and hides its sole task row', async ({ page }) => {
   await page.goto('/?two-projects')

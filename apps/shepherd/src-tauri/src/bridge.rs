@@ -18,14 +18,14 @@ use agent_harness::Decision;
 use serde::{Deserialize, Serialize};
 use shepherd_core::git::GitService;
 use shepherd_core::harness::HarnessFactory;
-use shepherd_core::store::{ProjectApproval, TursoStore};
+use shepherd_core::store::TursoStore;
 use shepherd_core::terminal::{
     InspectorTab, TerminalEvent, TerminalId, TerminalList, TerminalRecord, TerminalService,
     TerminalSpec,
 };
 use shepherd_core::{
-    Agent, Command, CommandResult, Core, CoreError, Event, ProjectId, ProjectList, QuitSummary,
-    TaskId, TaskList, TaskWorkspace, WorkspaceLayout,
+    Agent, Command, CommandResult, Core, CoreError, Event, ProjectApprovalsSnapshot, ProjectId,
+    ProjectList, QuitSummary, TaskId, TaskList, TaskWorkspace, WorkspaceLayout,
 };
 use tokio::sync::{Mutex, broadcast, mpsc, oneshot, watch};
 use tokio::time::Instant;
@@ -400,7 +400,7 @@ impl ShellState {
     pub async fn project_approvals(
         &self,
         project_id: String,
-    ) -> Result<Vec<ProjectApproval>, BridgeError> {
+    ) -> Result<ProjectApprovalsSnapshot, BridgeError> {
         Ok(self
             .core
             .lock()
@@ -409,16 +409,21 @@ impl ShellState {
             .await?)
     }
 
-    pub async fn reset_project_approval(
+    pub async fn reset_approval_grant(
         &self,
         project_id: String,
         approval_id: String,
+        task_id: Option<String>,
     ) -> Result<(), BridgeError> {
         Ok(self
             .core
             .lock()
             .await
-            .reset_project_approval(&ProjectId::new(project_id), &approval_id)
+            .reset_approval_grant(
+                &ProjectId::new(project_id),
+                &approval_id,
+                task_id.map(TaskId::new).as_ref(),
+            )
             .await?)
     }
 
@@ -1116,19 +1121,20 @@ pub mod commands {
     pub async fn project_approvals(
         state: State<'_, ShellState>,
         project_id: String,
-    ) -> Result<Vec<ProjectApproval>, BridgeError> {
+    ) -> Result<ProjectApprovalsSnapshot, BridgeError> {
         state.inner().project_approvals(project_id).await
     }
 
     #[tauri::command]
-    pub async fn reset_project_approval(
+    pub async fn reset_approval_grant(
         state: State<'_, ShellState>,
         project_id: String,
         approval_id: String,
+        task_id: Option<String>,
     ) -> Result<(), BridgeError> {
         state
             .inner()
-            .reset_project_approval(project_id, approval_id)
+            .reset_approval_grant(project_id, approval_id, task_id)
             .await
     }
 

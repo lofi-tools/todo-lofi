@@ -1,6 +1,6 @@
 import { For, Show, createEffect, createResource, createSignal, on, type JSX } from 'solid-js'
 
-import { AGENT_LABELS, projectApprovals, resetProjectApproval, type ProjectSnapshot } from './bridge'
+import { AGENT_LABELS, projectApprovals, resetApprovalGrant, type ProjectApproval, type ProjectSnapshot, type SessionApproval } from './bridge'
 
 const categories = ['Workspace', 'Projects', 'Appearance'] as const
 
@@ -17,47 +17,29 @@ interface SettingsPaneProps {
   projectImports: JSX.Element
   project?: ProjectSnapshot
   projectSettingsRequest?: { id: string }
+  approvalChange?: { projectId: string }
   showProjectArchived: boolean
   onShowProjectArchived: (projectId: string, visible: boolean) => void
 }
 
-function ProjectApprovals(props: { projectId: string }) {
-  const [resetting, setResetting] = createSignal(false)
-  const [resetError, setResetError] = createSignal('')
-  const [approvals, { refetch }] = createResource(() => props.projectId, async (projectId) => {
-    try {
-      return { grants: await projectApprovals(projectId), error: '' }
-    } catch (error) {
-      return { grants: [], error: approvalError(error) }
-    }
-  })
-
-  async function reset(approvalId: string) {
-    setResetting(true)
-    setResetError('')
-    try {
-      await resetProjectApproval(props.projectId, approvalId)
-      await refetch()
-    } catch (error) {
-      setResetError(approvalError(error))
-    } finally {
-      setResetting(false)
-    }
-  }
-
+function ApprovalGrantList(props: {
+  title: string
+  empty: string
+  grants?: (ProjectApproval | SessionApproval)[]
+  resetting: boolean
+  onReset: (id: string, taskId?: string) => void
+}) {
   return (
-    <section class="settings__project" aria-label="Saved project approvals">
-      <h4>Saved project approvals</h4>
-      <Show when={resetError() || approvals()?.error}>
-        {(error) => <p class="entry__notice--error" role="alert">{error()}</p>}
-      </Show>
-      <Show when={!approvals.loading && !approvals()?.error}>
-        <For each={approvals()?.grants} fallback={<p class="empty">No saved project approvals.</p>}>
-          {(grant) => (
+    <section class="settings__project" aria-label={props.title}>
+      <h4>{props.title}</h4>
+      <For each={props.grants} fallback={<p class="empty">{props.empty}</p>}>
+        {(grant) => {
+          const task = 'taskId' in grant ? grant : undefined
+          return (
             <div class="settings__approval">
               <div>
                 <p>{grant.title}</p>
-                <p class="empty">{AGENT_LABELS[grant.agent]}</p>
+                <p class="empty">{AGENT_LABELS[grant.agent]}{task && ` · ${task.taskTitle}`}</p>
                 <Show when={grant.paths.length > 0}>
                   <p class="entry__permission-paths">{grant.paths.join(', ')}</p>
                 </Show>
@@ -68,17 +50,70 @@ function ProjectApprovals(props: { projectId: string }) {
               <button
                 type="button"
                 class="project-action"
-                disabled={resetting()}
-                aria-label={`Reset approval for ${grant.title}`}
-                onClick={() => void reset(grant.id)}
+                disabled={props.resetting}
+                aria-label={`Reset approval for ${grant.title}${task ? ` in ${task.taskTitle}` : ''}`}
+                onClick={() => props.onReset(grant.id, task?.taskId)}
               >
                 Reset
               </button>
             </div>
-          )}
-        </For>
-      </Show>
+          )
+        }}
+      </For>
     </section>
+  )
+}
+
+function ProjectApprovals(props: { projectId: string; change?: { projectId: string } }) {
+  const [resetting, setResetting] = createSignal(false)
+  const [resetError, setResetError] = createSignal('')
+  const [approvals, { refetch }] = createResource(() => props.projectId, async (projectId) => {
+    try {
+      return { snapshot: await projectApprovals(projectId), error: '' }
+    } catch (error) {
+      return { snapshot: undefined, error: approvalError(error) }
+    }
+  })
+
+  createEffect(on(() => props.change, (change) => {
+    if (change?.projectId === props.projectId) void refetch()
+  }, { defer: true }))
+
+  async function reset(approvalId: string, taskId?: string) {
+    setResetting(true)
+    setResetError('')
+    try {
+      await resetApprovalGrant(props.projectId, approvalId, taskId)
+      await refetch()
+    } catch (error) {
+      setResetError(approvalError(error))
+    } finally {
+      setResetting(false)
+    }
+  }
+
+  return (
+    <div class="settings__project">
+      <Show when={resetError() || approvals.latest?.error}>
+        {(error) => <p class="entry__notice--error" role="alert">{error()}</p>}
+      </Show>
+      <Show when={approvals.latest?.snapshot}>
+        <ApprovalGrantList
+          title="Saved project approvals"
+          empty="No saved project approvals."
+          grants={approvals.latest?.snapshot?.saved}
+          resetting={resetting()}
+          onReset={reset}
+        />
+        <ApprovalGrantList
+          title="Live session approvals"
+          empty="No live session approvals."
+          grants={approvals.latest?.snapshot?.sessions}
+          resetting={resetting()}
+          onReset={reset}
+        />
+      </Show>
+    </div>
   )
 }
 
@@ -126,21 +161,23 @@ export function SettingsPane(props: SettingsPaneProps) {
             </label>
           </Show>
           <Show when={category() === 'Projects'}>
-            <Show when={props.project} keyed>
+            <Show when={props.project}>
               {(project) => (
                 <div class="settings__project">
                   <h4>Project settings</h4>
-                  <p>{project.name}</p>
-                  <p class="empty settings__project-path">{project.path}</p>
+                  <p>{project().name}</p>
+                  <p class="empty settings__project-path">{project().path}</p>
                   <label>
                     <input
                       type="checkbox"
                       checked={props.showProjectArchived}
-                      onChange={(event) => props.onShowProjectArchived(project.id, event.currentTarget.checked)}
+                      onChange={(event) => props.onShowProjectArchived(project().id, event.currentTarget.checked)}
                     />
                     Show archived tasks
                   </label>
-                  <ProjectApprovals projectId={project.id} />
+                  <Show when={project().id} keyed>
+                    {(projectId) => <ProjectApprovals projectId={projectId} change={props.approvalChange} />}
+                  </Show>
                 </div>
               )}
             </Show>

@@ -432,6 +432,15 @@ pub struct ApprovalRequest {
     pub choices: Option<Vec<Decision>>,
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionApproval {
+    pub id: String,
+    pub title: String,
+    pub arguments: Value,
+    pub paths: Vec<PathBuf>,
+}
+
 #[async_trait]
 pub trait ProjectApprovalPolicy: Send + Sync {
     async fn allows(&self, key: &str) -> Result<bool, String>;
@@ -1078,6 +1087,14 @@ pub trait AgentHarness: Send {
     }
 
     fn set_project_approval_policy(&mut self, _policy: Arc<dyn ProjectApprovalPolicy>) {}
+
+    fn session_approvals(&self) -> Vec<SessionApproval> {
+        Vec::new()
+    }
+
+    async fn reset_session_approval(&mut self, _id: &str) -> HarnessResult<()> {
+        Ok(())
+    }
 
     /// History returned while opening a persisted agent session.
     fn take_replayed_transcript(&mut self) -> Vec<Entry> {

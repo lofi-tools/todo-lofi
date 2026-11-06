@@ -202,6 +202,19 @@ impl AgentHarness for OpenCodeHarness {
         self.project_approvals = Some(policy);
     }
 
+    fn session_approvals(&self) -> Vec<crate::SessionApproval> {
+        self.fallback
+            .as_ref()
+            .map_or_else(Vec::new, AgentHarness::session_approvals)
+    }
+
+    async fn reset_session_approval(&mut self, id: &str) -> HarnessResult<()> {
+        if let Some(fallback) = &mut self.fallback {
+            fallback.reset_session_approval(id).await?;
+        }
+        Ok(())
+    }
+
     async fn start(&mut self, mut spec: SpawnSpec) -> HarnessResult<Capabilities> {
         if self.server.is_some() || self.fallback.is_some() {
             return Err(HarnessError::Protocol(

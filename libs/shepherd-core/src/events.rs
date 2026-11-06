@@ -2,6 +2,7 @@
 
 use serde::Serialize;
 
+use crate::projects::ProjectId;
 use crate::snapshots::{ProjectList, TaskList, TaskWorkspace};
 use crate::tasks::TaskSummary;
 use crate::terminal::TerminalList;
@@ -26,6 +27,9 @@ pub enum ShutdownState {
 )]
 pub enum Event {
     ProjectListChanged(ProjectList),
+    ProjectApprovalsChanged {
+        project_id: ProjectId,
+    },
     TaskListChanged(TaskList),
     TaskChanged(TaskSummary),
     TaskWorkspaceChanged(TaskWorkspace),

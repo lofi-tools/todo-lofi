@@ -238,6 +238,7 @@ export interface TerminalFrame {
 
 export type Event =
   | { type: 'projectListChanged'; data: ProjectList }
+  | { type: 'projectApprovalsChanged'; data: { projectId: string } }
   | { type: 'terminalBell'; data: { projectId: string; taskId: string | null; terminalId: string } }
   | { type: 'terminalListChanged'; data: TerminalList }
   | { type: 'taskListChanged'; data: TaskList }
@@ -296,12 +297,22 @@ export interface ProjectApproval {
   paths: string[]
 }
 
-export function projectApprovals(projectId: string) {
-  return invoke<ProjectApproval[]>('project_approvals', { projectId })
+export interface SessionApproval extends ProjectApproval {
+  taskId: string
+  taskTitle: string
 }
 
-export function resetProjectApproval(projectId: string, approvalId: string) {
-  return invoke<void>('reset_project_approval', { projectId, approvalId })
+export interface ProjectApprovalsSnapshot {
+  saved: ProjectApproval[]
+  sessions: SessionApproval[]
+}
+
+export function projectApprovals(projectId: string) {
+  return invoke<ProjectApprovalsSnapshot>('project_approvals', { projectId })
+}
+
+export function resetApprovalGrant(projectId: string, approvalId: string, taskId?: string) {
+  return invoke<void>('reset_approval_grant', { projectId, approvalId, taskId })
 }
 
 export function cancelTask(taskId: string): Promise<TaskWorkspace> {

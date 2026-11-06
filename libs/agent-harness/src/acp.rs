@@ -16,16 +16,16 @@ use acp_client::{
     SessionRoots, ToolPermissions,
 };
 use async_trait::async_trait;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 use tokio::time::timeout;
 
 use crate::{
     AdapterTier, AgentDiagnostics, AgentHarness, ApprovalId, ApprovalRequest, ApprovalSource,
     Capabilities, Decision, DeltaKind, Entry, FailureKind, FileDiff, HarnessError, HarnessEvent,
-    HarnessResult, ItemId, PlanRow, ProjectApprovalPolicy, PromptInput, SessionId, SessionState,
-    SpawnSpec, ToolCallId, ToolStatus, Transcript, TurnFinishReason, TurnId, command_line,
-    limit_command_output,
+    HarnessResult, ItemId, PlanRow, ProjectApprovalPolicy, PromptInput, SessionApproval, SessionId,
+    SessionState, SpawnSpec, ToolCallId, ToolStatus, Transcript, TurnFinishReason, TurnId,
+    command_line, limit_command_output,
 };
 
 const SESSION_TIMEOUT: Duration = Duration::from_secs(15);
@@ -111,6 +111,26 @@ impl AgentHarness for AcpHarness {
 
     fn set_project_approval_policy(&mut self, policy: Arc<dyn ProjectApprovalPolicy>) {
         self.project_approvals = Some(policy);
+    }
+
+    fn session_approvals(&self) -> Vec<SessionApproval> {
+        let Some(runtime) = &self.runtime else {
+            return Vec::new();
+        };
+        if runtime.grants.has_changed().is_err() {
+            return Vec::new();
+        }
+        runtime.grants.borrow().clone()
+    }
+
+    async fn reset_session_approval(&mut self, id: &str) -> HarnessResult<()> {
+        if self.runtime.is_none() {
+            return Ok(());
+        }
+        match self.control(Control::ResetSessionApproval(id.into())).await {
+            Err(HarnessError::ChannelClosed) => Ok(()),
+            result => result,
+        }
     }
 
     fn take_replayed_transcript(&mut self) -> Vec<Entry> {
@@ -282,6 +302,7 @@ enum Control {
     Prompt(String),
     Cancel,
     Respond(ApprovalId, Decision),
+    ResetSessionApproval(String),
 }
 
 type Command = (Control, oneshot::Sender<HarnessResult<()>>);
@@ -290,6 +311,7 @@ type Prompt = Pin<Box<dyn Future<Output = Result<StopReason, AcpError>> + Send>>
 struct Runtime {
     commands: mpsc::Sender<Command>,
     worker: JoinHandle<()>,
+    grants: watch::Receiver<Vec<SessionApproval>>,
 }
 
 impl Runtime {
@@ -301,6 +323,7 @@ impl Runtime {
         project_approvals: Option<Arc<dyn ProjectApprovalPolicy>>,
     ) -> Self {
         let (commands, incoming) = mpsc::channel(8);
+        let (grant_changes, grants) = watch::channel(Vec::new());
         let worker = tokio::spawn(async move {
             if let Err(error) = drive_session(
                 requester,
@@ -309,13 +332,18 @@ impl Runtime {
                 incoming,
                 sender,
                 project_approvals.as_deref(),
+                grant_changes,
             )
             .await
             {
                 tracing::debug!(%error, "ACP harness event loop ended");
             }
         });
-        Self { commands, worker }
+        Self {
+            commands,
+            worker,
+            grants,
+        }
     }
 }
 
@@ -332,11 +360,12 @@ async fn drive_session(
     mut commands: mpsc::Receiver<Command>,
     sender: mpsc::UnboundedSender<HarnessEvent>,
     project_approvals: Option<&dyn ProjectApprovalPolicy>,
+    grant_changes: watch::Sender<Vec<SessionApproval>>,
 ) -> HarnessResult<()> {
     let mut prompt: Option<Prompt> = None;
     let mut updates = Updates::default();
     let mut approvals = VecDeque::<PendingApproval>::new();
-    let mut session_grants = Vec::new();
+    let mut session_grants = SessionGrants::new(grant_changes);
     let mut cancelling = false;
     loop {
         tokio::select! {
@@ -410,6 +439,10 @@ async fn drive_session(
                     Control::Respond(id, decision) => {
                         respond(&sender, &mut approvals, &mut session_grants, project_approvals, id, decision).await
                     }
+                    Control::ResetSessionApproval(id) => {
+                        session_grants.reset(&id);
+                        Ok(())
+                    }
                 };
                 if answer.send(result).is_err() {
                     tracing::debug!("ACP command caller released its reply");
@@ -449,15 +482,60 @@ struct PendingApproval {
     request: ApprovalRequest,
     allow: Option<schema::PermissionOptionId>,
     deny: Option<schema::PermissionOptionId>,
-    grant: Option<SessionGrant>,
+    fingerprint: Option<ApprovalFingerprint>,
     project_key: Option<String>,
     reply: PermissionReply,
 }
 
 #[derive(PartialEq)]
-struct SessionGrant {
+struct ApprovalFingerprint {
     fields: ToolCallUpdateFields,
     meta: Option<schema::Meta>,
+}
+
+struct SessionGrants {
+    entries: Vec<(ApprovalFingerprint, SessionApproval)>,
+    changes: watch::Sender<Vec<SessionApproval>>,
+}
+
+impl SessionGrants {
+    fn new(changes: watch::Sender<Vec<SessionApproval>>) -> Self {
+        Self {
+            entries: Vec::new(),
+            changes,
+        }
+    }
+
+    fn contains(&self, fingerprint: &ApprovalFingerprint) -> bool {
+        self.entries.iter().any(|(saved, _)| saved == fingerprint)
+    }
+
+    fn remember(&mut self, fingerprint: ApprovalFingerprint, request: ApprovalRequest) {
+        self.entries.push((
+            fingerprint,
+            SessionApproval {
+                id: request.approval_id.to_string(),
+                title: request.title,
+                arguments: request.arguments,
+                paths: request.paths,
+            },
+        ));
+        self.publish();
+    }
+
+    fn reset(&mut self, id: &str) {
+        self.entries.retain(|(_, approval)| approval.id != id);
+        self.publish();
+    }
+
+    fn publish(&self) {
+        self.changes.send_replace(
+            self.entries
+                .iter()
+                .map(|(_, grant)| grant.clone())
+                .collect(),
+        );
+    }
 }
 
 impl PendingApproval {
@@ -476,7 +554,7 @@ impl PendingApproval {
         let fields = call.fields;
         let allow = once(PermissionOptionKind::AllowOnce);
         let mut choices = Vec::new();
-        let mut grant = None;
+        let mut fingerprint = None;
         if allow.is_some() {
             choices.push(Decision::Allow);
             // The title is agent-authored display text. Reuse an approval only
@@ -485,13 +563,13 @@ impl PendingApproval {
                 && fields.raw_input.as_ref().is_some_and(has_approval_input)
             {
                 choices.push(Decision::AllowSession);
-                grant = Some(SessionGrant {
+                fingerprint = Some(ApprovalFingerprint {
                     fields: fields.clone().status(None).raw_output(None),
                     meta: call.meta,
                 });
             }
         }
-        let project_key = grant
+        let project_key = fingerprint
             .as_ref()
             .filter(|_| project_approvals)
             .and_then(
@@ -541,7 +619,7 @@ impl PendingApproval {
             request,
             allow,
             deny: once(PermissionOptionKind::RejectOnce),
-            grant,
+            fingerprint,
             project_key,
             reply,
         }
@@ -561,12 +639,12 @@ fn has_approval_input(input: &serde_json::Value) -> bool {
 async fn show_next_approval(
     sender: &mpsc::UnboundedSender<HarnessEvent>,
     approvals: &mut VecDeque<PendingApproval>,
-    session_grants: &[SessionGrant],
+    session_grants: &SessionGrants,
     project_approvals: Option<&dyn ProjectApprovalPolicy>,
 ) -> HarnessResult<()> {
     while let Some(approval) = approvals.front() {
         let source = if approval
-            .grant
+            .fingerprint
             .as_ref()
             .is_some_and(|grant| session_grants.contains(grant))
         {
@@ -622,7 +700,7 @@ async fn show_next_approval(
 async fn respond(
     sender: &mpsc::UnboundedSender<HarnessEvent>,
     approvals: &mut VecDeque<PendingApproval>,
-    session_grants: &mut Vec<SessionGrant>,
+    session_grants: &mut SessionGrants,
     project_approvals: Option<&dyn ProjectApprovalPolicy>,
     id: ApprovalId,
     decision: Decision,
@@ -670,9 +748,9 @@ async fn respond(
             decision
         };
         if decision == Decision::AllowSession
-            && let Some(grant) = approval.grant
+            && let Some(fingerprint) = approval.fingerprint
         {
-            session_grants.push(grant);
+            session_grants.remember(fingerprint, approval.request);
         }
         publish(
             sender,
@@ -1173,7 +1251,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reuses_an_exact_permission_for_the_live_session()
+    async fn reuses_and_resets_an_exact_permission_for_the_live_session()
     -> Result<(), Box<dyn std::error::Error>> {
         let script = FakeScript {
             permission: Some(ToolCallUpdate::new(
@@ -1208,9 +1286,19 @@ mod tests {
             request.choices.as_deref(),
             Some([Decision::Allow, Decision::AllowSession, Decision::Deny].as_slice()),
         );
+        let grant_id = request.approval_id.to_string();
         harness
             .respond(request.approval_id, Decision::AllowSession)
             .await?;
+        assert_eq!(
+            harness.session_approvals(),
+            [SessionApproval {
+                id: grant_id.clone(),
+                title: "Run a command".into(),
+                arguments: serde_json::json!({"command": "git status"}),
+                paths: Vec::new(),
+            }]
+        );
         loop {
             let event = next(&mut harness).await?;
             transcript.apply(&event);
@@ -1240,8 +1328,39 @@ mod tests {
                 ..
             }
         )));
+
+        harness.reset_session_approval("stale-grant").await?;
+        assert_eq!(harness.session_approvals().len(), 1);
+        harness.reset_session_approval(&grant_id).await?;
+        harness.reset_session_approval(&grant_id).await?;
+        assert!(harness.session_approvals().is_empty());
+        harness
+            .prompt(PromptInput {
+                text: "after reset".into(),
+            })
+            .await?;
+        let request = loop {
+            match next(&mut harness).await? {
+                HarnessEvent::ApprovalRequested { request } => break request,
+                HarnessEvent::ApprovalAutomaticallyResolved { .. } => {
+                    return Err("reset grant was reused".into());
+                }
+                _ => {}
+            }
+        };
+        harness
+            .respond(request.approval_id, Decision::AllowSession)
+            .await?;
+        loop {
+            if matches!(next(&mut harness).await?, HarnessEvent::TurnFinished { .. }) {
+                break;
+            }
+        }
+        assert_eq!(harness.session_approvals().len(), 1);
+        harness.shutdown().await?;
+        assert!(harness.session_approvals().is_empty());
         let observed = observed.lock().map_err(|_| "fake observations poisoned")?;
-        assert_eq!(observed.permission_responses.len(), 2);
+        assert_eq!(observed.permission_responses.len(), 3);
         assert!(
             observed
                 .permission_responses
@@ -1279,7 +1398,8 @@ mod tests {
         let first_id = first.request.approval_id.clone();
         let changed_id = changed.request.approval_id.clone();
         let mut queue = VecDeque::from([first, identical, changed]);
-        let mut grants = Vec::new();
+        let (grant_changes, _) = watch::channel(Vec::new());
+        let mut grants = SessionGrants::new(grant_changes);
         let (sender, mut events) = mpsc::unbounded_channel();
         respond(
             &sender,

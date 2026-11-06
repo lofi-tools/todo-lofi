@@ -753,7 +753,8 @@ Default policy is **agent-judged**:
    keeping the grant lifetime under Shepherd's control.
    Project grants use the same match and are scoped to the project and the
    configured executable, arguments, and launch environment overrides.
-   They survive Shepherd restarts and can be reset under Settings → Projects.
+   They survive Shepherd restarts. Settings → Projects lists saved project
+   grants and live session grants by task, with a reset for each grant.
 
 - Project overrides may only tighten this policy: they can remove commands from
   the safe list or require approval where the global default auto-allows. Adding
