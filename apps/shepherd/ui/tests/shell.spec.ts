@@ -17,6 +17,7 @@ test.beforeEach(async ({ context }) => {
     let eventChannel
     let eventIndex = 0
     let releaseTerminalWrite: (() => void) | undefined
+    let expiringTerminalSubscription: string | undefined
     const options = new URLSearchParams(window.location.search)
 
     const project = {
@@ -407,11 +408,14 @@ test.beforeEach(async ({ context }) => {
             return 'freebuff-fixture'
           case 'subscribe_terminal': {
             subscriptions.push(args.terminalId)
+            const subscriptionId = `subscription-${args.terminalId}-${subscriptions.length}`
+            const recovering = options.has('expired-terminal-subscription') && expiringTerminalSubscription !== undefined
             const frame = new Uint8Array([
               1, 3, 2, 0, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 4, 0, 0, 1, 0,
               0, 0, 1, 0, 2, 0, 1, 234, 230, 230, 0, 22, 19, 19, 0, 1, 0, 0, 0, 65,
               1, 0, 0, 0, 1, 0, 0, 0,
             ])
+            if (recovering) frame[frame.length - 9] = 'D'.charCodeAt(0)
             callbacks.get(args.channel.id)?.({ index: 0, message: frame.buffer })
             const update = new Uint8Array([
               1, 1, 2, 0, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 3, 4, 0, 0, 1, 0,
@@ -430,9 +434,10 @@ test.beforeEach(async ({ context }) => {
             if (options.has('interrupted-terminal-paste')) {
               new DataView(update.buffer).setUint32(14, 4 | (1 << 4), true)
             }
-            callbacks.get(args.channel.id)?.({ index: 1, message: update.buffer })
+            if (options.has('expired-terminal-subscription') && !recovering) expiringTerminalSubscription = subscriptionId
+            if (!recovering) callbacks.get(args.channel.id)?.({ index: 1, message: update.buffer })
             if (options.has('scrollback-selection')) {
-              let index = 2
+              let index = recovering ? 1 : 2
               Object.assign(window, {
                 __emitTerminalHistory: (offset: number, glyph: string) => {
                   const history = frame.slice()
@@ -446,8 +451,13 @@ test.beforeEach(async ({ context }) => {
                 },
               })
             }
-            return `subscription-${args.terminalId}`
+            return subscriptionId
           }
+          case 'acknowledge_terminal_frame':
+            if (args.subscriptionId === expiringTerminalSubscription && args.sequence === 3) {
+              throw { code: 'terminal_subscription_ended', message: 'terminal frame subscription ended' }
+            }
+            return null
           case 'terminal_write':
             writes.push(args.data)
             if (options.has('interrupted-terminal-paste') && writes.length === 2) {
@@ -832,6 +842,25 @@ test('paints the latest terminal output when a hidden window returns', async ({ 
 
   expect(paints).toEqual({ whileHidden: [], restored: ['D', 'D'] })
   await expect(output).toHaveText('DD')
+})
+
+test('reconnects an expired frame subscription without restarting the shell', async ({ page }) => {
+  await page.goto('/?scrollback-selection&expired-terminal-subscription')
+  const output = page.getByLabel('Terminal output')
+  await expect(output).toHaveText('BB')
+  const emit = (offset: number, glyph: string) => page.evaluate(({ offset, glyph }) => {
+    const fixture = window as unknown as { __emitTerminalHistory: (offset: number, glyph: string) => void }
+    fixture.__emitTerminalHistory(offset, glyph)
+  }, { offset, glyph })
+  await emit(2, 'C')
+
+  await expect(output).toHaveText('DD')
+  await emit(3, 'E')
+  await expect(output).toHaveText('EE')
+  await expect(page.getByText('terminal frame subscription ended')).toHaveCount(0)
+  const subscriptions = await page.evaluate(() => window.__subscriptions)
+  expect(subscriptions).toHaveLength(2)
+  expect(subscriptions[0]).toBe(subscriptions[1])
 })
 
 test('keeps a selection while new output leaves the selected scrollback unchanged', async ({ page }) => {

@@ -475,8 +475,9 @@ export async function subscribeTerminal(
   handler: (frame: TerminalFrame, changedRows: number[] | null) => void,
   onError: (failure: unknown) => void,
 ): Promise<() => Promise<void>> {
-  let previous: TerminalFrame | undefined
   let closed = false
+  let connection = 0
+  let canReconnect = true
   let subscription: Promise<string>
   async function dispose() {
     if (closed) return
@@ -488,20 +489,41 @@ export async function subscribeTerminal(
     onError(failure)
     void dispose().catch(console.error)
   }
-  const channel = new Channel<ArrayBuffer>((buffer) => {
-    if (closed) return
-    try {
-      const update = decodeTerminalFrame(buffer, previous)
-      previous = update.frame
-      handler(update.frame, update.changedRows)
-      void Promise.resolve().then(() => subscription).then((subscriptionId) => {
-        if (!closed) return invoke<void>('acknowledge_terminal_frame', { subscriptionId, sequence: update.sequence })
-      }).catch(failed)
-    } catch (failure) {
-      queueMicrotask(() => failed(failure))
-    }
-  })
-  subscription = invoke<string>('subscribe_terminal', { terminalId, channel })
+  function connect() {
+    const generation = ++connection
+    const isCurrent = () => !closed && connection === generation
+    let previous: TerminalFrame | undefined
+    const channel = new Channel<ArrayBuffer>((buffer) => {
+      if (!isCurrent()) return
+      try {
+        const update = decodeTerminalFrame(buffer, previous)
+        previous = update.frame
+        handler(update.frame, update.changedRows)
+        void Promise.resolve().then(async () => {
+          const subscriptionId = await id
+          if (!isCurrent()) return
+          await invoke<void>('acknowledge_terminal_frame', { subscriptionId, sequence: update.sequence })
+          if (isCurrent()) canReconnect = true
+        }).catch((failure: unknown) => {
+          if (!isCurrent()) return
+          if (canReconnect && typeof failure === 'object' && failure !== null
+            && 'code' in failure && failure.code === 'terminal_subscription_ended') {
+            // A suspended webview may wake after the server discarded its unacknowledged frame.
+            canReconnect = false
+            subscription = connect()
+            void subscription.catch(failed)
+          } else {
+            failed(failure)
+          }
+        })
+      } catch (failure) {
+        queueMicrotask(() => { if (isCurrent()) failed(failure) })
+      }
+    })
+    const id = invoke<string>('subscribe_terminal', { terminalId, channel })
+    return id
+  }
+  subscription = connect()
   await subscription
   return dispose
 }

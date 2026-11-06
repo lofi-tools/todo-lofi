@@ -924,8 +924,13 @@ impl ShellState {
                         ) => matches!(result, Ok(Ok(_))),
                     };
                     if !received {
-                        tracing::debug!(%id, sequence, "terminal frame was not acknowledged");
-                        break;
+                        let mut active = subscriptions.lock().await;
+                        // An acknowledgement can arrive just after the timer fires.
+                        if !active.contains_key(&id) || *acknowledged.borrow() != sequence {
+                            active.remove(&id);
+                            tracing::debug!(%id, sequence, "terminal frame was not acknowledged");
+                            return;
+                        }
                     }
                     previous = Some(frame);
                 }
@@ -952,9 +957,12 @@ impl ShellState {
         sequence: u32,
     ) -> Result<(), BridgeError> {
         let subscriptions = self.terminal_subscriptions.lock().await;
-        let subscription = subscriptions
-            .get(subscription_id)
-            .ok_or_else(|| BridgeError::new("terminal", "terminal frame subscription ended"))?;
+        let subscription = subscriptions.get(subscription_id).ok_or_else(|| {
+            BridgeError::new(
+                "terminal_subscription_ended",
+                "terminal frame subscription ended",
+            )
+        })?;
         subscription.acknowledgements.send_replace(sequence);
         Ok(())
     }
