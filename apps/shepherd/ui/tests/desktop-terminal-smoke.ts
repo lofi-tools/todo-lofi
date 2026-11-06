@@ -235,7 +235,7 @@ async function reportIme(details: object) {
   if (!response.ok) throw new Error('Could not report the native IME probe')
 }
 
-async function exerciseLinuxIme() {
+async function exerciseNativeIme(commitTimeout: number) {
   const project = await openFixtureProject()
   const start = await enabledButton('New shared terminal')
   start.click()
@@ -259,7 +259,7 @@ async function exerciseLinuxIme() {
     try {
       const { left, top } = input.getBoundingClientRect()
       await reportIme({ ime: 'ready', attempt, cursor: [left, top], devicePixelRatio })
-      const selection = await waitFor('native IME commit', () => commits[0], 30_000)
+      const selection = await waitFor('native IME commit', () => commits[0], commitTimeout)
       await reportIme({ ime: 'committed', attempt, selection })
       const marker = `S4_NATIVE_IME_RESULT_${attempt}:`
       const text = await waitFor('native composition reaches the PTY', () =>
@@ -1007,7 +1007,10 @@ void (async () => {
     await waitFor('the smoke window to become visible', () => !document.hidden)
     switch (__SHEPHERD_SMOKE_PHASE__) {
       case 'linux-ime':
-        result = await exerciseLinuxIme()
+        result = await exerciseNativeIme(30_000)
+        break
+      case 'macos-ime':
+        result = await exerciseNativeIme(90_000)
         break
       case 'restore':
         result = await restore()

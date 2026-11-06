@@ -22,6 +22,19 @@ case "${1:-}" in
     phases=(linux-ime)
     export SHEPHERD_DEV_SCRIPTED_HARNESS=1
     ;;
+  --macos-ime)
+    if [[ $(uname -s) != Darwin ]]; then
+      printf '%s\n' 'The macOS IME smoke requires a macOS desktop session.' >&2
+      exit 2
+    fi
+    command -v python3 >/dev/null
+    phases=(macos-ime)
+    duration=300s
+    export SHEPHERD_DEV_SCRIPTED_HARNESS=1
+    printf '%s\n' 'Use Pinyin - Simplified. Wait for each IME prompt before typing ni.' \
+      'At IME1>, check the candidate panel position, then press Space and Return.' \
+      'At IME2>, check the new position, select a different candidate, then press Return to submit it.'
+    ;;
   --codex-approval)
     command -v python3 >/dev/null
     phases=(codex-approval)
@@ -55,7 +68,7 @@ case "${1:-}" in
     export SHEPHERD_DEV_CODEX_SMOKE=review-merge
     ;;
   *)
-    printf '%s\n' "Usage: $0 [--linux-ime|--codex-approval|--codex-live|--codex-edit|--codex-restart|--codex-exit|--codex-review-merge]" >&2
+    printf '%s\n' "Usage: $0 [--linux-ime|--macos-ime|--codex-approval|--codex-live|--codex-edit|--codex-restart|--codex-exit|--codex-review-merge]" >&2
     exit 2
     ;;
 esac

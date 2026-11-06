@@ -662,6 +662,15 @@ delivered one `é` to the PTY. The shell printed `IME_BYTES:é`. Candidate
 selection and candidate-window placement still need a system IME with
 conversion candidates on macOS.
 
+Run the candidate check from the Nix shell with
+`./scripts/smoke-shepherd-terminal.sh --macos-ime`. Use the system
+**Pinyin - Simplified** input source. At each of the two prompts, type
+`ni` and check that the candidate panel opens next to the current cursor.
+Commit the first candidate at the first prompt and a different candidate
+at the second. Press Return after each commit to submit it to the shell.
+The smoke checks that a trusted composition event and the PTY's received
+text match on both attempts. The operator checks placement visually.
+
 On Ubuntu 24.04.5 ARM64, a disposable Xvfb session used IBus Pinyin through
 GTK. After the PTY cursor moved, the candidate panel initially opened by the
 previous caret. Refreshing the focused, empty input after moving it fixed the
