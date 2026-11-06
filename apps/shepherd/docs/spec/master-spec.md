@@ -313,6 +313,12 @@ core resolves a chord, runs the command, routes text to the focused input, or
 encodes terminal bytes when the chord is unclaimed. Focus and input mode are core
 state, so neither shell carries UI context in a key event.
 
+The Tauri webview receives the effective chord maps and command requirements
+from the core. It chooses the map for the focused control and checks the
+requirements against the current workspace snapshot and mounted panes before
+the browser's key event returns. This lets unclaimed chords continue to the
+terminal encoder without waiting for IPC.
+
 ### 3.4 Concurrency rules
 
 - One agent process per task; at most one in-flight prompt per task.

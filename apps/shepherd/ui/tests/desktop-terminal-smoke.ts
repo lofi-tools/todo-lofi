@@ -1068,6 +1068,17 @@ async function smoke() {
   })
   start.click()
   const input = await waitFor('terminal input', () => document.querySelector<HTMLTextAreaElement>('.terminal-view__input'))
+  const mac = navigator.platform.startsWith('Mac')
+  const paletteBinding = mac ? 'Meta+K' : 'Control+Shift+K'
+  await waitFor('platform command binding', () => button('Command palette')?.getAttribute('aria-keyshortcuts') === paletteBinding)
+  input.dispatchEvent(new KeyboardEvent('keydown', {
+    key: 'k', metaKey: mac, ctrlKey: !mac, shiftKey: !mac, bubbles: true, cancelable: true,
+  }))
+  const palette = await waitFor('open command palette', () =>
+    document.querySelector<HTMLDialogElement>('dialog[aria-label="Command palette"][open]'))
+  if (!palette.textContent?.includes('Send next key to terminal')) throw new Error('The palette did not receive the core command catalog')
+  palette.querySelector<HTMLButtonElement>('header button')?.click()
+  await waitFor('closed command palette', () => !palette.isConnected)
   const { terminals: [terminal] } = await bridge.terminalList(project.id)
   if (!terminal) throw new Error('The fixture terminal was not started')
   if (windowChecks) {
@@ -1110,7 +1121,7 @@ async function smoke() {
   await openInspectorTab('git')
   await requestQuitWithLiveTask(3)
   return { ok: true, quitWarning: true, taskSwitch: true, projectSwitch: true, roundTrip: true,
-    splitReattach: true, fishKeyBindings: __SHEPHERD_SMOKE_FISH__, bracketedPaste: true, ...windowResults }
+    splitReattach: true, commandPalette: true, fishKeyBindings: __SHEPHERD_SMOKE_FISH__, bracketedPaste: true, ...windowResults }
 }
 
 async function restore() {

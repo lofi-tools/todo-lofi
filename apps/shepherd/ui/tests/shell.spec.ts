@@ -5,12 +5,17 @@
  */
 
 import { fileURLToPath } from 'node:url'
+import { readFileSync } from 'node:fs'
 import { expect, test } from '@playwright/test'
 
-import type { AgentTerminal, Entry, Event as ShepherdEvent, FileChange, InspectorTab, TaskState, TerminalLayout, TerminalSnapshot, TerminalSplit, WorkspaceLayout } from '../src/bridge'
+import type { AgentTerminal, CommandCondition, Entry, Event as ShepherdEvent, FileChange, GitMutation, InspectorTab, ShortcutScope, TaskState, TerminalLayout, TerminalSnapshot, TerminalSplit, WorkspaceLayout } from '../src/bridge'
+
+const workspaceCommands: Array<{
+  id: string; label: string; category: string; mac?: string; linux?: string; scope?: ShortcutScope; requires?: CommandCondition[]
+}> = JSON.parse(readFileSync(new URL('../../../../libs/shepherd-core/src/workspace-commands.json', import.meta.url), 'utf8'))
 
 test.beforeEach(async ({ context }) => {
-  await context.addInitScript(() => {
+  await context.addInitScript((registry) => {
     const callbacks = new Map()
     let nextCallbackId = 1
     let nextTask = 2
@@ -23,6 +28,16 @@ test.beforeEach(async ({ context }) => {
     const notifications: string[] = []
     const dockCounts: Array<number | undefined> = []
     const archiveRequests: string[][] = []
+    const gitMutations: GitMutation[] = []
+    const gitState = () => {
+      const last = gitMutations.at(-1)?.type
+      return {
+        branch: 'shepherd/ship-it', tracking: null, projectRoot: null, branches: ['main'], history: [],
+        files: last === 'commit' ? [] : [{ path: 'src/main.rs', originalPath: null, actionable: true,
+          index: last === 'stage' ? 'M' : ' ', worktree: last === 'stage' ? ' ' : 'M' }],
+        stagedRevision: 'fixture', mergeBlocked: null, stagedDiff: last === 'stage' ? 'staged diff' : '', unstagedDiff: 'fixture diff',
+      }
+    }
     const promptFileUploads: Array<{ taskId: string; name: string; text: string }> = []
     const codexTurns: Array<{ taskId: string; model?: string; effort?: string }> = []
     const sessionModes = new Map<string, string>()
@@ -347,6 +362,23 @@ test.beforeEach(async ({ context }) => {
       },
       invoke: async (command, args, invokeOptions) => {
         switch (command) {
+          case 'command_registry': {
+            const reasons = {
+              cancel: 'No cancellable turn is active.',
+              focusedTerminal: 'Focus a terminal input before opening the palette.',
+            }
+            const commands = registry.map(({ id, label, category, scope, mac, linux, requires }) => ({
+              id, label, category, scope: scope ?? 'window', chord: (args.platform === 'mac' ? mac : linux) ?? null,
+              requirements: (requires ?? []).map((condition) => ({ condition, reason: reasons[condition] ?? `Requires ${condition}.` })),
+            }))
+            const chords = Object.fromEntries(['window', 'composer', 'workspaceTerminal', 'commitForm'].map((scope) => [
+              scope, Object.fromEntries(commands.filter((command) => command.chord && (command.scope === 'window' || command.scope === scope))
+                .map((command) => [command.chord, command.id])),
+            ]))
+            return { commands, chords }
+          }
+          case 'agent_availability':
+            return { codex: true, opencode: false, claude: false }
           case 'subscribe':
             eventChannel = args.channel.id
             return null
@@ -499,11 +531,10 @@ test.beforeEach(async ({ context }) => {
           }
           case 'git_snapshot':
           case 'review_snapshot':
-            return {
-              branch: 'shepherd/ship-it', tracking: null, projectRoot: null, branches: ['main'], history: [],
-              files: [{ path: 'src/main.rs', originalPath: null, actionable: true, index: ' ', worktree: 'M' }],
-              stagedRevision: 'fixture', mergeBlocked: null, stagedDiff: '', unstagedDiff: 'fixture diff',
-            }
+            return gitState()
+          case 'mutate_git':
+            gitMutations.push(args.mutation)
+            return gitState()
           case 'git_file_diff':
             return { staged: '', unstaged: 'fixture diff', revision: 'fixture', canDiscard: true }
           case 'review_file_diff':
@@ -852,6 +883,7 @@ test.beforeEach(async ({ context }) => {
     window.__notifications = notifications
     window.__dockCounts = dockCounts
     window.__archiveRequests = archiveRequests
+    window.__gitMutations = gitMutations
     window.__emitCoreEvent = (event: ShepherdEvent) =>
       callbacks.get(eventChannel)?.({ index: eventIndex++, message: event })
     window.__setTaskState = (taskId: string, state: TaskState) => {
@@ -878,7 +910,7 @@ test.beforeEach(async ({ context }) => {
       agentTerminals.set(taskId, terminals)
       window.__emitCoreEvent({ type: 'taskWorkspaceChanged', data: workspace(taskId) })
     }
-  })
+  }, workspaceCommands)
 })
 
 test('puts the macOS window controls and history buttons in one header row', async ({ page }) => {
@@ -901,6 +933,97 @@ test('puts the macOS window controls and history buttons in one header row', asy
   expect(next.y + next.height / 2).toBeCloseTo(windowControlsCenter)
   expect(previous.x).toBeGreaterThanOrEqual(windowControls.x + windowControls.width)
   expect(next.x).toBeGreaterThanOrEqual(previous.x + previous.width)
+})
+
+test('searches app commands, explains unavailable actions, and switches workspace from the keyboard', async ({ page }) => {
+  await page.addInitScript(() => Object.defineProperty(navigator, 'platform', { value: 'Linux x86_64' }))
+  await page.goto('/?task-search')
+  const paletteButton = page.getByRole('button', { name: 'Command palette' })
+  await expect(paletteButton).toHaveAttribute('aria-keyshortcuts', 'Control+Shift+K')
+  await paletteButton.click()
+  const palette = page.getByRole('dialog', { name: 'Command palette' })
+  const filter = palette.getByRole('combobox')
+  await expect(filter).toBeFocused()
+  await filter.fill('cancel turn')
+  const cancel = palette.getByRole('option', { name: /Cancel turn/ })
+  await expect(cancel).toHaveAttribute('aria-disabled', 'true')
+  await expect(cancel).toContainText('No cancellable turn is active.')
+  await expect(cancel.locator('kbd')).toHaveText('Ctrl+.')
+  await filter.press('Enter')
+  await expect(palette).toBeVisible()
+  await filter.press('Escape')
+  await expect(paletteButton).toBeFocused()
+
+  await page.keyboard.press('Control+Shift+K')
+  await filter.fill('swtch proj')
+  await expect(palette.getByRole('option', { name: /Switch project/ })).toHaveCount(1)
+  await filter.press('Enter')
+  const projectPicker = page.getByRole('dialog', { name: 'Switch project' })
+  await expect(projectPicker.getByRole('combobox')).toBeFocused()
+  await projectPicker.getByRole('combobox').fill('notes')
+  await projectPicker.getByRole('combobox').press('Enter')
+  const chat = page.getByRole('region', { name: 'Task chat' })
+  await expect(chat).toContainText('Current answer')
+  await page.keyboard.press('Control+Shift+T')
+  await expect(chat).toContainText('New task')
+  await page.keyboard.press('Control+Shift+O')
+  const taskPicker = page.getByRole('dialog', { name: 'Switch task' })
+  await taskPicker.getByRole('combobox').fill('current answer')
+  await taskPicker.getByRole('combobox').press('Enter')
+  await expect(chat).toContainText('Current answer')
+  await page.keyboard.press('Control+Shift+B')
+  await expect(page.getByRole('complementary', { name: 'Workspace navigation' })).toBeHidden()
+  await page.keyboard.press('Control+Shift+B')
+  await expect(page.getByRole('complementary', { name: 'Workspace navigation' })).toBeVisible()
+})
+
+test('forwards one claimed shortcut to a terminal and keeps ordinary readline shortcuts', async ({ page }) => {
+  await page.addInitScript(() => Object.defineProperty(navigator, 'platform', { value: 'Linux x86_64' }))
+  await page.goto('/?scoped-terminals')
+  const terminal = page.getByRole('region', { name: 'Terminal 1' }).getByRole('textbox')
+  const palette = page.getByRole('dialog', { name: 'Command palette' })
+  await terminal.press('Control+K')
+  await expect.poll(() => page.evaluate(() => window.__writes)).toEqual(['\x0b'])
+  await terminal.press('Control+Shift+K')
+  await expect(palette).toBeVisible()
+  const filter = palette.getByRole('combobox')
+  await filter.fill('send next key')
+  await expect(palette.getByRole('option', { name: /Send next key to terminal/ })).toHaveAttribute('aria-disabled', 'false')
+  await filter.press('Enter')
+  await expect(terminal).toBeFocused()
+  await terminal.press('Control+Shift+K')
+  await expect.poll(() => page.evaluate(() => window.__writes)).toEqual(['\x0b', '\x0b'])
+  await expect(palette).toHaveCount(0)
+  await terminal.press('Control+Shift+K')
+  await expect(palette).toBeVisible()
+  await filter.press('Escape')
+  await expect(terminal).toBeFocused()
+})
+
+test('stages through the palette and routes Control Enter to the active Git or composer input', async ({ page }) => {
+  await page.addInitScript(() => Object.defineProperty(navigator, 'platform', { value: 'Linux x86_64' }))
+  await page.goto('/')
+  const trigger = page.getByRole('button', { name: 'Command palette' })
+  const palette = page.getByRole('dialog', { name: 'Command palette' })
+  await expect(page.getByText('Ship it')).toBeVisible()
+  await trigger.click()
+  await palette.getByRole('combobox').fill('stage all')
+  await palette.getByRole('combobox').press('Enter')
+  await expect.poll(() => page.evaluate(() => window.__gitMutations)).toEqual([{ type: 'stage', path: null }])
+  await trigger.click()
+  await palette.getByRole('combobox').fill('commit staged')
+  await palette.getByRole('combobox').press('Enter')
+  const message = page.getByRole('textbox', { name: 'Commit message' })
+  await expect(message).toBeFocused()
+  await message.fill('Review staged work')
+  await message.press('Control+Enter')
+  await expect.poll(() => page.evaluate(() => window.__gitMutations)).toEqual([
+    { type: 'stage', path: null }, { type: 'commit', message: 'Review staged work', expected: 'fixture' },
+  ])
+  const prompt = page.getByRole('textbox', { name: 'Prompt' })
+  await prompt.fill('Inspect the commit')
+  await prompt.press('Control+Enter')
+  await expect(page.getByRole('region', { name: 'Transcript' })).toContainText('Inspect the commit')
 })
 
 test('filters review tasks across projects and archives the confirmed selection', async ({ page }) => {

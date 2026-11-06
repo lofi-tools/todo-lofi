@@ -1,8 +1,16 @@
-import { For, Show, createResource, createSignal } from 'solid-js'
+import { For, Show, createEffect, createResource, createSignal } from 'solid-js'
 
 import { gitFileDiff, gitSnapshot, mutateGit, type GitMutation } from './bridge'
 
-export function GitPane(props: { taskId: string; revision: number; live: boolean; openTerminal: () => void; openFile: (path: string) => void }) {
+interface GitRequest {
+  taskId: string
+  action: 'stageAll' | 'commit'
+}
+
+export function GitPane(props: {
+  taskId: string; revision: number; live: boolean; openTerminal: () => void; openFile: (path: string) => void
+  request?: GitRequest; onRequestHandled: (request: GitRequest) => void; commitShortcut?: string
+}) {
   const [git, { refetch, mutate }] = createResource(
     () => [props.taskId, props.revision] as const,
     ([taskId]) => gitSnapshot(taskId),
@@ -25,6 +33,21 @@ export function GitPane(props: { taskId: string; revision: number; live: boolean
   const [error, setError] = createSignal('')
   const [notice, setNotice] = createSignal('')
   const disabled = () => props.live || pending() || git.loading
+  let commitMessage: HTMLTextAreaElement | undefined
+
+  createEffect(() => {
+    const request = props.request
+    if (request?.taskId !== props.taskId || git.loading) return
+    props.onRequestHandled(request)
+    if (git.error || disabled()) return
+    if (request.action === 'commit') {
+      commitMessage?.focus()
+    } else if (git()?.files.some((file) => file.worktree.trim())) {
+      void apply({ type: 'stage', path: null })
+    } else {
+      setNotice('No unstaged changes.')
+    }
+  })
 
   async function apply(operation: GitMutation) {
     if (disabled()) return
@@ -159,12 +182,13 @@ export function GitPane(props: { taskId: string; revision: number; live: boolean
                 <button type="button" disabled={disabled()} onClick={() => void apply({ type: 'stage', path: null })}>Stage all</button>
               </div>
             </Show>
-            <form class="git-pane" onSubmit={(event) => {
+            <form class="git-pane" data-git-commit onSubmit={(event) => {
               event.preventDefault()
               void apply({ type: 'commit', message: message(), expected: snapshot().stagedRevision })
             }}>
-              <textarea class="composer__input" aria-label="Commit message" placeholder="Commit message" value={message()} onInput={(event) => setMessage(event.currentTarget.value)} />
-              <button class="composer__send" type="submit" disabled={disabled() || !message().trim() || !snapshot().stagedDiff}>Commit staged changes</button>
+              <textarea ref={commitMessage} class="composer__input" aria-label="Commit message" placeholder="Commit message" value={message()} onInput={(event) => setMessage(event.currentTarget.value)} />
+              <button class="composer__send" type="submit" aria-keyshortcuts={props.commitShortcut}
+                disabled={disabled() || !message().trim() || !snapshot().stagedDiff}>Commit staged changes</button>
               <Show when={amendRequested() !== snapshot().stagedRevision} fallback={
                 <div class="terminal-pane__bar">
                   <button type="button" disabled={disabled() || !message().trim() || !snapshot().branch}

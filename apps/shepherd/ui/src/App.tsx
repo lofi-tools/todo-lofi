@@ -10,6 +10,7 @@ import { homeDir } from '@tauri-apps/api/path'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 
 import * as bridge from './bridge'
+import { CommandPalette, type PaletteEntry } from './CommandPalette'
 import { ComposerInput } from './ComposerInput'
 import { FilesPane } from './FilesPane'
 import { ProjectImportSources, ProjectPicker } from './ProjectPicker'
@@ -18,13 +19,14 @@ import { PreviewPane, type PreviewAnnotation } from './PreviewPane'
 import { GitPane } from './GitPane'
 import { ReviewPane } from './ReviewPane'
 import { SEND_ACCENTS, SettingsPane, type SendAccent } from './SettingsPane'
-import { FreebuffPane, TerminalPane } from './TerminalPane'
+import { FreebuffPane, TerminalPane, type TerminalCommands } from './TerminalPane'
 import { TaskSearch } from './TaskSearch'
 import { ReviewArchiveDialog, TaskRows } from './TaskRows'
 
 type CoreEvent = bridge.Event
 type TerminalBell = Extract<CoreEvent, { type: 'terminalBell' }>['data']
 type TurnSelection = { codex?: bridge.CodexTurnOptions; mode?: string }
+type PaletteKind = 'commands' | 'projects' | 'tasks'
 
 const LIVE_STATES: bridge.TaskState[] = ['starting', 'queued', 'working', 'waiting']
 const TIER_LABELS: Record<bridge.AgentTier, string> = {
@@ -68,6 +70,22 @@ const AGENT_OPTIONS: PickerOption[] = [
   { id: 'claude', name: bridge.AGENT_LABELS.claude },
   { id: 'freebuff', name: 'Freebuff (terminal)' },
 ]
+
+function normalizeChord(event: KeyboardEvent): string | undefined {
+  if (event.isComposing || event.keyCode === 229 || event.getModifierState('AltGraph') ||
+      ['Alt', 'AltGraph', 'Control', 'Meta', 'Shift', 'Dead', 'Unidentified'].includes(event.key)) return
+  const key = event.code === 'Backquote' && (event.ctrlKey || event.metaKey) ? '`'
+    : event.key === ' ' ? 'Space' : event.key.length === 1 ? event.key.toUpperCase() : event.key
+  return [event.ctrlKey && 'Control', event.altKey && 'Alt', event.shiftKey && 'Shift', event.metaKey && 'Meta', key]
+    .filter(Boolean).join('+')
+}
+
+function displayChord(chord: string, mac: boolean) {
+  const labels: Record<string, string> = mac
+    ? { Control: '⌃', Alt: '⌥', Shift: '⇧', Meta: '⌘', Enter: '↵' }
+    : { Control: 'Ctrl' }
+  return chord.split('+').map((key) => labels[key] ?? key).join(mac ? '' : '+')
+}
 
 function appearanceStorage() {
   return import.meta.env.VITE_SHEPHERD_EPHEMERAL === '1' ? sessionStorage : localStorage
@@ -158,6 +176,17 @@ export function App() {
   const [selectedTaskId, setSelectedTaskId] = createSignal<string | null>(null)
   const [workspace, setWorkspace] = createSignal<bridge.TaskWorkspace | null>(null)
   const [searchOpen, setSearchOpen] = createSignal(false)
+  const [palette, setPalette] = createSignal<PaletteKind>()
+  const [commandRegistry, setCommandRegistry] = createSignal<bridge.CommandRegistry>()
+  const [terminalCommands, setTerminalCommands] = createSignal<TerminalCommands>()
+  const [sidebarHidden, setSidebarHidden] = createSignal(false)
+  const [commandNotice, setCommandNotice] = createSignal('')
+  const [gitRequest, setGitRequest] = createSignal<{ taskId: string; action: 'stageAll' | 'commit' }>()
+  let paletteOpener: HTMLElement | undefined
+  let forwardNextKeyTo: HTMLElement | undefined
+  let forwardedKey: string | undefined
+  let sidebar: HTMLElement | undefined
+  let diagnostics: HTMLDetailsElement | undefined
   const [searchJump, setSearchJump] = createSignal<bridge.TaskSearchHit>()
   let searchOpener: HTMLElement | undefined
   let transcript: HTMLDivElement | undefined
@@ -350,7 +379,7 @@ export function App() {
   const [cancelRequestTaskId, setCancelRequestTaskId] = createSignal<string>()
   const [quitRequired, setQuitRequired] = createSignal<bridge.QuitConfirmation | null>(null)
   const workspaceShortcutsEnabled = () =>
-    !settingsOpen() && !freebuffProjectId() && !pickerOpen() && !searchOpen() && !quitRequired()
+    !settingsOpen() && !freebuffProjectId() && !pickerOpen() && !searchOpen() && !quitRequired() && !palette()
   const [shutdownNote, setShutdownNote] = createSignal<string | null>(null)
   let allowClose = false
 
@@ -453,6 +482,233 @@ export function App() {
     return !!current && (current.cancelling || cancelRequestTaskId() === current.task.id)
   }
   const mac = navigator.platform.startsWith('Mac')
+  const bindingsById = createMemo(() => new Map(commandRegistry()?.commands.map((binding) => [binding.id, binding])))
+  const chordFor = (id: string) => bindingsById().get(id)?.chord ?? undefined
+  const canSend = () => canCompose() && !pending() && (!!prompt().trim() || !!promptFiles().length)
+  const canUseGit = () => {
+    const task = workspace()?.task
+    return !!task?.worktreePath && task.state !== 'done' && !LIVE_STATES.includes(task.state)
+  }
+
+  function workspaceTerminal(target: unknown): target is HTMLTextAreaElement {
+    return target instanceof HTMLTextAreaElement && target.matches('.inspector .terminal-view__input')
+  }
+
+  const commandConditions = (): Record<bridge.CommandCondition, boolean> => {
+    const project = selectedProject()
+    const current = workspace()
+    const terminal = terminalCommands()?.available()
+    return {
+      idle: !pending(),
+      projects: projects().length > 0 && !pending(),
+      project: !!project && !project.missing,
+      tasks: visibleTasks().length > 0 && !pending(),
+      task: !!current,
+      prompt: !settingsOpen() && canSend(),
+      cancel: !settingsOpen() && canCancel() && !cancellingTurn(),
+      worktree: !!current?.task.worktreePath,
+      terminalReady: !!terminal?.terminalReady,
+      terminalPane: !!terminal?.terminalPane,
+      terminalMultiple: !!terminal?.terminalMultiple,
+      terminalFour: !!terminal?.terminalFour,
+      focusedTerminal: workspaceTerminal(paletteOpener) && paletteOpener.isConnected,
+      gitWritable: canUseGit(),
+      diagnostics: !!current?.diagnostics,
+    }
+  }
+
+  function disabledReason(binding: bridge.CommandBinding, conditions: ReturnType<typeof commandConditions>) {
+    return binding.requirements.find(({ condition }) => !conditions[condition])?.reason
+  }
+
+  const paletteEntries = createMemo<PaletteEntry[]>(() => {
+    switch (palette()) {
+      case 'projects': return projects().map((project) => ({
+        id: project.id, label: project.name, detail: project.path,
+        disabledReason: project.missing ? 'Project path is missing.' : undefined,
+      }))
+      case 'tasks': return visibleTasks().map((task) => ({
+        id: task.id, label: task.title, detail: task.state,
+      }))
+      case 'commands': {
+        const conditions = commandConditions()
+        return (commandRegistry()?.commands ?? []).map((binding) => ({
+          id: binding.id, label: binding.label, category: binding.category,
+          binding: binding.chord ? displayChord(binding.chord, mac) : undefined,
+          disabledReason: disabledReason(binding, conditions),
+        }))
+      }
+      default: return []
+    }
+  })
+
+  function openPalette(kind: PaletteKind) {
+    if (freebuffProjectId() || pickerOpen() || searchOpen() || quitRequired() || archiveConfirmation()) return
+    if (!palette()) paletteOpener = document.activeElement instanceof HTMLElement ? document.activeElement : undefined
+    setPalette(kind)
+  }
+
+  function closePalette() {
+    setPalette(undefined)
+    paletteOpener?.focus({ preventScroll: true })
+    paletteOpener = undefined
+  }
+
+  function choosePaletteEntry(entry: PaletteEntry) {
+    switch (palette()) {
+      case 'projects': {
+        closePalette()
+        const project = projects().find(({ id }) => id === entry.id)
+        if (project) openProject(project, false)
+        break
+      }
+      case 'tasks': {
+        closePalette()
+        const task = visibleTasks().find(({ id }) => id === entry.id)
+        if (task) openTaskRow(task)
+        break
+      }
+      case 'commands': {
+        const binding = bindingsById().get(entry.id)
+        if (!binding || disabledReason(binding, commandConditions())) return
+        if (entry.id === 'switchProject' || entry.id === 'switchTask') {
+          openPalette(entry.id === 'switchProject' ? 'projects' : 'tasks')
+          return
+        }
+        const opener = paletteOpener
+        closePalette()
+        if (entry.id !== 'commandPalette') runWorkspaceCommand(entry.id, opener, false)
+        break
+      }
+    }
+  }
+
+  function toggleSidebar() {
+    const sidebarFocused = sidebar?.contains(document.activeElement)
+    setSidebarHidden((hidden) => !hidden)
+    if (sidebarHidden() && sidebarFocused) {
+      const next = settingsOpen()
+        ? document.querySelector<HTMLElement>('.settings__nav button[aria-current="true"]')
+        : promptInput?.disabled ? transcript : promptInput
+      next?.focus({ preventScroll: true })
+    }
+  }
+
+  function focusPane(target: unknown, step: number) {
+    const tab = inspectorTabList?.querySelector<HTMLButtonElement>('button[aria-selected="true"]')
+    const terminalStops = inspectorTab() === 'terminals' && inspector
+      ? Array.from(inspector.querySelectorAll<HTMLTextAreaElement>('.terminal-view__input')) : []
+    const inspectorStops = tab ? [tab, ...terminalStops] : terminalStops
+    const sidebarStop = sidebarHidden() ? undefined
+      : sidebar?.querySelector<HTMLElement>('.project[aria-current="true"], .sidebar__settings')
+    const chatStop = settingsOpen() ? document.querySelector<HTMLElement>('.settings__nav button[aria-current="true"]')
+      : promptInput?.disabled ? transcript : promptInput
+    const stops = terminalStops.length && inspectorStops.some((stop) => stop === target) ? inspectorStops
+      : [sidebarStop, chatStop, ...inspectorStops].filter((stop): stop is HTMLElement => !!stop)
+    if (!stops.length) return
+    const current = stops.findIndex((stop) => stop === target || (stop === sidebarStop && target instanceof Node && sidebar?.contains(target)))
+    const next = current < 0 ? (step > 0 ? 0 : stops.length - 1) : (current + step + stops.length) % stops.length
+    stops[next]?.focus({ preventScroll: true })
+  }
+
+  function runWorkspaceCommand(id: string, target: unknown, shortcut: boolean) {
+    const project = selectedProject()
+    const task = workspace()?.task
+    const terminal = terminalCommands()?.actions
+    if (terminal && Object.hasOwn(terminal, id)) {
+      terminal[id as keyof typeof terminal]()
+      return
+    }
+    switch (id) {
+      case 'commandPalette': openPalette('commands'); break
+      case 'switchProject': openPalette('projects'); break
+      case 'switchTask': openPalette('tasks'); break
+      case 'searchTasks': openTaskSearch(); break
+      case 'addProject': openPicker(); break
+      case 'settings': setProjectSettingsRequest(undefined); setSettingsOpen(true); break
+      case 'toggleSidebar': toggleSidebar(); break
+      case 'nextPane': focusPane(target, 1); break
+      case 'previousPane': focusPane(target, -1); break
+      case 'newTask': if (project) newTask(project.id); break
+      case 'sendPrompt': sendPrompt(); break
+      case 'cancelTurn': cancelTurn(); break
+      case 'review': setInspectorTab('review'); break
+      case 'terminals': setInspectorTab('terminals'); break
+      case 'git': setInspectorTab('git'); break
+      case 'preview': setInspectorTab('preview'); break
+      case 'files': setInspectorTab('files'); break
+      case 'forwardKey':
+        if (workspaceTerminal(target)) {
+          forwardNextKeyTo = target
+          target.focus({ preventScroll: true })
+        }
+        break
+      case 'stageAll':
+      case 'commit':
+        if (shortcut && id === 'commit' && target instanceof HTMLElement) {
+          const form = target.closest<HTMLFormElement>('[data-git-commit]')
+          const submitter = form?.querySelector<HTMLButtonElement>('button[type="submit"]:enabled')
+          if (submitter) form?.requestSubmit(submitter)
+        } else if (task) {
+          setInspectorTab('git')
+          setGitRequest({ taskId: task.id, action: id })
+        }
+        break
+      case 'diagnostics':
+        setSettingsOpen(false)
+        if (diagnostics) {
+          diagnostics.open = true
+          diagnostics.querySelector('summary')?.focus()
+        }
+        break
+      case 'checkAgents':
+        void bridge.agentAvailability().then((available) => {
+          setCommandNotice([
+            `Codex ${available.codex ? 'detected' : 'unavailable'}`,
+            `OpenCode ${available.opencode ? 'configured' : 'unconfigured'}`,
+            `Claude Code ${available.claude ? 'configured' : 'unconfigured'}`,
+          ].join(' · '))
+        }).catch((failure) => setError(describe(failure)))
+        break
+    }
+  }
+
+  function onWorkspaceKeyDown(event: KeyboardEvent) {
+    if (event.defaultPrevented) return
+    const chord = normalizeChord(event)
+    if (!chord) return
+    const key = event.code || event.key
+    if (forwardedKey === key && event.repeat) return
+    if (forwardNextKeyTo) {
+      const forward = event.target === forwardNextKeyTo
+      forwardNextKeyTo = undefined
+      if (forward) {
+        forwardedKey = key
+        return
+      }
+    }
+    if (freebuffProjectId() || pickerOpen() || searchOpen() || quitRequired() || archiveConfirmation()) return
+    if (palette()) {
+      if (chord === chordFor('commandPalette')) {
+        event.preventDefault()
+        if (!event.repeat) closePalette()
+      }
+      return
+    }
+    const target = event.target
+    const scope: bridge.ShortcutScope = target === promptInput ? 'composer'
+      : workspaceTerminal(target) && !target.closest('[data-agent-terminal]') ? 'workspaceTerminal'
+        : target instanceof HTMLElement && target.closest('[data-git-commit]') ? 'commitForm' : 'window'
+    const id = commandRegistry()?.chords[scope][chord]
+    const binding = id ? bindingsById().get(id) : undefined
+    if (!binding || disabledReason(binding, commandConditions())) return
+    event.preventDefault()
+    if (!event.repeat) runWorkspaceCommand(binding.id, target, true)
+  }
+
+  function onWorkspaceKeyUp(event: KeyboardEvent) {
+    if ((event.code || event.key) === forwardedKey) forwardedKey = undefined
+  }
 
   createEffect(() => {
     if (!mac || !isTauri() || !projectsLoaded()) return
@@ -575,9 +831,9 @@ export function App() {
     if (task) await selectTask(task.id)
   }
 
-  function openProject(project: bridge.ProjectSnapshot) {
+  function openProject(project: bridge.ProjectSnapshot, useReviewFilter = reviewOnly()) {
     setSettingsOpen(false)
-    const reviewed = reviewOnly() ? filteredReviewTasks(project.id) : []
+    const reviewed = useReviewFilter ? filteredReviewTasks(project.id) : []
     const target = reviewed.find((task) => task.id === project.lastTaskId) ?? reviewed[0]
     void run(() => selectProject(project, target?.id)).then(() => {
       if (selectedProjectId() === project.id && canStartTask()) promptInput?.focus()
@@ -704,6 +960,7 @@ export function App() {
 
   onMount(() => {
     void homeDir().then(setHomeDirectory).catch((error) => console.warn('Could not resolve the home directory', error))
+    void bridge.commandRegistry(mac ? 'mac' : 'linux').then(setCommandRegistry).catch((failure) => setError(describe(failure)))
     void bridge.opencodeConfigured().then(setOpencodeConfigured).catch((error) => console.warn('Could not read OpenCode availability', error))
     void bridge.claudeConfigured().then(setClaudeConfigured).catch((error) => console.warn('Could not read Claude Code availability', error))
     void bridge.notificationsEnabled().then(setNotificationsEnabled).catch((failure) => setError(describe(failure)))
@@ -737,7 +994,8 @@ export function App() {
   onMount(() => {
     let disposed = false
     let detach: (() => void) | undefined
-    window.addEventListener('keydown', onCancelShortcut, true)
+    window.addEventListener('keydown', onWorkspaceKeyDown, true)
+    window.addEventListener('keyup', onWorkspaceKeyUp, true)
     window.addEventListener('keydown', onInspectorFocusShortcut, true)
     void getCurrentWindow().onCloseRequested((event) => {
       if (allowClose) return
@@ -750,7 +1008,8 @@ export function App() {
     onCleanup(() => {
       disposed = true
       detach?.()
-      window.removeEventListener('keydown', onCancelShortcut, true)
+      window.removeEventListener('keydown', onWorkspaceKeyDown, true)
+      window.removeEventListener('keyup', onWorkspaceKeyUp, true)
       window.removeEventListener('keydown', onInspectorFocusShortcut, true)
     })
   })
@@ -992,16 +1251,6 @@ export function App() {
     })
   }
 
-  function onCancelShortcut(event: KeyboardEvent) {
-    const modifier = mac ? event.metaKey && !event.ctrlKey : event.ctrlKey && !event.metaKey
-    if (event.defaultPrevented || event.isComposing || event.key !== '.'
-      || event.altKey || event.shiftKey || !modifier
-      || !workspaceShortcutsEnabled()
-      || !canCancel()) return
-    event.preventDefault()
-    if (!event.repeat) cancelTurn()
-  }
-
   function onInspectorFocusShortcut(event: KeyboardEvent) {
     if (event.defaultPrevented || event.isComposing || event.keyCode === 229 || event.altKey ||
         !workspaceShortcutsEnabled() ||
@@ -1009,25 +1258,13 @@ export function App() {
     const tab = inspectorTabList?.querySelector<HTMLButtonElement>('#inspector-tab-terminals')
     const target = event.target
     if (!tab || !(target instanceof HTMLElement) || (target !== tab && !inspector.contains(target))) return
-    if (!event.ctrlKey && !event.metaKey && !event.shiftKey &&
-        ['ArrowDown', 'ArrowUp', 'ArrowLeft', 'ArrowRight'].includes(event.key)) {
-      const destination = terminalArrowDestination(inspector, tab, target, event.key)
-      if (destination) {
-        event.preventDefault()
-        destination.focus()
-      }
-      return
+    if (event.ctrlKey || event.metaKey || event.shiftKey ||
+        !['ArrowDown', 'ArrowUp', 'ArrowLeft', 'ArrowRight'].includes(event.key)) return
+    const destination = terminalArrowDestination(inspector, tab, target, event.key)
+    if (destination) {
+      event.preventDefault()
+      destination.focus()
     }
-    const modifier = mac ? event.metaKey && !event.ctrlKey : event.ctrlKey && !event.metaKey
-    if (!modifier || event.code !== 'Backquote') return
-    const terminals = Array.from(inspector.querySelectorAll<HTMLTextAreaElement>('.terminal-view__input'))
-    if (!terminals.length) return
-    const stops = [tab, ...terminals]
-    const index = stops.findIndex((stop) => stop === event.target)
-    if (index < 0) return
-    event.preventDefault()
-    const step = event.shiftKey ? -1 : 1
-    stops[(index + step + stops.length) % stops.length]?.focus({ preventScroll: true })
   }
 
   function onInspectorTabKeyDown(event: KeyboardEvent, tabList: HTMLDivElement) {
@@ -1135,6 +1372,12 @@ export function App() {
   const workspaceFooter = (
     <>
       <div class="shell__notices">
+        <Show when={commandNotice()}>
+          {(notice) => <div class="banner" role="status">
+            <span>{notice()}</span>
+            <button type="button" class="banner__quiet" onClick={() => setCommandNotice('')}>Dismiss</button>
+          </div>}
+        </Show>
         <Show when={quitRequired()}>
           {(confirmation) => (
             <div class="banner" role="alert">
@@ -1195,9 +1438,10 @@ export function App() {
     <>
       <WorkspaceFrame taskId={selectedTaskId()} inspectorWidth={inspectorWidth()} onInspectorWidthChange={resizeInspector}
         onSearch={openTaskSearch} searchDisabled={pending()}
+        sidebarHidden={sidebarHidden()} onCommands={() => openPalette('commands')} paletteShortcut={chordFor('commandPalette')}
         inspectorTabs={inspectorTabsHeader} footer={workspaceFooter}
         onBackToChat={freebuffProjectId() && !settingsOpen() ? () => setFreebuffProjectId(undefined) : undefined}>
-        <aside class="sidebar" aria-label="Workspace navigation">
+        <aside ref={sidebar} class="sidebar" aria-label="Workspace navigation" hidden={sidebarHidden()}>
           <header class="sidebar__header">
             <h2 class="sidebar__title">Projects</h2>
             <button
@@ -1335,7 +1579,7 @@ export function App() {
                 <span class="chat__state">{current().task.state}</span>
                 <Show when={canCancel()}>
                   <button type="button" class="project-action" onClick={cancelTurn}
-                    aria-keyshortcuts={mac ? 'Meta+.' : 'Control+.'}
+                    aria-keyshortcuts={chordFor('cancelTurn')}
                     disabled={cancellingTurn() || !!cancelRequestTaskId()}>
                     {cancellingTurn() ? 'Cancelling…' : 'Cancel turn'}
                   </button>
@@ -1381,7 +1625,7 @@ export function App() {
 
           <Show when={workspace()?.diagnostics}>
             {(diagnostics) => (
-              <details class="diagnostics">
+              <details class="diagnostics" ref={diagnostics}>
                 <summary>Diagnostics</summary>
                 <dl>
                   <dt>Command</dt>
@@ -1519,6 +1763,7 @@ export function App() {
                   class="composer__send composer__send--icon"
                   data-send-accent={sendAccent()}
                   aria-label="Send"
+                  aria-keyshortcuts={chordFor('sendPrompt')}
                   title="Send"
                   onClick={sendPrompt}
                   disabled={!canCompose() || pending() || (!prompt().trim() && !promptFiles().length)}
@@ -1546,7 +1791,8 @@ export function App() {
                   transcript={workspace()?.transcript}
                   agentTerminals={workspace()?.task.id === selectedTaskId() && workspace()?.capabilities?.agentTerminals ? workspace()?.agentTerminals : undefined}
                   listEvent={terminalListEvent()} shown={inspectorTab() === 'terminals'}
-                  shortcutsEnabled={workspaceShortcutsEnabled()} onShow={() => setInspectorTab('terminals')}
+                  onCommands={setTerminalCommands} taskTerminalShortcut={chordFor('newTaskTerminal')}
+                  onShow={() => setInspectorTab('terminals')}
                   onLayoutLoaded={(layout) => restoreInspectorTab(projectId, layout.inspectorTab)}
                   attention={projectAttention().map((bell) => bell.terminalId)} onTerminalFocus={focusTerminal}
                 />}
@@ -1577,7 +1823,10 @@ export function App() {
             <Show when={inspectorTab() === 'git'}>
               <Show when={workspace()?.task.worktreePath} fallback={<p class="empty">Select a task with a worktree.</p>}>
                 <Show when={workspace()?.task.id} keyed>
-                  {(taskId) => <GitPane openTerminal={() => setInspectorTab('terminals')} openFile={openTaskFile} taskId={taskId} revision={workspace()!.task.updatedAt} live={LIVE_STATES.includes(workspace()!.task.state) || workspace()!.task.state === 'done'} />}
+                  {(taskId) => <GitPane openTerminal={() => setInspectorTab('terminals')} openFile={openTaskFile} taskId={taskId}
+                    revision={workspace()!.task.updatedAt} live={LIVE_STATES.includes(workspace()!.task.state) || workspace()!.task.state === 'done'}
+                    request={gitRequest()} onRequestHandled={(request) => setGitRequest((current) => current === request ? undefined : current)}
+                    commitShortcut={chordFor('commit')} />}
                 </Show>
               </Show>
             </Show>
@@ -1592,6 +1841,10 @@ export function App() {
         </aside>
       </WorkspaceFrame>
 
+      <Show when={palette()} keyed>
+        {(kind) => <CommandPalette title={kind === 'commands' ? 'Command palette' : kind === 'projects' ? 'Switch project' : 'Switch task'}
+          entries={paletteEntries()} onClose={closePalette} onSelect={choosePaletteEntry} />}
+      </Show>
       <Show when={archiveConfirmation()}>
         {(selection) => <ReviewArchiveDialog count={selection().length}
           onCancel={dismissArchiveConfirmation} onConfirm={archiveSelectedTasks} />}
@@ -1627,6 +1880,9 @@ function WorkspaceFrame(props: {
   onInspectorWidthChange: (width: number) => Promise<void>
   onSearch: () => void
   searchDisabled: boolean
+  sidebarHidden: boolean
+  onCommands: () => void
+  paletteShortcut?: string
   onBackToChat?: () => void
 }) {
   const macWindow = isTauri() && navigator.platform.startsWith('Mac')
@@ -1672,7 +1928,7 @@ function WorkspaceFrame(props: {
   const dragRegion = macWindow ? '' : undefined
 
   return (
-    <div class="shell" style={{
+    <div class="shell" classList={{ 'shell--sidebar-hidden': props.sidebarHidden }} style={{
       '--workspace-inspector-width': requestedWidth() === null ? undefined : `${requestedWidth()}px`,
       '--inspector-min-width': `${INSPECTOR_MIN_WIDTH}px`,
       '--inspector-max-width': `${INSPECTOR_MAX_WIDTH}px`,
@@ -1723,7 +1979,8 @@ function WorkspaceFrame(props: {
             <path d="m15 15 4 4" />
           </svg>
         </button>
-        <button class="shell__icon-button" type="button" aria-label="Tools" title="Tools" disabled>
+        <button class="shell__icon-button" type="button" aria-label="Command palette" title="Command palette"
+          aria-keyshortcuts={props.paletteShortcut} onClick={props.onCommands}>
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
             <rect x="3" y="4" width="18" height="16" rx="2" />
             <path d="m7 9 3 3-3 3m6 0h4" />

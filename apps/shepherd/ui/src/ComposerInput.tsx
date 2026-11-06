@@ -93,7 +93,7 @@ export function ComposerInput(props: ComposerInputProps) {
 
   const rowId = (index: number) => `${listId}-${index}`
   function keyDown(event: KeyboardEvent) {
-    if (event.isComposing || composing() || event.keyCode === 229) return
+    if (event.defaultPrevented || event.isComposing || composing() || event.keyCode === 229) return
     if (mention()) {
       if (event.key === 'Escape') {
         event.preventDefault()
@@ -115,7 +115,7 @@ export function ComposerInput(props: ComposerInputProps) {
         return
       }
     }
-    if (event.key === 'Enter' && !event.shiftKey) {
+    if (event.key === 'Enter' && !event.shiftKey && !event.metaKey && !event.ctrlKey && !event.altKey) {
       event.preventDefault()
       props.onSend()
     }

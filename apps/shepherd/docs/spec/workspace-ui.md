@@ -18,7 +18,7 @@ current layout and give future changes a point of comparison.
   and a subtle border. The current wrapper radius is 10 px.
 - Place a slim icon rail to the left, outside the wrapper. The rail and the
   Previous and Next control group share a 52 px width and 6 px padding. The
-  rail currently has placeholder icons for Workspace, Conversations, and Tools.
+  rail currently has placeholder icons for Workspace and Conversations.
   Previous and Next are placeholders for navigation history. While the
   Freebuff terminal is visible, Previous is available as **Back to chat**.
 - **Search tasks** in the icon rail opens a compact dialog with ranked matches
@@ -27,6 +27,14 @@ current layout and give future changes a point of comparison.
   closes the dialog and restores focus. Opening a result scrolls to and focuses
   its transcript row and highlights the matching text. Archived tasks can open
   directly from search while their sidebar visibility preference stays intact.
+- **Command palette** in the icon rail opens an app-styled search dialog.
+  Command-K on macOS or Ctrl-Shift-K on Linux opens it from the keyboard.
+  Results show the command, its category, the current shortcut, and any
+  reason it is unavailable. Up and Down move between results, Enter runs the
+  selected command, and Escape restores focus. The project and task switchers
+  use the same dialog. **Send next key to terminal** restores the terminal
+  input that opened the palette and gives it the next key before normal
+  shortcut routing resumes.
 - On macOS, show the native window controls on the app's surface, with the
   title hidden. Put Previous and Next directly to their right on the same
   horizontal line, centred vertically in a 42 px header. The free header space

@@ -26,6 +26,33 @@ export type ShutdownState = 'running' | 'draining' | 'terminating' | 'closed'
 
 export type Decision = 'allow' | 'allowSession' | 'allowProject' | 'deny'
 
+export type ShortcutScope = 'window' | 'composer' | 'workspaceTerminal' | 'commitForm'
+export type CommandCondition = 'idle' | 'projects' | 'project' | 'tasks' | 'task' | 'prompt' | 'cancel'
+  | 'worktree' | 'terminalReady' | 'terminalPane' | 'terminalMultiple' | 'terminalFour' | 'focusedTerminal'
+  | 'gitWritable' | 'diagnostics'
+
+export interface CommandBinding {
+  id: string
+  label: string
+  category: string
+  chord: string | null
+  scope: ShortcutScope
+  requirements: { condition: CommandCondition; reason: string }[]
+}
+
+export interface CommandRegistry {
+  commands: CommandBinding[]
+  chords: Record<ShortcutScope, Record<string, string>>
+}
+
+export function commandRegistry(platform: 'mac' | 'linux'): Promise<CommandRegistry> {
+  return invoke('command_registry', { platform })
+}
+
+export function agentAvailability(): Promise<Record<Agent, boolean>> {
+  return invoke('agent_availability')
+}
+
 export interface ProjectSnapshot {
   id: string
   path: string

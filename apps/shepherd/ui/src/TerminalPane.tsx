@@ -60,7 +60,8 @@ interface TerminalPaneProps {
   transcript: bridge.Entry[] | undefined
   agentTerminals?: bridge.AgentTerminal[]
   shown: boolean
-  shortcutsEnabled: boolean
+  onCommands: (commands: TerminalCommands | undefined) => void
+  taskTerminalShortcut?: string
   onShow: () => void
   onLayoutLoaded: (layout: bridge.TerminalLayout) => void
   attention: string[]
@@ -68,8 +69,15 @@ interface TerminalPaneProps {
   listEvent: bridge.TerminalList | undefined
 }
 
+type TerminalAction = 'newSharedTerminal' | 'newTaskTerminal' | 'splitRight' | 'splitDown' | 'hideTerminal'
+  | 'terminalSingle' | 'terminalColumns' | 'terminalStack' | 'terminalQuad'
+
+export interface TerminalCommands {
+  available: () => { terminalReady: boolean; terminalPane: boolean; terminalMultiple: boolean; terminalFour: boolean }
+  actions: Record<TerminalAction, () => void>
+}
+
 export function TerminalPane(props: TerminalPaneProps) {
-  let region: HTMLDivElement | undefined
   const measuredSizes = new Map<string, TerminalSize>()
   const [terminalList, setTerminalList] = createSignal<bridge.TerminalList>()
   const terminals = () => terminalList()?.terminals ?? []
@@ -91,7 +99,6 @@ export function TerminalPane(props: TerminalPaneProps) {
       return next
     })
   }
-  const mac = navigator.platform.startsWith('Mac')
   const commands = createMemo(() => {
     const commands = new Map<string, bridge.ToolCallEntry>()
     for (const entry of props.transcript ?? []) {
@@ -220,14 +227,6 @@ export function TerminalPane(props: TerminalPaneProps) {
     start(taskId, 'vertical')
   }
 
-  function handleTaskTerminalShortcut(event: KeyboardEvent) {
-    if (!props.shortcutsEnabled || !props.taskHasWorktree || !props.taskId || event.defaultPrevented ||
-        event.altKey || !event.shiftKey || event.isComposing || event.keyCode === 229 ||
-        !hasPaneModifier(event) || event.key.toLowerCase() !== (mac ? 't' : 'n')) return
-    event.preventDefault()
-    if (!event.repeat) startTaskTerminal()
-  }
-
   createEffect(() => {
     const event = props.listEvent
     if (event) applyTerminalList(event)
@@ -248,33 +247,38 @@ export function TerminalPane(props: TerminalPaneProps) {
     if (entry) start(entry.taskId, axis)
   }
 
-  function handleShortcut(event: KeyboardEvent) {
-    if (event.defaultPrevented || event.altKey || event.isComposing || event.keyCode === 229 ||
-        !props.shortcutsEnabled || !hasPaneModifier(event)) return
-    const target = event.target
-    if (!(target instanceof HTMLElement) || !target.matches('.terminal-view__input')) return
-    if (target.closest('[data-agent-terminal]')) return
+  function detachActive() {
     const id = active()
-    if (!id) return
-    const letter = event.key.toLowerCase()
-    if (event.shiftKey && (letter === 'd' || letter === 'e')) {
-      event.preventDefault()
-      if (!event.repeat) splitActive(letter === 'd' ? 'horizontal' : 'vertical')
-    } else if (letter === 'w' && event.shiftKey === !mac) {
-      event.preventDefault()
-      if (!event.repeat) detach(id)
-    }
+    if (id) detach(id)
   }
 
-  function hasPaneModifier(event: KeyboardEvent) {
-    return mac ? event.metaKey && !event.ctrlKey : event.ctrlKey && !event.metaKey
+  function startSharedTerminal() {
+    props.onShow()
+    start(null, 'vertical')
   }
 
   onMount(() => {
-    region?.addEventListener('keydown', handleShortcut, true)
-    window.addEventListener('keydown', handleTaskTerminalShortcut, true)
-    onCleanup(() => region?.removeEventListener('keydown', handleShortcut, true))
-    onCleanup(() => window.removeEventListener('keydown', handleTaskTerminalShortcut, true))
+    const terminalReady = () => layoutLoaded() && !pending()
+    props.onCommands({
+      available: () => ({
+        terminalReady: terminalReady(),
+        terminalPane: terminalReady() && props.shown && !!active(),
+        terminalMultiple: terminalReady() && props.shown && attached().length > 1,
+        terminalFour: terminalReady() && props.shown && attachedVisible().length === 4,
+      }),
+      actions: {
+        newSharedTerminal: startSharedTerminal,
+        newTaskTerminal: startTaskTerminal,
+        splitRight: () => splitActive('horizontal'),
+        splitDown: () => splitActive('vertical'),
+        hideTerminal: detachActive,
+        terminalSingle: single,
+        terminalColumns: () => arrange('horizontal'),
+        terminalStack: () => arrange('vertical'),
+        terminalQuad: quad,
+      },
+    })
+    onCleanup(() => props.onCommands(undefined))
     let disposed = false
     void run(async () => {
       const [list, saved] = await Promise.all([bridge.terminalList(props.projectId), bridge.terminalLayout(props.projectId)])
@@ -290,11 +294,11 @@ export function TerminalPane(props: TerminalPaneProps) {
   })
 
   return (
-    <div class="terminal-pane" ref={region}>
+    <div class="terminal-pane">
       <div class="terminal-pane__bar">
-        <button type="button" onClick={() => start(null, 'vertical')} disabled={pending()}>New shared terminal</button>
+        <button type="button" onClick={startSharedTerminal} disabled={pending()}>New shared terminal</button>
         <button type="button" onClick={startTaskTerminal} disabled={pending() || !props.taskHasWorktree}
-          aria-keyshortcuts={mac ? 'Meta+Shift+T' : 'Control+Shift+N'}>New task terminal</button>
+          aria-keyshortcuts={props.taskTerminalShortcut}>New task terminal</button>
         <button type="button" onClick={() => splitActive('horizontal')} disabled={pending() || !active()}>Split right</button>
         <button type="button" onClick={() => splitActive('vertical')} disabled={pending() || !active()}>Split down</button>
         <Show when={attached().length > 1}>

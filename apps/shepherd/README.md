@@ -33,6 +33,10 @@ permission. The status bar shows running and review totals across projects.
 Click the review count to filter the sidebar and archive selected review
 tasks together.
 
+Open the **Command palette** from the icon rail or with Command-K on macOS
+and Ctrl-Shift-K on Linux. Search by command name or category. The palette
+shows each shortcut and explains unavailable actions.
+
 Tauri reloads the app when the shell, its local Rust dependencies, or the frontend
 changes. Vite keeps running during those reloads. Non-interactive runners can use
 `direnv exec . shep` or `direnv exec . shep --test`.

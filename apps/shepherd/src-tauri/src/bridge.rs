@@ -429,6 +429,7 @@ pub struct ShellState {
     attachment_root: Option<PathBuf>,
     pub(crate) settings: AgentSettings,
     pub(crate) codex_program: Option<PathBuf>,
+    pub(crate) codex_detected: bool,
     pub(crate) opencode_configured: bool,
     pub(crate) claude_configured: bool,
     events: broadcast::Sender<Event>,
@@ -465,6 +466,7 @@ impl ShellState {
             attachment_root: None,
             settings: AgentSettings::default(),
             codex_program: None,
+            codex_detected: false,
             opencode_configured: false,
             claude_configured: false,
             events,
@@ -1607,6 +1609,23 @@ pub mod commands {
     use tauri::State;
 
     use super::*;
+
+    #[tauri::command]
+    pub fn agent_availability(state: State<'_, ShellState>) -> BTreeMap<&'static str, bool> {
+        BTreeMap::from([
+            ("codex", state.codex_detected),
+            ("opencode", state.opencode_configured),
+            ("claude", state.claude_configured),
+        ])
+    }
+
+    #[tauri::command]
+    pub fn command_registry(
+        platform: shepherd_core::input::KeyPlatform,
+    ) -> Result<shepherd_core::input::CommandRegistry, BridgeError> {
+        shepherd_core::input::command_registry(platform)
+            .map_err(|error| BridgeError::new("commands", error.to_string()))
+    }
 
     #[tauri::command]
     pub async fn add_project(

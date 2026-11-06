@@ -22,7 +22,9 @@ use agent_harness::settings::AgentSettings;
 use shepherd_core::harness::HarnessFactory;
 use tauri::Manager;
 
-fn codex_factory(data_directory: &std::path::Path) -> (Box<dyn HarnessFactory>, Option<PathBuf>) {
+fn codex_factory(
+    data_directory: &std::path::Path,
+) -> (Box<dyn HarnessFactory>, Option<PathBuf>, bool) {
     let probe_directory = std::env::current_dir().unwrap_or_else(|_| data_directory.to_path_buf());
     let detection =
         tauri::async_runtime::block_on(agent_harness::codex::detect(None, &probe_directory));
@@ -34,6 +36,7 @@ fn codex_factory(data_directory: &std::path::Path) -> (Box<dyn HarnessFactory>, 
             (
                 Box::new(codex_harness::CodexHarnessFactory::new(install)),
                 program,
+                true,
             )
         }
         None => {
@@ -44,6 +47,7 @@ fn codex_factory(data_directory: &std::path::Path) -> (Box<dyn HarnessFactory>, 
                     detection.failure_kind(),
                 )),
                 None,
+                false,
             )
         }
     }
@@ -62,12 +66,14 @@ pub fn run() -> Result<(), tauri::Error> {
         use tauri::menu::{Menu, MenuItem, MenuItemKind};
 
         const QUIT_MENU_ITEM: &str = "shepherd-quit";
+        const CLOSE_FILE_MENU_ITEM: &str = "shepherd-close-file";
+        const CLOSE_WINDOW_MENU_ITEM: &str = "shepherd-close-window";
 
         builder
             .menu(|app| {
                 let menu = Menu::default(app)?;
-                let Some(MenuItemKind::Submenu(application)) = menu.items()?.into_iter().next()
-                else {
+                let mut items = menu.items()?.into_iter();
+                let Some(MenuItemKind::Submenu(application)) = items.next() else {
                     return Err(std::io::Error::other("missing macOS application menu").into());
                 };
                 let Some(MenuItemKind::Predefined(quit)) = application.items()?.pop() else {
@@ -79,10 +85,31 @@ pub fn run() -> Result<(), tauri::Error> {
                     MenuItem::with_id(app, QUIT_MENU_ITEM, quit.text()?, true, Some("Cmd+Q"))?;
                 application.remove(&quit)?;
                 application.append(&guarded_quit)?;
+
+                // AppKit would consume Command+W before the terminal shortcut reached the webview.
+                for item in items {
+                    let MenuItemKind::Submenu(submenu) = item else {
+                        continue;
+                    };
+                    let id = match submenu.text()?.as_str() {
+                        "File" => CLOSE_FILE_MENU_ITEM,
+                        "Window" => CLOSE_WINDOW_MENU_ITEM,
+                        _ => continue,
+                    };
+                    let Some(MenuItemKind::Predefined(close)) = submenu.items()?.pop() else {
+                        return Err(std::io::Error::other("missing macOS close menu item").into());
+                    };
+                    let guarded_close =
+                        MenuItem::with_id(app, id, close.text()?, true, None::<&str>)?;
+                    submenu.remove(&close)?;
+                    submenu.append(&guarded_close)?;
+                }
                 Ok(menu)
             })
             .on_menu_event(|app, event| {
-                if event.id() == QUIT_MENU_ITEM
+                if (event.id() == QUIT_MENU_ITEM
+                    || event.id() == CLOSE_FILE_MENU_ITEM
+                    || event.id() == CLOSE_WINDOW_MENU_ITEM)
                     && let Some(window) = app.get_webview_window("main")
                     && let Err(error) = window.close()
                 {
@@ -111,15 +138,16 @@ pub fn run() -> Result<(), tauri::Error> {
             if let Err(error) = &settings {
                 tracing::warn!(%error, "could not load Shepherd configuration");
             }
-            let (harness_factory, codex_program, opencode_configured, claude_configured): (
-                Box<dyn HarnessFactory>,
-                _,
-                _,
-                _,
-            ) = match dev_factory {
-                Some(factory) => (factory, None, false, false),
+            let (
+                harness_factory,
+                codex_program,
+                codex_detected,
+                opencode_configured,
+                claude_configured,
+            ): (Box<dyn HarnessFactory>, _, _, _, _) = match dev_factory {
+                Some(factory) => (factory, None, false, false, false),
                 None => {
-                    let (codex, codex_program) = codex_factory(&data_directory);
+                    let (codex, codex_program, codex_detected) = codex_factory(&data_directory);
                     let (opencode, claude) = match &settings {
                         Ok(settings) => (
                             settings.executable("agents.opencode.executable"),
@@ -149,6 +177,7 @@ pub fn run() -> Result<(), tauri::Error> {
                             terminals: std::sync::Arc::new(terminals.clone()),
                         }),
                         codex_program,
+                        codex_detected,
                         opencode_configured,
                         claude_configured,
                     )
@@ -161,6 +190,7 @@ pub fn run() -> Result<(), tauri::Error> {
             ))?;
             state.settings = settings.unwrap_or_default();
             state.codex_program = codex_program;
+            state.codex_detected = codex_detected;
             state.opencode_configured = opencode_configured;
             state.claude_configured = claude_configured;
             state.start_event_pump();
@@ -176,6 +206,8 @@ pub fn run() -> Result<(), tauri::Error> {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            bridge::commands::command_registry,
+            bridge::commands::agent_availability,
             bridge::commands::add_project,
             bridge::commands::set_project_preview_url,
             bridge::commands::open_project_preview,

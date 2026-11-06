@@ -1006,8 +1006,15 @@ and the task header never overstates the tier.
   projects and confirm **Archive selected**. The core validates the selection
   and persists the archived states in one transaction. Headless fixtures
   cover the notification gate, Dock count requests and batch selection.
-- [ ] Command palette, keybinding editor, settings files, project overrides,
-  themes and accessibility.
+- [x] Command palette and default keymap.
+  The core registry supplies command labels, categories, platform-specific
+  chords and disabled reasons. The icon rail and keyboard open the palette
+  and its project and task switchers. App chords dispatch by input scope.
+  Terminal focus keeps unclaimed chords, and the palette can forward one
+  claimed chord to the focused terminal. Existing terminal layout, Git
+  staging, composer and diagnostics actions are available from the palette.
+- [ ] Keybinding editor, settings files, project overrides, themes and
+  accessibility.
 - [ ] Review/archive edge cases; leave the 30-day worktree collection to S7.
 - [ ] Status bar, window title and empty states.
 
@@ -1031,6 +1038,10 @@ and the task header never overstates the tier.
   and focus and highlighting on a cross-project archived result.
   A hidden macOS WebKit smoke verifies the real Turso hit through the desktop
   bridge and confirms focus and highlighting in the restored transcript.
+  Chromium checks fuzzy command search, disabled reasons, switcher navigation,
+  a forwarded terminal chord, and scoped Send and Commit shortcuts.
+  The hidden macOS WebKit smoke opens the palette with the native registry
+  while the terminal is mounted.
 - [x] Preview fixture: annotation adds URL/selector/note to the composer;
   blocked injection falls back to a screenshot note.
   Headless Chromium verifies both paths, including a page that denies framing

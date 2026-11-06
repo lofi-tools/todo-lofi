@@ -68,6 +68,14 @@ textarea {
   grid-template-columns: subgrid;
 }
 
+.shell--sidebar-hidden {
+  --sidebar-track: 0px;
+}
+
+.sidebar[hidden] {
+  display: none;
+}
+
 .shell__header-navigation,
 .shell__header-inspector {
   display: flex;
@@ -326,6 +334,31 @@ textarea {
 
 .picker-dialog::backdrop {
   background: rgba(0, 0, 0, 0.45);
+}
+
+.palette__entry {
+  display: grid;
+  flex: 1;
+  gap: 2px;
+  min-width: 0;
+}
+
+.palette__detail {
+  color: var(--text-muted);
+  overflow-wrap: anywhere;
+}
+
+.picker__row[aria-disabled='true'] .palette__entry strong {
+  color: var(--text-muted);
+}
+
+.picker__row > kbd {
+  flex: none;
+  padding: 1px 4px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text-muted);
+  font: inherit;
 }
 
 .task-search__hit {
