@@ -44,7 +44,42 @@ fn harness_factory(data_directory: &std::path::Path) -> (Box<dyn HarnessFactory>
 /// Build and run the window. A startup failure is returned so `main` can report
 /// it and exit with a non-zero status.
 pub fn run() -> Result<(), tauri::Error> {
-    tauri::Builder::default()
+    let builder = tauri::Builder::default();
+    #[cfg(target_os = "macos")]
+    let builder = {
+        use tauri::menu::{Menu, MenuItem, MenuItemKind};
+
+        const QUIT_MENU_ITEM: &str = "shepherd-quit";
+
+        builder
+            .menu(|app| {
+                let menu = Menu::default(app)?;
+                let Some(MenuItemKind::Submenu(application)) = menu.items()?.into_iter().next()
+                else {
+                    return Err(std::io::Error::other("missing macOS application menu").into());
+                };
+                let Some(MenuItemKind::Predefined(quit)) = application.items()?.pop() else {
+                    return Err(std::io::Error::other("missing macOS quit menu item").into());
+                };
+
+                // AppKit's Quit role terminates before the window can confirm and shut down.
+                let guarded_quit =
+                    MenuItem::with_id(app, QUIT_MENU_ITEM, quit.text()?, true, Some("Cmd+Q"))?;
+                application.remove(&quit)?;
+                application.append(&guarded_quit)?;
+                Ok(menu)
+            })
+            .on_menu_event(|app, event| {
+                if event.id() == QUIT_MENU_ITEM
+                    && let Some(window) = app.get_webview_window("main")
+                    && let Err(error) = window.close()
+                {
+                    tracing::error!(%error, "could not request window close from the Quit menu");
+                }
+            })
+    };
+
+    builder
         .setup(|app| {
             let override_directory = cfg!(debug_assertions)
                 .then(|| std::env::var_os("SHEPHERD_DEV_DATA_DIR"))

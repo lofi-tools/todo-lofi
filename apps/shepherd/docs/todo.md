@@ -589,6 +589,11 @@ Automated:
   foreground jobs that ignore SIGHUP, and that the stopped task terminal can
   restart. Both actions give terminal groups a 200 ms grace period, then stop
   groups whose leaders still belong to their original PTY sessions.
+  On macOS, Command+Q and the Quit menu item use the guarded window-close
+  path. With a waiting scripted task and one live terminal, Command+Q showed
+  both counts. Keep working preserved the task and shell. Confirming quit
+  restored the task as interrupted and the terminal as ended on relaunch.
+  Command+Q closed directly when only an idle terminal was running.
   Switching projects preserves the original PTY's shell
   state and output received while hidden. The hyperlink check verifies the
   exact URL passed to a test-only desktop opener.
