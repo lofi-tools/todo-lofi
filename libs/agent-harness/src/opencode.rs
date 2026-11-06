@@ -1026,6 +1026,8 @@ fn protocol_error(context: &str, error: impl std::fmt::Display) -> HarnessError 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::io::AsyncWriteExt;
+    use tokio::net::TcpListener;
 
     #[test]
     fn reads_an_explicit_opencode_executable() -> Result<(), Box<dyn std::error::Error>> {
@@ -1216,37 +1218,8 @@ mod tests {
     #[ignore = "requires a configured OpenCode executable and a loopback socket"]
     async fn installed_server_creates_and_resumes_a_session()
     -> Result<(), Box<dyn std::error::Error>> {
-        let settings = PathBuf::from(
-            std::env::var_os("SHEPHERD_OPENCODE_TEST_SETTINGS")
-                .ok_or("set SHEPHERD_OPENCODE_TEST_SETTINGS to the path of a settings.json file")?,
-        );
-        let executable =
-            configured_executable(&settings)?.ok_or("configure agents.opencode.executable")?;
         let root = tempfile::tempdir()?;
-        let project = root.path().join("project");
-        std::fs::create_dir(&project)?;
-        let mut environment = BTreeMap::new();
-        for (key, child) in [
-            ("XDG_CONFIG_HOME", "config"),
-            ("XDG_DATA_HOME", "data"),
-            ("XDG_CACHE_HOME", "cache"),
-            ("XDG_STATE_HOME", "state"),
-        ] {
-            environment.insert(
-                key.into(),
-                root.path().join(child).to_string_lossy().into_owned(),
-            );
-        }
-        environment.insert("OPENCODE_DISABLE_MODELS_FETCH".into(), "1".into());
-        let spec = SpawnSpec {
-            program: executable
-                .into_os_string()
-                .into_string()
-                .map_err(|_| "OpenCode path must be UTF-8")?,
-            args: Vec::new(),
-            cwd: project,
-            environment,
-        };
+        let spec = installed_fixture_spec(root.path())?;
         let server = OpenCodeServer::start(&spec).await?;
         assert!(server.probe().resume);
         let mut events = server.subscribe().await?;
@@ -1286,5 +1259,159 @@ mod tests {
         ));
         restarted.shutdown().await?;
         Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a configured OpenCode executable and loopback sockets"]
+    async fn installed_harness_streams_a_turn_through_a_local_fixture()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = tempfile::tempdir()?;
+        let mut spec = installed_fixture_spec(root.path())?;
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let endpoint = format!("http://{}/v1", listener.local_addr()?);
+        let config = spec.cwd.join("opencode.json");
+        std::fs::write(
+            &config,
+            serde_json::to_vec(&json!({
+                "model": "shepherd_fixture/coder",
+                "providers": {
+                    "shepherd_fixture": {
+                        "name": "Local Shepherd fixture",
+                        "package": "@opencode/ai/providers/openai-compatible",
+                        "settings": { "baseURL": endpoint },
+                        "models": {
+                            "coder": {
+                                "modelID": "coder",
+                                "capabilities": { "tools": true, "input": ["text"], "output": ["text"] },
+                                "limit": { "context": 32768, "output": 8192 }
+                            }
+                        }
+                    }
+                }
+            }))?,
+        )?;
+        spec.environment.insert(
+            "OPENCODE_CONFIG".into(),
+            config.to_string_lossy().into_owned(),
+        );
+        let provider = tokio::spawn(serve_fixture_model(listener));
+        let outcome = async {
+            let mut harness = OpenCodeHarness::default();
+            harness.start(spec).await?;
+            harness.open_session(None).await?;
+            harness
+                .prompt(PromptInput {
+                    text: "Reply with local fixture text only".into(),
+                })
+                .await?;
+            let mut transcript = crate::Transcript::default();
+            let reason = timeout(REQUEST_TIMEOUT, async {
+                loop {
+                    let event = harness
+                        .events()
+                        .recv()
+                        .await
+                        .ok_or(HarnessError::ChannelClosed)?;
+                    transcript.apply(&event);
+                    match event {
+                        HarnessEvent::TurnFinished { reason } => return Ok(reason),
+                        HarnessEvent::Exited { stderr, .. } => {
+                            return Err(HarnessError::Protocol(stderr));
+                        }
+                        _ => {}
+                    }
+                }
+            })
+            .await
+            .map_err(|error| protocol_error("fixture turn timed out", error))??;
+            harness.shutdown().await?;
+            Ok::<_, HarnessError>((reason, transcript))
+        }
+        .await;
+        provider.abort();
+        let (reason, transcript) = outcome?;
+        assert_eq!(reason, TurnFinishReason::Completed);
+        assert_eq!(transcript.len(), 1);
+        assert_eq!(
+            transcript.entry(0).map(crate::Entry::summary).as_deref(),
+            Some("agent: local fixture reply")
+        );
+        Ok(())
+    }
+
+    fn installed_fixture_spec(root: &Path) -> Result<SpawnSpec, Box<dyn std::error::Error>> {
+        let settings = PathBuf::from(
+            std::env::var_os("SHEPHERD_OPENCODE_TEST_SETTINGS")
+                .ok_or("set SHEPHERD_OPENCODE_TEST_SETTINGS to the path of a settings.json file")?,
+        );
+        let executable =
+            configured_executable(&settings)?.ok_or("configure agents.opencode.executable")?;
+        let project = root.join("project");
+        std::fs::create_dir(&project)?;
+        let mut environment = BTreeMap::new();
+        for (name, path) in [
+            ("HOME", root.to_owned()),
+            ("XDG_CONFIG_HOME", root.join("config")),
+            ("XDG_DATA_HOME", root.join("data")),
+            ("XDG_CACHE_HOME", root.join("cache")),
+            ("XDG_STATE_HOME", root.join("state")),
+        ] {
+            environment.insert(name.into(), path.to_string_lossy().into_owned());
+        }
+        for (name, value) in [
+            ("OPENCODE_DISABLE_MODELS_FETCH", "1"),
+            ("HTTP_PROXY", "http://127.0.0.1:1"),
+            ("HTTPS_PROXY", "http://127.0.0.1:1"),
+            ("NO_PROXY", "127.0.0.1,localhost"),
+        ] {
+            environment.insert(name.into(), value.into());
+        }
+        Ok(SpawnSpec {
+            program: executable
+                .into_os_string()
+                .into_string()
+                .map_err(|_| "OpenCode path must be UTF-8")?,
+            cwd: project,
+            environment,
+            ..SpawnSpec::default()
+        })
+    }
+
+    async fn serve_fixture_model(listener: TcpListener) -> std::io::Result<()> {
+        loop {
+            let (socket, _) = listener.accept().await?;
+            let (reader, mut writer) = socket.into_split();
+            let mut reader = BufReader::new(reader);
+            let mut line = String::new();
+            let mut length = 0;
+            while reader.read_line(&mut line).await? > 0 && line != "\r\n" {
+                if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                    length = value.trim().parse::<u64>().map_err(std::io::Error::other)?;
+                }
+                line.clear();
+            }
+            tokio::io::copy(&mut reader.take(length), &mut tokio::io::sink()).await?;
+            let mut body = String::new();
+            for (delta, finish) in [
+                (
+                    json!({"role":"assistant", "content":"local fixture reply"}),
+                    None,
+                ),
+                (json!({}), Some("stop")),
+            ] {
+                let chunk = json!({
+                    "id":"chatcmpl-fixture", "object":"chat.completion.chunk", "created":1,
+                    "model":"coder", "choices":[{"index":0,"delta":delta,"finish_reason":finish}]
+                });
+                body.push_str(&format!("data: {chunk}\n\n"));
+            }
+            body.push_str("data: [DONE]\n\n");
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            writer.write_all(response.as_bytes()).await?;
+            writer.shutdown().await?;
+        }
     }
 }

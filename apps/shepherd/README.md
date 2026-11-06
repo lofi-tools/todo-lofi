@@ -110,6 +110,14 @@ Restart Shepherd, then select **OpenCode** from the agent picker in an empty
 conversation or a draft. Shepherd launches the configured executable and uses
 OpenCode's native 2.x HTTP API. The task keeps its agent after the first prompt.
 
+To run the opt-in smoke tests, set `SHEPHERD_OPENCODE_TEST_SETTINGS` to the
+absolute path of a settings file with that key. The tests use a disposable
+OpenCode profile and a loopback model fixture.
+
+```sh
+direnv exec . cargo test -p agent-harness opencode::tests::installed_ -- --ignored
+```
+
 ## Live Codex tests
 
 The ignored Codex tests use the ChatGPT login with `gpt-6.1-terra` at

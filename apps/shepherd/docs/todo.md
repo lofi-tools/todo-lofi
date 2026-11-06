@@ -860,19 +860,16 @@ If Pi’s RPC probe is blocked, proceed with ACP while resolving it.
 
 ### Build
 
-- [ ] OpenCode probe, session control and transcript mapping.
-  The native OpenCode 2 probe reads `app["agents.opencode.executable"]` from
-  `settings.json`. The opt-in harness smoke checks event subscription, session
-  creation, lookup after a server restart, idle interruption and queued prompt
-  cancellation using the installed executable with model execution disabled.
-  Mapping fixtures cover streamed text and reasoning, tool rows and permission
-  replies. The native harness implements prompt, cancel and permission replies.
-  The desktop routes each task by its persisted agent and enables OpenCode in
-  the existing pickers when an executable is configured. A running-turn
-  harness smoke and ACP fallback are still open.
+- [x] OpenCode probe, session control and transcript mapping.
+  Shepherd reads `app["agents.opencode.executable"]` from `settings.json` and
+  persists the agent on each task. The opt-in OpenCode 2.0.14 smokes verify
+  session creation and resume after restart, queued prompt cancellation, and
+  a complete streamed turn through a loopback model fixture. Contract fixtures
+  cover text, reasoning, tool rows and permission replies.
 - [ ] Pi byte-oriented LF reader, ID correlation, `agent_settled`, extension UI
   bridge and approval bridge.
 - [ ] ACP adapter using `libs/acp-client`; no duplicate protocol client.
+  Use this adapter for OpenCode when its native protocol is unavailable.
 - [x] Freebuff runs in a standalone PTY in place of the conversation pane.
 - [ ] Tier downgrade UI, capability gates and diagnostics per adapter.
 - [ ] Missing binary, auth failure, protocol failure and mid-turn exit all have
