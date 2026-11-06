@@ -260,6 +260,7 @@ dependencies = [
 name = "agent-harness"
 version = "0.1.0"
 dependencies = [
+ "acp-client",
  "async-trait",
  "libc",
  "reqwest 0.13.4",

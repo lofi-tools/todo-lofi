@@ -89,6 +89,10 @@ impl HarnessSession {
         resume: Option<SessionId>,
     ) -> Result<SessionId, CoreError> {
         let session_id = self.harness.open_session(resume).await?;
+        let replay = self.harness.take_replayed_transcript();
+        if self.transcript.is_empty() && !replay.is_empty() {
+            self.transcript.restore(replay);
+        }
         self.session_id = Some(session_id.clone());
         Ok(session_id)
     }
@@ -140,9 +144,14 @@ impl HarnessSession {
                         self.pending_approval = None;
                     }
                 }
-                HarnessEvent::TurnFinished { .. } | HarnessEvent::Exited { .. } => {
+                HarnessEvent::TurnFinished { .. } => {
                     self.cancelling = false;
                     self.pending_approval = None;
+                }
+                HarnessEvent::Exited { .. } => {
+                    self.cancelling = false;
+                    self.pending_approval = None;
+                    self.closed = true;
                 }
                 _ => {}
             }

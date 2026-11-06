@@ -70,6 +70,7 @@ pub enum AcpEvent {
     SessionUpdate(Box<acp::schema::v1::SessionNotification>),
     /// The agent wants the user to approve a tool call.
     PermissionRequested {
+        session_id: schema::SessionId,
         tool_call: ToolCallUpdate,
         options: Vec<PermissionOption>,
         decision: PermissionReply,

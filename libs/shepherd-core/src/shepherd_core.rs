@@ -1156,7 +1156,12 @@ impl Core {
         };
         let events = match events {
             Ok(events) => events,
-            Err(error @ CoreError::Harness(agent_harness::HarnessError::NoPendingApproval)) => {
+            Err(
+                error @ CoreError::Harness(
+                    agent_harness::HarnessError::NoPendingApproval
+                    | agent_harness::HarnessError::ApprovalOptionUnavailable,
+                ),
+            ) => {
                 return Err(error);
             }
             Err(error) => {
@@ -1444,6 +1449,9 @@ impl Core {
                         next_state = Some(TaskState::Interrupted);
                     }
                 },
+                HarnessEvent::TurnError { text, .. } => {
+                    task_error = Some(text.clone());
+                }
                 HarnessEvent::Exited { code, stderr } => {
                     let turn_in_progress = next_state.map_or(started_live, TaskState::is_live);
                     if *code != Some(0) || turn_in_progress {

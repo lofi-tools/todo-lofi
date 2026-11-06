@@ -39,6 +39,8 @@ pub struct FakeScript {
     pub permission_options: Vec<PermissionOption>,
     /// `session/load` fails, as an agent without resume support would.
     pub fail_load: bool,
+    /// Conversation updates replayed before `session/load` completes.
+    pub load_updates: Vec<SessionUpdate>,
     /// Ask the client to run a command.
     pub terminal: Option<(String, Vec<String>)>,
     /// Ask the client to read this path.
@@ -68,6 +70,15 @@ pub struct FakeObservations {
 
 pub type Shared = Arc<Mutex<FakeObservations>>;
 
+pub async fn connect_fake_agent(
+    script: FakeScript,
+    options: crate::ConnectOptions,
+) -> Result<(crate::AcpConnection, Shared), crate::AcpError> {
+    let (transport, observations) = spawn_fake_agent(script);
+    let connection = crate::connection::connect_over(move |_, _| transport, options).await?;
+    Ok((connection, observations))
+}
+
 /// Start a fake agent, returning the channel end the client should connect to.
 pub fn spawn_fake_agent(script: FakeScript) -> (acp::Channel, Shared) {
     let (client_side, agent_side) = acp::Channel::duplex();
@@ -76,6 +87,7 @@ pub fn spawn_fake_agent(script: FakeScript) -> (acp::Channel, Shared) {
 
     let initialize_observations = observations.clone();
     let protocol_version = script.protocol_version;
+    let load_session = !script.load_updates.is_empty();
     let new_session_observations = observations.clone();
     let config_observations = observations.clone();
     let load_observations = observations.clone();
@@ -99,6 +111,7 @@ pub fn spawn_fake_agent(script: FakeScript) -> (acp::Channel, Shared) {
                         )
                         .agent_capabilities(
                             AgentCapabilities::default()
+                                .load_session(load_session)
                                 .mcp_capabilities(McpCapabilities::new().http(true).sse(true)),
                         )
                         .agent_info(Implementation::new("fake-agent", "1.0")),
@@ -136,13 +149,19 @@ pub fn spawn_fake_agent(script: FakeScript) -> (acp::Channel, Shared) {
                 acp::on_receive_request!(),
             )
             .on_receive_request(
-                async move |request: LoadSessionRequest, responder, _cx| {
+                async move |request: LoadSessionRequest, responder, cx| {
                     if let Ok(mut state) = load_observations.lock() {
                         state.load_attempts.push(request.session_id.0.to_string());
                     }
                     if load_script.fail_load {
                         responder.respond_with_internal_error("resume unsupported")
                     } else {
+                        for update in &load_script.load_updates {
+                            cx.send_notification(SessionNotification::new(
+                                request.session_id.clone(),
+                                update.clone(),
+                            ))?;
+                        }
                         responder.respond(LoadSessionResponse::new())
                     }
                 },
@@ -203,6 +222,16 @@ async fn run_turn(
     session_id: acp::schema::v1::SessionId,
     responder: acp::Responder<PromptResponse>,
 ) -> Result<(), acp::Error> {
+    let cancel_count = || {
+        observations.lock().map_or(0, |observed| {
+            observed
+                .cancels
+                .iter()
+                .filter(|id| id.as_str() == session_id.0.as_ref())
+                .count()
+        })
+    };
+    let initial_cancels = cancel_count();
     for chunk in &script.chunks {
         connection.send_notification(SessionNotification::new(
             session_id.clone(),
@@ -292,7 +321,13 @@ async fn run_turn(
             state.terminal_exit.push(exit.exit_status.exit_code);
         }
     }
-    responder.respond(PromptResponse::new(StopReason::EndTurn))
+    let cancelled = cancel_count() > initial_cancels;
+    let reason = if cancelled {
+        StopReason::Cancelled
+    } else {
+        StopReason::EndTurn
+    };
+    responder.respond(PromptResponse::new(reason))
 }
 
 /// The option set opencode advertises when a session is created: a model, with

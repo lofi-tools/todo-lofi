@@ -1580,6 +1580,7 @@ impl AgentPane {
                     tool_call,
                     options,
                     decision,
+                    ..
                 } => {
                     let title = permission_title(&tool_call);
                     let choices = PermissionChoice::from_options(&options);

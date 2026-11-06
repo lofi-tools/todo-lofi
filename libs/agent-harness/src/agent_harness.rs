@@ -5,6 +5,7 @@
 //! their protocol into [`HarnessEvent`] values; the core assembles those events
 //! into [`Transcript`] rows and persists settled rows.
 
+pub mod acp;
 pub mod codex;
 pub mod fake_harness;
 #[cfg(any(test, feature = "live-test-support"))]
@@ -42,6 +43,8 @@ pub enum HarnessError {
     ApprovalPending,
     #[error("there is no pending approval")]
     NoPendingApproval,
+    #[error("the agent did not offer this approval option")]
+    ApprovalOptionUnavailable,
     #[error("the harness has no scripted turn left")]
     ScriptExhausted,
     #[error("the harness event channel closed")]
@@ -456,6 +459,10 @@ pub enum HarnessEvent {
     ModeChanged {
         mode: String,
     },
+    TurnError {
+        kind: FailureKind,
+        text: String,
+    },
     TurnFinished {
         reason: TurnFinishReason,
     },
@@ -731,6 +738,9 @@ impl Transcript {
             } => self.settle_approval(approval_id.as_str(), Some(*decision)),
             HarnessEvent::ApprovalWithdrawn { approval_id } => {
                 self.settle_approval(approval_id.as_str(), None)
+            }
+            HarnessEvent::TurnError { kind, text } => {
+                self.push_failure(*kind, text.clone(), Some(kind.hint().to_string()))
             }
             _ => TranscriptChange::default(),
         }
@@ -1018,6 +1028,11 @@ pub trait AgentHarness: Send {
     /// empty, so a test adapter need not invent values.
     fn diagnostics(&self) -> AgentDiagnostics {
         AgentDiagnostics::default()
+    }
+
+    /// History returned while opening a persisted agent session.
+    fn take_replayed_transcript(&mut self) -> Vec<Entry> {
+        Vec::new()
     }
 
     async fn start(&mut self, spec: SpawnSpec) -> HarnessResult<Capabilities>;

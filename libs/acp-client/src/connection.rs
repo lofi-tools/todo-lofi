@@ -385,6 +385,7 @@ where
                 tokio::spawn(async move {
                     let (decision_tx, decision_rx) = oneshot::channel();
                     let sent = permissions.send(AcpEvent::PermissionRequested {
+                        session_id: request.session_id.clone(),
                         tool_call: request.tool_call.clone(),
                         options: request.options.clone(),
                         decision: PermissionReply::new(decision_tx),
