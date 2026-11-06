@@ -42,6 +42,31 @@ struct TerminalProcessGroup {
 
 #[cfg(unix)]
 impl TerminalProcessGroup {
+    fn for_session(
+        session: libc::pid_t,
+        processes: impl IntoIterator<Item = libc::pid_t>,
+    ) -> Vec<Self> {
+        let own_group = unsafe { libc::getpgrp() };
+        let mut groups = BTreeMap::<libc::pid_t, Vec<libc::pid_t>>::new();
+        for process in processes {
+            if process <= 1 || unsafe { libc::getsid(process) } != session {
+                continue;
+            }
+            let group = unsafe { libc::getpgid(process) };
+            if group > 1 && group != own_group {
+                groups.entry(group).or_default().push(process);
+            }
+        }
+        groups
+            .into_iter()
+            .map(|(group, members)| Self {
+                group,
+                session,
+                members,
+            })
+            .collect()
+    }
+
     fn still_owned(&self) -> bool {
         self.group > 1
             && self.group != unsafe { libc::getpgrp() }
@@ -75,6 +100,65 @@ impl TerminalProcessGroup {
             group.signal(libc::SIGKILL);
         }
     }
+}
+
+#[cfg(unix)]
+struct ProcessIdentity {
+    pid: libc::pid_t,
+    started_at: u64,
+}
+
+#[cfg(unix)]
+impl ProcessIdentity {
+    fn new(pid: libc::pid_t) -> Option<Self> {
+        Some(Self {
+            pid,
+            started_at: process_start_time(pid)?,
+        })
+    }
+
+    fn is_in_session(&self, session: libc::pid_t) -> bool {
+        (unsafe { libc::getsid(self.pid) == session })
+            && process_start_time(self.pid) == Some(self.started_at)
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn process_start_time(pid: libc::pid_t) -> Option<u64> {
+    let mut info = std::mem::MaybeUninit::<libc::proc_bsdinfo>::uninit();
+    let size = std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
+    let read = unsafe {
+        libc::proc_pidinfo(
+            pid,
+            libc::PROC_PIDTBSDINFO,
+            0,
+            info.as_mut_ptr().cast(),
+            size,
+        )
+    };
+    if read != size {
+        return None;
+    }
+    let info = unsafe { info.assume_init() };
+    Some(info.pbi_start_tvsec * 1_000_000 + info.pbi_start_tvusec)
+}
+
+#[cfg(target_os = "linux")]
+fn process_start_time(pid: libc::pid_t) -> Option<u64> {
+    let stat = std::fs::read(format!("/proc/{pid}/stat")).ok()?;
+    // The command name can contain spaces or parentheses. Fields after it start at 3.
+    let fields = stat.rsplit(|&byte| byte == b')').next()?;
+    std::str::from_utf8(fields)
+        .ok()?
+        .split_ascii_whitespace()
+        .nth(19)?
+        .parse()
+        .ok()
+}
+
+#[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
+fn process_start_time(_: libc::pid_t) -> Option<u64> {
+    None
 }
 
 #[cfg(target_os = "macos")]
@@ -137,32 +221,16 @@ impl Session {
         let Some(session) = self.session_id else {
             return Vec::new();
         };
-        let own_group = unsafe { libc::getpgrp() };
-        let mut groups = BTreeMap::<libc::pid_t, Vec<libc::pid_t>>::new();
         // The shell and foreground leader are still available if the process
         // table could not be read. Other members can outlive their group leader.
         let fallback = [Some(session), self.master.process_group_leader()];
-        for process in processes
-            .iter()
-            .copied()
-            .chain(fallback.into_iter().flatten())
-        {
-            if process <= 1 || unsafe { libc::getsid(process) } != session {
-                continue;
-            }
-            let group = unsafe { libc::getpgid(process) };
-            if group > 1 && group != own_group {
-                groups.entry(group).or_default().push(process);
-            }
-        }
-        groups
-            .into_iter()
-            .map(|(group, members)| TerminalProcessGroup {
-                group,
-                session,
-                members,
-            })
-            .collect()
+        TerminalProcessGroup::for_session(
+            session,
+            processes
+                .iter()
+                .copied()
+                .chain(fallback.into_iter().flatten()),
+        )
     }
 
     fn hangup(&mut self, #[cfg(unix)] groups: &[TerminalProcessGroup]) -> std::io::Result<()> {
@@ -191,8 +259,42 @@ impl Session {
 }
 
 #[derive(Default)]
+struct TerminalSessions {
+    live: BTreeMap<String, Session>,
+    #[cfg(unix)]
+    exited: BTreeMap<libc::pid_t, Vec<ProcessIdentity>>,
+}
+
+impl TerminalSessions {
+    fn release(&mut self, id: &str) {
+        let session = self.live.remove(id);
+        #[cfg(unix)]
+        if let Some(session) = &session
+            && !session.closing
+            && let Some(session_id) = session.session_id
+            && unsafe { libc::getsid(session_id) != session_id }
+        {
+            self.exited.retain(|&session, members| {
+                members.iter().any(|member| member.is_in_session(session))
+            });
+            let members: Vec<_> = session
+                .process_groups(&terminal_processes())
+                .into_iter()
+                .flat_map(|group| group.members)
+                .filter_map(ProcessIdentity::new)
+                .filter(|member| unsafe { libc::getsid(member.pid) == session_id })
+                .collect();
+            if !members.is_empty() {
+                self.exited.insert(session_id, members);
+            }
+        }
+        drop(session);
+    }
+}
+
+#[derive(Default)]
 pub struct PtyTerminals {
-    sessions: Arc<Mutex<BTreeMap<String, Session>>>,
+    sessions: Arc<Mutex<TerminalSessions>>,
 }
 
 impl PtyTerminals {
@@ -217,14 +319,16 @@ impl PtyTerminals {
                 std::mem::take(&mut *error.into_inner())
             }
         };
-        if sessions.is_empty() {
-            return;
-        }
         #[cfg(unix)]
-        let processes = terminal_processes();
+        let processes = {
+            if sessions.live.is_empty() && sessions.exited.is_empty() {
+                return;
+            }
+            terminal_processes()
+        };
         #[cfg(unix)]
         let mut all_groups = Vec::new();
-        for (terminal_id, mut session) in sessions {
+        for (terminal_id, mut session) in sessions.live {
             #[cfg(unix)]
             let groups = session.process_groups(&processes);
             if let Err(error) = session.hangup(
@@ -234,6 +338,26 @@ impl PtyTerminals {
                 tracing::warn!(%terminal_id, %error, "could not stop terminal process");
             }
             #[cfg(unix)]
+            all_groups.extend(groups);
+        }
+        #[cfg(unix)]
+        for (session, members) in sessions.exited {
+            let known_members: Vec<_> = members
+                .into_iter()
+                .filter(|member| member.is_in_session(session))
+                .map(|member| member.pid)
+                .collect();
+            // A recycled session ID alone cannot establish ownership after exit.
+            if known_members.is_empty() {
+                continue;
+            }
+            let groups = TerminalProcessGroup::for_session(
+                session,
+                processes.iter().copied().chain(known_members),
+            );
+            for group in &groups {
+                group.signal(libc::SIGHUP);
+            }
             all_groups.extend(groups);
         }
         #[cfg(unix)]
@@ -266,6 +390,7 @@ impl PtyTerminals {
         }
         let sessions = self.sessions()?;
         let session = sessions
+            .live
             .get(terminal_id.as_str())
             .filter(|session| !session.closing)
             .ok_or_else(|| {
@@ -277,9 +402,7 @@ impl PtyTerminals {
             .map_err(|error| TerminalError::Backend(format!("terminal input queue: {error}")))
     }
 
-    fn sessions(
-        &self,
-    ) -> Result<std::sync::MutexGuard<'_, BTreeMap<String, Session>>, TerminalError> {
+    fn sessions(&self) -> Result<std::sync::MutexGuard<'_, TerminalSessions>, TerminalError> {
         self.sessions
             .lock()
             .map_err(|_| TerminalError::Backend("the terminal table is poisoned".to_string()))
@@ -300,7 +423,7 @@ impl TerminalService for PtyTerminals {
     ) -> Result<TerminalId, TerminalError> {
         validate_size(spec.columns, spec.rows)?;
         let terminal_id = spec.id;
-        if self.sessions()?.contains_key(terminal_id.as_str()) {
+        if self.sessions()?.live.contains_key(terminal_id.as_str()) {
             return Err(TerminalError::Backend("terminal is already running".into()));
         }
         let system = native_pty_system();
@@ -390,7 +513,7 @@ impl TerminalService for PtyTerminals {
         let session_id = child
             .process_id()
             .and_then(|pid| libc::pid_t::try_from(pid).ok());
-        self.sessions()?.insert(
+        self.sessions()?.live.insert(
             terminal_id.as_str().to_string(),
             Session {
                 writer: input,
@@ -414,7 +537,7 @@ impl TerminalService for PtyTerminals {
             };
             match sessions.lock() {
                 Ok(mut sessions) => {
-                    sessions.remove(&id);
+                    sessions.release(&id);
                 }
                 Err(error) => tracing::error!(%error, "could not release terminal descriptors"),
             }
@@ -467,6 +590,7 @@ impl TerminalService for PtyTerminals {
         validate_size(columns, rows)?;
         let sessions = self.sessions()?;
         let session = sessions
+            .live
             .get(terminal_id.as_str())
             .filter(|session| !session.closing)
             .ok_or_else(|| {
@@ -482,6 +606,7 @@ impl TerminalService for PtyTerminals {
         let mut sessions = self.sessions()?;
         // The waiter owns removal so a failed signal can be retried.
         let Some(session) = sessions
+            .live
             .get_mut(terminal_id.as_str())
             .filter(|session| !session.closing)
         else {
@@ -629,6 +754,20 @@ mod tests {
     #[tokio::test]
     async fn closing_a_terminal_stops_a_separate_background_process_group()
     -> Result<(), Box<dyn std::error::Error>> {
+        check_background_job_shutdown(false).await
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[tokio::test]
+    async fn quitting_stops_a_background_job_after_its_shell_exits()
+    -> Result<(), Box<dyn std::error::Error>> {
+        check_background_job_shutdown(true).await
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    async fn check_background_job_shutdown(
+        exit_before_quit: bool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let mut engine = PtyTerminals::new();
         let (sender, mut receiver) = mpsc::channel(8);
         let terminal_id = engine.spawn(
@@ -640,7 +779,7 @@ mod tests {
                 command: "/bin/sh".to_string(),
                 args: vec![
                     "-c".to_string(),
-                    r#"python3 -u -c 'import os, signal, time; os.setpgid(0, 0); signal.signal(signal.SIGHUP, signal.SIG_IGN); print(f"background:{os.getpid()}"); time.sleep(10)' & wait"#.into(),
+                    r#"python3 -u -c 'import os, signal, time; os.setpgid(0, 0); signal.signal(signal.SIGHUP, signal.SIG_IGN); print(f"background:{os.getpid()}"); time.sleep(10)' & IFS= read -r line; exit 23"#.into(),
                 ],
                 environment: BTreeMap::new(),
             },
@@ -669,7 +808,23 @@ mod tests {
             "session {session}, group {group}"
         );
 
-        engine.close(&terminal_id)?;
+        if exit_before_quit {
+            engine.write(&terminal_id, b"leave\r".to_vec())?.await??;
+            let exit_code = tokio::time::timeout(Duration::from_secs(3), async {
+                while let Some(event) = receiver.recv().await {
+                    if let TerminalEvent::Exited { exit_code } = event {
+                        return exit_code;
+                    }
+                }
+                None
+            })
+            .await?;
+            assert_eq!(exit_code, Some(23));
+            assert_eq!(unsafe { libc::getsid(process) }, session);
+            engine.terminate_all();
+        } else {
+            engine.close(&terminal_id)?;
+        }
         let stopped = tokio::time::timeout(Duration::from_secs(1), async {
             loop {
                 let status = std::process::Command::new("ps")

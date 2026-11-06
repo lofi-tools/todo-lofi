@@ -580,7 +580,9 @@ quitting the app does, by design (§2.5). A terminal's scope is either the proje
 - Each terminal runs in its own session. Stop and Quit signal the shell and
   the foreground and background process groups in that session. Groups that
   survive the grace period are stopped after checking their session membership
-  again. Processes in separately detached sessions keep running.
+  again. After a shell exits, Quit can still stop its background jobs if a
+  process recorded at shell exit is verifiably still in the same session.
+  Processes in separately detached sessions keep running.
 
 ### 5.3 Parsing and rendering
 

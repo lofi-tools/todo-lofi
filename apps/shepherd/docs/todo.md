@@ -626,6 +626,9 @@ Automated:
   terminal can restart. Both actions give terminal groups a 200 ms grace
   period, then stop groups with members that still belong to their original
   PTY sessions.
+  A PTY regression also lets the shell exit normally with a background job
+  still running. The shell reports its exit code, and Quit stops the job
+  after verifying its process identity and session membership.
   On macOS, Command+Q and the Quit menu item use the guarded window-close
   path. With a waiting scripted task and one live terminal, Command+Q showed
   both counts. Keep working preserved the task and shell. Confirming quit
