@@ -3750,9 +3750,8 @@ mod live {
     const TURN_LIMIT: Duration = Duration::from_secs(180);
 
     /// Drives the installed, logged-in Codex through the same path the app uses.
-    /// Ignored because CI has no CLI; replaying the recorded fixtures covers the
-    /// translation without one. Run it with
-    /// `cargo test -p agent-harness -- --ignored live_codex`.
+    /// Run with `cargo test -p agent-harness -- --ignored live_codex` to replay.
+    /// Add `--features live-codex` before `--` to record a missing fixture.
     #[tokio::test]
     #[ignore]
     async fn live_codex_streams_a_tool_change_approves_resumes_and_cancels() {

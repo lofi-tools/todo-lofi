@@ -1707,8 +1707,8 @@ exec sleep 60
         Ok(())
     }
 
+    #[cfg(feature = "live-opencode")]
     #[tokio::test]
-    #[ignore = "requires a configured OpenCode executable and a loopback socket"]
     async fn installed_server_creates_and_resumes_a_session()
     -> Result<(), Box<dyn std::error::Error>> {
         let root = tempfile::tempdir()?;
@@ -1759,8 +1759,8 @@ exec sleep 60
         Ok(())
     }
 
+    #[cfg(feature = "live-opencode")]
     #[tokio::test]
-    #[ignore = "requires a configured OpenCode executable and loopback sockets"]
     async fn installed_harness_switches_mode_and_reads_it_on_reconnect()
     -> Result<(), Box<dyn std::error::Error>> {
         let root = tempfile::tempdir()?;
@@ -1813,15 +1813,15 @@ exec sleep 60
         Ok(())
     }
 
+    #[cfg(feature = "live-opencode")]
     #[tokio::test]
-    #[ignore = "requires a configured OpenCode executable and loopback sockets"]
     async fn installed_harness_streams_a_turn_through_a_local_fixture()
     -> Result<(), Box<dyn std::error::Error>> {
         installed_harness_with_fixture_provider(FixtureModel::Text).await
     }
 
+    #[cfg(feature = "live-opencode")]
     #[tokio::test]
-    #[ignore = "requires a configured OpenCode executable and loopback sockets"]
     async fn installed_harness_delivers_an_image_to_the_local_provider()
     -> Result<(), Box<dyn std::error::Error>> {
         use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -1865,13 +1865,14 @@ exec sleep 60
         Ok(())
     }
 
+    #[cfg(feature = "live-opencode")]
     #[tokio::test]
-    #[ignore = "requires a configured OpenCode executable and loopback sockets"]
     async fn installed_harness_reports_a_provider_sign_in_failure()
     -> Result<(), Box<dyn std::error::Error>> {
         installed_harness_with_fixture_provider(FixtureModel::Unauthorized).await
     }
 
+    #[cfg(feature = "live-opencode")]
     fn installed_provider_spec(
         root: &Path,
         listener: &TcpListener,
@@ -1908,6 +1909,7 @@ exec sleep 60
         Ok(spec)
     }
 
+    #[cfg(feature = "live-opencode")]
     async fn installed_harness_with_fixture_provider(
         model: FixtureModel,
     ) -> Result<(), Box<dyn std::error::Error>> {
@@ -1958,8 +1960,8 @@ exec sleep 60
         Ok(())
     }
 
+    #[cfg(feature = "live-opencode")]
     #[tokio::test]
-    #[ignore = "requires a configured OpenCode executable and loopback sockets"]
     async fn installed_harness_approves_and_cancels_after_resuming()
     -> Result<(), Box<dyn std::error::Error>> {
         let root = tempfile::tempdir()?;
@@ -2036,6 +2038,7 @@ exec sleep 60
         outcome
     }
 
+    #[cfg(feature = "live-opencode")]
     async fn fixture_approval(harness: &mut OpenCodeHarness) -> HarnessResult<ApprovalId> {
         timeout(REQUEST_TIMEOUT, async {
             while let Some(event) = harness.events().recv().await {
@@ -2067,6 +2070,7 @@ exec sleep 60
         .map_err(|error| protocol_error("fixture approval timed out", error))?
     }
 
+    #[cfg(feature = "live-opencode")]
     async fn fixture_outcome(
         harness: &mut OpenCodeHarness,
         expected: TurnFinishReason,
@@ -2147,9 +2151,8 @@ done
         Ok(())
     }
 
-    #[cfg(unix)]
+    #[cfg(all(unix, feature = "live-opencode"))]
     #[tokio::test]
-    #[ignore = "requires a configured OpenCode executable and loopback sockets"]
     async fn installed_harness_falls_back_to_acp_and_loads_a_session()
     -> Result<(), Box<dyn std::error::Error>> {
         let root = tempfile::tempdir()?;
@@ -2217,6 +2220,7 @@ done
         Ok(path.to_string_lossy().into_owned())
     }
 
+    #[cfg(feature = "live-opencode")]
     fn installed_fixture_spec(root: &Path) -> Result<SpawnSpec, Box<dyn std::error::Error>> {
         let settings = PathBuf::from(
             std::env::var_os("SHEPHERD_OPENCODE_TEST_SETTINGS")
@@ -2255,6 +2259,7 @@ done
         })
     }
 
+    #[cfg(feature = "live-opencode")]
     #[derive(Clone, Copy)]
     enum FixtureModel {
         Text,
@@ -2263,8 +2268,10 @@ done
         Shell,
     }
 
+    #[cfg(feature = "live-opencode")]
     const FIXTURE_PNG: &str = "iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAIAAACQkWg2AAAAFklEQVR4nGNwURIkCTGMahjVMHw1AAB4uncB7nfs+wAAAABJRU5ErkJggg==";
 
+    #[cfg(feature = "live-opencode")]
     async fn serve_fixture_model(
         listener: TcpListener,
         model: FixtureModel,
@@ -2333,6 +2340,7 @@ done
         }
     }
 
+    #[cfg(feature = "live-opencode")]
     fn fixture_shell_call(request: &Value) -> Option<Value> {
         let last_input = request["messages"]
             .as_array()?

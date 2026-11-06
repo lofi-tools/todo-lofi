@@ -175,9 +175,13 @@ Other entities can then register a callback to handle these events by doing `cx.
 
 # Build guidelines
 
-Live tests that use a ChatGPT plan through Codex must use `gpt-6.1-terra`
-at `low` effort. Use the shared `LiveCodexRun` helper to record successful
-responses under `.cache/shepherd-live/` and replay them on later runs.
+Tests that call a real agent must cache successful responses and external
+effects that the assertions depend on, such as worktree edits. Replay the
+capture on subsequent runs. Keep process or provider probes that require the
+real implementation behind a per-agent feature that is disabled by default.
+Live Codex tests using a ChatGPT plan must use `gpt-6.1-terra` at `low` effort.
+Use `LiveCodexRun` to record under `.cache/shepherd-live/`. A cache miss
+requires the `live-codex` feature to record.
 
 Run workspace commands through the repository's Nix direnv environment, not
 the ambient shell:

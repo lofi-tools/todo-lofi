@@ -176,7 +176,7 @@ OpenCode profile. The native turn smoke uses a loopback model fixture, and
 the installed ACP fallback smoke checks session creation and reload.
 
 ```sh
-direnv exec . cargo test -p agent-harness opencode::tests::installed_ -- --ignored
+direnv exec . cargo test -p agent-harness --features live-opencode opencode::tests::installed_
 ```
 
 ## Use an installed Claude Code ACP adapter
@@ -224,24 +224,27 @@ file with the configured command. The smoke initializes ACP and opens a
 session in a disposable project and profile without sending a model prompt.
 The Pi smoke checks RPC framing and a local extension dialog. Pi versions
 without prompt disposition can pass this dialog probe.
+The installed-process probes are excluded by default. Each requires the
+feature for that agent because a replay would skip the process being tested.
 
 ```sh
-direnv exec . cargo test -p agent-harness --lib acp::tests::installed_claude_code_opens_an_acp_session -- --ignored
-direnv exec . cargo test -p agent-harness --lib pi::tests::installed_pi_exchanges_extension_dialog_records -- --ignored
+direnv exec . cargo test -p agent-harness --features live-claude --lib acp::tests::installed_claude_code_opens_an_acp_session
+direnv exec . cargo test -p agent-harness --features live-pi --lib pi::tests::installed_pi_exchanges_extension_dialog_records
 ```
 
 ## Live Codex tests
 
-The ignored Codex tests use the ChatGPT login with `gpt-6.1-terra` at
-`low` effort. A successful run records the app-server responses under
-`.cache/shepherd-live/codex/terra-low-v1/`. Later runs replay them through
-the adapter, including the recorded file change where the scenario needs it.
-Delete a scenario's JSON file to request a fresh live run.
+Codex scenarios replay the app-server responses and recorded worktree edits
+from `.cache/shepherd-live/codex/terra-low-v1/`. To record a missing scenario,
+add `--features live-codex` to the Cargo command or `--record` to the desktop
+smoke command. Recording uses the ChatGPT login with `gpt-6.1-terra` at `low`
+effort. An existing capture takes precedence when recording is enabled.
 
 ```sh
 direnv exec . cargo test -p agent-harness -- --ignored live_codex
 direnv exec . cargo test -p shepherd-core -- --ignored live_exit
 direnv exec . cargo test -p shepherd-core -- --ignored live_restart
+direnv exec . ./scripts/smoke-shepherd-terminal.sh --codex-review-merge
 ```
 
 Design and build order: [docs/todo.md](./docs/todo.md).

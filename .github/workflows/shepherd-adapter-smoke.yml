@@ -29,16 +29,16 @@ jobs:
         if: inputs.agent == 'opencode'
         env:
           SHEPHERD_OPENCODE_TEST_SETTINGS: ${{ vars.SHEPHERD_ADAPTER_TEST_SETTINGS }}
-        run: nix develop --impure -c cargo test --locked -p agent-harness --lib opencode::tests::installed_ -- --ignored
+        run: nix develop --impure -c cargo test --locked -p agent-harness --features live-opencode --lib opencode::tests::installed_
 
       - name: Pi RPC dialog probe
         if: inputs.agent == 'pi'
         env:
           SHEPHERD_PI_TEST_EXECUTABLE: ${{ vars.SHEPHERD_PI_TEST_EXECUTABLE }}
-        run: nix develop --impure -c cargo test --locked -p agent-harness --lib pi::tests::installed_pi_exchanges_extension_dialog_records -- --ignored
+        run: nix develop --impure -c cargo test --locked -p agent-harness --features live-pi --lib pi::tests::installed_pi_exchanges_extension_dialog_records
 
       - name: Claude Code ACP session smoke
         if: inputs.agent == 'claude-acp'
         env:
           SHEPHERD_CLAUDE_TEST_SETTINGS: ${{ vars.SHEPHERD_ADAPTER_TEST_SETTINGS }}
-        run: nix develop --impure -c cargo test --locked -p agent-harness --lib acp::tests::installed_claude_code_opens_an_acp_session -- --ignored
+        run: nix develop --impure -c cargo test --locked -p agent-harness --features live-claude --lib acp::tests::installed_claude_code_opens_an_acp_session

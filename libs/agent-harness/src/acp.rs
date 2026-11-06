@@ -1572,8 +1572,8 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "live-claude")]
     #[tokio::test]
-    #[ignore = "requires a configured Claude Code ACP executable"]
     async fn installed_claude_code_opens_an_acp_session() -> Result<(), Box<dyn std::error::Error>>
     {
         let settings = std::env::var_os("SHEPHERD_CLAUDE_TEST_SETTINGS")

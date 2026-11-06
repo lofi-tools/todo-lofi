@@ -27,3 +27,4 @@ libc = "0.2"
 
 [features]
 test-support = []
+live-opencode = []

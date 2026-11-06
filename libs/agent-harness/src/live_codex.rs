@@ -102,6 +102,13 @@ impl LiveCodexRun {
         if let Some(replay) = Self::cached(&cache_path)? {
             return Ok(Some(replay));
         }
+        if !cfg!(feature = "live-codex") {
+            return Err(format!(
+                "missing cached Codex run at {}. Enable live-codex to record it.",
+                cache_path.display()
+            )
+            .into());
+        }
         let parent = cache_path
             .parent()
             .ok_or("live cache has no parent directory")?;
@@ -354,6 +361,24 @@ mod tests {
     use super::*;
     use crate::{AgentHarness, PromptInput};
     use std::time::Duration;
+
+    #[cfg(not(feature = "live-codex"))]
+    #[tokio::test]
+    async fn a_cache_miss_requires_the_live_codex_feature() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let scenario = format!("uncached-{}", uuid::Uuid::new_v4());
+        let error = LiveCodexRun::load(&scenario)
+            .await
+            .err()
+            .ok_or("expected a cache miss to fail before starting Codex")?;
+        assert!(error.to_string().contains("Enable live-codex"));
+        assert!(
+            !LiveCodexRun::cache_path(&scenario)?
+                .with_extension("lock")
+                .exists()
+        );
+        Ok(())
+    }
 
     #[tokio::test]
     async fn records_and_replays_codex_responses_across_worktrees()

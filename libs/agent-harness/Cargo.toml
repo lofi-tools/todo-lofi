@@ -9,6 +9,10 @@ path = "src/agent_harness.rs"
 
 [features]
 live-test-support = ["dep:tempfile"]
+live-codex = ["live-test-support"]
+live-opencode = []
+live-claude = []
+live-pi = []
 
 [dependencies]
 acp-client = { path = "../acp-client" }

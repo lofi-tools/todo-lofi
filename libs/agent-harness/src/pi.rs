@@ -408,7 +408,6 @@ fn protocol(message: impl Into<String>) -> HarnessError {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
 
     use super::*;
 
@@ -536,10 +535,12 @@ exit 23
         Ok(())
     }
 
+    #[cfg(feature = "live-pi")]
     #[tokio::test]
-    #[ignore = "requires an installed Pi executable"]
     async fn installed_pi_exchanges_extension_dialog_records()
     -> Result<(), Box<dyn std::error::Error>> {
+        use std::path::PathBuf;
+
         let executable = std::env::var("SHEPHERD_PI_TEST_EXECUTABLE")?;
         if !PathBuf::from(&executable).is_absolute() {
             return Err("set SHEPHERD_PI_TEST_EXECUTABLE to an absolute path".into());

@@ -113,10 +113,19 @@ EOF
     export SHEPHERD_DEV_CODEX_SMOKE=review-merge
     ;;
   *)
-    printf '%s\n' "Usage: $0 [--macos-window|--linux-ime|--macos-ime [pinyin|british]|--macos-visibility|--codex-approval|--codex-live|--codex-edit|--codex-restart|--codex-exit|--codex-review-merge]" >&2
+    printf '%s\n' "Usage: $0 [--macos-window|--linux-ime|--macos-ime [pinyin|british]|--macos-visibility|--codex-approval|--codex-live|--codex-edit|--codex-restart|--codex-exit|--codex-review-merge] [--record for Codex scenarios]" >&2
     exit 2
     ;;
 esac
+
+codex_feature=desktop-codex-smoke
+if [[ -n ${SHEPHERD_DEV_CODEX_SMOKE:-} && -n ${2:-} ]]; then
+  if [[ $2 != --record || $SHEPHERD_DEV_CODEX_SMOKE == approval-replay || $# != 2 ]]; then
+    printf '%s\n' 'Codex smoke accepts --record only for scenarios other than --codex-approval.' >&2
+    exit 2
+  fi
+  codex_feature=live-codex
+fi
 
 if [[ $platform == Darwin && ( -z ${1:-} || ${1:-} == --codex-* ) ]]; then
   export SHEPHERD_DEV_BACKGROUND_SMOKE=1
@@ -200,7 +209,7 @@ EOF
 )
 launch=(pnpm --dir apps/shepherd exec tauri dev --no-watch --config "$config")
 if [[ -n ${SHEPHERD_DEV_CODEX_SMOKE:-} ]]; then
-  launch+=(--features desktop-codex-smoke)
+  launch+=(--features "$codex_feature")
 fi
 for phase in "${phases[@]}"; do
   if [[ $phase == linux-ime ]]; then

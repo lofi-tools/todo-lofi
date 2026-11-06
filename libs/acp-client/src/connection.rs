@@ -1000,8 +1000,8 @@ pub fn stderr_summary(lines: &[String]) -> String {
 mod tests {
     use super::*;
 
+    #[cfg(feature = "live-opencode")]
     #[tokio::test]
-    #[ignore = "requires the configured OpenCode executable and loopback permission"]
     async fn installed_opencode_initializes_and_loads_an_acp_session()
     -> Result<(), Box<dyn std::error::Error>> {
         let program = PathBuf::from(

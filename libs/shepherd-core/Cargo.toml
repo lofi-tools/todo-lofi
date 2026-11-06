@@ -9,6 +9,7 @@ path = "src/shepherd_core.rs"
 
 [features]
 test-support = ["dep:tempfile"]
+live-codex = ["agent-harness/live-codex"]
 
 [dependencies]
 agent-harness = { path = "../agent-harness" }

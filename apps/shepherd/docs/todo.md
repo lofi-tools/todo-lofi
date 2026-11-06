@@ -351,9 +351,12 @@ decision and a ready task. It uses a disposable project and database.
 direnv exec . ./scripts/smoke-shepherd-terminal.sh --codex-approval
 ```
 
-The desktop smoke requires an existing capture. The ignored
+The desktop smoke requires an existing capture. With `--features live-codex`, the ignored
 `live_codex_requests_approval_for_a_network_command` test in `agent-harness`
 can create it with a ChatGPT-authenticated Codex CLI.
+
+The remaining desktop Codex smokes use their existing captures by default.
+Append `--record` to allow a live run to populate a missing capture.
 
 The live macOS smoke covers the desktop approval and cancel steps. It clicks
 **Allow** on the network approval, cancels a running `sleep 25` tool, and sends
