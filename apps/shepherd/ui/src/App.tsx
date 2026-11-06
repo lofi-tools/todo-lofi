@@ -875,7 +875,7 @@ export function App() {
             <Show
               when={workspace()}
               fallback={
-                <Show when={canStartTask() && selectedProject()} fallback={<p class="empty">Select a task to read its transcript.</p>}>
+                <Show when={canStartTask() && selectedProject()}>
                   {(project) => (
                     <div class="chat__welcome">
                       <h1 aria-label={`What should ${DEFAULT_AGENT.name} build in ${project().name}?`}>
