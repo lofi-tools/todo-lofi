@@ -706,6 +706,8 @@ Alt encoding. Run the native check with
 `./scripts/smoke-shepherd-terminal.sh --macos-ime british` from the Nix shell.
 The British dead keys exercise character composition. Candidate selection
 and candidate-window placement still need a separate macOS check.
+With the same layout, holding `e` for 1.5 seconds in the disposable Shepherd
+terminal sent a plain `e` to the shell without showing a candidate panel.
 
 Run the candidate check from the Nix shell with
 `./scripts/smoke-shepherd-terminal.sh --macos-ime`. Use the system
@@ -804,6 +806,13 @@ probe was skipped.
 
 **Pass:** a developer can use Shepherd’s terminals for a normal workday without
 falling back to a separate terminal app.
+
+Start the trial from the repository with `direnv exec . shep`. It preserves
+projects and terminal layout across relaunches in `.cache/test-db/shepherd.db`.
+Use the shell and projects you normally work in. At the end of the day, record
+the commit, OS, shell, and whether you switched to another terminal. For any
+fallback, record the command or shortcut and what Shepherd did. Include the
+pane width if terminal output wrapped or became garbled.
 
 **If it fails:** fix the terminal engine, IME or frame path before S5. Adapter
 breadth will not compensate for an unusable terminal.
