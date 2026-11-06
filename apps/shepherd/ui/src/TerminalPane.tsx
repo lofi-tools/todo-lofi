@@ -7,7 +7,7 @@
 import { For, Show, batch, createEffect, createSignal, onCleanup, onMount } from 'solid-js'
 
 import * as bridge from './bridge'
-import { encodeKittyKey, encodeLegacyKey, encodeTerminalText } from './terminal_keys'
+import { KITTY_REPORT_EVENTS, encodeKittyKey, encodeLegacyKey, encodeTerminalText } from './terminal_keys'
 
 interface TerminalSize {
   columns: number
@@ -547,7 +547,7 @@ function TerminalCanvas(props: { terminalId: string; shown: boolean; focusReques
   let inputWrites = Promise.resolve()
   let pendingInputWrites = 0
   let pendingInputBytes = 0
-  const reportedKeys = new Map<string, string>()
+  const reportedKeys = new Map<string, (event?: KeyboardEvent) => string>()
   let selection: { start: number; end: number } | undefined
   let selecting: number | undefined
   let selectionAnchor: number | undefined
@@ -577,6 +577,7 @@ function TerminalCanvas(props: { terminalId: string; shown: boolean; focusReques
       scheduleDraw()
       if (frame && !copying()) setVisibleText(viewportText(frame))
     } else {
+      leaveTerminal()
       if (paintRequest !== undefined) window.cancelAnimationFrame(paintRequest)
       paintRequest = undefined
       dirtyRows = null
@@ -876,6 +877,14 @@ function TerminalCanvas(props: { terminalId: string; shown: boolean; focusReques
     reportFocus(props.shown && document.hasFocus() && input === document.activeElement)
   }
 
+  function leaveTerminal() {
+    for (const [code, release] of reportedKeys) {
+      reportedKeys.delete(code)
+      write(release(), false)
+    }
+    reportFocus(false)
+  }
+
   function onWindowFocus() {
     if (props.shown && input === document.activeElement) props.onFocus?.(props.terminalId)
     updateWindowFocus()
@@ -954,23 +963,22 @@ function TerminalCanvas(props: { terminalId: string; shown: boolean; focusReques
     if (event.metaKey && ['c', 'v'].includes(event.key.toLowerCase())) return
     if (event.ctrlKey && event.shiftKey && event.key.toLowerCase() === 'v') return
     const encoded = encodeKittyKey(event, modes)
-    const data = encoded ?? encodeLegacyKey(event, modes)
+    const data = encoded?.data ?? encodeLegacyKey(event, modes)
     if (data === null) return
     selection = undefined
     scheduleDraw()
     event.preventDefault()
-    const reportsKey = !!(encoded && event.code)
-    if (write(data, true, reportsKey && !reportedKeys.has(event.code)) && reportsKey) {
-      reportedKeys.set(event.code, event.key)
+    const release = event.code && !reportedKeys.has(event.code) ? encoded?.release : undefined
+    if (write(data, true, release !== undefined) && release) {
+      reportedKeys.set(event.code, release)
     }
   }
 
   function onKeyUp(event: KeyboardEvent) {
-    const key = reportedKeys.get(event.code)
-    if (!key) return
+    const release = reportedKeys.get(event.code)
+    if (!release) return
     reportedKeys.delete(event.code)
-    const data = encodeKittyKey(event, frame?.modes ?? 0, key)
-    if (data) write(data, false)
+    write(release(event), false)
   }
 
   function onPaste(event: ClipboardEvent) {
@@ -1025,6 +1033,9 @@ function TerminalCanvas(props: { terminalId: string; shown: boolean; focusReques
     void bridge.subscribeTerminal(props.terminalId, (next, changedRows) => {
       if (detached) return
       const previous = frame
+      if (previous && ((previous.modes ^ next.modes) & (ALT_SCREEN | KITTY_REPORT_EVENTS))) {
+        reportedKeys.clear()
+      }
       if (previous && (previous.displayOffset !== next.displayOffset || previous.columns !== next.columns || previous.rows !== next.rows)) {
         selection = undefined
         selecting = undefined
@@ -1061,11 +1072,11 @@ function TerminalCanvas(props: { terminalId: string; shown: boolean; focusReques
       else unsubscribe = dispose
     }).catch((failure) => { if (!detached) setError(describe(failure)) })
     window.addEventListener('focus', onWindowFocus)
-    window.addEventListener('blur', updateWindowFocus)
+    window.addEventListener('blur', leaveTerminal)
     onCleanup(() => {
-      reportFocus(false)
+      leaveTerminal()
       window.removeEventListener('focus', onWindowFocus)
-      window.removeEventListener('blur', updateWindowFocus)
+      window.removeEventListener('blur', leaveTerminal)
       detached = true
       if (paintRequest !== undefined) window.cancelAnimationFrame(paintRequest)
       window.clearTimeout(mirrorTimer)
@@ -1141,8 +1152,7 @@ function TerminalCanvas(props: { terminalId: string; shown: boolean; focusReques
         }}
         onBlur={() => {
           props.onFocus?.(null)
-          reportedKeys.clear()
-          reportFocus(false)
+          leaveTerminal()
         }}
         onPaste={onPaste}
         onCopy={onCopy}

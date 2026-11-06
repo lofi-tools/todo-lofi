@@ -309,16 +309,22 @@ async function exerciseKitty(terminalId: string, input: HTMLTextAreaElement) {
 os.write(1, b'\x1b[>3u\x1b[?u')
 expect(b'\x1b[?3u')
 os.write(1, b'\r\nS4_' + b'KITTY_READY\r\n')
-expect(b'\x1b[27u\x1b[27;1:3u')
+expect(b'\x1b[97;5u\x1b[97;1:3u\x1b[27u\x1b[27;1:3u')
 os.write(1, b'\r\nS4_' + b'KITTY_PASS\r\n')
 `, '1b5b3c75')
   await waitFor('Kitty negotiation reply in the PTY', () => terminalOutput().includes('S4_KITTY_READY'))
+  input.focus()
   for (const type of ['keydown', 'keyup']) {
     input.dispatchEvent(new KeyboardEvent(type, {
-      key: 'Escape', code: 'Escape', bubbles: true, cancelable: true,
+      key: 'a', code: 'KeyA', ctrlKey: type === 'keydown', bubbles: true, cancelable: true,
     }))
   }
+  input.dispatchEvent(new KeyboardEvent('keydown', {
+    key: 'Escape', code: 'Escape', bubbles: true, cancelable: true,
+  }))
+  input.blur()
   await waitFor('Kitty key press and release in the PTY', () => terminalOutput().includes('S4_KITTY_PASS'))
+  input.focus()
 }
 
 async function exerciseFish(terminalId: string, input: HTMLTextAreaElement) {

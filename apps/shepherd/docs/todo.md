@@ -517,6 +517,9 @@ task-scoped, persistent and fast enough.
   distinct Ctrl+I and Tab bindings. Native IBus Pinyin verifies candidate
   selection and placement on Ubuntu. A candidate-based input source still
   needs a pass on macOS.
+  The native PTY probe checks Kitty releases after lifting a shortcut modifier
+  and after leaving the terminal. A browser regression checks that focus loss
+  releases every reported key once.
 - [x] Add the binary frame protocol, dirty-row rendering and a frame smoke test.
 - [x] Build the Terminals tab split tree, resize, focus and presets.
   Single and Quad save through the project layout, preserve slots for other

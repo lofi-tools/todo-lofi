@@ -52,11 +52,11 @@ export function encodeLegacyKey(event: KeyboardEvent, modes: number): string | n
 }
 
 const DISAMBIGUATE = 1 << 18
-const REPORT_EVENTS = 1 << 19
+export const KITTY_REPORT_EVENTS = 1 << 19
 const ALTERNATE_KEYS = 1 << 20
 const ALL_KEYS = 1 << 21
 const ASSOCIATED_TEXT = 1 << 22
-const KITTY_MODES = DISAMBIGUATE | REPORT_EVENTS | ALTERNATE_KEYS | ALL_KEYS | ASSOCIATED_TEXT
+const KITTY_MODES = DISAMBIGUATE | KITTY_REPORT_EVENTS | ALTERNATE_KEYS | ALL_KEYS | ASSOCIATED_TEXT
 
 const FUNCTIONAL_KEYS: Record<string, string> = {
   Escape: '27u', Enter: '13u', Tab: '9u', Backspace: '127u',
@@ -106,12 +106,16 @@ function unshifted(key: string, code: string): [string, string | undefined] {
   return [key.toLowerCase(), base]
 }
 
-export function encodeKittyKey(event: KeyboardEvent, modes: number, key = event.key): string | null {
+interface KittyKeyPress {
+  data: string
+  release?: (event?: KeyboardEvent) => string
+}
+
+export function encodeKittyKey(event: KeyboardEvent, modes: number): KittyKeyPress | null {
   if (!(modes & KITTY_MODES) || event.isComposing || event.getModifierState('AltGraph')) return null
+  const key = event.key
   const all = Boolean(modes & ALL_KEYS)
-  const reportEvents = Boolean(modes & REPORT_EVENTS)
-  const release = event.type === 'keyup'
-  if (release && !reportEvents) return null
+  const reportEvents = Boolean(modes & KITTY_REPORT_EVENTS)
 
   const modified = event.ctrlKey || event.altKey || event.metaKey
   const printable = [...key].length === 1
@@ -126,8 +130,8 @@ export function encodeKittyKey(event: KeyboardEvent, modes: number, key = event.
   }
   if (all && MODIFIER_KEYS[event.code]) code = `${MODIFIER_KEYS[event.code]}u`
   if (!all && ['Enter', 'Tab', 'Backspace'].includes(key) && code === FUNCTIONAL_KEYS[key]) return null
-  if (!all && key === 'Escape' && !(modes & (DISAMBIGUATE | REPORT_EVENTS))) return null
-  if (!all && code && !(modes & (DISAMBIGUATE | REPORT_EVENTS))) return null
+  if (!all && key === 'Escape' && !(modes & (DISAMBIGUATE | KITTY_REPORT_EVENTS))) return null
+  if (!all && code && !(modes & (DISAMBIGUATE | KITTY_REPORT_EVENTS))) return null
   if (!code) {
     if (!printable || (!all && (!(modes & DISAMBIGUATE) || !modified))) return null
     code = `${primary.codePointAt(0)}u`
@@ -141,22 +145,34 @@ export function encodeKittyKey(event: KeyboardEvent, modes: number, key = event.
     if (baseCode !== undefined) keyCode += `:${shifted ?? ''}:${baseCode}`
     else if (shifted !== undefined) keyCode += `:${shifted}`
   }
-  const modifiers = 1
-    + (event.shiftKey ? 1 : 0)
-    + (event.altKey ? 2 : 0)
-    + (event.ctrlKey ? 4 : 0)
-    + (event.metaKey ? 8 : 0)
-    + (all && event.getModifierState('CapsLock') ? 64 : 0)
-    + (all && event.getModifierState('NumLock') ? 128 : 0)
-  const kind = reportEvents && (release ? 3 : event.repeat ? 2 : 0)
-  const associated = all && (modes & ASSOCIATED_TEXT) && !release && !modified && printable
+  const locks = lockModifiers(event, all)
+  const modifiers = 1 + keyModifiers(event) + locks
+  const kind = reportEvents && event.repeat ? 2 : 0
+  const associated = all && (modes & ASSOCIATED_TEXT) && !modified && printable
     ? textCodePoints(key)
     : ''
   const modifierField = modifiers !== 1 || kind ? `${modifiers}${kind ? `:${kind}` : ''}` : ''
   const parameters = modifierField || associated
     ? `${keyCode};${modifierField}${associated ? `;${associated}` : ''}`
     : (keyCode === '1' && final !== 'u' ? '' : keyCode)
-  return `\x1b[${parameters}${final}`
+  return {
+    data: `\x1b[${parameters}${final}`,
+    // The released key keeps the identity reported on keydown even if its modifiers changed.
+    release: reportEvents ? (event) => {
+      const modifiers = 1 + (event ? keyModifiers(event) + lockModifiers(event, all) : locks)
+      return `\x1b[${keyCode};${modifiers}:3${final}`
+    } : undefined,
+  }
+}
+
+function keyModifiers(event: KeyboardEvent): number {
+  return (event.shiftKey ? 1 : 0) + (event.altKey ? 2 : 0)
+    + (event.ctrlKey ? 4 : 0) + (event.metaKey ? 8 : 0)
+}
+
+function lockModifiers(event: KeyboardEvent, all: boolean): number {
+  return (all && event.getModifierState('CapsLock') ? 64 : 0)
+    + (all && event.getModifierState('NumLock') ? 128 : 0)
 }
 
 export function encodeTerminalText(text: string, modes: number): string {

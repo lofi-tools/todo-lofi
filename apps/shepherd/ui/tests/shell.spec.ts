@@ -398,8 +398,11 @@ test.beforeEach(async ({ context }) => {
               0, 0, 1, 0, 2, 0, 1, 234, 230, 230, 0, 22, 19, 19, 0, 1, 0, 0, 0, 66,
               2, 0, 0, 0, 2, 0, 0, 0,
             ])
-            if (new URLSearchParams(window.location.search).has('kitty-terminal')) {
+            if (options.has('kitty-terminal')) {
               new DataView(update.buffer).setUint32(14, (31 << 18) | 1025, true)
+            }
+            if (options.has('kitty-shortcuts')) {
+              new DataView(update.buffer).setUint32(14, (3 << 18) | 1025, true)
             }
             if (options.has('interrupted-terminal-paste')) {
               new DataView(update.buffer).setUint32(14, 4 | (1 << 4), true)
@@ -1135,4 +1138,39 @@ test('reports Kitty key events and keeps a keyboard copy view', async ({ page })
   await expect(copy).toHaveValue('BB')
   await copy.press('Escape')
   await expect(input).toBeFocused()
+})
+
+test('reports a Kitty release after its shortcut modifier is released', async ({ page }) => {
+  await page.goto('/?kitty-shortcuts')
+  const input = page.getByRole('textbox', { name: 'Terminal', exact: true })
+  await expect(page.getByText('BB', { exact: true })).toBeAttached()
+  await input.focus()
+
+  await page.keyboard.down('Control')
+  await page.keyboard.down('a')
+  await page.keyboard.up('Control')
+  await page.keyboard.up('a')
+
+  await expect.poll(() => page.evaluate(() => window.__writes))
+    .toEqual(['\x1b[97;5u', '\x1b[97;1:3u'])
+})
+
+test('releases reported Kitty keys when focus leaves a terminal', async ({ page }) => {
+  await page.goto('/?kitty-terminal')
+  const input = page.getByRole('textbox', { name: 'Terminal', exact: true })
+  const writes = () => page.evaluate(() => window.__writes)
+  const firstKeys = ['\x1b[97;;97u', '\x1b[98;;98u', '\x1b[97;1:3u', '\x1b[98;1:3u']
+  await expect(page.getByText('BB', { exact: true })).toBeAttached()
+  await input.focus()
+
+  await page.keyboard.down('a')
+  await page.keyboard.down('b')
+  await input.evaluate((element) => (element as HTMLTextAreaElement).blur())
+  await expect.poll(writes).toEqual(firstKeys)
+
+  await input.focus()
+  await page.keyboard.up('a')
+  await page.keyboard.up('b')
+  await page.keyboard.press('c')
+  await expect.poll(writes).toEqual([...firstKeys, '\x1b[99;;99u', '\x1b[99;1:3u'])
 })
