@@ -55,6 +55,10 @@ pub enum CoreError {
     EmptyProjectPath,
     #[error("project path is already registered: {path}")]
     DuplicateProject { path: String },
+    #[error(
+        "Enter a loopback HTTP or HTTPS URL without credentials, such as http://localhost:3000."
+    )]
+    InvalidPreviewUrl,
     #[error("project not found: {id}")]
     ProjectNotFound { id: String },
     #[error("project path is missing: {path}")]
@@ -594,6 +598,9 @@ impl Core {
 
         match command {
             Command::AddProject { path } => self.add_project(path).await,
+            Command::SetProjectPreviewUrl { project_id, url } => {
+                self.set_project_preview_url(project_id, &url).await
+            }
             Command::CreateDraft {
                 project_id,
                 title,
@@ -923,6 +930,29 @@ impl Core {
             project_id,
             tasks: Vec::new(),
         }));
+        Ok(CommandResult::ProjectList(projects))
+    }
+
+    async fn set_project_preview_url(
+        &mut self,
+        project_id: ProjectId,
+        input: &str,
+    ) -> Result<CommandResult, CoreError> {
+        let input = input.trim();
+        let url = if input.is_empty() {
+            None
+        } else {
+            Some(projects::parse_preview_url(input).ok_or(CoreError::InvalidPreviewUrl)?)
+        };
+        let mut project = self.project(&project_id)?.clone();
+        if project.preview_url == url {
+            return Ok(CommandResult::ProjectList(self.project_list()));
+        }
+        project.preview_url = url;
+        self.store.save_project(&project).await?;
+        self.projects.insert(project_id, project);
+        let projects = self.project_list();
+        self.emit(Event::ProjectListChanged(projects.clone()));
         Ok(CommandResult::ProjectList(projects))
     }
 
@@ -1890,9 +1920,19 @@ impl Core {
     }
 
     pub fn project_path(&self, project_id: &ProjectId) -> Result<PathBuf, CoreError> {
+        Ok(self.project(project_id)?.path.clone())
+    }
+
+    pub fn project_preview_url(
+        &self,
+        project_id: &ProjectId,
+    ) -> Result<Option<url::Url>, CoreError> {
+        Ok(self.project(project_id)?.preview_url.clone())
+    }
+
+    fn project(&self, project_id: &ProjectId) -> Result<&Project, CoreError> {
         self.projects
             .get(project_id)
-            .map(|project| project.path.clone())
             .ok_or_else(|| CoreError::ProjectNotFound {
                 id: project_id.as_str().to_string(),
             })
@@ -1953,6 +1993,7 @@ impl Core {
                 .last_task_id
                 .as_ref()
                 .map(|task_id| task_id.as_str().to_string()),
+            preview_url: project.preview_url.as_ref().map(ToString::to_string),
             unfinished_task_count,
             review_task_count: self
                 .tasks

@@ -572,6 +572,38 @@ impl ShellState {
         }
     }
 
+    pub async fn set_project_preview_url(
+        &self,
+        project_id: String,
+        url: String,
+    ) -> Result<ProjectList, BridgeError> {
+        match self
+            .execute(Command::SetProjectPreviewUrl {
+                project_id: ProjectId::new(project_id),
+                url,
+            })
+            .await?
+        {
+            CommandResult::ProjectList(projects) => Ok(projects),
+            other => Err(unexpected(&other)),
+        }
+    }
+
+    pub async fn open_project_preview(&self, project_id: String) -> Result<(), BridgeError> {
+        let url = self
+            .core
+            .lock()
+            .await
+            .project_preview_url(&ProjectId::new(project_id))?
+            .ok_or_else(|| BridgeError::new("preview", "Set the project preview URL first."))?;
+        open_in_browser(url).await.map_err(|error| {
+            BridgeError::new(
+                "preview",
+                format!("Could not open the preview in a browser. {error}"),
+            )
+        })
+    }
+
     pub async fn create_draft(
         &self,
         project_id: String,
@@ -1146,32 +1178,12 @@ impl ShellState {
             .ok()
             .filter(|url| matches!(url.scheme(), "http" | "https") && url.host().is_some())
             .ok_or_else(|| BridgeError::new("terminal", "terminal links must use HTTP or HTTPS"))?;
-        let program = match std::env::consts::OS {
-            "macos" => "open",
-            "linux" => "xdg-open",
-            _ => {
-                return Err(BridgeError::new(
-                    "terminal",
-                    "opening terminal links is unavailable",
-                ));
-            }
-        };
-        let status = tokio::task::spawn_blocking(move || {
-            std::process::Command::new(program)
-                .arg(url.as_str())
-                .status()
-        })
-        .await
-        .map_err(|error| BridgeError::new("terminal", error.to_string()))?
-        .map_err(|error| BridgeError::new("terminal", error.to_string()))?;
-        if status.success() {
-            Ok(())
-        } else {
-            Err(BridgeError::new(
+        open_in_browser(url).await.map_err(|error| {
+            BridgeError::new(
                 "terminal",
-                format!("could not open the terminal link: {status}"),
-            ))
-        }
+                format!("could not open the terminal link: {error}"),
+            )
+        })
     }
 
     pub async fn terminal_resize(
@@ -1296,6 +1308,28 @@ impl ShellState {
     }
 }
 
+async fn open_in_browser(url: tauri::Url) -> std::io::Result<()> {
+    let program = match std::env::consts::OS {
+        "macos" => "open",
+        "linux" => "xdg-open",
+        _ => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "Opening a browser is unavailable on this platform.",
+            ));
+        }
+    };
+    let status = tokio::process::Command::new(program)
+        .arg(url.as_str())
+        .status()
+        .await?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(std::io::Error::other(status.to_string()))
+    }
+}
+
 fn project_scan_root() -> Option<PathBuf> {
     if cfg!(debug_assertions)
         && let Some(path) = std::env::var_os("SHEPHERD_DEV_PROJECT_ROOT")
@@ -1326,6 +1360,23 @@ pub mod commands {
         path: String,
     ) -> Result<ProjectList, BridgeError> {
         state.inner().add_project(path).await
+    }
+
+    #[tauri::command]
+    pub async fn set_project_preview_url(
+        state: State<'_, ShellState>,
+        project_id: String,
+        url: String,
+    ) -> Result<ProjectList, BridgeError> {
+        state.inner().set_project_preview_url(project_id, url).await
+    }
+
+    #[tauri::command]
+    pub async fn open_project_preview(
+        state: State<'_, ShellState>,
+        project_id: String,
+    ) -> Result<(), BridgeError> {
+        state.inner().open_project_preview(project_id).await
     }
 
     #[tauri::command]
@@ -2493,6 +2544,29 @@ mod tests {
             .add_project(directory.path().display().to_string())
             .await?;
         assert_eq!(projects.projects.len(), 1);
+        let project_id = projects
+            .projects
+            .first()
+            .ok_or("missing project")?
+            .id
+            .clone();
+        let preview = "http://[::1]:3000/demo?view=compact#header";
+        state
+            .set_project_preview_url(project_id.clone(), format!(" {preview} "))
+            .await?;
+        for invalid in [
+            "file:///tmp/demo.html",
+            "https://example.com/",
+            "http://localhost.example.com/",
+            "http://secret@localhost:3000/",
+        ] {
+            assert!(
+                state
+                    .set_project_preview_url(project_id.clone(), invalid.into())
+                    .await
+                    .is_err()
+            );
+        }
         assert!(
             directory.join("shepherd.db").is_file(),
             "the shell should create its database in the data directory"
@@ -2509,6 +2583,18 @@ mod tests {
         assert_eq!(projects.projects.len(), 1);
         assert!(!projects.projects[0].is_git_repository);
         assert!(!projects.projects[0].name.is_empty());
+        assert_eq!(projects.projects[0].preview_url.as_deref(), Some(preview));
+        let cleared = reopened
+            .set_project_preview_url(project_id.clone(), String::new())
+            .await?;
+        assert_eq!(
+            cleared
+                .projects
+                .first()
+                .and_then(|project| project.preview_url.as_deref()),
+            None
+        );
+        assert!(reopened.open_project_preview(project_id).await.is_err());
         Ok(())
     }
 }

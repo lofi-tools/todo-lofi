@@ -13,6 +13,7 @@ import * as bridge from './bridge'
 import { FilesPane } from './FilesPane'
 import { ProjectImportSources, ProjectPicker } from './ProjectPicker'
 import { ProjectRow } from './ProjectRow'
+import { PreviewPane } from './PreviewPane'
 import { GitPane } from './GitPane'
 import { ReviewPane } from './ReviewPane'
 import { SEND_ACCENTS, SettingsPane, type SendAccent } from './SettingsPane'
@@ -165,6 +166,11 @@ export function App() {
 
   function setProjectArchived(projectId: string, visible: boolean) {
     setArchiveVisibility((previous) => new Map(previous).set(projectId, visible))
+  }
+
+  function openProjectSettings(projectId: string) {
+    setProjectSettingsRequest({ id: projectId })
+    setSettingsOpen(true)
   }
   const [terminalListEvent, setTerminalListEvent] = createSignal<Extract<CoreEvent, { type: 'terminalListChanged' }>['data']>()
   const [inspectorTabs, setInspectorTabs] = createSignal(new Map<string | null, bridge.InspectorTab>())
@@ -855,10 +861,7 @@ export function App() {
                       else if (projectMenuId() === project.id) setProjectMenuId(undefined)
                     }}
                     onToggleArchived={() => setProjectArchived(project.id, !showsArchived(project.id))}
-                    onProjectSettings={() => {
-                      setProjectSettingsRequest({ id: project.id })
-                      setSettingsOpen(true)
-                    }}
+                    onProjectSettings={() => openProjectSettings(project.id)}
                   />
                   <Show when={project.missing}>
                     <p class="project__missing">path is missing</p>
@@ -932,6 +935,13 @@ export function App() {
             approvalChange={approvalChange()}
             showProjectArchived={showsArchived(settingsProject()?.id ?? null)}
             onShowProjectArchived={setProjectArchived}
+            onSavePreviewUrl={async (projectId, url) => {
+              const { projects: updated } = await bridge.setProjectPreviewUrl(projectId, url)
+              const project = updated.find((entry) => entry.id === projectId)
+              if (project) setProjects((current) => current.map((entry) => entry.id === projectId
+                ? { ...entry, previewUrl: project.previewUrl }
+                : entry))
+            }}
           />
         </Show>
 
@@ -1142,6 +1152,12 @@ export function App() {
                 />}
               </Show>
             </div>
+            <Show when={inspectorTab() === 'preview'}>
+              <Show when={selectedProjectId()} keyed fallback={<p class="empty">Select a project to preview.</p>}>
+                {(projectId) => <PreviewPane projectId={projectId} url={selectedProject()?.previewUrl}
+                  onProjectSettings={() => openProjectSettings(projectId)} />}
+              </Show>
+            </Show>
             <Show when={inspectorTab() === 'review'}>
               <Show when={workspace()?.task.id} keyed fallback={<p class="empty">Select a task to review.</p>}>
                 {(taskId) => <ReviewPane
@@ -1571,7 +1587,7 @@ function PlusIcon() {
 
 const INSPECTOR_TABS: InspectorTabOption[] = [
   { id: 'terminals', label: 'Terminals', enabled: true, icon: 'M3 6a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Zm4 3 3 3-3 3m6 0h4' },
-  { id: 'preview', label: 'Preview', enabled: false, icon: 'M2 12s3.6-6 10-6 10 6 10 6-3.6 6-10 6S2 12 2 12Zm13 0a3 3 0 1 1-6 0 3 3 0 0 1 6 0Z' },
+  { id: 'preview', label: 'Preview', enabled: true, icon: 'M2 12s3.6-6 10-6 10 6 10 6-3.6 6-10 6S2 12 2 12Zm13 0a3 3 0 1 1-6 0 3 3 0 0 1 6 0Z' },
   { id: 'review', label: 'Review', enabled: true, icon: 'M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Zm0 0v6h6M8 14l3 3 5-5' },
   { id: 'git', label: 'Git', enabled: true, icon: 'M6 6a2 2 0 1 0 0-4 2 2 0 0 0 0 4Zm0 16a2 2 0 1 0 0-4 2 2 0 0 0 0 4ZM6 6v12M18 9a2 2 0 1 0 0-4 2 2 0 0 0 0 4Zm0 0c0 4-4 6-12 6' },
   { id: 'files', label: 'Files', enabled: true, icon: 'M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z' },

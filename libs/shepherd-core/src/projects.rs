@@ -4,6 +4,7 @@ use std::fmt;
 use std::path::PathBuf;
 
 use serde::Serialize;
+use url::{Host, Url};
 use uuid::Uuid;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize)]
@@ -32,6 +33,7 @@ pub struct Project {
     pub name: String,
     pub missing: bool,
     pub last_task_id: Option<crate::tasks::TaskId>,
+    pub preview_url: Option<Url>,
     pub created_at: u64,
 }
 
@@ -49,6 +51,7 @@ impl Project {
             path,
             name,
             last_task_id: None,
+            preview_url: None,
             created_at: now_millis(),
         }
     }
@@ -63,8 +66,25 @@ pub struct ProjectSnapshot {
     pub missing: bool,
     pub is_git_repository: bool,
     pub last_task_id: Option<String>,
+    pub preview_url: Option<String>,
     pub unfinished_task_count: usize,
     pub review_task_count: usize,
+}
+
+pub(crate) fn parse_preview_url(input: &str) -> Option<Url> {
+    let url = Url::parse(input).ok()?;
+    if !matches!(url.scheme(), "http" | "https")
+        || !url.username().is_empty()
+        || url.password().is_some()
+    {
+        return None;
+    }
+    match url.host()? {
+        Host::Domain("localhost") => Some(url),
+        Host::Ipv4(address) if address.is_loopback() => Some(url),
+        Host::Ipv6(address) if address.is_loopback() => Some(url),
+        _ => None,
+    }
 }
 
 pub(crate) fn now_millis() -> u64 {

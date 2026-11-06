@@ -791,6 +791,20 @@ textarea {
   overflow-wrap: anywhere;
 }
 
+.settings__category .settings__preview-url {
+  display: grid;
+  gap: 4px;
+}
+
+.settings__preview-url input {
+  min-width: 0;
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface-raised);
+  color: var(--text);
+}
+
 .settings__approval {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
@@ -1401,6 +1415,34 @@ textarea {
 .terminal-pane__bar button:disabled,
 .terminal-ended button:disabled {
   color: var(--text-disabled);
+}
+
+.preview-pane {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  height: 100%;
+  min-height: 14rem;
+}
+
+.preview-pane__bar {
+  flex-wrap: wrap;
+}
+
+.preview-pane__address {
+  flex-basis: 100%;
+  margin: 0;
+  overflow-wrap: anywhere;
+  color: var(--text-muted);
+}
+
+.preview-pane iframe {
+  flex: 1;
+  width: 100%;
+  min-height: 0;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: white;
 }
 
 .terminal-pane__body {

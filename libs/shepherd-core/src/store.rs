@@ -13,7 +13,7 @@ use toasty::stmt::{Type, Value};
 use toasty_driver_turso::Turso;
 use tokio::sync::{Mutex, RwLock};
 
-use crate::projects::{Project, ProjectId};
+use crate::projects::{Project, ProjectId, parse_preview_url};
 use crate::session::SessionRecord;
 use crate::snapshots::WorkspaceLayout;
 use crate::tasks::{Agent, AgentTier, Task, TaskId, TaskState};
@@ -116,6 +116,10 @@ const MIGRATIONS: &[Migration] = &[
     Migration {
         name: "0007_session_capabilities.sql",
         sql: include_str!("../toasty/migrations/0007_session_capabilities.sql"),
+    },
+    Migration {
+        name: "0008_project_preview_url.sql",
+        sql: include_str!("../toasty/migrations/0008_project_preview_url.sql"),
     },
 ];
 
@@ -230,7 +234,7 @@ impl Store for TursoStore {
     async fn load_projects(&self) -> Result<Vec<Project>, StoreError> {
         let mut db = self.db.lock().await;
         let rows = toasty::sql::query(
-            "SELECT id, path, name, missing, last_task_id, created_at \
+            "SELECT id, path, name, missing, last_task_id, created_at, preview_url \
              FROM projects ORDER BY created_at, id",
         )
         .column_types([
@@ -240,6 +244,7 @@ impl Store for TursoStore {
             Type::I64,
             Type::String,
             Type::I64,
+            Type::String,
         ])
         .exec(&mut *db)
         .await?;
@@ -254,14 +259,15 @@ impl Store for TursoStore {
             .map(|task_id| task_id.as_str())
             .unwrap_or_default();
         toasty::sql::statement(
-            "INSERT INTO projects (id, path, name, missing, last_task_id, created_at) \
-             VALUES (?1, ?2, ?3, ?4, NULLIF(?5, ''), ?6) \
+            "INSERT INTO projects (id, path, name, missing, last_task_id, created_at, preview_url) \
+             VALUES (?1, ?2, ?3, ?4, NULLIF(?5, ''), ?6, NULLIF(?7, '')) \
              ON CONFLICT (id) DO UPDATE SET \
                 path = excluded.path, \
                 name = excluded.name, \
                 missing = excluded.missing, \
                 last_task_id = excluded.last_task_id, \
-                created_at = excluded.created_at",
+                created_at = excluded.created_at, \
+                preview_url = excluded.preview_url",
         )
         .bind(project.id.as_str())
         .bind(project.path.to_string_lossy().as_ref())
@@ -269,6 +275,13 @@ impl Store for TursoStore {
         .bind(i64::from(project.missing))
         .bind(last_task_id)
         .bind(project.created_at as i64)
+        .bind(
+            project
+                .preview_url
+                .as_ref()
+                .map(url::Url::as_str)
+                .unwrap_or_default(),
+        )
         .exec(&mut *db)
         .await?;
         Ok(())
@@ -668,6 +681,9 @@ fn parse_project(value: Value) -> Result<Project, StoreError> {
         missing: required_missing(record.get(3))?,
         last_task_id: optional_string(record.get(4))?.map(TaskId::new),
         created_at: required_u64(record.get(5))?,
+        preview_url: optional_string(record.get(6))?
+            .as_deref()
+            .and_then(parse_preview_url),
     })
 }
 
@@ -1154,6 +1170,12 @@ mod tests {
             .exec(&mut db)
             .await?;
         let store = TursoStore { db: Mutex::new(db) };
+        let projects = store.load_projects().await?;
+        assert!(
+            projects
+                .first()
+                .is_some_and(|project| project.preview_url.is_none())
+        );
         let tasks = store.load_tasks().await?;
         assert_eq!(tasks.first().map(|task| task.agent), Some(Agent::Codex));
         Ok(())

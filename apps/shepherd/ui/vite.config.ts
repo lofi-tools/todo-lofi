@@ -67,6 +67,7 @@ export default defineConfig({
   server: {
     port: 1420,
     strictPort: true,
+    headers: { 'Content-Security-Policy': "frame-ancestors 'none'" },
     ...(smokeProject ? { hmr: false } : {}),
   },
 })

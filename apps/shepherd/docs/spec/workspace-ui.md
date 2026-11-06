@@ -62,6 +62,11 @@ current layout and give future changes a point of comparison.
   Put **Open in external editor** and **Reveal in file manager** above the file
   preview. **Open in Files** from a Git or Review diff selects and focuses the
   Files tab and opens the matching worktree file.
+- In Preview, offer **Project settings** when the selected project has no
+  preview URL. **Settings → Projects** saves or clears that project's loopback
+  URL. When it is configured, show the address, **Reload**, **Open in browser**,
+  and **Project settings** above the sandboxed page. The preview uses a separate
+  origin from the shell so the project can load its own modules and assets.
 - Place the status bar below the wrapper on the window background. Its
   transparent, borderless surface keeps it visually separate from the panes.
 

@@ -159,6 +159,8 @@ pub fn run() -> Result<(), tauri::Error> {
         })
         .invoke_handler(tauri::generate_handler![
             bridge::commands::add_project,
+            bridge::commands::set_project_preview_url,
+            bridge::commands::open_project_preview,
             bridge::commands::create_draft,
             bridge::commands::set_draft_agent,
             bridge::commands::opencode_configured,

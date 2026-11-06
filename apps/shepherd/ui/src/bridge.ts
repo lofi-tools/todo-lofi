@@ -33,6 +33,7 @@ export interface ProjectSnapshot {
   missing: boolean
   isGitRepository: boolean
   lastTaskId: string | null
+  previewUrl: string | null
   unfinishedTaskCount: number
   reviewTaskCount: number
 }
@@ -286,6 +287,14 @@ export interface BridgeError {
 
 export function addProject(path: string): Promise<ProjectList> {
   return invoke<ProjectList>('add_project', { path })
+}
+
+export function setProjectPreviewUrl(projectId: string, url: string): Promise<ProjectList> {
+  return invoke<ProjectList>('set_project_preview_url', { projectId, url })
+}
+
+export function openProjectPreview(projectId: string): Promise<void> {
+  return invoke<void>('open_project_preview', { projectId })
 }
 
 export function createDraft(projectId: string, title: string, agent: Agent = 'codex'): Promise<TaskWorkspace> {

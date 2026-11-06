@@ -20,6 +20,41 @@ interface SettingsPaneProps {
   approvalChange?: { projectId: string }
   showProjectArchived: boolean
   onShowProjectArchived: (projectId: string, visible: boolean) => void
+  onSavePreviewUrl: (projectId: string, url: string) => Promise<void>
+}
+
+function ProjectPreviewSetting(props: { url?: string | null; onSave: (url: string) => Promise<void> }) {
+  const [url, setUrl] = createSignal(props.url ?? '')
+  const [saving, setSaving] = createSignal(false)
+  const [error, setError] = createSignal('')
+  createEffect(on(() => props.url, (saved) => setUrl(saved ?? '')))
+
+  async function save(event: SubmitEvent) {
+    event.preventDefault()
+    if (saving()) return
+    setSaving(true)
+    setError('')
+    try {
+      await props.onSave(url())
+      setUrl(props.url ?? '')
+    } catch (failure) {
+      setError(settingsError(failure))
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <form class="settings__project" onSubmit={save}>
+      <label class="settings__preview-url">
+        Preview URL
+        <input type="text" inputmode="url" value={url()} onInput={(event) => setUrl(event.currentTarget.value)}
+          disabled={saving()} placeholder="http://localhost:3000" />
+      </label>
+      <button type="submit" class="project-action" disabled={saving() || url() === (props.url ?? '')}>Save preview URL</button>
+      <Show when={error()}>{(message) => <p class="entry__notice--error" role="alert">{message()}</p>}</Show>
+    </form>
+  )
 }
 
 function ApprovalGrantList(props: {
@@ -71,7 +106,7 @@ function ProjectApprovals(props: { projectId: string; change?: { projectId: stri
     try {
       return { snapshot: await projectApprovals(projectId), error: '' }
     } catch (error) {
-      return { snapshot: undefined, error: approvalError(error) }
+      return { snapshot: undefined, error: settingsError(error) }
     }
   })
 
@@ -86,7 +121,7 @@ function ProjectApprovals(props: { projectId: string; change?: { projectId: stri
       await resetApprovalGrant(props.projectId, approvalId, taskId)
       await refetch()
     } catch (error) {
-      setResetError(approvalError(error))
+      setResetError(settingsError(error))
     } finally {
       setResetting(false)
     }
@@ -117,7 +152,7 @@ function ProjectApprovals(props: { projectId: string; change?: { projectId: stri
   )
 }
 
-function approvalError(error: unknown): string {
+function settingsError(error: unknown): string {
   if (typeof error === 'object' && error !== null && 'message' in error) return String(error.message)
   return String(error)
 }
@@ -176,7 +211,10 @@ export function SettingsPane(props: SettingsPaneProps) {
                     Show archived tasks
                   </label>
                   <Show when={project().id} keyed>
-                    {(projectId) => <ProjectApprovals projectId={projectId} change={props.approvalChange} />}
+                    {(projectId) => <>
+                      <ProjectPreviewSetting url={project().previewUrl} onSave={(url) => props.onSavePreviewUrl(projectId, url)} />
+                      <ProjectApprovals projectId={projectId} change={props.approvalChange} />
+                    </>}
                   </Show>
                 </div>
               )}

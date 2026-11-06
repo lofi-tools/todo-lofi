@@ -41,6 +41,7 @@ test.beforeEach(async ({ context }) => {
       missing: false,
       isGitRepository: true,
       lastTaskId: 'task-1',
+      previewUrl: null as string | null,
       unfinishedTaskCount: 1,
     }
 
@@ -297,6 +298,16 @@ test.beforeEach(async ({ context }) => {
             return '/tmp/home/'
           case 'project_list':
             return { projects: [...projects] }
+          case 'set_project_preview_url': {
+            const selected = projects.findIndex((candidate) => candidate.id === args.projectId)
+            if (args.url && !args.url.startsWith('http://localhost:')) {
+              throw { message: 'Enter a loopback HTTP or HTTPS URL without credentials.' }
+            }
+            projects[selected] = { ...projects[selected], previewUrl: args.url || null }
+            return { projects: [...projects] }
+          }
+          case 'open_project_preview':
+            throw { message: `Could not open the preview in a browser. ${args.projectId}` }
           case 'project_approvals':
             return args.projectId === project.id
               ? { saved: [...projectGrants], sessions: [...sessionGrants] }
@@ -344,6 +355,7 @@ test.beforeEach(async ({ context }) => {
                 missing: false,
                 isGitRepository: args.path.startsWith('/tmp/home/'),
                 lastTaskId: null,
+                previewUrl: null,
                 unfinishedTaskCount: 0,
               })
             }
@@ -753,6 +765,55 @@ test('shows the project, drafts a task, streams a reply and switches tasks', asy
 
   await page.getByRole('button', { name: /Ship it/ }).click()
   await expect(page.getByText('ready to go')).toBeVisible()
+})
+
+test('saves a project preview URL and loads and reloads a sandboxed page', async ({ page }) => {
+  const url = 'http://localhost:1431/preview-fixture'
+  let loads = 0
+  await page.route(url, async (route) => {
+    loads += 1
+    await route.fulfill({ contentType: 'text/html', body: `<h1>Load ${loads}</h1>
+      <p id="isolation"></p><script type="module" src="/fixture.js"></script>` })
+  })
+  await page.route('http://localhost:1431/fixture.js', (route) => route.fulfill({
+    contentType: 'text/javascript',
+    body: `try { parent.document.title; document.querySelector('#isolation').textContent = 'Shared origin' }
+      catch { document.querySelector('#isolation').textContent = 'Isolated origin' }`,
+  }))
+  await page.goto('/?two-projects')
+  const shellUrl = page.url()
+  await page.route('http://localhost:1431/preview-redirect', (route) => route.fulfill({
+    status: 302, headers: { location: shellUrl },
+  }))
+  const tab = page.getByRole('tab', { name: 'Preview' })
+  await tab.click()
+  await page.getByRole('button', { name: 'Project settings', exact: true }).click()
+  const setting = page.getByRole('textbox', { name: 'Preview URL' })
+  const save = page.getByRole('button', { name: 'Save preview URL' })
+  await setting.fill('https://example.com')
+  await save.click()
+  await expect(page.getByRole('alert')).toContainText('Enter a loopback HTTP or HTTPS URL')
+  await setting.fill(url)
+  await save.click()
+  const frame = page.frameLocator('iframe[title="Project website"]')
+  await expect(frame.getByRole('heading')).toHaveText('Load 1')
+  await expect(frame.getByText('Isolated origin')).toBeVisible()
+  await page.getByRole('button', { name: 'Reload', exact: true }).click()
+  await expect(frame.getByRole('heading')).toHaveText('Load 2')
+  await page.getByRole('button', { name: 'Open in browser' }).click()
+  await expect(page.getByRole('alert')).toContainText('Could not open the preview in a browser. project-1')
+  const deniedFrame = page.waitForEvent('requestfailed', (request) => request.url() === shellUrl && request.isNavigationRequest())
+  await setting.fill('http://localhost:1431/preview-redirect')
+  await save.click()
+  await deniedFrame
+  await setting.fill(shellUrl)
+  await save.click()
+  await expect(page.getByRole('alert')).toContainText('Choose a preview URL on a different origin from Shepherd')
+  await expect(page.getByTitle('Project website')).toHaveCount(0)
+  await setting.clear()
+  await save.click()
+  await expect(page.getByText('Set a preview URL for this project.')).toBeVisible()
+  await expect(page.getByTitle('Project website')).toHaveCount(0)
 })
 
 test('browses a worktree and project root with lazy folders and read-only previews', async ({ page }) => {
@@ -2027,7 +2088,7 @@ test('resizes a split and reopens a hidden terminal from the instance list', asy
   const sharedInput = page.getByRole('region', { name: 'Terminal 1' }).getByRole('textbox')
   const scopedInput = scoped.getByRole('textbox')
   const terminalsTab = page.getByRole('tab', { name: 'Terminals' })
-  const reviewTab = page.getByRole('tab', { name: 'Review', exact: true })
+  const previewTab = page.getByRole('tab', { name: 'Preview', exact: true })
   const modifier = await page.evaluate(() => navigator.platform.startsWith('Mac') ? 'Meta' : 'Control')
   await sharedInput.press(`${modifier}+Backquote`)
   await expect(scopedInput).toBeFocused()
@@ -2041,10 +2102,10 @@ test('resizes a split and reopens a hidden terminal from the instance list', asy
   expect(await page.evaluate(() => (window as unknown as { __writes: string[] }).__writes)).toEqual([])
 
   await terminalsTab.press('ArrowRight')
-  await expect(reviewTab).toBeFocused()
-  await expect(reviewTab).toHaveAttribute('aria-selected', 'true')
+  await expect(previewTab).toBeFocused()
+  await expect(previewTab).toHaveAttribute('aria-selected', 'true')
   await expect(terminalsTab).toHaveAttribute('tabindex', '-1')
-  await reviewTab.press('Home')
+  await previewTab.press('Home')
   await expect(terminalsTab).toBeFocused()
   await expect(terminalsTab).toHaveAttribute('aria-selected', 'true')
 

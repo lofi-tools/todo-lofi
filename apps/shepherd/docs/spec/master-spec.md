@@ -833,8 +833,9 @@ State comes from adapter events and process exit, never polling.
 
 ### 8.1 Preview and annotation
 
-- The Preview tab loads the project's configured preview URL in an isolated
-  browser surface; no URL means a setup card with the project setting.
+- The Preview tab loads the project's configured loopback HTTP(S) URL in an
+  isolated browser surface. Its setup card opens **Settings → Projects** to
+  save the address. Saving an empty field clears it.
 - **Annotate** freezes the page and lets the user click an element. The
   annotation captures the selector, a short text excerpt, the bounding box and an
   optional screenshot, plus the page URL.

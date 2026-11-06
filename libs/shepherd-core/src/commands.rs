@@ -14,6 +14,10 @@ pub enum Command {
     AddProject {
         path: PathBuf,
     },
+    SetProjectPreviewUrl {
+        project_id: ProjectId,
+        url: String,
+    },
     CreateDraft {
         project_id: ProjectId,
         title: String,

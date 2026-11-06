@@ -963,6 +963,9 @@ and the task header never overstates the tier.
   diffs can focus the Files tab and open the selected worktree file.
 - [ ] Preview tab: project URL, element annotation, structured prompt context,
   screenshot fallback when framing or injection is blocked.
+  Settings → Projects saves a loopback URL per project. The Preview tab loads
+  it in a sandboxed frame with explicit reload and browser actions. Element
+  annotation, prompt context and screenshot fallback remain open.
 - [ ] Cross-task search over Turso FTS.
 - [ ] Attachments and images, `@file` mentions, model/mode pickers.
 - [ ] Notifications, dock/status counts and review batch actions.
