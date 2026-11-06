@@ -21,6 +21,7 @@ use alacritty_terminal::vte::ansi::{
     Color, CursorShape, NamedColor, NamedPrivateMode, Processor, Rgb,
 };
 use alacritty_terminal::vte::{Params, Parser, Perform};
+use compact_str::CompactString;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, PartialEq, Eq, Serialize)]
@@ -49,7 +50,7 @@ pub struct SearchHighlight {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FrameCell {
-    pub text: String,
+    pub text: CompactString,
     pub width: u8,
     pub foreground: u32,
     pub background: u32,
@@ -112,8 +113,9 @@ impl TerminalFrame {
                 bytes.push(flags);
                 bytes.extend(cell.foreground.to_le_bytes());
                 bytes.extend(cell.background.to_le_bytes());
-                bytes.extend((cell.text.len() as u32).to_le_bytes());
-                bytes.extend(cell.text.as_bytes());
+                let text = cell.text.as_bytes();
+                bytes.extend((text.len() as u32).to_le_bytes());
+                bytes.extend(text);
                 remaining = &remaining[run_length..];
                 run_count += 1;
             }
@@ -542,11 +544,11 @@ impl Screen {
                     .flags
                     .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER)
                 {
-                    String::new()
+                    CompactString::default()
                 } else if hidden {
-                    " ".to_owned()
+                    CompactString::const_new(" ")
                 } else {
-                    let mut text = cell.c.to_string();
+                    let mut text = CompactString::new(cell.c.encode_utf8(&mut [0; 4]));
                     if let Some(combining) = cell.zerowidth() {
                         text.extend(combining.iter().copied());
                     }
@@ -671,7 +673,7 @@ mod tests {
         let start = row * frame.columns;
         frame.cells[start..start + frame.columns]
             .iter()
-            .map(|cell| cell.text.clone())
+            .map(|cell| cell.text.as_str())
             .collect()
     }
 
@@ -805,6 +807,13 @@ mod tests {
             start.elapsed(),
         );
         assert!(encoded_bytes < BURST_BYTES);
+
+        const SNAPSHOTS: usize = 1_000;
+        let snapshot_start = Instant::now();
+        for _ in 0..SNAPSHOTS {
+            std::hint::black_box(screen.frame());
+        }
+        eprintln!("{SNAPSHOTS} snapshots in {:.1?}", snapshot_start.elapsed());
     }
 
     #[test]

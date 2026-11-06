@@ -1991,6 +1991,7 @@ dependencies = [
  "itoa",
  "rustversion",
  "ryu",
+ "serde",
  "static_assertions",
 ]
 
@@ -10120,6 +10121,7 @@ version = "0.1.0"
 dependencies = [
  "agent-harness",
  "alacritty_terminal",
+ "compact_str",
  "libc",
  "portable-pty",
  "serde",

@@ -596,6 +596,11 @@ task-scoped, persistent and fast enough.
   Shepherd and `alacritty_terminal` reduced parser and encoder time from
   126 ms to 43 ms. The native smoke painted the burst tail in 67 ms, down
   from 135 ms on the same machine, and painted all 24 paced markers.
+  Inline storage for short cell text reduced the time to build 1,000
+  80 × 24 snapshots from 140 ms to 28–30 ms on macOS. The parser and
+  encoder benchmark produced 45,632 bytes across four frames in both builds.
+  The native 1 MiB burst painted in 36 ms with the inline storage, compared
+  with 37–40 ms across three baseline runs. All 24 paced markers appeared.
 - [x] Bound PTY queues and allow one frame in flight per webview subscription.
   Coalesce paints and defer canvas work while the tab is hidden. Rate-limit
   frame delivery from the previous send so an idle pane can update immediately.
