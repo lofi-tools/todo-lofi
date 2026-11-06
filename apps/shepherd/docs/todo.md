@@ -741,6 +741,13 @@ the dimensions with Python's `os.get_terminal_size`. Both Pinyin candidates
 appeared by the caret and reached the shell once each. The 554 ms burst
 result measures the emulated guest. The hosted x86-64 run remains pending.
 
+At `5075c5c`, the Ubuntu 24.04.5 x86-64 guest passed all 33 regular Rust
+tests, both desktop smoke phases and the IBus candidate probe. The tested
+binary was ELF64 x86-64. The desktop run verified foreground and background
+job shutdown, search during new output and the terminal hyperlink opener.
+It painted the burst tail in 438 ms under QEMU and showed all 24 paced
+markers. The optional fish probe was skipped.
+
 ### Gate
 
 **Pass:** a developer can use Shepherd’s terminals for a normal workday without
