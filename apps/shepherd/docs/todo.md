@@ -1430,6 +1430,8 @@ placeholder tabs and no unearned state badges.
   error text; a log-capture fixture checks the Codex exec warning.
   Codex stderr is retained in the bounded diagnostic tail without logging its
   contents; a debug-log fixture checks that agent output is not exposed.
+  Invalid ACP permission patterns are ignored without logging their contents
+  or the regex parser's echoed input; a debug-log fixture covers this path.
   Other adapter-internal logs and live-adapter behavior remain to be audited.
   On 2026-11-07 the default offline headless agent-harness suite passed 124
   tests (two live tests ignored), the core suite passed 120 tests (three

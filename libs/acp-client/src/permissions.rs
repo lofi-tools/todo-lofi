@@ -121,13 +121,10 @@ fn matches_any(rules: &[PatternRule], haystack: &str) -> bool {
     rules.iter().any(|rule| {
         match regex::Regex::new(&rule.pattern) {
             Ok(expression) => expression.is_match(haystack),
-            Err(error) => {
+            Err(_) => {
                 // A hand-edited pattern must never break answering; it just
                 // stops matching until fixed.
-                tracing::debug!(
-                    "ignoring invalid permission pattern {:?}: {error}",
-                    rule.pattern
-                );
+                tracing::debug!("ignoring invalid permission pattern");
                 false
             }
         }
@@ -310,5 +307,49 @@ mod tests {
                 pattern: "([invalid".to_string(),
             });
         assert_eq!(policy.decide("read", "anything"), Verdict::Allow);
+    }
+
+    #[test]
+    fn invalid_pattern_does_not_expose_its_contents_in_logs()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use std::io::Write;
+        use std::sync::{Arc, Mutex};
+
+        #[derive(Clone)]
+        struct Writer(Arc<Mutex<Vec<u8>>>);
+        impl Write for Writer {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0
+                    .lock()
+                    .map_err(|error| std::io::Error::other(error.to_string()))?
+                    .extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let logs = Arc::new(Mutex::new(Vec::new()));
+        let writer = Writer(logs.clone());
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .without_time()
+            .with_max_level(tracing::Level::DEBUG)
+            .with_writer(move || writer.clone())
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            assert!(!matches_any(
+                &[PatternRule {
+                    pattern: "(fixture-private-value".to_owned(),
+                }],
+                "anything"
+            ));
+        });
+        let output = String::from_utf8(logs.lock().map_err(|error| error.to_string())?.clone())?;
+        assert!(output.contains("ignoring invalid permission pattern"));
+        assert!(!output.contains("fixture-private-value"));
+        Ok(())
     }
 }

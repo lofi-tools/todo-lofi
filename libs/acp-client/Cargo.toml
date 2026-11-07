@@ -22,6 +22,9 @@ tracing.workspace = true
 dirs.workspace = true
 tempfile = "3"
 
+[dev-dependencies]
+tracing-subscriber.workspace = true
+
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 rustix = { version = "1", features = ["fs"] }
