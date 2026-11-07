@@ -1247,6 +1247,9 @@ placeholder tabs and no unearned state badges.
   retains the child handle for retry. An injected group-signal failure verifies
   the handle is retained and a later shutdown stops the process group. A
   separate injected child-stop failure also verifies handle retention and retry.
+  App-server requests check for reader closure while holding the pending map
+  lock, preventing registration after disconnect cleanup; a fixture covers
+  the contested lock case.
   Codex exec shutdown retains its waiter after a timeout so a later quit can
   retry, and reports a waiter failure on subsequent attempts. Local fixtures
   cover both paths and verify that shutdown stops a real descendant process.

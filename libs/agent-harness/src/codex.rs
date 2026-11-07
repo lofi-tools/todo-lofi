@@ -960,16 +960,18 @@ impl CodexHarness {
     }
 
     async fn request(&mut self, method: &str, params: Value) -> HarnessResult<Value> {
-        if self.closed.load(Ordering::Relaxed) {
-            return Err(HarnessError::Protocol(format!(
-                "codex is no longer running; cannot call {method}"
-            )));
-        }
-
         let id = self.next_request_id;
         self.next_request_id += 1;
         let (sender, receiver) = oneshot::channel();
-        self.pending.lock().await.responses.insert(id, sender);
+        {
+            let mut pending = self.pending.lock().await;
+            if self.closed.load(Ordering::Relaxed) {
+                return Err(HarnessError::Protocol(format!(
+                    "codex is no longer running; cannot call {method}"
+                )));
+            }
+            pending.responses.insert(id, sender);
+        }
         if let Err(error) = self.send(json!({ "method": method, "id": id, "params": params })) {
             self.pending.lock().await.responses.remove(&id);
             return Err(error);
@@ -3698,6 +3700,28 @@ esac
         );
         tokio::time::sleep(Duration::from_millis(1300)).await;
         assert!(!directory.path().join("escaped").exists());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn request_does_not_register_after_reader_closes()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut harness = CodexHarness::new();
+        let (outgoing, _receiver) = mpsc::unbounded_channel();
+        harness.outgoing = Some(outgoing);
+        let pending = Arc::clone(&harness.pending);
+        let closed = Arc::clone(&harness.closed);
+        let mut guard = pending.lock().await;
+        let request = tokio::spawn(async move { harness.request("initialize", json!({})).await });
+        tokio::task::yield_now().await;
+        closed.store(true, Ordering::Relaxed);
+        guard.responses.clear();
+        drop(guard);
+        let result = timeout(Duration::from_secs(1), request).await??;
+        assert!(
+            matches!(result, Err(HarnessError::Protocol(message)) if message.contains("no longer running"))
+        );
+        assert!(pending.lock().await.responses.is_empty());
         Ok(())
     }
 
