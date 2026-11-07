@@ -1216,6 +1216,11 @@ placeholder tabs and no unearned state badges.
   rolls back a mid-deletion failure, preserving those records, transcripts and
   attachments for retry. Draft creation commits the project selection and new
   task together, with a rollback and retry fixture for a failed task write.
+  Task deletion with worktree removal still removes the checkout before the
+  database transaction. A failed deletion can therefore leave a saved task
+  pointing at a missing checkout. Recreating its branch alone is insufficient
+  recovery because ignored files may have been removed; stage the checkout and
+  durably recover or finish removal across database failure and process death.
   If an opened agent session cannot be recorded, the core stops it before
   retrying; a database-trigger fixture verifies cleanup and a subsequent start.
   A second fixture makes cleanup fail twice and verifies that the session is
