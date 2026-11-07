@@ -303,21 +303,13 @@ impl TodoStore {
     /// linked occurrence already carries that deadline (even a tombstoned
     /// one, so a deleted occurrence is never resurrected). Returns the
     /// number of tasks created.
-    pub async fn materialize_daily_occurrences(
-        &mut self,
-        now_secs: u64,
-    ) -> QueryResult<usize> {
+    pub async fn materialize_daily_occurrences(&mut self, now_secs: u64) -> QueryResult<usize> {
         let templates = self.list_repeat_templates().await?;
         let mut created = 0;
         // Workflow schedules first: each occurrence is a new run of the
         // referenced recipe, not a task.
-        for template in templates
-            .iter()
-            .filter(|t| t.recipe_id.is_some())
-        {
-            created += self
-                .materialize_recipe_schedule(template, now_secs)
-                .await?;
+        for template in templates.iter().filter(|t| t.recipe_id.is_some()) {
+            created += self.materialize_recipe_schedule(template, now_secs).await?;
         }
         for template in templates
             .into_iter()
@@ -538,8 +530,7 @@ impl TodoStore {
             if date < today {
                 continue;
             }
-            let Some((blocked_until, deadline)) =
-                occurrence_times_for_date(template, &zone, date)
+            let Some((blocked_until, deadline)) = occurrence_times_for_date(template, &zone, date)
             else {
                 continue;
             };
@@ -620,18 +611,15 @@ impl TodoStore {
 
 /// Timezone for recurrence evaluation: the template's zone, else UTC.
 /// Task instances store UTC epochs only.
-fn template_zone(template: &RepeatTaskTemplate) -> jiff::tz::TimeZone {    template
+fn template_zone(template: &RepeatTaskTemplate) -> jiff::tz::TimeZone {
+    template
         .timezone
         .as_deref()
         .and_then(|name| jiff::tz::TimeZone::get(name).ok())
         .unwrap_or(jiff::tz::TimeZone::UTC)
 }
 
-fn civil_at(
-    date: jiff::civil::Date,
-    minutes: u64,
-    zone: &jiff::tz::TimeZone,
-) -> Option<u64> {
+fn civil_at(date: jiff::civil::Date, minutes: u64, zone: &jiff::tz::TimeZone) -> Option<u64> {
     date.at((minutes / 60) as i8, (minutes % 60) as i8, 0, 0)
         .to_zoned(zone.clone())
         .ok()
@@ -735,7 +723,9 @@ mod tests {
     #[tokio::test]
     async fn test_remove_repeat() -> anyhow::Result<()> {
         let mut storage = TodoStore::for_test().await?;
-        let task = storage.create_task(Task::create().title("Repeating")).await?;
+        let task = storage
+            .create_task(Task::create().title("Repeating"))
+            .await?;
         storage
             .set_repeat(task.id, "Repeating".to_string(), 1, None, None)
             .await?;
@@ -763,11 +753,7 @@ mod tests {
     async fn test_materialize_daily_occurrence() -> anyhow::Result<()> {
         let mut storage = TodoStore::for_test().await?;
         let task = storage
-            .create_task(
-                Task::create()
-                    .title("Feed dorito")
-                    .importance_factor(3.0),
-            )
+            .create_task(Task::create().title("Feed dorito").importance_factor(3.0))
             .await?;
         storage
             .set_repeat(
@@ -814,19 +800,14 @@ mod tests {
         assert_eq!(storage.materialize_daily_occurrences(noon).await?, 1);
         let occurrences = storage.repeat_occurrences(template.id).await?;
         let tomorrow = storage.get_task(*occurrences.last().unwrap()).await?;
-        assert_eq!(
-            tomorrow.deadline,
-            Some(noon + 86400 + 6 * 3600 + 30 * 60)
-        );
+        assert_eq!(tomorrow.deadline, Some(noon + 86400 + 6 * 3600 + 30 * 60));
         assert!(tomorrow.deleted_at.is_none());
 
         // Next day with tomorrow still open: nothing new, and today's
         // (done) row is history, not trash.
         let tomorrow_noon = noon + 86400;
         assert_eq!(
-            storage
-                .materialize_daily_occurrences(tomorrow_noon)
-                .await?,
+            storage.materialize_daily_occurrences(tomorrow_noon).await?,
             0
         );
         let done = storage.get_task(today.id).await?;
@@ -838,15 +819,11 @@ mod tests {
     #[tokio::test]
     async fn test_repeat_dependency_links_same_generation() -> anyhow::Result<()> {
         let mut storage = TodoStore::for_test().await?;
-        let gym = storage
-            .create_task(Task::create().title("gym"))
-            .await?;
+        let gym = storage.create_task(Task::create().title("gym")).await?;
         storage
             .set_repeat(gym.id, "gym".to_string(), 1, Some(8 * 60), Some(7 * 60))
             .await?;
-        let shower = storage
-            .create_task(Task::create().title("shower"))
-            .await?;
+        let shower = storage.create_task(Task::create().title("shower")).await?;
         storage
             .set_repeat(shower.id, "shower".to_string(), 1, Some(8 * 60 + 30), None)
             .await?;
@@ -878,15 +855,16 @@ mod tests {
         // Same civil date on both sides: no cross-generation links.
         let today = storage.get_task(live_today).await?;
         let gym_task = storage.get_task(live_gym).await?;
-        assert_eq!(today.deadline.unwrap() / 86400, gym_task.deadline.unwrap() / 86400);
+        assert_eq!(
+            today.deadline.unwrap() / 86400,
+            gym_task.deadline.unwrap() / 86400
+        );
 
         // Tomorrow, after both are done, the new pair links up the same way.
         storage.update_task_done(live_today, true).await?;
         storage.update_task_done(live_gym, true).await?;
         assert_eq!(
-            storage
-                .materialize_daily_occurrences(noon + 86400)
-                .await?,
+            storage.materialize_daily_occurrences(noon + 86400).await?,
             2
         );
         let shower_days = storage.repeat_occurrences(shower_template.id).await?;
@@ -897,7 +875,7 @@ mod tests {
         Ok(())
     }
 
-        fn epoch(raw: &str) -> u64 {
+    fn epoch(raw: &str) -> u64 {
         raw.parse::<jiff::Timestamp>().unwrap().as_second() as u64
     }
 
@@ -916,7 +894,13 @@ mod tests {
             .await?;
         storage.update_task_done(anchor.id, true).await?;
         storage
-            .set_repeat(anchor.id, "green bin".to_string(), 14, Some(21 * 60), Some(16 * 60))
+            .set_repeat(
+                anchor.id,
+                "green bin".to_string(),
+                14,
+                Some(21 * 60),
+                Some(16 * 60),
+            )
             .await?;
 
         // Sun Sep 20 noon: Mon Sep 21 4pm is ~28h out (inside the window),
@@ -965,7 +949,8 @@ mod tests {
     }
 
     #[test]
-    fn test_occurrence_times_uses_template_timezone() {        let template = RepeatTaskTemplate {
+    fn test_occurrence_times_uses_template_timezone() {
+        let template = RepeatTaskTemplate {
             id: 1,
             name: "x".to_string(),
             interval_days: 1,

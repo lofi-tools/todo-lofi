@@ -488,17 +488,22 @@ pub fn parse_recipe(json: &Value) -> Result<Recipe, String> {
             if let Some(default) = &default
                 && !type_matches(default, &r#type)
             {
-                return Err(format!("param `{param_name}` default does not match type `{type}`"));
+                return Err(format!(
+                    "param `{param_name}` default does not match type `{type}`"
+                ));
             }
             let required = obj
                 .get("required")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
-            params.insert(param_name.clone(), ParamSchema {
-                r#type,
-                default,
-                required,
-            });
+            params.insert(
+                param_name.clone(),
+                ParamSchema {
+                    r#type,
+                    default,
+                    required,
+                },
+            );
         }
     }
 
@@ -558,7 +563,9 @@ pub fn parse_recipe(json: &Value) -> Result<Recipe, String> {
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
         if approval && kind != "action" {
-            return Err(format!("node `{id}`: `approval` is only valid on action nodes"));
+            return Err(format!(
+                "node `{id}`: `approval` is only valid on action nodes"
+            ));
         }
         let retrigger_on_reject = obj
             .get("retrigger_on_reject")
@@ -610,9 +617,7 @@ pub fn parse_recipe(json: &Value) -> Result<Recipe, String> {
                     ));
                 }
                 if obj.get("phase").and_then(|v| v.as_str()).is_none() {
-                    return Err(format!(
-                        "node `{id}`: `role: \"step\"` requires a `phase`"
-                    ));
+                    return Err(format!("node `{id}`: `role: \"step\"` requires a `phase`"));
                 }
             }
         }
@@ -629,7 +634,10 @@ pub fn parse_recipe(json: &Value) -> Result<Recipe, String> {
             id,
             kind,
             title: title.to_string(),
-            description: obj.get("description").and_then(|v| v.as_str()).map(str::to_string),
+            description: obj
+                .get("description")
+                .and_then(|v| v.as_str())
+                .map(str::to_string),
             ai,
             approval,
             retrigger_on_reject,
@@ -658,10 +666,14 @@ pub fn parse_recipe(json: &Value) -> Result<Recipe, String> {
             .ok_or("recipe edge requires `to`")?
             .to_string();
         if !node_ids.contains(from.as_str()) {
-            return Err(format!("edge `{from}->{to}` references unknown node `{from}`"));
+            return Err(format!(
+                "edge `{from}->{to}` references unknown node `{from}`"
+            ));
         }
         if !node_ids.contains(to.as_str()) {
-            return Err(format!("edge `{from}->{to}` references unknown node `{to}`"));
+            return Err(format!(
+                "edge `{from}->{to}` references unknown node `{to}`"
+            ));
         }
         if from == to {
             return Err(format!("edge `{from}->{to}` must not be a self-loop"));
@@ -705,9 +717,9 @@ pub fn parse_recipe(json: &Value) -> Result<Recipe, String> {
                         "edge `{from}->{to}`: timer edges must target an action node"
                     ));
                 }
-                let value = condition_value
-                    .as_ref()
-                    .ok_or(format!("edge `{from}->{to}`: timer edge requires a duration"))?;
+                let value = condition_value.as_ref().ok_or(format!(
+                    "edge `{from}->{to}`: timer edge requires a duration"
+                ))?;
                 validate_duration(value, &params)
                     .map_err(|e| format!("edge `{from}->{to}`: {e}"))?;
             }
@@ -761,15 +773,10 @@ pub fn parse_recipe(json: &Value) -> Result<Recipe, String> {
             }
         }
         if node.approval {
-            let fed_by_ai = incoming
-                .iter()
-                .any(|e| {
-                    e.condition_type == "on_result"
-                        && nodes
-                            .iter()
-                            .find(|n| n.id == e.from)
-                            .is_some_and(|n| n.ai)
-                });
+            let fed_by_ai = incoming.iter().any(|e| {
+                e.condition_type == "on_result"
+                    && nodes.iter().find(|n| n.id == e.from).is_some_and(|n| n.ai)
+            });
             if !fed_by_ai {
                 return Err(format!(
                     "approval node `{}` must be fed by an on_result edge from an ai: true node",
@@ -849,7 +856,8 @@ pub fn parse_recipe(json: &Value) -> Result<Recipe, String> {
 }
 
 fn valid_id(s: &str) -> bool {
-    s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    s.chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
 }
 
 fn type_matches(value: &Value, r#type: &str) -> bool {
@@ -877,9 +885,8 @@ fn parse_duration(s: &str) -> Option<u64> {
 
 fn validate_duration(value: &Value, params: &HashMap<String, ParamSchema>) -> Result<u64, String> {
     match value {
-        Value::String(s) => parse_duration(s).ok_or_else(|| {
-            format!("invalid duration `{s}` (expected e.g. \"4 days\")")
-        }),
+        Value::String(s) => parse_duration(s)
+            .ok_or_else(|| format!("invalid duration `{s}` (expected e.g. \"4 days\")")),
         Value::Object(map) => {
             let param = map
                 .get("if")
@@ -887,7 +894,9 @@ fn validate_duration(value: &Value, params: &HashMap<String, ParamSchema>) -> Re
                 .and_then(|s| s.strip_prefix("param:"))
                 .ok_or("duration expression `if` must be \"param:<name>\"")?;
             if !params.contains_key(param) {
-                return Err(format!("duration expression references unknown param `{param}`"));
+                return Err(format!(
+                    "duration expression references unknown param `{param}`"
+                ));
             }
             let then = map
                 .get("then")
@@ -897,10 +906,8 @@ fn validate_duration(value: &Value, params: &HashMap<String, ParamSchema>) -> Re
                 .get("else")
                 .and_then(|v| v.as_str())
                 .ok_or("duration expression requires `else`")?;
-            parse_duration(then)
-                .ok_or_else(|| format!("invalid duration `{then}`"))?;
-            parse_duration(otherwise)
-                .ok_or_else(|| format!("invalid duration `{otherwise}`"))?;
+            parse_duration(then).ok_or_else(|| format!("invalid duration `{then}`"))?;
+            parse_duration(otherwise).ok_or_else(|| format!("invalid duration `{otherwise}`"))?;
             Ok(0) // resolved at run time; shape is what matters here
         }
         _ => Err("duration must be a string or an {\"if\"…} expression".to_string()),
@@ -998,11 +1005,54 @@ fn phase_note_for(recipe: &Recipe, node_id: &str, result: &Value) -> Option<RunN
 
 /// Filler words dropped from an issue-derived branch slug (decision 16).
 const BRANCH_STOPWORDS: &[&str] = &[
-    "a", "an", "the", "and", "or", "of", "to", "in", "on", "for", "with", "at", "by",
-    "from", "is", "are", "be", "as", "it", "its", "this", "that", "into", "via", "when",
-    "add", "adds", "fix", "fixes", "fixed", "feat", "feature", "implement", "implements",
-    "support", "supports", "update", "updates", "improve", "improves", "make", "makes",
-    "allow", "allows", "use", "using", "should", "must",
+    "a",
+    "an",
+    "the",
+    "and",
+    "or",
+    "of",
+    "to",
+    "in",
+    "on",
+    "for",
+    "with",
+    "at",
+    "by",
+    "from",
+    "is",
+    "are",
+    "be",
+    "as",
+    "it",
+    "its",
+    "this",
+    "that",
+    "into",
+    "via",
+    "when",
+    "add",
+    "adds",
+    "fix",
+    "fixes",
+    "fixed",
+    "feat",
+    "feature",
+    "implement",
+    "implements",
+    "support",
+    "supports",
+    "update",
+    "updates",
+    "improve",
+    "improves",
+    "make",
+    "makes",
+    "allow",
+    "allows",
+    "use",
+    "using",
+    "should",
+    "must",
 ];
 
 /// The slug caps of decision 16: a few words, a short name.
@@ -1090,12 +1140,11 @@ impl TodoStore {
     }
 
     pub async fn list_recipes(&mut self) -> QueryResult<Vec<WorkflowRecipe>> {
-        let recipes = WorkflowRecipe::all()
-            .exec(&mut self.db)
-            .await
-            .context(crate::error::QueryTagsSnafu {
+        let recipes = WorkflowRecipe::all().exec(&mut self.db).await.context(
+            crate::error::QueryTagsSnafu {
                 context: "list workflow recipes",
-            })?;
+            },
+        )?;
         Ok(recipes)
     }
 
@@ -1111,16 +1160,15 @@ impl TodoStore {
             });
         let mut metas = Vec::new();
         for recipe in self.list_recipes().await? {
-            let parsed = parse_recipe(&recipe.recipe_json.0)
-                .unwrap_or_else(|_| Recipe {
-                    name: recipe.slug.clone(),
-                    description: None,
-                    managed_tag: None,
-                    params: HashMap::new(),
-                    missed_policy: "skip".to_string(),
-                    nodes: Vec::new(),
-                    edges: Vec::new(),
-                });
+            let parsed = parse_recipe(&recipe.recipe_json.0).unwrap_or_else(|_| Recipe {
+                name: recipe.slug.clone(),
+                description: None,
+                managed_tag: None,
+                params: HashMap::new(),
+                missed_policy: "skip".to_string(),
+                nodes: Vec::new(),
+                edges: Vec::new(),
+            });
             let managed_enabled = match &parsed.managed_tag {
                 Some(tag_name) => self.get_tag_by_name(tag_name).await?.is_some(),
                 None => false,
@@ -1147,16 +1195,14 @@ impl TodoStore {
         recipe_json: Value,
     ) -> QueryResult<WorkflowRecipe> {
         parse_recipe(&recipe_json).map_err(|message| invalid(message))?;
-        let rows = toasty::sql::query(
-            r#"SELECT id FROM workflow_recipes WHERE slug = ?1"#,
-        )
-        .column_types([toasty::stmt::Type::I64])
-        .bind(slug)
-        .exec(&mut self.db)
-        .await
-        .context(crate::error::QueryTagsSnafu {
-            context: "count workflow recipe versions",
-        })?;
+        let rows = toasty::sql::query(r#"SELECT id FROM workflow_recipes WHERE slug = ?1"#)
+            .column_types([toasty::stmt::Type::I64])
+            .bind(slug)
+            .exec(&mut self.db)
+            .await
+            .context(crate::error::QueryTagsSnafu {
+                context: "count workflow recipe versions",
+            })?;
         let version = rows.len() as u64 + 1;
         let recipe = WorkflowRecipe::create()
             .slug(slug.to_string())
@@ -1236,10 +1282,7 @@ impl TodoStore {
 
     /// Runs created by a recipe schedule (for the materializer's
     /// last-fired watermark).
-    pub async fn runs_for_schedule(
-        &mut self,
-        template_id: u64,
-    ) -> QueryResult<Vec<WorkflowRun>> {
+    pub async fn runs_for_schedule(&mut self, template_id: u64) -> QueryResult<Vec<WorkflowRun>> {
         let rows = toasty::sql::query(
             r#"SELECT id, recipe_id, schedule_id, status, params, step_results, created_at, completed_at,
                       root_task_id, branch, base_branch, branch_status
@@ -1326,7 +1369,11 @@ impl TodoStore {
     /// Create the run row for a managed-tag recipe without materializing
     /// start nodes: the tag's own flow (e.g. the travel trip builder)
     /// generates the run's content instead.
-    pub async fn create_managed_run(&mut self, recipe_id: u64, params: Value) -> QueryResult<WorkflowRun> {
+    pub async fn create_managed_run(
+        &mut self,
+        recipe_id: u64,
+        params: Value,
+    ) -> QueryResult<WorkflowRun> {
         let (run, _) = self.insert_run_row(recipe_id, params, None, None).await?;
         Ok(run)
     }
@@ -1335,11 +1382,7 @@ impl TodoStore {
     /// AI output, …). Marks the task done, records the result, evaluates
     /// outgoing edges, and auto-completes the run when nothing is pending.
     /// Plain ticks (no result) go through `update_task_done` instead.
-    pub async fn complete_workflow_step(
-        &mut self,
-        task_id: u64,
-        result: Value,
-    ) -> QueryResult<()> {
+    pub async fn complete_workflow_step(&mut self, task_id: u64, result: Value) -> QueryResult<()> {
         let task = self.get_task(task_id).await?;
         let Some(run_id) = task.workflow_run_id else {
             return Ok(());
@@ -1363,7 +1406,8 @@ impl TodoStore {
             return Ok(());
         };
         let run = self.get_run(run_id).await?;
-        self.evaluate_step_completion(task, &run, Value::Null).await?;
+        self.evaluate_step_completion(task, &run, Value::Null)
+            .await?;
         self.check_run_complete(run_id).await?;
         Ok(())
     }
@@ -1412,7 +1456,8 @@ impl TodoStore {
                     .exec(&mut self.db)
                     .await
                     .context(crate::error::UpdateTaskSnafu { id })?;
-                self.evaluate_step_completion(&task, &run, Value::Null).await?;
+                self.evaluate_step_completion(&task, &run, Value::Null)
+                    .await?;
                 fired += 1;
             }
         }
@@ -1586,9 +1631,9 @@ impl TodoStore {
             .map_err(|message| invalid(format!("recipe {}: {message}", run.recipe_id)))?;
 
         let mut results = run.step_results.0.clone();
-        let results_obj = results.as_object_mut().ok_or_else(|| {
-            invalid("workflow run step_results is corrupt (expected an object)")
-        })?;
+        let results_obj = results
+            .as_object_mut()
+            .ok_or_else(|| invalid("workflow run step_results is corrupt (expected an object)"))?;
         results_obj.insert(node_id.clone(), result.clone());
         // Coding approvals are also appended to the run's ordered log, so the
         // review history survives the retrigger that clears this node's result.
@@ -1866,11 +1911,7 @@ impl TodoStore {
     }
 
     /// The id of `node_id`'s open (pending) task row in this run, if any.
-    async fn open_node_task_id(
-        &mut self,
-        run_id: u64,
-        node_id: &str,
-    ) -> QueryResult<Option<u64>> {
+    async fn open_node_task_id(&mut self, run_id: u64, node_id: &str) -> QueryResult<Option<u64>> {
         let rows = toasty::sql::query(
             r#"SELECT id FROM tasks WHERE workflow_run_id = ?1 AND node_id = ?2
                AND done = 0 AND deleted_at IS NULL ORDER BY id LIMIT 1"#,
@@ -2055,11 +2096,7 @@ impl TodoStore {
     /// commits and every earlier row, and the rewind is logged as a rejection
     /// so `Round N` advances (decision #29). Available in any phase; the
     /// caller stops a running agent turn first (decision #27).
-    pub async fn reopen_coding_interview(
-        &mut self,
-        run_id: u64,
-        reason: &str,
-    ) -> QueryResult<()> {
+    pub async fn reopen_coding_interview(&mut self, run_id: u64, reason: &str) -> QueryResult<()> {
         let run = self.get_run(run_id).await?;
         let recipe_row = self.get_recipe(run.recipe_id).await?;
         let recipe = parse_recipe(&recipe_row.recipe_json.0)
@@ -2172,7 +2209,13 @@ impl TodoStore {
                     && view.run.status == "active"
                 {
                     store
-                        .append_run_note(view.run.id, "spec", "interview", "interview", "Spec saved")
+                        .append_run_note(
+                            view.run.id,
+                            "spec",
+                            "interview",
+                            "interview",
+                            "Spec saved",
+                        )
                         .await?;
                     if let Some(step) = view
                         .steps
@@ -2251,7 +2294,6 @@ impl TodoStore {
         }
         Ok(None)
     }
-
 }
 
 impl TodoStore {
@@ -2388,11 +2430,7 @@ impl TodoStore {
         self.finish_coding_run(run_id, Some(note.to_string())).await
     }
 
-    async fn finish_coding_run(
-        &mut self,
-        run_id: u64,
-        note: Option<String>,
-    ) -> QueryResult<()> {
+    async fn finish_coding_run(&mut self, run_id: u64, note: Option<String>) -> QueryResult<()> {
         let run = self.get_run(run_id).await?;
         let rows = toasty::sql::query(
             r#"SELECT id FROM tasks WHERE workflow_run_id = ?1 AND node_id = 'merge'
@@ -2479,7 +2517,9 @@ fn parse_run_row(record: &toasty::stmt::Value) -> Option<WorkflowRun> {
 /// values, unknown names and type mismatches are rejected, `required`
 /// params without a default must be provided.
 fn resolve_params(recipe: &Recipe, provided: Value) -> Result<Value, String> {
-    let provided = provided.as_object().ok_or("run params must be a JSON object")?;
+    let provided = provided
+        .as_object()
+        .ok_or("run params must be a JSON object")?;
     let mut out = serde_json::Map::new();
     for (name, schema) in &recipe.params {
         match provided.get(name) {
@@ -2533,10 +2573,19 @@ mod tests {
             &serde_json::json!({ "approved": false }),
             &serde_json::json!({ "approved": true })
         ));
-        assert!(key_match(&serde_json::json!({ "anything": 1 }), &serde_json::json!({})));
+        assert!(key_match(
+            &serde_json::json!({ "anything": 1 }),
+            &serde_json::json!({})
+        ));
         // Scalars match exactly.
-        assert!(key_match(&serde_json::json!("ok"), &serde_json::json!("ok")));
-        assert!(!key_match(&serde_json::json!("ok"), &serde_json::json!("no")));
+        assert!(key_match(
+            &serde_json::json!("ok"),
+            &serde_json::json!("ok")
+        ));
+        assert!(!key_match(
+            &serde_json::json!("ok"),
+            &serde_json::json!("no")
+        ));
     }
 
     #[tokio::test]
@@ -2595,7 +2644,11 @@ mod tests {
         store.update_task_done(submit, true).await?;
         let after = store.workflow_run_view(run.id).await?.unwrap();
         assert_eq!(after.steps.len(), 2);
-        let followup = after.steps.iter().find(|s| s.node.id == "followup").unwrap();
+        let followup = after
+            .steps
+            .iter()
+            .find(|s| s.node.id == "followup")
+            .unwrap();
         assert!(followup.task.blocked_until.is_some());
         assert!(followup.task.blocked_until.unwrap() > now());
         // The run is still active while the step waits.
@@ -2626,8 +2679,16 @@ mod tests {
         .await;
         let run = store.create_run(id, serde_json::json!({}), None).await?;
         let view = store.workflow_run_view(run.id).await?.unwrap();
-        let draft = view.steps.iter().find(|s| s.node.id == "draft").unwrap().task.id;
-        store.complete_workflow_step(draft, serde_json::json!({})).await?;
+        let draft = view
+            .steps
+            .iter()
+            .find(|s| s.node.id == "draft")
+            .unwrap()
+            .task
+            .id;
+        store
+            .complete_workflow_step(draft, serde_json::json!({}))
+            .await?;
         let view = store.workflow_run_view(run.id).await?.unwrap();
         let approval = view.steps.iter().find(|s| s.node.id == "approve").unwrap();
         // Approval materializes as a subtask of the automated draft.
@@ -2667,10 +2728,24 @@ mod tests {
         .await;
         let run = store.create_run(id, serde_json::json!({}), None).await?;
         let view = store.workflow_run_view(run.id).await?.unwrap();
-        let draft = view.steps.iter().find(|s| s.node.id == "draft").unwrap().task.id;
-        store.complete_workflow_step(draft, serde_json::json!({})).await?;
+        let draft = view
+            .steps
+            .iter()
+            .find(|s| s.node.id == "draft")
+            .unwrap()
+            .task
+            .id;
+        store
+            .complete_workflow_step(draft, serde_json::json!({}))
+            .await?;
         let view = store.workflow_run_view(run.id).await?.unwrap();
-        let approval = view.steps.iter().find(|s| s.node.id == "approve").unwrap().task.id;
+        let approval = view
+            .steps
+            .iter()
+            .find(|s| s.node.id == "approve")
+            .unwrap()
+            .task
+            .id;
         store
             .complete_workflow_step(approval, serde_json::json!({ "approved": false }))
             .await?;
@@ -2755,7 +2830,13 @@ mod tests {
             .create_run(id, serde_json::json!({ "urgent": true }), None)
             .await?;
         let view = store.workflow_run_view(urgent.id).await?.unwrap();
-        let review = view.steps.iter().find(|s| s.node.id == "review").unwrap().task.id;
+        let review = view
+            .steps
+            .iter()
+            .find(|s| s.node.id == "review")
+            .unwrap()
+            .task
+            .id;
         store.update_task_done(review, true).await?;
         let view = store.workflow_run_view(urgent.id).await?.unwrap();
         let call = view.steps.iter().find(|s| s.node.id == "call").unwrap();
@@ -2767,7 +2848,13 @@ mod tests {
             .create_run(id, serde_json::json!({ "urgent": false }), None)
             .await?;
         let view = store.workflow_run_view(calm.id).await?.unwrap();
-        let review = view.steps.iter().find(|s| s.node.id == "review").unwrap().task.id;
+        let review = view
+            .steps
+            .iter()
+            .find(|s| s.node.id == "review")
+            .unwrap()
+            .task
+            .id;
         store.update_task_done(review, true).await?;
         let view = store.workflow_run_view(calm.id).await?.unwrap();
         let call = view.steps.iter().find(|s| s.node.id == "call").unwrap();
@@ -2796,10 +2883,20 @@ mod tests {
         .await;
         let run = store.create_run(id, serde_json::json!({}), None).await?;
         let view = store.workflow_run_view(run.id).await?.unwrap();
-        let send = view.steps.iter().find(|s| s.node.id == "send_email").unwrap().task.id;
+        let send = view
+            .steps
+            .iter()
+            .find(|s| s.node.id == "send_email")
+            .unwrap()
+            .task
+            .id;
         store.update_task_done(send, true).await?;
         let view = store.workflow_run_view(run.id).await?.unwrap();
-        let waiter = view.steps.iter().find(|s| s.node.id == "await_reply").unwrap();
+        let waiter = view
+            .steps
+            .iter()
+            .find(|s| s.node.id == "await_reply")
+            .unwrap();
         assert!(waiter.incoming_event.is_some());
         assert!(view.steps.iter().all(|s| s.node.id != "draft_contract"));
 
@@ -2830,10 +2927,20 @@ mod tests {
         .await;
         let run = store.create_run(id, serde_json::json!({}), None).await?;
         let view = store.workflow_run_view(run.id).await?.unwrap();
-        let order = view.steps.iter().find(|s| s.node.id == "place_order").unwrap().task.id;
+        let order = view
+            .steps
+            .iter()
+            .find(|s| s.node.id == "place_order")
+            .unwrap()
+            .task
+            .id;
         store.update_task_done(order, true).await?;
         let view = store.workflow_run_view(run.id).await?.unwrap();
-        let received = view.steps.iter().find(|s| s.node.id == "mark_received").unwrap();
+        let received = view
+            .steps
+            .iter()
+            .find(|s| s.node.id == "mark_received")
+            .unwrap();
         assert!(received.task.blocked_until.is_some());
         assert!(received.task.blocked_until.unwrap() > now());
         Ok(())
@@ -3014,12 +3121,19 @@ mod tests {
             .filter(|recipe| recipe.slug == "coding-task")
             .map(|recipe| recipe.version)
             .collect();
-        assert_eq!(versions.len(), 2, "one upsert, then idempotent: {versions:?}");
+        assert_eq!(
+            versions.len(),
+            2,
+            "one upsert, then idempotent: {versions:?}"
+        );
         let current = store
             .recipe_id_by_slug("coding-task")
             .await?
             .expect("newest version");
-        assert_ne!(current, installed.id, "the newest version is the shipped one");
+        assert_ne!(
+            current, installed.id,
+            "the newest version is the shipped one"
+        );
         // The pinned v1 row still declares its step as a subtask.
         let v1_recipe = parse_recipe(&store.get_recipe(installed.id).await?.recipe_json.0)
             .expect("v1 validates");
@@ -3201,7 +3315,10 @@ mod tests {
         assert!(view.steps.iter().any(|step| step.node.id == "merge"));
         store.complete_coding_merge(run.id).await?;
 
-        assert_eq!(store.find_run(run.id).await?.expect("run").status, "completed");
+        assert_eq!(
+            store.find_run(run.id).await?.expect("run").status,
+            "completed"
+        );
         assert!(store.get_task(feature_id).await?.done);
         let notes = run_notes(&view.run.step_results.0);
         assert!(notes.iter().any(|note| note.kind == "approve"));
@@ -3375,11 +3492,11 @@ mod tests {
             )
             .await?;
 
-        let (found, chain) = store
-            .find_run_in_task_chain(step.id)
-            .await?
-            .expect("a run");
-        assert_eq!(found.id, nested.id, "the nested run is nearer than the feature's");
+        let (found, chain) = store.find_run_in_task_chain(step.id).await?.expect("a run");
+        assert_eq!(
+            found.id, nested.id,
+            "the nested run is nearer than the feature's"
+        );
         assert_eq!(chain.len(), 2, "the walk stopped at the nested root");
 
         let (found, _) = store
@@ -3460,7 +3577,11 @@ mod tests {
         let (_other_feature, other) = start_coding_run(&mut store, "Add SSO").await?;
         store.cancel_run(other.id).await?;
         let branches = store.managed_branches().await?;
-        assert_eq!(branches.len(), 1, "only the run with a worktree has a branch");
+        assert_eq!(
+            branches.len(),
+            1,
+            "only the run with a worktree has a branch"
+        );
         Ok(())
     }
 
@@ -3468,7 +3589,9 @@ mod tests {
     async fn test_branch_proposal_is_normalized() -> anyhow::Result<()> {
         let mut store = TodoStore::for_test().await?;
         let (_feature_id, run) = start_coding_run(&mut store, "Add OAuth").await?;
-        let kept = store.propose_run_branch(run.id, "Feature/Add OAuth!!").await?;
+        let kept = store
+            .propose_run_branch(run.id, "Feature/Add OAuth!!")
+            .await?;
         assert_eq!(kept, "Feature/Add-OAuth");
         let stored = store.find_run(run.id).await?.expect("run");
         assert_eq!(stored.branch.as_deref(), Some("Feature/Add-OAuth"));
@@ -3615,7 +3738,13 @@ mod tests {
         let interview = pending_step(&view, "interview");
         assert_eq!(interview.task.role.as_deref(), Some("step"));
         assert!(store.run_subtasks(feature_id).await?.is_empty());
-        assert!(!store.list_subtasks(feature_id).await?.iter().any(|task| task.id == interview.task.id));
+        assert!(
+            !store
+                .list_subtasks(feature_id)
+                .await?
+                .iter()
+                .any(|task| task.id == interview.task.id)
+        );
         assert!(
             store
                 .subtasks_map(&[feature_id])
@@ -3647,9 +3776,7 @@ mod tests {
         assert_eq!(seen[0].id, subtask.id);
         assert!(store.is_direct_subtask(feature_id, subtask.id).await?);
         assert!(
-            !store
-                .is_direct_subtask(feature_id, spec.task.id)
-                .await?,
+            !store.is_direct_subtask(feature_id, spec.task.id).await?,
             "a step is never a settable subtask"
         );
         Ok(())
@@ -3737,12 +3864,7 @@ mod tests {
         // A step id is refused too.
         assert!(
             store
-                .save_subtask_specs(
-                    feature_id,
-                    None,
-                    Vec::new(),
-                    vec![interview_step],
-                )
+                .save_subtask_specs(feature_id, None, Vec::new(), vec![interview_step],)
                 .await
                 .is_err()
         );
@@ -3772,7 +3894,9 @@ mod tests {
         // Rewind from the implement phase: the interview row is the same row,
         // the pending implement row is untouched, and the rewind is logged as
         // a rejection.
-        store.reopen_coding_interview(run.id, "Scope changed").await?;
+        store
+            .reopen_coding_interview(run.id, "Scope changed")
+            .await?;
         // The rewind turns the run back, it does not start another one.
         assert_eq!(
             store.get_task(feature_id).await?.workflow_run_id,
@@ -3788,7 +3912,10 @@ mod tests {
                 .any(|note| note.kind == "reject" && note.body == "Scope changed")
         );
         assert_eq!(
-            view.steps.iter().filter(|step| step.node.id == "spec").count(),
+            view.steps
+                .iter()
+                .filter(|step| step.node.id == "spec")
+                .count(),
             1
         );
 
@@ -3800,7 +3927,10 @@ mod tests {
         let view = store.workflow_run_view(run.id).await?.expect("run view");
         let spec = pending_step(&view, "spec").task.id;
         assert_eq!(
-            view.steps.iter().filter(|step| step.node.id == "spec").count(),
+            view.steps
+                .iter()
+                .filter(|step| step.node.id == "spec")
+                .count(),
             2,
             "each round's spec gate is a fresh row"
         );
@@ -3833,7 +3963,9 @@ mod tests {
                     .parent_id(Some(feature_id)),
             )
             .await?;
-        store.cover_subtask_at(subtask.id, jiff::Timestamp::now()).await?;
+        store
+            .cover_subtask_at(subtask.id, jiff::Timestamp::now())
+            .await?;
         let marked = store.get_task_with_meta(subtask.id).await?;
         assert_eq!(subtask_coverage(&marked), SubtaskCoverage::Covered);
 
@@ -3874,7 +4006,10 @@ mod tests {
         store
             .cover_subtask_at(subtask.id, jiff::Timestamp::now())
             .await?;
-        let recipes = store.recipe_id_by_slug("coding-task").await?.expect("recipe");
+        let recipes = store
+            .recipe_id_by_slug("coding-task")
+            .await?
+            .expect("recipe");
         let nested = store
             .create_task_run(subtask.id, recipes, serde_json::json!({}))
             .await?;

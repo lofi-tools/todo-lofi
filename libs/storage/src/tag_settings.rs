@@ -161,11 +161,7 @@ impl TodoStore {
     }
 
     /// Replace the directory list backing a dir-project tag.
-    pub async fn set_tag_dirs(
-        &mut self,
-        tag_id: u64,
-        dirs: Vec<String>,
-    ) -> QueryResult<()> {
+    pub async fn set_tag_dirs(&mut self, tag_id: u64, dirs: Vec<String>) -> QueryResult<()> {
         let mut settings = self.read_settings(tag_id).await?;
         settings.dirs = dirs;
         self.write_settings(&settings).await
@@ -199,7 +195,11 @@ impl TodoStore {
         Some(TagSection {
             id: record.first().and_then(|v| v.to_i64()).unwrap_or(0) as u64,
             tag_id: record.get(1).and_then(|v| v.to_i64()).unwrap_or(0) as u64,
-            name: record.get(2).and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            name: record
+                .get(2)
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
             position: record.get(3).and_then(|v| v.to_i64()).unwrap_or(0),
             managed_by,
             managed_capture: record.get(5).and_then(|v| v.to_i64()).unwrap_or(0) != 0,
@@ -232,11 +232,7 @@ impl TodoStore {
 
     /// Create a section (appended at the end), or return the existing one
     /// when the name is already taken within the tag.
-    pub async fn add_tag_section(
-        &mut self,
-        tag_id: u64,
-        name: String,
-    ) -> QueryResult<TagSection> {
+    pub async fn add_tag_section(&mut self, tag_id: u64, name: String) -> QueryResult<TagSection> {
         if let Some(existing) = self
             .tag_sections(tag_id)
             .await?
@@ -284,20 +280,15 @@ impl TodoStore {
                 context: "last section id",
             })?;
         match rows.first() {
-            Some(toasty::stmt::Value::Record(record)) => Ok(record
-                .first()
-                .and_then(|v| v.to_i64())
-                .unwrap_or(0) as u64),
+            Some(toasty::stmt::Value::Record(record)) => {
+                Ok(record.first().and_then(|v| v.to_i64()).unwrap_or(0) as u64)
+            }
             _ => Ok(0),
         }
     }
 
     /// Rename a section within its tag.
-    pub async fn rename_tag_section(
-        &mut self,
-        section_id: u64,
-        name: String,
-    ) -> QueryResult<()> {
+    pub async fn rename_tag_section(&mut self, section_id: u64, name: String) -> QueryResult<()> {
         toasty::sql::statement(r#"UPDATE tag_sections SET name = ?1 WHERE id = ?2"#)
             .bind(&name)
             .bind(section_id as i64)
@@ -367,10 +358,7 @@ impl TodoStore {
             .all(|child| child.label() != name)
         {
             let child = self
-                .create_tag_with_display_name(
-                    format!("{}:{}", tag.name, section.id),
-                    Some(name),
-                )
+                .create_tag_with_display_name(format!("{}:{}", tag.name, section.id), Some(name))
                 .await?;
             self.add_tag_implication(child.id, tag_id).await?;
         }
@@ -399,7 +387,12 @@ impl TodoStore {
     }
 
     /// Move a section one slot up or down among its tag's sections.
-    pub async fn move_section(&mut self, tag_id: u64, section_id: u64, delta: i64) -> QueryResult<()> {
+    pub async fn move_section(
+        &mut self,
+        tag_id: u64,
+        section_id: u64,
+        delta: i64,
+    ) -> QueryResult<()> {
         let sections = self.tag_sections(tag_id).await?;
         let Some(index) = sections.iter().position(|section| section.id == section_id) else {
             return Ok(());
@@ -510,7 +503,9 @@ mod tests {
         assert!(storage.tag_settings(tag.id).await?.isolated_build_cache);
 
         // Unrelated writes must not clear it.
-        storage.set_tag_dirs(tag.id, vec!["/a/work".to_string()]).await?;
+        storage
+            .set_tag_dirs(tag.id, vec!["/a/work".to_string()])
+            .await?;
         assert!(storage.tag_settings(tag.id).await?.isolated_build_cache);
 
         storage.set_tag_isolated_build_cache(tag.id, false).await?;
@@ -568,15 +563,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_tag_sections_crud() -> anyhow::Result<()> {        let mut storage = TodoStore::for_test().await?;
+    async fn test_tag_sections_crud() -> anyhow::Result<()> {
+        let mut storage = TodoStore::for_test().await?;
         let tag = storage.create_tag("Work").await?;
 
         assert!(storage.tag_sections(tag.id).await?.is_empty());
 
-        let first = storage.add_tag_section(tag.id, "Backlog".to_string()).await?;
+        let first = storage
+            .add_tag_section(tag.id, "Backlog".to_string())
+            .await?;
         let second = storage.add_tag_section(tag.id, "Doing".to_string()).await?;
         // Duplicate names return the existing section.
-        let again = storage.add_tag_section(tag.id, "Backlog".to_string()).await?;
+        let again = storage
+            .add_tag_section(tag.id, "Backlog".to_string())
+            .await?;
         assert_eq!(again.id, first.id);
 
         let sections = storage.tag_sections(tag.id).await?;
@@ -584,11 +584,15 @@ mod tests {
         assert_eq!(sections[0].name, "Backlog");
         assert_eq!(sections[1].name, "Doing");
 
-        storage.reorder_tag_sections(tag.id, &[second.id, first.id]).await?;
+        storage
+            .reorder_tag_sections(tag.id, &[second.id, first.id])
+            .await?;
         let sections = storage.tag_sections(tag.id).await?;
         assert_eq!(sections[0].name, "Doing");
 
-        storage.rename_tag_section(first.id, "Icebox".to_string()).await?;
+        storage
+            .rename_tag_section(first.id, "Icebox".to_string())
+            .await?;
         let sections = storage.tag_sections(tag.id).await?;
         assert!(sections.iter().any(|s| s.name == "Icebox"));
 
@@ -610,13 +614,17 @@ mod tests {
         let doing = storage.create_tag("Doing").await?;
         storage.add_tag_implication(backlog.id, project.id).await?;
         storage.add_tag_implication(doing.id, project.id).await?;
-        storage.add_tag_section(project.id, "Doing".to_string()).await?;
-        storage.add_tag_section(project.id, "Backlog".to_string()).await?;
-
-        let unsectioned = storage
-            .create_task(Task::create().title("Loose"))
+        storage
+            .add_tag_section(project.id, "Doing".to_string())
             .await?;
-        storage.assign_tag_to_task(unsectioned.id, &project.name).await?;
+        storage
+            .add_tag_section(project.id, "Backlog".to_string())
+            .await?;
+
+        let unsectioned = storage.create_task(Task::create().title("Loose")).await?;
+        storage
+            .assign_tag_to_task(unsectioned.id, &project.name)
+            .await?;
         let first = storage.create_task(Task::create().title("One")).await?;
         storage.assign_tag_to_task(first.id, &backlog.name).await?;
         let second = storage.create_task(Task::create().title("Two")).await?;

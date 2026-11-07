@@ -212,7 +212,10 @@ mod tests {
         // Deleting the task takes its extension data with it.
         store.delete_task(task.id).await.expect("delete");
         assert_eq!(
-            store.get_task_spec(task.id).await.expect("read after delete"),
+            store
+                .get_task_spec(task.id)
+                .await
+                .expect("read after delete"),
             None
         );
     }

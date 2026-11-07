@@ -81,8 +81,7 @@ fn seed_tasks() -> Vec<SeedTask> {
             .unwrap()
             .to_zoned(zone.clone())
             .date();
-        let mut date =
-            jiff::civil::Date::new(anchor.0, anchor.1, anchor.2).unwrap();
+        let mut date = jiff::civil::Date::new(anchor.0, anchor.1, anchor.2).unwrap();
         while date < today {
             date = date.checked_add(14.days()).unwrap();
         }
@@ -358,7 +357,9 @@ fn seed_tasks() -> Vec<SeedTask> {
         // The about-me site.
         SeedTask {
             title: "Add the 2026 accounts to the site".to_string(),
-            description: Some("Publish the last accounts and a short write-up on the site".to_string()),
+            description: Some(
+                "Publish the last accounts and a short write-up on the site".to_string(),
+            ),
             branch_name: Some("content/2026-accounts".to_string()),
             labels: vec!["content".to_string()],
             deadline: Some(now_secs + 4 * 86400),
@@ -965,7 +966,10 @@ mod tests {
             .find(|m| m.slug == "packing-list")
             .expect("travel recipe should be seeded");
         assert!(travel_meta.managed_tag.is_some());
-        assert!(travel_meta.managed_enabled, "travel should be enabled by default");
+        assert!(
+            travel_meta.managed_enabled,
+            "travel should be enabled by default"
+        );
         assert!(
             store
                 .get_tag_by_name("managed:packing-list")

@@ -141,14 +141,25 @@ pub fn travel_items(days: &str, activities: &[String]) -> Vec<(String, String)> 
         add(&mut items, PACK_STAY_SECTION, &title);
     }
 
-    add(&mut items, LEAVE_SECTION, "Confirm bookings (flights, accommodation)");
-    add(&mut items, LEAVE_SECTION, "Arrange house care (pets, plants)");
+    add(
+        &mut items,
+        LEAVE_SECTION,
+        "Confirm bookings (flights, accommodation)",
+    );
+    add(
+        &mut items,
+        LEAVE_SECTION,
+        "Arrange house care (pets, plants)",
+    );
     add(&mut items, LEAVE_SECTION, "Lock up and set the alarm");
 
     for activity in activities {
         match activity.as_str() {
             "hiking" => {
-                for title in ["Check trail conditions and weather", "Download offline maps"] {
+                for title in [
+                    "Check trail conditions and weather",
+                    "Download offline maps",
+                ] {
                     add(&mut items, LEAVE_SECTION, title);
                 }
             }
@@ -210,12 +221,13 @@ impl TodoStore {
         let recipe_row = self.get_recipe(recipe_id).await?;
         let parsed = crate::workflow::parse_recipe(&recipe_row.recipe_json.0)
             .map_err(|message| crate::QueryErr::UnexpectedValue { message })?;
-        let tag_name = parsed
-            .managed_tag
-            .clone()
-            .ok_or_else(|| crate::QueryErr::UnexpectedValue {
-                message: "recipe does not manage a tag".to_string(),
-            })?;
+        let tag_name =
+            parsed
+                .managed_tag
+                .clone()
+                .ok_or_else(|| crate::QueryErr::UnexpectedValue {
+                    message: "recipe does not manage a tag".to_string(),
+                })?;
         let tag = if let Some(tag) = self.get_tag_by_name(&tag_name).await? {
             tag
         } else {
@@ -244,13 +256,8 @@ impl TodoStore {
             .context(crate::error::QueryTagsSnafu {
                 context: "name managed tag",
             })?;
-        self.attach_app_to_tag(
-            app.id,
-            tag.id,
-            crate::managed::BindingRole::Partial,
-            true,
-        )
-        .await?;
+        self.attach_app_to_tag(app.id, tag.id, crate::managed::BindingRole::Partial, true)
+            .await?;
         self.ensure_recipe_sections(recipe_id, tag.id).await?;
         Ok(tag)
     }
@@ -260,11 +267,7 @@ impl TodoStore {
     /// it) and a `tag_sections` row (so the task list groups by it).
     /// Idempotent, so attaching an existing user tag provisions its
     /// sections the same way enabling the automation does.
-    pub async fn ensure_recipe_sections(
-        &mut self,
-        recipe_id: u64,
-        tag_id: u64,
-    ) -> QueryResult<()> {
+    pub async fn ensure_recipe_sections(&mut self, recipe_id: u64, tag_id: u64) -> QueryResult<()> {
         let Some(app) = self.app_for_recipe(recipe_id).await? else {
             return Ok(());
         };
@@ -330,12 +333,11 @@ impl TodoStore {
         activities: Vec<String>,
     ) -> QueryResult<crate::WorkflowRun> {
         let tag = self.get_tag(tag_id).await?;
-        let app = self
-            .app_for_recipe(recipe_id)
-            .await?
-            .ok_or_else(|| crate::QueryErr::UnexpectedValue {
+        let app = self.app_for_recipe(recipe_id).await?.ok_or_else(|| {
+            crate::QueryErr::UnexpectedValue {
                 message: "recipe does not manage a tag".to_string(),
-            })?;
+            }
+        })?;
         let bound = self
             .bindings_for_tag(tag_id)
             .await?
@@ -356,7 +358,8 @@ impl TodoStore {
         let mut activities = activities;
         activities.sort();
         activities.dedup();
-        let activities_json = serde_json::to_string(&activities).unwrap_or_else(|_| "[]".to_string());
+        let activities_json =
+            serde_json::to_string(&activities).unwrap_or_else(|_| "[]".to_string());
         let run = self
             .create_managed_run(
                 recipe_id,
@@ -380,13 +383,8 @@ impl TodoStore {
                 .await?;
             let tag_name = section_tag_name(&tag.name, section_key(&section));
             self.assign_tag_to_task(task.id, &tag_name).await?;
-            self.set_task_managed(
-                task.id,
-                app.id,
-                crate::managed::ManagedMode::Managed,
-                false,
-            )
-            .await?;
+            self.set_task_managed(task.id, app.id, crate::managed::ManagedMode::Managed, false)
+                .await?;
         }
         Ok(run)
     }
@@ -498,14 +496,12 @@ mod tests {
         assert!(!titles.iter().any(|(s, _)| *s == "Pack / wedding"));
 
         let hike = travel_items("3", &["hiking".to_string()]);
-        let hike_sections: Vec<&str> =
-            hike.iter().map(|(s, _)| s.as_str()).collect();
+        let hike_sections: Vec<&str> = hike.iter().map(|(s, _)| s.as_str()).collect();
         assert!(hike_sections.contains(&"Pack / outdoors"));
         assert!(!hike_sections.contains(&"Pack / wedding"));
 
         let wedding = travel_items("2", &["wedding".to_string()]);
-        let wedding_sections: Vec<&str> =
-            wedding.iter().map(|(s, _)| s.as_str()).collect();
+        let wedding_sections: Vec<&str> = wedding.iter().map(|(s, _)| s.as_str()).collect();
         assert!(wedding_sections.contains(&"Pack / wedding"));
         assert!(!wedding_sections.contains(&"Pack / outdoors"));
     }
@@ -550,12 +546,7 @@ mod tests {
             .await?;
         store.set_recipe_app(recipe_id, app.id).await?;
         store
-            .attach_app_to_tag(
-                app.id,
-                tag.id,
-                crate::managed::BindingRole::Partial,
-                false,
-            )
+            .attach_app_to_tag(app.id, tag.id, crate::managed::BindingRole::Partial, false)
             .await?;
         store.ensure_recipe_sections(recipe_id, tag.id).await?;
         // The sections land under the user's tag, not the recipe's own.
@@ -679,9 +670,7 @@ mod tests {
         );
         let sleep_ids: Vec<u64> = ids
             .iter()
-            .filter(|id| {
-                map.get(id).map(String::as_str) == Some("Pack / sleep & bathroom")
-            })
+            .filter(|id| map.get(id).map(String::as_str) == Some("Pack / sleep & bathroom"))
             .copied()
             .collect();
         assert!(sleep_ids.len() >= 2);

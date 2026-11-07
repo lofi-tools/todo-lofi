@@ -162,8 +162,7 @@ async fn get_json(
 }
 
 fn results(body: &serde_json::Value) -> Vec<serde_json::Value> {
-    body
-        .get("results")
+    body.get("results")
         .unwrap_or(body)
         .as_array()
         .cloned()
@@ -298,13 +297,7 @@ impl TodoStore {
         let mut local_ids: HashMap<String, u64> = HashMap::new();
         for task in &tasks {
             let id = self
-                .upsert_todoist_task(
-                    token,
-                    integration_id,
-                    project_tag_id,
-                    &section_tags,
-                    task,
-                )
+                .upsert_todoist_task(token, integration_id, project_tag_id, &section_tags, task)
                 .await?;
             local_ids.insert(task.id.clone(), id);
         }
@@ -363,11 +356,8 @@ impl TodoStore {
                 match self.get_tag_by_name(&scoped).await? {
                     Some(tag) => tag,
                     None => {
-                        self.create_tag_with_display_name(
-                            scoped,
-                            Some(section.name.clone()),
-                        )
-                        .await?
+                        self.create_tag_with_display_name(scoped, Some(section.name.clone()))
+                            .await?
                     }
                 }
             }
@@ -467,10 +457,7 @@ impl TodoStore {
         remote: &RemoteTask,
     ) -> QueryResult<u64> {
         let deadline = remote.due.as_ref().and_then(deadline_for_due);
-        let timezone = remote
-            .due
-            .as_ref()
-            .and_then(|due| due.timezone.clone());
+        let timezone = remote.due.as_ref().and_then(|due| due.timezone.clone());
         let urgency = urgency_for_priority(remote.priority);
         let remote_updated = parse_updated(remote.updated_at.as_deref());
 
@@ -495,28 +482,16 @@ impl TodoStore {
                     .done(false)
                     .exec(&mut self.db)
                     .await
-                    .context(crate::error::UpdateTaskSnafu {
-                        id: link.task_id,
-                    })?;
+                    .context(crate::error::UpdateTaskSnafu { id: link.task_id })?;
                 // A remote edit to an app-owned task wins: unlock the whole
                 // task and spare it from regeneration, so the app does not
                 // clobber what the user changed on the Todoist side.
                 self.unlock_task_from_remote(link.task_id).await?;
-                self.link_task(
-                    integration_id,
-                    &remote.id,
-                    link.task_id,
-                    remote_updated,
-                )
-                .await?;
+                self.link_task(integration_id, &remote.id, link.task_id, remote_updated)
+                    .await?;
             }
-            self.assign_todoist_tags(
-                link.task_id,
-                project_tag_id,
-                section_tags,
-                remote,
-            )
-            .await?;
+            self.assign_todoist_tags(link.task_id, project_tag_id, section_tags, remote)
+                .await?;
             return Ok(link.task_id);
         }
 
@@ -619,12 +594,7 @@ async fn send_commands(
         .iter()
         .filter_map(|command| command.get("uuid")?.as_str())
         .filter(|uuid| status.get(*uuid).and_then(|s| s.as_str()) != Some("ok"))
-        .map(|uuid| {
-            format!(
-                "{uuid}: {}",
-                status.get(uuid).cloned().unwrap_or_default()
-            )
-        })
+        .map(|uuid| format!("{uuid}: {}", status.get(uuid).cloned().unwrap_or_default()))
         .collect();
     if failures.is_empty() {
         Ok(body)
@@ -701,10 +671,7 @@ impl TodoStore {
             );
         }
         if let Some(priority) = patch.priority {
-            update_args.insert(
-                "priority".to_string(),
-                serde_json::Value::from(priority),
-            );
+            update_args.insert("priority".to_string(), serde_json::Value::from(priority));
         }
         let mut commands = Vec::new();
         if update_args.len() > 1 {
@@ -715,7 +682,11 @@ impl TodoStore {
         }
         if let Some(done) = patch.done {
             commands.push(sync_command(
-                if done { "item_close" } else { "item_uncomplete" },
+                if done {
+                    "item_close"
+                } else {
+                    "item_uncomplete"
+                },
                 serde_json::json!({ "id": external_id }),
             ));
         }
@@ -800,10 +771,7 @@ impl TodoStore {
         );
         let response = send_commands(
             token,
-            vec![sync_command(
-                "item_add",
-                serde_json::Value::Object(args),
-            )],
+            vec![sync_command("item_add", serde_json::Value::Object(args))],
         )
         .await
         .map_err(|e| crate::QueryErr::UnexpectedValue {
@@ -811,9 +779,7 @@ impl TodoStore {
         })?;
         let remote_id = remote_id_for_temp(&response, &temp_id).ok_or_else(|| {
             crate::QueryErr::UnexpectedValue {
-                message: format!(
-                    "Todoist capture for task {task_id} returned no id for {temp_id}"
-                ),
+                message: format!("Todoist capture for task {task_id} returned no id for {temp_id}"),
             }
         })?;
         self.link_task(
@@ -888,10 +854,7 @@ impl TodoStore {
 
     /// Todoist links on one tag as `(integration_id, external_id,
     /// source_kind)`.
-    async fn todoist_tag_links(
-        &mut self,
-        tag_id: u64,
-    ) -> QueryResult<Vec<(u64, String, String)>> {
+    async fn todoist_tag_links(&mut self, tag_id: u64) -> QueryResult<Vec<(u64, String, String)>> {
         let rows = toasty::sql::query(
             r#"SELECT l.integration_id, l.external_id, l.source_kind
                FROM external_tag_links l
@@ -936,7 +899,10 @@ mod tests {
         assert_eq!(priority_for_urgency(0.5), 1);
         // Round-trips through the import mapping.
         for priority in 1..=4 {
-            assert_eq!(priority_for_urgency(urgency_for_priority(priority)), priority);
+            assert_eq!(
+                priority_for_urgency(urgency_for_priority(priority)),
+                priority
+            );
         }
     }
 
@@ -952,8 +918,16 @@ mod tests {
     #[test]
     fn test_sync_command_shape() {
         let command = sync_command("item_update", serde_json::json!({"id": "x"}));
-        assert_eq!(command.get("type").and_then(|t| t.as_str()), Some("item_update"));
-        assert!(command.get("uuid").and_then(|u| u.as_str()).is_some_and(|u| !u.is_empty()));
+        assert_eq!(
+            command.get("type").and_then(|t| t.as_str()),
+            Some("item_update")
+        );
+        assert!(
+            command
+                .get("uuid")
+                .and_then(|u| u.as_str())
+                .is_some_and(|u| !u.is_empty())
+        );
         // UUIDs must differ per command for idempotent retries.
         let other = sync_command("item_update", serde_json::json!({"id": "x"}));
         assert_ne!(command.get("uuid"), other.get("uuid"));
@@ -1016,10 +990,16 @@ mod tests {
             )
             .await?;
         storage
-            .push_todoist_patch("bogus", 1, "ext-1", shipped.id, &TaskPatch {
-                content: Some("changed".to_string()),
-                ..Default::default()
-            })
+            .push_todoist_patch(
+                "bogus",
+                1,
+                "ext-1",
+                shipped.id,
+                &TaskPatch {
+                    content: Some("changed".to_string()),
+                    ..Default::default()
+                },
+            )
             .await?;
         // A real task with the same bogus token fails at the network —
         // proving the guard above is what skipped the builtin-owned row.
@@ -1028,10 +1008,16 @@ mod tests {
             .await?;
         assert!(
             storage
-                .push_todoist_patch("bogus", 1, "ext-2", live.id, &TaskPatch {
-                    content: Some("changed".to_string()),
-                    ..Default::default()
-                })
+                .push_todoist_patch(
+                    "bogus",
+                    1,
+                    "ext-2",
+                    live.id,
+                    &TaskPatch {
+                        content: Some("changed".to_string()),
+                        ..Default::default()
+                    }
+                )
                 .await
                 .is_err()
         );
@@ -1101,10 +1087,12 @@ mod tests {
             .await?;
         storage.assign_tag_to_task(personal.id, "Home").await?;
         assert!(storage.capture_task(personal.id).await?.is_empty());
-        assert!(storage
-            .todoist_destination_for_task(personal.id)
-            .await?
-            .is_none());
+        assert!(
+            storage
+                .todoist_destination_for_task(personal.id)
+                .await?
+                .is_none()
+        );
         Ok(())
     }
 
@@ -1227,7 +1215,11 @@ mod tests {
         storage.nest_travel_subsections(tag.id).await?;
         // Pack / stay is no longer a direct child of the travel tag.
         let travel_children = storage.get_children(tag.id).await?;
-        assert!(!travel_children.iter().any(|child| child.label() == "Pack / stay"));
+        assert!(
+            !travel_children
+                .iter()
+                .any(|child| child.label() == "Pack / stay")
+        );
         let stay = storage
             .get_children(travel_pack.id)
             .await?

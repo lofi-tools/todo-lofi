@@ -203,9 +203,7 @@ impl TodoStore {
     /// Seed data tag: demo content owned by the builtin app, so it is never
     /// pushed to an integration.
     pub async fn create_seed_tag(&mut self, name: impl Into<String>) -> QueryResult<Tag> {
-        let tag = self
-            .create_tag_with_display_name(name, None)
-            .await?;
+        let tag = self.create_tag_with_display_name(name, None).await?;
         let demo = self.demo_app().await?;
         self.set_tag_managed(tag.id, Some(demo.id)).await?;
         Ok(tag)
@@ -229,8 +227,7 @@ impl TodoStore {
             .exec(&mut self.db)
             .await
             .context(crate::error::CreateTagSnafu { name })?;
-        self.add_tag_dir(tag.id, path.display().to_string())
-            .await?;
+        self.add_tag_dir(tag.id, path.display().to_string()).await?;
         Ok(tag)
     }
 
@@ -256,13 +253,8 @@ impl TodoStore {
     /// in the tag's directory settings, which is what tag settings lists and
     /// what sync detection reads; the `project:` name is only the legacy
     /// fallback. Tags created before this also get the directory backfilled.
-    pub async fn get_or_create_project_tag(
-        &mut self,
-        path: &std::path::Path,
-    ) -> QueryResult<Tag> {
-        let canonical = path
-            .canonicalize()
-            .unwrap_or_else(|_| path.to_path_buf());
+    pub async fn get_or_create_project_tag(&mut self, path: &std::path::Path) -> QueryResult<Tag> {
+        let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
         let name = format!("project:{}", canonical.display());
         let display_name = path
             .file_name()
@@ -288,19 +280,20 @@ impl TodoStore {
     }
 
     pub async fn get_tag_by_name(&mut self, name: &str) -> QueryResult<Option<Tag>> {
-        let rows =
-            toasty::sql::query(r#"SELECT id, name, display_name FROM tags WHERE LOWER(name) = LOWER(?1)"#)
-                .column_types([
-                    toasty::stmt::Type::I64,
-                    toasty::stmt::Type::String,
-                    toasty::stmt::Type::String,
-                ])
-                .bind(name)
-                .exec(&mut self.db)
-                .await
-                .context(crate::error::FindTagByNameSnafu {
-                    name: name.to_string(),
-                })?;
+        let rows = toasty::sql::query(
+            r#"SELECT id, name, display_name FROM tags WHERE LOWER(name) = LOWER(?1)"#,
+        )
+        .column_types([
+            toasty::stmt::Type::I64,
+            toasty::stmt::Type::String,
+            toasty::stmt::Type::String,
+        ])
+        .bind(name)
+        .exec(&mut self.db)
+        .await
+        .context(crate::error::FindTagByNameSnafu {
+            name: name.to_string(),
+        })?;
 
         Ok(rows.into_iter().next().and_then(|row| parse_tag_row(&row)))
     }
@@ -583,8 +576,7 @@ impl TodoStore {
         for name in &desired {
             let lower = name.to_lowercase();
             let matches = all.iter().find(|candidate| {
-                candidate.name.to_lowercase() == lower
-                    || candidate.label().to_lowercase() == lower
+                candidate.name.to_lowercase() == lower || candidate.label().to_lowercase() == lower
             });
             match matches {
                 Some(existing) if !kept_ids.contains(&existing.id) => {
@@ -685,7 +677,10 @@ impl TodoStore {
                     record.get(1).and_then(|v| v.to_i64()),
                 )
             {
-                children.entry(parent as u64).or_default().push(child as u64);
+                children
+                    .entry(parent as u64)
+                    .or_default()
+                    .push(child as u64);
                 // A tag whose parent row is missing (hand-edited database)
                 // still counts as a child, so it is not also rendered as a
                 // root while its edge is skipped during the walk.
@@ -820,8 +815,7 @@ impl TodoStore {
         for tag in &desired {
             let lower = tag.to_lowercase();
             let matches = all.iter().find(|candidate| {
-                candidate.name.to_lowercase() == lower
-                    || candidate.label().to_lowercase() == lower
+                candidate.name.to_lowercase() == lower || candidate.label().to_lowercase() == lower
             });
             match matches {
                 Some(existing) if !kept_ids.contains(&existing.id) => {
@@ -969,10 +963,10 @@ impl TodoStore {
 
         let rows = toasty::sql::query(&query)
             .column_types([
-            toasty::stmt::Type::I64,
-            toasty::stmt::Type::String,
-            toasty::stmt::Type::String,
-        ])
+                toasty::stmt::Type::I64,
+                toasty::stmt::Type::String,
+                toasty::stmt::Type::String,
+            ])
             .exec(&mut self.db)
             .await
             .context(crate::error::QueryTagsSnafu {
@@ -1016,8 +1010,7 @@ impl TodoStore {
         let ids: HashSet<u64> = all.iter().map(|t| t.id).collect();
         let mut implied: HashSet<u64> = HashSet::new();
         for tag in all {
-            let mut queue: VecDeque<u64> =
-                graph.get(&tag.id).cloned().unwrap_or_default().into();
+            let mut queue: VecDeque<u64> = graph.get(&tag.id).cloned().unwrap_or_default().into();
             let mut seen: HashSet<u64> = HashSet::new();
             while let Some(current) = queue.pop_front() {
                 if !seen.insert(current) {
@@ -1034,7 +1027,11 @@ impl TodoStore {
             }
         }
 
-        Ok(all.iter().filter(|t| !implied.contains(&t.id)).cloned().collect())
+        Ok(all
+            .iter()
+            .filter(|t| !implied.contains(&t.id))
+            .cloned()
+            .collect())
     }
 
     /// Leaf tags for a task's own direct tags (plus DAG inference): kept
@@ -1096,10 +1093,10 @@ impl TodoStore {
 
         let rows = toasty::sql::query(&query)
             .column_types([
-            toasty::stmt::Type::I64,
-            toasty::stmt::Type::String,
-            toasty::stmt::Type::String,
-        ])
+                toasty::stmt::Type::I64,
+                toasty::stmt::Type::String,
+                toasty::stmt::Type::String,
+            ])
             .exec(&mut self.db)
             .await
             .context(crate::error::QueryTagsSnafu {
@@ -1159,7 +1156,9 @@ mod tests {
         );
 
         // A different path with the same dir name does not collide.
-        let other = storage.get_or_create_project_tag(std::path::Path::new("/tmp/elsewhere/api")).await?;
+        let other = storage
+            .get_or_create_project_tag(std::path::Path::new("/tmp/elsewhere/api"))
+            .await?;
         assert_ne!(other.id, tag.id);
         assert_eq!(other.name, "project:/tmp/elsewhere/api");
         assert_eq!(other.display_name.as_deref(), Some("api"));
@@ -1182,7 +1181,9 @@ mod tests {
         assert_eq!(top.len(), 1);
         assert_eq!(top[0].display_name.as_deref(), Some("about-me"));
 
-        let by_name = storage.get_tag_by_name("project:/Users/me/dev/about-me").await?;
+        let by_name = storage
+            .get_tag_by_name("project:/Users/me/dev/about-me")
+            .await?;
         assert_eq!(by_name.unwrap().display_name.as_deref(), Some("about-me"));
 
         let all = storage.list_tags().await?;
@@ -1355,11 +1356,15 @@ mod tests {
             .get_or_create_project_tag(std::path::Path::new("/Users/me/dev/api"))
             .await?;
         let child = storage.create_tag("Client").await?;
-        storage.set_tag_placements(child.id, &["api".to_string()]).await?;
+        storage
+            .set_tag_placements(child.id, &["api".to_string()])
+            .await?;
 
         // The display label "api" resolves to the existing project tag, so a
         // re-save with the same label keeps the same id (no duplicate "api").
-        storage.set_tag_placements(child.id, &["api".to_string()]).await?;
+        storage
+            .set_tag_placements(child.id, &["api".to_string()])
+            .await?;
         let parents = storage.get_parents(child.id).await?;
         assert_eq!(parents.len(), 1);
         assert_eq!(parents[0].id, project.id);
@@ -1564,8 +1569,12 @@ mod tests {
         let tag_a = storage.create_tag("TagA").await?;
         let tag_b = storage.create_tag("TagB").await?;
 
-        let grandparent = storage.create_task(Task::create().title("Grandparent")).await?;
-        storage.assign_tag_to_task(grandparent.id, &tag_b.name).await?;
+        let grandparent = storage
+            .create_task(Task::create().title("Grandparent"))
+            .await?;
+        storage
+            .assign_tag_to_task(grandparent.id, &tag_b.name)
+            .await?;
         let parent = storage
             .create_task(
                 Task::create()
@@ -1575,11 +1584,7 @@ mod tests {
             .await?;
         storage.assign_tag_to_task(parent.id, &tag_a.name).await?;
         let child = storage
-            .create_task(
-                Task::create()
-                    .title("Child")
-                    .parent_id(Some(parent.id)),
-            )
+            .create_task(Task::create().title("Child").parent_id(Some(parent.id)))
             .await?;
 
         // Inherited tags are the ancestors' direct tags, nearest first,
@@ -1600,8 +1605,12 @@ mod tests {
         let mut storage = TodoStore::for_test().await?;
         let tag = storage.create_tag("Shared").await?;
 
-        let grandparent = storage.create_task(Task::create().title("Grandparent")).await?;
-        storage.assign_tag_to_task(grandparent.id, &tag.name).await?;
+        let grandparent = storage
+            .create_task(Task::create().title("Grandparent"))
+            .await?;
+        storage
+            .assign_tag_to_task(grandparent.id, &tag.name)
+            .await?;
         let parent = storage
             .create_task(
                 Task::create()
@@ -1611,11 +1620,7 @@ mod tests {
             .await?;
         storage.assign_tag_to_task(parent.id, &tag.name).await?;
         let child = storage
-            .create_task(
-                Task::create()
-                    .title("Child")
-                    .parent_id(Some(parent.id)),
-            )
+            .create_task(Task::create().title("Child").parent_id(Some(parent.id)))
             .await?;
 
         let meta = storage.get_task_with_meta(child.id).await?;
@@ -1632,18 +1637,12 @@ mod tests {
         storage
             .add_tag_implication(python.id, programming.id)
             .await?;
-        storage
-            .add_tag_implication(programming.id, cs.id)
-            .await?;
+        storage.add_tag_implication(programming.id, cs.id).await?;
 
         let parent = storage.create_task(Task::create().title("Parent")).await?;
         storage.assign_tag_to_task(parent.id, &python.name).await?;
         let child = storage
-            .create_task(
-                Task::create()
-                    .title("Child")
-                    .parent_id(Some(parent.id)),
-            )
+            .create_task(Task::create().title("Child").parent_id(Some(parent.id)))
             .await?;
 
         let meta = storage.get_task_with_meta(child.id).await?;
@@ -1669,18 +1668,10 @@ mod tests {
         let parent = storage.create_task(Task::create().title("Parent")).await?;
         storage.assign_tag_to_task(parent.id, &tag.name).await?;
         let child = storage
-            .create_task(
-                Task::create()
-                    .title("Child")
-                    .parent_id(Some(parent.id)),
-            )
+            .create_task(Task::create().title("Child").parent_id(Some(parent.id)))
             .await?;
         let grandchild = storage
-            .create_task(
-                Task::create()
-                    .title("Grandchild")
-                    .parent_id(Some(child.id)),
-            )
+            .create_task(Task::create().title("Grandchild").parent_id(Some(child.id)))
             .await?;
 
         // An unrelated task and its subtask stay out of the tag's list.

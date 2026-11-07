@@ -236,9 +236,21 @@ fn parse_app(row: &toasty::stmt::Value) -> Option<App> {
     };
     Some(App {
         id: record.first().and_then(|v| v.to_i64()).unwrap_or(0) as u64,
-        kind: record.get(1).and_then(|v| v.as_str()).unwrap_or("").to_string(),
-        slug: record.get(2).and_then(|v| v.as_str()).unwrap_or("").to_string(),
-        label: record.get(3).and_then(|v| v.as_str()).unwrap_or("").to_string(),
+        kind: record
+            .get(1)
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+        slug: record
+            .get(2)
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+        label: record
+            .get(3)
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
         description: record
             .get(4)
             .and_then(|v| v.as_str())
@@ -671,16 +683,14 @@ impl TodoStore {
     }
 
     pub async fn detach_app_from_tag(&mut self, app_id: u64, tag_id: u64) -> QueryResult<()> {
-        toasty::sql::statement(
-            r#"DELETE FROM app_tag_bindings WHERE app_id = ?1 AND tag_id = ?2"#,
-        )
-        .bind(app_id as i64)
-        .bind(tag_id as i64)
-        .exec(&mut self.db)
-        .await
-        .context(crate::error::QueryTagsSnafu {
-            context: "detach app from tag",
-        })?;
+        toasty::sql::statement(r#"DELETE FROM app_tag_bindings WHERE app_id = ?1 AND tag_id = ?2"#)
+            .bind(app_id as i64)
+            .bind(tag_id as i64)
+            .exec(&mut self.db)
+            .await
+            .context(crate::error::QueryTagsSnafu {
+                context: "detach app from tag",
+            })?;
         Ok(())
     }
 
@@ -759,10 +769,8 @@ impl TodoStore {
     pub async fn set_tag_managed(&mut self, tag_id: u64, app_id: Option<u64>) -> QueryResult<()> {
         // `NULLIF(..., -1)` keeps "no owner" a real NULL rather than a
         // sentinel id.
-        toasty::sql::statement(
-            r#"UPDATE tags SET managed_by = NULLIF(?1, -1) WHERE id = ?2"#,
-        )
-        .bind(app_id.map(|id| id as i64).unwrap_or(-1))
+        toasty::sql::statement(r#"UPDATE tags SET managed_by = NULLIF(?1, -1) WHERE id = ?2"#)
+            .bind(app_id.map(|id| id as i64).unwrap_or(-1))
             .bind(tag_id as i64)
             .exec(&mut self.db)
             .await
@@ -938,7 +946,12 @@ impl TodoStore {
         app_id: u64,
     ) -> QueryResult<Vec<u64>> {
         let mut tag_ids = vec![tag_id];
-        tag_ids.extend(self.get_all_descendants(tag_id).await?.into_iter().map(|t| t.id));
+        tag_ids.extend(
+            self.get_all_descendants(tag_id)
+                .await?
+                .into_iter()
+                .map(|t| t.id),
+        );
         let id_list: Vec<String> = tag_ids.iter().map(|id| id.to_string()).collect();
         let query = format!(
             r#"SELECT DISTINCT t.id FROM tasks t
@@ -1024,7 +1037,9 @@ impl TodoStore {
             context: "set section owner",
         })?;
         if let Some(section) = self.section_row(section_id).await?
-            && let Some(child) = self.section_child_tag(section.tag_id, &section.name).await?
+            && let Some(child) = self
+                .section_child_tag(section.tag_id, &section.name)
+                .await?
         {
             self.set_tag_managed(child.id, app_id).await?;
         }
@@ -1045,7 +1060,10 @@ impl TodoStore {
         .context(crate::error::QueryTagsSnafu {
             context: "downgrade section",
         })?;
-        if let Some(child) = self.section_child_tag(section.tag_id, &section.name).await? {
+        if let Some(child) = self
+            .section_child_tag(section.tag_id, &section.name)
+            .await?
+        {
             self.set_tag_managed(child.id, None).await?;
         }
         Ok(())
@@ -1077,7 +1095,11 @@ impl TodoStore {
             Some(crate::tag_settings::TagSection {
                 id: record.first().and_then(|v| v.to_i64()).unwrap_or(0) as u64,
                 tag_id: record.get(1).and_then(|v| v.to_i64()).unwrap_or(0) as u64,
-                name: record.get(2).and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                name: record
+                    .get(2)
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
                 position: record.get(3).and_then(|v| v.to_i64()).unwrap_or(0),
                 managed_by: record.get(4).and_then(|v| v.to_i64()).map(|id| id as u64),
                 managed_capture: record.get(5).and_then(|v| v.to_i64()).unwrap_or(0) != 0,
@@ -1289,13 +1311,18 @@ impl TodoStore {
                 continue;
             };
             let id = record.first().and_then(|v| v.to_i64()).unwrap_or(0) as u64;
-            let provider = record.get(1).and_then(|v| v.as_str()).unwrap_or("integration");
+            let provider = record
+                .get(1)
+                .and_then(|v| v.as_str())
+                .unwrap_or("integration");
             let account = record.get(2).and_then(|v| v.as_str()).unwrap_or("");
-            let label = if account.is_empty() { provider } else { account };
+            let label = if account.is_empty() {
+                provider
+            } else {
+                account
+            };
             let slug = format!("{provider}-{id}");
-            let app = self
-                .upsert_app("integration", &slug, label, None)
-                .await?;
+            let app = self.upsert_app("integration", &slug, label, None).await?;
             self.set_app_enabled(app.id, true).await?;
             self.set_integration_app(id, app.id).await?;
         }
@@ -1318,7 +1345,11 @@ impl TodoStore {
                 continue;
             };
             let recipe_id = record.first().and_then(|v| v.to_i64()).unwrap_or(0) as u64;
-            let slug = record.get(1).and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let slug = record
+                .get(1)
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
             let raw = record.get(2).and_then(|v| v.as_str()).unwrap_or("");
             let Ok(value) = serde_json::from_str::<serde_json::Value>(raw) else {
                 continue;
@@ -1345,13 +1376,9 @@ impl TodoStore {
     pub async fn check_managed_integrity(&mut self) -> QueryResult<ManagedIntegrityReport> {
         Ok(ManagedIntegrityReport {
             orphaned_tag_owners: self.orphaned_owners("tags", "managed_by").await?,
-            orphaned_section_owners: self
-                .orphaned_owners("tag_sections", "managed_by")
-                .await?,
+            orphaned_section_owners: self.orphaned_owners("tag_sections", "managed_by").await?,
             orphaned_task_owners: self.orphaned_owners("tasks", "managed_by").await?,
-            orphaned_recipe_apps: self
-                .orphaned_owners("workflow_recipes", "app_id")
-                .await?,
+            orphaned_recipe_apps: self.orphaned_owners("workflow_recipes", "app_id").await?,
             orphaned_integration_apps: self.orphaned_owners("integrations", "app_id").await?,
             dangling_binding_apps: self.dangling_bindings("app_id", "apps").await?,
             dangling_binding_tags: self.dangling_bindings("tag_id", "tags").await?,
@@ -1451,9 +1478,7 @@ mod tests {
         assert_eq!(travel.kind, "recipe");
         assert!(!travel.enabled);
         // Upsert refreshes the label without duplicating.
-        let again = store
-            .upsert_app("recipe", "travel", "Travel", None)
-            .await?;
+        let again = store.upsert_app("recipe", "travel", "Travel", None).await?;
         assert_eq!(again.id, travel.id);
         // The builtin demo app also exists; the travel upsert did not
         // duplicate.
@@ -1486,7 +1511,9 @@ mod tests {
         store.detach_app_from_tag(app.id, tag.id).await?;
 
         // …and not once it backs a directory, even without a `project:` name.
-        store.add_tag_dir(tag.id, "/tmp/binding/api".to_string()).await?;
+        store
+            .add_tag_dir(tag.id, "/tmp/binding/api".to_string())
+            .await?;
         assert!(
             store
                 .attach_app_to_tag(app.id, tag.id, BindingRole::Partial, false)
@@ -1575,11 +1602,19 @@ mod tests {
         store.set_binding_capture(app.id, tag.id, true).await?;
         assert!(store.bindings_for_tag(tag.id).await?[0].capture_new_tasks);
         // The role is untouched by a capture flip.
-        assert_eq!(store.bindings_for_tag(tag.id).await?[0].role, BindingRole::Partial);
+        assert_eq!(
+            store.bindings_for_tag(tag.id).await?[0].role,
+            BindingRole::Partial
+        );
 
         // A stale UI cannot flip capture on a tag the app is not on.
         let other = store.create_tag("Home").await?;
-        assert!(store.set_binding_capture(app.id, other.id, true).await.is_err());
+        assert!(
+            store
+                .set_binding_capture(app.id, other.id, true)
+                .await
+                .is_err()
+        );
         Ok(())
     }
 
@@ -1702,7 +1737,9 @@ mod tests {
     #[tokio::test]
     async fn test_remote_edit_unlocks_and_spares() -> anyhow::Result<()> {
         let mut store = TodoStore::for_test().await?;
-        let app = store.upsert_app("integration", "todoist", "Todoist", None).await?;
+        let app = store
+            .upsert_app("integration", "todoist", "Todoist", None)
+            .await?;
         let task = store.create_task(Task::create().title("Synced")).await?;
         store
             .set_task_managed(task.id, app.id, ManagedMode::Managed, false)
@@ -1728,10 +1765,7 @@ mod tests {
 
         let section = store.add_tag_section(tag.id, "Pack".to_string()).await?;
         let section_tag = store
-            .create_tag_with_display_name(
-                format!("{}:pack", tag.name),
-                Some("Pack".to_string()),
-            )
+            .create_tag_with_display_name(format!("{}:pack", tag.name), Some("Pack".to_string()))
             .await?;
         store.add_tag_implication(section_tag.id, tag.id).await?;
         store

@@ -12,8 +12,8 @@ pub mod tag;
 pub mod tag_settings;
 pub mod task;
 pub mod task_extra;
-pub mod todoist;
 pub mod testing;
+pub mod todoist;
 pub mod tracing_setup;
 pub mod trip;
 pub mod workflow;
@@ -46,14 +46,14 @@ pub mod prelude {
     pub use crate::repeat::RepeatTaskTemplate;
     pub use crate::tag::{Tag, TagId, TagNode, TagTreeNode, TagTreeRow};
     pub use crate::tag_settings::{SyncTarget, TagSection, TagSettings};
-    pub use crate::todoist::SyncSummary;
     pub use crate::task::{Task, TaskWithMeta, factors_between};
     pub use crate::task_extra::{CODING_NAMESPACE, SPEC_KEY, TaskExtra};
+    pub use crate::todoist::SyncSummary;
     pub use crate::workflow::{
-        CODING_PHASES, CoverageSummary, RECIPE_ROLES, Recipe, RecipeEdge, RecipeMeta, RecipeNode,
-        RUN_NOTES_KEY, STEP_ROLE, RunNote, RunStepView, RunView, SubtaskCoverage, SubtaskSpecInput,
-        WorkflowRecipe, WorkflowRun, coding_recipes, coverage_summary, is_step, issue_branch_name,
-        issue_branch_slug, normalize_branch_name, run_notes, subtask_coverage,
+        CODING_PHASES, CoverageSummary, RECIPE_ROLES, RUN_NOTES_KEY, Recipe, RecipeEdge,
+        RecipeMeta, RecipeNode, RunNote, RunStepView, RunView, STEP_ROLE, SubtaskCoverage,
+        SubtaskSpecInput, WorkflowRecipe, WorkflowRun, coding_recipes, coverage_summary, is_step,
+        issue_branch_name, issue_branch_slug, normalize_branch_name, run_notes, subtask_coverage,
     };
     pub use crate::{StorageConfig, TodoStore};
     pub use toasty::Deferred;

@@ -101,12 +101,7 @@ impl SyncOpLogEntry {
     }
 
     /// A push that landed.
-    pub fn delivered(
-        provider: &str,
-        task_id: u64,
-        kind: &str,
-        payload: serde_json::Value,
-    ) -> Self {
+    pub fn delivered(provider: &str, task_id: u64, kind: &str, payload: serde_json::Value) -> Self {
         Self::new(provider, Some(task_id), kind, payload, SYNC_OP_OK, None)
     }
 
@@ -132,12 +127,7 @@ impl SyncOpLogEntry {
     /// that no longer binds a repo — recorded so it stops being retried. The
     /// reason lands in the payload, because the push did not fail: it was not
     /// needed.
-    pub fn settled(
-        provider: &str,
-        task_id: u64,
-        kind: &str,
-        reason: &str,
-    ) -> Self {
+    pub fn settled(provider: &str, task_id: u64, kind: &str, reason: &str) -> Self {
         Self::new(
             provider,
             Some(task_id),
@@ -235,9 +225,7 @@ impl TodoStore {
                 let mut chars = provider.chars();
                 match chars.next() {
                     None => String::new(),
-                    Some(first) => {
-                        first.to_uppercase().collect::<String>() + chars.as_str()
-                    }
+                    Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
                 }
             });
         let app = self
@@ -262,10 +250,9 @@ impl TodoStore {
                 context: "last insert id",
             })?;
         match rows.first() {
-            Some(toasty::stmt::Value::Record(record)) => Ok(record
-                .first()
-                .and_then(|v| v.to_i64())
-                .unwrap_or(0) as u64),
+            Some(toasty::stmt::Value::Record(record)) => {
+                Ok(record.first().and_then(|v| v.to_i64()).unwrap_or(0) as u64)
+            }
             _ => Ok(0),
         }
     }
@@ -313,15 +300,13 @@ impl TodoStore {
 
     pub async fn delete_integration(&mut self, integration_id: u64) -> QueryResult<()> {
         for table in ["external_task_links", "external_tag_links", "sync_state"] {
-            toasty::sql::statement(format!(
-                "DELETE FROM {table} WHERE integration_id = ?1"
-            ))
-            .bind(integration_id as i64)
-            .exec(&mut self.db)
-            .await
-            .context(crate::error::QueryTagsSnafu {
-                context: "delete integration links",
-            })?;
+            toasty::sql::statement(format!("DELETE FROM {table} WHERE integration_id = ?1"))
+                .bind(integration_id as i64)
+                .exec(&mut self.db)
+                .await
+                .context(crate::error::QueryTagsSnafu {
+                    context: "delete integration links",
+                })?;
         }
         // The integration's app goes with it: its capture bindings would
         // otherwise keep marking new tasks as owned by an app that no
@@ -359,7 +344,11 @@ impl TodoStore {
         .bind(integration_id as i64)
         .bind(external_id)
         .bind(task_id as i64)
-        .bind(external_updated_at.map(|t| t.to_string()).unwrap_or_default())
+        .bind(
+            external_updated_at
+                .map(|t| t.to_string())
+                .unwrap_or_default(),
+        )
         .exec(&mut self.db)
         .await
         .context(crate::error::QueryTagsSnafu {
@@ -837,7 +826,10 @@ impl TodoStore {
     /// A task that failed and then succeeded is not behind — the later row is
     /// what its state is — while a task whose last push failed is, whichever
     /// operation that was.
-    pub async fn sync_op_log_backlog(&mut self, provider: &str) -> QueryResult<Vec<SyncOpLogEntry>> {
+    pub async fn sync_op_log_backlog(
+        &mut self,
+        provider: &str,
+    ) -> QueryResult<Vec<SyncOpLogEntry>> {
         let mut entries = self.sync_op_log_rows(provider).await?;
         entries.sort_by_key(|(id, _)| *id);
         let mut backlog: std::collections::HashMap<u64, SyncOpLogEntry> =
@@ -945,12 +937,8 @@ mod tests {
         let second = storage.create_integration("todoist", None).await?;
         let task = storage.create_task(Task::create().title("Synced")).await?;
 
-        storage
-            .link_task(first.id, "ext-1", task.id, None)
-            .await?;
-        storage
-            .link_task(second.id, "ext-9", task.id, None)
-            .await?;
+        storage.link_task(first.id, "ext-1", task.id, None).await?;
+        storage.link_task(second.id, "ext-9", task.id, None).await?;
 
         let links = storage.task_links_for_task(task.id).await?;
         assert_eq!(links.len(), 2);
@@ -966,7 +954,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_deleting_an_integration_releases_its_capture_bindings() -> anyhow::Result<()> {        let mut storage = TodoStore::for_test().await?;
+    async fn test_deleting_an_integration_releases_its_capture_bindings() -> anyhow::Result<()> {
+        let mut storage = TodoStore::for_test().await?;
         let integration = storage.create_integration("todoist", None).await?;
         let app = storage
             .app_for_integration(integration.id)
@@ -1014,15 +1003,18 @@ mod tests {
             .record_watermark(integration.id, "proj-1", "w1")
             .await?;
         assert_eq!(
-            storage.watermark(integration.id, "proj-1").await?.as_deref(),
+            storage
+                .watermark(integration.id, "proj-1")
+                .await?
+                .as_deref(),
             Some("w1")
         );
         Ok(())
     }
 
     #[tokio::test]
-    async fn test_disabling_an_integration_clears_pairings_but_keeps_history(
-    ) -> anyhow::Result<()> {
+    async fn test_disabling_an_integration_clears_pairings_but_keeps_history() -> anyhow::Result<()>
+    {
         let mut storage = TodoStore::for_test().await?;
         let integration = storage.create_integration("todoist", None).await?;
         let app = storage
@@ -1042,10 +1034,7 @@ mod tests {
 
         assert!(storage.tag_link(integration.id, "proj-1").await?.is_none());
         assert!(
-            storage
-                .task_link(integration.id, "ext-1")
-                .await?
-                .is_some(),
+            storage.task_link(integration.id, "ext-1").await?.is_some(),
             "task links stay for the history"
         );
         assert!(

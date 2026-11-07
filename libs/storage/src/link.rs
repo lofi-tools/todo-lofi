@@ -33,16 +33,15 @@ impl LinkKind {
 
 impl TodoStore {
     async fn link_graph(&mut self, kind: LinkKind) -> QueryResult<HashMap<u64, Vec<u64>>> {
-        let rows = toasty::sql::query(
-            r#"SELECT task_id, other_id FROM task_links WHERE kind = ?1"#,
-        )
-        .column_types([toasty::stmt::Type::I64, toasty::stmt::Type::I64])
-        .bind(kind.as_str())
-        .exec(&mut self.db)
-        .await
-        .context(crate::error::QueryTagsSnafu {
-            context: "load task link graph",
-        })?;
+        let rows =
+            toasty::sql::query(r#"SELECT task_id, other_id FROM task_links WHERE kind = ?1"#)
+                .column_types([toasty::stmt::Type::I64, toasty::stmt::Type::I64])
+                .bind(kind.as_str())
+                .exec(&mut self.db)
+                .await
+                .context(crate::error::QueryTagsSnafu {
+                    context: "load task link graph",
+                })?;
 
         let mut graph: HashMap<u64, Vec<u64>> = HashMap::new();
         for row in rows {
@@ -84,7 +83,10 @@ impl TodoStore {
     }
 
     async fn add_link(&mut self, task_id: u64, other_id: u64, kind: LinkKind) -> QueryResult<()> {
-        if self.link_would_create_cycle(task_id, other_id, kind).await? {
+        if self
+            .link_would_create_cycle(task_id, other_id, kind)
+            .await?
+        {
             return crate::error::LinkCycleSnafu {
                 task_id,
                 other_id,
@@ -101,14 +103,16 @@ impl TodoStore {
         .bind(kind.as_str())
         .exec(&mut self.db)
         .await
-        .context(crate::error::AddTaskLinkSnafu {
-            task_id,
-            other_id,
-        })?;
+        .context(crate::error::AddTaskLinkSnafu { task_id, other_id })?;
         Ok(())
     }
 
-    async fn remove_link(&mut self, task_id: u64, other_id: u64, kind: LinkKind) -> QueryResult<()> {
+    async fn remove_link(
+        &mut self,
+        task_id: u64,
+        other_id: u64,
+        kind: LinkKind,
+    ) -> QueryResult<()> {
         toasty::sql::statement(
             r#"DELETE FROM task_links WHERE task_id = ?1 AND other_id = ?2 AND kind = ?3"#,
         )
@@ -117,10 +121,7 @@ impl TodoStore {
         .bind(kind.as_str())
         .exec(&mut self.db)
         .await
-        .context(crate::error::RemoveTaskLinkSnafu {
-            task_id,
-            other_id,
-        })?;
+        .context(crate::error::RemoveTaskLinkSnafu { task_id, other_id })?;
         Ok(())
     }
 
@@ -269,7 +270,10 @@ impl TodoStore {
 
     /// Load task metadata for every id in `ids`, one query per id but
     /// shared by the two map helpers below.
-    async fn load_meta_map(&mut self, ids: &[u64]) -> QueryResult<HashMap<u64, crate::TaskWithMeta>> {
+    async fn load_meta_map(
+        &mut self,
+        ids: &[u64],
+    ) -> QueryResult<HashMap<u64, crate::TaskWithMeta>> {
         let mut map = HashMap::with_capacity(ids.len());
         for &id in ids {
             map.insert(id, self.get_task_with_meta(id).await?);
@@ -415,25 +419,23 @@ impl TodoStore {
 
     /// Candidates that may become blockers of `task_id`: every task except
     /// itself, its current blockers, and tasks that would close a cycle.
-    pub async fn blocker_candidates(
-        &mut self,
-        task_id: u64,
-    ) -> QueryResult<Vec<crate::Task>> {
+    pub async fn blocker_candidates(&mut self, task_id: u64) -> QueryResult<Vec<crate::Task>> {
         self.link_candidates(task_id, LinkKind::BlockedBy).await
     }
 
     /// Candidates that may be linked "after" `task_id`: every task except
     /// itself, its current after links, and tasks that would close a cycle.
-    pub async fn after_candidates(
-        &mut self,
-        task_id: u64,
-    ) -> QueryResult<Vec<crate::Task>> {
+    pub async fn after_candidates(&mut self, task_id: u64) -> QueryResult<Vec<crate::Task>> {
         self.link_candidates(task_id, LinkKind::After).await
     }
 
     /// Candidates that may be linked from `task_id` with `kind`: every task
     /// except itself, its current links, and tasks that would close a cycle.
-    async fn link_candidates(&mut self, task_id: u64, kind: LinkKind) -> QueryResult<Vec<crate::Task>> {
+    async fn link_candidates(
+        &mut self,
+        task_id: u64,
+        kind: LinkKind,
+    ) -> QueryResult<Vec<crate::Task>> {
         let current: HashSet<u64> = self.linked_ids(task_id, kind).await?.into_iter().collect();
         let tasks = self.list_tasks().await?;
         let graph = self.link_graph(kind).await?;
@@ -493,11 +495,7 @@ impl TodoStore {
         Ok(())
     }
 
-    pub async fn update_deadline(
-        &mut self,
-        id: u64,
-        deadline: Option<u64>,
-    ) -> QueryResult<()> {
+    pub async fn update_deadline(&mut self, id: u64, deadline: Option<u64>) -> QueryResult<()> {
         self.guard_and_mark_modified(id).await?;
         crate::Task::update_by_id(id)
             .deadline(deadline)

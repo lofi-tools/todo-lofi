@@ -95,7 +95,6 @@ pub struct SyncReplaySummary {
     pub settled: usize,
 }
 
-
 /// What one label push did.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct LabelMirror {
@@ -120,13 +119,9 @@ fn label_push_log_entry(
     let payload = serde_json::json!({ "labels": labels });
     match error {
         None => crate::SyncOpLogEntry::delivered("github", task_id, SYNC_OP_LABELS, payload),
-        Some(error) => crate::SyncOpLogEntry::failed(
-            "github",
-            Some(task_id),
-            SYNC_OP_LABELS,
-            payload,
-            error,
-        ),
+        Some(error) => {
+            crate::SyncOpLogEntry::failed("github", Some(task_id), SYNC_OP_LABELS, payload, error)
+        }
     }
 }
 
@@ -525,7 +520,11 @@ impl TodoStore {
         .bind(integration_id as i64)
         .bind(external_id)
         .bind(task_id as i64)
-        .bind(external_updated_at.map(|t| t.to_string()).unwrap_or_default())
+        .bind(
+            external_updated_at
+                .map(|t| t.to_string())
+                .unwrap_or_default(),
+        )
         .bind(state)
         .exec(&mut self.db)
         .await
@@ -682,19 +681,13 @@ impl TodoStore {
         .context(crate::error::QueryTagsSnafu {
             context: "load last sync",
         })?;
-        Ok(rows
-            .into_iter()
-            .next()
-            .and_then(|row| match row {
-                toasty::stmt::Value::Record(record) => record_timestamp(&record, 0),
-                _ => None,
-            }))
+        Ok(rows.into_iter().next().and_then(|row| match row {
+            toasty::stmt::Value::Record(record) => record_timestamp(&record, 0),
+            _ => None,
+        }))
     }
 
-    pub async fn insert_run_worktree(
-        &mut self,
-        worktree: &NewRunWorktree,
-    ) -> QueryResult<u64> {
+    pub async fn insert_run_worktree(&mut self, worktree: &NewRunWorktree) -> QueryResult<u64> {
         toasty::sql::statement(
             r#"INSERT INTO run_worktrees
                (run_id, repo_dir, worktree_path, branch, base_branch, remote, created_at)
@@ -793,16 +786,14 @@ impl TodoStore {
     }
 
     pub async fn mark_run_worktree_removed(&mut self, id: u64) -> QueryResult<()> {
-        toasty::sql::statement(
-            r#"UPDATE run_worktrees SET removed_at = ?1 WHERE id = ?2"#,
-        )
-        .bind(jiff::Timestamp::now().to_string())
-        .bind(id as i64)
-        .exec(&mut self.db)
-        .await
-        .context(crate::error::QueryTagsSnafu {
-            context: "mark run worktree removed",
-        })?;
+        toasty::sql::statement(r#"UPDATE run_worktrees SET removed_at = ?1 WHERE id = ?2"#)
+            .bind(jiff::Timestamp::now().to_string())
+            .bind(id as i64)
+            .exec(&mut self.db)
+            .await
+            .context(crate::error::QueryTagsSnafu {
+                context: "mark run worktree removed",
+            })?;
         Ok(())
     }
 
@@ -898,7 +889,10 @@ impl TodoStore {
             .context(crate::error::QueryTagsSnafu {
                 context: "list run pull requests",
             })?;
-        Ok(rows.into_iter().filter_map(parse_run_pull_request).collect())
+        Ok(rows
+            .into_iter()
+            .filter_map(parse_run_pull_request)
+            .collect())
     }
 
     /// Every pull request row, whatever its state.
@@ -910,7 +904,10 @@ impl TodoStore {
             .context(crate::error::QueryTagsSnafu {
                 context: "list all run pull requests",
             })?;
-        Ok(rows.into_iter().filter_map(parse_run_pull_request).collect())
+        Ok(rows
+            .into_iter()
+            .filter_map(parse_run_pull_request)
+            .collect())
     }
 
     /// One pull request row by id.
@@ -1009,10 +1006,7 @@ pub struct IssuePatch {
 
 impl IssuePatch {
     pub fn is_empty(&self) -> bool {
-        self.title.is_none()
-            && self.body.is_none()
-            && self.state.is_none()
-            && self.labels.is_none()
+        self.title.is_none() && self.body.is_none() && self.state.is_none() && self.labels.is_none()
     }
 }
 
@@ -1200,7 +1194,10 @@ pub fn remote_issue_from_json(value: &serde_json::Value) -> Option<RemoteIssue> 
             .unwrap_or_default()
     };
     Some(RemoteIssue {
-        id: value.get("id").and_then(|id| id.as_u64()).unwrap_or_default(),
+        id: value
+            .get("id")
+            .and_then(|id| id.as_u64())
+            .unwrap_or_default(),
         number,
         title: value
             .get("title")
@@ -1343,30 +1340,88 @@ pub fn remote_pull_request_from_json(value: &serde_json::Value) -> Option<Remote
 /// Conventional-commit types stripped from a generated PR title: they are
 /// exactly what the repo's PR convention forbids (decision 36).
 const CONVENTIONAL_TYPES: &[&str] = &[
-    "fix", "feat", "feature", "chore", "docs", "doc", "refactor", "test", "tests", "ci",
-    "build", "perf", "style", "revert", "wip",
+    "fix", "feat", "feature", "chore", "docs", "doc", "refactor", "test", "tests", "ci", "build",
+    "perf", "style", "revert", "wip",
 ];
 
 /// Leading imperative verbs dropped before a release-notes bullet, so the
 /// bullet does not read "Added add …".
 const LEADING_VERBS: &[&str] = &[
-    "add", "adds", "fix", "fixes", "support", "supports", "implement", "implements", "update",
-    "updates", "improve", "improves", "enable", "enables", "create", "creates", "remove",
-    "removes", "refactor", "document", "documents", "rename", "renames", "make", "makes",
-    "allow", "allows", "handle", "handles",
+    "add",
+    "adds",
+    "fix",
+    "fixes",
+    "support",
+    "supports",
+    "implement",
+    "implements",
+    "update",
+    "updates",
+    "improve",
+    "improves",
+    "enable",
+    "enables",
+    "create",
+    "creates",
+    "remove",
+    "removes",
+    "refactor",
+    "document",
+    "documents",
+    "rename",
+    "renames",
+    "make",
+    "makes",
+    "allow",
+    "allows",
+    "handle",
+    "handles",
 ];
 
 /// Words that mean a change is not user-facing, so its release note is `N/A`.
 const NON_USER_FACING_WORDS: &[&str] = &[
-    "docs", "documentation", "readme", "test", "tests", "testing", "refactor", "refactoring",
-    "chore", "ci", "internal", "cleanup", "lint", "linting", "typo", "typos", "comment",
-    "comments", "formatting", "rename", "renames",
+    "docs",
+    "documentation",
+    "readme",
+    "test",
+    "tests",
+    "testing",
+    "refactor",
+    "refactoring",
+    "chore",
+    "ci",
+    "internal",
+    "cleanup",
+    "lint",
+    "linting",
+    "typo",
+    "typos",
+    "comment",
+    "comments",
+    "formatting",
+    "rename",
+    "renames",
 ];
 
 /// Words that mean a change fixes something, so its release note is `Fixed`.
 const FIX_WORDS: &[&str] = &[
-    "fix", "fixes", "fixed", "bug", "bugs", "broken", "crash", "crashes", "regression",
-    "regressions", "error", "errors", "incorrect", "wrong", "fails", "failing", "failure",
+    "fix",
+    "fixes",
+    "fixed",
+    "bug",
+    "bugs",
+    "broken",
+    "crash",
+    "crashes",
+    "regression",
+    "regressions",
+    "error",
+    "errors",
+    "incorrect",
+    "wrong",
+    "fails",
+    "failing",
+    "failure",
 ];
 
 /// Shape a title the way the repo's PR convention asks (decision 36):
@@ -1374,10 +1429,7 @@ const FIX_WORDS: &[&str] = &[
 /// punctuation, and short enough to read. A `scope:` prefix that is not a
 /// conventional type is kept, since that is the crate name.
 pub fn format_pull_request_title(raw: &str) -> String {
-    let collapsed = raw
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ");
+    let collapsed = raw.split_whitespace().collect::<Vec<_>>().join(" ");
     let mut title = collapsed.trim().to_string();
     if let Some((head, rest)) = title.split_once(':') {
         let head = head.trim();
@@ -1396,7 +1448,10 @@ pub fn format_pull_request_title(raw: &str) -> String {
             };
         }
     }
-    title = title.trim_end_matches(['.', ',', ';', ':']).trim().to_string();
+    title = title
+        .trim_end_matches(['.', ',', ';', ':'])
+        .trim()
+        .to_string();
     // A kept `scope: subject` keeps the scope exactly as written (it is a crate
     // name, so lower case matters) and capitalizes the imperative subject.
     title = match title.split_once(": ") {
@@ -1413,7 +1468,9 @@ pub fn format_pull_request_title(raw: &str) -> String {
 fn capitalize_first(text: &str) -> String {
     let mut chars = text.chars();
     match chars.next() {
-        Some(first) if first.is_lowercase() => first.to_uppercase().collect::<String>() + chars.as_str(),
+        Some(first) if first.is_lowercase() => {
+            first.to_uppercase().collect::<String>() + chars.as_str()
+        }
         _ => text.to_string(),
     }
 }
@@ -1474,7 +1531,9 @@ fn strip_leading_verb(subject: &str) -> String {
 fn lower_first(text: &str) -> String {
     let mut chars = text.chars();
     match chars.next() {
-        Some(first) if first.is_uppercase() => first.to_lowercase().collect::<String>() + chars.as_str(),
+        Some(first) if first.is_uppercase() => {
+            first.to_lowercase().collect::<String>() + chars.as_str()
+        }
         _ => text.to_string(),
     }
 }
@@ -1625,7 +1684,9 @@ pub trait GithubClient {
 
     /// Every repository the account can reach, most recently pushed first:
     /// what the tag settings binding picker offers (§5.3).
-    fn list_repos(&self) -> impl std::future::Future<Output = anyhow::Result<Vec<RemoteRepo>>> + Send + '_;
+    fn list_repos(
+        &self,
+    ) -> impl std::future::Future<Output = anyhow::Result<Vec<RemoteRepo>>> + Send + '_;
 
     /// Create the label unless it already exists. The app never deletes or
     /// renames label objects (decision 27).
@@ -1901,7 +1962,9 @@ impl GithubClient for GithubHttpClient {
         }
     }
 
-    fn list_repos(&self) -> impl std::future::Future<Output = anyhow::Result<Vec<RemoteRepo>>> + Send + '_ {
+    fn list_repos(
+        &self,
+    ) -> impl std::future::Future<Output = anyhow::Result<Vec<RemoteRepo>>> + Send + '_ {
         async move {
             // Most recently pushed first, so the repos the user actually works
             // in are the first rows of the picker.
@@ -2027,9 +2090,8 @@ impl GithubClient for GithubHttpClient {
             let path = format!("/repos/{owner}/{repo}/issues/{number}");
             let response = self.send(self.request(reqwest::Method::GET, &path)).await?;
             let body = self.json(response, "issue").await?;
-            remote_issue_from_json(&body).ok_or_else(|| {
-                anyhow::anyhow!("GitHub did not describe issue #{number}: {body}")
-            })
+            remote_issue_from_json(&body)
+                .ok_or_else(|| anyhow::anyhow!("GitHub did not describe issue #{number}: {body}"))
         }
     }
 
@@ -2103,7 +2165,8 @@ impl GithubClient for GithubHttpClient {
         owner: &'a str,
         repo: &'a str,
         head_branch: &'a str,
-    ) -> impl std::future::Future<Output = anyhow::Result<Option<RemotePullRequest>>> + Send + 'a {
+    ) -> impl std::future::Future<Output = anyhow::Result<Option<RemotePullRequest>>> + Send + 'a
+    {
         async move {
             // `head` is `<owner>:<branch>`; the query is for any state so an
             // already-merged branch is adopted rather than reopened.
@@ -2322,32 +2385,34 @@ impl GithubHttpClient {
     /// POST a JSON body where only success matters. The body is read so the
     /// connection is released, and a read failure is reported rather than
     /// swallowed.
-    async fn post_json(
-        &self,
-        path: &str,
-        body: serde_json::Value,
-    ) -> anyhow::Result<()> {
+    async fn post_json(&self, path: &str, body: serde_json::Value) -> anyhow::Result<()> {
         let response = self
             .send(self.request(reqwest::Method::POST, path).json(&body))
             .await?;
-        response
-            .bytes()
-            .await
-            .map_err(|e| {
-                anyhow::Error::new(SyncFailure::Transient {
-                    message: format!("GitHub response could not be read: {e}"),
-                    retry_after: None,
-                })
-            })?;
+        response.bytes().await.map_err(|e| {
+            anyhow::Error::new(SyncFailure::Transient {
+                message: format!("GitHub response could not be read: {e}"),
+                retry_after: None,
+            })
+        })?;
         Ok(())
     }
 }
 
 fn next_link(response: &reqwest::Response) -> Option<String> {
-    let header = response.headers().get(reqwest::header::LINK)?.to_str().ok()?;
+    let header = response
+        .headers()
+        .get(reqwest::header::LINK)?
+        .to_str()
+        .ok()?;
     header.split(',').find_map(|part| {
         let part = part.trim();
-        let url = part.split(';').next()?.trim().trim_start_matches('<').trim_end_matches('>');
+        let url = part
+            .split(';')
+            .next()?
+            .trim()
+            .trim_start_matches('<')
+            .trim_end_matches('>');
         part.contains("rel=\"next\"").then(|| url.to_string())
     })
 }
@@ -2548,9 +2613,13 @@ impl TodoStore {
         repo: &str,
     ) -> QueryResult<()> {
         self.unlink_tag(integration_id, repo).await?;
-        let pointed_here = self.tag_settings(tag_id).await?.sync_target.is_some_and(
-            |target| target.integration_id == integration_id && target.external_id == repo,
-        );
+        let pointed_here = self
+            .tag_settings(tag_id)
+            .await?
+            .sync_target
+            .is_some_and(|target| {
+                target.integration_id == integration_id && target.external_id == repo
+            });
         if !pointed_here {
             return Ok(());
         }
@@ -2591,7 +2660,8 @@ impl TodoStore {
                     .await?
             }
         };
-        self.bind_repo_tag(tag.id, integration_id, owner, repo).await?;
+        self.bind_repo_tag(tag.id, integration_id, owner, repo)
+            .await?;
         Ok(tag.id)
     }
 
@@ -2660,7 +2730,12 @@ impl TodoStore {
         }
         for tag in self.get_direct_task_tags(task_id).await? {
             let mut chain = vec![tag.id];
-            chain.extend(self.get_parents(tag.id).await?.into_iter().map(|tag| tag.id));
+            chain.extend(
+                self.get_parents(tag.id)
+                    .await?
+                    .into_iter()
+                    .map(|tag| tag.id),
+            );
             for tag_id in chain {
                 // The tag's own binding first: detection persists it there
                 // (§5.3), so it is the common case and needs no link scan.
@@ -2876,8 +2951,14 @@ impl TodoStore {
             .await?;
         let external_id = issue_external_id(&owner, &repo, issue.number);
         let state = issue_state_for(&issue);
-        self.link_issue(integration_id, &external_id, task_id, &state, issue.updated_at)
-            .await?;
+        self.link_issue(
+            integration_id,
+            &external_id,
+            task_id,
+            &state,
+            issue.updated_at,
+        )
+        .await?;
         if let Some((_, parent_issue)) = &parent {
             self.attach_sub_issue(client, parent_issue, task_id).await?;
         }
@@ -3039,7 +3120,10 @@ impl TodoStore {
             {
                 continue;
             }
-            let Some(stored) = self.issue_link(link.integration_id, &link.external_id).await? else {
+            let Some(stored) = self
+                .issue_link(link.integration_id, &link.external_id)
+                .await?
+            else {
                 continue;
             };
             if stored.state.tombstoned {
@@ -3184,10 +3268,18 @@ impl TodoStore {
     /// integrations' links are ignored.
     pub async fn issue_link_for_task(&mut self, task_id: u64) -> QueryResult<Option<TaskIssue>> {
         for link in self.task_links_for_task(task_id).await? {
-            if self.integration_provider(link.integration_id).await?.as_deref() != Some("github") {
+            if self
+                .integration_provider(link.integration_id)
+                .await?
+                .as_deref()
+                != Some("github")
+            {
                 continue;
             }
-            let Some(stored) = self.issue_link(link.integration_id, &link.external_id).await? else {
+            let Some(stored) = self
+                .issue_link(link.integration_id, &link.external_id)
+                .await?
+            else {
                 continue;
             };
             let Some(issue) = parse_issue_external_id(&link.external_id) else {
@@ -3205,16 +3297,20 @@ impl TodoStore {
 
     /// Record that the local side changed one mapped field, so a later pull
     /// keeps it (decision 7). No-op for tasks with no GitHub issue link.
-    pub async fn stamp_local_issue_field(
-        &mut self,
-        task_id: u64,
-        field: &str,
-    ) -> QueryResult<()> {
+    pub async fn stamp_local_issue_field(&mut self, task_id: u64, field: &str) -> QueryResult<()> {
         for link in self.task_links_for_task(task_id).await? {
-            if self.integration_provider(link.integration_id).await?.as_deref() != Some("github") {
+            if self
+                .integration_provider(link.integration_id)
+                .await?
+                .as_deref()
+                != Some("github")
+            {
                 continue;
             }
-            let Some(stored) = self.issue_link(link.integration_id, &link.external_id).await? else {
+            let Some(stored) = self
+                .issue_link(link.integration_id, &link.external_id)
+                .await?
+            else {
                 continue;
             };
             let mut state = stored.state;
@@ -3449,7 +3545,10 @@ impl TodoStore {
             if issue_ref.owner != bound.owner || issue_ref.repo != bound.repo {
                 continue;
             }
-            let Some(stored) = self.issue_link(link.integration_id, &link.external_id).await? else {
+            let Some(stored) = self
+                .issue_link(link.integration_id, &link.external_id)
+                .await?
+            else {
                 continue;
             };
             if stored.state.tombstoned {
@@ -3506,10 +3605,9 @@ impl TodoStore {
                 .await
                 .map_err(|e| match e.downcast::<SyncFailure>() {
                     Ok(failure) => anyhow::Error::new(failure),
-                    Err(other) => anyhow::anyhow!(
-                        "GitHub sync failed for {}: {other}",
-                        bound.external_id()
-                    ),
+                    Err(other) => {
+                        anyhow::anyhow!("GitHub sync failed for {}: {other}", bound.external_id())
+                    }
                 })?;
             summary.absorb(&repo_summary);
             if !completed {
@@ -3566,19 +3664,26 @@ impl TodoStore {
             if should_yield() {
                 return Ok(false);
             }
-            self.sync_github_issue(client, bound, &issue, summary).await?;
+            self.sync_github_issue(client, bound, &issue, summary)
+                .await?;
         }
 
         // Parents we recorded children under are read too: a parent whose last
         // sub-issue was removed on GitHub still has to notice.
-        for link in self.issue_links_for_integration(bound.integration_id).await? {
+        for link in self
+            .issue_links_for_integration(bound.integration_id)
+            .await?
+        {
             if link.state.tombstoned {
                 continue;
             }
             let Some(parent_external_id) = link.state.parent_issue else {
                 continue;
             };
-            if parents.iter().any(|(known, _)| known == &parent_external_id) {
+            if parents
+                .iter()
+                .any(|(known, _)| known == &parent_external_id)
+            {
                 continue;
             }
             if let Some(parent) = parse_issue_external_id(&parent_external_id)
@@ -3606,7 +3711,10 @@ impl TodoStore {
         // A missing link is only evidence of deletion when the listing was
         // the repo's complete issue set (§5.6).
         if page.complete {
-            for link in self.issue_links_for_integration(bound.integration_id).await? {
+            for link in self
+                .issue_links_for_integration(bound.integration_id)
+                .await?
+            {
                 if link.state.tombstoned || seen.contains(&link.external_id) {
                     continue;
                 }
@@ -3659,10 +3767,7 @@ impl TodoStore {
         summary: &mut GithubSyncSummary,
     ) -> anyhow::Result<()> {
         let external_id = issue_external_id(&bound.owner, &bound.repo, issue.number);
-        let Some(link) = self
-            .issue_link(bound.integration_id, &external_id)
-            .await?
-        else {
+        let Some(link) = self.issue_link(bound.integration_id, &external_id).await? else {
             // Issue scope is the repo's open issues (decision 6): a closed
             // issue that was never linked is history, not a task. A linked
             // issue that closes later still syncs, below.
@@ -3706,7 +3811,10 @@ impl TodoStore {
         in_page: &std::collections::HashSet<String>,
         summary: &mut GithubSyncSummary,
     ) -> anyhow::Result<()> {
-        let Some(parent) = self.issue_link(bound.integration_id, parent_external_id).await? else {
+        let Some(parent) = self
+            .issue_link(bound.integration_id, parent_external_id)
+            .await?
+        else {
             return Ok(());
         };
         if parent.state.tombstoned {
@@ -3730,7 +3838,8 @@ impl TodoStore {
             let child_external_id = issue_external_id(&bound.owner, &bound.repo, child.number);
             listed.insert(child_external_id.clone());
             if in_page.contains(&child_external_id) {
-                self.sync_github_issue(client, bound, child, summary).await?;
+                self.sync_github_issue(client, bound, child, summary)
+                    .await?;
             } else if self
                 .issue_link(bound.integration_id, &child_external_id)
                 .await?
@@ -4187,9 +4296,12 @@ impl TodoStore {
         if pull_requests.is_empty() {
             return Ok(false);
         }
-        Ok(pull_requests
-            .iter()
-            .all(|pull_request| matches!(pull_request.state.as_str(), PULL_REQUEST_MERGED | PULL_REQUEST_WAIVED)))
+        Ok(pull_requests.iter().all(|pull_request| {
+            matches!(
+                pull_request.state.as_str(),
+                PULL_REQUEST_MERGED | PULL_REQUEST_WAIVED
+            )
+        }))
     }
 
     /// Give up on the still-open pull requests of a run so a multi-repo run
@@ -4369,8 +4481,7 @@ mod tests {
         let parsed: IssueFieldState = serde_json::from_str(&raw).unwrap();
         assert_eq!(parsed, state);
         // Unknown/absent keys from an older row still parse.
-        let legacy: IssueFieldState =
-            serde_json::from_str(r#"{"remote":{"title":"t"}}"#).unwrap();
+        let legacy: IssueFieldState = serde_json::from_str(r#"{"remote":{"title":"t"}}"#).unwrap();
         assert_eq!(legacy.remote.title, "t");
         assert!(legacy.local_changed_at.is_empty());
     }
@@ -4378,7 +4489,9 @@ mod tests {
     #[tokio::test]
     async fn issue_links_carry_their_merge_state() -> anyhow::Result<()> {
         let mut storage = TodoStore::for_test().await?;
-        let integration = storage.create_integration("github", Some("me".to_string())).await?;
+        let integration = storage
+            .create_integration("github", Some("me".to_string()))
+            .await?;
         let task = storage.create_task(Task::create().title("Issue")).await?;
         let external_id = issue_external_id("lofi-tools", "taskstream", 7);
 
@@ -4395,11 +4508,17 @@ mod tests {
             )
             .await?;
 
-        let link = storage.issue_link(integration.id, &external_id).await?.unwrap();
+        let link = storage
+            .issue_link(integration.id, &external_id)
+            .await?
+            .unwrap();
         assert_eq!(link.task_id, task.id);
         assert_eq!(link.state.remote.title, "Fix login");
         assert_eq!(link.state.local_changed_at.get("body"), Some(&120));
-        assert_eq!(link.external_updated_at.and_then(|t| Some(t.as_second())), Some(100));
+        assert_eq!(
+            link.external_updated_at.and_then(|t| Some(t.as_second())),
+            Some(100)
+        );
 
         // Re-linking updates in place instead of duplicating.
         let mut updated = state.clone();
@@ -4530,7 +4649,12 @@ mod tests {
         // Only open PRs are polled.
         assert_eq!(storage.open_run_pull_requests().await?.len(), 1);
         storage
-            .update_run_pull_request(id, PULL_REQUEST_MERGED, false, jiff::Timestamp::from_second(2000).ok())
+            .update_run_pull_request(
+                id,
+                PULL_REQUEST_MERGED,
+                false,
+                jiff::Timestamp::from_second(2000).ok(),
+            )
             .await?;
         assert!(storage.open_run_pull_requests().await?.is_empty());
         let merged = &storage.run_pull_requests(9).await?[0];
@@ -4564,8 +4688,7 @@ mod tests {
         fail_labels: std::sync::atomic::AtomicBool,
         /// `(repo, head_branch, pull request)`, so `find_pull_request` works
         /// the way GitHub's `head=` filter does.
-        pull_requests:
-            std::sync::Mutex<Vec<(String, String, RemotePullRequest)>>,
+        pull_requests: std::sync::Mutex<Vec<(String, String, RemotePullRequest)>>,
         created_pull_requests: std::sync::Mutex<Vec<(String, NewPullRequest)>>,
         ready_pull_requests: std::sync::Mutex<Vec<u64>>,
         pull_request_labels: std::sync::Mutex<Vec<(u64, Vec<String>)>>,
@@ -4627,7 +4750,13 @@ mod tests {
         /// The same, for a sub-issue that lives in another repo of the same
         /// owner: GitHub allows it, and its number means nothing in the
         /// parent's repo.
-        fn with_sub_issue_from(self, repo: &str, parent: u64, child_repo: &str, child: u64) -> Self {
+        fn with_sub_issue_from(
+            self,
+            repo: &str,
+            parent: u64,
+            child_repo: &str,
+            child: u64,
+        ) -> Self {
             if let Some(issues) = self.issues.lock().expect("issues lock").get_mut(repo)
                 && let Some(issue) = issues.iter_mut().find(|issue| issue.number == parent)
             {
@@ -4659,12 +4788,11 @@ mod tests {
         /// Un-parent a sub-issue the way the GitHub UI does: the relationship
         /// goes and the parent's summary drops with it.
         fn remove_sub_issue(&self, repo: &str, parent: u64, child: u64) {
-            self.sub_issues
-                .lock()
-                .expect("sub-issues lock")
-                .retain(|(slug, number, _, sub_issue)| {
+            self.sub_issues.lock().expect("sub-issues lock").retain(
+                |(slug, number, _, sub_issue)| {
                     !(slug == repo && *number == parent && *sub_issue == child)
-                });
+                },
+            );
             if let Some(issues) = self.issues.lock().expect("issues lock").get_mut(repo)
                 && let Some(issue) = issues.iter_mut().find(|issue| issue.number == parent)
             {
@@ -4677,10 +4805,7 @@ mod tests {
         }
 
         fn removed_labels(&self) -> Vec<(u64, String)> {
-            self.removed_labels
-                .lock()
-                .expect("removed labels")
-                .clone()
+            self.removed_labels.lock().expect("removed labels").clone()
         }
 
         /// The labels the issue carries right now, as the fake's own state.
@@ -4772,7 +4897,8 @@ mod tests {
 
         fn list_repos(
             &self,
-        ) -> impl std::future::Future<Output = anyhow::Result<Vec<RemoteRepo>>> + Send + '_ {
+        ) -> impl std::future::Future<Output = anyhow::Result<Vec<RemoteRepo>>> + Send + '_
+        {
             async move { Ok(self.repos.lock().expect("repos lock").clone()) }
         }
 
@@ -4781,7 +4907,8 @@ mod tests {
             owner: &'a str,
             repo: &'a str,
             number: u64,
-        ) -> impl std::future::Future<Output = anyhow::Result<Vec<ExternalComment>>> + Send + 'a {
+        ) -> impl std::future::Future<Output = anyhow::Result<Vec<ExternalComment>>> + Send + 'a
+        {
             async move {
                 Ok(self
                     .comments
@@ -4801,11 +4928,10 @@ mod tests {
             body: &'a str,
         ) -> impl std::future::Future<Output = anyhow::Result<()>> + Send + 'a {
             async move {
-                self.posted_comments.lock().expect("posted comments lock").push((
-                    format!("{owner}/{repo}"),
-                    number,
-                    body.to_string(),
-                ));
+                self.posted_comments
+                    .lock()
+                    .expect("posted comments lock")
+                    .push((format!("{owner}/{repo}"), number, body.to_string()));
                 Ok(())
             }
         }
@@ -4819,10 +4945,11 @@ mod tests {
         ) -> impl std::future::Future<Output = anyhow::Result<RemoteIssue>> + Send + 'a {
             async move {
                 let key = format!("{owner}/{repo}");
-                self.updates
-                    .lock()
-                    .expect("updates lock")
-                    .push((key.clone(), number, patch.clone()));
+                self.updates.lock().expect("updates lock").push((
+                    key.clone(),
+                    number,
+                    patch.clone(),
+                ));
                 let mut issues = self.issues.lock().expect("issues lock");
                 let Some(issue) = issues
                     .entry(key)
@@ -4935,7 +5062,8 @@ mod tests {
             owner: &'a str,
             repo: &'a str,
             number: u64,
-        ) -> impl std::future::Future<Output = anyhow::Result<Vec<RemoteIssue>>> + Send + 'a {
+        ) -> impl std::future::Future<Output = anyhow::Result<Vec<RemoteIssue>>> + Send + 'a
+        {
             async move {
                 let key = format!("{owner}/{repo}");
                 let children = self
@@ -4973,13 +5101,13 @@ mod tests {
             name: &'a str,
         ) -> impl std::future::Future<Output = anyhow::Result<()>> + Send + 'a {
             async move {
-                if self
-                    .fail_labels
-                    .load(std::sync::atomic::Ordering::Relaxed)
-                {
+                if self.fail_labels.load(std::sync::atomic::Ordering::Relaxed) {
                     anyhow::bail!("label write refused");
                 }
-                self.labels.lock().expect("labels lock").push(name.to_string());
+                self.labels
+                    .lock()
+                    .expect("labels lock")
+                    .push(name.to_string());
                 Ok(())
             }
         }
@@ -4989,7 +5117,8 @@ mod tests {
             owner: &'a str,
             repo: &'a str,
             request: &'a NewPullRequest,
-        ) -> impl std::future::Future<Output = anyhow::Result<RemotePullRequest>> + Send + 'a {
+        ) -> impl std::future::Future<Output = anyhow::Result<RemotePullRequest>> + Send + 'a
+        {
             async move {
                 let mut counter = self.pull_request_counter.lock().expect("pr counter");
                 *counter += 1;
@@ -5022,7 +5151,8 @@ mod tests {
             owner: &'a str,
             repo: &'a str,
             head_branch: &'a str,
-        ) -> impl std::future::Future<Output = anyhow::Result<Option<RemotePullRequest>>> + Send + 'a {
+        ) -> impl std::future::Future<Output = anyhow::Result<Option<RemotePullRequest>>> + Send + 'a
+        {
             async move {
                 Ok(self
                     .pull_requests
@@ -5041,7 +5171,8 @@ mod tests {
             owner: &'a str,
             repo: &'a str,
             number: u64,
-        ) -> impl std::future::Future<Output = anyhow::Result<RemotePullRequest>> + Send + 'a {
+        ) -> impl std::future::Future<Output = anyhow::Result<RemotePullRequest>> + Send + 'a
+        {
             async move {
                 self.pull_requests
                     .lock()
@@ -5168,10 +5299,7 @@ mod tests {
         }
     }
 
-    async fn bound_store(
-        owner: &str,
-        repo: &str,
-    ) -> anyhow::Result<(TodoStore, Integration, Tag)> {
+    async fn bound_store(owner: &str, repo: &str) -> anyhow::Result<(TodoStore, Integration, Tag)> {
         let mut storage = TodoStore::for_test().await?;
         let integration = storage
             .create_integration("github", Some("me".to_string()))
@@ -5191,16 +5319,18 @@ mod tests {
         issue.url = Some("https://github.com/lofi-tools/taskstream/issues/7".to_string());
         issue.assignees = vec!["me".to_string()];
         issue.milestone = Some("v1".to_string());
-        let fake = FakeGithub::default().with_issue("lofi-tools/taskstream", issue).with_comment(
-            "lofi-tools/taskstream",
-            7,
-            ExternalComment {
-                external_id: "1".to_string(),
-                text: "me too".to_string(),
-                author: Some("someone".to_string()),
-                created_at: None,
-            },
-        );
+        let fake = FakeGithub::default()
+            .with_issue("lofi-tools/taskstream", issue)
+            .with_comment(
+                "lofi-tools/taskstream",
+                7,
+                ExternalComment {
+                    external_id: "1".to_string(),
+                    text: "me too".to_string(),
+                    author: Some("someone".to_string()),
+                    created_at: None,
+                },
+            );
 
         let summary = storage
             .sync_github_integration(&fake, integration.id, false)
@@ -5313,14 +5443,26 @@ mod tests {
         storage
             .sync_github_integration(&fake, integration.id, true)
             .await?;
-        assert!(storage.github_last_synced_at(integration.id).await?.is_some());
-        let task_id = storage.issue_link(integration.id, "o/r#1").await?.unwrap().task_id;
+        assert!(
+            storage
+                .github_last_synced_at(integration.id)
+                .await?
+                .is_some()
+        );
+        let task_id = storage
+            .issue_link(integration.id, "o/r#1")
+            .await?
+            .unwrap()
+            .task_id;
 
         assert!(storage.close_issue_for_task(&fake, task_id).await?);
         assert_eq!(fake.last_patch().state.as_deref(), Some("closed"));
         let link = storage.issue_link(integration.id, "o/r#1").await?.unwrap();
         assert!(link.state.tombstoned);
-        assert_eq!(link.state.tombstone_reason.as_deref(), Some("deleted locally"));
+        assert_eq!(
+            link.state.tombstone_reason.as_deref(),
+            Some("deleted locally")
+        );
 
         // The link outlives the row it points at, so the next pass must skip
         // it instead of looking up a task that is gone (§5.6).
@@ -5343,10 +5485,18 @@ mod tests {
         storage
             .sync_github_integration(&fake, integration.id, true)
             .await?;
-        let task_id = storage.issue_link(integration.id, "o/r#1").await?.unwrap().task_id;
+        let task_id = storage
+            .issue_link(integration.id, "o/r#1")
+            .await?
+            .unwrap()
+            .task_id;
 
         storage.update_task_done(task_id, true).await?;
-        assert!(storage.close_issue_for_completed_task(&fake, task_id).await?);
+        assert!(
+            storage
+                .close_issue_for_completed_task(&fake, task_id)
+                .await?
+        );
         assert_eq!(fake.last_patch().state.as_deref(), Some("closed"));
         assert_eq!(
             fake.posted_comments(),
@@ -5358,7 +5508,11 @@ mod tests {
         // has nothing left to close or explain.
         let link = storage.issue_link(integration.id, "o/r#1").await?.unwrap();
         assert_eq!(link.state.remote.state, "closed");
-        assert!(storage.close_issue_for_completed_task(&fake, task_id).await?);
+        assert!(
+            storage
+                .close_issue_for_completed_task(&fake, task_id)
+                .await?
+        );
         assert_eq!(fake.push_count(), 1, "the close is pushed once");
         assert_eq!(fake.posted_comments().len(), 1, "and commented once");
 
@@ -5375,10 +5529,16 @@ mod tests {
     #[tokio::test]
     async fn completing_a_task_without_an_issue_touches_nothing() -> anyhow::Result<()> {
         let (mut storage, _, _) = bound_store("o", "r").await?;
-        let task = storage.create_task(Task::create().title("Local only")).await?;
+        let task = storage
+            .create_task(Task::create().title("Local only"))
+            .await?;
         let fake = FakeGithub::default();
 
-        assert!(!storage.close_issue_for_completed_task(&fake, task.id).await?);
+        assert!(
+            !storage
+                .close_issue_for_completed_task(&fake, task.id)
+                .await?
+        );
         assert_eq!(fake.push_count(), 0);
         assert!(fake.posted_comments().is_empty());
         Ok(())
@@ -5391,10 +5551,18 @@ mod tests {
         storage
             .sync_github_integration(&fake, integration.id, false)
             .await?;
-        let task_id = storage.issue_link(integration.id, "o/r#1").await?.unwrap().task_id;
+        let task_id = storage
+            .issue_link(integration.id, "o/r#1")
+            .await?
+            .unwrap()
+            .task_id;
 
         assert!(storage.tombstone_issue_link_for_task(task_id).await?);
-        assert_eq!(fake.push_count(), 0, "nothing is pushed without a connection");
+        assert_eq!(
+            fake.push_count(),
+            0,
+            "nothing is pushed without a connection"
+        );
         storage.delete_task(task_id).await?;
         let summary = storage
             .sync_github_integration(&fake, integration.id, false)
@@ -5449,7 +5617,11 @@ mod tests {
         storage
             .sync_github_integration(&fake, integration.id, false)
             .await?;
-        let task_id = storage.issue_link(integration.id, "o/r#1").await?.unwrap().task_id;
+        let task_id = storage
+            .issue_link(integration.id, "o/r#1")
+            .await?
+            .unwrap()
+            .task_id;
 
         // A run step's task is the run's, not the issue's: a local rename
         // stays local instead of being pushed as an issue edit (§5.5). The
@@ -5526,11 +5698,18 @@ mod tests {
         let (mut storage, _, tag) = bound_store("lofi-tools", "taskstream").await?;
         let section = storage.create_tag("In progress").await?;
         storage.add_tag_implication(section.id, tag.id).await?;
-        let task = storage.create_task(Task::create().title("Add login".to_string())).await?;
+        let task = storage
+            .create_task(Task::create().title("Add login".to_string()))
+            .await?;
         storage.assign_tag_to_task(task.id, "In progress").await?;
 
         let fake = FakeGithub::default();
-        assert!(storage.push_github_new_task(&fake, task.id).await?.is_some());
+        assert!(
+            storage
+                .push_github_new_task(&fake, task.id)
+                .await?
+                .is_some()
+        );
         assert_eq!(fake.created_issues().len(), 1);
         Ok(())
     }
@@ -5539,11 +5718,18 @@ mod tests {
     async fn tasks_outside_a_bound_project_open_nothing() -> anyhow::Result<()> {
         let mut storage = TodoStore::for_test().await?;
         storage.create_integration("github", None).await?;
-        let task = storage.create_task(Task::create().title("Local only".to_string())).await?;
+        let task = storage
+            .create_task(Task::create().title("Local only".to_string()))
+            .await?;
         storage.assign_tag_to_task(task.id, "errands").await?;
 
         let fake = FakeGithub::default();
-        assert!(storage.push_github_new_task(&fake, task.id).await?.is_none());
+        assert!(
+            storage
+                .push_github_new_task(&fake, task.id)
+                .await?
+                .is_none()
+        );
         assert!(fake.created_issues().is_empty());
         Ok(())
     }
@@ -5562,7 +5748,12 @@ mod tests {
         storage.assign_tag_to_task(step.id, &tag.name).await?;
 
         let fake = FakeGithub::default();
-        assert!(storage.push_github_new_task(&fake, step.id).await?.is_none());
+        assert!(
+            storage
+                .push_github_new_task(&fake, step.id)
+                .await?
+                .is_none()
+        );
         assert!(fake.created_issues().is_empty());
         Ok(())
     }
@@ -5632,7 +5823,9 @@ mod tests {
         let grandparent = storage
             .create_task(Task::create().title("Add login".to_string()))
             .await?;
-        storage.assign_tag_to_task(grandparent.id, &tag.name).await?;
+        storage
+            .assign_tag_to_task(grandparent.id, &tag.name)
+            .await?;
         let parent = storage
             .create_task(
                 Task::create()
@@ -5676,8 +5869,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_child_link_without_a_recorded_id_is_looked_up_before_attaching()
-    -> anyhow::Result<()> {
+    async fn a_child_link_without_a_recorded_id_is_looked_up_before_attaching() -> anyhow::Result<()>
+    {
         let (mut storage, integration, tag) = bound_store("o", "r").await?;
         let parent = storage
             .create_task(Task::create().title("Add login".to_string()))
@@ -5704,7 +5897,8 @@ mod tests {
 
         // Only the parent's issue is opened (#2, since #1 exists), and the
         // attachment uses the id the lookup returned for the child.
-        let fake = FakeGithub::default().with_issue("o/r", remote(1, "Sketch the form", "open", 100));
+        let fake =
+            FakeGithub::default().with_issue("o/r", remote(1, "Sketch the form", "open", 100));
         assert!(
             storage
                 .push_github_new_task(&fake, subtask.id)
@@ -5746,7 +5940,12 @@ mod tests {
         // Run content is the app's, not the issue's: a step is not pushed, and
         // neither is anything under it.
         let fake = FakeGithub::default();
-        assert!(storage.push_github_new_task(&fake, note.id).await?.is_none());
+        assert!(
+            storage
+                .push_github_new_task(&fake, note.id)
+                .await?
+                .is_none()
+        );
         assert!(fake.created_issues().is_empty());
         // The run's own task still syncs; only its step subtask is left out.
         assert!(storage.push_github_new_task(&fake, run.id).await?.is_some());
@@ -5756,7 +5955,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_pulled_sub_issue_becomes_a_subtask_and_un_nests_when_removed() -> anyhow::Result<()> {
+    async fn a_pulled_sub_issue_becomes_a_subtask_and_un_nests_when_removed() -> anyhow::Result<()>
+    {
         let (mut storage, integration, _) = bound_store("o", "r").await?;
         let fake = FakeGithub::default()
             .with_issue("o/r", remote(1, "Add login", "open", 100))
@@ -5872,8 +6072,7 @@ mod tests {
     #[tokio::test]
     async fn pushed_local_edits_are_not_read_back_as_remote_edits() -> anyhow::Result<()> {
         let (mut storage, integration, _) = bound_store("o", "r").await?;
-        let fake =
-            FakeGithub::default().with_issue("o/r", remote(1, "Remote title", "open", 100));
+        let fake = FakeGithub::default().with_issue("o/r", remote(1, "Remote title", "open", 100));
         storage
             .sync_github_integration(&fake, integration.id, false)
             .await?;
@@ -5913,7 +6112,11 @@ mod tests {
         storage
             .sync_github_integration(&fake, integration.id, false)
             .await?;
-        let task_id = storage.issue_link(integration.id, "o/r#1").await?.unwrap().task_id;
+        let task_id = storage
+            .issue_link(integration.id, "o/r#1")
+            .await?
+            .unwrap()
+            .task_id;
 
         // Local edit stamped "now", remote edit dated 100 (1970): the local
         // stamp is newer, so the local title survives and is pushed.
@@ -6135,7 +6338,11 @@ mod tests {
         assert_eq!(op.kind, SYNC_OP_LABELS);
         assert_eq!(op.task_id, Some(task_id));
         assert!(op.is_failed());
-        assert!(op.error.as_deref().is_some_and(|e| e.contains("label write refused")));
+        assert!(
+            op.error
+                .as_deref()
+                .is_some_and(|e| e.contains("label write refused"))
+        );
         assert!(op.payload.contains("needs-review"));
 
         // The log is append-only, so a second failure is a second entry rather
@@ -6533,13 +6740,7 @@ mod tests {
         storage
             .unbind_repo_tag(tag.id, integration.id, "lofi-tools/taskstream")
             .await?;
-        assert!(
-            storage
-                .tag_settings(tag.id)
-                .await?
-                .sync_target
-                .is_none()
-        );
+        assert!(storage.tag_settings(tag.id).await?.sync_target.is_none());
         assert!(storage.bound_repos(integration.id).await?.is_empty());
         Ok(())
     }
@@ -6561,7 +6762,12 @@ mod tests {
         // Bound, so the engine finds it without re-detecting the remote.
         assert_eq!(storage.bound_repos(integration.id).await?.len(), 1);
         assert_eq!(
-            storage.tag_settings(first).await?.sync_target.unwrap().external_id,
+            storage
+                .tag_settings(first)
+                .await?
+                .sync_target
+                .unwrap()
+                .external_id,
             "lofi-tools/taskstream"
         );
         Ok(())
@@ -6687,9 +6893,7 @@ mod tests {
         assert_eq!(comment.text, "looks good");
         assert_eq!(comment.author.as_deref(), Some("reviewer"));
         // An empty body is not worth importing.
-        assert!(
-            comment_from_json(&serde_json::json!({ "id": 10, "body": "   " })).is_none()
-        );
+        assert!(comment_from_json(&serde_json::json!({ "id": 10, "body": "   " })).is_none());
     }
 
     #[test]
@@ -6713,8 +6917,14 @@ mod tests {
             "git_ui: Add history view"
         );
         // Trailing punctuation goes, and the title stays imperative.
-        assert_eq!(format_pull_request_title("Handle empty repos;"), "Handle empty repos");
-        assert_eq!(format_pull_request_title("  fix conflict  "), "Fix conflict");
+        assert_eq!(
+            format_pull_request_title("Handle empty repos;"),
+            "Handle empty repos"
+        );
+        assert_eq!(
+            format_pull_request_title("  fix conflict  "),
+            "Fix conflict"
+        );
         // Long titles are cut at a word boundary, not mid-word.
         let long = format_pull_request_title(
             "Refactor the synchronisation engine so that it can handle every remote transport",
@@ -6726,8 +6936,14 @@ mod tests {
     #[test]
     fn release_notes_are_one_bullet_of_the_right_kind() {
         assert_eq!(release_note_for("Add login flow"), "- Added login flow");
-        assert_eq!(release_note_for("Fix crash on startup"), "- Fixed crash on startup");
-        assert_eq!(release_note_for("Fix the broken sync"), "- Fixed the broken sync");
+        assert_eq!(
+            release_note_for("Fix crash on startup"),
+            "- Fixed crash on startup"
+        );
+        assert_eq!(
+            release_note_for("Fix the broken sync"),
+            "- Fixed the broken sync"
+        );
         // Docs, tests and internal work are not user-facing.
         assert_eq!(release_note_for("docs: update the readme"), "- N/A");
         assert_eq!(release_note_for("Add tests for the parser"), "- N/A");
@@ -6745,7 +6961,10 @@ mod tests {
             body,
             "This adds a login form and wires it to the API.\n\nCloses #42\n\nRelease Notes:\n\n- Added login form"
         );
-        let tail = body.split("Release Notes:\n\n").nth(1).expect("the section");
+        let tail = body
+            .split("Release Notes:\n\n")
+            .nth(1)
+            .expect("the section");
         assert_eq!(tail.lines().count(), 1, "exactly one bullet: {tail}");
 
         // Without an issue there is no `Closes`, and an agent-written section
@@ -6872,10 +7091,7 @@ mod tests {
                 state: PULL_REQUEST_OPEN.to_string(),
             })
             .await?;
-        let row = storage
-            .run_pull_request(id)
-            .await?
-            .expect("the row by id");
+        let row = storage.run_pull_request(id).await?.expect("the row by id");
         assert_eq!(row.number, opened.number);
         assert!(storage.run_pull_request(id + 99).await?.is_none());
         Ok(())
@@ -6911,7 +7127,12 @@ mod tests {
         assert!(!storage.run_pull_requests_resolved(11).await?);
 
         storage
-            .update_run_pull_request(ids[0], PULL_REQUEST_MERGED, false, jiff::Timestamp::from_second(9).ok())
+            .update_run_pull_request(
+                ids[0],
+                PULL_REQUEST_MERGED,
+                false,
+                jiff::Timestamp::from_second(9).ok(),
+            )
             .await?;
         assert!(!storage.run_pull_requests_resolved(11).await?);
 
@@ -6919,7 +7140,9 @@ mod tests {
         assert_eq!(storage.waive_run_pull_requests(11).await?, 1);
         assert!(storage.run_pull_requests_resolved(11).await?);
         assert!(
-            storage.all_run_pull_requests().await?
+            storage
+                .all_run_pull_requests()
+                .await?
                 .iter()
                 .any(|pull_request| pull_request.state == PULL_REQUEST_WAIVED)
         );
@@ -6944,10 +7167,7 @@ mod tests {
             .await?;
         assert_eq!(
             *fake.pull_request_labels.lock().expect("labels"),
-            vec![(
-                12,
-                vec!["bug".to_string(), "needs-review".to_string()]
-            )]
+            vec![(12, vec!["bug".to_string(), "needs-review".to_string()])]
         );
         assert_eq!(
             *fake.pull_request_assignees.lock().expect("assignees"),
