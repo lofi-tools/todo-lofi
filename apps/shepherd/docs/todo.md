@@ -879,8 +879,10 @@ If Pi’s RPC probe is blocked, proceed with ACP while resolving it.
   Pending RPC requests fail when output closes, without waiting for a lingering
   process to exit; a local subprocess fixture verifies the disconnect path.
   On Unix the RPC process has its own group; explicit shutdown or dropping an
-  active transport stops that group, with a local descendant fixture. Cleanup
-  after the output reader has already ended still needs further supervision.
+  active transport stops that group, with a local descendant fixture. The
+  supervisor also accepts shutdown while waiting after output closes and stops
+  the group on a wait timeout; a disconnect fixture covers prompt shutdown.
+  Descendants surviving an already-reaped leader still need recovery.
   Startup waits for the exit report so it can retain process diagnostics.
   The installed Nix-profile Pi 0.75.4 passed the isolated dialog smoke, but its
   prompt reply omitted `disposition` and its shipped RPC/session code lacks

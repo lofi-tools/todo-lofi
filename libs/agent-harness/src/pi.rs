@@ -109,7 +109,7 @@ impl PiRpc {
         };
         let (input, outgoing) = mpsc::channel(32);
         let (events, receiver) = mpsc::unbounded_channel();
-        let (shutdown_request, shutdown) = oneshot::channel();
+        let (shutdown_request, mut shutdown) = oneshot::channel();
         let replies = Replies::default();
         let writer = tokio::spawn(write_input(stdin, outgoing));
         let supervisor = tokio::spawn({
@@ -119,16 +119,17 @@ impl PiRpc {
                 let mut stderr = tokio::spawn(drain_stderr(stderr, stderr_tail.clone()));
                 let reading = read_output(BufReader::new(stdout), &replies, &events);
                 tokio::pin!(reading);
-                let protocol_error = tokio::select! {
-                    result = &mut reading => result.err(),
-                    _ = shutdown => {
+                let (protocol_error, stopped) = tokio::select! {
+                    result = &mut reading => (result.err(), false),
+                    _ = &mut shutdown => {
                         if let Err(error) = terminate(&child) {
                             tracing::debug!(%error, "could not signal Pi during shutdown");
                         }
-                        match timeout(SHUTDOWN_TIMEOUT, &mut reading).await {
+                        let error = match timeout(SHUTDOWN_TIMEOUT, &mut reading).await {
                             Ok(result) => result.err(),
                             Err(_) => Some(protocol("Pi did not close its RPC output during shutdown")),
-                        }
+                        };
+                        (error, true)
                     }
                 };
                 {
@@ -144,12 +145,30 @@ impl PiRpc {
                         tracing::debug!(%error, "could not stop Pi after an RPC framing error");
                     }
                 }
-                let status = match timeout(SHUTDOWN_TIMEOUT, child.wait()).await {
+                let waiting = if stopped {
+                    timeout(SHUTDOWN_TIMEOUT, child.wait()).await
+                } else {
+                    tokio::select! {
+                        result = timeout(SHUTDOWN_TIMEOUT, child.wait()) => result,
+                        _ = &mut shutdown => {
+                            if let Err(error) = terminate(&child) {
+                                tracing::debug!(%error, "could not signal Pi during shutdown after output closed");
+                            }
+                            timeout(SHUTDOWN_TIMEOUT, child.wait()).await
+                        }
+                    }
+                };
+                let status = match waiting {
                     Ok(status) => status,
-                    Err(_) => match child.start_kill() {
-                        Ok(()) => child.wait().await,
-                        Err(error) => Err(error),
-                    },
+                    Err(_) => {
+                        if let Err(error) = terminate(&child) {
+                            tracing::debug!(%error, "could not stop the Pi process group after timeout");
+                        }
+                        match child.start_kill() {
+                            Ok(()) => child.wait().await,
+                            Err(error) => Err(error),
+                        }
+                    }
                 };
                 let code = match status {
                     Ok(status) => status.code(),
@@ -560,6 +579,7 @@ IFS= read -r state || exit 3
 state_id=$(printf '%s\n' "$state" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
 printf '{"type":"response","id":"%s","command":"get_state","success":true,"data":{"sessionId":"pi-fixture","sessionFile":null,"isStreaming":false,"isCompacting":false,"pendingMessageCount":0}}\n' "$state_id"
 IFS= read -r request || exit 4
+(sleep 1; printf survived > child-survived) >/dev/null 2>&1 &
 exec 1>&-
 exec sleep 30
 "#,
@@ -573,7 +593,9 @@ exec sleep 30
         let (rpc, _) = PiRpc::start(&spec).await?;
         let result = timeout(Duration::from_secs(1), rpc.request("get_state", Map::new())).await?;
         assert!(matches!(result, Err(HarnessError::ChannelClosed)));
-        rpc.shutdown().await?;
+        timeout(Duration::from_secs(1), rpc.shutdown()).await??;
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        assert!(!directory.path().join("child-survived").exists());
         Ok(())
     }
 
