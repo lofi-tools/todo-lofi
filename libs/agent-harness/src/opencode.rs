@@ -2014,6 +2014,28 @@ exec sleep 60
     }
 
     #[test]
+    fn rejects_fragmented_oversized_event_lines_and_multiline_data()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fragment = vec![b'x'; 1024 * 1024];
+        let mut decoder = EventDecoder::default();
+        for _ in 0..8 {
+            decoder.push(&fragment)?;
+        }
+        assert!(decoder.push(b"x").is_err());
+
+        let mut decoder = EventDecoder::default();
+        for _ in 0..7 {
+            decoder.push(b"data: ")?;
+            decoder.push(&fragment)?;
+            decoder.push(b"\n")?;
+        }
+        decoder.push(b"data: ")?;
+        assert!(decoder.push(&fragment).is_ok());
+        assert!(decoder.push(b"\n").is_err());
+        Ok(())
+    }
+
+    #[test]
     fn maps_only_the_task_session_and_appends_the_unstreamed_suffix()
     -> Result<(), Box<dyn std::error::Error>> {
         let mut mapping = OpenCodeTranscript::new(SessionId::new("ses_1"));
