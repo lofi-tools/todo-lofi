@@ -2779,7 +2779,7 @@ pub mod commands {
         show_dotfiles: bool,
     ) -> Result<DirectoryListing, BridgeError> {
         let root = state.files_directory(project_id, task_id).await?;
-        Ok(tokio::task::spawn_blocking(move || {
+        tokio::task::spawn_blocking(move || {
             files::list_directory(&root, Path::new(&path), show_dotfiles).map_err(|error| {
                 let mut error = BridgeError::from(error);
                 error.message = format!(
@@ -2796,7 +2796,7 @@ pub mod commands {
                 "files",
                 format!("Could not finish reading the folder: {error}"),
             )
-        })??)
+        })?
     }
 
     #[tauri::command]
@@ -4841,12 +4841,11 @@ mod tests {
             fn stop(&mut self) -> std::io::Result<()> {
                 if !self.stopped
                     && crate::pty_terminal::process_start_time(self.pid) == Some(self.started_at)
+                    && unsafe { libc::kill(self.pid, libc::SIGKILL) } != 0
                 {
-                    if unsafe { libc::kill(self.pid, libc::SIGKILL) } != 0 {
-                        let error = std::io::Error::last_os_error();
-                        if error.raw_os_error() != Some(libc::ESRCH) {
-                            return Err(error);
-                        }
+                    let error = std::io::Error::last_os_error();
+                    if error.raw_os_error() != Some(libc::ESRCH) {
+                        return Err(error);
                     }
                 }
                 self.stopped = true;

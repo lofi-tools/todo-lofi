@@ -557,7 +557,7 @@ impl Screen {
         let offset = (display_offset * self.columns) as i32;
         let start = (self.cell_index(range.start) + offset).max(0);
         let end = (self.cell_index(range.end) + offset).min((self.columns * self.rows) as i32 - 1);
-        (start <= end).then(|| SearchHighlight {
+        (start <= end).then_some(SearchHighlight {
             id: self.search_id,
             start: start as u32,
             end: end as u32,

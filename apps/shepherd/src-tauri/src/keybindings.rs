@@ -71,7 +71,7 @@ fn parse_document(
             bindings.get(&command.id).map(|binding| {
                 let chord = binding
                     .as_str()
-                    .ok_or_else(|| DocumentError::Value(command.label))?;
+                    .ok_or(DocumentError::Value(command.label))?;
                 Ok((command.id, chord.to_owned()))
             })
         })

@@ -105,11 +105,11 @@ impl ProcessLeases {
                     "agent process lease directory changed while opening",
                 ));
             }
-            return Ok(Self {
+            Ok(Self {
                 directory,
                 directory_handle,
                 active: Mutex::new(BTreeMap::new()),
-            });
+            })
         }
         #[cfg(not(unix))]
         Ok(Self {
