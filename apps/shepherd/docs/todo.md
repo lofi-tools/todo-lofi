@@ -1245,8 +1245,8 @@ placeholder tabs and no unearned state badges.
   with the session retained; a fixture verifies that a later quit retries it.
   Codex app-server shutdown propagates process-group and child-stop errors and
   retains the child handle for retry. An injected group-signal failure verifies
-  the handle is retained and a later shutdown stops the process group; direct
-  child-stop failure injection remains.
+  the handle is retained and a later shutdown stops the process group. A
+  separate injected child-stop failure also verifies handle retention and retry.
   Codex exec shutdown retains its waiter after a timeout so a later quit can
   retry, and reports a waiter failure on subsequent attempts. Local fixtures
   cover both paths and verify that shutdown stops a real descendant process.

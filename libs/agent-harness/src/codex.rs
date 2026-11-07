@@ -1112,6 +1112,15 @@ impl CodexHarness {
         &mut self,
         signal_group: impl FnOnce(&Child) -> std::io::Result<()> + Send,
     ) -> HarnessResult<()> {
+        self.shutdown_with_signals(signal_group, Child::start_kill)
+            .await
+    }
+
+    async fn shutdown_with_signals(
+        &mut self,
+        signal_group: impl FnOnce(&Child) -> std::io::Result<()> + Send,
+        signal_child: impl FnOnce(&mut Child) -> std::io::Result<()> + Send,
+    ) -> HarnessResult<()> {
         if !self.started {
             return Ok(());
         }
@@ -1126,16 +1135,20 @@ impl CodexHarness {
                         "could not stop the Codex app-server process group: {error}"
                     ))
                 })?;
+                signal_child(&mut child).map_err(|error| {
+                    HarnessError::Protocol(format!(
+                        "could not stop the Codex app-server process: {error}"
+                    ))
+                })?;
                 child
-                    .kill()
+                    .wait()
                     .await
-                    .and_then(|()| child.try_wait())
                     .map_err(|error| {
                         HarnessError::Protocol(format!(
                             "could not stop the Codex app-server process: {error}"
                         ))
                     })?
-                    .and_then(|status| status.code())
+                    .code()
             }
             None => None,
         };
@@ -3601,6 +3614,35 @@ esac
         harness.shutdown().await?;
         tokio::time::sleep(Duration::from_millis(1300)).await;
         assert!(!directory.path().join("escaped").exists());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn failed_app_server_child_signal_retains_process_for_retry()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = TempDir::new()?;
+        let stub = write_stub(&directory, "codex-child-failure.sh", PROTOCOL_STUB);
+        let mut harness = CodexHarness::new();
+        harness.start(spec(&stub, directory.path())).await?;
+        let failure = harness
+            .shutdown_with_signals(
+                |_| Ok(()),
+                |_| Err(std::io::Error::other("fixture child failure")),
+            )
+            .await;
+        assert!(failure.is_err());
+        assert!(harness.started);
+        let mut child = harness
+            .child
+            .as_ref()
+            .ok_or("process handle was discarded")?
+            .lock()
+            .await;
+        assert!(child.id().is_some());
+        assert!(child.try_wait()?.is_none());
+        drop(child);
+        harness.shutdown().await?;
+        assert!(!harness.started && harness.child.is_none());
         Ok(())
     }
 
