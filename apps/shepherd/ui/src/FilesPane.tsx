@@ -1,6 +1,7 @@
 import { For, Show, createEffect, createMemo, createResource, createSignal, onCleanup, onMount } from 'solid-js'
 
 import { actOnWorkspaceFile, cancelFileSearch, listFiles, readWorkspaceFile, reserveFileSearch, searchWorkspaceFiles, watchWorkspaceFiles, type DirectoryListing, type FileAction, type FileChange, type FileSearchQuery, type FileSearchResult, type WorkspaceFileEntry } from './bridge'
+import { FolderIcon } from './ProjectRow'
 
 interface FileLocation {
   projectId: string
@@ -230,8 +231,8 @@ function FileRow(props: FolderProps & { entry: WorkspaceFileEntry }) {
           <span class="files-tree__label"><span>{props.entry.name}</span><FileChangeBadge change={props.changeFor(props.entry.path)} /></span>
         </button>
       }>
-        <button type="button" class="files-tree__entry" aria-expanded={expanded()} onClick={() => setExpanded((open) => !open)}>
-          <span aria-hidden="true">{expanded() ? '▾' : '▸'}</span> {props.entry.name}
+        <button type="button" class="files-tree__entry files-tree__directory" aria-expanded={expanded()} onClick={() => setExpanded((open) => !open)}>
+          <span aria-hidden="true">{expanded() ? '▾' : '▸'}</span><FolderIcon size={14} /><span>{props.entry.name}</span>
         </button>
         <Show when={expanded()}>
           <FolderContents {...props} path={props.entry.path} />

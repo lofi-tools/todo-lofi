@@ -2214,6 +2214,16 @@ textarea {
   background: var(--surface-raised);
 }
 
+.files-tree__directory {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.files-tree__directory svg {
+  flex: none;
+}
+
 .files-tree__label {
   display: flex;
   align-items: baseline;
