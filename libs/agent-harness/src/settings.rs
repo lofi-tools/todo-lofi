@@ -66,6 +66,18 @@ async fn resolve_environment_with_timeout(
     deadline: std::time::Duration,
 ) -> HarnessResult<()> {
     use tokio::io::AsyncReadExt;
+    for (key, value) in environment.iter() {
+        if key.is_empty() || key.contains(['=', '\0']) {
+            return Err(HarnessError::Protocol(
+                "Environment variable names must be nonempty and cannot contain '=' or NUL".into(),
+            ));
+        }
+        if value.contains('\0') {
+            return Err(HarnessError::Protocol(format!(
+                "Environment variable {key} contains a NUL byte"
+            )));
+        }
+    }
     let mut resolved = BTreeMap::new();
     for (key, value) in environment.iter() {
         let Some(command) = value.strip_prefix('!') else {
@@ -295,6 +307,35 @@ mod tests {
         assert!(task.await.is_err_and(|error| error.is_cancelled()));
         tokio::time::sleep(std::time::Duration::from_millis(1300)).await;
         assert!(!directory.path().join("escaped").exists());
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn invalid_environment_is_rejected_before_running_commands()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        for (key, value) in [
+            ("Z=INVALID", "value"),
+            ("Z\0INVALID", "value"),
+            ("Z_VALID", "bad\0value"),
+            ("", "value"),
+        ] {
+            let mut values = BTreeMap::from([
+                ("A_COMMAND".into(), "!printf ran > marker".into()),
+                (key.into(), value.into()),
+            ]);
+            assert!(
+                resolve_environment(&mut values, directory.path())
+                    .await
+                    .is_err()
+            );
+            assert!(!directory.path().join("marker").exists());
+            assert_eq!(
+                values.get("A_COMMAND").map(String::as_str),
+                Some("!printf ran > marker")
+            );
+        }
         Ok(())
     }
 

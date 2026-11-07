@@ -1343,6 +1343,8 @@ placeholder tabs and no unearned state badges.
   commands resolve at spawn with a five-second timeout and bounded output; errors
   exclude their output. Resolution updates the environment only after every
   command succeeds, so a failed attempt can be retried from the original map.
+  Invalid environment names and NUL-containing values are rejected before
+  any resolver command runs.
   Oversized output and failed commands with inherited
   stdout fail promptly; any process-group cleanup failure is reported and
   retains the group for the cleanup guard's retry.
