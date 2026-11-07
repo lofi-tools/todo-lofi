@@ -4294,13 +4294,36 @@ mod tests {
         harness.shutdown().await?;
         assert!(store.load_processes().await?.is_empty());
         let mut harness = agent_harness::acp::AcpHarness::default();
-        harness.set_process_tracker(tracker);
+        harness.set_process_tracker(tracker.clone());
         harness.start(agent_harness::SpawnSpec {
             program: "/bin/sh".into(),
             args: vec!["-c".into(), r#"while IFS= read -r request; do case "$request" in *'"method":"initialize"'*) id=$(printf '%s\n' "$request" | sed -nE 's/.*"id":("[^"]+"|[0-9]+).*/\1/p'); printf '{"jsonrpc":"2.0","id":%s,"result":{"protocolVersion":1}}\n' "$id";; esac; done"#.into()],
             cwd: directory.path().to_path_buf(),
             ..Default::default()
         }).await?;
+        let records = TursoStore::open_at(&database)
+            .await?
+            .load_processes()
+            .await?;
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].kind, "agent");
+        assert_eq!(records[0].owner_id, "task-fixture");
+        harness.shutdown().await?;
+        assert!(store.load_processes().await?.is_empty());
+        let mut harness = agent_harness::codex::ExecHarness::new();
+        harness.set_process_tracker(tracker);
+        harness
+            .start(agent_harness::SpawnSpec {
+                program: "/bin/sh".into(),
+                args: vec!["-c".into(), "sleep 30".into()],
+                cwd: directory.path().to_path_buf(),
+                ..Default::default()
+            })
+            .await?;
+        harness.open_session(None).await?;
+        harness
+            .prompt(agent_harness::PromptInput::text("fixture"))
+            .await?;
         let records = TursoStore::open_at(&database)
             .await?
             .load_processes()

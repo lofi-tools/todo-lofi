@@ -1409,6 +1409,7 @@ pub struct ExecHarness {
     environment: BTreeMap<String, String>,
     stderr: Arc<Mutex<VecDeque<String>>>,
     stderr_task: Option<JoinHandle<()>>,
+    process_tracker: Option<Arc<dyn crate::AgentProcessTracker>>,
     run: Option<ExecRun>,
     session_id: Option<SessionId>,
     next_turn: u64,
@@ -1423,11 +1424,63 @@ struct ExecRun {
     reader: tokio::task::AbortHandle,
     kill: Option<mpsc::UnboundedSender<oneshot::Sender<Result<(), String>>>>,
     wait_errors: mpsc::UnboundedReceiver<String>,
+    process_record: ExecProcessRecord,
     stopping: bool,
     finished: Arc<AtomicBool>,
 }
 
+type ExecProcessRecord = Arc<AsyncMutex<Option<(Arc<dyn crate::AgentProcessTracker>, String)>>>;
+
+async fn clear_exec_process_record(record: &ExecProcessRecord) -> HarnessResult<()> {
+    let mut record = record.lock().await;
+    if let Some((tracker, id)) = &*record {
+        tracker.stopped(id).await.map_err(|error| {
+            HarnessError::Protocol(format!(
+                "Could not clear Codex exec process record: {error}"
+            ))
+        })?;
+        *record = None;
+    }
+    Ok(())
+}
+
 static EXEC_SESSION_COUNTER: AtomicU64 = AtomicU64::new(1);
+
+struct ExecStartupGroup(#[cfg(unix)] Option<libc::pid_t>);
+
+impl ExecStartupGroup {
+    fn new(child: &Child) -> Self {
+        #[cfg(unix)]
+        {
+            Self(child.id().and_then(|id| libc::pid_t::try_from(id).ok()))
+        }
+        #[cfg(not(unix))]
+        {
+            let _child = child;
+            Self()
+        }
+    }
+    fn disarm(&mut self) {
+        #[cfg(unix)]
+        {
+            self.0 = None;
+        }
+    }
+}
+
+#[cfg(unix)]
+impl Drop for ExecStartupGroup {
+    fn drop(&mut self) {
+        if let Some(group) = self.0.take()
+            && unsafe { libc::killpg(group, libc::SIGKILL) } != 0
+        {
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() != Some(libc::ESRCH) {
+                tracing::warn!(%error, "could not stop Codex exec during startup");
+            }
+        }
+    }
+}
 
 impl ExecHarness {
     async fn shutdown_with_timeout(&mut self, deadline: Duration) -> HarnessResult<()> {
@@ -1482,6 +1535,7 @@ impl ExecHarness {
                     ));
                 }
             }
+            clear_exec_process_record(&run.process_record).await?;
         }
         if let Some(run) = self.run.take() {
             run.reader.abort();
@@ -1513,6 +1567,7 @@ impl ExecHarness {
             environment: BTreeMap::new(),
             stderr: Arc::new(Mutex::new(VecDeque::new())),
             stderr_task: None,
+            process_tracker: None,
             run: None,
             session_id: None,
             next_turn: 0,
@@ -1558,6 +1613,10 @@ impl Default for ExecHarness {
 
 #[async_trait]
 impl AgentHarness for ExecHarness {
+    fn set_process_tracker(&mut self, tracker: Arc<dyn crate::AgentProcessTracker>) {
+        self.process_tracker = Some(tracker);
+    }
+
     fn events(&mut self) -> &mut mpsc::UnboundedReceiver<HarnessEvent> {
         &mut self.receiver
     }
@@ -1634,6 +1693,9 @@ impl AgentHarness for ExecHarness {
                 "a codex exec turn is still running".to_string(),
             ));
         }
+        if let Some(run) = &self.run {
+            clear_exec_process_record(&run.process_record).await?;
+        }
         self.run = None;
 
         let mut command = Command::new(&self.program);
@@ -1662,6 +1724,17 @@ impl AgentHarness for ExecHarness {
         let mut child = command
             .spawn()
             .map_err(|source| spawn_error(&self.program, source))?;
+        let mut startup_group = ExecStartupGroup::new(&child);
+        let process_record: ExecProcessRecord = Arc::new(AsyncMutex::new(None));
+        if let Some(tracker) = &self.process_tracker {
+            let pid = child
+                .id()
+                .ok_or_else(|| HarnessError::Protocol("Codex exec has no process ID".into()))?;
+            let id = tracker.started(pid).await.map_err(|error| {
+                HarnessError::Protocol(format!("Could not record Codex exec process: {error}"))
+            })?;
+            *process_record.lock().await = Some((tracker.clone(), id));
+        }
         let Some(stdout) = child.stdout.take() else {
             return Err(HarnessError::Protocol(
                 "codex exec stdout was not captured".to_string(),
@@ -1700,6 +1773,7 @@ impl AgentHarness for ExecHarness {
                 reader,
                 progress,
                 wait_errors,
+                process_record: process_record.clone(),
             },
             stop_exec_child,
             || None,
@@ -1710,9 +1784,11 @@ impl AgentHarness for ExecHarness {
             reader: reader_abort,
             kill: Some(kill),
             wait_errors: wait_error_receiver,
+            process_record,
             stopping: false,
             finished,
         });
+        startup_group.disarm();
 
         self.sender
             .send(HarnessEvent::SessionState {
@@ -1789,6 +1865,7 @@ struct ExecWaiter {
     reader: JoinHandle<Result<(), String>>,
     progress: Arc<AtomicU64>,
     wait_errors: mpsc::UnboundedSender<String>,
+    process_record: ExecProcessRecord,
 }
 
 fn spawn_exec_waiter(
@@ -1807,6 +1884,7 @@ fn spawn_exec_waiter(
             mut reader,
             progress,
             wait_errors,
+            process_record,
         } = waiter;
         let mut reader_finished = false;
         let mut protocol_error = None;
@@ -1938,6 +2016,17 @@ fn spawn_exec_waiter(
             let kind = FailureKind::classify(&HarnessError::Protocol(text.clone()))
                 .unwrap_or(FailureKind::Protocol);
             if sender.send(HarnessEvent::TurnError { kind, text }).is_err() {
+                tracing::debug!("the core stopped listening to codex errors");
+            }
+        }
+        if let Err(error) = clear_exec_process_record(&process_record).await {
+            if sender
+                .send(HarnessEvent::TurnError {
+                    kind: FailureKind::Protocol,
+                    text: error.to_string(),
+                })
+                .is_err()
+            {
                 tracing::debug!("the core stopped listening to codex errors");
             }
         }
@@ -4718,6 +4807,130 @@ sleep 30
     }
 
     #[tokio::test]
+    async fn exec_tracks_each_run_and_retries_record_removal()
+    -> Result<(), Box<dyn std::error::Error>> {
+        struct Tracker {
+            pid: Mutex<Option<u32>>,
+            failures: std::sync::atomic::AtomicUsize,
+            fail_start: bool,
+        }
+        #[async_trait]
+        impl crate::AgentProcessTracker for Tracker {
+            async fn started(&self, pid: u32) -> Result<String, String> {
+                *self.pid.lock().map_err(|error| error.to_string())? = Some(pid);
+                if self.fail_start {
+                    return Err("fixture save failure".into());
+                }
+                Ok("exec-record".into())
+            }
+            async fn stopped(&self, id: &str) -> Result<(), String> {
+                assert_eq!(id, "exec-record");
+                if self
+                    .failures
+                    .try_update(Ordering::SeqCst, Ordering::SeqCst, |value| {
+                        value.checked_sub(1)
+                    })
+                    .is_ok()
+                {
+                    return Err("fixture clear failure".into());
+                }
+                *self.pid.lock().map_err(|error| error.to_string())? = None;
+                Ok(())
+            }
+        }
+        for cancel in [false, true] {
+            let directory = TempDir::new()?;
+            let stub = write_stub(
+                &directory,
+                "tracked-exec.sh",
+                if cancel { EXEC_SLOW_STUB } else { EXEC_STUB },
+            );
+            let tracker = Arc::new(Tracker {
+                pid: Mutex::new(None),
+                failures: std::sync::atomic::AtomicUsize::new(2),
+                fail_start: false,
+            });
+            let mut harness = ExecHarness::new();
+            harness.set_process_tracker(tracker.clone());
+            harness.start(spec(&stub, directory.path())).await?;
+            harness.open_session(None).await?;
+            harness.prompt(PromptInput::text("go")).await?;
+            assert!(
+                tracker
+                    .pid
+                    .lock()
+                    .map_err(|error| error.to_string())?
+                    .is_some()
+            );
+            if cancel {
+                harness.cancel().await?;
+            }
+            let events = collect_until(&mut harness, |events| {
+                events
+                    .iter()
+                    .any(|event| matches!(event, HarnessEvent::TurnFinished { .. }))
+            })
+            .await;
+            assert!(events.iter().any(|event| matches!(event, HarnessEvent::TurnError { text, .. } if text.contains("fixture clear failure"))));
+            assert!(
+                tracker
+                    .pid
+                    .lock()
+                    .map_err(|error| error.to_string())?
+                    .is_some()
+            );
+            let error = harness
+                .prompt(PromptInput::text("next"))
+                .await
+                .expect_err("record removal must succeed before the next run");
+            assert!(error.to_string().contains("fixture clear failure"));
+            harness.shutdown().await?;
+            assert!(
+                tracker
+                    .pid
+                    .lock()
+                    .map_err(|error| error.to_string())?
+                    .is_none()
+            );
+        }
+        #[cfg(unix)]
+        {
+            let directory = TempDir::new()?;
+            let stub = write_stub(&directory, "failed-tracked-exec.sh", EXEC_SLOW_STUB);
+            let tracker = Arc::new(Tracker {
+                pid: Mutex::new(None),
+                failures: std::sync::atomic::AtomicUsize::new(0),
+                fail_start: true,
+            });
+            let mut harness = ExecHarness::new();
+            harness.set_process_tracker(tracker.clone());
+            harness.start(spec(&stub, directory.path())).await?;
+            harness.open_session(None).await?;
+            let error = harness
+                .prompt(PromptInput::text("go"))
+                .await
+                .expect_err("tracking must fail");
+            assert!(error.to_string().contains("fixture save failure"));
+            let pid = tracker
+                .pid
+                .lock()
+                .map_err(|error| error.to_string())?
+                .ok_or("missing PID")?;
+            timeout(Duration::from_secs(3), async {
+                loop {
+                    if unsafe { libc::kill(libc::pid_t::try_from(pid)?, 0) } != 0 {
+                        break Ok::<(), Box<dyn std::error::Error>>(());
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await??;
+            harness.shutdown().await?;
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn exec_events_map_to_messages_tools_and_usage() {
         let directory = TempDir::new().expect("temp dir");
         let stub = write_stub(&directory, "codex-exec.sh", EXEC_STUB);
@@ -4905,6 +5118,7 @@ sleep 30
             reader,
             kill: None,
             wait_errors: mpsc::unbounded_channel().1,
+            process_record: Arc::new(AsyncMutex::new(None)),
             stopping: false,
             finished: Arc::new(AtomicBool::new(false)),
         });
@@ -4965,6 +5179,7 @@ sleep 30
                     reader,
                     progress: Arc::new(AtomicU64::new(0)),
                     wait_errors,
+                    process_record: Arc::new(AsyncMutex::new(None)),
                 },
                 move |child| {
                     attempts += 1;
@@ -4992,6 +5207,7 @@ sleep 30
                 reader: reader_abort,
                 kill: Some(kill),
                 wait_errors: wait_error_receiver,
+                process_record: Arc::new(AsyncMutex::new(None)),
                 stopping: false,
                 finished,
             });
@@ -5049,6 +5265,7 @@ sleep 30
                     reader,
                     progress: Arc::new(AtomicU64::new(0)),
                     wait_errors,
+                    process_record: Arc::new(AsyncMutex::new(None)),
                 },
                 move |child| {
                     let result = stop_exec_child(child);
@@ -5069,6 +5286,7 @@ sleep 30
                 reader: reader_abort,
                 kill: Some(kill),
                 wait_errors: wait_error_receiver,
+                process_record: Arc::new(AsyncMutex::new(None)),
                 stopping: false,
                 finished,
             });
@@ -5114,6 +5332,7 @@ sleep 30
             reader,
             kill: None,
             wait_errors: mpsc::unbounded_channel().1,
+            process_record: Arc::new(AsyncMutex::new(None)),
             stopping: false,
             finished: Arc::new(AtomicBool::new(false)),
         });

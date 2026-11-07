@@ -1208,8 +1208,10 @@ placeholder tabs and no unearned state badges.
   inspection. ACP task launches, including OpenCode fallback and Claude, now
   record their process before protocol initialization and clear the record
   after the child is reaped. Save failures stop startup, and failed removal
-  can be retried; local fixtures cover both and durable storage. Codex exec,
-  surviving descendants, and stopping surviving processes remain.
+  can be retried; local fixtures cover both and durable storage. Codex exec now
+  records each per-turn process and retries failed record removal before a new
+  run or shutdown. Local fixtures cover completion, cancellation and storage
+  failures. Surviving descendants and stopping surviving processes remain.
   ACP supervision reports a failed process-group signal even if killing the
   leader succeeds, with an injected-failure fixture. ACP quit now waits for
   process supervision and reports its failure; timeout retains the connection
