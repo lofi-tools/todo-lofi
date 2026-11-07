@@ -1162,7 +1162,9 @@ placeholder tabs and no unearned state badges.
   startup notice shows matching and uncertain records and allows a recheck.
   Running direct ACP terminals now signal their process group on kill, release
   and shutdown, and report signal termination in the ACP exit status. Agent
-  process identities and stopping surviving processes remain.
+  Codex app-server now runs in its own process group and stops that group on
+  normal shutdown; a local fixture checks a descendant cannot outlive shutdown.
+  Agent process identities and stopping surviving processes remain.
 - [ ] 30-day archived-worktree collection, dirty skip, branch-tip recreation.
   Startup preserves dirty worktrees and lists collection failures with their
   reasons; clean collection retains the tip and prunes Git worktree metadata.

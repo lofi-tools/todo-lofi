@@ -986,6 +986,9 @@ impl CodexHarness {
             .stderr(Stdio::piped())
             .kill_on_drop(true);
 
+        #[cfg(unix)]
+        command.process_group(0);
+
         #[cfg(any(test, feature = "live-test-support"))]
         if let Some(capture) = self.wire_capture.as_mut() {
             without_api_credentials(&mut command);
@@ -1259,6 +1262,15 @@ impl AgentHarness for CodexHarness {
         let code = match self.child.take() {
             Some(child) => {
                 let mut child = child.lock().await;
+                #[cfg(unix)]
+                if let Some(group) = child.id().and_then(|id| libc::pid_t::try_from(id).ok())
+                    && unsafe { libc::killpg(group, libc::SIGKILL) } != 0
+                {
+                    let error = std::io::Error::last_os_error();
+                    if error.raw_os_error() != Some(libc::ESRCH) {
+                        tracing::warn!(%error, "could not stop the Codex app-server process group");
+                    }
+                }
                 match child.kill().await.and_then(|()| child.try_wait()) {
                     Ok(status) => status.and_then(|status| status.code()),
                     Err(error) => {
@@ -3368,6 +3380,28 @@ esac
             probe.methods
         );
         assert!(!probe.supports("thread/archive"));
+    }
+
+    #[tokio::test]
+    async fn app_server_shutdown_stops_its_process_group() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let directory = TempDir::new()?;
+        let script = PROTOCOL_STUB.replace(
+            "while IFS= read -r line; do",
+            "(sleep 1; printf escaped > escaped) &\nwhile IFS= read -r line; do",
+        );
+        let stub = write_stub(&directory, "codex-group.sh", &script);
+        let mut harness = CodexHarness::new();
+        harness.start(spec(&stub, directory.path())).await?;
+        let child = harness.child.as_ref().ok_or("missing child")?.lock().await;
+        let pid = libc::pid_t::try_from(child.id().ok_or("missing process id")?)?;
+        assert_eq!(unsafe { libc::getpgid(pid) }, pid);
+        assert_ne!(unsafe { libc::getpgrp() }, pid);
+        drop(child);
+        harness.shutdown().await?;
+        tokio::time::sleep(Duration::from_millis(1300)).await;
+        assert!(!directory.path().join("escaped").exists());
+        Ok(())
     }
 
     #[tokio::test]
