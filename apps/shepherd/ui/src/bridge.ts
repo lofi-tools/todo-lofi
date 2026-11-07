@@ -744,7 +744,7 @@ export async function subscribeTerminal(
         void Promise.resolve().then(async () => {
           const subscriptionId = await id
           if (!isCurrent()) return
-          await invoke<void>('acknowledge_terminal_frame', { subscriptionId, sequence: update.sequence })
+          await nativeInvoke<void>('acknowledge_terminal_frame', { subscriptionId, sequence: update.sequence })
           if (isCurrent()) canReconnect = true
         }).catch((failure: unknown) => {
           if (!isCurrent()) return

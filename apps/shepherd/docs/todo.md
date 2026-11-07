@@ -620,7 +620,8 @@ task-scoped, persistent and fast enough.
   pane can update immediately.
   If a suspended webview wakes after its frame subscription expires, it
   reconnects to the same PTY. The headless regression checks that a fresh
-  snapshot and subsequent output reach the pane without restarting the shell.
+  snapshot and subsequent output reach the pane without restarting the shell
+  or showing an error; unrecoverable acknowledgement failures are reported.
   Each terminal view limits queued input to 128 operations and 1 MiB of
   payload. Kitty key presses and reported mouse buttons reserve room for their
   releases. The browser fixture stalls a write, checks the limit, and verifies

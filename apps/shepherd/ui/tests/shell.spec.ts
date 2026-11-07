@@ -953,6 +953,9 @@ test.beforeEach(async ({ context }) => {
             return subscriptionId
           }
           case 'acknowledge_terminal_frame':
+            if (options.has('terminal-ack-failure') && args.sequence === 3) {
+              throw { code: 'terminal_write_failed', message: 'terminal frame acknowledgement failed' }
+            }
             if (args.subscriptionId === expiringTerminalSubscription && args.sequence === 3) {
               throw { code: 'terminal_subscription_ended', message: 'terminal frame subscription ended' }
             }
@@ -2589,6 +2592,16 @@ test('reconnects an expired frame subscription without restarting the shell', as
   const subscriptions = await page.evaluate(() => window.__subscriptions)
   expect(subscriptions).toHaveLength(2)
   expect(subscriptions[0]).toBe(subscriptions[1])
+})
+
+test('reports an unrecoverable terminal frame acknowledgement failure', async ({ page }) => {
+  await page.goto('/?scrollback-selection&terminal-ack-failure')
+  await expect(page.getByLabel('Terminal output')).toHaveText('BB')
+  await page.evaluate(() => {
+    const fixture = window as unknown as { __emitTerminalHistory: (offset: number, glyph: string) => void }
+    fixture.__emitTerminalHistory(2, 'C')
+  })
+  await expect(page.getByText('terminal frame acknowledgement failed')).toBeVisible()
 })
 
 test('keeps a selection while new output leaves the selected scrollback unchanged', async ({ page }) => {
