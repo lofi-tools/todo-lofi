@@ -1,5 +1,5 @@
 use std::fs::{self, OpenOptions};
-use std::io::{self, BufRead, BufReader, Write};
+use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
 use std::sync::Mutex;
 
@@ -40,10 +40,22 @@ impl DiagnosticLog {
         fs::create_dir_all(parent)?;
         let mut file = OpenOptions::new()
             .create(true)
+            .read(true)
             .append(true)
             .open(&self.path)?;
-        serde_json::to_writer(&mut file, record)?;
-        file.write_all(b"\n")
+        file.lock()?;
+        if file.metadata()?.len() > 0 {
+            file.seek(SeekFrom::End(-1))?;
+            let mut last = [0];
+            file.read_exact(&mut last)?;
+            if last[0] != b'\n' {
+                file.write_all(b"\n")?;
+            }
+        }
+        let mut encoded = serde_json::to_vec(record)?;
+        encoded.push(b'\n');
+        file.write_all(&encoded)?;
+        file.unlock()
     }
 
     fn recent(&self) -> io::Result<Vec<Diagnostic>> {
@@ -56,6 +68,7 @@ impl DiagnosticLog {
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
             Err(error) => return Err(error),
         };
+        file.lock_shared()?;
         let mut records = std::collections::VecDeque::new();
         let mut reader = BufReader::new(file);
         let mut line = Vec::new();
@@ -141,7 +154,7 @@ mod tests {
         OpenOptions::new()
             .append(true)
             .open(&path)?
-            .write_all(b"{\xff\n")?;
+            .write_all(b"{\xff")?;
         log.append(&record("after"))?;
         let history = log.recent()?;
         assert_eq!(history.len(), 3);
@@ -156,6 +169,39 @@ mod tests {
             history.get(2).map(|record| record.id.as_str()),
             Some("after")
         );
+        Ok(())
+    }
+
+    #[test]
+    fn independent_logs_can_append_concurrently() -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("errors.jsonl");
+        std::thread::scope(|scope| -> Result<(), Box<dyn std::error::Error>> {
+            let mut threads = Vec::new();
+            for worker in 0..2 {
+                let path = path.clone();
+                threads.push(scope.spawn(move || -> io::Result<()> {
+                    let log = DiagnosticLog::new(path);
+                    for index in 0..25 {
+                        log.append(&Diagnostic {
+                            id: format!("{worker}-{index}"),
+                            time: "fixture".into(),
+                            operation: "fixture".into(),
+                            message: "fixture error".into(),
+                            details: String::new(),
+                        })?;
+                    }
+                    Ok(())
+                }));
+            }
+            for thread in threads {
+                thread.join().map_err(|_| "diagnostic writer panicked")??;
+            }
+            Ok(())
+        })?;
+        let records = DiagnosticLog::new(path).recent()?;
+        assert_eq!(records.len(), 50);
+        assert!(records.iter().all(|record| record.operation == "fixture"));
         Ok(())
     }
 }
