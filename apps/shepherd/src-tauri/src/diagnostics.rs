@@ -38,11 +38,14 @@ impl DiagnosticLog {
             .parent()
             .ok_or_else(|| io::Error::other("missing log directory"))?;
         fs::create_dir_all(parent)?;
-        let mut file = OpenOptions::new()
-            .create(true)
-            .read(true)
-            .append(true)
-            .open(&self.path)?;
+        let mut options = OpenOptions::new();
+        options.create(true).read(true).append(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&self.path)?;
         file.lock()?;
         if file.metadata()?.len() > 0 {
             file.seek(SeekFrom::End(-1))?;
@@ -134,6 +137,24 @@ mod tests {
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].id, "fixture");
         assert_eq!(records[0].details, "Permission denied\nCaused by: denied");
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn newly_created_log_is_private() -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("errors.jsonl");
+        let log = DiagnosticLog::new(path.clone());
+        log.append(&Diagnostic {
+            id: "fixture".into(),
+            time: "fixture".into(),
+            operation: "fixture".into(),
+            message: "fixture error".into(),
+            details: String::new(),
+        })?;
+        assert_eq!(std::fs::metadata(path)?.permissions().mode() & 0o077, 0);
         Ok(())
     }
 

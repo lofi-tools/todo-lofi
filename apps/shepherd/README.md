@@ -55,7 +55,8 @@ Runtime error toasts link to **Error history** in the status bar. The structured
 log is `logs/errors.jsonl` in the active data directory (normally
 `.cache/test-db/logs/errors.jsonl` for `shep`). Use `tail -F` on that file to
 follow new diagnostics; the `shepherd-debug` repository skill describes the
-investigation workflow.
+investigation workflow. Newly created log files are owner-only on Unix;
+existing file permissions are left unchanged.
 
 The native terminal smoke uses a disposable Git project, database and scripted
 agent in a temporary directory under `.cache/test-db/`. It requires `python3`.
