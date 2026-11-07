@@ -44,6 +44,7 @@ export function FilesPane(props: { projectId: string; worktreeTaskId: string | n
 
 function FileBrowser(props: FileLocation & { showDotfiles: boolean; initialPath?: string }) {
   const [selected, setSelected] = createSignal<FileSelection | null>(props.initialPath ? { path: props.initialPath, line: null } : null)
+  const [openPath, setOpenPath] = createSignal(props.initialPath ? parentPath(props.initialPath) : '')
   const [query, setQuery] = createSignal('')
   const [results, setResults] = createSignal<FileSearchResult>()
   const [error, setError] = createSignal<string>()
@@ -138,7 +139,9 @@ function FileBrowser(props: FileLocation & { showDotfiles: boolean; initialPath?
       <div class="files-pane__tree" aria-label="File tree" hidden={!!query().trim()}>
         <FolderContents projectId={props.projectId} taskId={props.taskId} path="" showDotfiles={props.showDotfiles}
           revision={treeRevision()} changeFor={changeFor} selected={selected()?.path ?? null}
-          onSelect={(path) => setSelected({ path, line: null })} />
+          openPath={openPath()} onToggleFolder={(path) => setOpenPath((current) =>
+            current === path || current.startsWith(`${path}/`) ? parentPath(path) : path)}
+          onSelect={(path) => { setOpenPath(parentPath(path)); setSelected({ path, line: null }) }} />
         <Show when={deleted().length}>
           <details class="files-tree__deleted" open>
             <summary>Deleted files</summary>
@@ -160,7 +163,7 @@ function FileBrowser(props: FileLocation & { showDotfiles: boolean; initialPath?
               <ul class="files-tree">
                 <For each={result().matches}>{(match) => (
                   <li>
-                    <button type="button" class="files-tree__entry" onClick={() => setSelected(match)}
+                    <button type="button" class="files-tree__entry" onClick={() => { setOpenPath(parentPath(match.path)); setSelected(match) }}
                       aria-pressed={selected()?.path === match.path && selected()?.line === match.line}>
                       <span class="files-tree__label">
                         <span>{match.path}{match.line === null ? '' : `:${match.line}`}</span>
@@ -187,6 +190,8 @@ interface FolderProps extends FileLocation {
   showDotfiles: boolean
   selected: string | null
   onSelect: (path: string) => void
+  openPath: string
+  onToggleFolder: (path: string) => void
   revision: number
   changeFor: (path: string) => FileChange | undefined
 }
@@ -222,7 +227,7 @@ function FolderContents(props: FolderProps & { path: string }) {
 }
 
 function FileRow(props: FolderProps & { entry: WorkspaceFileEntry }) {
-  const [expanded, setExpanded] = createSignal(false)
+  const expanded = () => props.openPath === props.entry.path || props.openPath.startsWith(`${props.entry.path}/`)
   return (
     <li>
       <Show when={props.entry.directory} fallback={
@@ -231,8 +236,8 @@ function FileRow(props: FolderProps & { entry: WorkspaceFileEntry }) {
           <span class="files-tree__label"><span>{props.entry.name}</span><FileChangeBadge change={props.changeFor(props.entry.path)} /></span>
         </button>
       }>
-        <button type="button" class="files-tree__entry files-tree__directory" aria-expanded={expanded()} onClick={() => setExpanded((open) => !open)}>
-          <span aria-hidden="true">{expanded() ? '▾' : '▸'}</span><FolderIcon size={14} /><span>{props.entry.name}</span>
+        <button type="button" class="files-tree__entry files-tree__directory" aria-expanded={expanded()} onClick={() => props.onToggleFolder(props.entry.path)}>
+          <FolderIcon size={14} /><span>{props.entry.name}</span>
         </button>
         <Show when={expanded()}>
           <FolderContents {...props} path={props.entry.path} />
@@ -240,6 +245,11 @@ function FileRow(props: FolderProps & { entry: WorkspaceFileEntry }) {
       </Show>
     </li>
   )
+}
+
+function parentPath(path: string): string {
+  const separator = path.lastIndexOf('/')
+  return separator < 0 ? '' : path.slice(0, separator)
 }
 
 const FILE_CHANGE_LABELS: Record<FileChange['kind'], string> = {

@@ -604,6 +604,16 @@ test.beforeEach(async ({ context }) => {
             return 'fixture diff'
           case 'list_files': {
             fileListings.push(args.path)
+            if (options.has('folder-tree')) {
+              const entries: Record<string, Array<{ name: string; path: string; directory: boolean }>> = {
+                '': [{ name: 'src', path: 'src', directory: true }, { name: 'docs', path: 'docs', directory: true }, { name: 'root.txt', path: 'root.txt', directory: false }],
+                src: [{ name: 'lib', path: 'src/lib', directory: true }, { name: 'bin', path: 'src/bin', directory: true }],
+                'src/lib': [{ name: 'deep.txt', path: 'src/lib/deep.txt', directory: false }],
+                'src/bin': [{ name: 'tool.txt', path: 'src/bin/tool.txt', directory: false }],
+                docs: [{ name: 'guide.txt', path: 'docs/guide.txt', directory: false }],
+              }
+              return { entries: entries[args.path] ?? [], incomplete: false }
+            }
             if (args.path === 'src') {
               const paths = watchedSourceFiles.get(args.taskId) ?? new Set(['src/main.rs'])
               return { entries: [...paths].map((path) => ({ name: path.split('/').at(-1), path, directory: false })), incomplete: false }
@@ -1541,6 +1551,30 @@ test('browses a worktree and project root with lazy folders and read-only previe
   await expect(files.getByRole('button', { name: '.env.example' })).toBeVisible()
   await files.getByRole('button', { name: 'README.md' }).click()
   await expect(viewer.getByText('<file>', { exact: true })).toBeVisible()
+})
+
+test('keeps only one expanded folder path in the file tree', async ({ page }) => {
+  await page.goto('/?folder-tree')
+  await page.getByRole('tab', { name: 'Files' }).click()
+  const files = page.getByRole('region', { name: 'Workspace files' })
+  const src = files.getByRole('button', { name: 'src', exact: true })
+  const docs = files.getByRole('button', { name: 'docs', exact: true })
+  await expect(src).toHaveText('src')
+  await expect(src.locator('svg')).toHaveCount(1)
+  await src.click()
+  await files.getByRole('button', { name: 'lib', exact: true }).click()
+  await expect(src).toHaveAttribute('aria-expanded', 'true')
+  await expect(files.getByRole('button', { name: 'deep.txt' })).toBeVisible()
+  await files.getByRole('button', { name: 'bin', exact: true }).click()
+  await expect(files.getByRole('button', { name: 'lib', exact: true })).toHaveAttribute('aria-expanded', 'false')
+  await expect(files.getByRole('button', { name: 'deep.txt' })).toHaveCount(0)
+  await expect(files.getByRole('button', { name: 'tool.txt' })).toBeVisible()
+  await docs.click()
+  await expect(src).toHaveAttribute('aria-expanded', 'false')
+  await expect(files.getByRole('button', { name: 'guide.txt' })).toBeVisible()
+  await files.getByRole('button', { name: 'root.txt' }).click()
+  await expect(docs).toHaveAttribute('aria-expanded', 'false')
+  await expect(files.getByRole('button', { name: 'guide.txt' })).toHaveCount(0)
 })
 
 test('filters by name, cancels content searches, and opens matches at their line', async ({ page }) => {

@@ -77,8 +77,9 @@ current layout and give future changes a point of comparison.
   while the separator is focused. Save the chosen width with the task.
 - In Files, name the active root above the tree and let the user choose the
   project root or the selected task's worktree. Show a small folder icon on
-  each directory row. Expand folders in place on
-  demand. Hide dotfiles by default with a **Show dotfiles** toggle. Open text
+  each directory row without an expand caret. Expand folders in place on
+  demand, keeping one open path and its ancestors while closing sibling
+  branches. Hide dotfiles by default with a **Show dotfiles** toggle. Open text
   in a read-only, line-numbered viewer inside the inspector. **Find files**
   filters filenames as the user types. **Search contents** and Enter start a
   cancellable literal search. Selecting a content match opens its line.
