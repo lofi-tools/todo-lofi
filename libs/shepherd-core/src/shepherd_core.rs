@@ -649,6 +649,23 @@ impl Core {
 
     pub async fn touch_archived_worktree(&mut self, task_id: &TaskId) -> Result<(), CoreError> {
         let task = self.task(task_id)?;
+        if task.state == TaskState::Done
+            && task.collection_pending
+            && let Some(path) = &task.worktree_path
+        {
+            match path.symlink_metadata() {
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    return self.collect_archived_worktree(task_id).await;
+                }
+                Err(source) => {
+                    return Err(CoreError::Io {
+                        path: path.display().to_string(),
+                        source,
+                    });
+                }
+                Ok(_) => {}
+            }
+        }
         if task.state == TaskState::Done && task.worktree_path.is_some() {
             let mut updated = task.clone();
             updated.worktree_last_used_at = projects::now_millis();
@@ -6082,6 +6099,50 @@ mod tests {
         let transcript = summaries(&reopened.open_task_workspace(&task_id).await?).join("\n");
         assert!(transcript.contains("first reply"));
         assert!(transcript.contains("second reply"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn touching_an_interrupted_collection_preserves_and_recovers_its_intent()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let repository = TestRepository::new()?;
+        let database = TestDatabase::new()?;
+        let mut core = Core::with_services(
+            Box::new(TursoStore::open(&database.uri()).await?),
+            Box::new(UnavailableHarnessFactory),
+        );
+        let project_id = add_project(&mut core, repository.path().to_path_buf()).await?;
+        let mut task = Task::draft(
+            project_id,
+            "Archived task",
+            &repository.repository().git_dir,
+        );
+        GitService.create_worktree(
+            repository.repository(),
+            &task.proposed_worktree_path,
+            &task.proposed_branch,
+            "main",
+        )?;
+        let tip =
+            GitService.checked_out_tip(&task.proposed_worktree_path, &task.proposed_branch)?;
+        GitService.retain_task_tip(repository.repository(), task.id.as_str(), &tip)?;
+        GitService.remove_clean_worktree(repository.repository(), &task.proposed_worktree_path)?;
+        task.worktree_path = Some(task.proposed_worktree_path.clone());
+        task.branch = Some(task.proposed_branch.clone());
+        task.state = TaskState::Done;
+        task.collection_pending = true;
+        task.branch_tip_sha = Some("invalid-tip".into());
+        core.store.save_task(&task).await?;
+        core.tasks.insert(task.id.clone(), task.clone());
+
+        assert!(core.touch_archived_worktree(&task.id).await.is_err());
+        assert!(core.task(&task.id)?.collection_pending);
+        task.branch_tip_sha = Some(tip);
+        core.store.save_task(&task).await?;
+        core.tasks.insert(task.id.clone(), task.clone());
+        core.touch_archived_worktree(&task.id).await?;
+        let recovered = core.task(&task.id)?;
+        assert!(!recovered.collection_pending && recovered.worktree_path.is_none());
         Ok(())
     }
 

@@ -1197,7 +1197,9 @@ placeholder tabs and no unearned state badges.
   fails, startup verifies the retained Git reference before finishing the
   missing-path record. Fixtures cover this recovery, a missing retained ref,
   an unrelated missing checkout, and a worktree that became dirty while a
-  collection was interrupted.
+  collection was interrupted. Opening an archived task with a missing checkout
+  and a pending collection first completes recovery; failed verification
+  preserves the intent for retry.
 - [ ] Database backup, migration checks, malformed migration handling and
   transactional writes.
   Existing file databases receive a retained Turso snapshot in a private
