@@ -1253,6 +1253,9 @@ placeholder tabs and no unearned state badges.
   when environment values are present, with local Codex and OpenCode fixtures.
   ACP connection and OpenCode cleanup warnings omit agent-controlled error text.
   Other adapter-internal logs and live-adapter behavior remain to be audited.
+  The headless agent-harness suite passed 87 tests (two live tests ignored) and
+  the core suite passed 100 tests (three live tests ignored) on macOS after
+  these confinement and environment changes.
 - [ ] Packaging and CI: macOS 13+, Ubuntu 24.04+, pinned Zig, Tauri build,
   platform smoke.
 - [ ] v2/GPUI explicitly not started until v1 is feature complete.
