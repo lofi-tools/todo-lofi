@@ -3051,6 +3051,26 @@ mod tests {
             .exec(&mut db)
             .await?;
         assert!(history.is_empty());
+        let repaired = [Migration {
+            name: "broken.sql",
+            sql: "CREATE TABLE example (value TEXT); INSERT INTO example VALUES ('saved');",
+        }];
+        apply_migration_set(&mut db, &repaired).await?;
+        let rows = toasty::sql::query("SELECT value FROM example")
+            .column_types([Type::String])
+            .exec(&mut db)
+            .await?;
+        assert_eq!(rows.len(), 1);
+        let Some(Value::Record(record)) = rows.first() else {
+            return Err("missing migrated row".into());
+        };
+        assert_eq!(required_string(record.first())?, "saved");
+        let history =
+            toasty::sql::query("SELECT name FROM _migrations_history WHERE name = 'broken.sql'")
+                .column_types([Type::String])
+                .exec(&mut db)
+                .await?;
+        assert_eq!(history.len(), 1);
         Ok(())
     }
 

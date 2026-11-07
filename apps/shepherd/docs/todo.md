@@ -1214,7 +1214,8 @@ placeholder tabs and no unearned state badges.
   successfully after access is restored. An inaccessible database path also
   fails before opening or migrating instead of being treated as a new database.
   Turso's parser validates migration statements before changes, and a failed
-  statement rolls back its migration and history entry. Broader transaction
+  statement rolls back its migration and history entry; a fixture retries the
+  repaired migration on the same connection. Broader transaction
   checks remain. Transcript batches reject missing or mismatched task/session
   owners; fixtures verify failed attachment updates roll back the whole batch.
   Normal task-state saves and interrupted shutdowns commit eligible transcript
