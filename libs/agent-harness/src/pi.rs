@@ -121,8 +121,9 @@ impl PiRpc {
         let (events, receiver) = mpsc::unbounded_channel();
         let (shutdown_request, mut shutdown) = mpsc::unbounded_channel();
         let (stop_errors, stop_error_receiver) = mpsc::unbounded_channel();
+        let (writer_failure, mut writer_failed) = oneshot::channel();
         let replies = Replies::default();
-        let writer = tokio::spawn(write_input(stdin, outgoing));
+        let writer = tokio::spawn(write_input(stdin, outgoing, writer_failure));
         let supervisor = tokio::spawn({
             let replies = replies.clone();
             async move {
@@ -133,6 +134,7 @@ impl PiRpc {
                 tokio::pin!(reading);
                 let (protocol_error, stopped) = tokio::select! {
                     result = &mut reading => (result.err(), false),
+                    Ok(error) = &mut writer_failed => (Some(protocol(error)), false),
                     _ = shutdown.recv() => {
                         if let Err(error) = stop_with_retry(&child, terminate, &mut shutdown, &stop_errors).await {
                             cleanup_error = Some(format!("could not signal Pi during shutdown: {error}"));
@@ -445,11 +447,20 @@ async fn stop_with_retry(
     }
 }
 
-async fn write_input(mut stdin: ChildStdin, mut outgoing: mpsc::Receiver<Vec<u8>>) {
+async fn write_input(
+    mut stdin: ChildStdin,
+    mut outgoing: mpsc::Receiver<Vec<u8>>,
+    failure: oneshot::Sender<String>,
+) {
     while let Some(frame) = outgoing.recv().await {
         if let Err(error) = stdin.write_all(&frame).await {
-            tracing::debug!(%error, "could not write Pi RPC frame");
-            break;
+            if failure
+                .send(format!("could not write Pi RPC frame: {error}"))
+                .is_err()
+            {
+                tracing::debug!("Pi RPC supervisor stopped before the writer");
+            }
+            return;
         }
     }
 }
@@ -691,6 +702,50 @@ exec sleep 30
         timeout(Duration::from_secs(2), rpc.shutdown()).await??;
         rpc.shutdown().await?;
         assert_eq!(SIGNAL_ATTEMPTS.load(std::sync::atomic::Ordering::SeqCst), 2);
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn closed_input_fails_pending_request_and_stops_descendants()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let script = directory.path().join("pi-input-closed.sh");
+        std::fs::write(
+            &script,
+            r#"
+IFS= read -r state || exit 3
+state_id=$(printf '%s\n' "$state" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
+printf '{"type":"response","id":"%s","command":"get_state","success":true,"data":{"sessionId":"pi-fixture","sessionFile":null,"isStreaming":false,"isCompacting":false,"pendingMessageCount":0}}\n' "$state_id"
+(sleep 1; printf survived > child-survived) </dev/null >/dev/null 2>&1 &
+exec 0<&-
+printf '%s\n' '{"type":"fixture_input_closed"}'
+exec sleep 30
+"#,
+        )?;
+        let spec = SpawnSpec {
+            program: "/bin/sh".into(),
+            args: vec![script.to_string_lossy().into_owned()],
+            cwd: directory.path().to_owned(),
+            ..SpawnSpec::default()
+        };
+        let (mut rpc, _) = PiRpc::start(&spec).await?;
+        assert!(matches!(
+            timeout(Duration::from_secs(1), rpc.next_event()).await?,
+            Some(PiRpcEvent::Record(record)) if record["type"] == "fixture_input_closed"
+        ));
+        assert!(matches!(
+            timeout(Duration::from_secs(1), rpc.request("get_state", Map::new())).await?,
+            Err(HarnessError::ChannelClosed)
+        ));
+        assert!(matches!(
+            timeout(Duration::from_secs(2), rpc.next_event()).await?,
+            Some(PiRpcEvent::Exited { protocol_error: Some(error), .. })
+                if error.contains("could not write Pi RPC frame")
+        ));
+        rpc.shutdown().await?;
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        assert!(!directory.path().join("child-survived").exists());
         Ok(())
     }
 

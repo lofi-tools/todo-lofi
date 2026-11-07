@@ -878,6 +878,8 @@ If Pi’s RPC probe is blocked, proceed with ACP while resolving it.
   The stdio transport and ID-based command and dialog replies are implemented.
   Pending RPC requests fail when output closes, without waiting for a lingering
   process to exit; a local subprocess fixture verifies the disconnect path.
+  A failed stdin write also closes pending requests and stops the process group,
+  even when the agent leaves stdout open; a local descendant fixture covers it.
   On Unix the RPC process has its own group; explicit shutdown or dropping an
   active transport stops that group, with a local descendant fixture. The
   supervisor also accepts shutdown while waiting after output closes and stops
