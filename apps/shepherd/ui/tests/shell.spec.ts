@@ -30,6 +30,7 @@ test.beforeEach(async ({ context }) => {
     const terminalAppearances: Array<{ light: boolean; moreContrast: boolean }> = []
     const archiveRequests: string[][] = []
     const gitMutations: GitMutation[] = []
+    let failedReviewSnapshot = false
     const gitState = () => {
       const last = gitMutations.at(-1)?.type
       return {
@@ -594,9 +595,15 @@ test.beforeEach(async ({ context }) => {
             return []
           }
           case 'git_snapshot':
+            return gitState()
           case 'review_snapshot':
+            if (options.has('review-load-error') && !failedReviewSnapshot) {
+              failedReviewSnapshot = true
+              throw { message: 'Could not load review diff', code: 'git' }
+            }
             return gitState()
           case 'mutate_git':
+            if (options.has('git-mutation-error')) throw { message: 'Git hook rejected this change', code: 'git' }
             gitMutations.push(args.mutation)
             return gitState()
           case 'git_file_diff':
@@ -1690,6 +1697,28 @@ test('opens error details above the project picker', async ({ page }) => {
   await expect(history).toBeVisible()
   await history.getByRole('button', { name: 'Close' }).click()
   await expect(page.getByRole('dialog', { name: 'Add project' })).toBeVisible()
+})
+
+test('reports Git failures in the toast while keeping retry controls', async ({ page }) => {
+  await page.goto('/?git-mutation-error')
+  await page.getByRole('tab', { name: 'Git', exact: true }).click()
+  const git = page.getByRole('region', { name: 'Git worktree' })
+  await git.getByRole('button', { name: 'Stage', exact: true }).click()
+  await expect(page.getByRole('alert')).toContainText('Git hook rejected this change')
+  await expect(git.getByRole('alert')).toHaveCount(0)
+  await expect(git.getByRole('button', { name: 'Stage', exact: true })).toBeEnabled()
+  await page.getByRole('button', { name: 'Error history' }).click()
+  await expect(page.getByRole('dialog', { name: 'Error history' })).toContainText('Git hook rejected this change')
+})
+
+test('reports Review loading failures and permits refresh', async ({ page }) => {
+  await page.goto('/?review-load-error')
+  await page.getByRole('tab', { name: 'Review', exact: true }).click()
+  const review = page.getByRole('region', { name: 'Task changes' })
+  await expect(page.getByRole('alert')).toContainText('Could not load review diff')
+  await expect(review.getByRole('alert')).toHaveCount(0)
+  await review.getByRole('button', { name: 'Refresh' }).click()
+  await expect(review.getByText('src/main.rs')).toBeVisible()
 })
 
 test('filters filenames as the user types and opens a match', async ({ page }) => {

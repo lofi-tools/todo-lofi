@@ -2,6 +2,7 @@ import { For, Show, createResource, createSignal } from 'solid-js'
 
 import { reviewFileDiff, reviewSnapshot, type ReviewAction, type TaskDetail } from './bridge'
 import { GitDiffFile, GitDiffText } from './GitDiff'
+import { reportError } from './diagnostics'
 
 export function ReviewPane(props: { task: TaskDetail; queuedNote?: string; openFile: (path: string) => void; onAction: (action: ReviewAction) => Promise<void> }) {
   const [review, { refetch }] = createResource(
@@ -21,17 +22,15 @@ export function ReviewPane(props: { task: TaskDetail; queuedNote?: string; openF
   const [note, setNote] = createSignal('')
   const [pending, setPending] = createSignal(false)
   const running = () => ['starting', 'working', 'waiting', 'queued'].includes(props.task.state)
-  const [error, setError] = createSignal('')
 
   async function apply(action: ReviewAction) {
     if (pending()) return
     setPending(true)
-    setError('')
     try {
       await props.onAction(action)
       if (action.type === 'sendNote') setNote('')
     } catch (failure) {
-      setError((failure as { message?: string })?.message ?? String(failure))
+      reportError('review_task', failure)
     } finally {
       setPending(false)
     }
@@ -75,9 +74,7 @@ export function ReviewPane(props: { task: TaskDetail; queuedNote?: string; openF
           <button type="button" disabled={pending()} onClick={() => void apply({ type: 'archive' })}>Mark reviewed and archive</button>
         </div>
       </Show>
-      <Show when={error()}>{(failure) => <p role="alert">{failure()}</p>}</Show>
       <Show when={review.loading}><p class="empty" role="status">Loading changes…</p></Show>
-      <Show when={review.error}><p role="alert">{review.error.message ?? String(review.error)}</p></Show>
       <Show when={!review.error && review()}>
         {(snapshot) => (
           <>
@@ -97,7 +94,6 @@ export function ReviewPane(props: { task: TaskDetail; queuedNote?: string; openF
                   <div class="terminal-pane__bar"><button type="button" onClick={() => props.openFile(path())}>Open in Files</button></div>
                 </Show>
                 <Show when={diff.loading}><p role="status" class="empty">Loading diff…</p></Show>
-                <Show when={diff.error}><p role="alert">{diff.error.message ?? String(diff.error)}</p></Show>
                 <Show when={!diff.error && !diff.loading && diff() !== undefined}>
                   <GitDiffText label="File diff" text={diff() || 'No net content change.'} />
                 </Show>

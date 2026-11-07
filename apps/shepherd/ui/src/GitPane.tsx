@@ -2,6 +2,7 @@ import { For, Show, createEffect, createResource, createSignal } from 'solid-js'
 
 import { gitFileDiff, gitSnapshot, mutateGit, type GitMutation } from './bridge'
 import { GitDiffFile, GitDiffText } from './GitDiff'
+import { reportError } from './diagnostics'
 
 interface GitRequest {
   taskId: string
@@ -31,7 +32,6 @@ export function GitPane(props: {
     ([taskId, , path]) => gitFileDiff(taskId, path),
   )
   const [pending, setPending] = createSignal(false)
-  const [error, setError] = createSignal('')
   const [notice, setNotice] = createSignal('')
   const disabled = () => props.live || pending() || git.loading
   let commitMessage: HTMLTextAreaElement | undefined
@@ -53,7 +53,6 @@ export function GitPane(props: {
   async function apply(operation: GitMutation) {
     if (disabled()) return
     setPending(true)
-    setError('')
     setNotice('')
     try {
       const snapshot = await mutateGit(props.taskId, operation)
@@ -68,7 +67,7 @@ export function GitPane(props: {
         setNotice(`Squash-merged into ${snapshot.projectRoot?.branch ?? 'the base branch'}.`)
       }
     } catch (failure) {
-      setError((failure as { message?: string })?.message ?? String(failure))
+      reportError('mutate_git', failure)
       void refetch()
       void refetchFile()
     } finally {
@@ -82,8 +81,6 @@ export function GitPane(props: {
         <button type="button" onClick={() => { void refetch(); if (selectedFile()) void refetchFile() }} disabled={git.loading}>Refresh</button>
       </div>
       <Show when={git.loading}><p class="empty" role="status">Loading Git status…</p></Show>
-      <Show when={error()}><pre class="git-pane__diff" role="alert">{error()}</pre></Show>
-      <Show when={git.error}><p role="alert">{git.error.message ?? String(git.error)}</p></Show>
       <Show when={!git.error && git()}>
         {(snapshot) => (
           <>
@@ -146,7 +143,6 @@ export function GitPane(props: {
                     <div class="terminal-pane__bar"><button type="button" onClick={() => props.openFile(name())}>Open in Files</button></div>
                   </Show>
                   <Show when={fileDiff.loading}><p class="empty" role="status">Loading file diff…</p></Show>
-                  <Show when={fileDiff.error}><p role="alert">{fileDiff.error.message ?? String(fileDiff.error)}</p></Show>
                   <Show when={!fileDiff.loading && !fileDiff.error && fileDiff()}>
                     {(diff) => (
                       <section class="git-pane" aria-label={`Diff for ${name()}`}>
