@@ -631,6 +631,7 @@ pub struct ShellState {
     events: broadcast::Sender<Event>,
     terminal_subscriptions: Arc<Mutex<BTreeMap<String, TerminalSubscription>>>,
     terminal_lifecycle: Mutex<()>,
+    pending_quit: Mutex<Option<QuitSummary>>,
     terminals: TerminalHost,
     previous_processes: Vec<ProcessRecord>,
     scan: Arc<Mutex<Option<shepherd_core::project_scan::ProjectScan>>>,
@@ -679,6 +680,7 @@ impl ShellState {
             events,
             terminal_subscriptions: Arc::new(Mutex::new(BTreeMap::new())),
             terminal_lifecycle: Mutex::new(()),
+            pending_quit: Mutex::new(None),
             terminals,
             previous_processes: Vec::new(),
             scan: Arc::new(Mutex::new(None)),
@@ -1254,20 +1256,47 @@ impl ShellState {
     }
 
     pub async fn quit(&self, force: bool) -> Result<QuitSummary, BridgeError> {
-        let _guard = self.terminal_lifecycle.lock().await;
-        match self.execute(Command::Quit { force }).await? {
-            CommandResult::Quit(summary) => {
-                let mut engine = std::mem::take(&mut *self.terminals.engine.lock().await);
-                if let Err(error) =
-                    tokio::task::spawn_blocking(move || engine.terminate_all()).await
-                {
-                    tracing::error!(%error, "terminal shutdown worker failed");
-                }
-                Ok(summary)
-            }
+        let engine = self.terminals.engine.clone();
+        self.quit_with_cleanup(force, || async move {
+            tokio::task::spawn_blocking(move || engine.blocking_lock().terminate_all())
+                .await
+                .map_err(|error| {
+                    BridgeError::new(
+                        "terminal",
+                        format!("Terminal shutdown worker failed: {error}"),
+                    )
+                })?
+                .map_err(|error| {
+                    BridgeError::new("terminal", format!("Could not stop terminals: {error}"))
+                })
+        })
+        .await
+    }
 
-            other => Err(unexpected(&other)),
-        }
+    async fn quit_with_cleanup<F, Fut>(
+        &self,
+        force: bool,
+        cleanup: F,
+    ) -> Result<QuitSummary, BridgeError>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = Result<(), BridgeError>>,
+    {
+        let _guard = self.terminal_lifecycle.lock().await;
+        let mut pending = self.pending_quit.lock().await;
+        let summary = match pending.as_ref() {
+            Some(summary) => summary.clone(),
+            None => match self.execute(Command::Quit { force }).await? {
+                CommandResult::Quit(summary) => {
+                    *pending = Some(summary.clone());
+                    summary
+                }
+                other => return Err(unexpected(&other)),
+            },
+        };
+        cleanup().await?;
+        *pending = None;
+        Ok(summary)
     }
 
     pub async fn project_list(&self) -> ProjectList {
@@ -2995,6 +3024,23 @@ mod tests {
                 Some("preserved")
             );
         }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn quit_retries_terminal_cleanup_after_core_has_closed()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let state = ShellState::new(Core::new());
+        let failure = state
+            .quit_with_cleanup(true, || async {
+                Err(BridgeError::new("terminal", "fixture cleanup failure"))
+            })
+            .await;
+        assert!(failure.is_err());
+        assert!(state.pending_quit.lock().await.is_some());
+        let summary = state.quit_with_cleanup(true, || async { Ok(()) }).await?;
+        assert_eq!(summary.interrupted_tasks, 0);
+        assert!(state.pending_quit.lock().await.is_none());
         Ok(())
     }
 

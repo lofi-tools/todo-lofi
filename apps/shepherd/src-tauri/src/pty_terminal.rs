@@ -384,45 +384,46 @@ impl PtyTerminals {
         }
     }
 
-    pub fn terminate_all(&mut self) {
-        let sessions = match self.sessions.lock() {
-            Ok(mut sessions) => std::mem::take(&mut *sessions),
-            Err(error) => {
-                tracing::error!(%error, "could not drain terminal sessions");
-                std::mem::take(&mut *error.into_inner())
-            }
-        };
-        #[cfg(unix)]
-        let processes = {
-            if sessions.live.is_empty() && sessions.exited.is_empty() {
-                return;
-            }
-            terminal_processes()
-        };
-        #[cfg(unix)]
-        let mut all_groups = Vec::new();
-        for (terminal_id, mut session) in sessions.live {
+    pub fn terminate_all(&mut self) -> Result<(), TerminalError> {
+        self.terminate_all_with_scan(
             #[cfg(unix)]
-            let groups = session.process_groups(&processes);
-            if let Err(error) = session.hangup(
+            list_processes,
+        )
+    }
+
+    fn terminate_all_with_scan(
+        &mut self,
+        #[cfg(unix)] mut scan: impl FnMut() -> std::io::Result<Vec<libc::pid_t>>,
+    ) -> Result<(), TerminalError> {
+        let terminal_ids: std::collections::BTreeSet<String> = {
+            let sessions = self.sessions()?;
+            #[cfg(unix)]
+            {
+                sessions
+                    .live
+                    .keys()
+                    .cloned()
+                    .chain(
+                        sessions
+                            .exited
+                            .values()
+                            .map(|session| session.terminal_id.clone()),
+                    )
+                    .collect()
+            }
+            #[cfg(not(unix))]
+            {
+                sessions.live.keys().cloned().collect()
+            }
+        };
+        for id in terminal_ids {
+            self.close_with_scan(
+                &TerminalId::new(id),
                 #[cfg(unix)]
-                &groups,
-            ) {
-                tracing::warn!(%terminal_id, %error, "could not stop terminal process");
-            }
-            #[cfg(unix)]
-            all_groups.extend(groups);
+                &mut scan,
+            )?;
         }
-        #[cfg(unix)]
-        for (session, exited) in sessions.exited {
-            let groups = exited.process_groups(session, &processes);
-            for group in &groups {
-                group.signal(libc::SIGHUP);
-            }
-            all_groups.extend(groups);
-        }
-        #[cfg(unix)]
-        TerminalProcessGroup::finish_hangup(all_groups);
+        Ok(())
     }
 
     pub fn write_reply(
@@ -540,7 +541,9 @@ impl PtyTerminals {
 
 impl Drop for PtyTerminals {
     fn drop(&mut self) {
-        self.terminate_all();
+        if let Err(error) = self.terminate_all() {
+            tracing::error!(%error, "could not stop terminal sessions during drop");
+        }
     }
 }
 
@@ -1073,7 +1076,13 @@ mod tests {
                     .any(|record| i64::from(record.pid) == i64::from(process)
                         && i64::from(record.process_group) == i64::from(group))
             );
-            engine.terminate_all();
+            assert!(
+                engine
+                    .terminate_all_with_scan(|| Err(std::io::Error::other("fixture scan failed")))
+                    .is_err()
+            );
+            assert!(!engine.lingering_process_records(&terminal_id)?.is_empty());
+            engine.terminate_all()?;
         } else {
             engine.close(&terminal_id)?;
         }
