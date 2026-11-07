@@ -53,8 +53,9 @@ export function ErrorNotifications() {
       <button type="button" aria-label="Dismiss error" onClick={() => setToast(undefined)}>×</button>
     </div>}</Show>
     <Show when={open()}>
-      <div class="picker-backdrop" onClick={() => setOpen(false)}>
-        <section class="picker error-history" role="dialog" aria-modal="true" aria-label="Error history" onClick={(event) => event.stopPropagation()}>
+      <div class="picker-backdrop error-history-backdrop" onClick={() => setOpen(false)}>
+        <section class="picker error-history" role="dialog" aria-modal="true" aria-label="Error history" onClick={(event) => event.stopPropagation()}
+          onKeyDown={(event) => { if (event.key === 'Escape') { event.stopPropagation(); setOpen(false) } }}>
           <header class="picker__header"><h3>Error history</h3><button type="button" onClick={() => setOpen(false)}>Close</button></header>
           <Show when={historyError()}>{(message) => <p>{message()}</p>}</Show>
           <Show when={history().length} fallback={<p class="empty">No recorded errors.</p>}>

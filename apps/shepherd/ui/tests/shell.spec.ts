@@ -517,6 +517,7 @@ test.beforeEach(async ({ context }) => {
               ? { label: 'demo/alpha-a-repository-with-a-long-name-that-still-fits-on-one-line', forge: 'gitlab' }
               : { label: 'example/demo', forge: 'github' }
           case 'project_scan':
+            if (options.has('project-scan-error')) throw { message: 'Cannot scan projects', code: 'scan' }
             return scan
           case 'local_codex_available':
             return !new URLSearchParams(window.location.search).has('no-codex')
@@ -1655,6 +1656,18 @@ test('shows file errors as temporary toasts and keeps diagnostic history', async
   await page.goto('/')
   await page.getByRole('button', { name: 'Error history' }).click()
   await expect(page.getByRole('dialog', { name: 'Error history' })).toContainText('Permission denied opening workspace')
+})
+
+test('opens error details above the project picker', async ({ page }) => {
+  await page.goto('/?project-scan-error')
+  await page.getByRole('button', { name: 'Add project' }).click()
+  const toast = page.getByRole('alert').filter({ hasText: 'Cannot scan projects' })
+  await expect(toast).toBeVisible()
+  await toast.getByRole('button', { name: 'Details' }).click()
+  const history = page.getByRole('dialog', { name: 'Error history' })
+  await expect(history).toBeVisible()
+  await history.getByRole('button', { name: 'Close' }).click()
+  await expect(page.getByRole('dialog', { name: 'Add project' })).toBeVisible()
 })
 
 test('filters by name, cancels content searches, and opens matches at their line', async ({ page }) => {
