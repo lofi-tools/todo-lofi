@@ -1832,7 +1832,8 @@ test('dispatches external actions for the selected root and shows opener errors'
   await page.getByLabel('File root').selectOption('project')
   await page.getByRole('button', { name: 'README.md', exact: true }).click()
   await preview.getByRole('button', { name: 'Reveal in file manager' }).click()
-  await expect(preview.getByRole('alert')).toHaveText('Could not reveal the file in the file manager: opener unavailable')
+  await expect(page.getByRole('alert')).toHaveText(/Could not reveal the file in the file manager: opener unavailable/)
+  await expect(preview.getByRole('alert')).toHaveCount(0)
   expect(await page.evaluate(() => window.__fileActions)).toEqual([
     { projectId: 'project-1', taskId: 'task-1', path: 'worktree.txt', action: 'edit' },
     { projectId: 'project-1', taskId: null, path: 'README.md', action: 'reveal' },

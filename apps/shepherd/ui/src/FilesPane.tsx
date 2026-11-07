@@ -8,7 +8,6 @@ interface FileLocation {
   projectId: string
   taskId: string | null
 }
-
 interface FileSelection {
   path: string
   line: number | null
@@ -56,10 +55,8 @@ function FileBrowser(props: FileLocation & { showDotfiles: boolean; initialPath?
   const [openPath, setOpenPath] = createSignal(props.initialPath ? parentPath(props.initialPath) : '')
   const [query, setQuery] = createSignal('')
   const [results, setResults] = createSignal<FileSearchResult>()
-  const [error, setError] = createSignal<string>()
   const [status, setStatus] = createSignal<'idle' | 'searching' | 'cancelled'>('idle')
   const [changes, setChanges] = createSignal<FileChange[]>([])
-  const [watchError, setWatchError] = createSignal<string>()
   const [treeRevision, setTreeRevision] = createSignal(0)
   const directories = new Map<string, CachedDirectory>()
   let cacheVersion = ''
@@ -127,14 +124,13 @@ function FileBrowser(props: FileLocation & { showDotfiles: boolean; initialPath?
     const watcher = watchWorkspaceFiles(props.projectId, props.taskId, (update, replayed) => {
       if (closed) return
       if (update.type === 'error') {
-        setWatchError(update.message)
+        reportError('watch_workspace_files', update.message)
       } else {
-        setWatchError(undefined)
         setChanges(update.files)
         if (!replayed) setTreeRevision((revision) => revision + 1)
       }
     })
-    void watcher.catch((failure) => { if (!closed) setWatchError(failureMessage(failure)) })
+    void watcher.catch((failure) => { if (!closed) reportError('watch_workspace_files', failure) })
     onCleanup(() => {
       closed = true
       void watcher.then((dispose) => dispose(), () => undefined)
@@ -153,7 +149,6 @@ function FileBrowser(props: FileLocation & { showDotfiles: boolean; initialPath?
     stopSearch()
     const text = query().trim()
     setResults(undefined)
-    setError(undefined)
     setStatus(text ? 'searching' : 'idle')
     if (!text) return
     const request: PendingSearch = {}
@@ -170,7 +165,7 @@ function FileBrowser(props: FileLocation & { showDotfiles: boolean; initialPath?
         const result = await searchWorkspaceFiles(id, props.projectId, props.taskId, parameters)
         if (active === request) setResults(result)
       } catch (failure) {
-        if (active === request) setError(failureMessage(failure))
+        if (active === request) reportError('search_workspace_files', failure)
         else console.debug('A superseded file search ended', failure)
       } finally {
         if (active === request) {
@@ -199,7 +194,6 @@ function FileBrowser(props: FileLocation & { showDotfiles: boolean; initialPath?
           <button type="button" onClick={() => { stopSearch(); setStatus('cancelled') }}>Cancel search</button>
         </Show>
       </form>
-      <Show when={watchError()}>{(message) => <p class="error" role="alert">{message()}</p>}</Show>
       <div class="files-pane__tree" aria-label="File tree" hidden={!!query().trim()}>
         <FolderContents projectId={props.projectId} taskId={props.taskId} path="" showDotfiles={props.showDotfiles}
           revision={treeRevision()} changeFor={changeFor} directoryChangeFor={directoryChangeFor} selected={selected()?.path ?? null}
@@ -221,7 +215,6 @@ function FileBrowser(props: FileLocation & { showDotfiles: boolean; initialPath?
         <section class="files-pane__tree" aria-label="File search results">
           <Show when={status() === 'searching'}><p class="empty empty--tight" role="status">Searching files…</p></Show>
           <Show when={status() === 'cancelled'}><p class="empty empty--tight" role="status">Search cancelled.</p></Show>
-          <Show when={error()}>{(message) => <p class="error" role="alert">{message()}</p>}</Show>
           <Show when={results()}>{(result) => <>
             <Show when={result().matches.length} fallback={<p class="empty empty--tight">No matching files.</p>}>
               <ul class="files-tree">
@@ -375,7 +368,6 @@ function FileChangeBadge(props: { change: FileChange | undefined }) {
 
 function FileViewer(props: FileLocation & FileSelection) {
   const [actionPending, setActionPending] = createSignal(false)
-  const [actionError, setActionError] = createSignal<string>()
   const [file] = createResource(
     () => [props.projectId, props.taskId, props.path, props.line] as const,
     ([projectId, taskId, path, line]) => readWorkspaceFile(projectId, taskId, path, line),
@@ -383,11 +375,10 @@ function FileViewer(props: FileLocation & FileSelection) {
   async function act(action: FileAction) {
     if (actionPending()) return
     setActionPending(true)
-    setActionError(undefined)
     try {
       await actOnWorkspaceFile(props.projectId, props.taskId, props.path, action)
     } catch (failure) {
-      setActionError(failureMessage(failure))
+      reportError('act_on_workspace_file', failure)
     } finally {
       setActionPending(false)
     }
@@ -400,7 +391,6 @@ function FileViewer(props: FileLocation & FileSelection) {
         <button type="button" disabled={actionPending()} onClick={() => void act('edit')}>Open in external editor</button>
         <button type="button" disabled={actionPending()} onClick={() => void act('reveal')}>Reveal in file manager</button>
       </div>
-      <Show when={actionError()}>{(message) => <p class="error" role="alert">{message()}</p>}</Show>
       <Show when={file.loading}><p class="empty empty--tight" role="status">Opening file…</p></Show>
       <Show when={!file.error && file()}>
         {(current) => <>
@@ -425,8 +415,4 @@ function FileViewer(props: FileLocation & FileSelection) {
       </Show>
     </section>
   )
-}
-
-function failureMessage(error: unknown): string {
-  return (error as { message?: string } | null)?.message ?? String(error)
 }
