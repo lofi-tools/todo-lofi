@@ -296,6 +296,19 @@ function FolderContents(props: FolderProps & { path: string }) {
 
 function FileRow(props: FolderProps & { entry: WorkspaceFileEntry }) {
   const expanded = () => props.openPath === props.entry.path || props.openPath.startsWith(`${props.entry.path}/`)
+  const [mounted, setMounted] = createSignal(false)
+  const [revealed, setRevealed] = createSignal(false)
+  createEffect(() => {
+    if (expanded()) {
+      setMounted(true)
+      const frame = requestAnimationFrame(() => setRevealed(true))
+      onCleanup(() => cancelAnimationFrame(frame))
+    } else {
+      setRevealed(false)
+      const timer = window.setTimeout(() => setMounted(false), 180)
+      onCleanup(() => window.clearTimeout(timer))
+    }
+  })
   return (
     <li>
       <Show when={props.entry.directory} fallback={
@@ -307,8 +320,11 @@ function FileRow(props: FolderProps & { entry: WorkspaceFileEntry }) {
         <button type="button" class="files-tree__entry files-tree__directory" classList={{ 'files-tree__entry--ignored': props.entry.ignored }} data-kind={props.directoryChangeFor(props.entry.path)?.kind} aria-expanded={expanded()} onClick={() => props.onToggleFolder(props.entry.path)}>
           <ThemeIcon icon={expanded() ? '_folder_open' : '_folder'} ignored={props.entry.ignored} /><span>{props.entry.name}</span>
         </button>
-        <Show when={expanded()}>
-          <FolderContents {...props} path={props.entry.path} />
+        <Show when={mounted()}>
+          <div class="files-tree__children" classList={{ 'files-tree__children--open': revealed() }}
+            aria-hidden={!expanded()} inert={!expanded()}>
+            <div><FolderContents {...props} path={props.entry.path} /></div>
+          </div>
         </Show>
       </Show>
     </li>

@@ -2283,6 +2283,21 @@ textarea {
   padding-inline-start: 1em;
 }
 
+.files-tree__children {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows 160ms ease;
+}
+
+.files-tree__children--open {
+  grid-template-rows: 1fr;
+}
+
+.files-tree__children > div {
+  min-height: 0;
+  overflow: hidden;
+}
+
 .files-tree__entry {
   width: 100%;
   padding: 3px 6px;
