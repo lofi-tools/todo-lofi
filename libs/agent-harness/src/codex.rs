@@ -54,6 +54,8 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(20);
 const STDERR_TAIL_LINES: usize = 20;
 const MAX_PROTOCOL_LINE_BYTES: usize = 8 * 1024 * 1024;
 const MAX_PROBE_OUTPUT_BYTES: usize = 256 * 1024;
+const EXEC_STREAM_CHUNKS: usize = 64;
+const EXEC_STREAM_CHUNK_BYTES: usize = 8 * 1024;
 
 async fn read_protocol_line<R: AsyncBufRead + Unpin>(
     reader: &mut R,
@@ -1400,6 +1402,7 @@ impl AgentHarness for CodexHarness {
 pub struct ExecHarness {
     sender: mpsc::UnboundedSender<HarnessEvent>,
     receiver: mpsc::UnboundedReceiver<HarnessEvent>,
+    stream_capacity: Arc<tokio::sync::Semaphore>,
     program: String,
     command: String,
     version: Option<String>,
@@ -1558,6 +1561,7 @@ impl ExecHarness {
         Self {
             sender,
             receiver,
+            stream_capacity: Arc::new(tokio::sync::Semaphore::new(EXEC_STREAM_CHUNKS)),
             program: String::new(),
             command: String::new(),
             version: None,
@@ -1760,7 +1764,14 @@ impl AgentHarness for ExecHarness {
         let (wait_errors, wait_error_receiver) = mpsc::unbounded_channel();
         let finished = Arc::new(AtomicBool::new(false));
         let progress = Arc::new(AtomicU64::new(0));
-        let reader = spawn_exec_reader(stdout, self.sender.clone(), progress.clone());
+        let backpressured = Arc::new(AtomicBool::new(false));
+        let reader = spawn_exec_reader(
+            stdout,
+            self.sender.clone(),
+            progress.clone(),
+            backpressured.clone(),
+            self.stream_capacity.clone(),
+        );
         let reader_abort = reader.abort_handle();
         let waiter = spawn_exec_waiter(
             ExecWaiter {
@@ -1772,6 +1783,7 @@ impl AgentHarness for ExecHarness {
                 finished: Arc::clone(&finished),
                 reader,
                 progress,
+                backpressured,
                 wait_errors,
                 process_record: process_record.clone(),
             },
@@ -1864,6 +1876,7 @@ struct ExecWaiter {
     finished: Arc<AtomicBool>,
     reader: JoinHandle<Result<(), String>>,
     progress: Arc<AtomicU64>,
+    backpressured: Arc<AtomicBool>,
     wait_errors: mpsc::UnboundedSender<String>,
     process_record: ExecProcessRecord,
 }
@@ -1883,6 +1896,7 @@ fn spawn_exec_waiter(
             finished,
             mut reader,
             progress,
+            backpressured,
             wait_errors,
             process_record,
         } = waiter;
@@ -1969,6 +1983,7 @@ fn spawn_exec_waiter(
             match drain_exec_reader(
                 &mut reader,
                 &progress,
+                &backpressured,
                 &mut kill,
                 cancelled,
                 Duration::from_secs(1),
@@ -2040,14 +2055,16 @@ fn spawn_exec_waiter(
 async fn drain_exec_reader(
     reader: &mut JoinHandle<Result<(), String>>,
     progress: &AtomicU64,
+    backpressured: &AtomicBool,
     kill: &mut mpsc::UnboundedReceiver<oneshot::Sender<Result<(), String>>>,
     cancelled: bool,
     idle_timeout: Duration,
     total_timeout: Duration,
 ) -> Result<bool, String> {
-    let deadline = Instant::now() + total_timeout;
+    let mut deadline = Instant::now() + total_timeout;
     loop {
         let previous = progress.load(Ordering::Relaxed);
+        let started = Instant::now();
         let next_check = (Instant::now() + idle_timeout).min(deadline);
         let result = tokio::select! {
             result = timeout_at(next_check, &mut *reader) => result,
@@ -2062,6 +2079,12 @@ async fn drain_exec_reader(
         match result {
             Ok(Ok(result)) => return result.map(|()| false),
             Ok(Err(error)) => return Err(format!("Codex exec reader failed: {error}")),
+            Err(_) if !cancelled && backpressured.load(Ordering::Acquire) => {
+                let now = Instant::now();
+                deadline =
+                    (deadline + now.saturating_duration_since(started)).max(now + idle_timeout);
+                continue;
+            }
             Err(_) if Instant::now() >= deadline => {
                 reader.abort();
                 return Err("Codex exec output exceeded the post-exit drain limit".into());
@@ -2093,11 +2116,13 @@ fn spawn_exec_reader(
     stdout: ChildStdout,
     sender: mpsc::UnboundedSender<HarnessEvent>,
     progress: Arc<AtomicU64>,
+    backpressured: Arc<AtomicBool>,
+    capacity: Arc<tokio::sync::Semaphore>,
 ) -> JoinHandle<Result<(), String>> {
     tokio::spawn(async move {
         let mut lines = BufReader::new(ProgressReader {
             inner: stdout,
-            progress,
+            progress: progress.clone(),
         });
         loop {
             let line = match read_protocol_line(&mut lines).await {
@@ -2117,7 +2142,10 @@ fn spawn_exec_reader(
                 }
             };
             for event in exec_events(&message) {
-                if sender.send(event).is_err() {
+                if publish_exec_event(&sender, &capacity, &backpressured, &progress, event)
+                    .await
+                    .is_err()
+                {
                     tracing::debug!("the core stopped listening to codex events");
                     return Ok(());
                 }
@@ -2125,6 +2153,58 @@ fn spawn_exec_reader(
         }
         Ok(())
     })
+}
+
+async fn publish_exec_event(
+    sender: &mpsc::UnboundedSender<HarnessEvent>,
+    capacity: &Arc<tokio::sync::Semaphore>,
+    backpressured: &AtomicBool,
+    progress: &AtomicU64,
+    event: HarnessEvent,
+) -> Result<(), ()> {
+    let HarnessEvent::Delta {
+        item_id,
+        kind,
+        text,
+        ..
+    } = event
+    else {
+        return sender.send(event).map_err(|_| ());
+    };
+    if text.is_empty() {
+        backpressured.store(true, Ordering::Release);
+        let permit = capacity.clone().acquire_owned().await.map_err(|_| ())?;
+        backpressured.store(false, Ordering::Release);
+        sender
+            .send(HarnessEvent::Delta {
+                item_id,
+                kind,
+                text,
+                stream_permit: Some(Arc::new(permit)),
+            })
+            .map_err(|_| ())?;
+        progress.fetch_add(1, Ordering::Relaxed);
+        return Ok(());
+    }
+    let mut remaining = text.as_str();
+    while !remaining.is_empty() {
+        let end = remaining.floor_char_boundary(remaining.len().min(EXEC_STREAM_CHUNK_BYTES));
+        let (chunk, rest) = remaining.split_at(end);
+        backpressured.store(true, Ordering::Release);
+        let permit = capacity.clone().acquire_owned().await.map_err(|_| ())?;
+        backpressured.store(false, Ordering::Release);
+        sender
+            .send(HarnessEvent::Delta {
+                item_id: item_id.clone(),
+                kind,
+                text: chunk.to_owned(),
+                stream_permit: Some(Arc::new(permit)),
+            })
+            .map_err(|_| ())?;
+        progress.fetch_add(1, Ordering::Relaxed);
+        remaining = rest;
+    }
+    Ok(())
 }
 
 struct ProgressReader<R> {
@@ -4706,6 +4786,216 @@ exit 0
     }
 
     #[tokio::test]
+    async fn exec_stream_backpressure_bounds_chunks_and_preserves_unicode()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        let capacity = Arc::new(tokio::sync::Semaphore::new(2));
+        let blocked = Arc::new(AtomicBool::new(false));
+        let progress = Arc::new(AtomicU64::new(0));
+        let expected = "界".repeat(7_000);
+        let task = tokio::spawn({
+            let capacity = capacity.clone();
+            let blocked = blocked.clone();
+            let progress = progress.clone();
+            let text = expected.clone();
+            async move {
+                publish_exec_event(
+                    &sender,
+                    &capacity,
+                    &blocked,
+                    &progress,
+                    HarnessEvent::Delta {
+                        item_id: ItemId::new("message"),
+                        kind: DeltaKind::Message,
+                        text,
+                        stream_permit: None,
+                    },
+                )
+                .await
+            }
+        });
+        let first = receiver.recv().await.ok_or("missing first chunk")?;
+        let second = receiver.recv().await.ok_or("missing second chunk")?;
+        assert_eq!(capacity.available_permits(), 0);
+        assert!(
+            timeout(Duration::from_millis(30), receiver.recv())
+                .await
+                .is_err()
+        );
+        let HarnessEvent::Delta {
+            text: first_text, ..
+        } = &first
+        else {
+            return Err("unexpected event".into());
+        };
+        let mut output = first_text.clone();
+        drop(first);
+        let third = receiver.recv().await.ok_or("missing third chunk")?;
+        for event in [&second, &third] {
+            let HarnessEvent::Delta { text, .. } = event else {
+                return Err("unexpected event".into());
+            };
+            assert!(text.len() <= EXEC_STREAM_CHUNK_BYTES);
+            output.push_str(text);
+        }
+        task.await?.map_err(|()| "stream closed")?;
+        assert_eq!(output, expected);
+        drop(second);
+        drop(third);
+        assert_eq!(capacity.available_permits(), 2);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn exec_backpressure_does_not_fail_post_exit_drain()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = TempDir::new()?;
+        let stub = write_stub(
+            &directory,
+            "exec-many.sh",
+            r##"#!/bin/sh
+number=0
+while [ "$number" -lt 100 ]; do
+    printf '{"id":"%s","msg":{"type":"agent_message","message":"message"}}\n' "$number"
+    number=$((number + 1))
+done
+"##,
+        );
+        let (mut harness, _) = start_exec(&stub, directory.path()).await;
+        harness.prompt(PromptInput::text("go")).await?;
+        tokio::time::sleep(Duration::from_millis(1300)).await;
+        let mut count = 0;
+        let reason = timeout(Duration::from_secs(5), async {
+            loop {
+                match harness.events().recv().await {
+                    Some(HarnessEvent::Delta { .. }) => count += 1,
+                    Some(HarnessEvent::TurnFinished { reason }) => break Ok(reason),
+                    Some(HarnessEvent::TurnError { text, .. }) => break Err(text),
+                    Some(_) => {}
+                    None => break Err("event stream closed".into()),
+                }
+            }
+        })
+        .await??;
+        assert_eq!(count, 100);
+        assert_eq!(reason, TurnFinishReason::Completed);
+        harness.shutdown().await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn exec_stream_capacity_is_shared_across_turns() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let directory = TempDir::new()?;
+        let stub = write_stub(
+            &directory,
+            "exec-one.sh",
+            "#!/bin/sh\nprintf '{\"id\":\"one\",\"msg\":{\"type\":\"agent_message\",\"message\":\"hello\"}}\\n'\n",
+        );
+        let (mut harness, _) = start_exec(&stub, directory.path()).await;
+        harness.stream_capacity = Arc::new(tokio::sync::Semaphore::new(1));
+        harness.prompt(PromptInput::text("first")).await?;
+        timeout(Duration::from_secs(3), async {
+            while !harness
+                .run
+                .as_ref()
+                .is_some_and(|run| run.finished.load(Ordering::Relaxed))
+            {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await?;
+        harness.prompt(PromptInput::text("second")).await?;
+        assert_eq!(harness.stream_capacity.available_permits(), 0);
+        timeout(Duration::from_secs(3), async {
+            loop {
+                match harness.receiver.recv().await {
+                    Some(HarnessEvent::Delta { .. }) => break Ok::<(), &'static str>(()),
+                    Some(_) => {}
+                    None => break Err("event stream closed"),
+                }
+            }
+        })
+        .await??;
+        timeout(Duration::from_secs(3), async {
+            while !harness
+                .run
+                .as_ref()
+                .is_some_and(|run| run.finished.load(Ordering::Relaxed))
+            {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await?;
+        harness.shutdown().await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cancelling_exec_unblocks_backpressured_output()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = TempDir::new()?;
+        let stub = write_stub(
+            &directory,
+            "exec-blocked.sh",
+            r##"#!/bin/sh
+number=0
+while [ "$number" -lt 100 ]; do
+    printf '{"id":"%s","msg":{"type":"agent_message","message":"message"}}\n' "$number"
+    number=$((number + 1))
+done
+sleep 30
+"##,
+        );
+        let (mut harness, _) = start_exec(&stub, directory.path()).await;
+        harness.prompt(PromptInput::text("go")).await?;
+        timeout(Duration::from_secs(3), async {
+            while harness.receiver.len() < EXEC_STREAM_CHUNKS + 3 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await?;
+        timeout(Duration::from_secs(3), harness.cancel()).await??;
+        harness
+            .shutdown_with_timeout(Duration::from_secs(3))
+            .await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn backpressure_pauses_the_post_exit_total_deadline()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let progress = AtomicU64::new(0);
+        let blocked = AtomicBool::new(true);
+        let (sender, mut kill) = mpsc::unbounded_channel();
+        let mut reader = tokio::spawn(std::future::pending::<Result<(), String>>());
+        let request = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            let (reply, response) = oneshot::channel::<Result<(), String>>();
+            sender.send(reply).map_err(|_| "receiver closed")?;
+            response
+                .await
+                .map_err(|_| "reply closed")?
+                .map_err(|_| "cancellation failed")
+        });
+        assert!(
+            drain_exec_reader(
+                &mut reader,
+                &progress,
+                &blocked,
+                &mut kill,
+                false,
+                Duration::from_millis(20),
+                Duration::from_millis(60)
+            )
+            .await?
+        );
+        request.await??;
+        assert!(reader.await.is_err_and(|error| error.is_cancelled()));
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn exec_post_exit_drain_has_a_limit_even_with_continuous_progress()
     -> Result<(), Box<dyn std::error::Error>> {
         let progress = Arc::new(AtomicU64::new(0));
@@ -4722,6 +5012,7 @@ exit 0
         let result = drain_exec_reader(
             &mut reader,
             &progress,
+            &AtomicBool::new(false),
             &mut kill,
             false,
             Duration::from_millis(80),
@@ -4747,6 +5038,7 @@ exit 0
             drain_exec_reader(
                 &mut reader,
                 &progress,
+                &AtomicBool::new(false),
                 &mut kill,
                 false,
                 Duration::from_secs(1),
@@ -5178,6 +5470,7 @@ sleep 30
                     finished: Arc::clone(&finished),
                     reader,
                     progress: Arc::new(AtomicU64::new(0)),
+                    backpressured: Arc::new(AtomicBool::new(false)),
                     wait_errors,
                     process_record: Arc::new(AsyncMutex::new(None)),
                 },
@@ -5264,6 +5557,7 @@ sleep 30
                     finished: finished.clone(),
                     reader,
                     progress: Arc::new(AtomicU64::new(0)),
+                    backpressured: Arc::new(AtomicBool::new(false)),
                     wait_errors,
                     process_record: Arc::new(AsyncMutex::new(None)),
                 },

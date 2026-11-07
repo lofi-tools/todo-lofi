@@ -1342,10 +1342,13 @@ placeholder tabs and no unearned state badges.
   instead of keeping a second copy of every text fragment.
   OpenCode message and reasoning deltas use a 64-permit queue with 8 KiB
   UTF-8-safe chunks; the producer waits for consumption and a blocked producer
-  can be cancelled. Other OpenCode events and other adapters still need
-  coordinated backpressure. A Codex fixture verifies that a command reply
-  remains reachable after 100 unconsumed stream events; a bounded design must
-  preserve that behavior.
+  can be cancelled. Codex exec message and reasoning events now use the same
+  limits across turns, and its post-exit drain pauses its deadline while the
+  consumer is backpressured. Local fixtures cover UTF-8, multiple turns,
+  cancellation and a slow consumer. Other OpenCode and Codex exec events and
+  other adapters still need coordinated backpressure. A Codex fixture verifies
+  that a command reply remains reachable after 100 unconsumed stream events; a
+  bounded design must preserve that behavior.
   Event folding handles at
   most 256 events per session per pass, including during commands, and
   reschedules remaining events so one busy agent cannot monopolize other
