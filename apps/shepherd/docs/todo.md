@@ -622,6 +622,8 @@ task-scoped, persistent and fast enough.
   reconnects to the same PTY. The headless regression checks that a fresh
   snapshot and subsequent output reach the pane without restarting the shell
   or showing an error; unrecoverable acknowledgement failures are reported.
+  The two-launch hidden macOS terminal smoke also passed after this change,
+  including task switching, terminal reattachment and restart.
   Each terminal view limits queued input to 128 operations and 1 MiB of
   payload. Kitty key presses and reported mouse buttons reserve room for their
   releases. The browser fixture stalls a write, checks the limit, and verifies
