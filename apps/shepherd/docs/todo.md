@@ -1231,7 +1231,10 @@ placeholder tabs and no unearned state badges.
   another Shepherd instance from recovering an active deletion. Database
   failure and post-commit cleanup fixtures cover the live deletion path; the
   desktop does not restore attachments after the task has already been deleted.
-  Attachment-cache staging itself still needs crash recovery.
+  Attachment deletion uses a task-specific intent and an app-data lock;
+  startup restores caches for surviving tasks and finishes removal for deleted
+  tasks. Conflicting paths stop recovery, and older unidentified staging
+  directories are left untouched. Local fixtures cover restart and lock cases.
   If an opened agent session cannot be recorded, the core stops it before
   retrying; a database-trigger fixture verifies cleanup and a subsequent start.
   A second fixture makes cleanup fail twice and verifies that the session is
@@ -1329,8 +1332,9 @@ placeholder tabs and no unearned state badges.
   The default headless agent-harness suite passed 109 tests (two live tests
   ignored) and the core suite passed 116 tests (three tests ignored) on
   macOS after the confinement, environment and shutdown-recovery changes.
-  The default desktop-backend suite also passed 79 tests on macOS after the
-  terminal shutdown changes; one local throughput benchmark was ignored.
+  The default desktop-backend suite also passed 85 tests on macOS after the
+  terminal and attachment recovery changes; one local throughput benchmark
+  was ignored.
 - [ ] Packaging and CI: macOS 13+, Ubuntu 24.04+, pinned Zig, Tauri build,
   platform smoke.
   The local macOS debug app bundle declares macOS 13.0 in both Info.plist and

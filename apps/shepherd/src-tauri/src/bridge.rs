@@ -707,6 +707,12 @@ impl ShellState {
                 ),
             )
         })?;
+        let attachment_lock = attachments::lock_deletions(data_directory).map_err(|error| {
+            BridgeError::new(
+                "attachments",
+                format!("Could not lock attachment recovery: {error}"),
+            )
+        })?;
         let database_path = data_directory.join("shepherd.db");
         let store = TursoStore::open_at(&database_path)
             .await
@@ -714,6 +720,32 @@ impl ShellState {
         let mut core = Core::load(Box::new(store), harness_factory)
             .await
             .map_err(BridgeError::from)?;
+        let tasks = core
+            .process_store()
+            .load_tasks()
+            .await
+            .map_err(|error| BridgeError::new("storage", error.to_string()))?
+            .into_iter()
+            .map(|task| task.id.to_string())
+            .collect();
+        let attachment_root = data_directory.join("attachments");
+        tokio::task::spawn_blocking(move || {
+            let _lock = attachment_lock;
+            attachments::recover_staged(&attachment_root, &tasks)
+        })
+        .await
+        .map_err(|error| {
+            BridgeError::new(
+                "attachments",
+                format!("Could not finish attachment recovery: {error}"),
+            )
+        })?
+        .map_err(|error| {
+            BridgeError::new(
+                "attachments",
+                format!("Could not recover staged attachments: {error}"),
+            )
+        })?;
         let previous_processes = core.recorded_processes().await.map_err(BridgeError::from)?;
         let mut state = Self::with_terminals(core, terminals);
         state.previous_processes = previous_processes;
@@ -877,16 +909,20 @@ impl ShellState {
                 "Could not locate this task's attachment directory.",
             )
         })?;
+        let attachment_lock = self.lock_attachment_deletions()?;
         // A draft cannot be discarded until its screenshot write finishes.
         let core = self.core.lock().await;
+        let task_id = TaskId::new(task_id);
+        Self::ensure_durable_attachment_task(core.process_store(), &task_id).await?;
         let limit = self
-            .attachment_limit_for(&core.task_project_path(&TaskId::new(task_id))?)
+            .attachment_limit_for(&core.task_project_path(&task_id)?)
             .await;
         limit
             .check(bytes.len() as u64)
             .map_err(|error| BridgeError::new("preview", error.to_string()))?;
         let bytes = bytes.to_vec();
         let result = tokio::task::spawn_blocking(move || {
+            let _lock = attachment_lock;
             attachments::persist_preview_screenshot(&directory, &bytes)
         })
         .await
@@ -900,6 +936,48 @@ impl ShellState {
     fn task_attachment_directory(&self, task_id: &str) -> Option<PathBuf> {
         let task_id = uuid::Uuid::parse_str(task_id).ok()?;
         Some(self.attachment_root.as_ref()?.join(task_id.to_string()))
+    }
+
+    fn lock_attachment_deletions(&self) -> Result<Option<attachments::DeletionLock>, BridgeError> {
+        match &self.attachment_root {
+            Some(root) => {
+                let data_directory = root.parent().ok_or_else(|| {
+                    BridgeError::new(
+                        "attachments",
+                        "Could not locate the attachment data directory.",
+                    )
+                })?;
+                attachments::lock_deletions(data_directory)
+                    .map(Some)
+                    .map_err(|error| {
+                        BridgeError::new(
+                            "attachments",
+                            format!("Could not lock attachment access: {error}"),
+                        )
+                    })
+            }
+            None => Ok(None),
+        }
+    }
+
+    async fn ensure_durable_attachment_task(
+        store: Arc<dyn Store>,
+        task_id: &TaskId,
+    ) -> Result<(), BridgeError> {
+        if store
+            .load_tasks()
+            .await
+            .map_err(|error| BridgeError::new("storage", error.to_string()))?
+            .iter()
+            .any(|task| &task.id == task_id)
+        {
+            Ok(())
+        } else {
+            Err(BridgeError::new(
+                "attachments",
+                "The task no longer exists.",
+            ))
+        }
     }
 
     async fn attachment_limit_for(&self, path: &Path) -> AttachmentLimit {
@@ -939,15 +1017,19 @@ impl ShellState {
                 "Could not locate this task's attachment directory.",
             )
         })?;
+        let attachment_lock = self.lock_attachment_deletions()?;
         let core = self.core.lock().await;
+        let task_id = TaskId::new(task_id);
+        Self::ensure_durable_attachment_task(core.process_store(), &task_id).await?;
         let limit = self
-            .attachment_limit_for(&core.task_project_path(&TaskId::new(task_id))?)
+            .attachment_limit_for(&core.task_project_path(&task_id)?)
             .await;
         limit
             .check(bytes.len() as u64)
             .map_err(|error| BridgeError::new("attachments", error.to_string()))?;
         let bytes = bytes.to_vec();
         let result = tokio::task::spawn_blocking(move || {
+            let _lock = attachment_lock;
             attachments::persist_prompt_file(&directory, &name, &bytes)
         })
         .await
@@ -1007,6 +1089,7 @@ impl ShellState {
     ) -> Result<(), BridgeError> {
         let attachments = self.task_attachment_directory(&task_id);
         let _guard = self.terminal_lifecycle.lock().await;
+        let mut attachment_lock = self.lock_attachment_deletions()?;
         let task_id = TaskId::new(task_id);
         let mut core = self.core.lock().await;
         let workspace = core.task_workspace(&task_id)?;
@@ -1048,20 +1131,23 @@ impl ShellState {
         }
         let staged = if let Some(path) = attachments.as_ref() {
             let path = path.clone();
-            tokio::task::spawn_blocking(move || attachments::stage_task(&path))
-                .await
-                .map_err(|error| {
-                    BridgeError::new(
-                        "attachments",
-                        format!("Could not prepare attachment removal: {error}"),
-                    )
-                })?
-                .map_err(|error| {
-                    BridgeError::new(
-                        "attachments",
-                        format!("Could not prepare attachment removal: {error}"),
-                    )
-                })?
+            let lock = attachment_lock.take();
+            let (result, lock) =
+                tokio::task::spawn_blocking(move || (attachments::stage_task(&path), lock))
+                    .await
+                    .map_err(|error| {
+                        BridgeError::new(
+                            "attachments",
+                            format!("Could not prepare attachment removal: {error}"),
+                        )
+                    })?;
+            attachment_lock = lock;
+            result.map_err(|error| {
+                BridgeError::new(
+                    "attachments",
+                    format!("Could not prepare attachment removal: {error}"),
+                )
+            })?
         } else {
             None
         };
@@ -1087,7 +1173,9 @@ impl ShellState {
             Err(error) if !committed => {
                 if let (Some(staged), Some(original)) = (staged, attachments) {
                     let display = staged.display().to_string();
+                    let lock = attachment_lock.take();
                     tokio::task::spawn_blocking(move || {
+                        let _lock = lock;
                         attachments::restore_task(&staged, &original)
                     })
                     .await
@@ -1113,9 +1201,28 @@ impl ShellState {
             outcome => {
                 if let Some(path) = staged {
                     let display = path.display().to_string();
-                    tokio::task::spawn_blocking(move || attachments::remove_task(&path)).await
-                        .map_err(|error| BridgeError::new("attachments", format!("Task deleted, but attachment cleanup failed at {display}: {error}")))?
-                        .map_err(|error| BridgeError::new("attachments", format!("Task deleted, but attachment cleanup failed at {display}: {error}")))?;
+                    let lock = attachment_lock.take();
+                    tokio::task::spawn_blocking(move || {
+                        let _lock = lock;
+                        attachments::remove_staged_task(&path)
+                    })
+                    .await
+                    .map_err(|error| {
+                        BridgeError::new(
+                            "attachments",
+                            format!(
+                                "Task deleted, but attachment cleanup failed at {display}: {error}"
+                            ),
+                        )
+                    })?
+                    .map_err(|error| {
+                        BridgeError::new(
+                            "attachments",
+                            format!(
+                                "Task deleted, but attachment cleanup failed at {display}: {error}"
+                            ),
+                        )
+                    })?;
                 }
                 outcome
             }
@@ -1147,19 +1254,21 @@ impl ShellState {
             ..PromptInput::default()
         };
         if !ids.is_empty() {
+            let attachment_lock = self.lock_attachment_deletions()?;
             let directory = self.task_attachment_directory(&task_id).ok_or_else(|| {
                 BridgeError::new(
                     "attachments",
                     "Could not locate this task's attachment directory.",
                 )
             })?;
-            let path = self
-                .core
-                .lock()
-                .await
-                .task_project_path(&TaskId::new(&task_id))?;
+            let core = self.core.lock().await;
+            let id = TaskId::new(&task_id);
+            Self::ensure_durable_attachment_task(core.process_store(), &id).await?;
+            let path = core.task_project_path(&id)?;
+            drop(core);
             let limit = self.attachment_limit_for(&path).await;
             let attachments = tokio::task::spawn_blocking(move || {
+                let _lock = attachment_lock;
                 ids.iter()
                     .map(|id| attachments::resolve_prompt_file(&directory, id, &limit))
                     .collect::<std::io::Result<Vec<_>>>()
@@ -4603,6 +4712,112 @@ mod tests {
                 .load_worktree_deletions()
                 .await?
                 .is_empty()
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn startup_recovers_staged_attachments_from_task_state()
+    -> Result<(), Box<dyn std::error::Error>> {
+        for deleted in [false, true] {
+            let directory = TestDirectory::new()?;
+            let repository = TestRepository::new()?;
+            let state = ShellState::load(
+                directory.path(),
+                Box::new(ScriptedHarnessFactory),
+                TerminalHost::default(),
+            )
+            .await?;
+            let projects = state
+                .add_project(repository.path().display().to_string())
+                .await?;
+            let project = projects.projects.first().ok_or("missing project")?;
+            let task = state
+                .create_draft(project.id.clone(), "Recovery".into(), Agent::Codex)
+                .await?
+                .task
+                .id;
+            let id = state
+                .save_prompt_file(task.clone(), "notes.txt".into(), b"recover me")
+                .await?;
+            let original = directory.path().join("attachments").join(&task);
+            let staged = attachments::stage_task(&original)?.ok_or("missing staged attachments")?;
+            if deleted {
+                state
+                    .core
+                    .lock()
+                    .await
+                    .execute(Command::DiscardDraft {
+                        task_id: TaskId::new(&task),
+                    })
+                    .await?;
+            }
+            state.quit(true).await?;
+            drop(state);
+            let reopened = ShellState::load(
+                directory.path(),
+                Box::new(ScriptedHarnessFactory),
+                TerminalHost::default(),
+            )
+            .await?;
+            assert!(!staged.exists());
+            if deleted {
+                assert!(!original.exists());
+            } else {
+                assert_eq!(
+                    std::fs::read(attachments::prompt_file(&original, &id)?)?,
+                    b"recover me"
+                );
+            }
+            reopened.quit(true).await?;
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn attachment_writes_respect_deletion_lock_and_durable_task_state()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = TestDirectory::new()?;
+        let repository = TestRepository::new()?;
+        let state = ShellState::load(
+            directory.path(),
+            Box::new(ScriptedHarnessFactory),
+            TerminalHost::default(),
+        )
+        .await?;
+        let projects = state
+            .add_project(repository.path().display().to_string())
+            .await?;
+        let project = projects.projects.first().ok_or("missing project")?;
+        let task = state
+            .create_draft(project.id.clone(), "Concurrent".into(), Agent::Codex)
+            .await?
+            .task
+            .id;
+        let lock = attachments::lock_deletions(directory.path())?;
+        assert!(
+            state
+                .save_prompt_file(task.clone(), "notes.txt".into(), b"blocked")
+                .await
+                .is_err()
+        );
+        drop(lock);
+        state
+            .save_prompt_file(task.clone(), "notes.txt".into(), b"allowed")
+            .await?;
+        let store = state.core.lock().await.process_store();
+        store.delete_task(&TaskId::new(&task), None).await?;
+        assert!(
+            state
+                .save_prompt_file(task.clone(), "stale.txt".into(), b"blocked")
+                .await
+                .is_err()
+        );
+        assert!(
+            state
+                .save_preview_screenshot(task.clone(), include_bytes!("../icons/128x128.png"))
+                .await
+                .is_err()
         );
         Ok(())
     }

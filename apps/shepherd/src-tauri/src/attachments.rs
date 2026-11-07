@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::fs;
 use std::io::{self, ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
@@ -83,14 +84,170 @@ pub(crate) fn stage_task(path: &Path) -> io::Result<Option<PathBuf>> {
     let root = path
         .parent()
         .ok_or_else(|| invalid("Missing attachment root."))?;
-    let staged = root.join(format!(".deleting-{}", uuid::Uuid::new_v4()));
-    fs::rename(path, &staged)?;
+    let task_id = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| invalid("Invalid task attachment directory."))?;
+    let parsed_id = uuid::Uuid::parse_str(task_id)
+        .map_err(|_| invalid("Invalid task attachment directory."))?;
+    if parsed_id.to_string() != task_id {
+        return Err(invalid("Invalid task attachment directory."));
+    }
+    let task_id = parsed_id;
+    let staged = root.join(format!(".shepherd-deleting-task-{task_id}"));
+    match staged.symlink_metadata() {
+        Ok(_) => {
+            return Err(io::Error::new(
+                ErrorKind::AlreadyExists,
+                "A staged attachment directory already exists.",
+            ));
+        }
+        Err(error) if error.kind() == ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    let intent = root.join(format!(".shepherd-deletion-intent-{task_id}"));
+    fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&intent)?;
+    if let Err(error) = fs::rename(path, &staged) {
+        if let Err(cleanup) = fs::remove_file(&intent) {
+            return Err(io::Error::other(format!(
+                "could not stage attachments: {error}; could not clear deletion intent: {cleanup}"
+            )));
+        }
+        return Err(error);
+    }
     Ok(Some(staged))
+}
+
+pub(crate) struct DeletionLock(fs::File);
+
+impl Drop for DeletionLock {
+    fn drop(&mut self) {
+        if let Err(error) = self.0.unlock() {
+            tracing::warn!(%error, "could not unlock attachment deletion recovery");
+        }
+    }
+}
+
+pub(crate) fn lock_deletions(data_directory: &Path) -> io::Result<DeletionLock> {
+    let mut options = fs::OpenOptions::new();
+    options.read(true).write(true).create(true).truncate(false);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+    }
+    let file = options.open(data_directory.join(".attachment-deletions.lock"))?;
+    file.try_lock().map_err(|error| {
+        io::Error::other(format!(
+            "could not lock attachment deletion recovery: {error}"
+        ))
+    })?;
+    Ok(DeletionLock(file))
+}
+
+pub(crate) fn recover_staged(root: &Path, tasks: &BTreeSet<String>) -> io::Result<()> {
+    match directory(root, false) {
+        Ok(()) => {}
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    }
+    let entries = fs::read_dir(root)?.collect::<io::Result<Vec<_>>>()?;
+    for entry in entries {
+        let name = entry.file_name();
+        let Some(suffix) = name
+            .to_str()
+            .and_then(|name| name.strip_prefix(".shepherd-deletion-intent-"))
+        else {
+            continue;
+        };
+        let Ok(task_id) = uuid::Uuid::parse_str(suffix) else {
+            continue;
+        };
+        if task_id.to_string() != suffix {
+            continue;
+        }
+        let intent = entry.path();
+        if !intent.symlink_metadata()?.is_file() {
+            return Err(invalid(
+                "An attachment deletion intent is not a regular file.",
+            ));
+        }
+        let staged = root.join(format!(".shepherd-deleting-task-{task_id}"));
+        let original = root.join(task_id.to_string());
+        let exists = |path: &Path| -> io::Result<bool> {
+            match path.symlink_metadata() {
+                Ok(_) => Ok(true),
+                Err(error) if error.kind() == ErrorKind::NotFound => Ok(false),
+                Err(error) => Err(error),
+            }
+        };
+        match (
+            tasks.contains(&task_id.to_string()),
+            exists(&original)?,
+            exists(&staged)?,
+        ) {
+            (true, false, true) => restore_task(&staged, &original)?,
+            (false, false, true) => remove_staged_task(&staged)?,
+            (true, true, false) => {
+                task_directory(&original, false)?;
+                fs::remove_file(intent)?;
+            }
+            (false, false, false) => fs::remove_file(intent)?,
+            _ => {
+                return Err(io::Error::other(format!(
+                    "Attachment deletion state is ambiguous for task {task_id}."
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn restore_task(staged: &Path, path: &Path) -> io::Result<()> {
     task_directory(staged, false)?;
-    fs::rename(staged, path)
+    match path.symlink_metadata() {
+        Ok(_) => {
+            return Err(io::Error::new(
+                ErrorKind::AlreadyExists,
+                "The original attachment directory already exists.",
+            ));
+        }
+        Err(error) if error.kind() == ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    fs::rename(staged, path)?;
+    fs::remove_file(staged_intent(staged)?)
+}
+
+pub(crate) fn remove_staged_task(staged: &Path) -> io::Result<()> {
+    let intent = staged_intent(staged)?;
+    if !intent.symlink_metadata()?.is_file() {
+        return Err(invalid(
+            "An attachment deletion intent is not a regular file.",
+        ));
+    }
+    remove_task(staged)?;
+    fs::remove_file(intent)
+}
+
+fn staged_intent(staged: &Path) -> io::Result<PathBuf> {
+    let suffix = staged
+        .file_name()
+        .and_then(|name| name.to_str())
+        .and_then(|name| name.strip_prefix(".shepherd-deleting-task-"))
+        .ok_or_else(|| invalid("Invalid staged attachment directory."))?;
+    let task_id = uuid::Uuid::parse_str(suffix)
+        .map_err(|_| invalid("Invalid staged attachment directory."))?;
+    if task_id.to_string() != suffix {
+        return Err(invalid("Invalid staged attachment directory."));
+    }
+    Ok(staged
+        .parent()
+        .ok_or_else(|| invalid("Missing attachment root."))?
+        .join(format!(".shepherd-deletion-intent-{task_id}")))
 }
 
 pub(crate) fn persist_prompt_file(path: &Path, name: &str, bytes: &[u8]) -> io::Result<String> {
@@ -250,13 +407,82 @@ mod tests {
     #[test]
     fn staged_deletion_can_restore_cached_files() -> io::Result<()> {
         let root = tempfile::tempdir()?;
-        let task = root.path().join("attachments/task");
+        let task = root
+            .path()
+            .join("attachments")
+            .join(uuid::Uuid::new_v4().to_string());
         let id = persist_prompt_file(&task, "notes.txt", b"keep")?;
         let staged = stage_task(&task)?.ok_or_else(|| io::Error::other("missing staged cache"))?;
         assert!(!task.exists());
         restore_task(&staged, &task)?;
         assert_eq!(fs::read(prompt_file(&task, &id)?)?, b"keep");
         assert!(!staged.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn staged_recovery_restores_live_tasks_and_removes_deleted_tasks() -> io::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let root = directory.path().join("attachments");
+        let live = uuid::Uuid::new_v4().to_string();
+        let deleted = uuid::Uuid::new_v4().to_string();
+        let live_path = root.join(&live);
+        let deleted_path = root.join(&deleted);
+        let live_file = persist_prompt_file(&live_path, "live.txt", b"keep")?;
+        persist_prompt_file(&deleted_path, "deleted.txt", b"remove")?;
+        let live_staged =
+            stage_task(&live_path)?.ok_or_else(|| io::Error::other("missing live staging"))?;
+        let deleted_staged = stage_task(&deleted_path)?
+            .ok_or_else(|| io::Error::other("missing deleted staging"))?;
+        let legacy = root.join(format!(".deleting-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&legacy)?;
+        let unmarked = root.join(format!(".shepherd-deleting-task-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&unmarked)?;
+        let lock = lock_deletions(directory.path())?;
+        assert!(lock_deletions(directory.path()).is_err());
+        recover_staged(&root, &BTreeSet::from([live.clone()]))?;
+        assert_eq!(fs::read(prompt_file(&live_path, &live_file)?)?, b"keep");
+        assert!(!live_staged.exists() && !deleted_staged.exists());
+        assert!(legacy.is_dir());
+        assert!(unmarked.is_dir());
+        drop(lock);
+        let _lock = lock_deletions(directory.path())?;
+        Ok(())
+    }
+
+    #[test]
+    fn staged_recovery_refuses_conflicting_original_directory() -> io::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let root = directory.path().join("attachments");
+        let task = uuid::Uuid::new_v4().to_string();
+        let original = root.join(&task);
+        persist_prompt_file(&original, "notes.txt", b"staged data")?;
+        let staged = stage_task(&original)?.ok_or_else(|| io::Error::other("missing staging"))?;
+        fs::create_dir(&original)?;
+        fs::write(original.join("existing"), b"do not replace")?;
+        assert!(recover_staged(&root, &BTreeSet::from([task])).is_err());
+        assert_eq!(fs::read(original.join("existing"))?, b"do not replace");
+        assert!(staged.is_dir());
+        Ok(())
+    }
+
+    #[test]
+    fn recovery_clears_intent_before_move_and_after_completed_removal() -> io::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let root = directory.path().join("attachments");
+        let task = uuid::Uuid::new_v4().to_string();
+        let original = root.join(&task);
+        let file = persist_prompt_file(&original, "notes.txt", b"keep")?;
+        let intent = root.join(format!(".shepherd-deletion-intent-{task}"));
+        fs::write(&intent, b"")?;
+        recover_staged(&root, &BTreeSet::from([task.clone()]))?;
+        assert!(!intent.exists());
+        assert_eq!(fs::read(prompt_file(&original, &file)?)?, b"keep");
+        let staged = stage_task(&original)?.ok_or_else(|| io::Error::other("missing staging"))?;
+        remove_task(&staged)?;
+        assert!(intent.is_file());
+        recover_staged(&root, &BTreeSet::new())?;
+        assert!(!intent.exists());
         Ok(())
     }
 
