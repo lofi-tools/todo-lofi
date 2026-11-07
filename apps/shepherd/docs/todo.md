@@ -1251,6 +1251,7 @@ placeholder tabs and no unearned state badges.
   hide adapter stderr and failure details while preserving failure categories;
   a fixture covers exit events and errors. Discovery failures also hide details
   when environment values are present, with local Codex and OpenCode fixtures.
+  ACP connection and OpenCode cleanup warnings omit agent-controlled error text.
   Other adapter-internal logs and live-adapter behavior remain to be audited.
 - [ ] Packaging and CI: macOS 13+, Ubuntu 24.04+, pinned Zig, Tauri build,
   platform smoke.

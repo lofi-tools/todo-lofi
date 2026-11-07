@@ -412,7 +412,7 @@ impl AgentHarness for OpenCodeHarness {
         if server.probe.modes {
             match server.session_modes(&session).await {
                 Ok(modes) => self.modes = modes,
-                Err(error) => tracing::warn!(%error, "could not load OpenCode session modes"),
+                Err(_) => tracing::warn!("could not load OpenCode session modes"),
             }
         }
         self.session = Some(session.clone());
@@ -444,8 +444,8 @@ impl AgentHarness for OpenCodeHarness {
         let events = server.subscribe().await?;
         let id = format!("msg_{}", uuid::Uuid::new_v4().simple());
         if let Err(error) = server.enqueue_prompt(&session, &id, &input, true).await {
-            if let Err(cleanup) = server.cancel_prompt(&session, &id).await {
-                tracing::warn!(%cleanup, "could not clean up an unconfirmed OpenCode prompt");
+            if server.cancel_prompt(&session, &id).await.is_err() {
+                tracing::warn!("could not clean up an unconfirmed OpenCode prompt");
             }
             return Err(error);
         }
@@ -488,13 +488,20 @@ impl AgentHarness for OpenCodeHarness {
                                 tracing::warn!(%status, "could not read the OpenCode exit status");
                             }
                             if timeout(Duration::from_secs(1), async {
-                                if let Err(cleanup) = send_request(remove).await {
-                                    tracing::warn!(%cleanup, "could not remove the disconnected OpenCode prompt");
+                                if send_request(remove).await.is_err() {
+                                    tracing::warn!(
+                                        "could not remove the disconnected OpenCode prompt"
+                                    );
                                 }
-                                if let Err(cleanup) = send_request(interrupt).await {
-                                    tracing::warn!(%cleanup, "could not interrupt the disconnected OpenCode turn");
+                                if send_request(interrupt).await.is_err() {
+                                    tracing::warn!(
+                                        "could not interrupt the disconnected OpenCode turn"
+                                    );
                                 }
-                            }).await.is_err() {
+                            })
+                            .await
+                            .is_err()
+                            {
                                 tracing::warn!("OpenCode turn cleanup timed out");
                             }
                             if let Err(stop) = child.lock().await.kill().await {

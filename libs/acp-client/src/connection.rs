@@ -731,8 +731,8 @@ where
     // shutdown channel above is what ends it.
     let terminals = registry.clone();
     tokio::spawn(async move {
-        if let Err(error) = connection.await {
-            tracing::warn!("agent connection ended: {error}");
+        if connection.await.is_err() {
+            tracing::warn!("agent connection ended with an error");
         }
         registry.shutdown().await;
     });

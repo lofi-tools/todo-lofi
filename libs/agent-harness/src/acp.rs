@@ -559,7 +559,7 @@ impl Runtime {
         let (grant_changes, grants) = watch::channel(Vec::new());
         let (mode_changes, modes) = watch::channel(mode);
         let worker = tokio::spawn(async move {
-            if let Err(error) = drive_session(
+            if drive_session(
                 requester,
                 session,
                 events,
@@ -572,8 +572,9 @@ impl Runtime {
                 },
             )
             .await
+            .is_err()
             {
-                tracing::debug!(%error, "ACP harness event loop ended");
+                tracing::debug!("ACP harness event loop ended with an error");
             }
             close_terminals.await;
         });
