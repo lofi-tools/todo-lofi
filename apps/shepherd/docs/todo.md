@@ -1162,8 +1162,10 @@ placeholder tabs and no unearned state badges.
   startup notice shows matching and uncertain records and allows a recheck.
   Running direct ACP terminals now signal their process group on kill, release
   and shutdown, and report signal termination in the ACP exit status. Agent
-  Codex app-server now runs in its own process group and stops that group on
-  normal shutdown; a local fixture checks a descendant cannot outlive shutdown.
+  Codex app-server and OpenCode's native server now run in their own process
+  groups and stop those groups on normal shutdown; local fixtures check that
+  descendants cannot outlive shutdown. OpenCode also stops its group on a
+  disconnected turn. Startup-failure cleanup still needs verification.
   Agent process identities and stopping surviving processes remain.
 - [ ] 30-day archived-worktree collection, dirty skip, branch-tip recreation.
   Startup preserves dirty worktrees and lists collection failures with their

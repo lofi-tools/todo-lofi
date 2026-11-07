@@ -504,7 +504,7 @@ impl AgentHarness for OpenCodeHarness {
                             {
                                 tracing::warn!("OpenCode turn cleanup timed out");
                             }
-                            if let Err(stop) = child.lock().await.kill().await {
+                            if let Err(stop) = stop_server(&mut *child.lock().await).await {
                                 tracing::debug!(%stop, "could not stop OpenCode after the connection failed");
                             }
                             HarnessEvent::ConnectionFailed {
@@ -1002,6 +1002,50 @@ impl EventDecoder {
     }
 }
 
+fn server_command(spec: &SpawnSpec, directory: &str, password: &str) -> Command {
+    let mut command = Command::new(&spec.program);
+    command
+        .args(&spec.args)
+        .args(SERVER_ARGS)
+        .current_dir(directory)
+        .envs(&spec.environment)
+        .env("OPENCODE_PASSWORD", password)
+        .env("OPENCODE_SERVER_PASSWORD", password)
+        .env("OPENCODE_DISABLE_AUTOUPDATE", "1")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    #[cfg(unix)]
+    command.process_group(0);
+    command
+}
+
+async fn stop_server(child: &mut tokio::process::Child) -> std::io::Result<()> {
+    #[cfg(unix)]
+    let group_error = child
+        .id()
+        .and_then(|id| libc::pid_t::try_from(id).ok())
+        .and_then(|group| {
+            if unsafe { libc::killpg(group, libc::SIGKILL) } == 0 {
+                return None;
+            }
+            let error = std::io::Error::last_os_error();
+            (error.raw_os_error() != Some(libc::ESRCH)).then_some(error)
+        });
+    let child_result = child.kill().await;
+    #[cfg(unix)]
+    if let Some(error) = group_error {
+        return Err(match child_result {
+            Ok(()) => error,
+            Err(child_error) => std::io::Error::other(format!(
+                "could not stop process group: {error}; could not stop server: {child_error}"
+            )),
+        });
+    }
+    child_result
+}
+
 impl OpenCodeServer {
     pub async fn start(spec: &SpawnSpec) -> HarnessResult<Self> {
         require_absolute_executable(Path::new(&spec.program))?;
@@ -1020,18 +1064,7 @@ impl OpenCodeServer {
             .build()
             .map_err(|error| protocol_error("could not configure OpenCode HTTP client", error))?;
         let password = uuid::Uuid::new_v4().to_string();
-        let mut child = Command::new(&spec.program)
-            .args(&spec.args)
-            .args(SERVER_ARGS)
-            .current_dir(&directory)
-            .envs(&spec.environment)
-            .env("OPENCODE_PASSWORD", &password)
-            .env("OPENCODE_SERVER_PASSWORD", &password)
-            .env("OPENCODE_DISABLE_AUTOUPDATE", "1")
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true)
+        let mut child = server_command(spec, &directory, &password)
             .spawn()
             .map_err(|source| HarnessError::Spawn {
                 program: spec.program.clone(),
@@ -1280,10 +1313,7 @@ impl OpenCodeServer {
     }
 
     pub async fn shutdown(self) -> HarnessResult<()> {
-        self.child
-            .lock()
-            .await
-            .kill()
+        stop_server(&mut *self.child.lock().await)
             .await
             .map_err(|error| protocol_error("could not stop OpenCode server", error))
     }
@@ -1407,6 +1437,43 @@ fn protocol_error(context: &str, error: impl std::fmt::Display) -> HarnessError 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn native_server_shutdown_stops_its_process_group()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = tempfile::tempdir()?;
+        let script = directory.path().join("opencode");
+        std::fs::write(
+            &script,
+            "#!/bin/sh\n(sleep 1; printf escaped > escaped) &\nprintf ready > ready\nwait\n",
+        )?;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700))?;
+        let spec = SpawnSpec {
+            program: script.to_string_lossy().into_owned(),
+            ..SpawnSpec::default()
+        };
+        let mut child = server_command(
+            &spec,
+            directory.path().to_str().ok_or("non-UTF-8 path")?,
+            "fixture",
+        )
+        .spawn()?;
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while !directory.path().join("ready").exists() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await?;
+        let pid = libc::pid_t::try_from(child.id().ok_or("missing process id")?)?;
+        assert_eq!(unsafe { libc::getpgid(pid) }, pid);
+        assert_ne!(unsafe { libc::getpgrp() }, pid);
+        stop_server(&mut child).await?;
+        tokio::time::sleep(Duration::from_millis(1300)).await;
+        assert!(!directory.path().join("escaped").exists());
+        Ok(())
+    }
 
     #[cfg(unix)]
     #[tokio::test]
