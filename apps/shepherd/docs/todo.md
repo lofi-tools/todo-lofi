@@ -1106,6 +1106,8 @@ and the task header never overstates the tier.
   neighboring cache files and symlink redirects.
   Turso fixtures verify attachment metadata after reopen, rollback on an
   invalid path, and removal with the task record.
+  Memory and Turso fixtures also verify task-scoped session, terminal, and
+  layout records are removed while another task and shared terminal remain.
   Saved-task deletion is not yet exposed by the app, so removal of its cached
   files cannot yet be verified end to end.
 - [x] Corrupt settings file falls back with a banner and backup.

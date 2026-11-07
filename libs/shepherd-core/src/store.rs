@@ -632,6 +632,8 @@ impl Store for TursoStore {
             "DELETE FROM attachments WHERE task_id = ?1",
             "DELETE FROM entries WHERE task_id = ?1",
             "DELETE FROM sessions WHERE task_id = ?1",
+            "DELETE FROM terminals WHERE task_id = ?1",
+            "DELETE FROM layouts WHERE task_id = ?1",
             "DELETE FROM tasks WHERE id = ?1",
         ] {
             toasty::sql::statement(statement)
@@ -1232,10 +1234,17 @@ impl Store for MemoryStore {
     }
 
     async fn delete_task(&self, task_id: &TaskId) -> Result<(), StoreError> {
-        let mut tasks = self.tasks.write().await;
-        tasks.remove(task_id.as_str());
+        self.tasks.write().await.remove(task_id.as_str());
         self.workspace_layouts.write().await.remove(task_id);
         self.transcripts.write().await.remove(task_id);
+        self.sessions
+            .write()
+            .await
+            .retain(|session| &session.task_id != task_id);
+        self.terminals
+            .write()
+            .await
+            .retain(|_, terminal| terminal.task_id.as_ref() != Some(task_id));
         Ok(())
     }
 
@@ -1337,6 +1346,108 @@ mod tests {
                 required_string(record.first())
             })
             .collect()
+    }
+
+    async fn verify_task_deletion(
+        store: &dyn Store,
+        root: &Path,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let project = Project::new(root.to_path_buf());
+        let removed = Task::draft(project.id.clone(), "Removed", root);
+        let kept = Task::draft(project.id.clone(), "Kept", root);
+        store.save_project(&project).await?;
+        store.save_task(&removed).await?;
+        store.save_task(&kept).await?;
+        let layout = WorkspaceLayout {
+            inspector_width: Some(320),
+        };
+        store.save_workspace_layout(&removed.id, layout).await?;
+        store.save_workspace_layout(&kept.id, layout).await?;
+        store
+            .save_session(&SessionRecord::started(removed.id.clone(), "codex", None))
+            .await?;
+        store
+            .save_session(&SessionRecord::started(kept.id.clone(), "codex", None))
+            .await?;
+        let shared = TerminalRecord::project_shared(
+            TerminalId::new("shared"),
+            project.id.clone(),
+            "Shared",
+            root.to_path_buf(),
+            "shell",
+            1,
+        );
+        let removed_terminal = TerminalRecord::project_shared(
+            TerminalId::new("removed"),
+            project.id.clone(),
+            "Removed",
+            root.to_path_buf(),
+            "shell",
+            2,
+        )
+        .for_task(removed.id.clone());
+        let kept_terminal = TerminalRecord::project_shared(
+            TerminalId::new("kept"),
+            project.id.clone(),
+            "Kept",
+            root.to_path_buf(),
+            "shell",
+            3,
+        )
+        .for_task(kept.id.clone());
+        for terminal in [&shared, &removed_terminal, &kept_terminal] {
+            store.save_terminal(terminal).await?;
+        }
+        store.delete_task(&removed.id).await?;
+        assert_eq!(
+            store
+                .load_tasks()
+                .await?
+                .iter()
+                .map(|task| task.id.clone())
+                .collect::<Vec<_>>(),
+            [kept.id.clone()]
+        );
+        assert_eq!(
+            store.load_workspace_layouts().await?,
+            vec![(kept.id.clone(), layout)]
+        );
+        assert_eq!(
+            store
+                .load_sessions()
+                .await?
+                .iter()
+                .map(|session| session.task_id.clone())
+                .collect::<Vec<_>>(),
+            [kept.id]
+        );
+        let ids: Vec<_> = store
+            .load_terminals()
+            .await?
+            .into_iter()
+            .map(|terminal| terminal.id.as_str().to_owned())
+            .collect();
+        assert!(ids.contains(&"shared".to_owned()));
+        assert!(ids.contains(&"kept".to_owned()));
+        assert!(!ids.contains(&"removed".to_owned()));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn task_deletion_removes_only_its_durable_state() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let database = TestDatabase::new()?;
+        verify_task_deletion(&MemoryStore::new(), database.path()).await?;
+        let uri = database.uri();
+        let store = TursoStore::open(&uri).await?;
+        verify_task_deletion(&store, database.path()).await?;
+        drop(store);
+        let reopened = TursoStore::open(&uri).await?;
+        assert_eq!(reopened.load_tasks().await?.len(), 1);
+        assert_eq!(reopened.load_workspace_layouts().await?.len(), 1);
+        assert_eq!(reopened.load_sessions().await?.len(), 1);
+        assert_eq!(reopened.load_terminals().await?.len(), 2);
+        Ok(())
     }
 
     #[tokio::test]
