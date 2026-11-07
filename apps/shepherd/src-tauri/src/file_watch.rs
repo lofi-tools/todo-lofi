@@ -56,6 +56,11 @@ struct WatchPaths {
 }
 
 impl WorkspaceWatch {
+    #[cfg(test)]
+    pub(crate) fn inject_error(&self, message: &str) {
+        record_notification(&self.changed, Some(message.into()));
+    }
+
     pub(crate) fn start(root: PathBuf) -> Result<Self, WatchError> {
         let root = root.canonicalize()?;
         let (git_dir, common_dir) = if has_git_marker(&root)? {

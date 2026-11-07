@@ -40,7 +40,7 @@ use tokio::time::Instant;
 use crate::attachments::{self, AttachmentLimit};
 use crate::codex_harness::codex_spawn_spec;
 use crate::file_actions::{self, FileAction};
-use crate::file_watch::{FileWatchUpdate, WorkspaceWatch};
+use crate::file_watch::{FileWatchUpdate, WatchError, WorkspaceWatch};
 use crate::pty_terminal::PtyTerminals;
 use crate::settings::{DEFAULT_ATTACHMENT_BYTES, DEFAULT_SCROLLBACK, SettingKey, Settings};
 use crate::terminal_screen::{Screen, SearchDirection, TerminalAppearance, TerminalFrame};
@@ -649,6 +649,40 @@ struct FileSearch {
 struct TaskSearchRequest {
     _cancel: oneshot::Sender<()>,
     cancellation: Option<oneshot::Receiver<()>>,
+}
+
+async fn pump_workspace_watch(
+    watcher: &mut WorkspaceWatch,
+    cancelled: &mut oneshot::Receiver<()>,
+    mut send: impl FnMut(FileWatchUpdate) -> Result<(), String>,
+) {
+    loop {
+        let update = tokio::select! {
+            _ = &mut *cancelled => break,
+            snapshot = watcher.snapshot() => match snapshot {
+                Ok(update) => update,
+                Err(error) => FileWatchUpdate::Error { message: format!("Could not refresh Git changes: {error}") },
+            }
+        };
+        if let Err(error) = send(update) {
+            tracing::debug!(%error, "the workspace file watch detached");
+            break;
+        }
+        tokio::select! {
+            _ = &mut *cancelled => break,
+            refresh = watcher.next_refresh() => if let Err(error) = refresh {
+                let recoverable = matches!(error, WatchError::Notification(_));
+                let update = FileWatchUpdate::Error { message: format!("Could not watch workspace files: {error}") };
+                if let Err(error) = send(update) {
+                    tracing::debug!(%error, "the workspace file watch detached");
+                    break;
+                }
+                if !recoverable {
+                    break;
+                }
+            },
+        }
+    }
 }
 
 impl ShellState {
@@ -1632,29 +1666,10 @@ impl ShellState {
         let watches = self.file_watches.clone();
         let id = watch_id.clone();
         tauri::async_runtime::spawn(async move {
-            loop {
-                let update = tokio::select! {
-                    _ = &mut cancelled => break,
-                    snapshot = watcher.snapshot() => match snapshot {
-                        Ok(update) => update,
-                        Err(error) => FileWatchUpdate::Error { message: format!("Could not refresh Git changes: {error}") },
-                    }
-                };
-                if let Err(error) = channel.send(update) {
-                    tracing::debug!(%error, "the workspace file watch detached");
-                    break;
-                }
-                tokio::select! {
-                    _ = &mut cancelled => break,
-                    refresh = watcher.next_refresh() => if let Err(error) = refresh {
-                        let update = FileWatchUpdate::Error { message: format!("Could not watch workspace files: {error}") };
-                        if let Err(error) = channel.send(update) {
-                            tracing::debug!(%error, "the workspace file watch detached");
-                        }
-                        break;
-                    },
-                }
-            }
+            pump_workspace_watch(&mut watcher, &mut cancelled, |update| {
+                channel.send(update).map_err(|error| error.to_string())
+            })
+            .await;
             watches.lock().await.remove(&id);
         });
         Ok(watch_id)
@@ -3398,6 +3413,43 @@ mod tests {
 
     fn state_with(core: Core) -> ShellState {
         ShellState::new(core)
+    }
+
+    #[tokio::test]
+    async fn workspace_watch_continues_after_a_notification_error()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let mut watcher = WorkspaceWatch::start(directory.path().to_path_buf())?;
+        watcher.inject_error("fixture error");
+        let (cancel, mut cancelled) = oneshot::channel();
+        let (updates, mut received) = mpsc::unbounded_channel();
+        let pump = tokio::spawn(async move {
+            pump_workspace_watch(&mut watcher, &mut cancelled, |update| {
+                updates.send(update).map_err(|error| error.to_string())
+            })
+            .await;
+        });
+        let mut saw_error = false;
+        let mut saw_refresh = false;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while let Some(update) = received.recv().await {
+                match update {
+                    FileWatchUpdate::Error { message } if message.contains("fixture error") => {
+                        saw_error = true
+                    }
+                    FileWatchUpdate::Changes { .. } if saw_error => {
+                        saw_refresh = true;
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+        })
+        .await?;
+        assert!(saw_error && saw_refresh);
+        cancel.send(()).map_err(|_| "watcher stopped early")?;
+        pump.await?;
+        Ok(())
     }
 
     #[tokio::test]
