@@ -74,6 +74,12 @@ pub trait Store: Send + Sync {
     async fn save_project(&self, project: &Project) -> Result<(), StoreError>;
     async fn load_tasks(&self) -> Result<Vec<Task>, StoreError>;
     async fn save_task(&self, task: &Task) -> Result<(), StoreError>;
+    async fn save_task_with_transcript(
+        &self,
+        task: &Task,
+        session: &SessionRecord,
+        entries: &[&Entry],
+    ) -> Result<(), StoreError>;
     async fn archive_tasks(&self, tasks: &[Task]) -> Result<(), StoreError>;
     async fn delete_task(&self, task_id: &TaskId) -> Result<(), StoreError>;
     async fn load_workspace_layouts(&self) -> Result<Vec<(TaskId, WorkspaceLayout)>, StoreError>;
@@ -304,6 +310,158 @@ async fn backup_database(db: &mut toasty::db::Db, path: &Path) -> Result<(), Sto
     Ok(())
 }
 
+async fn write_transcript_entries(
+    executor: &mut dyn toasty::db::Executor,
+    session: &SessionRecord,
+    entries: &[&Entry],
+) -> Result<(), StoreError> {
+    let owners = toasty::sql::query(
+            "SELECT sessions.id FROM sessions JOIN tasks ON tasks.id = sessions.task_id \
+             JOIN projects ON projects.id = tasks.project_id WHERE sessions.id = ?1 AND tasks.id = ?2",
+        )
+        .column_types([Type::String])
+        .bind(&session.id)
+        .bind(session.task_id.as_str())
+        .exec(&mut *executor)
+        .await?;
+    if owners.is_empty() {
+        return Err(StoreError::TranscriptOwnerMissing {
+            task_id: session.task_id.clone(),
+            session_id: session.id.clone(),
+        });
+    }
+    let created_at = crate::projects::now_millis() as i64;
+    for entry in entries {
+        let mut payload = serde_json::to_value(entry).map_err(|error| {
+            StoreError::InvalidRow(format!("could not encode transcript entry: {error}"))
+        })?;
+        if let Some(fields) = payload.as_object_mut() {
+            fields.remove("attachments");
+        }
+        let kind = payload
+            .pointer("/kind/type")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| StoreError::InvalidRow("missing transcript entry kind".into()))?;
+        toasty::sql::statement(
+                "INSERT INTO entries (session_id, task_id, id, sequence, kind, payload, created_at,
+                                      entry_text, task_title, project_name)
+                 SELECT ?1, tasks.id, ?3, ?4, ?5, ?6, ?7, ?8, tasks.title, projects.name
+                 FROM tasks JOIN projects ON projects.id = tasks.project_id WHERE tasks.id = ?2
+                 ON CONFLICT(task_id, id) DO UPDATE SET kind = excluded.kind, payload = excluded.payload,
+                     entry_text = excluded.entry_text, task_title = excluded.task_title, project_name = excluded.project_name",
+            )
+            .bind(&session.id)
+            .bind(session.task_id.as_str())
+            .bind(&entry.id)
+            .bind(entry.sequence as i64)
+            .bind(kind)
+            .bind(payload.to_string())
+            .bind(created_at)
+            .bind(entry_text(&entry.kind))
+            .exec(&mut *executor)
+            .await?;
+        if matches!(entry.kind, EntryKind::UserMessage { .. }) {
+            for (position, attachment) in entry.attachments.iter().enumerate() {
+                let path = attachment
+                    .relative_path
+                    .to_str()
+                    .filter(|path| {
+                        !path.is_empty()
+                            && attachment
+                                .relative_path
+                                .components()
+                                .all(|part| matches!(part, std::path::Component::Normal(_)))
+                    })
+                    .ok_or_else(|| {
+                        StoreError::InvalidRow("expected a relative attachment path".into())
+                    })?;
+                let bytes = i64::try_from(attachment.bytes).map_err(|_| {
+                    StoreError::InvalidRow("attachment size exceeds database range".into())
+                })?;
+                toasty::sql::statement(
+                        "INSERT INTO attachments (task_id, entry_id, position, id, relative_path, mime, bytes, created_at)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                         ON CONFLICT(task_id, entry_id, position) DO UPDATE SET id = excluded.id,
+                             relative_path = excluded.relative_path, mime = excluded.mime, bytes = excluded.bytes",
+                    )
+                    .bind(session.task_id.as_str())
+                    .bind(&entry.id)
+                    .bind(position as i64)
+                    .bind(&attachment.id)
+                    .bind(path)
+                    .bind(&attachment.mime)
+                    .bind(bytes)
+                    .bind(created_at)
+                    .exec(&mut *executor)
+                    .await?;
+            }
+            toasty::sql::statement(
+                "DELETE FROM attachments WHERE task_id = ?1 AND entry_id = ?2 AND position >= ?3",
+            )
+            .bind(session.task_id.as_str())
+            .bind(&entry.id)
+            .bind(entry.attachments.len() as i64)
+            .exec(&mut *executor)
+            .await?;
+        }
+    }
+    Ok(())
+}
+
+async fn write_task(
+    executor: &mut dyn toasty::db::Executor,
+    task: &Task,
+) -> Result<(), StoreError> {
+    let worktree_path = optional_path(task.worktree_path.as_ref());
+    let branch = task.branch.as_deref().unwrap_or_default();
+    let base_branch = task.base_branch.as_deref().unwrap_or_default();
+    let error = task.error.as_deref().unwrap_or_default();
+    toasty::sql::statement(
+            "INSERT INTO tasks (\
+                id, project_id, title, state, tier, proposed_worktree_path, \
+                proposed_branch, worktree_path, branch, base_branch, error, \
+                created_at, updated_at, branch_tip_sha, agent, worktree_last_used_at\
+             ) VALUES (\
+                ?1, ?2, ?3, ?4, ?5, ?6, ?7, \
+                NULLIF(?8, ''), NULLIF(?9, ''), NULLIF(?10, ''), NULLIF(?11, ''), ?12, ?13, NULLIF(?14, ''), ?15, ?16\
+             ) ON CONFLICT (id) DO UPDATE SET \
+                project_id = excluded.project_id, \
+                title = excluded.title, \
+                state = excluded.state, \
+                tier = excluded.tier, \
+                proposed_worktree_path = excluded.proposed_worktree_path, \
+                proposed_branch = excluded.proposed_branch, \
+                worktree_path = excluded.worktree_path, \
+                branch = excluded.branch, \
+                base_branch = excluded.base_branch, \
+                error = excluded.error, \
+                created_at = excluded.created_at, \
+                updated_at = excluded.updated_at, \
+                branch_tip_sha = excluded.branch_tip_sha, \
+                agent = excluded.agent, \
+                worktree_last_used_at = excluded.worktree_last_used_at",
+        )
+        .bind(task.id.as_str())
+        .bind(task.project_id.as_str())
+        .bind(&task.title)
+        .bind(task.state.as_str())
+        .bind(task.tier.as_str())
+        .bind(task.proposed_worktree_path.to_string_lossy().as_ref())
+        .bind(&task.proposed_branch)
+        .bind(worktree_path)
+        .bind(branch)
+        .bind(base_branch)
+        .bind(error)
+        .bind(task.created_at as i64)
+        .bind(task.updated_at as i64)
+        .bind(task.branch_tip_sha.as_deref().unwrap_or_default())
+        .bind(task.agent.as_str())
+        .bind(task.worktree_last_used_at as i64)
+        .exec(&mut *executor)
+        .await?;
+    Ok(())
+}
+
 #[async_trait]
 impl Store for TursoStore {
     async fn save_process(&self, process: &ProcessRecord) -> Result<(), StoreError> {
@@ -473,96 +631,28 @@ impl Store for TursoStore {
         }
         let mut db = self.db.lock().await;
         let mut transaction = db.transaction().await?;
-        let owners = toasty::sql::query(
-            "SELECT sessions.id FROM sessions JOIN tasks ON tasks.id = sessions.task_id \
-             JOIN projects ON projects.id = tasks.project_id WHERE sessions.id = ?1 AND tasks.id = ?2",
-        )
-        .column_types([Type::String])
-        .bind(&session.id)
-        .bind(session.task_id.as_str())
-        .exec(&mut transaction)
-        .await?;
-        if owners.is_empty() {
-            transaction.rollback().await?;
+        write_transcript_entries(&mut transaction, session, entries).await?;
+        transaction.commit().await?;
+        Ok(())
+    }
+
+    async fn save_task_with_transcript(
+        &self,
+        task: &Task,
+        session: &SessionRecord,
+        entries: &[&Entry],
+    ) -> Result<(), StoreError> {
+        if task.id != session.task_id {
             return Err(StoreError::TranscriptOwnerMissing {
-                task_id: session.task_id.clone(),
+                task_id: task.id.clone(),
                 session_id: session.id.clone(),
             });
         }
-        let created_at = crate::projects::now_millis() as i64;
-        for entry in entries {
-            let mut payload = serde_json::to_value(entry).map_err(|error| {
-                StoreError::InvalidRow(format!("could not encode transcript entry: {error}"))
-            })?;
-            if let Some(fields) = payload.as_object_mut() {
-                fields.remove("attachments");
-            }
-            let kind = payload
-                .pointer("/kind/type")
-                .and_then(serde_json::Value::as_str)
-                .ok_or_else(|| StoreError::InvalidRow("missing transcript entry kind".into()))?;
-            toasty::sql::statement(
-                "INSERT INTO entries (session_id, task_id, id, sequence, kind, payload, created_at,
-                                      entry_text, task_title, project_name)
-                 SELECT ?1, tasks.id, ?3, ?4, ?5, ?6, ?7, ?8, tasks.title, projects.name
-                 FROM tasks JOIN projects ON projects.id = tasks.project_id WHERE tasks.id = ?2
-                 ON CONFLICT(task_id, id) DO UPDATE SET kind = excluded.kind, payload = excluded.payload,
-                     entry_text = excluded.entry_text, task_title = excluded.task_title, project_name = excluded.project_name",
-            )
-            .bind(&session.id)
-            .bind(session.task_id.as_str())
-            .bind(&entry.id)
-            .bind(entry.sequence as i64)
-            .bind(kind)
-            .bind(payload.to_string())
-            .bind(created_at)
-            .bind(entry_text(&entry.kind))
-            .exec(&mut transaction)
-            .await?;
-            if matches!(entry.kind, EntryKind::UserMessage { .. }) {
-                for (position, attachment) in entry.attachments.iter().enumerate() {
-                    let path = attachment
-                        .relative_path
-                        .to_str()
-                        .filter(|path| {
-                            !path.is_empty()
-                                && attachment
-                                    .relative_path
-                                    .components()
-                                    .all(|part| matches!(part, std::path::Component::Normal(_)))
-                        })
-                        .ok_or_else(|| {
-                            StoreError::InvalidRow("expected a relative attachment path".into())
-                        })?;
-                    let bytes = i64::try_from(attachment.bytes).map_err(|_| {
-                        StoreError::InvalidRow("attachment size exceeds database range".into())
-                    })?;
-                    toasty::sql::statement(
-                        "INSERT INTO attachments (task_id, entry_id, position, id, relative_path, mime, bytes, created_at)
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
-                         ON CONFLICT(task_id, entry_id, position) DO UPDATE SET id = excluded.id,
-                             relative_path = excluded.relative_path, mime = excluded.mime, bytes = excluded.bytes",
-                    )
-                    .bind(session.task_id.as_str())
-                    .bind(&entry.id)
-                    .bind(position as i64)
-                    .bind(&attachment.id)
-                    .bind(path)
-                    .bind(&attachment.mime)
-                    .bind(bytes)
-                    .bind(created_at)
-                    .exec(&mut transaction)
-                    .await?;
-                }
-                toasty::sql::statement(
-                    "DELETE FROM attachments WHERE task_id = ?1 AND entry_id = ?2 AND position >= ?3",
-                )
-                .bind(session.task_id.as_str())
-                .bind(&entry.id)
-                .bind(entry.attachments.len() as i64)
-                .exec(&mut transaction)
-                .await?;
-            }
+        let mut db = self.db.lock().await;
+        let mut transaction = db.transaction().await?;
+        write_task(&mut transaction, task).await?;
+        if !entries.is_empty() {
+            write_transcript_entries(&mut transaction, session, entries).await?;
         }
         transaction.commit().await?;
         Ok(())
@@ -735,54 +825,7 @@ impl Store for TursoStore {
 
     async fn save_task(&self, task: &Task) -> Result<(), StoreError> {
         let mut db = self.db.lock().await;
-        let worktree_path = optional_path(task.worktree_path.as_ref());
-        let branch = task.branch.as_deref().unwrap_or_default();
-        let base_branch = task.base_branch.as_deref().unwrap_or_default();
-        let error = task.error.as_deref().unwrap_or_default();
-        toasty::sql::statement(
-            "INSERT INTO tasks (\
-                id, project_id, title, state, tier, proposed_worktree_path, \
-                proposed_branch, worktree_path, branch, base_branch, error, \
-                created_at, updated_at, branch_tip_sha, agent, worktree_last_used_at\
-             ) VALUES (\
-                ?1, ?2, ?3, ?4, ?5, ?6, ?7, \
-                NULLIF(?8, ''), NULLIF(?9, ''), NULLIF(?10, ''), NULLIF(?11, ''), ?12, ?13, NULLIF(?14, ''), ?15, ?16\
-             ) ON CONFLICT (id) DO UPDATE SET \
-                project_id = excluded.project_id, \
-                title = excluded.title, \
-                state = excluded.state, \
-                tier = excluded.tier, \
-                proposed_worktree_path = excluded.proposed_worktree_path, \
-                proposed_branch = excluded.proposed_branch, \
-                worktree_path = excluded.worktree_path, \
-                branch = excluded.branch, \
-                base_branch = excluded.base_branch, \
-                error = excluded.error, \
-                created_at = excluded.created_at, \
-                updated_at = excluded.updated_at, \
-                branch_tip_sha = excluded.branch_tip_sha, \
-                agent = excluded.agent, \
-                worktree_last_used_at = excluded.worktree_last_used_at",
-        )
-        .bind(task.id.as_str())
-        .bind(task.project_id.as_str())
-        .bind(&task.title)
-        .bind(task.state.as_str())
-        .bind(task.tier.as_str())
-        .bind(task.proposed_worktree_path.to_string_lossy().as_ref())
-        .bind(&task.proposed_branch)
-        .bind(worktree_path)
-        .bind(branch)
-        .bind(base_branch)
-        .bind(error)
-        .bind(task.created_at as i64)
-        .bind(task.updated_at as i64)
-        .bind(task.branch_tip_sha.as_deref().unwrap_or_default())
-        .bind(task.agent.as_str())
-        .bind(task.worktree_last_used_at as i64)
-        .exec(&mut *db)
-        .await?;
-        Ok(())
+        write_task(&mut *db, task).await
     }
 
     async fn archive_tasks(&self, tasks: &[Task]) -> Result<(), StoreError> {
@@ -1345,6 +1388,29 @@ fn optional_path(path: Option<&PathBuf>) -> String {
         .unwrap_or_default()
 }
 
+fn validate_attachments(entries: &[&Entry]) -> Result<(), StoreError> {
+    for entry in entries {
+        if matches!(entry.kind, EntryKind::UserMessage { .. }) {
+            for attachment in &entry.attachments {
+                if attachment.relative_path.to_str().is_none_or(str::is_empty)
+                    || !attachment
+                        .relative_path
+                        .components()
+                        .all(|part| matches!(part, std::path::Component::Normal(_)))
+                {
+                    return Err(StoreError::InvalidRow(
+                        "expected a relative attachment path".into(),
+                    ));
+                }
+                i64::try_from(attachment.bytes).map_err(|_| {
+                    StoreError::InvalidRow("attachment size exceeds database range".into())
+                })?;
+            }
+        }
+    }
+    Ok(())
+}
+
 /// A non-durable store used to test the boundary before a database is opened.
 #[derive(Default)]
 pub struct MemoryStore {
@@ -1402,6 +1468,7 @@ impl Store for MemoryStore {
         if entries.is_empty() {
             return Ok(());
         }
+        validate_attachments(entries)?;
         let tasks = self.tasks.read().await;
         let sessions = self.sessions.read().await;
         let projects = self.projects.read().await;
@@ -1495,6 +1562,45 @@ impl Store for MemoryStore {
     async fn save_task(&self, task: &Task) -> Result<(), StoreError> {
         let mut tasks = self.tasks.write().await;
         tasks.insert(task.id.as_str().to_string(), task.clone());
+        Ok(())
+    }
+
+    async fn save_task_with_transcript(
+        &self,
+        task: &Task,
+        session: &SessionRecord,
+        entries: &[&Entry],
+    ) -> Result<(), StoreError> {
+        if task.id != session.task_id {
+            return Err(StoreError::TranscriptOwnerMissing {
+                task_id: task.id.clone(),
+                session_id: session.id.clone(),
+            });
+        }
+        validate_attachments(entries)?;
+        let mut tasks = self.tasks.write().await;
+        let sessions = self.sessions.read().await;
+        let projects = self.projects.read().await;
+        if !entries.is_empty()
+            && (!tasks.contains_key(task.id.as_str())
+                || !projects.contains_key(task.project_id.as_str())
+                || !sessions
+                    .iter()
+                    .any(|stored| stored.id == session.id && stored.task_id == task.id))
+        {
+            return Err(StoreError::TranscriptOwnerMissing {
+                task_id: task.id.clone(),
+                session_id: session.id.clone(),
+            });
+        }
+        let mut transcripts = self.transcripts.write().await;
+        tasks.insert(task.id.as_str().to_string(), task.clone());
+        if !entries.is_empty() {
+            let transcript = transcripts.entry(task.id.clone()).or_default();
+            for entry in entries {
+                transcript.insert(entry.sequence, (*entry).clone());
+            }
+        }
         Ok(())
     }
 
@@ -1628,6 +1734,74 @@ mod tests {
                 required_string(record.first())
             })
             .collect()
+    }
+
+    #[tokio::test]
+    async fn task_and_transcript_commit_or_roll_back_together()
+    -> Result<(), Box<dyn std::error::Error>> {
+        async fn verify(store: &dyn Store, root: &Path) -> Result<(), Box<dyn std::error::Error>> {
+            let project = Project::new(root.to_path_buf());
+            let task = Task::draft(project.id.clone(), "Original", root);
+            let session = SessionRecord::started(task.id.clone(), "codex", None);
+            store.save_project(&project).await?;
+            store.save_task(&task).await?;
+            store.save_session(&session).await?;
+            let mut transcript = agent_harness::Transcript::default();
+            transcript.push_user_message("Original prompt");
+            let entry = transcript.entry(0).ok_or("missing entry")?;
+            store.save_transcript_entries(&session, &[entry]).await?;
+            let mut changed_task = task.clone();
+            changed_task.title = "Changed".into();
+            let mut changed_entry = entry.clone();
+            if let EntryKind::UserMessage { text } = &mut changed_entry.kind {
+                *text = "Changed prompt".into();
+            }
+            changed_entry.attachments.push(AttachmentMetadata {
+                id: "invalid".into(),
+                relative_path: "../outside".into(),
+                mime: "text/plain".into(),
+                bytes: 1,
+            });
+            assert!(
+                store
+                    .save_task_with_transcript(&changed_task, &session, &[&changed_entry])
+                    .await
+                    .is_err()
+            );
+            assert_eq!(
+                store
+                    .load_tasks()
+                    .await?
+                    .first()
+                    .ok_or("missing task")?
+                    .title,
+                "Original"
+            );
+            assert_eq!(store.load_transcript(&task.id).await?, transcript.entries());
+            changed_entry.attachments.clear();
+            store
+                .save_task_with_transcript(&changed_task, &session, &[&changed_entry])
+                .await?;
+            assert_eq!(
+                store
+                    .load_tasks()
+                    .await?
+                    .first()
+                    .ok_or("missing task")?
+                    .title,
+                "Changed"
+            );
+            assert_eq!(store.load_transcript(&task.id).await?, vec![changed_entry]);
+            Ok(())
+        }
+        let directory = TestDirectory::new()?;
+        verify(&MemoryStore::new(), directory.path()).await?;
+        verify(
+            &TursoStore::open_at(&directory.join("shepherd.db")).await?,
+            directory.path(),
+        )
+        .await?;
+        Ok(())
     }
 
     #[tokio::test]

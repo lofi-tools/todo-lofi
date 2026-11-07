@@ -18,7 +18,7 @@ use async_trait::async_trait;
 
 use crate::session::SessionRecord;
 use crate::store::{ProjectApproval, Store, checksum};
-use crate::{Agent, AgentTier, CoreError, ProjectId};
+use crate::{Agent, AgentTier, CoreError, ProjectId, Task};
 
 pub(crate) struct ProjectApprovals {
     store: Arc<dyn Store>,
@@ -354,6 +354,7 @@ impl HarnessSession {
         store: &dyn Store,
         record: &SessionRecord,
         settled: bool,
+        task: Option<&Task>,
     ) -> Result<bool, CoreError> {
         let transcript = &self.transcript;
         let can_save =
@@ -365,9 +366,18 @@ impl HarnessSession {
             .filter(|entry| can_save(entry))
             .collect();
         if entries.is_empty() {
+            if let Some(task) = task {
+                store.save_task(task).await?;
+            }
             return Ok(false);
         }
-        store.save_transcript_entries(record, &entries).await?;
+        if let Some(task) = task {
+            store
+                .save_task_with_transcript(task, record, &entries)
+                .await?;
+        } else {
+            store.save_transcript_entries(record, &entries).await?;
+        }
         self.dirty_entries.retain(|index| {
             transcript
                 .entry(*index)

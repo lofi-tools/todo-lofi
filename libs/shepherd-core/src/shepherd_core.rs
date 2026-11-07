@@ -2186,6 +2186,7 @@ impl Core {
                             &*self.store,
                             record,
                             !self.task(&task_id)?.state.is_live(),
+                            None,
                         )
                         .await?;
                 }
@@ -2208,7 +2209,7 @@ impl Core {
                         .iter()
                         .any(|event| matches!(event, HarnessEvent::TurnFinished { .. }));
                 session
-                    .persist_transcript(&*self.store, record, settled)
+                    .persist_transcript(&*self.store, record, settled, None)
                     .await?;
             }
             self.end_session_record(&task_id, &events).await?;
@@ -2309,8 +2310,16 @@ impl Core {
     /// (only required to be `Send`) cannot promise.
     async fn save_task(&mut self, task_id: &TaskId) -> Result<(), CoreError> {
         let task = self.task(task_id)?.clone();
-        self.persist_task_transcript(task_id).await?;
-        self.store.save_task(&task).await?;
+        if let (Some(session), Some(record)) = (
+            self.sessions.get_mut(task_id),
+            self.session_records.get(task_id),
+        ) {
+            session
+                .persist_transcript(&*self.store, record, !task.state.is_live(), Some(&task))
+                .await?;
+        } else {
+            self.store.save_task(&task).await?;
+        }
         Ok(())
     }
 
@@ -2323,7 +2332,7 @@ impl Core {
             return Ok(false);
         };
         session
-            .persist_transcript(&*self.store, record, settled)
+            .persist_transcript(&*self.store, record, settled, None)
             .await
     }
 
