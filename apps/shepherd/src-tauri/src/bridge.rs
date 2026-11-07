@@ -4370,6 +4370,116 @@ mod tests {
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[tokio::test]
+    async fn abrupt_shell_death_leaves_a_verifiable_agent_record()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use agent_harness::AgentHarness;
+        if let Some(data) = std::env::var_os("SHEPHERD_AGENT_ORPHAN_DATA") {
+            let data = PathBuf::from(data);
+            let ready = data.join("agent-ready");
+            let store = Arc::new(TursoStore::open_at(&data.join("shepherd.db")).await?);
+            let slot = Arc::new(OnceLock::new());
+            slot.set(store.clone() as Arc<dyn Store>)
+                .map_err(|_| "store already set")?;
+            let tracker = Arc::new(AgentProcessStore {
+                store: slot,
+                task_id: "crash-task".into(),
+            });
+            let mut harness = agent_harness::codex::CodexHarness::new();
+            harness.set_process_tracker(tracker);
+            harness.start(agent_harness::SpawnSpec {
+                program: "/bin/sh".into(),
+                args: vec!["-c".into(), "while IFS= read -r line; do case \"$line\" in *initialize*) printf '{\"id\":1,\"result\":{}}\\n';; esac; done; exec sleep 30".into()],
+                cwd: data.clone(),
+                ..Default::default()
+            }).await?;
+            let record = store
+                .load_processes()
+                .await?
+                .into_iter()
+                .next()
+                .ok_or("missing agent record")?;
+            let temporary = ready.with_extension("tmp");
+            std::fs::write(&temporary, format!("{} {}", record.pid, record.started_at))?;
+            std::fs::rename(temporary, ready)?;
+            std::future::pending::<()>().await;
+            return Ok(());
+        }
+        struct ProcessGuard {
+            pid: libc::pid_t,
+            started_at: u64,
+        }
+        impl Drop for ProcessGuard {
+            fn drop(&mut self) {
+                if crate::pty_terminal::process_start_time(self.pid) == Some(self.started_at)
+                    && unsafe { libc::kill(self.pid, libc::SIGKILL) } != 0
+                {
+                    let error = std::io::Error::last_os_error();
+                    if error.raw_os_error() != Some(libc::ESRCH) {
+                        eprintln!("could not stop agent fixture: {error}");
+                    }
+                }
+            }
+        }
+        if crate::pty_terminal::boot_id().is_none() {
+            return Ok(());
+        }
+        let data = TestDirectory::new()?;
+        let ready = data.join("agent-ready");
+        let mut child = tokio::process::Command::new(std::env::current_exe()?)
+            .args([
+                "--exact",
+                "bridge::tests::abrupt_shell_death_leaves_a_verifiable_agent_record",
+                "--nocapture",
+            ])
+            .env("SHEPHERD_AGENT_ORPHAN_DATA", data.path())
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .kill_on_drop(true)
+            .spawn()?;
+        let contents = tokio::time::timeout(Duration::from_secs(20), async {
+            loop {
+                match std::fs::read_to_string(&ready) {
+                    Ok(contents) => break Ok::<_, Box<dyn std::error::Error>>(contents),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => break Err(error.into()),
+                }
+                if let Some(status) = child.try_wait()? {
+                    break Err(format!("fixture exited before ready: {status}").into());
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await??;
+        let mut fields = contents.split_whitespace();
+        let pid: libc::pid_t = fields.next().ok_or("missing pid")?.parse()?;
+        let started_at = fields.next().ok_or("missing start time")?.parse()?;
+        if pid <= 1 || u32::try_from(pid).ok() == Some(std::process::id()) {
+            return Err("invalid fixture PID".into());
+        }
+        let _guard = ProcessGuard { pid, started_at };
+        child.kill().await?;
+        use std::os::unix::process::ExitStatusExt as _;
+        assert_eq!(child.wait().await?.signal(), Some(libc::SIGKILL));
+        let store = TursoStore::open_at(&data.join("shepherd.db")).await?;
+        let records = store.load_processes().await?;
+        assert_eq!(records.len(), 1);
+        let record = records.first().ok_or("missing agent record")?;
+        assert_eq!(record.kind, "agent");
+        assert_eq!(record.owner_id, "crash-task");
+        assert_eq!(record.pid, u32::try_from(pid)?);
+        let inspection = serde_json::to_value(crate::orphan_process::inspect(records))?;
+        assert_eq!(
+            inspection
+                .get(0)
+                .and_then(|item| item.get("status"))
+                .and_then(serde_json::Value::as_str),
+            Some("matching")
+        );
+        Ok(())
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[tokio::test]
     async fn abrupt_shell_death_leaves_a_verifiable_terminal_record()
     -> Result<(), Box<dyn std::error::Error>> {
         if let Some(data) = std::env::var_os("SHEPHERD_ORPHAN_FIXTURE_DATA") {

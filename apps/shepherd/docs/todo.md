@@ -1199,8 +1199,10 @@ placeholder tabs and no unearned state badges.
   while hiding configured launch environment details. Codex app-server task
   launches now record the process identity before initialization and remove it
   after shutdown; save failures stop startup and failed removal can be retried.
-  Local fixtures cover those paths and durable storage. OpenCode's native server
-  is also recorded before its startup handshake; a failed record write blocks
+  A headless SIGKILL fixture reopens the database and verifies the surviving
+  scripted app-server process against its recorded identity; the fixture then
+  stops it. Local fixtures cover shutdown paths and durable storage. OpenCode's
+  native server is also recorded before its startup handshake; a failed record write blocks
   ACP fallback, and a failed record removal can be retried. A local HTTP
   fixture covers the lifecycle. Records from interrupted startup may remain for
   inspection. ACP task launches, including OpenCode fallback and Claude, now
