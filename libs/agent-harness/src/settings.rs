@@ -56,7 +56,8 @@ async fn resolve_environment_with_timeout(
     deadline: std::time::Duration,
 ) -> HarnessResult<()> {
     use tokio::io::AsyncReadExt;
-    for (key, value) in environment.iter_mut() {
+    let mut resolved = BTreeMap::new();
+    for (key, value) in environment.iter() {
         let Some(command) = value.strip_prefix('!') else {
             continue;
         };
@@ -145,10 +146,12 @@ async fn resolve_environment_with_timeout(
         } else {
             group.disarm();
         }
-        *value = outcome.map_err(|_| {
+        let output = outcome.map_err(|_| {
             HarnessError::Protocol(format!("Environment command for {key} timed out"))
         })??;
+        resolved.insert(key.clone(), output);
     }
+    environment.extend(resolved);
     Ok(())
 }
 
@@ -264,6 +267,34 @@ mod tests {
         assert!(task.await.is_err_and(|error| error.is_cancelled()));
         tokio::time::sleep(std::time::Duration::from_millis(1300)).await;
         assert!(!directory.path().join("escaped").exists());
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn failed_environment_resolution_preserves_all_values_for_retry()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        std::fs::write(directory.path().join("value"), "first")?;
+        let mut values = BTreeMap::from([
+            ("A_TOKEN".into(), "!cat value".into()),
+            ("Z_TOKEN".into(), "!exit 1".into()),
+        ]);
+        assert!(
+            resolve_environment(&mut values, directory.path())
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            values.get("A_TOKEN").map(String::as_str),
+            Some("!cat value")
+        );
+        assert_eq!(values.get("Z_TOKEN").map(String::as_str), Some("!exit 1"));
+        std::fs::write(directory.path().join("value"), "second")?;
+        values.insert("Z_TOKEN".into(), "!printf ready".into());
+        resolve_environment(&mut values, directory.path()).await?;
+        assert_eq!(values.get("A_TOKEN").map(String::as_str), Some("second"));
+        assert_eq!(values.get("Z_TOKEN").map(String::as_str), Some("ready"));
         Ok(())
     }
 

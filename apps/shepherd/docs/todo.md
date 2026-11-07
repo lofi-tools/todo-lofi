@@ -1339,7 +1339,9 @@ placeholder tabs and no unearned state badges.
   attachment grants open every path component without following symlinks and
   retain the opened file for the duration of the prompt. Agent launch environment
   commands resolve at spawn with a five-second timeout and bounded output; errors
-  exclude their output. Oversized output and failed commands with inherited
+  exclude their output. Resolution updates the environment only after every
+  command succeeds, so a failed attempt can be retried from the original map.
+  Oversized output and failed commands with inherited
   stdout fail promptly; any process-group cleanup failure is reported.
   Cancellation also stops the command's process group on Unix; a local fixture
   checks that a descendant cannot write after the resolver is dropped. Settings
