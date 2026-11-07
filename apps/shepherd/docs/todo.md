@@ -1214,6 +1214,8 @@ placeholder tabs and no unearned state badges.
   retrying; a database-trigger fixture verifies cleanup and a subsequent start.
   A second fixture makes cleanup fail twice and verifies that the session is
   retained until cleanup succeeds, before another agent can start.
+  Quit now returns an agent shutdown error and remains in the draining state
+  with the session retained; a fixture verifies that a later quit retries it.
 - [ ] Bounded transcript, stderr, search and frame buffers.
   Codex, OpenCode and ACP stderr readers cap each line while draining the
   process, including newline-free output. OpenCode omits overlong lines to

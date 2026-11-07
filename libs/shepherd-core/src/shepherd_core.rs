@@ -2390,7 +2390,7 @@ impl Core {
                         Ok(events) => events,
                         Err(error) => {
                             tracing::error!(task_id = task_id.as_str(), %error, "failed to stop the agent session during shutdown");
-                            Vec::new()
+                            return Err(error);
                         }
                     }
                 };
@@ -4349,6 +4349,79 @@ mod tests {
                 .iter()
                 .any(|summary| summary.contains("done"))
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn quit_retries_agent_shutdown_after_failure() -> Result<(), Box<dyn std::error::Error>> {
+        use agent_harness::{AgentHarness, Capabilities, HarnessError, HarnessResult, SpawnSpec};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        struct RetryShutdown {
+            receiver: mpsc::UnboundedReceiver<HarnessEvent>,
+            attempts: Arc<AtomicUsize>,
+        }
+        #[async_trait::async_trait]
+        impl AgentHarness for RetryShutdown {
+            fn events(&mut self) -> &mut mpsc::UnboundedReceiver<HarnessEvent> {
+                &mut self.receiver
+            }
+            async fn start(&mut self, _: SpawnSpec) -> HarnessResult<Capabilities> {
+                Err(HarnessError::NotStarted)
+            }
+            async fn open_session(&mut self, _: Option<SessionId>) -> HarnessResult<SessionId> {
+                Err(HarnessError::NotStarted)
+            }
+            async fn prompt(&mut self, _: PromptInput) -> HarnessResult<()> {
+                Err(HarnessError::NotStarted)
+            }
+            async fn cancel(&mut self) -> HarnessResult<()> {
+                Err(HarnessError::NotStarted)
+            }
+            async fn respond(&mut self, _: ApprovalId, _: Decision) -> HarnessResult<()> {
+                Err(HarnessError::NotStarted)
+            }
+            async fn shutdown(&mut self) -> HarnessResult<()> {
+                if self.attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+                    Err(HarnessError::Protocol("fixture shutdown failed".into()))
+                } else {
+                    Ok(())
+                }
+            }
+        }
+        let directory = TestDirectory::new()?;
+        let mut core = Core::with_services(
+            Box::new(MemoryStore::new()),
+            Box::new(UnavailableHarnessFactory),
+        );
+        let project_id = add_project(&mut core, directory.path().to_path_buf()).await?;
+        let draft = workspace_of(
+            core.execute(Command::CreateDraft {
+                project_id,
+                agent: Agent::Codex,
+                title: "Retry quit".into(),
+            })
+            .await?,
+        );
+        let task_id = TaskId::new(draft.task.id);
+        let (_sender, receiver) = mpsc::unbounded_channel();
+        let attempts = Arc::new(AtomicUsize::new(0));
+        core.sessions.insert(
+            task_id.clone(),
+            HarnessSession::new(Box::new(RetryShutdown {
+                receiver,
+                attempts: attempts.clone(),
+            })),
+        );
+        assert!(core.execute(Command::Quit { force: true }).await.is_err());
+        assert_eq!(core.shutdown_state(), ShutdownState::Draining);
+        assert!(core.sessions.contains_key(&task_id));
+        assert!(!core.shutdown_events.contains_key(&task_id));
+        assert!(matches!(
+            core.execute(Command::Quit { force: true }).await?,
+            CommandResult::Quit(_)
+        ));
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+        assert_eq!(core.shutdown_state(), ShutdownState::Closed);
         Ok(())
     }
 
