@@ -1216,6 +1216,8 @@ placeholder tabs and no unearned state badges.
   retained until cleanup succeeds, before another agent can start.
   Quit now returns an agent shutdown error and remains in the draining state
   with the session retained; a fixture verifies that a later quit retries it.
+  Codex app-server shutdown propagates process-group and child-stop errors and
+  retains the child handle for retry; operating-system failure injection remains.
 - [ ] Bounded transcript, stderr, search and frame buffers.
   Codex, OpenCode and ACP stderr readers cap each line while draining the
   process, including newline-free output. OpenCode omits overlong lines to
