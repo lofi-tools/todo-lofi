@@ -229,12 +229,14 @@ pub(crate) struct TerminalHost {
     screens: Arc<Mutex<BTreeMap<String, Arc<Mutex<ScreenSlot>>>>>,
     appearance: Arc<Mutex<TerminalAppearance>>,
     process_store: Arc<OnceLock<Arc<dyn Store>>>,
+    process_leases: Arc<OnceLock<Arc<crate::orphan_process::ProcessLeases>>>,
     core: Arc<OnceLock<std::sync::Weak<Mutex<Core>>>>,
 }
 
 struct AgentProcessStore {
     store: Arc<OnceLock<Arc<dyn Store>>>,
     task_id: String,
+    leases: Option<Arc<crate::orphan_process::ProcessLeases>>,
 }
 
 #[async_trait]
@@ -253,6 +255,11 @@ impl agent_harness::AgentProcessTracker for AgentProcessStore {
         ));
         #[cfg(unix)]
         {
+            self.leases
+                .as_ref()
+                .ok_or("agent process leases are unavailable")?
+                .claim(&record.id)
+                .map_err(|error| format!("could not acquire agent process lease: {error}"))?;
             store
                 .save_process(&record)
                 .await
@@ -270,7 +277,12 @@ impl agent_harness::AgentProcessTracker for AgentProcessStore {
             .into_iter()
             .find(|record| record.id == record_id);
         let Some(record) = record else {
-            return Ok(());
+            return self
+                .leases
+                .as_ref()
+                .ok_or("agent process leases are unavailable")?
+                .release(record_id)
+                .map_err(|error| error.to_string());
         };
         if record.kind != "agent" || record.owner_id != self.task_id {
             return Err("agent process record ownership changed".into());
@@ -290,6 +302,11 @@ impl agent_harness::AgentProcessTracker for AgentProcessStore {
         store
             .remove_process(record_id)
             .await
+            .map_err(|error| error.to_string())?;
+        self.leases
+            .as_ref()
+            .ok_or("agent process leases are unavailable")?
+            .release(record_id)
             .map_err(|error| error.to_string())
     }
 }
@@ -302,6 +319,7 @@ impl TerminalHost {
         Arc::new(AgentProcessStore {
             store: self.process_store.clone(),
             task_id: task_id.to_string(),
+            leases: self.process_leases.get().cloned(),
         })
     }
 }
@@ -313,6 +331,7 @@ impl Default for TerminalHost {
             screens: Arc::new(Mutex::new(BTreeMap::new())),
             appearance: Arc::new(Mutex::new(TerminalAppearance::default())),
             process_store: Arc::new(OnceLock::new()),
+            process_leases: Arc::new(OnceLock::new()),
             core: Arc::new(OnceLock::new()),
         }
     }
@@ -815,6 +834,18 @@ impl ShellState {
                 ),
             )
         })?;
+        let leases =
+            crate::orphan_process::ProcessLeases::new(data_directory.join(".agent-process-leases"))
+                .map_err(|error| {
+                    BridgeError::new(
+                        "storage",
+                        format!("could not initialize agent process leases: {error}"),
+                    )
+                })?;
+        terminals
+            .process_leases
+            .set(Arc::new(leases))
+            .map_err(|_| BridgeError::new("storage", "agent process leases already initialized"))?;
         let attachment_lock = attachments::lock_deletions(data_directory).map_err(|error| {
             BridgeError::new(
                 "attachments",
@@ -4295,6 +4326,9 @@ mod tests {
         let tracker = AgentProcessStore {
             store: slot,
             task_id: "task-fixture".into(),
+            leases: Some(Arc::new(crate::orphan_process::ProcessLeases::new(
+                directory.path().join("leases"),
+            )?)),
         };
         let pid = libc::pid_t::try_from(std::process::id())?;
         let mut record = crate::pty_terminal::capture_process_record(pid, "agent", "task-fixture")
@@ -4321,6 +4355,9 @@ mod tests {
         let tracker = AgentProcessStore {
             store: slot,
             task_id: "task-fixture".into(),
+            leases: Some(Arc::new(crate::orphan_process::ProcessLeases::new(
+                directory.path().join("leases"),
+            )?)),
         };
         let ready = directory.path().join("child-pid");
         let release = directory.path().join("release");
@@ -4381,6 +4418,10 @@ mod tests {
         agent_harness::AgentProcessTracker::stopped(&tracker, &id).await?;
         let records = store.load_processes().await?;
         assert_eq!(records.len(), 1);
+        assert!(
+            crate::orphan_process::ProcessLease::recover(&directory.path().join("leases"), &id)
+                .is_err()
+        );
         let inspection = serde_json::to_value(crate::orphan_process::inspect(records))?;
         assert_eq!(
             inspection
@@ -4403,6 +4444,9 @@ mod tests {
         .await??;
         agent_harness::AgentProcessTracker::stopped(&tracker, &id).await?;
         assert!(store.load_processes().await?.is_empty());
+        let recovered =
+            crate::orphan_process::ProcessLease::recover(&directory.path().join("leases"), &id)?;
+        drop(recovered);
         Ok(())
     }
 
@@ -4419,6 +4463,9 @@ mod tests {
         let tracker = Arc::new(AgentProcessStore {
             store: slot,
             task_id: "task-fixture".into(),
+            leases: Some(Arc::new(crate::orphan_process::ProcessLeases::new(
+                directory.path().join("leases"),
+            )?)),
         });
         use agent_harness::AgentHarness;
         let mut harness = agent_harness::codex::CodexHarness::new();
@@ -4560,6 +4607,9 @@ mod tests {
             let tracker = Arc::new(AgentProcessStore {
                 store: slot,
                 task_id: "crash-task".into(),
+                leases: Some(Arc::new(crate::orphan_process::ProcessLeases::new(
+                    data.join("leases"),
+                )?)),
             });
             let kind = std::env::var("SHEPHERD_AGENT_ORPHAN_KIND")?;
             let (mut harness, script, prompt): (Box<dyn AgentHarness>, &str, bool) = match kind
@@ -4613,7 +4663,10 @@ mod tests {
                 .next()
                 .ok_or("missing agent record")?;
             let temporary = ready.with_extension("tmp");
-            std::fs::write(&temporary, format!("{} {}", record.pid, record.started_at))?;
+            std::fs::write(
+                &temporary,
+                format!("{} {} {}", record.pid, record.started_at, record.id),
+            )?;
             std::fs::rename(temporary, ready)?;
             std::future::pending::<()>().await;
             return Ok(());
@@ -4669,13 +4722,21 @@ mod tests {
             let mut fields = contents.split_whitespace();
             let pid: libc::pid_t = fields.next().ok_or("missing pid")?.parse()?;
             let started_at = fields.next().ok_or("missing start time")?.parse()?;
+            let record_id = fields.next().ok_or("missing record ID")?;
             if pid <= 1 || u32::try_from(pid).ok() == Some(std::process::id()) {
                 return Err("invalid fixture PID".into());
             }
             let _guard = ProcessGuard { pid, started_at };
+            assert!(
+                crate::orphan_process::ProcessLease::recover(&data.join("leases"), record_id)
+                    .is_err()
+            );
             child.kill().await?;
             use std::os::unix::process::ExitStatusExt as _;
             assert_eq!(child.wait().await?.signal(), Some(libc::SIGKILL));
+            let recovered =
+                crate::orphan_process::ProcessLease::recover(&data.join("leases"), record_id)?;
+            drop(recovered);
             let store = TursoStore::open_at(&data.join("shepherd.db")).await?;
             let records = store.load_processes().await?;
             assert_eq!(records.len(), 1);

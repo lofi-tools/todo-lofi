@@ -1217,6 +1217,10 @@ placeholder tabs and no unearned state badges.
   unverified, since reuse prevents proving ownership; a local fixture covers
   retention and eventual cleanup. Group scans are snapshots and do not prove
   that every descendant is found. Stopping surviving processes remains open.
+  Newly recorded agents hold a per-record OS lock while owned by this instance;
+  cross-process and crash fixtures verify that another process cannot acquire
+  it until the owner exits. Existing records have no such ownership evidence.
+  Lease files are retained so all instances continue to lock the same file.
   ACP supervision reports a failed process-group signal even if killing the
   leader succeeds, with an injected-failure fixture. ACP quit now waits for
   process supervision and reports its failure; timeout retains the connection

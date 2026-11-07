@@ -1,5 +1,85 @@
 use serde::Serialize;
 use shepherd_core::terminal::ProcessRecord;
+use std::collections::BTreeMap;
+use std::fs::{File, OpenOptions};
+use std::io;
+use std::path::Path;
+use std::path::PathBuf;
+use std::sync::Mutex;
+
+pub(crate) struct ProcessLease(File);
+
+impl ProcessLease {
+    pub(crate) fn create(directory: &Path, id: &str) -> io::Result<Self> {
+        Self::open(directory, id, true)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn recover(directory: &Path, id: &str) -> io::Result<Self> {
+        Self::open(directory, id, false)
+    }
+
+    fn open(directory: &Path, id: &str, create: bool) -> io::Result<Self> {
+        let id = uuid::Uuid::parse_str(id).map_err(io::Error::other)?;
+        let mut options = OpenOptions::new();
+        options.read(true).write(true).create_new(create);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+        }
+        let file = options.open(directory.join(format!("{id}.lock")))?;
+        file.try_lock()?;
+        Ok(Self(file))
+    }
+}
+
+pub(crate) struct ProcessLeases {
+    directory: PathBuf,
+    active: Mutex<BTreeMap<String, ProcessLease>>,
+}
+
+impl ProcessLeases {
+    pub(crate) fn new(directory: PathBuf) -> io::Result<Self> {
+        std::fs::create_dir_all(&directory)?;
+        Ok(Self {
+            directory,
+            active: Mutex::new(BTreeMap::new()),
+        })
+    }
+
+    pub(crate) fn claim(&self, id: &str) -> io::Result<()> {
+        let lease = ProcessLease::create(&self.directory, id)?;
+        let mut active = self
+            .active
+            .lock()
+            .map_err(|error| io::Error::other(error.to_string()))?;
+        if active.contains_key(id) {
+            return Err(io::Error::other("agent process lease already exists"));
+        }
+        active.insert(id.to_owned(), lease);
+        Ok(())
+    }
+
+    pub(crate) fn release(&self, id: &str) -> io::Result<()> {
+        let mut active = self
+            .active
+            .lock()
+            .map_err(|error| io::Error::other(error.to_string()))?;
+        if active.remove(id).is_none() {
+            tracing::debug!("agent process lease was already released");
+        }
+        Ok(())
+    }
+}
+
+impl Drop for ProcessLease {
+    fn drop(&mut self) {
+        if let Err(error) = self.0.unlock() {
+            tracing::warn!(%error, "could not release agent process lease");
+        }
+    }
+}
 
 #[derive(Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -139,6 +219,39 @@ fn observe(_record: &ProcessRecord, boot_id: Option<String>) -> Observation {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn process_lease_blocks_other_owners_and_requires_existing_identity()
+    -> Result<(), Box<dyn std::error::Error>> {
+        if let Some(directory) = std::env::var_os("SHEPHERD_LEASE_TEST_DIRECTORY") {
+            let id = std::env::var("SHEPHERD_LEASE_TEST_ID")?;
+            assert!(ProcessLease::recover(Path::new(&directory), &id).is_err());
+            return Ok(());
+        }
+        let directory = tempfile::tempdir()?;
+        let id = uuid::Uuid::new_v4().to_string();
+        assert_eq!(
+            ProcessLease::recover(directory.path(), &id)
+                .err()
+                .ok_or("missing error")?
+                .kind(),
+            io::ErrorKind::NotFound
+        );
+        let lease = ProcessLease::create(directory.path(), &id)?;
+        assert!(ProcessLease::recover(directory.path(), &id).is_err());
+        let status = std::process::Command::new(std::env::current_exe()?)
+            .args(["--exact", "orphan_process::tests::process_lease_blocks_other_owners_and_requires_existing_identity"])
+            .env("SHEPHERD_LEASE_TEST_DIRECTORY", directory.path())
+            .env("SHEPHERD_LEASE_TEST_ID", &id)
+            .status()?;
+        assert!(status.success());
+        drop(lease);
+        let recovered = ProcessLease::recover(directory.path(), &id)?;
+        assert!(ProcessLease::recover(directory.path(), &id).is_err());
+        drop(recovered);
+        assert!(ProcessLease::recover(directory.path(), "../other").is_err());
+        Ok(())
+    }
 
     #[test]
     fn inspection_refuses_unverified_and_reused_identities() {
