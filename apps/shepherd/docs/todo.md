@@ -1211,7 +1211,8 @@ placeholder tabs and no unearned state badges.
   migrations; a failed backup, unknown migration or gap in migration history
   blocks the migration before schema changes. A Unix fixture denies backup
   directory creation, verifies the old history remains intact, then retries
-  successfully after access is restored.
+  successfully after access is restored. An inaccessible database path also
+  fails before opening or migrating instead of being treated as a new database.
   Turso's parser validates migration statements before changes, and a failed
   statement rolls back its migration and history entry. Broader transaction
   checks remain. Transcript batches reject missing or mismatched task/session

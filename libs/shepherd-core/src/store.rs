@@ -248,7 +248,15 @@ impl TursoStore {
     }
 
     async fn open_driver(driver: Turso, path: Option<&Path>) -> Result<Self, StoreError> {
-        let existed = path.is_some_and(Path::exists);
+        let existed = match path {
+            Some(path) => path.try_exists().map_err(|error| {
+                StoreError::Backend(format!(
+                    "could not inspect database path {}: {error}",
+                    path.display()
+                ))
+            })?,
+            None => false,
+        };
         let mut db = toasty::Db::builder()
             .build(driver.experimental_index_method(true))
             .await?;
@@ -3064,6 +3072,26 @@ mod tests {
         .exec(&mut db)
         .await?;
         assert!(tables.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn inaccessible_database_path_fails_before_migration()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = tempfile::tempdir()?;
+        let inaccessible = directory.path().join("private");
+        std::fs::create_dir(&inaccessible)?;
+        let path = inaccessible.join("shepherd.db");
+        std::fs::write(&path, b"unchanged")?;
+        std::fs::set_permissions(&inaccessible, std::fs::Permissions::from_mode(0o000))?;
+        let result = TursoStore::open_at(&path).await;
+        std::fs::set_permissions(&inaccessible, std::fs::Permissions::from_mode(0o700))?;
+        assert!(
+            matches!(result, Err(StoreError::Backend(message)) if message.contains("could not inspect database path"))
+        );
+        assert_eq!(std::fs::read(&path)?, b"unchanged");
         Ok(())
     }
 
