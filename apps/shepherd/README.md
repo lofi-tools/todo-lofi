@@ -188,8 +188,8 @@ five seconds. For example:
 }
 ```
 
-Restart Shepherd after changing these settings. Model and mode discovery do
-not yet use these environment maps.
+Restart Shepherd after changing these settings. Model and mode discovery use
+the same project environment as task launches.
 The task keeps its agent after the first prompt. The diagnostics show which
 protocol ran and why Shepherd selected the fallback.
 The conversation header shows the tier after a session opens. Diagnostics list

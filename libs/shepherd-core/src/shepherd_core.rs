@@ -2375,6 +2375,16 @@ impl Core {
         Ok(self.project(project_id)?.path.clone())
     }
 
+    pub fn project_launch_environment(
+        &self,
+        project_id: &ProjectId,
+        agent: Agent,
+    ) -> Result<(PathBuf, BTreeMap<String, String>), CoreError> {
+        let path = self.project_path(project_id)?;
+        let environment = self.harness_factory.environment_for_project(agent, &path)?;
+        Ok((path, environment))
+    }
+
     pub fn task_project_path(&self, task_id: &TaskId) -> Result<PathBuf, CoreError> {
         self.project_path(&self.task(task_id)?.project_id)
     }

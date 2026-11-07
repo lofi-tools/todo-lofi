@@ -1290,12 +1290,14 @@ impl ShellState {
         let Some(program) = &self.codex_program else {
             return Ok(CodexProjectModels::default());
         };
-        let directory = self
-            .core
-            .lock()
-            .await
-            .project_path(&ProjectId::new(project_id))?;
-        agent_harness::codex::project_models(codex_spawn_spec(program, directory))
+        let spec = self
+            .discovery_spec(
+                project_id,
+                Agent::Codex,
+                codex_spawn_spec(program, PathBuf::new()),
+            )
+            .await?;
+        agent_harness::codex::project_models(spec)
             .await
             .map_err(|error| BridgeError::new("codex_model", error.to_string()))
     }
@@ -1307,17 +1309,31 @@ impl ShellState {
         let Some(launch) = &self.opencode_launch else {
             return Ok(Vec::new());
         };
-        let cwd = self
+        let spec = self
+            .discovery_spec(project_id, Agent::OpenCode, launch.clone())
+            .await?;
+        agent_harness::opencode::project_modes(&spec)
+            .await
+            .map_err(|error| BridgeError::new("opencode_modes", error.to_string()))
+    }
+
+    async fn discovery_spec(
+        &self,
+        project_id: String,
+        agent: Agent,
+        mut spec: SpawnSpec,
+    ) -> Result<SpawnSpec, BridgeError> {
+        let (cwd, environment) = self
             .core
             .lock()
             .await
-            .project_path(&ProjectId::new(project_id))?;
-        agent_harness::opencode::project_modes(&SpawnSpec {
-            cwd,
-            ..launch.clone()
-        })
-        .await
-        .map_err(|error| BridgeError::new("opencode_modes", error.to_string()))
+            .project_launch_environment(&ProjectId::new(project_id), agent)?;
+        spec.environment.extend(environment);
+        agent_harness::settings::resolve_environment(&mut spec.environment, &cwd)
+            .await
+            .map_err(|error| BridgeError::new("agent_environment", error.to_string()))?;
+        spec.cwd = cwd;
+        Ok(spec)
     }
 
     pub async fn project_remote(
@@ -2919,6 +2935,68 @@ mod tests {
     use shepherd_core::{TaskState, TaskSummary};
 
     use super::*;
+
+    #[tokio::test]
+    async fn discovery_uses_project_environment_at_spawn() -> Result<(), Box<dyn std::error::Error>>
+    {
+        struct Factory;
+        impl HarnessFactory for Factory {
+            fn create(&self) -> Result<Box<dyn agent_harness::AgentHarness>, CoreError> {
+                Err(CoreError::HarnessUnavailable)
+            }
+            fn environment_for_project(
+                &self,
+                agent: Agent,
+                _project: &Path,
+            ) -> Result<BTreeMap<String, String>, CoreError> {
+                Ok(BTreeMap::from([(
+                    "TOKEN".into(),
+                    format!("!cat {}-token", agent.as_str()),
+                )]))
+            }
+        }
+        let directory = TestDirectory::new()?;
+        std::fs::write(directory.path().join("codex-token"), "codex-secret\n")?;
+        std::fs::write(directory.path().join("opencode-token"), "open-secret\n")?;
+        let state = ShellState::new(Core::with_services(
+            Box::new(MemoryStore::new()),
+            Box::new(Factory),
+        ));
+        let projects = state
+            .add_project(directory.path().display().to_string())
+            .await?;
+        let id = projects
+            .projects
+            .first()
+            .ok_or("missing project")?
+            .id
+            .clone();
+        for (agent, expected) in [
+            (Agent::Codex, "codex-secret"),
+            (Agent::OpenCode, "open-secret"),
+        ] {
+            let spec = state
+                .discovery_spec(
+                    id.clone(),
+                    agent,
+                    SpawnSpec {
+                        environment: BTreeMap::from([("EXISTING".into(), "preserved".into())]),
+                        ..SpawnSpec::default()
+                    },
+                )
+                .await?;
+            assert_eq!(spec.cwd, directory.path().canonicalize()?);
+            assert_eq!(
+                spec.environment.get("TOKEN").map(String::as_str),
+                Some(expected)
+            );
+            assert_eq!(
+                spec.environment.get("EXISTING").map(String::as_str),
+                Some("preserved")
+            );
+        }
+        Ok(())
+    }
 
     #[tokio::test]
     async fn dropping_shell_releases_the_event_pump_and_core()
