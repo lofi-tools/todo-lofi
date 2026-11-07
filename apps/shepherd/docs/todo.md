@@ -1212,7 +1212,11 @@ placeholder tabs and no unearned state badges.
   can be retried; local fixtures cover both and durable storage. Codex exec now
   records each per-turn process and retries failed record removal before a new
   run or shutdown. Local fixtures cover completion, cancellation and storage
-  failures. Surviving descendants and stopping surviving processes remain.
+  failures. When an agent leader exits, its record is retained if the recorded
+  group and session still have members. Inspection reports the group as
+  unverified, since reuse prevents proving ownership; a local fixture covers
+  retention and eventual cleanup. Group scans are snapshots and do not prove
+  that every descendant is found. Stopping surviving processes remains open.
   ACP supervision reports a failed process-group signal even if killing the
   leader succeeds, with an injected-failure fixture. ACP quit now waits for
   process supervision and reports its failure; timeout retains the connection

@@ -50,7 +50,7 @@ export interface PreviousProcess {
   kind: string
   ownerId: string
   pid: number
-  status: 'matching' | 'gone' | 'reused' | 'changed' | 'unknown'
+  status: 'matching' | 'gone' | 'reused' | 'changed' | 'unknown' | 'groupUnverified'
 }
 
 export function inspectPreviousProcesses(): Promise<PreviousProcess[]> {

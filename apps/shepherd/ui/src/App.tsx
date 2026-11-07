@@ -123,7 +123,7 @@ export function App() {
   const [checkingProcesses, setCheckingProcesses] = createSignal(false)
   const [processNoticeDismissed, setProcessNoticeDismissed] = createSignal(false)
   const processesNeedingReview = () => previousProcesses().filter((process) =>
-    process.status === 'matching' || process.status === 'unknown' || process.status === 'changed')
+    process.status === 'matching' || process.status === 'unknown' || process.status === 'changed' || process.status === 'groupUnverified')
   async function inspectPreviousProcesses() {
     setCheckingProcesses(true)
     try {
@@ -1556,7 +1556,7 @@ export function App() {
               <p>A matching process may belong to another running Shepherd instance. Shepherd has not stopped any processes.</p>
               <ul>
                 <For each={processesNeedingReview()}>{(process) =>
-                  <li>{process.kind === 'agent' ? 'Agent' : process.kind === 'acp_terminal' ? 'Agent terminal' : 'Terminal'} · PID {process.pid} · {process.status === 'matching' ? 'identity matches' : process.status === 'changed' ? 'process group or session is unsafe' : 'identity could not be verified'}</li>
+                  <li>{process.kind === 'agent' ? 'Agent' : process.kind === 'acp_terminal' ? 'Agent terminal' : 'Terminal'} · PID {process.pid} · {process.status === 'matching' ? 'identity matches' : process.status === 'changed' ? 'process group or session is unsafe' : process.status === 'groupUnverified' ? 'leader exited; process group may still be active' : 'identity could not be verified'}</li>
                 }</For>
               </ul>
             </details>

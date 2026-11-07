@@ -410,6 +410,7 @@ test.beforeEach(async ({ context }) => {
               { id: 'two', kind: 'acp_terminal', ownerId: 'terminal-2', pid: 456, status: 'unknown' },
               { id: 'three', kind: 'terminal', ownerId: 'terminal-3', pid: 789, status: 'gone' },
               { id: 'four', kind: 'agent', ownerId: 'task-1', pid: 654, status: 'matching' },
+              { id: 'five', kind: 'agent', ownerId: 'task-2', pid: 987, status: 'groupUnverified' },
             ] : []
           case 'command_registry':
             return commandSnapshot(args.platform, readKeybindings())
@@ -1078,15 +1079,16 @@ test('lists archived worktrees kept at startup with their reasons', async ({ pag
 test('shows previous processes that need review without reporting ended processes', async ({ page }) => {
   await page.goto('/?recovery')
   const notice = page.getByRole('status').filter({ hasText: 'Previously recorded processes need review' })
-  await expect(notice).toContainText('(3)')
+  await expect(notice).toContainText('(4)')
   await notice.locator('summary').click()
   await expect(notice).toContainText('PID 321 · identity matches')
   await expect(notice).toContainText('PID 456 · identity could not be verified')
   await expect(notice).toContainText('Agent · PID 654 · identity matches')
+  await expect(notice).toContainText('Agent · PID 987 · leader exited; process group may still be active')
   await expect(notice).not.toContainText('789')
   await expect(notice).toContainText('another running Shepherd instance')
   await notice.getByRole('button', { name: 'Recheck' }).click()
-  await expect(notice).toContainText('(3)')
+  await expect(notice).toContainText('(4)')
   await notice.getByRole('button', { name: 'Dismiss' }).click()
   await expect(notice).toHaveCount(0)
 })

@@ -9,6 +9,7 @@ pub enum ProcessStatus {
     Reused,
     Changed,
     Unknown,
+    GroupUnverified,
 }
 
 #[derive(Serialize)]
@@ -71,6 +72,19 @@ pub(crate) fn inspect(records: Vec<ProcessRecord>) -> Vec<ProcessInspection> {
         .map(|record| {
             let observed = observe(&record, boot_id.clone());
             let status = classify(&record, &observed);
+            #[cfg(unix)]
+            let status = if record.kind == "agent" && status == ProcessStatus::Gone {
+                match crate::pty_terminal::process_group_has_other_members(&record) {
+                    Ok(true) => ProcessStatus::GroupUnverified,
+                    Ok(false) => status,
+                    Err(error) => {
+                        tracing::warn!(%error, "could not inspect a previous agent process group");
+                        ProcessStatus::Unknown
+                    }
+                }
+            } else {
+                status
+            };
             ProcessInspection {
                 id: record.id,
                 kind: record.kind,

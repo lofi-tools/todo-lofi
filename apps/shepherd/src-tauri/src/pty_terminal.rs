@@ -279,6 +279,49 @@ fn list_processes() -> std::io::Result<Vec<libc::pid_t>> {
 }
 
 #[cfg(unix)]
+pub(crate) fn process_group_has_other_members(record: &ProcessRecord) -> std::io::Result<bool> {
+    let current_boot =
+        boot_id().ok_or_else(|| std::io::Error::other("could not identify the current boot"))?;
+    if current_boot != record.boot_id {
+        return Ok(false);
+    }
+    let group = libc::pid_t::try_from(record.process_group).map_err(std::io::Error::other)?;
+    let session = libc::pid_t::try_from(record.session_id).map_err(std::io::Error::other)?;
+    let leader = libc::pid_t::try_from(record.pid).map_err(std::io::Error::other)?;
+    if group <= 1 || session <= 1 || leader <= 1 {
+        return Err(std::io::Error::other("invalid recorded process identity"));
+    }
+    for pid in list_processes()? {
+        if pid <= 1 || pid == leader {
+            continue;
+        }
+        let observed_group = unsafe { libc::getpgid(pid) };
+        if observed_group < 0 {
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() == Some(libc::ESRCH) {
+                continue;
+            }
+            return Err(error);
+        }
+        if observed_group != group {
+            continue;
+        }
+        let observed_session = unsafe { libc::getsid(pid) };
+        if observed_session < 0 {
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() == Some(libc::ESRCH) {
+                continue;
+            }
+            return Err(error);
+        }
+        if observed_session == session {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+#[cfg(unix)]
 fn terminal_processes() -> Vec<libc::pid_t> {
     match list_processes() {
         Ok(processes) => processes,
@@ -883,6 +926,22 @@ mod tests {
     use std::time::Instant;
 
     use super::*;
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn process_group_inspection_rejects_invalid_and_old_boot_records()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let pid = libc::pid_t::try_from(std::process::id())?;
+        let mut record =
+            capture_process_record(pid, "agent", "task").ok_or("identity unavailable")?;
+        let current_boot = record.boot_id.clone();
+        record.boot_id = format!("different-{current_boot}");
+        assert!(!process_group_has_other_members(&record)?);
+        record.boot_id = current_boot;
+        record.process_group = 1;
+        assert!(process_group_has_other_members(&record).is_err());
+        Ok(())
+    }
 
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     #[test]

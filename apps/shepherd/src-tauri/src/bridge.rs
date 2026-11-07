@@ -262,9 +262,32 @@ impl agent_harness::AgentProcessTracker for AgentProcessStore {
     }
 
     async fn stopped(&self, record_id: &str) -> Result<(), String> {
-        self.store
-            .get()
-            .ok_or("process storage is unavailable")?
+        let store = self.store.get().ok_or("process storage is unavailable")?;
+        let record = store
+            .load_processes()
+            .await
+            .map_err(|error| error.to_string())?
+            .into_iter()
+            .find(|record| record.id == record_id);
+        let Some(record) = record else {
+            return Ok(());
+        };
+        if record.kind != "agent" || record.owner_id != self.task_id {
+            return Err("agent process record ownership changed".into());
+        }
+        #[cfg(unix)]
+        {
+            let has_members = tokio::task::spawn_blocking(move || {
+                crate::pty_terminal::process_group_has_other_members(&record)
+            })
+            .await
+            .map_err(|error| error.to_string())?
+            .map_err(|error| format!("could not inspect agent process group: {error}"))?;
+            if has_members {
+                return Ok(());
+            }
+        }
+        store
             .remove_process(record_id)
             .await
             .map_err(|error| error.to_string())
@@ -4257,6 +4280,129 @@ mod tests {
             Ok::<(), CoreError>(())
         })
         .await??;
+        Ok(())
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[tokio::test]
+    async fn agent_record_is_retained_when_group_inspection_fails()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = TestDirectory::new()?;
+        let store = Arc::new(TursoStore::open_at(&directory.path().join("shepherd.db")).await?);
+        let slot = Arc::new(OnceLock::new());
+        slot.set(store.clone() as Arc<dyn Store>)
+            .map_err(|_| "store already set")?;
+        let tracker = AgentProcessStore {
+            store: slot,
+            task_id: "task-fixture".into(),
+        };
+        let pid = libc::pid_t::try_from(std::process::id())?;
+        let mut record = crate::pty_terminal::capture_process_record(pid, "agent", "task-fixture")
+            .ok_or("identity unavailable")?;
+        record.process_group = 1;
+        store.save_process(&record).await?;
+        let error = agent_harness::AgentProcessTracker::stopped(&tracker, &record.id)
+            .await
+            .expect_err("invalid group must fail inspection");
+        assert!(error.contains("could not inspect agent process group"));
+        assert_eq!(store.load_processes().await?, vec![record]);
+        Ok(())
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[tokio::test]
+    async fn agent_record_remains_when_a_group_member_outlives_the_leader()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = TestDirectory::new()?;
+        let store = Arc::new(TursoStore::open_at(&directory.path().join("shepherd.db")).await?);
+        let slot = Arc::new(OnceLock::new());
+        slot.set(store.clone() as Arc<dyn Store>)
+            .map_err(|_| "store already set")?;
+        let tracker = AgentProcessStore {
+            store: slot,
+            task_id: "task-fixture".into(),
+        };
+        let ready = directory.path().join("child-pid");
+        let release = directory.path().join("release");
+        let mut command = tokio::process::Command::new("/bin/sh");
+        command
+            .args([
+                "-c",
+                "sleep 30 & echo $! > \"$1\"; while [ ! -e \"$2\" ]; do sleep 0.02; done",
+                "fixture",
+            ])
+            .arg(&ready)
+            .arg(&release)
+            .process_group(0)
+            .kill_on_drop(true);
+        let mut leader = command.spawn()?;
+        let id = agent_harness::AgentProcessTracker::started(
+            &tracker,
+            leader.id().ok_or("missing leader PID")?,
+        )
+        .await?;
+        let contents = tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                match std::fs::read_to_string(&ready) {
+                    Ok(contents) => break Ok::<_, std::io::Error>(contents),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                        tokio::time::sleep(Duration::from_millis(10)).await
+                    }
+                    Err(error) => break Err(error),
+                }
+            }
+        })
+        .await??;
+        let child_pid: libc::pid_t = contents.trim().parse()?;
+        let started_at =
+            crate::pty_terminal::process_start_time(child_pid).ok_or("missing child start time")?;
+        struct Guard {
+            pid: libc::pid_t,
+            started_at: u64,
+        }
+        impl Drop for Guard {
+            fn drop(&mut self) {
+                if crate::pty_terminal::process_start_time(self.pid) == Some(self.started_at)
+                    && unsafe { libc::kill(self.pid, libc::SIGKILL) } != 0
+                {
+                    let error = std::io::Error::last_os_error();
+                    if error.raw_os_error() != Some(libc::ESRCH) {
+                        eprintln!("could not stop group fixture: {error}");
+                    }
+                }
+            }
+        }
+        let guard = Guard {
+            pid: child_pid,
+            started_at,
+        };
+        std::fs::write(release, "release")?;
+        assert!(leader.wait().await?.success());
+        agent_harness::AgentProcessTracker::stopped(&tracker, &id).await?;
+        let records = store.load_processes().await?;
+        assert_eq!(records.len(), 1);
+        let inspection = serde_json::to_value(crate::orphan_process::inspect(records))?;
+        assert_eq!(
+            inspection
+                .get(0)
+                .and_then(|item| item.get("status"))
+                .and_then(serde_json::Value::as_str),
+            Some("groupUnverified")
+        );
+        drop(guard);
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                let records = store.load_processes().await?;
+                let record = records.first().ok_or("missing record")?;
+                if !crate::pty_terminal::process_group_has_other_members(record)? {
+                    break Ok::<(), Box<dyn std::error::Error>>(());
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await??;
+        agent_harness::AgentProcessTracker::stopped(&tracker, &id).await?;
+        assert!(store.load_processes().await?.is_empty());
         Ok(())
     }
 
