@@ -64,6 +64,7 @@ struct TerminalEntry {
     waiters: Vec<oneshot::Sender<TerminalExitStatus>>,
     byte_limit: usize,
     cancelled: tokio::sync::watch::Sender<bool>,
+    stop: Option<tokio::sync::mpsc::UnboundedSender<oneshot::Sender<Result<(), String>>>>,
 }
 
 /// Shared state for every terminal started in a session.
@@ -181,6 +182,11 @@ impl TerminalRegistry {
         let stderr = child.stderr.take();
 
         self.register(&key, byte_limit);
+        let (stop, mut stop_requests) =
+            tokio::sync::mpsc::unbounded_channel::<oneshot::Sender<Result<(), String>>>();
+        if let Some(entry) = self.entries().get_mut(&key) {
+            entry.stop = Some(stop);
+        }
 
         let registry = self.clone();
         let event_key = key.clone();
@@ -198,7 +204,17 @@ impl TerminalRegistry {
         });
         let registry = self.clone();
         tokio::spawn(async move {
-            let status = child.status().await;
+            let status = loop {
+                tokio::select! {
+                    status = child.status() => break status,
+                    Some(response) = stop_requests.recv() => {
+                        let result = stop_direct_process(&mut child);
+                        if response.send(result).is_err() {
+                            tracing::debug!(terminal_id = key, "terminal termination requester disconnected");
+                        }
+                    }
+                }
+            };
             let exit = match status {
                 Ok(status) => {
                     TerminalExitStatus::new().exit_code(status.code().map(|code| code as u32))
@@ -209,6 +225,7 @@ impl TerminalRegistry {
                 }
             };
             registry.record_exit(&key, &exit);
+            drop(stop_requests);
             for task in [stdout_task, stderr_task] {
                 if let Err(error) = task.await {
                     tracing::warn!(terminal_id = key, %error, "terminal output pump failed");
@@ -231,6 +248,7 @@ impl TerminalRegistry {
                 waiters: Vec::new(),
                 byte_limit,
                 cancelled,
+                stop: None,
             },
         );
     }
@@ -287,7 +305,7 @@ impl TerminalRegistry {
                 backend.stop(key).await?;
             }
         } else {
-            self.entries().remove(key);
+            self.stop_direct(key).await?;
         }
         Ok(KillTerminalResponse::new())
     }
@@ -307,6 +325,7 @@ impl TerminalRegistry {
                 });
             }
         } else {
+            self.stop_direct(key).await?;
             self.entries().remove(key);
         }
         Ok(ReleaseTerminalResponse::new())
@@ -319,12 +338,13 @@ impl TerminalRegistry {
         for entry in self.entries().values() {
             entry.cancelled.send_replace(true);
         }
-        let Some(backend) = &self.backend else {
-            return;
-        };
         let terminal_ids: Vec<_> = self.entries().keys().cloned().collect();
         for id in terminal_ids {
-            match backend.stop(&id).await {
+            let result = match &self.backend {
+                Some(backend) => backend.stop(&id).await,
+                None => self.stop_direct(&id).await,
+            };
+            match result {
                 Ok(()) => {
                     self.entries().remove(&id);
                 }
@@ -332,6 +352,29 @@ impl TerminalRegistry {
                     tracing::warn!(terminal_id = id, %error, "could not stop ACP terminal during shutdown")
                 }
             }
+        }
+    }
+
+    async fn stop_direct(&self, key: &str) -> Result<(), String> {
+        let stop = self.entries().get(key).and_then(|entry| entry.stop.clone());
+        let Some(stop) = stop else {
+            return Ok(());
+        };
+        let (response, result) = oneshot::channel();
+        if stop.send(response).is_err() {
+            return Ok(());
+        }
+        match result.await {
+            Ok(result) => result,
+            Err(_)
+                if self
+                    .entries()
+                    .get(key)
+                    .is_some_and(|entry| entry.exit.is_some()) =>
+            {
+                Ok(())
+            }
+            Err(_) => Err("terminal process stopped before confirming termination".into()),
         }
     }
 
@@ -516,6 +559,28 @@ fn next_terminal_number() -> u64 {
     use std::sync::atomic::{AtomicU64, Ordering};
     static COUNTER: AtomicU64 = AtomicU64::new(1);
     COUNTER.fetch_add(1, Ordering::Relaxed)
+}
+
+fn stop_direct_process(child: &mut async_process::Child) -> Result<(), String> {
+    #[cfg(unix)]
+    {
+        let process_group = i32::try_from(child.id())
+            .map_err(|error| format!("invalid terminal process id: {error}"))?;
+        if unsafe { libc::killpg(process_group, libc::SIGKILL) } == 0 {
+            return Ok(());
+        }
+        let error = std::io::Error::last_os_error();
+        if error.raw_os_error() == Some(libc::ESRCH) {
+            return Ok(());
+        }
+        Err(format!("could not stop terminal process group: {error}"))
+    }
+    #[cfg(not(unix))]
+    {
+        child
+            .kill()
+            .map_err(|error| format!("could not stop terminal process: {error}"))
+    }
 }
 
 /// The user's shell, preferring bash, falling back to `sh`.
@@ -704,6 +769,86 @@ mod tests {
         let request = CreateTerminalRequest::new("session", "true").cwd(root);
         let result = registry.create(request).await;
         assert!(matches!(result, Err(error) if error.contains("connection is closed")));
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn killing_a_direct_terminal_stops_its_process() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let directory = tempfile::tempdir()?;
+        let root = directory.path().canonicalize()?;
+        let (events, _receiver) = tokio::sync::mpsc::unbounded_channel();
+        let registry = TerminalRegistry::new(SessionRoots::new([root.clone()]), &events, None);
+        let request = CreateTerminalRequest::new("session", "exec sleep 30").cwd(root);
+        let terminal = registry
+            .create(request)
+            .await
+            .map_err(std::io::Error::other)?
+            .terminal_id;
+        registry
+            .kill(&terminal)
+            .await
+            .map_err(std::io::Error::other)?;
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            registry.wait_for_exit(&terminal),
+        )
+        .await?
+        .map_err(std::io::Error::other)?;
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn release_and_shutdown_stop_direct_processes() -> Result<(), Box<dyn std::error::Error>>
+    {
+        for shutdown in [false, true] {
+            let directory = tempfile::tempdir()?;
+            let root = directory.path().canonicalize()?;
+            let (events, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+            let registry = TerminalRegistry::new(SessionRoots::new([root.clone()]), &events, None);
+            let request = CreateTerminalRequest::new("session", "echo $$; exec sleep 30").cwd(root);
+            let terminal = registry
+                .create(request)
+                .await
+                .map_err(std::io::Error::other)?
+                .terminal_id;
+            let pid = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                let mut output = String::new();
+                while let Some(event) = receiver.recv().await {
+                    if let AcpEvent::TerminalOutput { chunk, .. } = event {
+                        output.push_str(&chunk);
+                        if output.contains('\n') {
+                            return output.trim().parse::<i32>().map_err(std::io::Error::other);
+                        }
+                    }
+                }
+                Err(std::io::Error::other(
+                    "terminal output closed before reporting pid",
+                ))
+            })
+            .await??;
+            if shutdown {
+                registry.shutdown().await;
+            } else {
+                registry
+                    .release(&terminal)
+                    .await
+                    .map_err(std::io::Error::other)?;
+            }
+            tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                loop {
+                    if unsafe { libc::kill(pid, 0) } != 0
+                        && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+                    {
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+            })
+            .await?;
+        }
         Ok(())
     }
 
