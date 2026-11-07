@@ -2497,7 +2497,11 @@ fn tool_call_from_item(item: &Value) -> Option<HarnessEvent> {
             "command".to_string(),
             item.get("aggregatedOutput")
                 .and_then(Value::as_str)
-                .map(str::to_string),
+                .map(|output| {
+                    let mut output = output.to_string();
+                    crate::limit_command_output(&mut output);
+                    output
+                }),
             Vec::new(),
         ),
         "fileChange" => (
@@ -3183,6 +3187,26 @@ done
                 ..
             },
         ] = events.as_slice()
+        else {
+            return Err("missing command output".into());
+        };
+        assert!(output.len() <= crate::MAX_COMMAND_OUTPUT_BYTES);
+        assert!(output.starts_with(crate::COMMAND_OUTPUT_OMITTED));
+        assert!(output.ends_with("tail"));
+        Ok(())
+    }
+
+    #[test]
+    fn app_server_command_events_bound_output_before_queueing()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let output = format!("{}tail", "界".repeat(crate::MAX_COMMAND_OUTPUT_BYTES));
+        let event = tool_call_from_item(&json!({
+            "id": "call", "type": "commandExecution", "status": "completed", "aggregatedOutput": output
+        })).ok_or("missing command event")?;
+        let HarnessEvent::ToolCall {
+            output: Some(output),
+            ..
+        } = event
         else {
             return Err("missing command output".into());
         };
