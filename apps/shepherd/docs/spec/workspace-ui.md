@@ -77,7 +77,8 @@ current layout and give future changes a point of comparison.
   Resize the inspector at its left edge by dragging or with the arrow keys
   while the separator is focused. Save the chosen width with the task.
 - In Files, name the active root above the tree and let the user choose the
-  project root or the selected task's worktree. Show a small folder icon on
+  project root or the selected task's worktree using a compact, themed picker.
+  Show a small folder icon on
   each directory row without an expand caret. Expand folders in place on
   demand, keeping one open path and its ancestors while closing sibling
   branches. Hide dotfiles by default with a **Show dotfiles** toggle. Open text

@@ -2178,6 +2178,34 @@ textarea {
   min-width: 8ch;
 }
 
+.files-root-picker {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  color: var(--text-muted);
+}
+
+.files-root-picker select {
+  appearance: none;
+  padding: 4px 25px 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface-raised);
+  color: var(--text);
+  font: inherit;
+  cursor: pointer;
+}
+
+.files-root-picker select:hover {
+  background: color-mix(in srgb, var(--surface-raised) 80%, var(--text));
+}
+
+.files-root-picker svg {
+  position: absolute;
+  inset-inline-end: 8px;
+  pointer-events: none;
+}
+
 .files-search__excerpt {
   display: block;
   color: var(--text-muted);

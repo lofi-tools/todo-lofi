@@ -27,11 +27,14 @@ export function FilesPane(props: { projectId: string; worktreeTaskId: string | n
   return (
     <section class="files-pane" aria-label="Workspace files">
       <div class="terminal-pane__bar files-pane__toolbar">
-        <select aria-label="File root" value={taskId() ? 'worktree' : 'project'}
-          onChange={(event) => setScope(event.currentTarget.value)}>
-          <option value="project">Project root</option>
-          <Show when={props.worktreeTaskId}><option value="worktree">Task worktree</option></Show>
-        </select>
+        <span class="files-root-picker">
+          <select aria-label="File root" value={taskId() ? 'worktree' : 'project'}
+            onChange={(event) => setScope(event.currentTarget.value)}>
+            <option value="project">Project root</option>
+            <Show when={props.worktreeTaskId}><option value="worktree">Task worktree</option></Show>
+          </select>
+          <svg aria-hidden="true" width="10" height="10" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="m2.5 4.5 3.5 3.5 3.5-3.5" /></svg>
+        </span>
         <label><input type="checkbox" checked={showDotfiles()} onChange={(event) => setShowDotfiles(event.currentTarget.checked)} /> Show dotfiles</label>
       </div>
       <Show when={location()} keyed>
