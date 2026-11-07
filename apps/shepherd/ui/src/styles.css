@@ -2176,6 +2176,16 @@ textarea {
 .files-pane__toolbar input[type='search'] {
   flex: 1 1 12ch;
   min-width: 8ch;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface-raised);
+  color: var(--text);
+  font: inherit;
+}
+
+.files-pane__toolbar input[type='search']::placeholder {
+  color: var(--text-muted);
 }
 
 .files-root-picker {

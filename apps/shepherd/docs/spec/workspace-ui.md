@@ -83,7 +83,8 @@ current layout and give future changes a point of comparison.
   demand, keeping one open path and its ancestors while closing sibling
   branches. Hide dotfiles by default with a **Show dotfiles** toggle. Open text
   in a read-only, line-numbered viewer inside the inspector. **Find files**
-  filters filenames as the user types. **Search contents** and Enter start a
+  uses the app's themed input and filters filenames as the user types.
+  **Search contents** and Enter start a
   cancellable literal search. Selecting a content match opens its line.
   Use muted default text and Warm Charmed file type icons. Colour changed paths
   and their ancestor folders using the Aura Dark or One Light Git status colours
