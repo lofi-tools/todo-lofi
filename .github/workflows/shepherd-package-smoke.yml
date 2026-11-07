@@ -56,3 +56,11 @@ jobs:
           test "${#packages[@]}" -eq 1
           dpkg-deb --info "${packages[0]}"
           dpkg-deb --contents "${packages[0]}" | grep -F 'usr/bin/shepherd'
+          extracted=$(mktemp -d)
+          trap 'rm -rf "$extracted"' EXIT
+          dpkg-deb --extract "${packages[0]}" "$extracted"
+          dynamic=$(readelf -lW -dW "$extracted/usr/bin/shepherd")
+          if grep -Fq '/nix/store/' <<< "$dynamic"; then
+            echo 'The packaged executable depends on Nix store paths and is not portable.' >&2
+            exit 1
+          fi
