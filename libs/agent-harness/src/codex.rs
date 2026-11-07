@@ -3712,12 +3712,16 @@ esac
         let pending = Arc::clone(&harness.pending);
         let closed = Arc::clone(&harness.closed);
         let mut guard = pending.lock().await;
-        let request = tokio::spawn(async move { harness.request("initialize", json!({})).await });
-        tokio::task::yield_now().await;
+        let mut request = Box::pin(harness.request("initialize", json!({})));
+        std::future::poll_fn(|cx| {
+            assert!(std::future::Future::poll(request.as_mut(), cx).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
         closed.store(true, Ordering::Relaxed);
         guard.responses.clear();
         drop(guard);
-        let result = timeout(Duration::from_secs(1), request).await??;
+        let result = timeout(Duration::from_secs(1), request).await?;
         assert!(
             matches!(result, Err(HarnessError::Protocol(message)) if message.contains("no longer running"))
         );
