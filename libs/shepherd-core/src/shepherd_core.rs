@@ -588,10 +588,7 @@ impl Core {
                     });
                 }
                 Ok(_) => {
-                    if path != &task.proposed_worktree_path {
-                        return Err(GitError::InvalidWorktree { path: path.clone() }.into());
-                    }
-                    self.task_git_worktree(task_id)?;
+                    self.validate_pending_collection_worktree(task_id)?;
                     let mut updated = task.clone();
                     updated.collection_pending = false;
                     self.store.save_task(&updated).await?;
@@ -659,6 +656,24 @@ impl Core {
         Ok(())
     }
 
+    fn validate_pending_collection_worktree(&self, task_id: &TaskId) -> Result<(), CoreError> {
+        let (task, _, path) = self.task_git_worktree(task_id)?;
+        if path != task.proposed_worktree_path {
+            return Err(GitError::InvalidWorktree {
+                path: path.to_path_buf(),
+            }
+            .into());
+        }
+        let branch = task
+            .branch
+            .as_deref()
+            .ok_or_else(|| CoreError::CollectionBranchMissing {
+                id: task_id.to_string(),
+            })?;
+        GitService.checked_out_tip(path, branch)?;
+        Ok(())
+    }
+
     pub async fn touch_archived_worktree(&mut self, task_id: &TaskId) -> Result<(), CoreError> {
         let task = self.task(task_id)?;
         if task.state == TaskState::Done
@@ -676,10 +691,7 @@ impl Core {
                     });
                 }
                 Ok(_) => {
-                    if path != &task.proposed_worktree_path {
-                        return Err(GitError::InvalidWorktree { path: path.clone() }.into());
-                    }
-                    self.task_git_worktree(task_id)?;
+                    self.validate_pending_collection_worktree(task_id)?;
                 }
             }
         }
@@ -6172,6 +6184,16 @@ mod tests {
             assert!(core.task(&task.id)?.collection_pending);
             std::fs::remove_file(&task.proposed_worktree_path)?;
         }
+        GitService.create_worktree(
+            repository.repository(),
+            &task.proposed_worktree_path,
+            "different-task-branch",
+            "main",
+        )?;
+        assert!(core.touch_archived_worktree(&task.id).await.is_err());
+        assert!(core.collect_archived_worktree(&task.id).await.is_err());
+        assert!(core.task(&task.id)?.collection_pending);
+        GitService.remove_clean_worktree(repository.repository(), &task.proposed_worktree_path)?;
         task.branch_tip_sha = Some(tip);
         core.store.save_task(&task).await?;
         core.tasks.insert(task.id.clone(), task.clone());

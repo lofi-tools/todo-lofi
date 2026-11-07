@@ -1202,8 +1202,8 @@ placeholder tabs and no unearned state badges.
   preserves the intent for retry. Startup also reconciles pending collections
   for recently used tasks, keeping any checkout that still exists. Reopening
   an archived task also verifies pending collection recovery first. Existing
-  paths are validated as task worktrees before their pending markers are cleared;
-  a symlink replacement fixture covers collection recovery and task access.
+  paths are validated as task worktrees on the recorded branch before their
+  pending markers are cleared; fixtures cover symlink and branch replacements.
 - [ ] Database backup, migration checks, malformed migration handling and
   transactional writes.
   Existing file databases receive a retained Turso snapshot in a private
