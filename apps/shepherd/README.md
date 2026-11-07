@@ -22,6 +22,10 @@ under `.cache/test-db/`. Changes survive Tauri reloads during that launch.
 Closing the app discards the session database. The next `shep --test` launch
 starts empty again.
 
+Build the app bundle with `direnv exec . pnpm --dir apps/shepherd build`.
+The build script sets the macOS deployment target to 13.0; use a clean target
+directory when checking a release so older cached objects cannot change it.
+
 Choose the Send button color under **Settings → Appearance**. The choice is
 saved between launches for `shep` and lasts for the window session in
 `shep --test`.

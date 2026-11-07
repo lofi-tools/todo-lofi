@@ -1261,9 +1261,11 @@ placeholder tabs and no unearned state badges.
 - [ ] Packaging and CI: macOS 13+, Ubuntu 24.04+, pinned Zig, Tauri build,
   platform smoke.
   The local macOS debug app bundle declares macOS 13.0 in both Info.plist and
-  its executable build metadata. Its linker warned that cached `unicase` and
-  `libm` objects were built for macOS 14.0; rebuild from a clean target and run
-  the release checklist on macOS 13 before claiming compatibility. The terminal
+  its executable build metadata. The Nix shell defaults to macOS 14.0; the app's
+  build script sets 13.0 before compiling. Rebuilding the two cached dependencies
+  that triggered deployment-target warnings produced a bundle without those
+  warnings. A full clean build and the release checklist on macOS 13 are still
+  needed before claiming compatibility. The terminal
   uses the recorded Alacritty fallback rather than the planned Zig engine.
 - [ ] v2/GPUI explicitly not started until v1 is feature complete.
 

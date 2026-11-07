@@ -5,7 +5,7 @@
   "description": "Shepherd shell: Tauri window over the UI package in ui/.",
   "scripts": {
     "dev": "tauri dev",
-    "build": "tauri build",
+    "build": "MACOSX_DEPLOYMENT_TARGET=13.0 tauri build",
     "tauri": "tauri"
   },
   "devDependencies": {
