@@ -1466,6 +1466,9 @@ placeholder tabs and no unearned state badges.
   desktop-backend suite passed 104 tests (one benchmark ignored), and the
   core suite passed 122 tests (three ignored). No live agent or UI window was
   used in that rerun.
+  A focused offline Clippy run with warnings denied currently stops on
+  pre-existing `acp-client` warnings under Rust 1.99. Running without that gate
+  also reports existing warnings in `agent-harness`; the Pi transport has none.
 - [ ] Packaging and CI: macOS 13+, Ubuntu 24.04+, pinned Zig, Tauri build,
   platform smoke.
   The local macOS debug app bundle declares macOS 13.0 in both Info.plist and

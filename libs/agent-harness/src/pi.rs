@@ -209,17 +209,16 @@ impl PiRpc {
                 let mut status = match waiting {
                     Ok(status) => status,
                     Err(_) => {
-                        if !group_stopped {
-                            if let Err(error) =
+                        if !group_stopped
+                            && let Err(error) =
                                 stop_with_retry(&child, terminate, &mut shutdown, &stop_errors)
                                     .await
-                            {
-                                cleanup_error.get_or_insert_with(|| {
-                                    format!(
-                                        "could not stop the Pi process group after timeout: {error}"
-                                    )
-                                });
-                            }
+                        {
+                            cleanup_error.get_or_insert_with(|| {
+                                format!(
+                                    "could not stop the Pi process group after timeout: {error}"
+                                )
+                            });
                         }
                         match child.start_kill() {
                             Ok(()) => wait(&mut child).await,
