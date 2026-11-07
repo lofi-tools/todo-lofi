@@ -54,6 +54,62 @@ impl SessionRoots {
             )
         }
     }
+
+    pub(crate) fn read_text_file(
+        &self,
+        requested: &Path,
+        line: Option<u32>,
+        limit: Option<u32>,
+    ) -> anyhow::Result<String> {
+        let path = self.resolve(requested)?;
+        #[cfg(unix)]
+        {
+            let root = self
+                .roots
+                .iter()
+                .find(|root| path.starts_with(root))
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "{} is outside the session's directories",
+                        requested.display()
+                    )
+                })?;
+            let mut file = open_confined_file(root, &path)?;
+            let mut content = String::new();
+            file.read_to_string(&mut content)?;
+            Ok(select_lines(content, line, limit))
+        }
+        #[cfg(not(unix))]
+        read_text_file(&path, line, limit)
+    }
+}
+
+#[cfg(unix)]
+fn open_confined_file(root: &Path, path: &Path) -> anyhow::Result<File> {
+    use rustix::fs::{Mode, OFlags, open, openat};
+
+    let relative = path.strip_prefix(root)?;
+    let parent = relative
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("file has no parent"))?;
+    let name = relative
+        .file_name()
+        .ok_or_else(|| anyhow::anyhow!("file has no name"))?;
+    let directory_flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    let mut directory = open(root, directory_flags, Mode::empty())?;
+    for component in parent {
+        directory = openat(&directory, component, directory_flags, Mode::empty())?;
+    }
+    let file = File::from(openat(
+        &directory,
+        name,
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+        Mode::empty(),
+    )?);
+    if !file.metadata()?.is_file() {
+        anyhow::bail!("{} is not a regular file", path.display());
+    }
+    Ok(file)
 }
 
 type AttachedFiles = HashMap<PathBuf, Arc<Mutex<File>>>;
@@ -231,6 +287,32 @@ pub fn write_text_file(path: &Path, content: &str) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn confined_read_rejects_a_directory_replaced_after_resolution() -> anyhow::Result<()> {
+        let root = tempfile::tempdir()?;
+        let outside = tempfile::tempdir()?;
+        std::fs::create_dir(root.path().join("folder"))?;
+        std::fs::write(root.path().join("folder/file"), "inside")?;
+        std::fs::write(outside.path().join("file"), "private")?;
+        let roots = SessionRoots::new([root.path().to_owned()]);
+        assert_eq!(
+            roots.read_text_file(Path::new("folder/file"), None, None)?,
+            "inside"
+        );
+        let resolved = roots.resolve(Path::new("folder/file"))?;
+        let canonical_root = root.path().canonicalize()?;
+        std::fs::rename(root.path().join("folder"), root.path().join("old"))?;
+        std::os::unix::fs::symlink(outside.path(), root.path().join("folder"))?;
+        assert!(open_confined_file(&canonical_root, &resolved).is_err());
+        assert!(
+            roots
+                .read_text_file(Path::new("folder/file"), None, None)
+                .is_err()
+        );
+        Ok(())
+    }
 
     #[cfg(unix)]
     #[test]

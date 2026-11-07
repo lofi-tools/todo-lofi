@@ -24,6 +24,7 @@ tempfile = "3"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+rustix = { version = "1", features = ["fs"] }
 
 [features]
 test-support = []

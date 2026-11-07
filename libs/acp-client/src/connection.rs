@@ -36,7 +36,7 @@ use futures::io::BufReader;
 use futures::{AsyncBufReadExt as _, AsyncReadExt as _, AsyncWriteExt as _};
 
 use crate::agent::{AgentServer, SpawnSpec};
-use crate::fs::{PromptReads, SessionRoots, read_text_file, write_text_file};
+use crate::fs::{PromptReads, SessionRoots, write_text_file};
 use crate::permissions::{
     PermissionDecision, PermissionReply, ToolPermissions, Verdict, haystack, strongest_allow,
     strongest_reject, tool_key,
@@ -566,8 +566,7 @@ where
                         .and_then(|content| match content {
                             Some(content) => Ok(content),
                             None => {
-                                let path = roots.resolve(&request.path)?;
-                                read_text_file(&path, request.line, request.limit)
+                                roots.read_text_file(&request.path, request.line, request.limit)
                             }
                         });
                     let reply = match content {
