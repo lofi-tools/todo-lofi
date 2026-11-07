@@ -1899,7 +1899,11 @@ fn exec_command_event(event: &Value, kind: &str) -> Option<HarnessEvent> {
         } else {
             ToolStatus::Completed
         };
-        (status, exec_command_output(event))
+        let mut output = exec_command_output(event);
+        if let Some(output) = &mut output {
+            crate::limit_command_output(output);
+        }
+        (status, output)
     } else {
         (ToolStatus::Running, None)
     };
@@ -3164,6 +3168,28 @@ done
             ]
         );
         assert_eq!(usage, Some((1200, 128_000)));
+    }
+
+    #[test]
+    fn exec_command_events_bound_output_before_queueing() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let output = format!("{}tail", "界".repeat(crate::MAX_COMMAND_OUTPUT_BYTES));
+        let events = exec_events(
+            &json!({"msg": {"type": "exec_command_end", "call_id": "call", "aggregated_output": output, "exit_code": 0}}),
+        );
+        let [
+            HarnessEvent::ToolCall {
+                output: Some(output),
+                ..
+            },
+        ] = events.as_slice()
+        else {
+            return Err("missing command output".into());
+        };
+        assert!(output.len() <= crate::MAX_COMMAND_OUTPUT_BYTES);
+        assert!(output.starts_with(crate::COMMAND_OUTPUT_OMITTED));
+        assert!(output.ends_with("tail"));
+        Ok(())
     }
 
     #[test]
