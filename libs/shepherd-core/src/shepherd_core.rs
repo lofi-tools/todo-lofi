@@ -739,7 +739,7 @@ impl Core {
         let mut changed = false;
         for task_id in task_ids {
             let events = match self.sessions.get_mut(&task_id) {
-                Some(session) if !session.is_closed() => session.pump(),
+                Some(session) if !session.is_closed() => session.pump_background_batch(),
                 Some(_) => Vec::new(),
                 None => continue,
             };
@@ -2875,6 +2875,85 @@ mod streaming {
                 .pump()
                 .len(),
             1
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn background_batches_are_fair_and_preserve_all_agent_events()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut core = Core::new();
+        let (busy_sender, busy_events) = mpsc::unbounded_channel();
+        let (other_sender, other_events) = mpsc::unbounded_channel();
+        let busy = TaskId::new("busy");
+        let other = TaskId::new("other");
+        for (id, events) in [(busy.clone(), busy_events), (other.clone(), other_events)] {
+            core.sessions.insert(
+                id,
+                HarnessSession::new(Box::new(LateHarness {
+                    events,
+                    approvals: Vec::new(),
+                    prompts: None,
+                    mode: None,
+                })),
+            );
+        }
+        let count = crate::harness::MAX_EVENTS_PER_BACKGROUND_PUMP * 2 + 1;
+        for index in 0..count {
+            busy_sender.send(HarnessEvent::Delta {
+                item_id: ItemId::new("busy"),
+                kind: DeltaKind::Message,
+                text: format!("{index},"),
+            })?;
+        }
+        other_sender.send(HarnessEvent::Delta {
+            item_id: ItemId::new("other"),
+            kind: DeltaKind::Message,
+            text: "other".into(),
+        })?;
+        let notify = Arc::new(tokio::sync::Notify::new());
+        core.arm_agent_events(&notify);
+        tokio::time::timeout(Duration::from_secs(1), notify.notified()).await?;
+        let first = core
+            .sessions
+            .get_mut(&busy)
+            .ok_or("missing busy session")?
+            .pump_background_batch();
+        assert_eq!(first.len(), crate::harness::MAX_EVENTS_PER_BACKGROUND_PUMP);
+        assert_eq!(
+            core.sessions
+                .get_mut(&other)
+                .ok_or("missing other session")?
+                .pump_background_batch()
+                .len(),
+            1
+        );
+        let mut received = first;
+        loop {
+            core.arm_agent_events(&notify);
+            if received.len() == count {
+                break;
+            }
+            tokio::time::timeout(Duration::from_secs(1), notify.notified()).await?;
+            received.extend(
+                core.sessions
+                    .get_mut(&busy)
+                    .ok_or("missing busy session")?
+                    .pump_background_batch(),
+            );
+        }
+        let chunks: Vec<_> = received
+            .into_iter()
+            .filter_map(|event| match event {
+                HarnessEvent::Delta { text, .. } => Some(text),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            chunks,
+            (0..count)
+                .map(|index| format!("{index},"))
+                .collect::<Vec<_>>()
         );
         Ok(())
     }

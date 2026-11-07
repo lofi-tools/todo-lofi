@@ -1197,8 +1197,10 @@ placeholder tabs and no unearned state badges.
   pump. A direct terminal's exit wait completes even if a descendant keeps an
   output pipe open, and shutdown rejects new terminals. OpenCode decodes
   event-stream chunks one event at a time instead of
-  queuing every decoded event from a network read. Other critical event queues
-  still need backpressure.
+  queuing every decoded event from a network read. Background event folding
+  handles at most 256 events per session per pass and reschedules remaining
+  events so one busy agent cannot monopolize other sessions. Critical event
+  queues still need backpressure.
 - [ ] Multiple agents and projects: three agents across two projects, no state
   bleed, no polling.
   A three-session fixture holds Codex, OpenCode and Claude tasks at approvals

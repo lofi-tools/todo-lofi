@@ -3015,6 +3015,13 @@ mod tests {
             })
             .await?;
         let mut events = state.subscribe();
+        for _ in 0..600 {
+            sender.send(HarnessEvent::Delta {
+                item_id: ItemId::new("answer"),
+                kind: DeltaKind::Message,
+                text: "x".into(),
+            })?;
+        }
         sender.send(HarnessEvent::Delta {
             item_id: ItemId::new("answer"),
             kind: DeltaKind::Message,
@@ -3027,10 +3034,11 @@ mod tests {
             loop {
                 if let Event::TaskWorkspaceChanged(workspace) = events.recv().await?
                     && workspace.task.id == task_id.as_str()
-                    && workspace
-                        .transcript
-                        .iter()
-                        .any(|entry| entry.summary().contains("delayed answer"))
+                    && workspace.transcript.iter().any(|entry| {
+                        entry
+                            .summary()
+                            .contains(&format!("{}delayed answer", "x".repeat(600)))
+                    })
                     && workspace.task.state == TaskState::Ready
                 {
                     return Ok::<_, tokio::sync::broadcast::error::RecvError>(());

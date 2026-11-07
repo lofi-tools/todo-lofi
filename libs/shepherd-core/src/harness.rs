@@ -20,6 +20,8 @@ use crate::session::SessionRecord;
 use crate::store::{ProjectApproval, Store, checksum};
 use crate::{Agent, AgentTier, CoreError, ProjectId, Task};
 
+pub(crate) const MAX_EVENTS_PER_BACKGROUND_PUMP: usize = 256;
+
 pub(crate) struct ProjectApprovals {
     store: Arc<dyn Store>,
     project: ProjectId,
@@ -266,12 +268,23 @@ impl HarnessSession {
     /// Drain events that have arrived since the last pump. Returning them as
     /// well as applying them lets the core forward adapter activity to the shell.
     pub fn pump(&mut self) -> Vec<HarnessEvent> {
+        self.pump_with_limit(usize::MAX)
+    }
+
+    pub(crate) fn pump_background_batch(&mut self) -> Vec<HarnessEvent> {
+        self.pump_with_limit(MAX_EVENTS_PER_BACKGROUND_PUMP)
+    }
+
+    fn pump_with_limit(&mut self, limit: usize) -> Vec<HarnessEvent> {
         let mut events = Vec::new();
-        while let Some(event) = self
-            .pending_event
-            .take()
-            .or_else(|| self.harness.events().try_recv().ok())
-        {
+        while events.len() < limit {
+            let Some(event) = self
+                .pending_event
+                .take()
+                .or_else(|| self.harness.events().try_recv().ok())
+            else {
+                break;
+            };
             match &event {
                 HarnessEvent::AgentTerminalStarted { id, title } => {
                     self.capabilities.agent_terminals = true;
