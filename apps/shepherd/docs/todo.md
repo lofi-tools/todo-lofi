@@ -1223,6 +1223,10 @@ placeholder tabs and no unearned state badges.
   cross-process and crash fixtures verify that another process cannot acquire
   it until the owner exits. Existing records have no such ownership evidence.
   Lease files are retained so all instances continue to lock the same file.
+  New lease directories are private; startup rejects a symlink, a directory
+  owned by another user, or one writable by other users. Directory replacement
+  after startup still needs protection before leases can authorize stopping a
+  process.
   ACP supervision reports a failed process-group signal even if killing the
   leader succeeds, with an injected-failure fixture. ACP quit now waits for
   process supervision and reports its failure; timeout retains the connection

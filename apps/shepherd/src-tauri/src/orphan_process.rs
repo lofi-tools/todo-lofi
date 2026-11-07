@@ -41,7 +41,31 @@ pub(crate) struct ProcessLeases {
 
 impl ProcessLeases {
     pub(crate) fn new(directory: PathBuf) -> io::Result<Self> {
-        std::fs::create_dir_all(&directory)?;
+        let mut builder = std::fs::DirBuilder::new();
+        builder.recursive(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt as _;
+            builder.mode(0o700);
+        }
+        builder.create(&directory)?;
+        let metadata = std::fs::symlink_metadata(&directory)?;
+        if !metadata.is_dir() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "agent process lease path is not a directory",
+            ));
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt as _;
+            if metadata.uid() != unsafe { libc::geteuid() } || metadata.mode() & 0o022 != 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "agent process lease directory must be owned by the current user and not writable by others",
+                ));
+            }
+        }
         Ok(Self {
             directory,
             active: Mutex::new(BTreeMap::new()),
@@ -219,6 +243,29 @@ fn observe(_record: &ProcessRecord, boot_id: Option<String>) -> Observation {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn lease_directory_rejects_symlinks_and_other_user_write_access()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _, symlink};
+        let root = tempfile::tempdir()?;
+        let directory = root.path().join("leases");
+        let leases = ProcessLeases::new(directory.clone())?;
+        assert_eq!(std::fs::metadata(&directory)?.mode() & 0o077, 0);
+        drop(leases);
+        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o755))?;
+        drop(ProcessLeases::new(directory.clone())?);
+        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o777))?;
+        let error = ProcessLeases::new(directory.clone())
+            .err()
+            .ok_or("unsafe directory accepted")?;
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        let link = root.path().join("lease-link");
+        symlink(&directory, &link)?;
+        assert!(ProcessLeases::new(link).is_err());
+        Ok(())
+    }
 
     #[test]
     fn process_lease_blocks_other_owners_and_requires_existing_identity()
