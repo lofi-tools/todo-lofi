@@ -62,7 +62,7 @@ pub fn configured_launch(settings: &AgentSettings) -> HarnessResult<Option<Spawn
 
 pub async fn project_modes(spec: &SpawnSpec) -> HarnessResult<Vec<AgentMode>> {
     let hide_diagnostics = !spec.environment.is_empty();
-    let server = OpenCodeServer::start(spec)
+    let (server, mut startup_group) = OpenCodeServer::start_guarded(spec)
         .await
         .map_err(|error| crate::protect_discovery_error(error, hide_diagnostics))?;
     let modes = if server.probe.modes {
@@ -71,6 +71,7 @@ pub async fn project_modes(spec: &SpawnSpec) -> HarnessResult<Vec<AgentMode>> {
         Ok(Vec::new())
     };
     let shutdown = server.shutdown().await;
+    startup_group.disarm();
     let modes = modes.map_err(|error| crate::protect_discovery_error(error, hide_diagnostics))?;
     shutdown.map_err(|error| crate::protect_discovery_error(error, hide_diagnostics))?;
     Ok(modes)
@@ -1685,6 +1686,56 @@ mod tests {
         timeout(Duration::from_secs(5), wait_for_subscription).await??;
         start.abort();
         assert!(start.await.is_err_and(|error| error.is_cancelled()));
+        fixture.abort();
+        tokio::time::sleep(Duration::from_millis(2300)).await;
+        assert!(!directory.path().join("escaped").exists());
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cancelled_mode_discovery_stops_server_descendants()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let program = fixture_launcher(
+            directory.path(),
+            "#!/bin/sh\n(sleep 2; printf escaped > escaped) &\nprintf 'server listening on %s\\n' \"$SHEPHERD_TEST_OPENCODE_URL\"\nsleep 30\n",
+        )?;
+        let spec = SpawnSpec {
+            program,
+            cwd: directory.path().to_owned(),
+            environment: BTreeMap::from([(
+                "SHEPHERD_TEST_OPENCODE_URL".into(),
+                format!("http://{}", listener.local_addr()?),
+            )]),
+            ..SpawnSpec::default()
+        };
+        let (requested, wait_for_request) = tokio::sync::oneshot::channel();
+        let fixture = tokio::spawn(async move {
+            let mut api: Value = serde_json::from_str(NATIVE_API)?;
+            api["paths"]["/api/agent"] = json!({"get": {}});
+            api["paths"]["/api/session/{sessionID}/agent"] = json!({"post": {}});
+            for response in [json!({"version": "fixture"}).to_string(), api.to_string()] {
+                let (socket, _) = listener.accept().await?;
+                let (reader, mut writer) = socket.into_split();
+                read_fixture_request(reader).await?;
+                writer.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response}", response.len()).as_bytes()).await?;
+            }
+            let (socket, _) = listener.accept().await?;
+            let (reader, _writer) = socket.into_split();
+            let (request, _) = read_fixture_request(reader).await?;
+            assert!(request.starts_with("GET /api/agent?"));
+            requested
+                .send(())
+                .map_err(|_| std::io::Error::other("discovery receiver dropped"))?;
+            std::future::pending::<()>().await;
+            Ok::<_, Box<dyn std::error::Error + Send + Sync>>(())
+        });
+        let discovery = tokio::spawn(async move { project_modes(&spec).await });
+        timeout(Duration::from_secs(5), wait_for_request).await??;
+        discovery.abort();
+        assert!(discovery.await.is_err_and(|error| error.is_cancelled()));
         fixture.abort();
         tokio::time::sleep(Duration::from_millis(2300)).await;
         assert!(!directory.path().join("escaped").exists());
