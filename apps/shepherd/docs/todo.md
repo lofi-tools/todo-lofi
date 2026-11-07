@@ -1222,7 +1222,9 @@ placeholder tabs and no unearned state badges.
   recovery because ignored files may have been removed; stage the checkout and
   durably recover or finish removal across database failure and process death.
   A deletion journal now survives task deletion and database reopen in both
-  store implementations. Staging and startup recovery are not yet connected.
+  store implementations. A Git worktree move primitive preserves ignored
+  files and registration while rejecting unsafe or occupied destinations.
+  Staging and startup recovery are not yet connected to deletion.
   If an opened agent session cannot be recorded, the core stops it before
   retrying; a database-trigger fixture verifies cleanup and a subsequent start.
   A second fixture makes cleanup fail twice and verifies that the session is

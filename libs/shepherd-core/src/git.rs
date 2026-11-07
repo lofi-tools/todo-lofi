@@ -218,6 +218,42 @@ impl GitService {
         Ok(())
     }
 
+    pub fn move_worktree(
+        &self,
+        repository: &GitRepository,
+        source: &Path,
+        destination: &Path,
+    ) -> Result<(), GitError> {
+        self.validate_worktree(repository, source)?;
+        if destination.parent() != Some(repository.git_dir.join("shepherd/worktrees").as_path()) {
+            return Err(GitError::InvalidWorktree {
+                path: destination.to_path_buf(),
+            });
+        }
+        match destination.symlink_metadata() {
+            Ok(_) => {
+                return Err(GitError::InvalidWorktree {
+                    path: destination.to_path_buf(),
+                });
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(source) => return Err(GitError::Io { source }),
+        }
+        let source = source.to_str().ok_or_else(|| GitError::InvalidWorktree {
+            path: source.to_path_buf(),
+        })?;
+        let destination = destination
+            .to_str()
+            .ok_or_else(|| GitError::InvalidWorktree {
+                path: destination.to_path_buf(),
+            })?;
+        run_git(
+            &repository.root,
+            &["worktree", "move", "--", source, destination],
+        )?;
+        Ok(())
+    }
+
     pub fn prune_worktrees(&self, repository: &GitRepository) -> Result<(), GitError> {
         run_git(&repository.root, &["worktree", "prune"])?;
         Ok(())
@@ -1257,6 +1293,48 @@ mod tests {
             )
             .is_ok()
         );
+        Ok(())
+    }
+
+    #[test]
+    fn moving_a_worktree_preserves_ignored_files_and_registration()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fixture = TestRepository::new()?;
+        let repository = fixture.repository();
+        let original = task_worktree(&fixture)?;
+        let staged = repository.git_dir.join("shepherd/worktrees/staged-fixture");
+        std::fs::write(repository.git_dir.join("info/exclude"), "ignored.txt\n")?;
+        std::fs::write(original.join("ignored.txt"), "keep me")?;
+        assert!(!GitService.has_changes(&original)?);
+        GitService.move_worktree(repository, &original, &staged)?;
+        assert!(!original.exists());
+        assert_eq!(
+            std::fs::read_to_string(staged.join("ignored.txt"))?,
+            "keep me"
+        );
+        GitService.validate_worktree(repository, &staged)?;
+        assert!(
+            GitService
+                .move_worktree(
+                    repository,
+                    &staged,
+                    fixture.path().join("outside").as_path()
+                )
+                .is_err()
+        );
+        std::fs::create_dir(&original)?;
+        assert!(
+            GitService
+                .move_worktree(repository, &staged, &original)
+                .is_err()
+        );
+        std::fs::remove_dir(&original)?;
+        GitService.move_worktree(repository, &staged, &original)?;
+        assert_eq!(
+            std::fs::read_to_string(original.join("ignored.txt"))?,
+            "keep me"
+        );
+        GitService.validate_worktree(repository, &original)?;
         Ok(())
     }
 
