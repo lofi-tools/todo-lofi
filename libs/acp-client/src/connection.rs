@@ -419,10 +419,10 @@ impl AcpConnection {
     }
 
     fn shutdown_now(&mut self) {
-        if let Some(shutdown) = self.shutdown.take() {
-            if shutdown.send(()).is_err() {
-                tracing::debug!("agent connection already finished");
-            }
+        if let Some(shutdown) = self.shutdown.take()
+            && shutdown.send(()).is_err()
+        {
+            tracing::debug!("agent connection already finished");
         }
     }
 }
@@ -440,6 +440,10 @@ pub struct ConnectOptions {
     pub tool_permissions: ToolPermissions,
 }
 
+#[allow(
+    clippy::double_must_use,
+    reason = "async_trait generates must-use futures"
+)]
 #[async_trait::async_trait]
 pub trait ProcessTracker: Send + Sync {
     async fn started(&self, pid: u32) -> Result<String, String>;
@@ -902,15 +906,23 @@ where
 ///
 /// Mirrors the SDK's own agent component, minus the launch configuration it
 /// cannot express: the child's working directory.
+type SupervisionChannels = (
+    tokio::sync::mpsc::UnboundedSender<Result<(), String>>,
+    tokio::sync::mpsc::UnboundedReceiver<()>,
+);
+
+struct AgentDiagnostics {
+    stderr_task: Option<tokio::task::JoinHandle<()>>,
+    events: Option<tokio::sync::mpsc::UnboundedSender<AcpEvent>>,
+    stderr: Option<Arc<Mutex<VecDeque<String>>>>,
+}
+
 pub struct ProjectAgent {
     spec: SpawnSpec,
     events: Option<tokio::sync::mpsc::UnboundedSender<AcpEvent>>,
     stderr: Option<Arc<Mutex<VecDeque<String>>>>,
     tracker: Option<Arc<dyn ProcessTracker>>,
-    supervision: Option<(
-        tokio::sync::mpsc::UnboundedSender<Result<(), String>>,
-        tokio::sync::mpsc::UnboundedReceiver<()>,
-    )>,
+    supervision: Option<SupervisionChannels>,
 }
 
 impl ProjectAgent {
@@ -1101,7 +1113,7 @@ impl ConnectTo<Client> for ProjectAgent {
                 )
             });
         let incoming = futures::StreamExt::map(incoming, move |line| {
-            let line = line.map_err(|error| {
+            let line = line.inspect_err(|error| {
                 if error.kind() == std::io::ErrorKind::InvalidData
                     && let Some(events) = &protocol_events
                     && events
@@ -1112,7 +1124,6 @@ impl ConnectTo<Client> for ProjectAgent {
                 {
                     tracing::debug!("ACP protocol failure receiver closed");
                 }
-                error
             })?;
             if !line.trim().is_empty()
                 && let Err(error) = serde_json::from_str::<serde::de::IgnoredAny>(&line)
@@ -1147,9 +1158,11 @@ impl ConnectTo<Client> for ProjectAgent {
             supervise_agent(
                 child,
                 finished,
-                stderr_task,
-                self.events,
-                self.stderr,
+                AgentDiagnostics {
+                    stderr_task,
+                    events: self.events,
+                    stderr: self.stderr,
+                },
                 self.supervision,
                 process_record,
                 kill_agent_process,
@@ -1171,16 +1184,16 @@ impl ConnectTo<Client> for ProjectAgent {
 async fn supervise_agent(
     mut child: async_process::Child,
     mut wire_finished: oneshot::Receiver<()>,
-    mut stderr_task: Option<tokio::task::JoinHandle<()>>,
-    events: Option<tokio::sync::mpsc::UnboundedSender<AcpEvent>>,
-    stderr: Option<Arc<Mutex<VecDeque<String>>>>,
-    mut supervision: Option<(
-        tokio::sync::mpsc::UnboundedSender<Result<(), String>>,
-        tokio::sync::mpsc::UnboundedReceiver<()>,
-    )>,
+    diagnostics: AgentDiagnostics,
+    mut supervision: Option<SupervisionChannels>,
     process_record: Option<(Arc<dyn ProcessTracker>, String)>,
     mut stop: impl FnMut(&mut async_process::Child) -> std::io::Result<()> + Send,
 ) {
+    let AgentDiagnostics {
+        mut stderr_task,
+        events,
+        stderr,
+    } = diagnostics;
     let mut status = tokio::select! {
         status = child.status() => {
             // Give the wire time to deliver any protocol records already in the pipe.
@@ -1406,9 +1419,11 @@ mod tests {
         let supervisor = tokio::spawn(supervise_agent(
             child,
             wire_finished,
-            None,
-            Some(events),
-            None,
+            AgentDiagnostics {
+                stderr_task: None,
+                events: Some(events),
+                stderr: None,
+            },
             Some((results, retries)),
             None,
             move |child| {

@@ -38,6 +38,10 @@ pub enum TerminalProcessEvent {
     Exited(TerminalExitStatus),
 }
 
+#[allow(
+    clippy::double_must_use,
+    reason = "async_trait generates must-use futures"
+)]
 #[async_trait]
 pub trait TerminalBackend: Send + Sync {
     async fn spawn(
@@ -398,13 +402,12 @@ impl TerminalRegistry {
                         }
                     });
                     let tail = pending.split_off(pending.len() - incomplete);
-                    if !pending.is_empty() {
-                        if !self
+                    if !pending.is_empty()
+                        && !self
                             .push(&key, String::from_utf8_lossy(&pending).into_owned())
                             .await
-                        {
-                            return;
-                        }
+                    {
+                        return;
                     }
                     pending = tail;
                 }
@@ -414,13 +417,12 @@ impl TerminalRegistry {
                 }
             }
         }
-        if !pending.is_empty() {
-            if !self
+        if !pending.is_empty()
+            && !self
                 .push(&key, String::from_utf8_lossy(&pending).into_owned())
                 .await
-            {
-                return;
-            }
+        {
+            return;
         }
         self.finish(&key, status);
     }

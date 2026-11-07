@@ -59,10 +59,7 @@ pub struct PermissionChoice {
 
 impl PermissionChoice {
     pub fn from_options(options: &[PermissionOption]) -> Vec<Self> {
-        options
-            .iter()
-            .map(|option| Self::from_option(option))
-            .collect()
+        options.iter().map(Self::from_option).collect()
     }
 
     pub fn from_option(option: &PermissionOption) -> Self {
@@ -252,23 +249,12 @@ impl TranscriptDelta {
 }
 
 /// Session state the pane renders outside the row list.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct SessionControls {
     pub commands: Vec<AvailableCommand>,
     pub mode: Option<SessionModeState>,
     pub config_options: Vec<SessionConfigOption>,
     pub title: Option<String>,
-}
-
-impl Default for SessionControls {
-    fn default() -> Self {
-        Self {
-            commands: Vec::new(),
-            mode: None,
-            config_options: Vec::new(),
-            title: None,
-        }
-    }
 }
 
 #[derive(Debug, Default)]
@@ -642,19 +628,20 @@ impl Transcript {
             EntryKind::AgentText { text } | EntryKind::Thought { text } => text.clone(),
             _ => String::new(),
         };
-        if let Some(index) = self.streaming.get(key).copied() {
-            if let Some(entry) = self.entries.get_mut(index) {
-                match &mut entry.kind {
-                    EntryKind::AgentText { text: existing }
-                    | EntryKind::Thought { text: existing } => existing.push_str(&text),
-                    _ => entry.kind = kind,
+        if let Some(index) = self.streaming.get(key).copied()
+            && let Some(entry) = self.entries.get_mut(index)
+        {
+            match &mut entry.kind {
+                EntryKind::AgentText { text: existing } | EntryKind::Thought { text: existing } => {
+                    existing.push_str(&text)
                 }
-                self.live = Some(index);
-                return TranscriptDelta {
-                    changed: Some(index),
-                    ..Default::default()
-                };
+                _ => entry.kind = kind,
             }
+            self.live = Some(index);
+            return TranscriptDelta {
+                changed: Some(index),
+                ..Default::default()
+            };
         }
         let index = self.append(kind);
         self.streaming.insert(key.to_string(), index);
