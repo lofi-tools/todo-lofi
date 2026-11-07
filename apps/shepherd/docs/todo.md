@@ -1224,7 +1224,9 @@ placeholder tabs and no unearned state badges.
   terminal burst budget.
   Review and Git retain in-flight diff requests across transcript-only updates;
   a headless fixture streams through 1,000 transcript entries while a 12,000-line
-  diff loads. End-to-end timing with a real worktree remains unmeasured.
+  diff loads. Project snapshots no longer re-query an unchanged attachment limit,
+  and a fixture checks that streaming preserves the Files path and preview.
+  End-to-end timing with a real worktree remains unmeasured.
 - [ ] Path confinement, environment `!command` timeout, no secret values in
   logs or storage.
 - [ ] Packaging and CI: macOS 13+, Ubuntu 24.04+, pinned Zig, Tauri build,

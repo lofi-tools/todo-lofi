@@ -32,6 +32,7 @@ test.beforeEach(async ({ context }) => {
     const deletions: Array<{ taskId: string; removeWorktree: boolean }> = []
     const gitMutations: GitMutation[] = []
     const gitRequests = { git: 0, gitDiff: 0, review: 0, reviewDiff: 0 }
+    const attachmentLimitRequests: string[] = []
     const taskRevisions = new Map<string, number>()
     let failedReviewSnapshot = false
     const gitState = () => {
@@ -474,6 +475,7 @@ test.beforeEach(async ({ context }) => {
           case 'open_project_preview':
             throw { message: `Could not open the preview in a browser. ${args.projectId}` }
           case 'attachment_limit': {
+            attachmentLimitRequests.push(args.projectId)
             const settings = readPreferences()
             const path = projects.find((project) => project.id === args.projectId)?.path
             const bytes = settings.projects[path]?.['attachments.max_file_bytes']
@@ -1022,6 +1024,7 @@ test.beforeEach(async ({ context }) => {
     Object.assign(window, { __windowTitles: windowTitles })
     window.__archiveRequests = archiveRequests
     window.__gitMutations = gitMutations
+    Object.assign(window, { __attachmentLimitRequests: attachmentLimitRequests })
     Object.assign(window, { __gitRequests: gitRequests, __setTaskRevision: (taskId: string, revision: number) => {
       taskRevisions.set(taskId, revision)
       window.__emitCoreEvent({ type: 'taskWorkspaceChanged', data: workspace(taskId) })
@@ -1711,6 +1714,37 @@ test('keeps only one expanded folder path in the file tree', async ({ page }) =>
   await files.getByRole('button', { name: 'root.txt' }).click()
   await expect(docs).toHaveAttribute('aria-expanded', 'false')
   await expect(files.getByRole('button', { name: 'guide.txt' })).toHaveCount(0)
+})
+
+test('keeps the file explorer path and preview while a task streams', async ({ page }) => {
+  await page.goto('/?folder-tree')
+  await page.getByRole('tab', { name: 'Files' }).click()
+  const files = page.getByRole('region', { name: 'Workspace files' })
+  const src = files.getByRole('button', { name: 'src', exact: true })
+  await src.click()
+  const lib = files.getByRole('button', { name: 'lib', exact: true })
+  await lib.click()
+  const file = files.getByRole('button', { name: 'deep.txt', exact: true })
+  await file.click()
+  const preview = files.getByRole('region', { name: 'File preview' })
+  await expect(preview).toContainText('src/lib/deep.txt')
+  await expect.poll(() => page.evaluate(() => window.__fileWatchIds())).toHaveLength(1)
+  const watches = await page.evaluate(() => window.__fileWatchIds())
+  const stopped = await page.evaluate(() => window.__unwatchedFiles.slice())
+
+  await page.evaluate(() => {
+    const fixture = window as unknown as { __setTranscript: (taskId: string, entries: Entry[]) => void }
+    for (let index = 0; index < 10; index++) {
+      fixture.__setTranscript('task-1', [{ id: 'stream', sequence: 0, kind: { type: 'agentText', data: { text: `chunk ${index}` } } }])
+    }
+  })
+  await expect(page.getByRole('region', { name: 'Transcript' })).toContainText('chunk 9')
+  await expect(src).toHaveAttribute('aria-expanded', 'true')
+  await expect(lib).toHaveAttribute('aria-expanded', 'true')
+  await expect(file).toHaveAttribute('aria-pressed', 'true')
+  await expect(preview).toContainText('src/lib/deep.txt')
+  expect(await page.evaluate(() => window.__fileWatchIds())).toEqual(watches)
+  expect(await page.evaluate(() => window.__unwatchedFiles)).toEqual(stopped)
 })
 
 test('uses the inspector height and scrolls to the end of a long file tree', async ({ page }) => {
@@ -3141,6 +3175,26 @@ test('queues removable files and uploads them only when sending the prompt', asy
   expect(await page.evaluate(() => window.__promptFileUploads)).toEqual([
     { taskId: 'task-1', name: 'Résumé 1.txt', text: 'keep this' },
   ])
+})
+
+test('does not reload the attachment limit on streaming project snapshots', async ({ page }) => {
+  await page.goto('/')
+  await expect(page.getByRole('region', { name: 'Task chat' })).toContainText('ready to go')
+  const requests = () => page.evaluate(() => (window as unknown as { __attachmentLimitRequests: string[] }).__attachmentLimitRequests.slice())
+  await expect.poll(async () => (await requests()).length).toBeGreaterThan(0)
+  const before = await requests()
+  await page.evaluate(async () => {
+    for (let index = 0; index < 10; index++) {
+      window.__setTaskState('task-1', 'working')
+      await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
+    }
+  })
+  await expect(page.getByRole('region', { name: 'Task chat' })).toContainText('working')
+  expect(await requests()).toEqual(before)
+  await page.getByRole('button', { name: 'Settings', exact: true }).click()
+  await page.getByRole('spinbutton', { name: 'Attachment limit (bytes)' }).fill('900')
+  await page.getByRole('button', { name: 'Save attachment limit (bytes)' }).click()
+  await expect.poll(async () => (await requests()).length).toBe(before.length + 1)
 })
 
 test('uses the selected project attachment limit', async ({ page }) => {
