@@ -1252,17 +1252,15 @@ impl AgentHarness for CodexHarness {
                     .await?
             }
             None => {
-                let response = self
-                    .request(
-                        "thread/start",
-                        json!({
-                            "cwd": cwd,
-                            "approvalPolicy": "on-request",
-                            "sandbox": "workspace-write",
-                        }),
-                    )
-                    .await?;
-                response
+                self.request(
+                    "thread/start",
+                    json!({
+                        "cwd": cwd,
+                        "approvalPolicy": "on-request",
+                        "sandbox": "workspace-write",
+                    }),
+                )
+                .await?
             }
         };
 
@@ -2034,16 +2032,15 @@ fn spawn_exec_waiter(
                 tracing::debug!("the core stopped listening to codex errors");
             }
         }
-        if let Err(error) = clear_exec_process_record(&process_record).await {
-            if sender
+        if let Err(error) = clear_exec_process_record(&process_record).await
+            && sender
                 .send(HarnessEvent::TurnError {
                     kind: FailureKind::Protocol,
                     text: error.to_string(),
                 })
                 .is_err()
-            {
-                tracing::debug!("the core stopped listening to codex errors");
-            }
+        {
+            tracing::debug!("the core stopped listening to codex errors");
         }
         finished.store(true, Ordering::Relaxed);
         if sender.send(HarnessEvent::TurnFinished { reason }).is_err() {
@@ -2495,6 +2492,10 @@ fn spawn_writer(
     })
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the reader supervises these shared resources"
+)]
 fn spawn_reader(
     stdout: ChildStdout,
     sender: mpsc::UnboundedSender<HarnessEvent>,

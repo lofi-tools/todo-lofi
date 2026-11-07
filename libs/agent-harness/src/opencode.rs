@@ -1356,15 +1356,15 @@ impl OpenCodeServer {
                     }
                 }
                 startup_group.disarm();
-                if let Some((tracker, id)) = &process_record {
-                    if let Err(cleanup) = tracker.stopped(id).await {
-                        return Err(HarnessError::Reported {
-                            kind: FailureKind::Protocol,
-                            message: format!(
-                                "OpenCode startup failed: {error}; process record cleanup failed: {cleanup}"
-                            ),
-                        });
-                    }
+                if let Some((tracker, id)) = &process_record
+                    && let Err(cleanup) = tracker.stopped(id).await
+                {
+                    return Err(HarnessError::Reported {
+                        kind: FailureKind::Protocol,
+                        message: format!(
+                            "OpenCode startup failed: {error}; process record cleanup failed: {cleanup}"
+                        ),
+                    });
                 }
                 return Err(error);
             }

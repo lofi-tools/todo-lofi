@@ -579,12 +579,20 @@ pub struct AgentTerminal {
     pub exit_code: Option<u32>,
 }
 
+#[allow(
+    clippy::double_must_use,
+    reason = "async_trait generates must-use futures"
+)]
 #[async_trait]
 pub trait ProjectApprovalPolicy: Send + Sync {
     async fn allows(&self, key: &str) -> Result<bool, String>;
     async fn remember(&self, key: &str, request: &ApprovalRequest) -> Result<(), String>;
 }
 
+#[allow(
+    clippy::double_must_use,
+    reason = "async_trait generates must-use futures"
+)]
 #[async_trait]
 pub trait AgentProcessTracker: Send + Sync {
     async fn started(&self, pid: u32) -> Result<String, String>;
@@ -1078,6 +1086,10 @@ impl Transcript {
         change
     }
 
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the fields belong to one tool-call event"
+    )]
     fn upsert_tool_call(
         &mut self,
         tool_call_id: &str,
@@ -1273,6 +1285,10 @@ impl Transcript {
 }
 
 /// The adapter contract. The core drives it; adapters never write to the store.
+#[allow(
+    clippy::double_must_use,
+    reason = "async_trait generates must-use futures"
+)]
 #[async_trait]
 pub trait AgentHarness: Send {
     /// Receive adapter events. The receiver is owned by the harness and must
