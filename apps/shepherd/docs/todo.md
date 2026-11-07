@@ -1093,7 +1093,8 @@ and the task header never overstates the tier.
   from the blocked-frame fallback through the desktop bridge.
 - [ ] Attachment cap, redirect and deletion tests.
   Rust fixtures cover the default file cap, task isolation, symlink rejection
-  and draft cleanup. Headless Chromium checks the composer queue and upload.
+  and draft cleanup, including isolation from another draft's cached files.
+  Headless Chromium checks the composer queue and upload.
   The bridge applies the project cap to uploads, screenshots, and cached
   files. Headless Chromium verifies the chooser uses the selected project.
   A hidden macOS WebKit smoke verifies sending with a file alone and preserving

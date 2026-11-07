@@ -3046,6 +3046,13 @@ mod tests {
             .create_draft(project.id.clone(), "Preview".into(), Agent::Codex)
             .await?;
         let task = workspace.task.id.as_str().to_owned();
+        let other = state
+            .create_draft(project.id.clone(), "Other".into(), Agent::Codex)
+            .await?
+            .task
+            .id
+            .as_str()
+            .to_owned();
         let image = include_bytes!("../icons/128x128.png");
         assert!(
             state
@@ -3076,8 +3083,25 @@ mod tests {
             state.save_preview_screenshot(task.clone(), image).await?,
             path
         );
+        let file_id = state
+            .save_prompt_file(task.clone(), "notes.txt".into(), b"draft notes")
+            .await?;
+        let other_file_id = state
+            .save_prompt_file(other.clone(), "notes.txt".into(), b"other notes")
+            .await?;
+        let task_directory = directory.path().join("attachments").join(&task);
+        let other_directory = directory.path().join("attachments").join(&other);
+        let file = attachments::prompt_file(&task_directory, &file_id)?;
+        let other_file = attachments::prompt_file(&other_directory, &other_file_id)?;
         state.discard_draft(task.clone()).await?;
         assert!(!path.exists());
+        assert!(!file.exists());
+        assert!(!task_directory.exists());
+        assert_eq!(std::fs::read(&other_file)?, b"other notes");
+        assert_eq!(
+            attachments::prompt_file(&other_directory, &other_file_id)?,
+            other_file
+        );
         assert!(state.save_preview_screenshot(task, image).await.is_err());
         Ok(())
     }
