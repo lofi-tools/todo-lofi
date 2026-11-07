@@ -1199,8 +1199,12 @@ placeholder tabs and no unearned state badges.
   while hiding configured launch environment details. Codex app-server task
   launches now record the process identity before initialization and remove it
   after shutdown; save failures stop startup and failed removal can be retried.
-  Local fixtures cover those paths and durable storage. Codex exec, OpenCode,
-  and ACP agent identities and stopping surviving processes remain.
+  Local fixtures cover those paths and durable storage. OpenCode's native server
+  is also recorded before its startup handshake; a failed record write blocks
+  ACP fallback, and a failed record removal can be retried. A local HTTP
+  fixture covers the lifecycle. Records from interrupted startup may remain for
+  inspection. Codex exec, OpenCode's ACP fallback, Claude ACP, and stopping
+  surviving processes remain.
 - [ ] 30-day archived-worktree collection, dirty skip, branch-tip recreation.
   Startup preserves dirty worktrees and lists collection failures with their
   reasons; clean collection retains the tip and prunes Git worktree metadata.

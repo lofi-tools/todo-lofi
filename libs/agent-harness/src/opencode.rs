@@ -65,7 +65,7 @@ pub fn configured_launch(settings: &AgentSettings) -> HarnessResult<Option<Spawn
 
 pub async fn project_modes(spec: &SpawnSpec) -> HarnessResult<Vec<AgentMode>> {
     let hide_diagnostics = !spec.environment.is_empty();
-    let (server, mut startup_group) = OpenCodeServer::start_guarded(spec)
+    let (server, mut startup_group) = OpenCodeServer::start_guarded(spec, None)
         .await
         .map_err(|error| crate::protect_discovery_error(error, hide_diagnostics))?;
     let modes = if server.probe.modes {
@@ -224,6 +224,7 @@ pub struct OpenCodeHarness {
     fallback: Option<AcpHarness>,
     project_approvals: Option<Arc<dyn crate::ProjectApprovalPolicy>>,
     terminals: Option<Arc<dyn TerminalBackend>>,
+    process_tracker: Option<Arc<dyn crate::AgentProcessTracker>>,
 }
 
 impl Default for OpenCodeHarness {
@@ -241,6 +242,7 @@ impl Default for OpenCodeHarness {
             fallback: None,
             project_approvals: None,
             terminals: None,
+            process_tracker: None,
         }
     }
 }
@@ -266,6 +268,10 @@ impl Drop for ActiveTurn {
 
 #[async_trait]
 impl AgentHarness for OpenCodeHarness {
+    fn set_process_tracker(&mut self, tracker: Arc<dyn crate::AgentProcessTracker>) {
+        self.process_tracker = Some(tracker);
+    }
+
     fn events(&mut self) -> &mut mpsc::UnboundedReceiver<HarnessEvent> {
         match &mut self.fallback {
             Some(fallback) => fallback.events(),
@@ -366,14 +372,18 @@ impl AgentHarness for OpenCodeHarness {
         }
         require_absolute_executable(Path::new(&spec.program))?;
         let native = async {
-            let (server, mut startup_group) = OpenCodeServer::start_guarded(&spec).await?;
+            let (server, mut startup_group) =
+                OpenCodeServer::start_guarded(&spec, self.process_tracker.clone()).await?;
             if let Err(error) = server.subscribe().await {
                 let cleanup = server.shutdown().await;
                 startup_group.disarm();
                 if let Err(cleanup) = cleanup {
-                    return Err(HarnessError::Protocol(format!(
-                        "OpenCode subscription failed: {error}; cleanup failed: {cleanup}"
-                    )));
+                    return Err(HarnessError::Reported {
+                        kind: FailureKind::Protocol,
+                        message: format!(
+                            "OpenCode subscription failed: {error}; cleanup failed: {cleanup}"
+                        ),
+                    });
                 }
                 return Err(error);
             }
@@ -758,6 +768,7 @@ async fn publish_stream_event(
 /// A loopback server owned by one Shepherd task.
 pub struct OpenCodeServer {
     child: Arc<AsyncMutex<Child>>,
+    process_record: AsyncMutex<Option<(Arc<dyn crate::AgentProcessTracker>, String)>>,
     client: Client,
     address: Url,
     password: String,
@@ -1190,12 +1201,15 @@ async fn stop_server_with(
 
 impl OpenCodeServer {
     pub async fn start(spec: &SpawnSpec) -> HarnessResult<Self> {
-        let (server, mut startup_group) = Self::start_guarded(spec).await?;
+        let (server, mut startup_group) = Self::start_guarded(spec, None).await?;
         startup_group.disarm();
         Ok(server)
     }
 
-    async fn start_guarded(spec: &SpawnSpec) -> HarnessResult<(Self, StartupProcessGroup)> {
+    async fn start_guarded(
+        spec: &SpawnSpec,
+        tracker: Option<Arc<dyn crate::AgentProcessTracker>>,
+    ) -> HarnessResult<(Self, StartupProcessGroup)> {
         require_absolute_executable(Path::new(&spec.program))?;
         let directory = tokio::fs::canonicalize(&spec.cwd)
             .await
@@ -1219,6 +1233,22 @@ impl OpenCodeServer {
                 source,
             })?;
         let startup_group = StartupProcessGroup::new(&child);
+        let process_record = if let Some(tracker) = tracker {
+            let pid = child.id().ok_or_else(|| HarnessError::Reported {
+                kind: FailureKind::Protocol,
+                message: "OpenCode server has no process ID".into(),
+            })?;
+            let id = tracker
+                .started(pid)
+                .await
+                .map_err(|error| HarnessError::Reported {
+                    kind: FailureKind::Protocol,
+                    message: format!("Could not record OpenCode server process: {error}"),
+                })?;
+            Some((tracker, id))
+        } else {
+            None
+        };
         let stdout = child.stdout.take().ok_or_else(|| {
             HarnessError::Protocol("OpenCode did not provide a startup pipe".into())
         })?;
@@ -1296,6 +1326,7 @@ impl OpenCodeServer {
         Ok((
             Self {
                 child: Arc::new(AsyncMutex::new(child)),
+                process_record: AsyncMutex::new(process_record),
                 client,
                 address,
                 password,
@@ -1467,7 +1498,19 @@ impl OpenCodeServer {
     pub async fn shutdown(&self) -> HarnessResult<()> {
         stop_server(&mut *self.child.lock().await)
             .await
-            .map_err(|error| protocol_error("could not stop OpenCode server", error))
+            .map_err(|error| protocol_error("could not stop OpenCode server", error))?;
+        let mut record = self.process_record.lock().await;
+        if let Some((tracker, id)) = &*record {
+            tracker
+                .stopped(id)
+                .await
+                .map_err(|error| HarnessError::Reported {
+                    kind: FailureKind::Protocol,
+                    message: format!("Could not clear OpenCode server process record: {error}"),
+                })?;
+            *record = None;
+        }
+        Ok(())
     }
 
     fn request(&self, method: Method, path: &str) -> RequestBuilder {
@@ -1589,6 +1632,42 @@ fn protocol_error(context: &str, error: impl std::fmt::Display) -> HarnessError 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn process_record_failure_does_not_start_acp_fallback()
+    -> Result<(), Box<dyn std::error::Error>> {
+        struct FailingTracker;
+        #[async_trait]
+        impl crate::AgentProcessTracker for FailingTracker {
+            async fn started(&self, _pid: u32) -> Result<String, String> {
+                Err("fixture save failure".into())
+            }
+            async fn stopped(&self, _id: &str) -> Result<(), String> {
+                Err("unexpected cleanup".into())
+            }
+        }
+        let directory = tempfile::tempdir()?;
+        let program = fixture_launcher(
+            directory.path(),
+            "#!/bin/sh\nif [ \"$1\" = acp ]; then printf fallback > fallback; fi\nsleep 30\n",
+        )?;
+        let spec = SpawnSpec {
+            program,
+            cwd: directory.path().to_path_buf(),
+            ..Default::default()
+        };
+        let mut harness = OpenCodeHarness::default();
+        harness.set_process_tracker(Arc::new(FailingTracker));
+        let error = harness
+            .start(spec)
+            .await
+            .expect_err("tracking failure must stop startup");
+        assert!(error.to_string().contains("fixture save failure"));
+        assert!(harness.fallback.is_none());
+        assert!(!directory.path().join("fallback").exists());
+        Ok(())
+    }
 
     #[cfg(unix)]
     #[tokio::test]
@@ -2023,6 +2102,25 @@ mod tests {
     #[tokio::test]
     async fn native_http_contract_requires_prompt_admission_before_streaming()
     -> Result<(), Box<dyn std::error::Error>> {
+        struct Tracker {
+            pid: Mutex<Option<u32>>,
+            fail_clear: AtomicBool,
+        }
+        #[async_trait]
+        impl crate::AgentProcessTracker for Tracker {
+            async fn started(&self, pid: u32) -> Result<String, String> {
+                *self.pid.lock().map_err(|error| error.to_string())? = Some(pid);
+                Ok("fixture-record".into())
+            }
+            async fn stopped(&self, id: &str) -> Result<(), String> {
+                assert_eq!(id, "fixture-record");
+                if self.fail_clear.swap(false, Ordering::SeqCst) {
+                    return Err("fixture cleanup failure".into());
+                }
+                *self.pid.lock().map_err(|error| error.to_string())? = None;
+                Ok(())
+            }
+        }
         let root = tempfile::tempdir()?;
         let directory = root.path().canonicalize()?;
         let listener = TcpListener::bind("127.0.0.1:0").await?;
@@ -2046,7 +2144,19 @@ exec sleep 60
         let fixture = serve_native_fixture(listener, &directory);
         let client = async {
             let mut harness = OpenCodeHarness::default();
+            let tracker = Arc::new(Tracker {
+                pid: Mutex::new(None),
+                fail_clear: AtomicBool::new(true),
+            });
+            harness.set_process_tracker(tracker.clone());
             let capabilities = harness.start(spec).await?;
+            assert!(
+                tracker
+                    .pid
+                    .lock()
+                    .map_err(|error| error.to_string())?
+                    .is_some()
+            );
             assert_eq!(harness.tier(), AdapterTier::Native);
             assert!(capabilities.streaming && capabilities.resume);
             assert_eq!(harness.open_session(None).await?.as_str(), "ses_fixture");
@@ -2056,7 +2166,20 @@ exec sleep 60
                 transcript.entry(0).map(Entry::summary).as_deref(),
                 Some("agent: native fixture reply")
             );
+            let error = harness
+                .shutdown()
+                .await
+                .expect_err("cleanup must fail once");
+            assert!(error.to_string().contains("fixture cleanup failure"));
+            assert!(harness.server.is_some());
             harness.shutdown().await?;
+            assert!(
+                tracker
+                    .pid
+                    .lock()
+                    .map_err(|error| error.to_string())?
+                    .is_none()
+            );
             Ok::<_, Box<dyn std::error::Error>>(())
         };
         timeout(REQUEST_TIMEOUT, async { tokio::try_join!(fixture, client) }).await??;
