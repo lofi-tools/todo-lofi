@@ -1237,7 +1237,9 @@ placeholder tabs and no unearned state badges.
   directory replaced by a symlink after opening. External editor paths and the
   remaining filesystem operations still need a confinement audit. ACP file reads
   and atomic writes also use descriptor-relative operations on Unix, with
-  fixtures for directory substitution and preserved file permissions. Configured
+  fixtures for directory substitution and preserved file permissions. ACP
+  attachment grants open every path component without following symlinks and
+  retain the opened file for the duration of the prompt. Configured
   environment substitutions and their timeout remain to be implemented and
   verified.
 - [ ] Packaging and CI: macOS 13+, Ubuntu 24.04+, pinned Zig, Tauri build,

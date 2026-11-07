@@ -2,7 +2,7 @@
 //! the session's roots.
 
 use std::collections::{HashMap, hash_map::Entry};
-use std::fs::{File, OpenOptions};
+use std::fs::File;
 use std::io::{ErrorKind, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -275,15 +275,11 @@ fn open_attachment(path: &Path) -> anyhow::Result<File> {
     if !path.is_absolute() || path.canonicalize()? != path || !path.symlink_metadata()?.is_file() {
         anyhow::bail!("{} is not a regular attachment file", path.display());
     }
-    let mut options = OpenOptions::new();
-    options.read(true);
     #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
-    }
+    let file = open_confined_file(Path::new("/"), path)?;
+    #[cfg(not(unix))]
+    let file = std::fs::OpenOptions::new().read(true).open(path)?;
     // Retain the open file so replacing its path during the turn cannot redirect a read.
-    let file = options.open(path)?;
     if !file.metadata()?.is_file() || path.canonicalize()? != path {
         anyhow::bail!("{} is not a regular attachment file", path.display());
     }
@@ -437,6 +433,23 @@ mod tests {
                 .read_text_file(Path::new("folder/file"), None, None)
                 .is_err()
         );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn attachment_open_refuses_a_substituted_parent() -> anyhow::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let root = directory.path().canonicalize()?;
+        let outside = tempfile::tempdir()?;
+        std::fs::create_dir(root.join("selected"))?;
+        std::fs::write(root.join("selected/file"), "selected")?;
+        std::fs::write(outside.path().join("file"), "private")?;
+        let path = root.join("selected/file");
+        std::fs::rename(root.join("selected"), root.join("old"))?;
+        std::os::unix::fs::symlink(outside.path(), root.join("selected"))?;
+        assert!(open_confined_file(Path::new("/"), &path).is_err());
+        assert!(open_attachment(&path).is_err());
         Ok(())
     }
 
