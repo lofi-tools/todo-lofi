@@ -318,7 +318,8 @@ impl Core {
     }
 
     async fn collect_archived_worktrees(&mut self) {
-        const ARCHIVE_AGE_MILLIS: u64 = 30 * 24 * 60 * 60 * 1000;
+        // Terminal input timestamps are coalesced for up to a minute.
+        const ARCHIVE_AGE_MILLIS: u64 = 30 * 24 * 60 * 60 * 1000 + 60_000;
         let cutoff = projects::now_millis().saturating_sub(ARCHIVE_AGE_MILLIS);
         let candidates: Vec<TaskId> = self
             .tasks
@@ -4360,6 +4361,8 @@ mod tests {
             task.state = TaskState::Done;
         }
         dirty.updated_at = projects::now_millis().saturating_sub(31 * 24 * 60 * 60 * 1000);
+        recent.updated_at =
+            projects::now_millis().saturating_sub(30 * 24 * 60 * 60 * 1000 + 30_000);
         std::fs::write(dirty.proposed_worktree_path.join("draft.txt"), "keep me")?;
         core.store.save_task(&dirty).await?;
         core.store.save_task(&recent).await?;

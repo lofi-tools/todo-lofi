@@ -193,6 +193,8 @@ struct ScreenSlot {
     revision: u32,
     screen: Screen,
     frames: watch::Sender<Arc<TerminalFrame>>,
+    task_id: Option<TaskId>,
+    last_worktree_touch: Option<Instant>,
 }
 
 impl ScreenSlot {
@@ -288,6 +290,8 @@ impl TerminalHost {
             revision: 0,
             screen,
             frames,
+            task_id: None,
+            last_worktree_touch: None,
         }));
         screens.insert(id.as_str().to_string(), slot.clone());
         Ok(PreparedTerminal {
@@ -1533,6 +1537,13 @@ impl ShellState {
         rows: u16,
     ) -> Result<TerminalList, BridgeError> {
         let project_id = record.project_id.clone();
+        if let Some(task_id) = &record.task_id {
+            self.core
+                .lock()
+                .await
+                .touch_archived_worktree(task_id)
+                .await?;
+        }
         self.spawn_terminal(
             TerminalSpec {
                 id: record.id.clone(),
@@ -1577,6 +1588,8 @@ impl ShellState {
         };
         let terminal = self.terminals.prepare(spec, scrollback).await?;
         let terminal_id = terminal.id.clone();
+        terminal.slot.lock().await.task_id =
+            record.as_ref().and_then(|record| record.task_id.clone());
         if record.is_some() {
             if let Some(process) = &terminal.process {
                 let result = { self.core.lock().await.record_process(process).await };
@@ -1711,6 +1724,22 @@ impl ShellState {
         data: TerminalInput,
         follow_output: bool,
     ) -> Result<(), BridgeError> {
+        let slot = self.screen_slot(&terminal_id).await?;
+        let task_id = {
+            let slot = slot.lock().await;
+            slot.task_id.clone().filter(|_| {
+                slot.last_worktree_touch
+                    .is_none_or(|last| last.elapsed() >= Duration::from_secs(60))
+            })
+        };
+        if let Some(task_id) = task_id {
+            self.core
+                .lock()
+                .await
+                .touch_archived_worktree(&task_id)
+                .await?;
+            slot.lock().await.last_worktree_touch = Some(Instant::now());
+        }
         let completion = self
             .terminals
             .engine
@@ -1722,7 +1751,7 @@ impl ShellState {
             .await
             .map_err(|_| BridgeError::new("terminal", "the terminal writer stopped"))?
             .map_err(|error| BridgeError::new("terminal", error.to_string()))?;
-        if follow_output && let Ok(slot) = self.screen_slot(&terminal_id).await {
+        if follow_output {
             slot.lock().await.follow_output();
         }
         Ok(())
@@ -2997,6 +3026,8 @@ mod tests {
             revision: 0,
             screen,
             frames,
+            task_id: None,
+            last_worktree_touch: None,
         };
         let mut receiver = slot.subscribe();
         let old = receiver.borrow_and_update().revision;
@@ -3305,6 +3336,115 @@ mod tests {
                 .await??
                 .is_err()
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn archived_task_terminal_activity_refreshes_worktree_usage()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use shepherd_core::store::Store;
+        use shepherd_core::tasks::Task;
+
+        let directory = TestDirectory::new()?;
+        let repository = TestRepository::new()?;
+        let state = ShellState::load(
+            directory.path(),
+            Box::new(ScriptedHarnessFactory),
+            TerminalHost::default(),
+        )
+        .await?;
+        let projects = state
+            .add_project(repository.path().display().to_string())
+            .await?;
+        let project_id = projects
+            .projects
+            .first()
+            .ok_or("missing project")?
+            .id
+            .clone();
+        let mut task = Task::draft(
+            ProjectId::new(project_id.clone()),
+            "Archived task",
+            &repository.repository().git_dir,
+        );
+        GitService.create_worktree(
+            repository.repository(),
+            &task.proposed_worktree_path,
+            &task.proposed_branch,
+            "main",
+        )?;
+        task.branch = Some(task.proposed_branch.clone());
+        task.worktree_path = Some(task.proposed_worktree_path.clone());
+        task.state = TaskState::Done;
+        task.updated_at = now_millis().saturating_sub(29 * 24 * 60 * 60 * 1000);
+        let store = TursoStore::open_at(&directory.path().join("shepherd.db")).await?;
+        store.save_task(&task).await?;
+        drop(state);
+
+        let state = ShellState::load(
+            directory.path(),
+            Box::new(ScriptedHarnessFactory),
+            TerminalHost::default(),
+        )
+        .await?;
+        let terminals = state
+            .start_terminal(project_id, Some(task.id.to_string()), 80, 24)
+            .await?;
+        let terminal_id = terminals
+            .terminals
+            .first()
+            .ok_or("missing terminal")?
+            .id
+            .clone();
+        let after_launch = store
+            .load_tasks()
+            .await?
+            .first()
+            .ok_or("missing task")?
+            .updated_at;
+        assert!(after_launch > task.updated_at);
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        state
+            .terminal_write(terminal_id.clone(), TerminalInput::Text(" ".into()), true)
+            .await?;
+        let after_input = store
+            .load_tasks()
+            .await?
+            .first()
+            .ok_or("missing task")?
+            .updated_at;
+        assert!(after_input > after_launch);
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        state
+            .terminal_write(terminal_id.clone(), TerminalInput::Text(" ".into()), true)
+            .await?;
+        assert_eq!(
+            store
+                .load_tasks()
+                .await?
+                .first()
+                .ok_or("missing task")?
+                .updated_at,
+            after_input
+        );
+        state.close_terminal(terminal_id.clone()).await?;
+        tokio::time::timeout(Duration::from_secs(4), async {
+            loop {
+                if state
+                    .core
+                    .lock()
+                    .await
+                    .terminal_record(&TerminalId::new(&terminal_id))?
+                    .ended_at
+                    .is_some()
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            Ok::<(), CoreError>(())
+        })
+        .await??;
         Ok(())
     }
 
