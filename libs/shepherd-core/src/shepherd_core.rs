@@ -4394,6 +4394,37 @@ mod tests {
             .exec(&mut database_probe)
             .await?;
 
+        let failing_id = stale_task.as_str().replace('\'', "''");
+        let trigger = format!(
+            "CREATE TRIGGER block_archive BEFORE UPDATE ON tasks WHEN NEW.state = 'done' AND NEW.id = '{failing_id}' BEGIN SELECT RAISE(ABORT, 'archive write blocked'); END"
+        );
+        toasty::sql::statement(&trigger)
+            .exec(&mut database_probe)
+            .await?;
+        let error = core
+            .execute(Command::ArchiveReviewed {
+                task_ids: review_ids.clone(),
+            })
+            .await
+            .err()
+            .ok_or("the archive write should fail")?;
+        assert!(error.to_string().contains("archive write blocked"));
+        let saved = core.store.load_tasks().await?;
+        for task_id in &review_ids {
+            assert_eq!(core.task(task_id)?.state, TaskState::Review);
+            assert_eq!(
+                saved
+                    .iter()
+                    .find(|task| &task.id == task_id)
+                    .ok_or("missing task")?
+                    .state,
+                TaskState::Review
+            );
+        }
+        toasty::sql::statement("DROP TRIGGER block_archive")
+            .exec(&mut database_probe)
+            .await?;
+
         core.drain_events();
         assert!(matches!(
             core.execute(Command::ArchiveReviewed {

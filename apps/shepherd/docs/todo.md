@@ -1174,7 +1174,8 @@ placeholder tabs and no unearned state badges.
   owners; fixtures verify failed attachment updates roll back the whole batch.
   Normal task-state saves and interrupted shutdowns commit eligible transcript
   entries in the same transaction. A failed shutdown save retains its session
-  and can be retried while draining. Multi-task archive still needs review.
+  and can be retried while draining. Multi-task archive rolls back on a
+  mid-batch database error and can be retried.
 - [ ] Bounded transcript, stderr, search and frame buffers.
 - [ ] Multiple agents and projects: three agents across two projects, no state
   bleed, no polling.

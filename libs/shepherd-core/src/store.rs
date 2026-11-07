@@ -832,13 +832,24 @@ impl Store for TursoStore {
         let mut db = self.db.lock().await;
         let mut transaction = db.transaction().await?;
         for task in tasks {
-            let updated = toasty::sql::statement(
+            let result = toasty::sql::statement(
                 "UPDATE tasks SET state = 'done', updated_at = ?2 WHERE id = ?1 AND state = 'review'",
             )
             .bind(task.id.as_str())
             .bind(task.updated_at as i64)
             .exec(&mut transaction)
-            .await?;
+            .await;
+            let updated = match result {
+                Ok(updated) => updated,
+                Err(error) => {
+                    if let Err(rollback_error) = transaction.rollback().await {
+                        return Err(StoreError::Backend(format!(
+                            "archive failed: {error}; rollback failed: {rollback_error}"
+                        )));
+                    }
+                    return Err(error.into());
+                }
+            };
             if updated != 1 {
                 transaction.rollback().await?;
                 return Err(StoreError::ReviewStateChanged {
