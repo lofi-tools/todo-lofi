@@ -1205,6 +1205,10 @@ placeholder tabs and no unearned state badges.
   fixture covers the lifecycle. Records from interrupted startup may remain for
   inspection. Codex exec, OpenCode's ACP fallback, Claude ACP, and stopping
   surviving processes remain.
+  ACP supervision reports a failed process-group signal even if killing the
+  leader succeeds, with an injected-failure fixture. The ACP harness currently
+  closes asynchronously, so quit still does not wait for or propagate that
+  cleanup result; this must be addressed before treating ACP cleanup as verified.
 - [ ] 30-day archived-worktree collection, dirty skip, branch-tip recreation.
   Startup preserves dirty worktrees and lists collection failures with their
   reasons; clean collection retains the tip and prunes Git worktree metadata.

@@ -1031,7 +1031,16 @@ async fn supervise_agent(
     let code = match status {
         Ok(status) => status.code(),
         Err(error) => {
-            tracing::debug!(%error, "could not reap the ACP agent");
+            tracing::warn!(%error, "could not stop or reap the ACP agent");
+            if let Some(events) = &events
+                && events
+                    .send(AcpEvent::ProtocolFailed {
+                        message: format!("Could not stop or reap the ACP agent: {error}"),
+                    })
+                    .is_err()
+            {
+                tracing::debug!("ACP protocol failure receiver closed");
+            }
             None
         }
     };
@@ -1059,18 +1068,35 @@ fn kill_agent_process(child: &mut async_process::Child) -> std::io::Result<()> {
         return Ok(());
     }
     #[cfg(unix)]
-    {
-        let group = libc::pid_t::try_from(child.id()).map_err(std::io::Error::other)?;
-        // `command()` puts the still-owned child in its own process group.
+    return kill_agent_process_with(child, |group| {
         if unsafe { libc::killpg(group, libc::SIGKILL) } == 0 {
-            return Ok(());
+            Ok(())
+        } else {
+            Err(std::io::Error::last_os_error())
         }
-        let error = std::io::Error::last_os_error();
-        if error.raw_os_error() != Some(libc::ESRCH) {
-            tracing::debug!(%error, "could not stop the ACP process group");
-        }
-    }
+    });
+    #[cfg(not(unix))]
     child.kill()
+}
+
+#[cfg(unix)]
+fn kill_agent_process_with(
+    child: &mut async_process::Child,
+    signal_group: impl FnOnce(libc::pid_t) -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    let group = libc::pid_t::try_from(child.id()).map_err(std::io::Error::other)?;
+    match signal_group(group) {
+        Ok(()) => Ok(()),
+        Err(error) if error.raw_os_error() == Some(libc::ESRCH) => child.kill(),
+        Err(error) => match child.kill() {
+            Ok(()) => Err(std::io::Error::other(format!(
+                "could not stop ACP process group: {error}"
+            ))),
+            Err(child_error) => Err(std::io::Error::other(format!(
+                "could not stop ACP process group: {error}; could not stop ACP child: {child_error}"
+            ))),
+        },
+    }
 }
 
 /// The trailing stderr lines worth showing in an error state.
@@ -1081,6 +1107,24 @@ pub fn stderr_summary(lines: &[String]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn failed_acp_group_signal_reports_error_and_stops_child()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut child = async_process::Command::new("/bin/sleep")
+            .arg("30")
+            .kill_on_drop(true)
+            .spawn()?;
+        let error = kill_agent_process_with(&mut child, |_| {
+            Err(std::io::Error::other("fixture group failure"))
+        })
+        .expect_err("group failure must be reported");
+        assert!(error.to_string().contains("fixture group failure"));
+        let status = tokio::time::timeout(Duration::from_secs(3), child.status()).await??;
+        assert!(!status.success());
+        Ok(())
+    }
 
     #[test]
     fn stderr_flood_keeps_a_bounded_queue_and_the_latest_diagnostics()
