@@ -1107,6 +1107,63 @@ impl CodexHarness {
     }
 }
 
+impl CodexHarness {
+    async fn shutdown_with_signal(
+        &mut self,
+        signal_group: impl FnOnce(&Child) -> std::io::Result<()> + Send,
+    ) -> HarnessResult<()> {
+        if !self.started {
+            return Ok(());
+        }
+        self.closing.store(true, Ordering::Relaxed);
+        self.outgoing = None;
+
+        let code = match self.child.as_ref() {
+            Some(child) => {
+                let mut child = child.lock().await;
+                signal_group(&child).map_err(|error| {
+                    HarnessError::Protocol(format!(
+                        "could not stop the Codex app-server process group: {error}"
+                    ))
+                })?;
+                child
+                    .kill()
+                    .await
+                    .and_then(|()| child.try_wait())
+                    .map_err(|error| {
+                        HarnessError::Protocol(format!(
+                            "could not stop the Codex app-server process: {error}"
+                        ))
+                    })?
+                    .and_then(|status| status.code())
+            }
+            None => None,
+        };
+        self.child = None;
+
+        if let Some(task) = self.stdout_task.take() {
+            task.abort();
+        }
+        if let Some(task) = self.stderr_task.take() {
+            task.abort();
+        }
+        if let Some(task) = self.writer_task.take() {
+            task.abort();
+        }
+        self.started = false;
+        self.session_id = None;
+        self.pending.lock().await.approvals.clear();
+
+        self.sender
+            .send(HarnessEvent::Exited {
+                code,
+                stderr: stderr_tail(&self.stderr),
+            })
+            .map_err(|_| HarnessError::ChannelClosed)?;
+        Ok(())
+    }
+}
+
 impl Default for CodexHarness {
     fn default() -> Self {
         Self::new()
@@ -1288,55 +1345,7 @@ impl AgentHarness for CodexHarness {
     }
 
     async fn shutdown(&mut self) -> HarnessResult<()> {
-        if !self.started {
-            return Ok(());
-        }
-        self.closing.store(true, Ordering::Relaxed);
-        self.outgoing = None;
-
-        let code = match self.child.as_ref() {
-            Some(child) => {
-                let mut child = child.lock().await;
-                stop_app_server_group(&child).map_err(|error| {
-                    HarnessError::Protocol(format!(
-                        "could not stop the Codex app-server process group: {error}"
-                    ))
-                })?;
-                child
-                    .kill()
-                    .await
-                    .and_then(|()| child.try_wait())
-                    .map_err(|error| {
-                        HarnessError::Protocol(format!(
-                            "could not stop the Codex app-server process: {error}"
-                        ))
-                    })?
-                    .and_then(|status| status.code())
-            }
-            None => None,
-        };
-        self.child = None;
-
-        if let Some(task) = self.stdout_task.take() {
-            task.abort();
-        }
-        if let Some(task) = self.stderr_task.take() {
-            task.abort();
-        }
-        if let Some(task) = self.writer_task.take() {
-            task.abort();
-        }
-        self.started = false;
-        self.session_id = None;
-        self.pending.lock().await.approvals.clear();
-
-        self.sender
-            .send(HarnessEvent::Exited {
-                code,
-                stderr: stderr_tail(&self.stderr),
-            })
-            .map_err(|_| HarnessError::ChannelClosed)?;
-        Ok(())
+        self.shutdown_with_signal(stop_app_server_group).await
     }
 }
 
@@ -3582,6 +3591,38 @@ esac
         assert_ne!(unsafe { libc::getpgrp() }, pid);
         drop(child);
         harness.shutdown().await?;
+        tokio::time::sleep(Duration::from_millis(1300)).await;
+        assert!(!directory.path().join("escaped").exists());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn failed_app_server_group_signal_retains_process_for_retry()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = TempDir::new()?;
+        let script = PROTOCOL_STUB.replace(
+            "while IFS= read -r line; do",
+            "(sleep 1; printf escaped > escaped) &\nwhile IFS= read -r line; do",
+        );
+        let stub = write_stub(&directory, "codex-signal-failure.sh", &script);
+        let mut harness = CodexHarness::new();
+        harness.start(spec(&stub, directory.path())).await?;
+        let failure = harness
+            .shutdown_with_signal(|_| Err(std::io::Error::other("fixture signal failure")))
+            .await;
+        assert!(failure.is_err());
+        assert!(harness.started);
+        let mut child = harness
+            .child
+            .as_ref()
+            .ok_or("process handle was discarded")?
+            .lock()
+            .await;
+        assert!(child.id().is_some());
+        assert!(child.try_wait()?.is_none());
+        drop(child);
+        harness.shutdown().await?;
+        assert!(!harness.started && harness.child.is_none());
         tokio::time::sleep(Duration::from_millis(1300)).await;
         assert!(!directory.path().join("escaped").exists());
         Ok(())

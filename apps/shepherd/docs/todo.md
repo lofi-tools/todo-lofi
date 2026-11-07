@@ -1244,7 +1244,9 @@ placeholder tabs and no unearned state badges.
   Quit now returns an agent shutdown error and remains in the draining state
   with the session retained; a fixture verifies that a later quit retries it.
   Codex app-server shutdown propagates process-group and child-stop errors and
-  retains the child handle for retry; operating-system failure injection remains.
+  retains the child handle for retry. An injected group-signal failure verifies
+  the handle is retained and a later shutdown stops the process group; direct
+  child-stop failure injection remains.
   OpenCode shutdown retains its server when stopping it fails; an injected
   group-signal failure verifies the process remains available for a retry.
 - [ ] Bounded transcript, stderr, search and frame buffers.
