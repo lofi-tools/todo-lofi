@@ -8,12 +8,12 @@
 
 use std::collections::HashMap;
 
+use agent_client_protocol::schema::MaybeUndefined;
 use agent_client_protocol::schema::v1::{
     AuthMethod, AvailableCommand, ContentBlock, PermissionOption, SessionConfigOption,
     SessionModeId, SessionModeState, SessionNotification, SessionUpdate, ToolCall, ToolCallContent,
     ToolCallStatus, ToolCallUpdate, UsageUpdate,
 };
-use agent_client_protocol::schema::MaybeUndefined;
 
 /// Status of a tool call row.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -377,15 +377,9 @@ impl Transcript {
             .iter()
             .rposition(|entry| matches!(entry.kind, EntryKind::UserMessage { .. }))
             .map_or(0, |index| index + 1);
-        self.entries[turn_start..].iter().any(|entry| {
-            matches!(
-                entry.kind,
-                EntryKind::Permission {
-                    decision: None,
-                    ..
-                }
-            )
-        })
+        self.entries[turn_start..]
+            .iter()
+            .any(|entry| matches!(entry.kind, EntryKind::Permission { decision: None, .. }))
     }
 
     /// What the agent is doing, from the transcript's point of view. `None`
@@ -878,9 +872,7 @@ mod tests {
     }
 
     fn tool_call(id: &str, title: &str, status: ToolCallStatus) -> SessionUpdate {
-        SessionUpdate::ToolCall(
-            ToolCall::new(id.to_string(), title.to_string()).status(status),
-        )
+        SessionUpdate::ToolCall(ToolCall::new(id.to_string(), title.to_string()).status(status))
     }
 
     /// A `session/set_config_option` answer carries the full current set, and
@@ -936,14 +928,21 @@ mod tests {
         assert_eq!(transcript.len(), 1);
         assert_eq!(transcript.activity(), Some(Activity::Thinking));
         assert_eq!(transcript.live_entry(), Some(0));
-        assert_eq!(transcript.entry(0).map(|row| row.summary()), Some("thought: Let me think.".to_string()));
+        assert_eq!(
+            transcript.entry(0).map(|row| row.summary()),
+            Some("thought: Let me think.".to_string())
+        );
     }
 
     #[test]
     fn a_finished_thought_is_no_longer_live() {
         let mut transcript = Transcript::default();
         transcript.apply_update(&thought("Considering options"));
-        transcript.apply_update(&tool_call("t1", "Read src/main.rs", ToolCallStatus::InProgress));
+        transcript.apply_update(&tool_call(
+            "t1",
+            "Read src/main.rs",
+            ToolCallStatus::InProgress,
+        ));
         assert_eq!(
             transcript.live_entry(),
             None,
@@ -951,9 +950,15 @@ mod tests {
         );
         assert_eq!(
             transcript.activity(),
-            Some(Activity::Tool { title: "Read src/main.rs".to_string() })
+            Some(Activity::Tool {
+                title: "Read src/main.rs".to_string()
+            })
         );
-        transcript.apply_update(&tool_call("t1", "Read src/main.rs", ToolCallStatus::Completed));
+        transcript.apply_update(&tool_call(
+            "t1",
+            "Read src/main.rs",
+            ToolCallStatus::Completed,
+        ));
         assert_eq!(transcript.activity(), None, "a finished turn is idle");
     }
 

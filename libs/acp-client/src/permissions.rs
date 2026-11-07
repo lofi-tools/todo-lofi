@@ -105,10 +105,7 @@ impl ToolPermissions {
     /// Set a tool-level default, creating the tool entry when needed. This is
     /// what the permission card's "Always allow / Always deny" buttons write.
     pub fn set_tool_default(&mut self, tool: &str, rule: PermissionRule) {
-        self.tools
-            .entry(tool.to_string())
-            .or_default()
-            .default = rule;
+        self.tools.entry(tool.to_string()).or_default().default = rule;
     }
 }
 
@@ -127,7 +124,10 @@ fn matches_any(rules: &[PatternRule], haystack: &str) -> bool {
             Err(error) => {
                 // A hand-edited pattern must never break answering; it just
                 // stops matching until fixed.
-                tracing::debug!("ignoring invalid permission pattern {:?}: {error}", rule.pattern);
+                tracing::debug!(
+                    "ignoring invalid permission pattern {:?}: {error}",
+                    rule.pattern
+                );
                 false
             }
         }
@@ -276,10 +276,7 @@ mod tests {
         // Allow matches on its own.
         assert_eq!(policy.decide("execute", "cargo test --all"), Verdict::Allow);
         // Nothing matches: the tool default (confirm) applies.
-        assert_eq!(
-            policy.decide("execute", "cargo build"),
-            Verdict::Confirm
-        );
+        assert_eq!(policy.decide("execute", "cargo build"), Verdict::Confirm);
         // Other tools fall back to the global default.
         assert_eq!(policy.decide("read", "cargo test --all"), Verdict::Confirm);
         // Confirm patterns beat allow patterns.
@@ -304,11 +301,14 @@ mod tests {
         assert_eq!(policy.decide("read", "anything"), Verdict::Allow);
         assert_eq!(policy.decide("edit", "anything"), Verdict::Deny);
         // An invalid regex never matches and never panics.
-        policy.tools.get_mut("read").expect("read rule").always_allow.push(
-            PatternRule {
+        policy
+            .tools
+            .get_mut("read")
+            .expect("read rule")
+            .always_allow
+            .push(PatternRule {
                 pattern: "([invalid".to_string(),
-            },
-        );
+            });
         assert_eq!(policy.decide("read", "anything"), Verdict::Allow);
     }
 }
