@@ -1375,7 +1375,9 @@ placeholder tabs and no unearned state badges.
   On 2026-11-07 the default offline headless agent-harness suite passed 124
   tests (two live tests ignored), the core suite passed 120 tests (three
   ignored), and the desktop-backend suite passed 95 tests (one local throughput
-  benchmark ignored) on macOS. No live agent or UI window was used.
+  benchmark ignored) on macOS. The headless Chromium suite passed 110 tests
+  after correcting the search-keycap expectations and recovered frame error
+  handling. No live agent or UI window was used.
 - [ ] Packaging and CI: macOS 13+, Ubuntu 24.04+, pinned Zig, Tauri build,
   platform smoke.
   The local macOS debug app bundle declares macOS 13.0 in both Info.plist and
