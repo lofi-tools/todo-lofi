@@ -15,18 +15,28 @@ struct EnvironmentProcessGroup(Option<i32>);
 #[cfg(unix)]
 impl EnvironmentProcessGroup {
     fn stop(&mut self) -> std::io::Result<()> {
-        let Some(group) = self.0.take() else {
+        self.stop_with(|group| {
+            if unsafe { libc::killpg(group, libc::SIGKILL) } == 0 {
+                Ok(())
+            } else {
+                Err(std::io::Error::last_os_error())
+            }
+        })
+    }
+
+    fn stop_with(
+        &mut self,
+        signal: impl FnOnce(i32) -> std::io::Result<()>,
+    ) -> std::io::Result<()> {
+        let Some(group) = self.0 else {
             return Ok(());
         };
-        if unsafe { libc::killpg(group, libc::SIGKILL) } == 0 {
-            return Ok(());
+        match signal(group) {
+            Ok(()) => self.0 = None,
+            Err(error) if error.raw_os_error() == Some(libc::ESRCH) => self.0 = None,
+            Err(error) => return Err(error),
         }
-        let error = std::io::Error::last_os_error();
-        if error.raw_os_error() == Some(libc::ESRCH) {
-            Ok(())
-        } else {
-            Err(error)
-        }
+        Ok(())
     }
 
     fn disarm(&mut self) {
@@ -243,6 +253,24 @@ impl AgentSettings {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn failed_environment_group_signal_keeps_identity_for_retry() -> std::io::Result<()> {
+        let mut group = EnvironmentProcessGroup(Some(42));
+        assert!(
+            group
+                .stop_with(|_| Err(std::io::Error::other("fixture failure")))
+                .is_err()
+        );
+        assert_eq!(group.0, Some(42));
+        group.stop_with(|group| {
+            assert_eq!(group, 42);
+            Ok(())
+        })?;
+        assert!(group.0.is_none());
+        Ok(())
+    }
 
     #[cfg(unix)]
     #[tokio::test]

@@ -1344,7 +1344,8 @@ placeholder tabs and no unearned state badges.
   exclude their output. Resolution updates the environment only after every
   command succeeds, so a failed attempt can be retried from the original map.
   Oversized output and failed commands with inherited
-  stdout fail promptly; any process-group cleanup failure is reported.
+  stdout fail promptly; any process-group cleanup failure is reported and
+  retains the group for the cleanup guard's retry.
   Cancellation also stops the command's process group on Unix; a local fixture
   checks that a descendant cannot write after the resolver is dropped. Settings
   supply per-agent maps with project overrides
