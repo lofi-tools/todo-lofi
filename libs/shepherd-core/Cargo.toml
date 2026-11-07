@@ -23,6 +23,7 @@ tempfile = { version = "3", optional = true }
 thiserror.workspace = true
 toasty = { version = "0.7", features = ["turso"] }
 toasty-driver-turso = "0.7"
+turso_parser = "0.6.1"
 tokio.workspace = true
 tracing.workspace = true
 url.workspace = true

@@ -37,6 +37,14 @@ pub enum StoreError {
         "unknown database migration {name}; this database may require a newer Shepherd version"
     )]
     UnknownMigration { name: String },
+    #[error("invalid migration {name}: {reason}")]
+    InvalidMigration { name: String, reason: String },
+    #[error("migration {name} failed at statement {statement}: {reason}")]
+    MigrationFailed {
+        name: String,
+        statement: usize,
+        reason: String,
+    },
     #[error("could not back up the database to {path}: {reason}")]
     Backup { path: String, reason: String },
     #[error("invalid database row: {0}")]
@@ -1030,6 +1038,17 @@ impl TursoStore {
 }
 
 async fn apply_migrations(db: &mut toasty::db::Db) -> Result<(), StoreError> {
+    apply_migration_set(db, MIGRATIONS).await
+}
+
+async fn apply_migration_set(
+    db: &mut toasty::db::Db,
+    migrations: &[Migration],
+) -> Result<(), StoreError> {
+    let statements = migrations
+        .iter()
+        .map(parse_migration)
+        .collect::<Result<Vec<_>, _>>()?;
     toasty::sql::statement(
         "CREATE TABLE IF NOT EXISTS _migrations_history (\
             name TEXT NOT NULL PRIMARY KEY, \
@@ -1039,7 +1058,7 @@ async fn apply_migrations(db: &mut toasty::db::Db) -> Result<(), StoreError> {
     .exec(&mut *db)
     .await?;
 
-    for migration in MIGRATIONS {
+    for (migration, statements) in migrations.iter().zip(statements) {
         let expected = checksum(migration.sql);
         let rows = toasty::sql::query("SELECT checksum FROM _migrations_history WHERE name = ?1")
             .column_types([Type::String])
@@ -1065,16 +1084,40 @@ async fn apply_migrations(db: &mut toasty::db::Db) -> Result<(), StoreError> {
         }
 
         let mut transaction = db.transaction().await?;
-        for statement in split_sql(migration.sql) {
-            toasty::sql::statement(statement)
+        for (index, statement) in statements.iter().enumerate() {
+            if let Err(error) = toasty::sql::statement(*statement)
                 .exec(&mut transaction)
-                .await?;
+                .await
+            {
+                let mut reason = error.to_string();
+                if let Err(rollback_error) = transaction.rollback().await {
+                    reason.push_str(&format!("; rollback failed: {rollback_error}"));
+                }
+                return Err(StoreError::MigrationFailed {
+                    name: migration.name.to_owned(),
+                    statement: index + 1,
+                    reason,
+                });
+            }
         }
-        toasty::sql::statement("INSERT INTO _migrations_history (name, checksum) VALUES (?1, ?2)")
-            .bind(migration.name)
-            .bind(&expected)
-            .exec(&mut transaction)
-            .await?;
+        if let Err(error) = toasty::sql::statement(
+            "INSERT INTO _migrations_history (name, checksum) VALUES (?1, ?2)",
+        )
+        .bind(migration.name)
+        .bind(&expected)
+        .exec(&mut transaction)
+        .await
+        {
+            let mut reason = error.to_string();
+            if let Err(rollback_error) = transaction.rollback().await {
+                reason.push_str(&format!("; rollback failed: {rollback_error}"));
+            }
+            return Err(StoreError::MigrationFailed {
+                name: migration.name.to_owned(),
+                statement: statements.len() + 1,
+                reason,
+            });
+        }
         transaction.commit().await?;
     }
 
@@ -1091,10 +1134,39 @@ pub(crate) fn checksum(input: &str) -> String {
         .collect::<String>()
 }
 
-fn split_sql(sql: &str) -> impl Iterator<Item = &str> {
-    sql.split(';')
-        .map(str::trim)
-        .filter(|statement| !statement.is_empty())
+fn parse_migration<'a>(migration: &'a Migration) -> Result<Vec<&'a str>, StoreError> {
+    let mut parser = turso_parser::parser::Parser::new(migration.sql.as_bytes());
+    let mut statements = Vec::new();
+    let mut start = 0;
+    loop {
+        let command = parser
+            .next_cmd()
+            .map_err(|error| StoreError::InvalidMigration {
+                name: migration.name.to_owned(),
+                reason: error.to_string(),
+            })?;
+        let Some(_) = command else {
+            break;
+        };
+        let end = parser.offset();
+        let statement = migration
+            .sql
+            .get(start..end)
+            .ok_or_else(|| StoreError::InvalidMigration {
+                name: migration.name.to_owned(),
+                reason: "parser returned an invalid statement boundary".into(),
+            })?
+            .trim();
+        statements.push(statement);
+        start = end;
+    }
+    if statements.is_empty() {
+        return Err(StoreError::InvalidMigration {
+            name: migration.name.to_owned(),
+            reason: "migration has no SQL statements".into(),
+        });
+    }
+    Ok(statements)
 }
 
 fn parse_project(value: Value) -> Result<Project, StoreError> {
@@ -2015,6 +2087,71 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn migration_parser_preserves_quoted_semicolons_and_comments()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut db = toasty::Db::builder().build(Turso::in_memory()).await?;
+        let migrations = [Migration {
+            name: "fixture.sql",
+            sql: "-- comment; with a semicolon\nCREATE TABLE example (value TEXT); INSERT INTO example VALUES ('hello; it''s working'); /* comment; */",
+        }];
+        apply_migration_set(&mut db, &migrations).await?;
+        let rows = toasty::sql::query("SELECT value FROM example")
+            .column_types([Type::String])
+            .exec(&mut db)
+            .await?;
+        let Some(Value::Record(record)) = rows.first() else {
+            return Err("missing migration row".into());
+        };
+        assert_eq!(required_string(record.first())?, "hello; it's working");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn migration_failure_rolls_back_schema_and_history()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut db = toasty::Db::builder().build(Turso::in_memory()).await?;
+        let migrations = [Migration {
+            name: "broken.sql",
+            sql: "CREATE TABLE example (value TEXT); INSERT INTO missing_table VALUES ('fail');",
+        }];
+        assert!(
+            matches!(apply_migration_set(&mut db, &migrations).await, Err(StoreError::MigrationFailed { name, statement: 2, .. }) if name == "broken.sql")
+        );
+        let tables = toasty::sql::query("SELECT name FROM sqlite_schema WHERE name = 'example'")
+            .column_types([Type::String])
+            .exec(&mut db)
+            .await?;
+        assert!(tables.is_empty());
+        let history = toasty::sql::query("SELECT name FROM _migrations_history")
+            .column_types([Type::String])
+            .exec(&mut db)
+            .await?;
+        assert!(history.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn malformed_migration_is_rejected_before_any_schema_changes()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut db = toasty::Db::builder().build(Turso::in_memory()).await?;
+        let migrations = [Migration {
+            name: "malformed.sql",
+            sql: "CREATE TABLE example (value TEXT); INSERT INTO example VALUES ('unterminated);",
+        }];
+        assert!(
+            matches!(apply_migration_set(&mut db, &migrations).await, Err(StoreError::InvalidMigration { name, .. }) if name == "malformed.sql")
+        );
+        let tables = toasty::sql::query(
+            "SELECT name FROM sqlite_schema WHERE name IN ('example', '_migrations_history')",
+        )
+        .column_types([Type::String])
+        .exec(&mut db)
+        .await?;
+        assert!(tables.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn backs_up_old_database_before_migrating_and_preserves_rows()
     -> Result<(), Box<dyn std::error::Error>> {
         let directory = tempfile::tempdir()?;
@@ -2025,7 +2162,7 @@ mod tests {
         toasty::sql::statement("CREATE TABLE _migrations_history (name TEXT NOT NULL PRIMARY KEY, checksum TEXT NOT NULL)")
             .exec(&mut db).await?;
         for migration in MIGRATIONS.iter().take(MIGRATIONS.len() - 1) {
-            for statement in split_sql(migration.sql) {
+            for statement in parse_migration(migration)? {
                 toasty::sql::statement(statement).exec(&mut db).await?;
             }
             toasty::sql::statement(
@@ -2163,7 +2300,7 @@ mod tests {
         )
         .exec(&mut db)
         .await?;
-        for statement in split_sql(first.sql) {
+        for statement in parse_migration(first)? {
             toasty::sql::statement(statement).exec(&mut db).await?;
         }
         toasty::sql::statement("INSERT INTO projects (id, path, name, created_at) VALUES ('project', '/legacy', 'Legacy', 1)")

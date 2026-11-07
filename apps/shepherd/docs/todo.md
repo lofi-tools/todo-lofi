@@ -1168,7 +1168,9 @@ placeholder tabs and no unearned state badges.
   Existing file databases receive a retained Turso snapshot in a private
   `<database>.pre-migration-<id>/snapshot.db` directory before pending
   migrations; a failed backup or unknown migration blocks the migration.
-  Migration parsing and broader transaction checks remain.
+  Turso's parser validates migration statements before changes, and a failed
+  statement rolls back its migration and history entry. Broader transaction
+  checks remain.
 - [ ] Bounded transcript, stderr, search and frame buffers.
 - [ ] Multiple agents and projects: three agents across two projects, no state
   bleed, no polling.

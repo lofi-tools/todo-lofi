@@ -10240,6 +10240,7 @@ dependencies = [
  "toasty-driver-turso",
  "tokio",
  "tracing",
+ "turso_parser",
  "url",
  "uuid",
 ]
