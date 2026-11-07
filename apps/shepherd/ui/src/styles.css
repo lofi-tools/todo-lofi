@@ -535,15 +535,15 @@ textarea {
 .task-search__keys {
   inset-inline-end: 6px;
   display: flex;
-  gap: 1px;
+  gap: 0;
   max-inline-size: calc(100% - 30px);
   overflow: hidden;
   color: color-mix(in srgb, var(--text-muted) 84%, var(--surface));
-  font-size: 8px;
+  font-size: 7.5px;
 }
 
 .task-search__keys kbd {
-  padding: 0 .5px;
+  padding: 0;
   border: 1px solid var(--border);
   border-radius: 3px;
   background: color-mix(in srgb, var(--text-muted) 8%, transparent);
@@ -2202,7 +2202,7 @@ textarea {
 }
 
 .terminal-pane__bar .files-settings-button:hover {
-  background: var(--surface-raised);
+  background: color-mix(in srgb, var(--text) 6%, transparent);
 }
 
 .files-settings-menu {
@@ -2213,10 +2213,11 @@ textarea {
 }
 
 .files-pane__toolbar input[type='search'] {
+  appearance: none;
   flex: 1 1 12ch;
   min-width: 8ch;
   height: 26px;
-  padding: 2px 8px;
+  padding: 0 8px;
   border: 1px solid var(--border);
   border-radius: 6px;
   background: var(--surface-raised);

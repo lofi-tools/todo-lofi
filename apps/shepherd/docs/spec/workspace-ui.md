@@ -24,7 +24,7 @@ current layout and give future changes a point of comparison.
 - **Search tasks** sits immediately after Previous and Next in the window
   header. It has a magnifier inside the field and shows the current shortcut
   as individually bordered, muted keycaps with small text, tight spacing and
-  compact horizontal padding and
+  minimal horizontal padding and
   a very dim background when collapsed. The field expands
   with an ease transition on focus. The default is Command-Shift-F on macOS
   or Ctrl-Alt-F on Linux. Ranked matches from every project appear underneath
@@ -81,7 +81,8 @@ current layout and give future changes a point of comparison.
   project root or the selected task's worktree using a compact, themed picker;
   label the project root `/`. Put it, the filename filter, and the settings gear
   on one row, with the gear at the right. Match the filter height to the root
-  picker. Keep the gear transparent and borderless until hovered.
+  picker, with minimal vertical padding. Keep the gear transparent and
+  borderless, with a subtle background only on hover.
   Show a small folder icon on
   each directory row without an expand caret. Expand folders in place on
   demand, keeping one open path and its ancestors while closing sibling
