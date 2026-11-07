@@ -146,6 +146,8 @@ pub enum CoreError {
     Store(#[from] StoreError),
     #[error("could not recover worktree deletion for task {task_id}: {reason}")]
     WorktreeDeletionRecovery { task_id: String, reason: String },
+    #[error("task {task_id} was deleted, but staged worktree cleanup remains pending: {reason}")]
+    TaskDeletedCleanupPending { task_id: String, reason: String },
     #[error("could not save the agent session: {store}; could not stop the agent: {cleanup}")]
     SessionRecordCleanup { store: String, cleanup: String },
     #[error("Git error: {0}")]
@@ -393,7 +395,16 @@ impl Core {
     }
 
     async fn recover_worktree_deletion(
-        &self,
+        &mut self,
+        deletion: &WorktreeDeletion,
+    ) -> Result<(), CoreError> {
+        let repository = GitService::discover(&deletion.repository_root)?;
+        let _lock = GitService.lock_worktree_deletions(&repository)?;
+        self.recover_worktree_deletion_locked(deletion).await
+    }
+
+    async fn recover_worktree_deletion_locked(
+        &mut self,
         deletion: &WorktreeDeletion,
     ) -> Result<(), CoreError> {
         let invalid = || CoreError::WorktreeDeletionRecovery {
@@ -1460,6 +1471,15 @@ impl Core {
         task_id: &TaskId,
         remove_worktree: bool,
     ) -> Result<CommandResult, CoreError> {
+        if let Some(pending) = self
+            .store
+            .load_worktree_deletions()
+            .await?
+            .into_iter()
+            .find(|deletion| &deletion.task_id == task_id)
+        {
+            self.recover_worktree_deletion(&pending).await?;
+        }
         let task = self.task(task_id)?;
         if matches!(
             task.state,
@@ -1483,12 +1503,93 @@ impl Core {
         {
             session.shutdown().await?;
         }
-        if remove_worktree {
-            let (_, repository, path) = self.task_git_worktree(task_id)?;
-            GitService.remove_clean_worktree(&repository, path)?;
-            GitService.prune_worktrees(&repository)?;
+        if !remove_worktree {
+            return self.delete_task_records(task_id).await;
         }
-        self.delete_task_records(task_id).await
+        let (_, repository, path) = self.task_git_worktree(task_id)?;
+        let original_path = path.to_path_buf();
+        let _deletion_lock = GitService.lock_worktree_deletions(&repository)?;
+        let identity = uuid::Uuid::new_v4().to_string();
+        let staged_path = repository
+            .git_dir
+            .join("shepherd/worktrees")
+            .join(format!(".shepherd-deletion-{identity}"));
+        let worktree_git_dir =
+            GitService.mark_worktree_deletion(&repository, &original_path, &identity)?;
+        let deletion = WorktreeDeletion {
+            task_id: task_id.clone(),
+            repository_root: repository.root.clone(),
+            original_path,
+            staged_path,
+            worktree_git_dir,
+            identity,
+        };
+        if let Err(error) = self.store.save_worktree_deletion(&deletion).await {
+            if let Err(cleanup) = GitService.clear_worktree_deletion_marker(
+                &repository,
+                &deletion.original_path,
+                &deletion.worktree_git_dir,
+                &deletion.identity,
+            ) {
+                return Err(CoreError::WorktreeDeletionRecovery {
+                    task_id: task_id.to_string(),
+                    reason: format!(
+                        "could not save deletion intent: {error}; could not clear its marker: {cleanup}"
+                    ),
+                });
+            }
+            return Err(error.into());
+        }
+        if let Err(error) =
+            GitService.move_worktree(&repository, &deletion.original_path, &deletion.staged_path)
+        {
+            return Err(self
+                .rollback_worktree_deletion(&deletion, error.into())
+                .await);
+        }
+        match GitService.has_changes(&deletion.staged_path) {
+            Ok(false) => {}
+            Ok(true) => {
+                let error = GitError::DirtyWorktree {
+                    path: deletion.original_path.clone(),
+                };
+                return Err(self
+                    .rollback_worktree_deletion(&deletion, error.into())
+                    .await);
+            }
+            Err(error) => {
+                return Err(self
+                    .rollback_worktree_deletion(&deletion, error.into())
+                    .await);
+            }
+        }
+        let result = match self.delete_task_records(task_id).await {
+            Ok(result) => result,
+            Err(error) => return Err(self.rollback_worktree_deletion(&deletion, error).await),
+        };
+        self.recover_worktree_deletion_locked(&deletion)
+            .await
+            .map_err(|error| CoreError::TaskDeletedCleanupPending {
+                task_id: task_id.to_string(),
+                reason: error.to_string(),
+            })?;
+        Ok(result)
+    }
+
+    async fn rollback_worktree_deletion(
+        &mut self,
+        deletion: &WorktreeDeletion,
+        error: CoreError,
+    ) -> CoreError {
+        match self.recover_worktree_deletion_locked(deletion).await {
+            Ok(()) => error,
+            Err(recovery) => CoreError::WorktreeDeletionRecovery {
+                task_id: deletion.task_id.to_string(),
+                reason: format!(
+                    "deletion failed: {error}; checkout recovery remains pending: {recovery}"
+                ),
+            },
+        }
     }
 
     pub fn check_task_worktree_removal(&self, task_id: &TaskId) -> Result<(), CoreError> {
@@ -4215,6 +4316,127 @@ mod tests {
         Ok(())
     }
 
+    #[tokio::test]
+    async fn failed_task_deletion_restores_checkout_and_ignored_files()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fixture = TestRepository::new()?;
+        let database = TestDatabase::new()?;
+        let uri = database.uri();
+        let mut core = Core::with_services(
+            Box::new(TursoStore::open(&uri).await?),
+            Box::new(FakeHarnessFactory::new(vec![vec![FakeTurn::new(vec![])]])),
+        );
+        let project = add_project(&mut core, fixture.path().to_path_buf()).await?;
+        let draft = workspace_of(
+            core.execute(Command::CreateDraft {
+                project_id: project,
+                title: "Recover deletion".into(),
+                agent: Agent::Codex,
+            })
+            .await?,
+        );
+        let task_id = TaskId::new(draft.task.id);
+        let workspace = workspace_of(
+            core.execute(Command::SendPrompt {
+                task_id: task_id.clone(),
+                input: PromptInput::text("hello"),
+            })
+            .await?,
+        );
+        let worktree = PathBuf::from(workspace.task.worktree_path.ok_or("missing worktree")?);
+        let repository = GitService::discover(fixture.path())?;
+        std::fs::write(repository.git_dir.join("info/exclude"), "ignored.txt\n")?;
+        std::fs::write(worktree.join("ignored.txt"), "important ignored data")?;
+        let mut database_probe = toasty::Db::builder()
+            .build(toasty_driver_turso::Turso::new(&uri)?.experimental_index_method(true))
+            .await?;
+        toasty::sql::statement("CREATE TRIGGER block_task_deletion BEFORE DELETE ON tasks BEGIN SELECT RAISE(ABORT, 'fixture deletion failure'); END").exec(&mut database_probe).await?;
+        assert!(
+            core.execute(Command::DeleteTask {
+                task_id: task_id.clone(),
+                remove_worktree: true
+            })
+            .await
+            .is_err()
+        );
+        assert_eq!(
+            std::fs::read_to_string(worktree.join("ignored.txt"))?,
+            "important ignored data"
+        );
+        assert!(core.task(&task_id).is_ok());
+        assert!(core.store.load_worktree_deletions().await?.is_empty());
+        toasty::sql::statement("DROP TRIGGER block_task_deletion")
+            .exec(&mut database_probe)
+            .await?;
+        core.execute(Command::DeleteTask {
+            task_id: task_id.clone(),
+            remove_worktree: true,
+        })
+        .await?;
+        assert!(!worktree.exists());
+        assert!(core.task(&task_id).is_err());
+        assert!(core.store.load_worktree_deletions().await?.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn committed_task_deletion_recovers_if_journal_cleanup_fails()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fixture = TestRepository::new()?;
+        let database = TestDatabase::new()?;
+        let uri = database.uri();
+        let mut core = Core::with_services(
+            Box::new(TursoStore::open(&uri).await?),
+            Box::new(FakeHarnessFactory::new(vec![vec![FakeTurn::new(vec![])]])),
+        );
+        let project = add_project(&mut core, fixture.path().to_path_buf()).await?;
+        let draft = workspace_of(
+            core.execute(Command::CreateDraft {
+                project_id: project,
+                title: "Finish deletion".into(),
+                agent: Agent::Codex,
+            })
+            .await?,
+        );
+        let task_id = TaskId::new(draft.task.id);
+        let workspace = workspace_of(
+            core.execute(Command::SendPrompt {
+                task_id: task_id.clone(),
+                input: PromptInput::text("hello"),
+            })
+            .await?,
+        );
+        let worktree = PathBuf::from(workspace.task.worktree_path.ok_or("missing worktree")?);
+        let mut database_probe = toasty::Db::builder()
+            .build(toasty_driver_turso::Turso::new(&uri)?.experimental_index_method(true))
+            .await?;
+        toasty::sql::statement("CREATE TRIGGER block_deletion_cleanup BEFORE DELETE ON worktree_deletions BEGIN SELECT RAISE(ABORT, 'fixture cleanup failure'); END").exec(&mut database_probe).await?;
+        let error = core
+            .execute(Command::DeleteTask {
+                task_id: task_id.clone(),
+                remove_worktree: true,
+            })
+            .await
+            .err()
+            .ok_or("expected cleanup failure")?;
+        assert!(matches!(error, CoreError::TaskDeletedCleanupPending { .. }));
+        assert!(core.task(&task_id).is_err());
+        assert!(!worktree.exists());
+        assert_eq!(core.store.load_worktree_deletions().await?.len(), 1);
+        toasty::sql::statement("DROP TRIGGER block_deletion_cleanup")
+            .exec(&mut database_probe)
+            .await?;
+        drop(core);
+        let reopened = Core::load(
+            Box::new(TursoStore::open(&uri).await?),
+            Box::new(UnavailableHarnessFactory),
+        )
+        .await?;
+        assert!(!reopened.tasks.contains_key(&task_id));
+        assert!(reopened.store.load_worktree_deletions().await?.is_empty());
+        Ok(())
+    }
+
     #[test]
     fn the_task_state_machine_rejects_skipping_states() {
         let directory = TestDirectory::new().expect("temp directory");
@@ -4362,6 +4584,7 @@ mod tests {
             "wrong-identity",
             "both-paths",
             "dirty",
+            "locked",
         ] {
             let fixture = TestRepository::new()?;
             let repository = GitService::discover(fixture.path())?;
@@ -4421,11 +4644,35 @@ mod tests {
                 )?;
             }
             drop(store);
+            let lock = if scenario == "locked" {
+                Some(GitService.lock_worktree_deletions(&repository)?)
+            } else {
+                None
+            };
             let result = Core::load(
                 Box::new(TursoStore::open(&database.uri()).await?),
                 Box::new(UnavailableHarnessFactory),
             )
             .await;
+            if scenario == "locked" {
+                assert!(result.is_err());
+                assert_eq!(
+                    std::fs::read_to_string(staged.join("ignored.txt"))?,
+                    "preserve me"
+                );
+                drop(lock);
+                let core = Core::load(
+                    Box::new(TursoStore::open(&database.uri()).await?),
+                    Box::new(UnavailableHarnessFactory),
+                )
+                .await?;
+                assert!(core.store.load_worktree_deletions().await?.is_empty());
+                assert_eq!(
+                    std::fs::read_to_string(original.join("ignored.txt"))?,
+                    "preserve me"
+                );
+                continue;
+            }
             if matches!(scenario, "wrong-identity" | "both-paths" | "dirty") {
                 assert!(result.is_err());
                 assert_eq!(

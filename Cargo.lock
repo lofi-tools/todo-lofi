@@ -10221,6 +10221,8 @@ dependencies = [
  "tauri-build",
  "tempfile",
  "thiserror 1.0.69",
+ "toasty",
+ "toasty-driver-turso",
  "tokio",
  "tracing",
  "uuid",

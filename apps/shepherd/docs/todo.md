@@ -1216,11 +1216,8 @@ placeholder tabs and no unearned state badges.
   rolls back a mid-deletion failure, preserving those records, transcripts and
   attachments for retry. Draft creation commits the project selection and new
   task together, with a rollback and retry fixture for a failed task write.
-  Task deletion with worktree removal still removes the checkout before the
-  database transaction. A failed deletion can therefore leave a saved task
-  pointing at a missing checkout. Recreating its branch alone is insufficient
-  recovery because ignored files may have been removed; stage the checkout and
-  durably recover or finish removal across database failure and process death.
+  Task deletion stages the checkout before the database transaction so a
+  failed deletion can restore ignored files as well as tracked files.
   A deletion journal now survives task deletion and database reopen in both
   store implementations. A Git worktree move primitive preserves ignored
   files and registration while rejecting unsafe or occupied destinations.
@@ -1230,8 +1227,11 @@ placeholder tabs and no unearned state badges.
   Startup recovery restores a staged checkout when the task remains and
   finishes removal after task deletion, checking the marker and paths first.
   Fixtures cover both outcomes, an already-finished removal, changed files,
-  conflicting paths and a missing marker. Task deletion does not yet stage or
-  write the journal.
+  conflicting paths and a missing marker. A per-repository lock prevents
+  another Shepherd instance from recovering an active deletion. Database
+  failure and post-commit cleanup fixtures cover the live deletion path; the
+  desktop does not restore attachments after the task has already been deleted.
+  Attachment-cache staging itself still needs crash recovery.
   If an opened agent session cannot be recorded, the core stops it before
   retrying; a database-trigger fixture verifies cleanup and a subsequent start.
   A second fixture makes cleanup fail twice and verifies that the session is
@@ -1327,7 +1327,7 @@ placeholder tabs and no unearned state badges.
   contents; a debug-log fixture checks that agent output is not exposed.
   Other adapter-internal logs and live-adapter behavior remain to be audited.
   The default headless agent-harness suite passed 109 tests (two live tests
-  ignored) and the core suite passed 111 tests (three live tests ignored) on
+  ignored) and the core suite passed 116 tests (three tests ignored) on
   macOS after the confinement, environment and shutdown-recovery changes.
   The default desktop-backend suite also passed 79 tests on macOS after the
   terminal shutdown changes; one local throughput benchmark was ignored.

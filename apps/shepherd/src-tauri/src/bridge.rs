@@ -1073,9 +1073,9 @@ impl ShellState {
                 remove_worktree,
             }
         };
-        let result = core
-            .execute(command)
-            .await
+        let result = core.execute(command).await;
+        let committed = matches!(&result, Err(CoreError::TaskDeletedCleanupPending { .. }));
+        let result = result
             .map_err(BridgeError::from)
             .and_then(|result| match result {
                 CommandResult::Ack => Ok(()),
@@ -1084,7 +1084,7 @@ impl ShellState {
         Self::broadcast_core_events(&mut core, &self.events);
         drop(core);
         match result {
-            Err(error) => {
+            Err(error) if !committed => {
                 if let (Some(staged), Some(original)) = (staged, attachments) {
                     let display = staged.display().to_string();
                     tokio::task::spawn_blocking(move || {
@@ -1110,14 +1110,14 @@ impl ShellState {
                 }
                 Err(error)
             }
-            Ok(()) => {
+            outcome => {
                 if let Some(path) = staged {
                     let display = path.display().to_string();
                     tokio::task::spawn_blocking(move || attachments::remove_task(&path)).await
                         .map_err(|error| BridgeError::new("attachments", format!("Task deleted, but attachment cleanup failed at {display}: {error}")))?
                         .map_err(|error| BridgeError::new("attachments", format!("Task deleted, but attachment cleanup failed at {display}: {error}")))?;
                 }
-                Ok(())
+                outcome
             }
         }
     }
@@ -4527,6 +4527,83 @@ mod tests {
                 .is_ok()
         );
         state.quit(true).await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn committed_deletion_cleanup_error_does_not_restore_attachments()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = TestDirectory::new()?;
+        let repository = TestRepository::new()?;
+        let state = ShellState::load(
+            directory.path(),
+            Box::new(ScriptedHarnessFactory),
+            TerminalHost::default(),
+        )
+        .await?;
+        let projects = state
+            .add_project(repository.path().display().to_string())
+            .await?;
+        let project = projects.projects.first().ok_or("missing project")?;
+        let task = state
+            .create_draft(project.id.clone(), "Cleanup".into(), Agent::Codex)
+            .await?
+            .task
+            .id;
+        let attachment = state
+            .save_prompt_file(task.clone(), "notes.txt".into(), b"notes")
+            .await?;
+        state
+            .send_prompt_with_files(
+                task.clone(),
+                "Read".into(),
+                vec![attachment],
+                CodexTurnOptions::default(),
+                None,
+            )
+            .await?;
+        state
+            .resolve_approval(task.clone(), "approval-1".into(), Decision::Allow)
+            .await?;
+        let attachment_dir = directory.path().join("attachments").join(&task);
+        assert!(attachment_dir.is_dir());
+        let uri = format!("turso:{}", directory.path().join("shepherd.db").display());
+        let mut database = toasty::Db::builder()
+            .build(toasty_driver_turso::Turso::new(&uri)?.experimental_index_method(true))
+            .await?;
+        toasty::sql::statement("CREATE TRIGGER block_deletion_cleanup BEFORE DELETE ON worktree_deletions BEGIN SELECT RAISE(ABORT, 'fixture cleanup failure'); END").exec(&mut database).await?;
+        let error = state
+            .delete_task(task.clone(), true)
+            .await
+            .err()
+            .ok_or("expected cleanup error")?;
+        assert!(error.to_string().contains("was deleted"));
+        assert!(!attachment_dir.exists());
+        assert!(
+            state
+                .core
+                .lock()
+                .await
+                .task_workspace(&TaskId::new(&task))
+                .is_err()
+        );
+        toasty::sql::statement("DROP TRIGGER block_deletion_cleanup")
+            .exec(&mut database)
+            .await?;
+        state.quit(true).await?;
+        drop(state);
+        let reopened = Core::load(
+            Box::new(TursoStore::open(&uri).await?),
+            Box::new(shepherd_core::harness::UnavailableHarnessFactory),
+        )
+        .await?;
+        assert!(
+            reopened
+                .process_store()
+                .load_worktree_deletions()
+                .await?
+                .is_empty()
+        );
         Ok(())
     }
 

@@ -68,6 +68,16 @@ pub enum GitError {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct GitService;
 
+pub struct WorktreeDeletionLock(std::fs::File);
+
+impl Drop for WorktreeDeletionLock {
+    fn drop(&mut self) {
+        if let Err(error) = self.0.unlock() {
+            tracing::warn!(%error, "could not unlock worktree deletion journal");
+        }
+    }
+}
+
 impl GitService {
     pub fn primary_remote(path: &Path) -> Result<Option<String>, GitError> {
         let names = run_git(path, &["remote"])?;
@@ -270,6 +280,25 @@ impl GitService {
             .open(marker)
             .map_err(|source| GitError::Io { source })?;
         Ok(git_dir)
+    }
+
+    pub fn lock_worktree_deletions(
+        &self,
+        repository: &GitRepository,
+    ) -> Result<WorktreeDeletionLock, GitError> {
+        let directory = repository.git_dir.join("shepherd");
+        std::fs::create_dir_all(&directory).map_err(|source| GitError::Io { source })?;
+        let lock = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(directory.join("worktree-deletions.lock"))
+            .map_err(|source| GitError::Io { source })?;
+        lock.try_lock().map_err(|error| GitError::Io {
+            source: std::io::Error::other(format!("could not lock worktree deletions: {error}")),
+        })?;
+        Ok(WorktreeDeletionLock(lock))
     }
 
     pub fn verify_worktree_deletion(
@@ -1387,6 +1416,10 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let fixture = TestRepository::new()?;
         let repository = fixture.repository();
+        let lock = GitService.lock_worktree_deletions(repository)?;
+        assert!(GitService.lock_worktree_deletions(repository).is_err());
+        drop(lock);
+        let _lock = GitService.lock_worktree_deletions(repository)?;
         let original = task_worktree(&fixture)?;
         let staged = repository.git_dir.join("shepherd/worktrees/staged-fixture");
         std::fs::write(repository.git_dir.join("info/exclude"), "ignored.txt\n")?;
