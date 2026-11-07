@@ -1709,6 +1709,10 @@ impl AgentHarness for ExecHarness {
                 "the codex exec turn already finished".to_string(),
             ));
         }
+        if let Ok(error) = run.wait_errors.try_recv() {
+            run.stopping = false;
+            return Err(HarnessError::Protocol(error));
+        }
         if run.stopping {
             return Err(HarnessError::Protocol(
                 "the codex exec turn is already stopping".to_string(),
@@ -4912,9 +4916,11 @@ sleep 30
     }
 
     #[tokio::test]
-    async fn exec_wait_failure_retains_child_until_shutdown_retry()
+    async fn exec_wait_failure_retains_child_for_cancel_or_shutdown_retry()
     -> Result<(), Box<dyn std::error::Error>> {
-        for cancel_first in [false, true] {
+        for (cancel_first, retry_cancel) in
+            [(false, false), (true, false), (false, true), (true, true)]
+        {
             let mut command = Command::new("/bin/sh");
             command.args(["-c", "sleep 30"]).kill_on_drop(true);
             #[cfg(unix)]
@@ -4971,16 +4977,21 @@ sleep 30
             assert!(
                 matches!(event, Some(HarnessEvent::TurnError { text, .. }) if text.contains("fixture wait failure"))
             );
-            let error = harness
-                .shutdown_with_timeout(Duration::from_secs(3))
-                .await
-                .expect_err("wait failure must be reported");
+            let result = if retry_cancel {
+                harness.cancel().await
+            } else {
+                harness.shutdown_with_timeout(Duration::from_secs(3)).await
+            };
+            let error = result.expect_err("wait failure must be reported");
             assert!(error.to_string().contains("fixture wait failure"));
             assert!(harness.started && harness.run.is_some());
             assert!(matches!(
                 harness.receiver.try_recv(),
                 Err(mpsc::error::TryRecvError::Empty)
             ));
+            if retry_cancel {
+                harness.cancel().await?;
+            }
             harness
                 .shutdown_with_timeout(Duration::from_secs(3))
                 .await?;

@@ -1280,7 +1280,8 @@ placeholder tabs and no unearned state badges.
   child for retry. Local fixtures inject stop failures, cover both paths and
   verify that shutdown stops a real descendant process. A child-wait error is
   reported without declaring the turn finished, and shutdown retains the child
-  for retry; a fixture covers errors before and after cancellation.
+  for retry; a fixture covers errors before and after cancellation, and
+  verifies that both cancellation and shutdown can report and retry the wait.
   One exec completion fixture reported an unexpected finish during a combined
   test run; the same fixture passed 200 isolated repetitions and the exec suite
   passed ten combined repetitions. Its assertion now prints the event sequence
