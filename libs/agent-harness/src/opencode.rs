@@ -1235,7 +1235,7 @@ impl OpenCodeServer {
                 program: spec.program.clone(),
                 source,
             })?;
-        let startup_group = StartupProcessGroup::new(&child);
+        let mut startup_group = StartupProcessGroup::new(&child);
         let process_record = if let Some(tracker) = tracker {
             let pid = child.id().ok_or_else(|| HarnessError::Reported {
                 kind: FailureKind::Protocol,
@@ -1261,80 +1261,114 @@ impl OpenCodeServer {
         } else {
             None
         };
-        let stdout = child.stdout.take().ok_or_else(|| {
-            HarnessError::Protocol("OpenCode did not provide a startup pipe".into())
-        })?;
-        let stderr = Arc::new(Mutex::new(VecDeque::new()));
-        if let Some(mut output) = child.stderr.take() {
-            let stderr = stderr.clone();
-            let password = password.clone();
-            tokio::spawn(async move {
-                let mut lines = acp_client::bounded_lines::BoundedLines::default();
-                let mut bytes = [0u8; 4096];
-                let record = |line: acp_client::bounded_lines::BoundedLine| {
-                    let mut tail = match stderr.lock() {
-                        Ok(tail) => tail,
-                        Err(error) => {
-                            tracing::error!(%error, "could not retain OpenCode stderr");
-                            error.into_inner()
+        let initialized = async {
+            let stdout = child.stdout.take().ok_or_else(|| {
+                HarnessError::Protocol("OpenCode did not provide a startup pipe".into())
+            })?;
+            let stderr = Arc::new(Mutex::new(VecDeque::new()));
+            if let Some(mut output) = child.stderr.take() {
+                let stderr = stderr.clone();
+                let password = password.clone();
+                tokio::spawn(async move {
+                    let mut lines = acp_client::bounded_lines::BoundedLines::default();
+                    let mut bytes = [0u8; 4096];
+                    let record = |line: acp_client::bounded_lines::BoundedLine| {
+                        let mut tail = match stderr.lock() {
+                            Ok(tail) => tail,
+                            Err(error) => {
+                                tracing::error!(%error, "could not retain OpenCode stderr");
+                                error.into_inner()
+                            }
+                        };
+                        if tail.len() == 20 {
+                            tail.pop_front();
                         }
+                        tail.push_back(sanitize_stderr_line(line, &password));
                     };
-                    if tail.len() == 20 {
-                        tail.pop_front();
-                    }
-                    tail.push_back(sanitize_stderr_line(line, &password));
-                };
-                loop {
-                    match output.read(&mut bytes).await {
-                        Ok(0) => break,
-                        Ok(count) => {
-                            for line in lines.push(&bytes[..count]) {
-                                record(line);
+                    loop {
+                        match output.read(&mut bytes).await {
+                            Ok(0) => break,
+                            Ok(count) => {
+                                for line in lines.push(&bytes[..count]) {
+                                    record(line);
+                                }
+                            }
+                            Err(error) => {
+                                tracing::debug!(%error, "could not read OpenCode stderr");
+                                break;
                             }
                         }
-                        Err(error) => {
-                            tracing::debug!(%error, "could not read OpenCode stderr");
-                            break;
+                    }
+                    if let Some(line) = lines.finish() {
+                        record(line);
+                    }
+                });
+            }
+            let mut startup = BufReader::new(stdout).take(64 * 1024).lines();
+            let address = timeout(STARTUP_TIMEOUT, async {
+                while let Some(line) = startup
+                    .next_line()
+                    .await
+                    .map_err(|error| protocol_error("could not read OpenCode startup", error))?
+                {
+                    let banner = line.trim().trim_start_matches("opencode ");
+                    if let Some(address) = banner.strip_prefix("server listening on ") {
+                        return loopback_address(address);
+                    }
+                }
+                Err(HarnessError::Protocol(
+                    "OpenCode did not announce a loopback server".into(),
+                ))
+            })
+            .await
+            .map_err(|_| HarnessError::Protocol("OpenCode server startup timed out".into()))??;
+            let mut stdout = startup.into_inner().into_inner();
+            tokio::spawn(async move {
+                if let Err(error) = tokio::io::copy(&mut stdout, &mut tokio::io::sink()).await {
+                    tracing::debug!(%error, "could not drain OpenCode stdout");
+                }
+            });
+            let request = |path: &str| {
+                client
+                    .get(format!("{}{path}", address.as_str().trim_end_matches('/')))
+                    .basic_auth(USERNAME, Some(&password))
+            };
+            let health = response_json(request("/api/info")).await?;
+            let api: Api = response_json(request("/openapi.json")).await?;
+            let probe = api.probe(health)?;
+            Ok::<_, HarnessError>((address, probe, stderr))
+        }
+        .await;
+        let (address, probe, stderr) = match initialized {
+            Ok(initialized) => initialized,
+            Err(error) => {
+                if let Err(cleanup) = stop_server(&mut child).await {
+                    match child.try_wait() {
+                        Ok(Some(_)) => {}
+                        _ => {
+                            return Err(HarnessError::Reported {
+                                kind: FailureKind::Protocol,
+                                message: format!(
+                                    "OpenCode startup failed: {error}; process cleanup failed: {cleanup}"
+                                ),
+                            });
                         }
                     }
                 }
-                if let Some(line) = lines.finish() {
-                    record(line);
+                startup_group.disarm();
+                if let Some((tracker, id)) = &process_record {
+                    if let Err(cleanup) = tracker.stopped(id).await {
+                        return Err(HarnessError::Reported {
+                            kind: FailureKind::Protocol,
+                            message: format!(
+                                "OpenCode startup failed: {error}; process record cleanup failed: {cleanup}"
+                            ),
+                        });
+                    }
                 }
-            });
-        }
-        let mut startup = BufReader::new(stdout).take(64 * 1024).lines();
-        let address = timeout(STARTUP_TIMEOUT, async {
-            while let Some(line) = startup
-                .next_line()
-                .await
-                .map_err(|error| protocol_error("could not read OpenCode startup", error))?
-            {
-                let banner = line.trim().trim_start_matches("opencode ");
-                if let Some(address) = banner.strip_prefix("server listening on ") {
-                    return loopback_address(address);
-                }
+                return Err(error);
             }
-            Err(HarnessError::Protocol(
-                "OpenCode did not announce a loopback server".into(),
-            ))
-        })
-        .await
-        .map_err(|_| HarnessError::Protocol("OpenCode server startup timed out".into()))??;
-        let mut stdout = startup.into_inner().into_inner();
-        tokio::spawn(async move {
-            if let Err(error) = tokio::io::copy(&mut stdout, &mut tokio::io::sink()).await {
-                tracing::debug!(%error, "could not drain OpenCode stdout");
-            }
-        });
-        let request = |path: &str| {
-            client
-                .get(format!("{}{path}", address.as_str().trim_end_matches('/')))
-                .basic_auth(USERNAME, Some(&password))
         };
-        let health = response_json(request("/api/info")).await?;
-        let api: Api = response_json(request("/openapi.json")).await?;
-        let probe = api.probe(health)?;
         Ok((
             Self {
                 child: Arc::new(AsyncMutex::new(child)),
@@ -1647,6 +1681,42 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
+    async fn failed_native_record_cleanup_prevents_fallback()
+    -> Result<(), Box<dyn std::error::Error>> {
+        struct Tracker;
+        #[async_trait]
+        impl crate::AgentProcessTracker for Tracker {
+            async fn started(&self, _pid: u32) -> Result<String, String> {
+                Ok("record".into())
+            }
+            async fn stopped(&self, _id: &str) -> Result<(), String> {
+                Err("fixture cleanup failure".into())
+            }
+        }
+        let directory = tempfile::tempdir()?;
+        let program = fixture_launcher(
+            directory.path(),
+            "#!/bin/sh\nif [ \"$1\" = acp ]; then printf fallback > fallback; fi\nexit 78\n",
+        )?;
+        let spec = SpawnSpec {
+            program,
+            cwd: directory.path().to_path_buf(),
+            ..Default::default()
+        };
+        let mut harness = OpenCodeHarness::default();
+        harness.set_process_tracker(Arc::new(Tracker));
+        let error = harness
+            .start(spec)
+            .await
+            .expect_err("failed record cleanup must block fallback");
+        assert!(error.to_string().contains("fixture cleanup failure"));
+        assert!(harness.fallback.is_none());
+        assert!(!directory.path().join("fallback").exists());
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn process_record_failure_does_not_start_acp_fallback()
     -> Result<(), Box<dyn std::error::Error>> {
         struct FailingTracker;
@@ -1706,6 +1776,26 @@ mod tests {
         .await?;
         start.abort();
         assert!(start.await.is_err_and(|error| error.is_cancelled()));
+        tokio::time::sleep(Duration::from_millis(1300)).await;
+        assert!(!directory.path().join("escaped").exists());
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn failed_native_start_stops_descendants_after_leader_exit()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let program = fixture_launcher(
+            directory.path(),
+            "#!/bin/sh\n(sleep 1; printf escaped > escaped) &\nprintf 'server listening on invalid\\n'\nexit 0\n",
+        )?;
+        let spec = SpawnSpec {
+            program,
+            cwd: directory.path().to_path_buf(),
+            ..Default::default()
+        };
+        assert!(OpenCodeServer::start(&spec).await.is_err());
         tokio::time::sleep(Duration::from_millis(1300)).await;
         assert!(!directory.path().join("escaped").exists());
         Ok(())
@@ -2970,7 +3060,7 @@ done
         );
         harness.shutdown().await?;
         assert_eq!(tracker.starts.load(Ordering::SeqCst), 2);
-        assert_eq!(tracker.stops.load(Ordering::SeqCst), 1);
+        assert_eq!(tracker.stops.load(Ordering::SeqCst), 2);
         Ok(())
     }
 

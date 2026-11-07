@@ -1203,9 +1203,11 @@ placeholder tabs and no unearned state badges.
   scripted app-server, exec and ACP processes against their recorded identities;
   the fixture then stops them. Local fixtures cover shutdown paths and durable
   storage. OpenCode's
-  native server is also recorded before its startup handshake; a failed record write blocks
-  ACP fallback, and a failed record removal can be retried. A local HTTP
-  fixture covers the lifecycle. Records from interrupted startup may remain for
+  native server is also recorded before its startup handshake; a failed record
+  write or cleanup blocks ACP fallback. Failed native startup stops the process
+  and clears its record before fallback when cleanup succeeds. Record removal
+  during normal shutdown can be retried. A local HTTP fixture covers the
+  lifecycle. Records from interrupted startup may remain for
   inspection. ACP task launches, including OpenCode fallback and Claude, now
   record their process before protocol initialization and clear the record
   after the child is reaped. Save failures stop startup, and failed removal
