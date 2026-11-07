@@ -1164,7 +1164,8 @@ placeholder tabs and no unearned state badges.
   before changing its session; an injected-failure fixture verifies retry.
   Whole-app terminal cleanup retains sessions on scan or close errors and the
   bridge allows quit to retry after the core has closed; local fixtures cover
-  both. Group-signal failures inside terminal cleanup still need propagation.
+  both. Hangup and forced-kill signal failures also propagate while preserving
+  live and exited-session records; injected-failure fixtures verify retries.
   Running direct ACP terminals now signal their process group on kill, release
   and shutdown, and report signal termination in the ACP exit status. Agent
   Codex app-server and OpenCode's native server now run in their own process

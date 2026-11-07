@@ -80,21 +80,25 @@ impl TerminalProcessGroup {
             })
     }
 
-    fn signal(&self, signal: libc::c_int) -> bool {
+    fn signal(&self, signal: libc::c_int) -> std::io::Result<bool> {
         if !self.still_owned() {
-            return false;
+            return Ok(false);
         }
         if unsafe { libc::killpg(self.group, signal) } == 0 {
-            return true;
+            return Ok(true);
         }
         let error = std::io::Error::last_os_error();
-        if error.raw_os_error() != Some(libc::ESRCH) {
-            tracing::warn!(%error, process_group = self.group, signal, "could not signal terminal process group");
+        if error.raw_os_error() == Some(libc::ESRCH) {
+            Ok(false)
+        } else {
+            Err(error)
         }
-        false
     }
 
-    fn finish_hangup(mut groups: Vec<Self>) {
+    fn finish_hangup(
+        mut groups: Vec<Self>,
+        signal_group: &mut impl FnMut(&Self, libc::c_int) -> std::io::Result<bool>,
+    ) -> std::io::Result<()> {
         let deadline = std::time::Instant::now() + Duration::from_millis(200);
         groups.retain(Self::still_owned);
         while !groups.is_empty() && std::time::Instant::now() < deadline {
@@ -102,8 +106,9 @@ impl TerminalProcessGroup {
             groups.retain(Self::still_owned);
         }
         for group in groups {
-            group.signal(libc::SIGKILL);
+            signal_group(&group, libc::SIGKILL)?;
         }
+        Ok(())
     }
 }
 
@@ -271,12 +276,19 @@ impl Session {
         )
     }
 
-    fn hangup(&mut self, #[cfg(unix)] groups: &[TerminalProcessGroup]) -> std::io::Result<()> {
+    fn hangup(
+        &mut self,
+        #[cfg(unix)] groups: &[TerminalProcessGroup],
+        #[cfg(unix)] signal_group: &mut impl FnMut(
+            &TerminalProcessGroup,
+            libc::c_int,
+        ) -> std::io::Result<bool>,
+    ) -> std::io::Result<()> {
         #[cfg(unix)]
         {
             let mut shell_signalled = false;
             for group in groups {
-                if group.signal(libc::SIGHUP) && group.group == group.session {
+                if signal_group(group, libc::SIGHUP)? && group.group == group.session {
                     shell_signalled = true;
                 }
             }
@@ -421,6 +433,8 @@ impl PtyTerminals {
                 &TerminalId::new(id),
                 #[cfg(unix)]
                 &mut scan,
+                #[cfg(unix)]
+                TerminalProcessGroup::signal,
             )?;
         }
         Ok(())
@@ -552,6 +566,10 @@ impl PtyTerminals {
         &mut self,
         terminal_id: &TerminalId,
         #[cfg(unix)] scan: impl FnOnce() -> std::io::Result<Vec<libc::pid_t>>,
+        #[cfg(unix)] mut signal_group: impl FnMut(
+            &TerminalProcessGroup,
+            libc::c_int,
+        ) -> std::io::Result<bool>,
     ) -> Result<(), TerminalError> {
         let mut sessions = self.sessions()?;
         let key = terminal_id.as_str();
@@ -582,9 +600,10 @@ impl PtyTerminals {
                 .hangup(
                     #[cfg(unix)]
                     &groups,
+                    #[cfg(unix)]
+                    &mut signal_group,
                 )
                 .map_err(|error| TerminalError::Backend(format!("kill failed: {error}")))?;
-            session.closing = true;
         }
         #[cfg(unix)]
         if sessions
@@ -592,20 +611,31 @@ impl PtyTerminals {
             .values()
             .any(|session| session.terminal_id == key)
         {
-            for (session, exited) in sessions
+            for (&session, exited) in sessions
                 .exited
-                .extract_if(.., |_, exited| exited.terminal_id == key)
+                .iter()
+                .filter(|(_, exited)| exited.terminal_id == key)
             {
                 let orphan_groups = exited.process_groups(session, &processes);
                 for group in &orphan_groups {
-                    group.signal(libc::SIGHUP);
+                    signal_group(group, libc::SIGHUP)
+                        .map_err(|error| TerminalError::Backend(format!("kill failed: {error}")))?;
                 }
                 groups.extend(orphan_groups);
             }
         }
         drop(sessions);
         #[cfg(unix)]
-        TerminalProcessGroup::finish_hangup(groups);
+        TerminalProcessGroup::finish_hangup(groups, &mut signal_group)
+            .map_err(|error| TerminalError::Backend(format!("kill failed: {error}")))?;
+        let mut sessions = self.sessions()?;
+        if let Some(session) = sessions.live.get_mut(key) {
+            session.closing = true;
+        }
+        #[cfg(unix)]
+        sessions
+            .exited
+            .retain(|_, exited| exited.terminal_id != key);
         Ok(())
     }
 }
@@ -827,6 +857,8 @@ impl TerminalService for PtyTerminals {
             terminal_id,
             #[cfg(unix)]
             list_processes,
+            #[cfg(unix)]
+            TerminalProcessGroup::signal,
         )
     }
 }
@@ -969,8 +1001,21 @@ mod tests {
             assert!(!group.still_owned());
         }
 
-        let failure = engine.close_with_scan(&terminal_id, || {
-            Err(std::io::Error::other("fixture process scan failed"))
+        let failure = engine.close_with_scan(
+            &terminal_id,
+            || Err(std::io::Error::other("fixture process scan failed")),
+            TerminalProcessGroup::signal,
+        );
+        assert!(failure.is_err());
+        assert!(
+            engine
+                .sessions()?
+                .live
+                .get(terminal_id.as_str())
+                .is_some_and(|session| !session.closing)
+        );
+        let failure = engine.close_with_scan(&terminal_id, list_processes, |_, _| {
+            Err(std::io::Error::other("fixture signal failure"))
         });
         assert!(failure.is_err());
         assert!(
@@ -1081,6 +1126,15 @@ mod tests {
                     .terminate_all_with_scan(|| Err(std::io::Error::other("fixture scan failed")))
                     .is_err()
             );
+            assert!(!engine.lingering_process_records(&terminal_id)?.is_empty());
+            let failure = engine.close_with_scan(&terminal_id, list_processes, |group, signal| {
+                if signal == libc::SIGKILL {
+                    Err(std::io::Error::other("fixture kill failure"))
+                } else {
+                    group.signal(signal)
+                }
+            });
+            assert!(failure.is_err());
             assert!(!engine.lingering_process_records(&terminal_id)?.is_empty());
             engine.terminate_all()?;
         } else {
