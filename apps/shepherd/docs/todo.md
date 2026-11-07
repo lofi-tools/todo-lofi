@@ -997,6 +997,8 @@ and the task header never overstates the tier.
   entries across projects. Replacing or dismissing a search cancels
   the pending request. A local macOS run measured 26.9 ms p95 for 50 Turso queries
   over 50,000 entries, excluding the typing debounce and desktop rendering.
+  A repeat after bounding search snippets measured 16.7 ms p95 with the same
+  fixture; it likewise excludes debounce and rendering.
 - [x] Attachments and images, `@file` mentions, model/mode pickers.
   The composer queues removable local files and copies them into the task
   attachment cache on Send. Prompts retain the copied paths. Codex sends local
