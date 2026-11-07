@@ -1179,8 +1179,9 @@ placeholder tabs and no unearned state badges.
 - [ ] Bounded transcript, stderr, search and frame buffers.
   Codex, OpenCode and ACP stderr readers cap each line while draining the
   process, including newline-free output. OpenCode omits overlong lines to
-  avoid exposing fragments of its authentication secret. Event queues and
-  other buffer limits still need review.
+  avoid exposing fragments of its authentication secret. ACP protocol lines
+  are rejected above 8 MiB while reading, with a protocol error. Event queues
+  and other buffer limits still need review.
 - [ ] Multiple agents and projects: three agents across two projects, no state
   bleed, no polling.
 - [ ] Performance: cold start under 1.2 s, streaming while a large diff renders,

@@ -1635,13 +1635,14 @@ while IFS= read -r request; do
             case "$1" in
                 auth) printf '{"jsonrpc":"2.0","id":%s,"error":{"code":-32000,"message":"Account expired"}}\n' "$id";;
                 protocol) echo 'not valid JSON';;
+                oversized) python3 -c 'import sys; sys.stdout.write("x" * (8 * 1024 * 1024 + 2)); sys.stdout.flush()';;
                 exit) echo 'ACP fixture crashed' >&2; exit 23;;
             esac;;
     esac
 done
 "#,
         )?;
-        for mode in ["auth", "protocol", "exit"] {
+        for mode in ["auth", "protocol", "oversized", "exit"] {
             let mut harness = AcpHarness::default();
             harness
                 .start(SpawnSpec {
@@ -1687,6 +1688,13 @@ done
                         text,
                     },
                 ) => assert!(text.contains("malformed JSON")),
+                (
+                    "oversized",
+                    HarnessEvent::ConnectionFailed {
+                        kind: FailureKind::Protocol,
+                        text,
+                    },
+                ) => assert!(text.contains("exceeds 8388608 bytes"), "{text}"),
                 (
                     "exit",
                     HarnessEvent::Exited {

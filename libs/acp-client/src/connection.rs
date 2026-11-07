@@ -46,6 +46,40 @@ use crate::{AcpError, AcpEvent, SessionSpec, schema};
 
 /// How many stderr lines are kept for the error state.
 const STDERR_LINES: usize = 250;
+const MAX_PROTOCOL_LINE_BYTES: usize = 8 * 1024 * 1024;
+
+async fn read_protocol_line<R: futures::io::AsyncBufRead + Unpin>(
+    reader: &mut R,
+    limit: usize,
+) -> std::io::Result<Option<String>> {
+    let mut bytes = Vec::new();
+    let read_limit = u64::try_from(limit.saturating_add(2)).unwrap_or(u64::MAX);
+    let count = reader
+        .take(read_limit)
+        .read_until(b'\n', &mut bytes)
+        .await?;
+    if count == 0 {
+        return Ok(None);
+    }
+    if bytes.last() == Some(&b'\n') {
+        bytes.pop();
+        if bytes.last() == Some(&b'\r') {
+            bytes.pop();
+        }
+    }
+    if bytes.len() > limit {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("ACP protocol message exceeds {limit} bytes"),
+        ));
+    }
+    String::from_utf8(bytes).map(Some).map_err(|error| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("ACP protocol message is not UTF-8: {error}"),
+        )
+    })
+}
 
 /// What the client learned about the agent during `initialize`.
 #[derive(Clone, Debug, Default)]
@@ -891,8 +925,28 @@ impl ConnectTo<Client> for ProjectAgent {
         };
 
         let protocol_events = self.events.clone();
-        let incoming = futures::StreamExt::map(BufReader::new(stdout).lines(), move |line| {
-            let line = line?;
+        let incoming =
+            futures::stream::try_unfold(BufReader::new(stdout), |mut reader| async move {
+                Ok::<_, std::io::Error>(
+                    read_protocol_line(&mut reader, MAX_PROTOCOL_LINE_BYTES)
+                        .await?
+                        .map(|line| (line, reader)),
+                )
+            });
+        let incoming = futures::StreamExt::map(incoming, move |line| {
+            let line = line.map_err(|error| {
+                if error.kind() == std::io::ErrorKind::InvalidData
+                    && let Some(events) = &protocol_events
+                    && events
+                        .send(AcpEvent::ProtocolFailed {
+                            message: error.to_string(),
+                        })
+                        .is_err()
+                {
+                    tracing::debug!("ACP protocol failure receiver closed");
+                }
+                error
+            })?;
             if !line.trim().is_empty()
                 && let Err(error) = serde_json::from_str::<serde::de::IgnoredAny>(&line)
             {
@@ -1020,6 +1074,37 @@ pub fn stderr_summary(lines: &[String]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn protocol_lines_are_bounded_and_validate_utf8() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let mut reader = BufReader::new(futures::io::Cursor::new(b"1234\r\nnext\nlast".to_vec()));
+        assert_eq!(
+            read_protocol_line(&mut reader, 4).await?.as_deref(),
+            Some("1234")
+        );
+        assert_eq!(
+            read_protocol_line(&mut reader, 4).await?.as_deref(),
+            Some("next")
+        );
+        assert_eq!(
+            read_protocol_line(&mut reader, 4).await?.as_deref(),
+            Some("last")
+        );
+        assert!(read_protocol_line(&mut reader, 4).await?.is_none());
+        let mut large = BufReader::new(futures::io::Cursor::new(b"12345".to_vec()));
+        let Err(error) = read_protocol_line(&mut large, 4).await else {
+            return Err("oversized line succeeded".into());
+        };
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("exceeds 4 bytes"));
+        let mut invalid = BufReader::new(futures::io::Cursor::new(vec![0xff, b'\n']));
+        let Err(error) = read_protocol_line(&mut invalid, 4).await else {
+            return Err("invalid UTF-8 succeeded".into());
+        };
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        Ok(())
+    }
 
     #[cfg(feature = "live-opencode")]
     #[tokio::test]
