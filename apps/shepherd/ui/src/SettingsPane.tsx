@@ -2,6 +2,7 @@ import { For, Show, createEffect, createResource, createSignal, on, type JSX } f
 
 import { AGENT_LABELS, projectApprovals, resetApprovalGrant, type CommandBinding, type CommandRegistry, type KeybindingEdit, type ProjectApproval, type ProjectSnapshot, type SessionApproval, type SettingsSnapshot, type SettingsEdit, type SettingKey } from './bridge'
 import { displayChord, normalizeChord } from './keybindings'
+import { reportError } from './diagnostics'
 
 const categories = ['Workspace', 'Projects', 'Appearance', 'Keyboard shortcuts'] as const
 
@@ -41,19 +42,17 @@ interface SettingsPaneProps {
 function ProjectPreviewSetting(props: { url?: string | null; onSave: (url: string) => Promise<void> }) {
   const [url, setUrl] = createSignal(props.url ?? '')
   const [saving, setSaving] = createSignal(false)
-  const [error, setError] = createSignal('')
   createEffect(on(() => props.url, (saved) => setUrl(saved ?? '')))
 
   async function save(event: SubmitEvent) {
     event.preventDefault()
     if (saving()) return
     setSaving(true)
-    setError('')
     try {
       await props.onSave(url())
       setUrl(props.url ?? '')
     } catch (failure) {
-      setError(settingsError(failure))
+      reportError('save_preview_url', failure)
     } finally {
       setSaving(false)
     }
@@ -67,7 +66,6 @@ function ProjectPreviewSetting(props: { url?: string | null; onSave: (url: strin
           disabled={saving()} placeholder="http://localhost:3000" />
       </label>
       <button type="submit" class="project-action" disabled={saving() || url() === (props.url ?? '')}>Save preview URL</button>
-      <Show when={error()}>{(message) => <p class="entry__notice--error" role="alert">{message()}</p>}</Show>
     </form>
   )
 }
@@ -116,11 +114,11 @@ function ApprovalGrantList(props: {
 
 function ProjectApprovals(props: { projectId: string; change?: { projectId: string } }) {
   const [resetting, setResetting] = createSignal(false)
-  const [resetError, setResetError] = createSignal('')
   const [approvals, { refetch }] = createResource(() => props.projectId, async (projectId) => {
     try {
       return { snapshot: await projectApprovals(projectId), error: '' }
     } catch (error) {
+      reportError('project_approvals', error)
       return { snapshot: undefined, error: settingsError(error) }
     }
   })
@@ -131,12 +129,11 @@ function ProjectApprovals(props: { projectId: string; change?: { projectId: stri
 
   async function reset(approvalId: string, taskId?: string) {
     setResetting(true)
-    setResetError('')
     try {
       await resetApprovalGrant(props.projectId, approvalId, taskId)
       await refetch()
     } catch (error) {
-      setResetError(settingsError(error))
+      reportError('reset_approval_grant', error)
     } finally {
       setResetting(false)
     }
@@ -144,8 +141,8 @@ function ProjectApprovals(props: { projectId: string; change?: { projectId: stri
 
   return (
     <div class="settings__project">
-      <Show when={resetError() || approvals.latest?.error}>
-        {(error) => <p class="entry__notice--error" role="alert">{error()}</p>}
+      <Show when={approvals.latest?.error}>
+        <button type="button" class="project-action" onClick={() => void refetch()}>Retry approvals</button>
       </Show>
       <Show when={approvals.latest?.snapshot}>
         <ApprovalGrantList
@@ -184,21 +181,18 @@ function NumberPreference(props: {
   onSave: (value: number | null) => Promise<void>
 }) {
   const [draft, setDraft] = createSignal(String(props.value))
-  const [error, setError] = createSignal('')
   createEffect(on(() => props.value, (value, previous) => {
     if (previous === undefined || draft() === String(previous)) setDraft(String(value))
-    if (draft() === String(value)) setError('')
   }))
   const number = () => draft().trim() ? Number(draft()) : NaN
   const valid = () => Number.isSafeInteger(number()) && number() >= props.minimum && number() <= props.maximum
 
   async function save(value: number | null) {
-    setError('')
     try {
       await props.onSave(value)
       setDraft(String(props.value))
     } catch (failure) {
-      setError(settingsError(failure))
+      reportError('save_preference', failure)
     }
   }
 
@@ -221,7 +215,6 @@ function NumberPreference(props: {
             onClick={() => void save(null)}>Reset {props.label.toLowerCase()}</button>
         </Show>
       </div>
-      <Show when={error()}>{(message) => <p class="entry__notice--error" role="alert">{message()}</p>}</Show>
     </form>
   )
 }
@@ -259,7 +252,9 @@ function KeyboardShortcuts(props: {
   const [editing, setEditing] = createSignal<{ id: string; previous: string | null }>()
   const [chord, setChord] = createSignal<string | null>(null)
   const [pending, setPending] = createSignal(false)
-  const [error, setError] = createSignal('')
+  function setError(message: string) {
+    if (message) reportError('keyboard_shortcuts', message)
+  }
   const [status, setStatus] = createSignal('')
   let opener: HTMLButtonElement | undefined
   let recorder: HTMLInputElement | undefined
@@ -344,7 +339,6 @@ function KeyboardShortcuts(props: {
       <Show when={props.registry?.warning}>
         <p class="empty">Repair the keybindings file, then reload configuration to edit shortcuts.</p>
       </Show>
-      <Show when={error()}>{(message) => <p class="entry__notice--error" role="alert">{message()}</p>}</Show>
       <Show when={status()}>{(message) => <p class="empty" role="status">{message()}</p>}</Show>
       <ul class="settings__shortcut-list" aria-label="Command shortcuts">
         <For each={commands().map(({ id }) => id)}>
@@ -395,18 +389,16 @@ function KeyboardShortcuts(props: {
 
 export function SettingsPane(props: SettingsPaneProps) {
   const [category, setCategory] = createSignal<(typeof categories)[number]>('Workspace')
-  const [appearanceError, setAppearanceError] = createSignal('')
   const theme = () => props.preferences?.app.theme ?? 'system'
   const density = () => props.preferences?.app['appearance.density'] ?? 'compact'
 
   async function chooseAppearance(key: 'theme' | 'appearance.density', input: HTMLSelectElement) {
-    setAppearanceError('')
     const value = input.value
     if (value !== 'system' && value !== 'light' && value !== 'dark' && value !== 'compact' && value !== 'comfortable') return
     try {
       await props.onEditPreference(key, value)
     } catch (failure) {
-      setAppearanceError(settingsError(failure))
+      reportError('save_appearance', failure)
     } finally {
       input.value = key === 'theme' ? theme() : density()
     }
@@ -541,7 +533,6 @@ export function SettingsPane(props: SettingsPaneProps) {
                 <option value="comfortable">Comfortable</option>
               </select>
             </label>
-            <Show when={appearanceError()}>{(message) => <p class="entry__notice--error" role="alert">{message()}</p>}</Show>
             <fieldset class="settings__accent-picker">
               <legend>Send button accent</legend>
               <For each={SEND_ACCENTS}>
