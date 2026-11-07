@@ -1016,6 +1016,7 @@ impl CodexHarness {
 
         self.cwd = spec.cwd;
         let child = Arc::new(AsyncMutex::new(child));
+        let mut startup_group = AppServerStartupGroup(Some(Arc::downgrade(&child)));
         self.child = Some(child.clone());
 
         let (outgoing, outgoing_receiver) = mpsc::unbounded_channel();
@@ -1068,6 +1069,7 @@ impl CodexHarness {
             })
             .map_err(|_| HarnessError::ChannelClosed)?;
 
+        startup_group.disarm();
         Ok(self.capabilities())
     }
 }
@@ -2185,6 +2187,30 @@ fn spawn_reader(
         }
         pending.lock().await.responses.clear();
     })
+}
+
+struct AppServerStartupGroup(Option<std::sync::Weak<AsyncMutex<Child>>>);
+
+impl AppServerStartupGroup {
+    fn disarm(&mut self) {
+        self.0 = None;
+    }
+}
+
+impl Drop for AppServerStartupGroup {
+    fn drop(&mut self) {
+        if let Some(child) = self.0.take().and_then(|child| child.upgrade()) {
+            match child.try_lock() {
+                Ok(mut child) => {
+                    stop_app_server_group(&child);
+                    if let Err(error) = child.start_kill() {
+                        tracing::debug!(%error, "could not stop Codex during startup");
+                    }
+                }
+                Err(_) => tracing::debug!("Codex startup process is being stopped by its reader"),
+            }
+        }
+    }
 }
 
 fn stop_app_server_group(child: &Child) {
@@ -3494,6 +3520,37 @@ esac
         );
         tokio::time::sleep(Duration::from_millis(1300)).await;
         assert!(!directory.path().join("escaped").exists());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn failed_and_cancelled_app_server_initialization_stop_descendants()
+    -> Result<(), Box<dyn std::error::Error>> {
+        for respond in [true, false] {
+            let directory = TempDir::new()?;
+            let response = if respond {
+                "printf '{\"id\":1,\"error\":{\"code\":-1,\"message\":\"failed\"}}\\n'"
+            } else {
+                ":"
+            };
+            let script = format!(
+                "#!/bin/sh\n(sleep 1; printf escaped > escaped) &\nread -r request\n{response}\nsleep 30\n"
+            );
+            let stub = write_stub(&directory, "codex-start.sh", &script);
+            let mut harness = CodexHarness::new();
+            let start = timeout(
+                Duration::from_millis(300),
+                harness.start(spec(&stub, directory.path())),
+            )
+            .await;
+            if respond {
+                assert!(start?.is_err());
+            } else {
+                assert!(start.is_err());
+            }
+            tokio::time::sleep(Duration::from_millis(1300)).await;
+            assert!(!directory.path().join("escaped").exists());
+        }
         Ok(())
     }
 
