@@ -967,6 +967,8 @@ and the task header never overstates the tier.
   badges for the selected root, including changes to the index and HEAD. A
   missing external Git metadata directory is skipped, while inspection errors
   are reported rather than silently disabling that part of the watcher. A
+  pending watcher error survives subsequent file events during debounce;
+  additional errors are logged while the first awaits delivery. A
   separate list shows deleted paths. The preview opens files in the default
   desktop text editor and reveals them in the file manager. Git and Review
   diffs can focus the Files tab and open the selected worktree file.

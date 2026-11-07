@@ -45,6 +45,7 @@ pub enum FileWatchUpdate {
 pub(crate) struct WorkspaceWatch {
     _watcher: RecommendedWatcher,
     root: PathBuf,
+    changed: watch::Sender<Option<String>>,
     notifications: watch::Receiver<Option<String>>,
 }
 
@@ -71,13 +72,14 @@ impl WorkspaceWatch {
             common_dir: common_dir.clone(),
         };
         let (changed, notifications) = watch::channel(None);
+        let callback_changed = changed.clone();
         let mut watcher = RecommendedWatcher::new(
             move |event: notify::Result<Event>| match event {
                 Ok(event) if paths.relevant(&event) => {
-                    changed.send_replace(None);
+                    record_notification(&callback_changed, None);
                 }
                 Err(error) => {
-                    changed.send_replace(Some(error.to_string()));
+                    record_notification(&callback_changed, Some(error.to_string()));
                 }
                 Ok(_) => {}
             },
@@ -97,6 +99,7 @@ impl WorkspaceWatch {
         Ok(Self {
             _watcher: watcher,
             root,
+            changed,
             notifications,
         })
     }
@@ -134,11 +137,31 @@ impl WorkspaceWatch {
                 changed = self.notifications.changed() => changed.map_err(|_| WatchError::Closed)?,
             }
         }
-        match self.notifications.borrow().as_ref() {
-            Some(error) => Err(WatchError::Notification(error.clone())),
-            None => Ok(()),
+        let error = self.notifications.borrow_and_update().clone();
+        if let Some(error) = error {
+            self.changed.send_if_modified(|pending| {
+                if pending.as_ref() == Some(&error) {
+                    *pending = None;
+                    true
+                } else {
+                    false
+                }
+            });
+            Err(WatchError::Notification(error))
+        } else {
+            Ok(())
         }
     }
+}
+
+fn record_notification(sender: &watch::Sender<Option<String>>, error: Option<String>) {
+    sender.send_modify(|pending| {
+        match (pending.as_mut(), error) {
+            (None, error) => *pending = error,
+            (Some(_), Some(error)) => tracing::warn!(%error, "additional file watcher error while a previous error is pending"),
+            (Some(_), None) => {}
+        }
+    });
 }
 
 fn has_git_marker(root: &Path) -> io::Result<bool> {
@@ -198,6 +221,22 @@ mod tests {
     use shepherd_core::test_support::TestRepository;
 
     use super::*;
+
+    #[tokio::test]
+    async fn watcher_error_survives_later_file_events_and_is_reported_once()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let mut watcher = WorkspaceWatch::start(directory.path().to_path_buf())?;
+        record_notification(&watcher.changed, Some("fixture watcher error".into()));
+        record_notification(&watcher.changed, None);
+        let result = tokio::time::timeout(Duration::from_secs(3), watcher.next_refresh()).await?;
+        assert!(
+            matches!(result, Err(WatchError::Notification(message)) if message == "fixture watcher error")
+        );
+        record_notification(&watcher.changed, None);
+        tokio::time::timeout(Duration::from_secs(3), watcher.next_refresh()).await??;
+        Ok(())
+    }
 
     #[cfg(unix)]
     #[test]
