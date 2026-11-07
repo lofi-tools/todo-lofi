@@ -9,15 +9,19 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll};
 use std::time::Duration;
 
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{Value, json};
-use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{
+    AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWriteExt, BufReader, ReadBuf,
+};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::sync::{Mutex as AsyncMutex, mpsc, oneshot};
 use tokio::task::JoinHandle;
@@ -1509,7 +1513,8 @@ impl AgentHarness for ExecHarness {
         self.next_turn += 1;
         let (kill, kill_receiver) = oneshot::channel();
         let finished = Arc::new(AtomicBool::new(false));
-        let reader = spawn_exec_reader(stdout, self.sender.clone());
+        let progress = Arc::new(AtomicU64::new(0));
+        let reader = spawn_exec_reader(stdout, self.sender.clone(), progress.clone());
         let reader_abort = reader.abort_handle();
         let waiter = spawn_exec_waiter(
             child,
@@ -1519,6 +1524,7 @@ impl AgentHarness for ExecHarness {
             stderr_drained,
             Arc::clone(&finished),
             reader,
+            progress,
         );
         self.run = Some(ExecRun {
             waiter,
@@ -1615,6 +1621,7 @@ fn spawn_exec_waiter(
     stderr_drained: oneshot::Receiver<()>,
     finished: Arc<AtomicBool>,
     mut reader: JoinHandle<Result<(), String>>,
+    progress: Arc<AtomicU64>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         let mut reader_finished = false;
@@ -1655,13 +1662,31 @@ fn spawn_exec_waiter(
         };
 
         if !reader_finished {
-            match timeout(Duration::from_secs(1), &mut reader).await {
-                Ok(Ok(Ok(()))) => {}
-                Ok(Ok(Err(error))) => protocol_error = Some(error),
-                Ok(Err(error)) => {
-                    protocol_error = Some(format!("Codex exec reader failed: {error}"))
+            loop {
+                let previous = progress.load(Ordering::Relaxed);
+                match timeout(Duration::from_secs(1), &mut reader).await {
+                    Ok(Ok(Ok(()))) => break,
+                    Ok(Ok(Err(error))) => {
+                        protocol_error = Some(error);
+                        break;
+                    }
+                    Ok(Err(error)) => {
+                        protocol_error = Some(format!("Codex exec reader failed: {error}"));
+                        break;
+                    }
+                    Err(_) if !cancelled && progress.load(Ordering::Relaxed) != previous => {
+                        continue;
+                    }
+                    Err(_) => {
+                        reader.abort();
+                        if !cancelled {
+                            protocol_error = Some(
+                                "Codex exec output did not close after the process exited".into(),
+                            );
+                        }
+                        break;
+                    }
                 }
-                Err(_) => reader.abort(),
             }
         }
         let code = match &status {
@@ -1716,9 +1741,13 @@ fn spawn_exec_waiter(
 fn spawn_exec_reader(
     stdout: ChildStdout,
     sender: mpsc::UnboundedSender<HarnessEvent>,
+    progress: Arc<AtomicU64>,
 ) -> JoinHandle<Result<(), String>> {
     tokio::spawn(async move {
-        let mut lines = BufReader::new(stdout);
+        let mut lines = BufReader::new(ProgressReader {
+            inner: stdout,
+            progress,
+        });
         loop {
             let line = match read_protocol_line(&mut lines).await {
                 Ok(Some(line)) => line,
@@ -1745,6 +1774,30 @@ fn spawn_exec_reader(
         }
         Ok(())
     })
+}
+
+struct ProgressReader<R> {
+    inner: R,
+    progress: Arc<AtomicU64>,
+}
+
+impl<R: AsyncRead + Unpin> AsyncRead for ProgressReader<R> {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buffer: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        let before = buffer.filled().len();
+        match Pin::new(&mut self.inner).poll_read(cx, buffer) {
+            Poll::Ready(Ok(())) => {
+                if buffer.filled().len() > before {
+                    self.progress.fetch_add(1, Ordering::Relaxed);
+                }
+                Poll::Ready(Ok(()))
+            }
+            other => other,
+        }
+    }
 }
 
 /// Map one `codex exec --json` line to events. Exec prints a config summary and
@@ -3659,6 +3712,80 @@ sleep 30
             )),
             "{events:?}"
         );
+        harness.shutdown().await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn exec_keeps_draining_output_while_it_is_progressing()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = TempDir::new()?;
+        let stub = write_stub(
+            &directory,
+            "codex-progress",
+            r##"#!/usr/bin/env bash
+(
+  sleep 0.4
+  printf '{"id":"1","msg":{"type":"agent_message","message":"fi'
+  sleep 0.4
+  printf 'rs'
+  sleep 0.4
+  printf 't"}}\n'
+  printf '{"id":"2","msg":{"type":"agent_message","message":"second"}}\n'
+) &
+exit 0
+"##,
+        );
+        let (mut harness, _) = start_exec(&stub, directory.path()).await;
+        harness.prompt(PromptInput::text("go")).await?;
+        let events = collect_until(&mut harness, |events| {
+            events
+                .iter()
+                .any(|event| matches!(event, HarnessEvent::TurnFinished { .. }))
+        })
+        .await;
+        let messages: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                HarnessEvent::Delta { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(messages, ["first", "second"]);
+        assert!(events.iter().any(|event| matches!(
+            event,
+            HarnessEvent::TurnFinished {
+                reason: TurnFinishReason::Completed
+            }
+        )));
+        harness.shutdown().await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn exec_reports_an_output_pipe_that_never_closes()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = TempDir::new()?;
+        let stub = write_stub(
+            &directory,
+            "codex-open-pipe",
+            "#!/usr/bin/env bash\nsleep 2 &\nexit 0\n",
+        );
+        let (mut harness, _) = start_exec(&stub, directory.path()).await;
+        harness.prompt(PromptInput::text("go")).await?;
+        let events = collect_until(&mut harness, |events| {
+            events
+                .iter()
+                .any(|event| matches!(event, HarnessEvent::TurnFinished { .. }))
+        })
+        .await;
+        assert!(events.iter().any(|event| matches!(event, HarnessEvent::TurnError { text, .. } if text.contains("output did not close"))));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            HarnessEvent::TurnFinished {
+                reason: TurnFinishReason::Failed
+            }
+        )));
         harness.shutdown().await?;
         Ok(())
     }

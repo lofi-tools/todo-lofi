@@ -1188,8 +1188,11 @@ placeholder tabs and no unearned state badges.
   are rejected above 8 MiB while reading, with a protocol error. Event queues
   and other buffer limits still need review. Codex app-server, exec and
   handshake protocol lines have the same limit; oversized exec output fails
-  the turn and stops its process. Codex version and help probes limit both
-  stdout and stderr and time out if the command does not finish. ACP keeps
+  the turn and stops its process. Exec keeps draining output while it makes
+  progress after process exit, and fails the turn if the output pipe stalls
+  instead of reporting incomplete output as successful. Codex version and help
+  probes limit both stdout and stderr and time out if the command does not
+  finish. ACP keeps
   only 64 unread stderr notifications while retaining its latest diagnostic
   tail. ACP terminal output honors smaller requested limits and caps larger
   requests at 1 MiB per terminal. ACP terminal output has a shared 64-event
