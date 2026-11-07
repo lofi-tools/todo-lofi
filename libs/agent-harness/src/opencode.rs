@@ -342,15 +342,18 @@ impl AgentHarness for OpenCodeHarness {
         }
         require_absolute_executable(Path::new(&spec.program))?;
         let native = async {
-            let server = OpenCodeServer::start(&spec).await?;
+            let (server, mut startup_group) = OpenCodeServer::start_guarded(&spec).await?;
             if let Err(error) = server.subscribe().await {
-                if let Err(cleanup) = server.shutdown().await {
+                let cleanup = server.shutdown().await;
+                startup_group.disarm();
+                if let Err(cleanup) = cleanup {
                     return Err(HarnessError::Protocol(format!(
                         "OpenCode subscription failed: {error}; cleanup failed: {cleanup}"
                     )));
                 }
                 return Err(error);
             }
+            startup_group.disarm();
             Ok::<_, HarnessError>(server)
         };
         let server = match native.await {
@@ -1028,8 +1031,28 @@ fn server_command(spec: &SpawnSpec, directory: &str, password: &str) -> Command 
     command
 }
 
-#[cfg(unix)]
-struct StartupProcessGroup(Option<libc::pid_t>);
+struct StartupProcessGroup(#[cfg(unix)] Option<libc::pid_t>);
+
+impl StartupProcessGroup {
+    fn new(child: &Child) -> Self {
+        #[cfg(unix)]
+        {
+            Self(child.id().and_then(|id| libc::pid_t::try_from(id).ok()))
+        }
+        #[cfg(not(unix))]
+        {
+            let _child = child;
+            Self()
+        }
+    }
+
+    fn disarm(&mut self) {
+        #[cfg(unix)]
+        {
+            self.0 = None;
+        }
+    }
+}
 
 #[cfg(unix)]
 impl Drop for StartupProcessGroup {
@@ -1072,6 +1095,12 @@ async fn stop_server(child: &mut tokio::process::Child) -> std::io::Result<()> {
 
 impl OpenCodeServer {
     pub async fn start(spec: &SpawnSpec) -> HarnessResult<Self> {
+        let (server, mut startup_group) = Self::start_guarded(spec).await?;
+        startup_group.disarm();
+        Ok(server)
+    }
+
+    async fn start_guarded(spec: &SpawnSpec) -> HarnessResult<(Self, StartupProcessGroup)> {
         require_absolute_executable(Path::new(&spec.program))?;
         let directory = tokio::fs::canonicalize(&spec.cwd)
             .await
@@ -1094,9 +1123,7 @@ impl OpenCodeServer {
                 program: spec.program.clone(),
                 source,
             })?;
-        #[cfg(unix)]
-        let mut startup_group =
-            StartupProcessGroup(child.id().and_then(|id| libc::pid_t::try_from(id).ok()));
+        let startup_group = StartupProcessGroup::new(&child);
         let stdout = child.stdout.take().ok_or_else(|| {
             HarnessError::Protocol("OpenCode did not provide a startup pipe".into())
         })?;
@@ -1171,19 +1198,18 @@ impl OpenCodeServer {
         let health = response_json(request("/api/info")).await?;
         let api: Api = response_json(request("/openapi.json")).await?;
         let probe = api.probe(health)?;
-        #[cfg(unix)]
-        {
-            startup_group.0 = None;
-        }
-        Ok(Self {
-            child: Arc::new(AsyncMutex::new(child)),
-            client,
-            address,
-            password,
-            directory,
-            probe,
-            stderr,
-        })
+        Ok((
+            Self {
+                child: Arc::new(AsyncMutex::new(child)),
+                client,
+                address,
+                password,
+                directory,
+                probe,
+                stderr,
+            },
+            startup_group,
+        ))
     }
 
     pub fn probe(&self) -> &OpenCodeProbe {
@@ -1615,6 +1641,55 @@ mod tests {
         "/api/session/{sessionID}/interrupt": {"post": {}},
         "/api/session/{sessionID}/permission/{requestID}/reply": {"post": {}}
     }}"#;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cancelled_subscription_stops_server_descendants()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let program = fixture_launcher(
+            directory.path(),
+            "#!/bin/sh\n(sleep 2; printf escaped > escaped) &\nprintf 'server listening on %s\\n' \"$SHEPHERD_TEST_OPENCODE_URL\"\nsleep 30\n",
+        )?;
+        let spec = SpawnSpec {
+            program,
+            cwd: directory.path().to_owned(),
+            environment: BTreeMap::from([(
+                "SHEPHERD_TEST_OPENCODE_URL".into(),
+                format!("http://{}", listener.local_addr()?),
+            )]),
+            ..SpawnSpec::default()
+        };
+        let (subscribed, wait_for_subscription) = tokio::sync::oneshot::channel();
+        let fixture = tokio::spawn(async move {
+            for response in [
+                json!({"version": "fixture"}).to_string(),
+                NATIVE_API.to_owned(),
+            ] {
+                let (socket, _) = listener.accept().await?;
+                let (reader, mut writer) = socket.into_split();
+                read_fixture_request(reader).await?;
+                writer.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response}", response.len()).as_bytes()).await?;
+            }
+            let (socket, _) = listener.accept().await?;
+            let (reader, _writer) = socket.into_split();
+            read_fixture_request(reader).await?;
+            subscribed
+                .send(())
+                .map_err(|_| std::io::Error::other("subscription receiver dropped"))?;
+            std::future::pending::<()>().await;
+            Ok::<_, Box<dyn std::error::Error + Send + Sync>>(())
+        });
+        let start = tokio::spawn(async move { OpenCodeHarness::default().start(spec).await });
+        timeout(Duration::from_secs(5), wait_for_subscription).await??;
+        start.abort();
+        assert!(start.await.is_err_and(|error| error.is_cancelled()));
+        fixture.abort();
+        tokio::time::sleep(Duration::from_millis(2300)).await;
+        assert!(!directory.path().join("escaped").exists());
+        Ok(())
+    }
 
     #[test]
     fn reads_an_explicit_opencode_executable() -> Result<(), Box<dyn std::error::Error>> {
