@@ -1375,6 +1375,8 @@ placeholder tabs and no unearned state badges.
   avoiding larger queued copies without changing the retained output.
   Codex exec also selects the retained command-output tail before allocating
   the event's string, avoiding a full extra copy of a large protocol field.
+  Transcript folding similarly selects the tail of an oversized command-output
+  chunk before allocating it, with a UTF-8 regression for the retained output.
 - [ ] Multiple agents and projects: three agents across two projects, no state
   bleed, no polling.
   A three-session fixture holds Codex, OpenCode and Claude tasks at approvals

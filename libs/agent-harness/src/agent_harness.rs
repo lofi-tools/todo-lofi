@@ -1052,8 +1052,12 @@ impl Transcript {
             return TranscriptChange::default();
         }
         let output = output.get_or_insert_with(String::new);
-        output.push_str(text);
-        limit_command_output(output);
+        if text.len() > MAX_COMMAND_OUTPUT_BYTES {
+            *output = bounded_command_output(text);
+        } else {
+            output.push_str(text);
+            limit_command_output(output);
+        }
         TranscriptChange {
             appended: false,
             changed: Some(index),
@@ -1433,6 +1437,39 @@ mod tests {
                     && output.starts_with(COMMAND_OUTPUT_OMITTED)
                     && output.ends_with("\nlast line\n")
         ));
+    }
+
+    #[test]
+    fn command_output_oversized_chunk_retains_tail_without_a_large_buffer()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut transcript = Transcript::default();
+        transcript.apply(&HarnessEvent::ToolCall {
+            tool_call_id: ToolCallId::new("command-1"),
+            title: "run".to_string(),
+            kind: "command".to_string(),
+            status: ToolStatus::Running,
+            output: Some("earlier output".to_string()),
+            diffs: Vec::new(),
+            terminal_id: None,
+        });
+        let text = format!("{}tail", "界".repeat(MAX_COMMAND_OUTPUT_BYTES));
+        let mut expected = format!("earlier output{text}");
+        limit_command_output(&mut expected);
+        transcript.apply(&HarnessEvent::CommandOutput {
+            tool_call_id: ToolCallId::new("command-1"),
+            text,
+            output_permit: None,
+        });
+        let Some(EntryKind::ToolCall {
+            output: Some(output),
+            ..
+        }) = transcript.entry(0).map(|entry| &entry.kind)
+        else {
+            return Err("missing command output".into());
+        };
+        assert_eq!(output, &expected);
+        assert!(output.capacity() <= MAX_COMMAND_OUTPUT_BYTES * 2);
+        Ok(())
     }
 
     #[test]
