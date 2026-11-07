@@ -3418,8 +3418,8 @@ mod tests {
     #[tokio::test]
     async fn workspace_watch_continues_after_a_notification_error()
     -> Result<(), Box<dyn std::error::Error>> {
-        let directory = tempfile::tempdir()?;
-        let mut watcher = WorkspaceWatch::start(directory.path().to_path_buf())?;
+        let repository = TestRepository::new()?;
+        let mut watcher = WorkspaceWatch::start(repository.path().to_path_buf())?;
         watcher.inject_error("fixture error");
         let (cancel, mut cancelled) = oneshot::channel();
         let (updates, mut received) = mpsc::unbounded_channel();
@@ -3431,21 +3431,28 @@ mod tests {
         });
         let mut saw_error = false;
         let mut saw_refresh = false;
-        tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::time::timeout(Duration::from_secs(10), async {
             while let Some(update) = received.recv().await {
                 match update {
                     FileWatchUpdate::Error { message } if message.contains("fixture error") => {
-                        saw_error = true
+                        saw_error = true;
+                        std::fs::write(repository.path().join("after-error.txt"), "fixture")?;
                     }
-                    FileWatchUpdate::Changes { .. } if saw_error => {
-                        saw_refresh = true;
-                        break;
+                    FileWatchUpdate::Changes { files, .. } if saw_error => {
+                        let files = serde_json::to_value(files)?;
+                        if files.as_array().is_some_and(|files| {
+                            files.iter().any(|file| file["path"] == "after-error.txt")
+                        }) {
+                            saw_refresh = true;
+                            break;
+                        }
                     }
                     _ => {}
                 }
             }
+            Ok::<(), Box<dyn std::error::Error>>(())
         })
-        .await?;
+        .await??;
         assert!(saw_error && saw_refresh);
         cancel.send(()).map_err(|_| "watcher stopped early")?;
         pump.await?;
