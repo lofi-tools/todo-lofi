@@ -129,7 +129,7 @@ impl ProcessIdentity {
 }
 
 #[cfg(target_os = "macos")]
-fn process_start_time(pid: libc::pid_t) -> Option<u64> {
+pub(crate) fn process_start_time(pid: libc::pid_t) -> Option<u64> {
     let mut info = std::mem::MaybeUninit::<libc::proc_bsdinfo>::uninit();
     let size = std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
     let read = unsafe {
@@ -149,7 +149,7 @@ fn process_start_time(pid: libc::pid_t) -> Option<u64> {
 }
 
 #[cfg(target_os = "linux")]
-fn process_start_time(pid: libc::pid_t) -> Option<u64> {
+pub(crate) fn process_start_time(pid: libc::pid_t) -> Option<u64> {
     let stat = std::fs::read(format!("/proc/{pid}/stat")).ok()?;
     // The command name can contain spaces or parentheses. Fields after it start at 3.
     let fields = stat.rsplit(|&byte| byte == b')').next()?;
@@ -162,7 +162,7 @@ fn process_start_time(pid: libc::pid_t) -> Option<u64> {
 }
 
 #[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
-fn process_start_time(_: libc::pid_t) -> Option<u64> {
+pub(crate) fn process_start_time(_: libc::pid_t) -> Option<u64> {
     None
 }
 

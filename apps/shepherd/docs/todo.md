@@ -1150,8 +1150,10 @@ placeholder tabs and no unearned state badges.
   Project and task terminal launches now persist PID, start time, process group,
   session, and boot identity per launch. On exit, remaining background jobs
   are recorded before the leader record is removed; PTY fixtures verify
-  persistence and cleanup. Agent and ACP terminal identities
-  and restart-time orphan handling remain.
+  persistence and cleanup. Startup snapshots earlier records for read-only
+  inspection against boot, start time, process group, and session identities;
+  a match does not establish that another Shepherd instance has released it.
+  Agent and ACP terminal identities and user-facing orphan handling remain.
 - [ ] 30-day archived-worktree collection, dirty skip, branch-tip recreation.
 - [ ] Database backup, migration checks, malformed migration handling and
   transactional writes.

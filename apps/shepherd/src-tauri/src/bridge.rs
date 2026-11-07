@@ -512,6 +512,7 @@ pub struct ShellState {
     terminal_subscriptions: Arc<Mutex<BTreeMap<String, TerminalSubscription>>>,
     terminal_lifecycle: Mutex<()>,
     terminals: TerminalHost,
+    previous_processes: Vec<ProcessRecord>,
     scan: Arc<Mutex<Option<shepherd_core::project_scan::ProjectScan>>>,
     file_searches: Mutex<BTreeMap<String, FileSearch>>,
     task_searches: Mutex<BTreeMap<String, TaskSearchRequest>>,
@@ -549,6 +550,7 @@ impl ShellState {
             terminal_subscriptions: Arc::new(Mutex::new(BTreeMap::new())),
             terminal_lifecycle: Mutex::new(()),
             terminals,
+            previous_processes: Vec::new(),
             scan: Arc::new(Mutex::new(None)),
             file_searches: Mutex::new(BTreeMap::new()),
             task_searches: Mutex::new(BTreeMap::new()),
@@ -577,10 +579,12 @@ impl ShellState {
         let store = TursoStore::open_at(&database_path)
             .await
             .map_err(|error| BridgeError::new("storage", error.to_string()))?;
-        let core = Core::load(Box::new(store), harness_factory)
+        let mut core = Core::load(Box::new(store), harness_factory)
             .await
             .map_err(BridgeError::from)?;
+        let previous_processes = core.recorded_processes().await.map_err(BridgeError::from)?;
         let mut state = Self::with_terminals(core, terminals);
+        state.previous_processes = previous_processes;
         state.attachment_root = Some(data_directory.join("attachments"));
 
         // Walking the home directory can take seconds, so the scan starts with
@@ -1858,6 +1862,16 @@ pub mod commands {
     use tauri::State;
 
     use super::*;
+
+    #[tauri::command]
+    pub async fn inspect_previous_processes(
+        state: State<'_, ShellState>,
+    ) -> Result<Vec<crate::orphan_process::ProcessInspection>, BridgeError> {
+        let records = state.previous_processes.clone();
+        tokio::task::spawn_blocking(move || crate::orphan_process::inspect(records))
+            .await
+            .map_err(|error| BridgeError::new("process_inspection", error.to_string()))
+    }
 
     #[tauri::command]
     pub async fn set_terminal_appearance(
@@ -3790,6 +3804,40 @@ mod tests {
             .find(|row| row.id == entry.id)
             .ok_or("missing restored prompt")?;
         assert_eq!(restored_entry, entry);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn startup_snapshots_only_previously_recorded_processes()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = TestDirectory::new()?;
+        let state = ShellState::load(
+            directory.path(),
+            Box::new(ScriptedHarnessFactory),
+            TerminalHost::default(),
+        )
+        .await?;
+        let record = ProcessRecord {
+            id: "old-terminal".into(),
+            kind: "terminal".into(),
+            owner_id: "project".into(),
+            pid: 123,
+            started_at: 456,
+            process_group: 123,
+            session_id: 123,
+            boot_id: "boot".into(),
+        };
+        state.core.lock().await.record_process(&record).await?;
+        assert!(state.previous_processes.is_empty());
+        drop(state);
+
+        let reopened = ShellState::load(
+            directory.path(),
+            Box::new(ScriptedHarnessFactory),
+            TerminalHost::default(),
+        )
+        .await?;
+        assert_eq!(reopened.previous_processes, vec![record]);
         Ok(())
     }
 

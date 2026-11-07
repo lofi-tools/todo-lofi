@@ -15,6 +15,7 @@ mod diagnostics;
 mod file_actions;
 mod file_watch;
 mod keybindings;
+mod orphan_process;
 mod pty_terminal;
 mod settings;
 mod terminal_screen;
@@ -282,6 +283,7 @@ pub fn run() -> Result<(), tauri::Error> {
             bridge::commands::save_terminal_layout,
             bridge::commands::save_inspector_tab,
             bridge::commands::terminal_list,
+            bridge::commands::inspect_previous_processes,
             bridge::commands::start_terminal,
             bridge::commands::start_freebuff_terminal,
             bridge::commands::restart_terminal,
