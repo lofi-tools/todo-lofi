@@ -883,9 +883,9 @@ If Pi’s RPC probe is blocked, proceed with ACP while resolving it.
   supervisor also accepts shutdown while waiting after output closes and stops
   the group on a wait timeout; local disconnect fixtures cover prompt shutdown
   and automatic timeout cleanup of a descendant without a shutdown request.
-  Shutdown reports process-group signal failures even if stopping the leader
-  succeeds; an injected-failure fixture covers this. A failed stop cannot yet
-  be retried through the consumed Pi transport.
+  Shutdown reports process-group signal failures while retaining the unreaped
+  leader, so another shutdown can safely retry; an injected-failure fixture
+  verifies the leader remains available and the retry succeeds.
   Descendants surviving an already-reaped leader still need recovery.
   Startup waits for the exit report so it can retain process diagnostics.
   The installed Nix-profile Pi 0.75.4 passed the isolated dialog smoke, but its

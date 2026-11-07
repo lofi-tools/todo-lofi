@@ -25,8 +25,11 @@ pub struct PiRpc {
     replies: Replies,
     events: Mutex<mpsc::UnboundedReceiver<PiRpcEvent>>,
     supervisor: JoinHandle<HarnessResult<()>>,
+    supervisor_complete: bool,
+    supervisor_error: Option<String>,
     writer: JoinHandle<()>,
-    shutdown_request: Option<oneshot::Sender<()>>,
+    shutdown_request: Option<mpsc::UnboundedSender<()>>,
+    stop_errors: mpsc::UnboundedReceiver<String>,
 }
 
 pub enum PiRpcEvent {
@@ -116,7 +119,8 @@ impl PiRpc {
         };
         let (input, outgoing) = mpsc::channel(32);
         let (events, receiver) = mpsc::unbounded_channel();
-        let (shutdown_request, mut shutdown) = oneshot::channel();
+        let (shutdown_request, mut shutdown) = mpsc::unbounded_channel();
+        let (stop_errors, stop_error_receiver) = mpsc::unbounded_channel();
         let replies = Replies::default();
         let writer = tokio::spawn(write_input(stdin, outgoing));
         let supervisor = tokio::spawn({
@@ -129,8 +133,8 @@ impl PiRpc {
                 tokio::pin!(reading);
                 let (protocol_error, stopped) = tokio::select! {
                     result = &mut reading => (result.err(), false),
-                    _ = &mut shutdown => {
-                        if let Err(error) = terminate(&child) {
+                    _ = shutdown.recv() => {
+                        if let Err(error) = stop_with_retry(&child, terminate, &mut shutdown, &stop_errors).await {
                             cleanup_error = Some(format!("could not signal Pi during shutdown: {error}"));
                             if let Err(error) = child.start_kill() {
                                 tracing::warn!(%error, "could not stop Pi after a group signal failure");
@@ -149,7 +153,9 @@ impl PiRpc {
                     replies.pending.clear();
                 }
                 if protocol_error.is_some() {
-                    if let Err(error) = terminate(&child) {
+                    if let Err(error) =
+                        stop_with_retry(&child, terminate, &mut shutdown, &stop_errors).await
+                    {
                         cleanup_error.get_or_insert_with(|| {
                             format!(
                                 "could not stop the Pi process group after an RPC error: {error}"
@@ -165,8 +171,8 @@ impl PiRpc {
                 } else {
                     tokio::select! {
                         result = timeout(SHUTDOWN_TIMEOUT, child.wait()) => result,
-                        _ = &mut shutdown => {
-                            if let Err(error) = terminate(&child) {
+                        _ = shutdown.recv() => {
+                            if let Err(error) = stop_with_retry(&child, terminate, &mut shutdown, &stop_errors).await {
                                 cleanup_error = Some(format!("could not signal Pi during shutdown after output closed: {error}"));
                                 if let Err(error) = child.start_kill() {
                                     tracing::warn!(%error, "could not stop Pi after a group signal failure");
@@ -179,7 +185,9 @@ impl PiRpc {
                 let status = match waiting {
                     Ok(status) => status,
                     Err(_) => {
-                        if let Err(error) = terminate(&child) {
+                        if let Err(error) =
+                            stop_with_retry(&child, terminate, &mut shutdown, &stop_errors).await
+                        {
                             cleanup_error.get_or_insert_with(|| {
                                 format!(
                                     "could not stop the Pi process group after timeout: {error}"
@@ -224,8 +232,11 @@ impl PiRpc {
             replies,
             events: Mutex::new(receiver),
             supervisor,
+            supervisor_complete: false,
+            supervisor_error: None,
             writer,
             shutdown_request: Some(shutdown_request),
+            stop_errors: stop_error_receiver,
         };
         // Separators in the echoed ID distinguish byte framing from Unicode line splitting.
         let id = format!("shepherd-probe\u{2028}\u{2029}-{}", uuid::Uuid::new_v4());
@@ -305,17 +316,38 @@ impl PiRpc {
         self.events.lock().await.recv().await
     }
 
-    pub async fn shutdown(mut self) -> HarnessResult<()> {
+    pub async fn shutdown(&mut self) -> HarnessResult<()> {
+        if self.supervisor_complete {
+            return match &self.supervisor_error {
+                Some(error) => Err(protocol(error.clone())),
+                None => Ok(()),
+            };
+        }
         self.input = None;
-        if let Some(request) = self.shutdown_request.take()
+        if let Ok(error) = self.stop_errors.try_recv() {
+            return Err(protocol(error));
+        }
+        if let Some(request) = &self.shutdown_request
             && request.send(()).is_err()
         {
             tracing::debug!("Pi already exited before shutdown");
         }
-        timeout(SHUTDOWN_TIMEOUT * 3, &mut self.supervisor)
-            .await
-            .map_err(|_| protocol("Pi did not exit after closing stdin"))?
-            .map_err(|error| protocol(format!("could not wait for Pi shutdown: {error}")))?
+        timeout(SHUTDOWN_TIMEOUT * 3, async {
+            tokio::select! {
+                biased;
+                Some(error) = self.stop_errors.recv() => Err(protocol(error)),
+                result = &mut self.supervisor => {
+                    self.supervisor_complete = true;
+                    let result = result
+                        .map_err(|error| format!("could not wait for Pi shutdown: {error}"))
+                        .and_then(|result| result.map_err(|error| error.to_string()));
+                    self.supervisor_error = result.as_ref().err().cloned();
+                    result.map_err(protocol)
+                },
+            }
+        })
+        .await
+        .map_err(|_| protocol("Pi did not exit after closing stdin"))?
     }
 
     async fn send(&self, record: Value) -> HarnessResult<()> {
@@ -334,7 +366,11 @@ impl PiRpc {
     }
 
     async fn startup_exit(&mut self) -> HarnessError {
-        match timeout(SHUTDOWN_TIMEOUT * 3, &mut self.supervisor).await {
+        let result = tokio::select! {
+            Some(error) = self.stop_errors.recv() => return protocol(error),
+            result = timeout(SHUTDOWN_TIMEOUT * 3, &mut self.supervisor) => result,
+        };
+        match result {
             Ok(Ok(Ok(()))) => {}
             Ok(Ok(Err(error))) => return error,
             Ok(Err(error)) => {
@@ -386,10 +422,25 @@ fn terminate(_child: &Child) -> std::io::Result<()> {
 impl Drop for PiRpc {
     fn drop(&mut self) {
         self.writer.abort();
-        if let Some(request) = self.shutdown_request.take()
-            && request.send(()).is_err()
-        {
-            tracing::debug!("Pi already exited before shutdown");
+        drop(self.shutdown_request.take());
+    }
+}
+
+async fn stop_with_retry(
+    child: &Child,
+    terminate: fn(&Child) -> std::io::Result<()>,
+    requests: &mut mpsc::UnboundedReceiver<()>,
+    errors: &mpsc::UnboundedSender<String>,
+) -> std::io::Result<()> {
+    loop {
+        match terminate(child) {
+            Ok(()) => return Ok(()),
+            Err(error) => {
+                let message = format!("could not stop the Pi process group: {error}");
+                if errors.send(message).is_err() || requests.recv().await.is_none() {
+                    return Err(error);
+                }
+            }
         }
     }
 }
@@ -584,7 +635,7 @@ while IFS= read -r line; do :; done
                 cwd: directory.path().to_owned(),
                 ..SpawnSpec::default()
             };
-            let (rpc, _) = PiRpc::start(&spec).await?;
+            let (mut rpc, _) = PiRpc::start(&spec).await?;
             if drop_transport {
                 drop(rpc);
             } else {
@@ -605,6 +656,7 @@ while IFS= read -r line; do :; done
         std::fs::write(
             &script,
             r#"
+printf '%s' "$$" > leader-pid
 IFS= read -r state || exit 3
 state_id=$(printf '%s\n' "$state" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
 printf '{"type":"response","id":"%s","command":"get_state","success":true,"data":{"sessionId":"pi-fixture","sessionFile":null,"isStreaming":false,"isCompacting":false,"pendingMessageCount":0}}\n' "$state_id"
@@ -617,8 +669,15 @@ exec sleep 30
             cwd: directory.path().to_owned(),
             ..SpawnSpec::default()
         };
-        let (rpc, _) = PiRpc::start_with_terminator(&spec, |_| {
-            Err(std::io::Error::other("fixture group signal failure"))
+        static SIGNAL_ATTEMPTS: std::sync::atomic::AtomicUsize =
+            std::sync::atomic::AtomicUsize::new(0);
+        SIGNAL_ATTEMPTS.store(0, std::sync::atomic::Ordering::SeqCst);
+        let (mut rpc, _) = PiRpc::start_with_terminator(&spec, |child| {
+            if SIGNAL_ATTEMPTS.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                Err(std::io::Error::other("fixture group signal failure"))
+            } else {
+                terminate(child)
+            }
         })
         .await?;
         let error = match timeout(Duration::from_secs(2), rpc.shutdown()).await? {
@@ -626,6 +685,12 @@ exec sleep 30
             Err(error) => error,
         };
         assert!(error.to_string().contains("fixture group signal failure"));
+        let leader: libc::pid_t =
+            std::fs::read_to_string(directory.path().join("leader-pid"))?.parse()?;
+        assert_eq!(unsafe { libc::kill(leader, 0) }, 0);
+        timeout(Duration::from_secs(2), rpc.shutdown()).await??;
+        rpc.shutdown().await?;
+        assert_eq!(SIGNAL_ATTEMPTS.load(std::sync::atomic::Ordering::SeqCst), 2);
         Ok(())
     }
 
@@ -653,7 +718,7 @@ exec sleep 30
             cwd: directory.path().to_owned(),
             ..SpawnSpec::default()
         };
-        let (rpc, _) = PiRpc::start(&spec).await?;
+        let (mut rpc, _) = PiRpc::start(&spec).await?;
         assert!(matches!(
             timeout(Duration::from_secs(1), rpc.request("get_state", Map::new())).await?,
             Err(HarnessError::ChannelClosed)
@@ -692,7 +757,7 @@ exec sleep 30
             cwd: directory.path().to_owned(),
             ..SpawnSpec::default()
         };
-        let (rpc, _) = PiRpc::start(&spec).await?;
+        let (mut rpc, _) = PiRpc::start(&spec).await?;
         let result = timeout(Duration::from_secs(1), rpc.request("get_state", Map::new())).await?;
         assert!(matches!(result, Err(HarnessError::ChannelClosed)));
         timeout(Duration::from_secs(1), rpc.shutdown()).await??;
@@ -734,7 +799,7 @@ exit 23
             cwd: directory.path().to_owned(),
             ..SpawnSpec::default()
         };
-        let (rpc, state) = PiRpc::start(&spec).await?;
+        let (mut rpc, state) = PiRpc::start(&spec).await?;
         assert_eq!(state.session_id, "pi-fixture");
         let prompt = rpc.request(
             "prompt",
@@ -815,7 +880,7 @@ exit 23
             ]
             .into(),
         };
-        let (rpc, state) = PiRpc::start(&spec).await?;
+        let (mut rpc, state) = PiRpc::start(&spec).await?;
         assert!(!state.is_streaming);
         let commands = rpc.request("get_commands", Map::new()).await?;
         assert!(commands["commands"].as_array().is_some_and(|commands| {
