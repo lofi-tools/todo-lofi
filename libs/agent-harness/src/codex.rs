@@ -743,6 +743,7 @@ struct CodexEffort {
 }
 
 pub async fn project_models(spec: SpawnSpec) -> HarnessResult<CodexProjectModels> {
+    let hide_diagnostics = !spec.environment.is_empty();
     let mut harness = CodexHarness::new();
     let result = async {
         let directory = spec.cwd.display().to_string();
@@ -762,12 +763,12 @@ pub async fn project_models(spec: SpawnSpec) -> HarnessResult<CodexProjectModels
                     .and_then(Value::as_str)
                     .map(str::to_owned);
             }
-            Err(error) => tracing::debug!(%error, "could not read Codex project defaults"),
+            Err(error) => tracing::debug!(error = %crate::protect_discovery_error(error, hide_diagnostics), "could not read Codex project defaults"),
         }
         if capabilities.model_picker {
             match harness.model_catalog().await {
                 Ok(models) => settings.models = models,
-                Err(error) => tracing::warn!(%error, "could not list Codex models"),
+                Err(error) => tracing::warn!(error = %crate::protect_discovery_error(error, hide_diagnostics), "could not list Codex models"),
             }
         }
         if settings.model.is_none() {
@@ -782,8 +783,9 @@ pub async fn project_models(spec: SpawnSpec) -> HarnessResult<CodexProjectModels
     }
     .await;
     let shutdown = harness.shutdown().await;
-    let settings = result?;
-    shutdown?;
+    let settings =
+        result.map_err(|error| crate::protect_discovery_error(error, hide_diagnostics))?;
+    shutdown.map_err(|error| crate::protect_discovery_error(error, hide_diagnostics))?;
     Ok(settings)
 }
 
@@ -3288,6 +3290,28 @@ esac
             probe.methods
         );
         assert!(!probe.supports("thread/archive"));
+    }
+
+    #[tokio::test]
+    async fn model_discovery_hides_agent_failure_with_environment()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = TempDir::new()?;
+        let stub = write_stub(
+            &directory,
+            "codex-secret",
+            "#!/bin/sh\nprintf '%s\\n' \"$TOKEN\" >&2\nexit 1\n",
+        );
+        let mut launch = spec(&stub, directory.path());
+        launch
+            .environment
+            .insert("TOKEN".into(), "fixture-private-value".into());
+        let error = match project_models(launch).await {
+            Ok(_) => return Err("expected discovery failure".into()),
+            Err(error) => error,
+        };
+        assert!(!error.to_string().contains("fixture-private-value"));
+        assert!(error.to_string().contains("hidden"));
+        Ok(())
     }
 
     #[tokio::test]

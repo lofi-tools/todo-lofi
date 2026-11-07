@@ -190,9 +190,9 @@ five seconds. For example:
 
 Restart Shepherd after changing these settings. Model and mode discovery use
 the same project environment as task launches.
-For task sessions with launch environment values, Shepherd hides adapter stderr
-and detailed failure messages because an agent may print a secret there; the
-failure category remains visible.
+For task sessions and agent discovery with launch environment values, Shepherd
+hides adapter stderr and detailed failure messages because an agent may print a
+secret there; the failure category remains visible.
 The task keeps its agent after the first prompt. The diagnostics show which
 protocol ran and why Shepherd selected the fallback.
 The conversation header shows the tier after a session opens. Diagnostics list

@@ -61,15 +61,18 @@ pub fn configured_launch(settings: &AgentSettings) -> HarnessResult<Option<Spawn
 }
 
 pub async fn project_modes(spec: &SpawnSpec) -> HarnessResult<Vec<AgentMode>> {
-    let server = OpenCodeServer::start(spec).await?;
+    let hide_diagnostics = !spec.environment.is_empty();
+    let server = OpenCodeServer::start(spec)
+        .await
+        .map_err(|error| crate::protect_discovery_error(error, hide_diagnostics))?;
     let modes = if server.probe.modes {
         server.mode_catalog().await
     } else {
         Ok(Vec::new())
     };
     let shutdown = server.shutdown().await;
-    let modes = modes?;
-    shutdown?;
+    let modes = modes.map_err(|error| crate::protect_discovery_error(error, hide_diagnostics))?;
+    shutdown.map_err(|error| crate::protect_discovery_error(error, hide_diagnostics))?;
     Ok(modes)
 }
 
@@ -1397,6 +1400,33 @@ fn protocol_error(context: &str, error: impl std::fmt::Display) -> HarnessError 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn mode_discovery_hides_agent_failure_with_environment()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = tempfile::tempdir()?;
+        let script = directory.path().join("opencode");
+        std::fs::write(
+            &script,
+            "#!/bin/sh\nprintf 'server listening on %s\\n' \"$TOKEN\"\n",
+        )?;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700))?;
+        let spec = SpawnSpec {
+            program: script.to_string_lossy().into_owned(),
+            cwd: directory.path().to_owned(),
+            environment: BTreeMap::from([("TOKEN".into(), "fixture-private-value".into())]),
+            ..SpawnSpec::default()
+        };
+        let error = match project_modes(&spec).await {
+            Ok(_) => return Err("expected discovery failure".into()),
+            Err(error) => error,
+        };
+        assert!(!error.to_string().contains("fixture-private-value"));
+        assert!(error.to_string().contains("hidden"));
+        Ok(())
+    }
 
     #[test]
     fn stderr_redaction_omits_truncated_lines_and_hides_credentials()

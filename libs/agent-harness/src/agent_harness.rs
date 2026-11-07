@@ -79,6 +79,17 @@ pub enum HarnessError {
 
 pub type HarnessResult<T> = Result<T, HarnessError>;
 
+pub(crate) fn protect_discovery_error(error: HarnessError, hide: bool) -> HarnessError {
+    if hide {
+        HarnessError::Reported {
+            kind: FailureKind::classify(&error).unwrap_or(FailureKind::Protocol),
+            message: "Agent discovery details are hidden because launch environment values are configured.".into(),
+        }
+    } else {
+        error
+    }
+}
+
 /// Why a session failed, in terms the UI can label without parsing an adapter's
 /// prose. An older server reports an unsupported build or a missing sign-in as
 /// a JSON-RPC error, so classification reads the message it sent.

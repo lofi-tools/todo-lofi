@@ -1249,8 +1249,9 @@ placeholder tabs and no unearned state badges.
   snapshot and reopened database files do not contain it. Launch-spec debug
   output omits environment values. Core sessions with launch environment values
   hide adapter stderr and failure details while preserving failure categories;
-  a fixture covers exit events and errors. Adapter-internal logs, discovery
-  processes and live-adapter behavior remain to be audited.
+  a fixture covers exit events and errors. Discovery failures also hide details
+  when environment values are present, with local Codex and OpenCode fixtures.
+  Other adapter-internal logs and live-adapter behavior remain to be audited.
 - [ ] Packaging and CI: macOS 13+, Ubuntu 24.04+, pinned Zig, Tauri build,
   platform smoke.
 - [ ] v2/GPUI explicitly not started until v1 is feature complete.
