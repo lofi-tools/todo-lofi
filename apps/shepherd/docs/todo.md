@@ -1170,7 +1170,8 @@ placeholder tabs and no unearned state badges.
   migrations; a failed backup or unknown migration blocks the migration.
   Turso's parser validates migration statements before changes, and a failed
   statement rolls back its migration and history entry. Broader transaction
-  checks remain.
+  checks remain. Transcript batches reject missing or mismatched task/session
+  owners; fixtures verify failed attachment updates roll back the whole batch.
 - [ ] Bounded transcript, stderr, search and frame buffers.
 - [ ] Multiple agents and projects: three agents across two projects, no state
   bleed, no polling.

@@ -51,6 +51,8 @@ pub enum StoreError {
     InvalidRow(String),
     #[error("task {task_id} is no longer awaiting review in the database")]
     ReviewStateChanged { task_id: TaskId },
+    #[error("session {session_id} does not belong to task {task_id} in the store")]
+    TranscriptOwnerMissing { task_id: TaskId, session_id: String },
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -471,6 +473,22 @@ impl Store for TursoStore {
         }
         let mut db = self.db.lock().await;
         let mut transaction = db.transaction().await?;
+        let owners = toasty::sql::query(
+            "SELECT sessions.id FROM sessions JOIN tasks ON tasks.id = sessions.task_id \
+             JOIN projects ON projects.id = tasks.project_id WHERE sessions.id = ?1 AND tasks.id = ?2",
+        )
+        .column_types([Type::String])
+        .bind(&session.id)
+        .bind(session.task_id.as_str())
+        .exec(&mut transaction)
+        .await?;
+        if owners.is_empty() {
+            transaction.rollback().await?;
+            return Err(StoreError::TranscriptOwnerMissing {
+                task_id: session.task_id.clone(),
+                session_id: session.id.clone(),
+            });
+        }
         let created_at = crate::projects::now_millis() as i64;
         for entry in entries {
             let mut payload = serde_json::to_value(entry).map_err(|error| {
@@ -1381,6 +1399,24 @@ impl Store for MemoryStore {
         session: &SessionRecord,
         entries: &[&Entry],
     ) -> Result<(), StoreError> {
+        if entries.is_empty() {
+            return Ok(());
+        }
+        let tasks = self.tasks.read().await;
+        let sessions = self.sessions.read().await;
+        let projects = self.projects.read().await;
+        if !tasks
+            .get(session.task_id.as_str())
+            .is_some_and(|task| projects.contains_key(task.project_id.as_str()))
+            || !sessions
+                .iter()
+                .any(|stored| stored.id == session.id && stored.task_id == session.task_id)
+        {
+            return Err(StoreError::TranscriptOwnerMissing {
+                task_id: session.task_id.clone(),
+                session_id: session.id.clone(),
+            });
+        }
         let mut transcripts = self.transcripts.write().await;
         let transcript = transcripts.entry(session.task_id.clone()).or_default();
         for entry in entries {
@@ -1592,6 +1628,58 @@ mod tests {
                 required_string(record.first())
             })
             .collect()
+    }
+
+    #[tokio::test]
+    async fn transcript_writes_reject_missing_or_mismatched_owners()
+    -> Result<(), Box<dyn std::error::Error>> {
+        async fn verify(store: &dyn Store, root: &Path) -> Result<(), Box<dyn std::error::Error>> {
+            let project = Project::new(root.to_path_buf());
+            let first = Task::draft(project.id.clone(), "First", root);
+            let second = Task::draft(project.id.clone(), "Second", root);
+            store.save_project(&project).await?;
+            store.save_task(&first).await?;
+            store.save_task(&second).await?;
+            let session = SessionRecord::started(first.id.clone(), "codex", None);
+            store.save_session(&session).await?;
+            let mut transcript = agent_harness::Transcript::default();
+            transcript.push_user_message("Keep this prompt");
+            let entry = transcript.entry(0).ok_or("missing prompt")?;
+
+            let mut mismatched = session.clone();
+            mismatched.task_id = second.id.clone();
+            assert!(matches!(
+                store.save_transcript_entries(&mismatched, &[entry]).await,
+                Err(StoreError::TranscriptOwnerMissing { .. })
+            ));
+            let missing = SessionRecord::started(first.id.clone(), "codex", None);
+            assert!(matches!(
+                store.save_transcript_entries(&missing, &[entry]).await,
+                Err(StoreError::TranscriptOwnerMissing { .. })
+            ));
+            mismatched.task_id = TaskId::new("deleted-task");
+            assert!(matches!(
+                store.save_transcript_entries(&mismatched, &[entry]).await,
+                Err(StoreError::TranscriptOwnerMissing { .. })
+            ));
+            assert!(store.load_transcript(&first.id).await?.is_empty());
+            assert!(store.load_transcript(&second.id).await?.is_empty());
+            store.save_transcript_entries(&session, &[entry]).await?;
+            assert_eq!(
+                store.load_transcript(&first.id).await?,
+                transcript.entries()
+            );
+            Ok(())
+        }
+
+        let directory = TestDirectory::new()?;
+        verify(&MemoryStore::new(), directory.path()).await?;
+        verify(
+            &TursoStore::open_at(&directory.join("shepherd.db")).await?,
+            directory.path(),
+        )
+        .await?;
+        Ok(())
     }
 
     #[tokio::test]
@@ -1963,9 +2051,13 @@ mod tests {
         if let EntryKind::UserMessage { text } = &mut invalid.kind {
             *text = "This failed update must roll back.".into();
         }
+        let mut earlier = first.clone();
+        if let EntryKind::UserMessage { text } = &mut earlier.kind {
+            *text = "An earlier update in this batch must also roll back.".into();
+        }
         assert!(
             store
-                .save_transcript_entries(&session, &[&invalid])
+                .save_transcript_entries(&session, &[&earlier, &invalid])
                 .await
                 .is_err()
         );
