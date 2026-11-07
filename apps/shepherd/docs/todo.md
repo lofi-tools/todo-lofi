@@ -1232,12 +1232,12 @@ placeholder tabs and no unearned state badges.
   End-to-end timing with a real worktree remains unmeasured.
 - [ ] Path confinement, environment `!command` timeout, no secret values in
   logs or storage.
-  File preview opens each path component without following symlinks on Unix,
-  and fixtures cover traversal and static symlinks. Directory listing and
-  search still enumerate by pathname after checking directory metadata, leaving
-  a symlink substitution race; use descriptor-relative enumeration before
-  treating path confinement as verified. Configured environment substitutions
-  and their timeout also remain to be implemented and verified.
+  File preview, directory listing and search open each path component without
+  following symlinks on Unix. Fixtures cover traversal, static symlinks and a
+  directory replaced by a symlink after opening. External editor paths and the
+  remaining filesystem operations still need a confinement audit. Configured
+  environment substitutions and their timeout remain to be implemented and
+  verified.
 - [ ] Packaging and CI: macOS 13+, Ubuntu 24.04+, pinned Zig, Tauri build,
   platform smoke.
 - [ ] v2/GPUI explicitly not started until v1 is feature complete.

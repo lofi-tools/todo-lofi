@@ -1,5 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs::{self, DirEntry, File};
+use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::sync::OnceLock;
@@ -211,16 +211,17 @@ pub fn list_directory(
 
     let mut entries = Vec::new();
     let mut incomplete = false;
-    for entry in fs::read_dir(&directory)? {
+    for entry in workspace_directory_entries(&root, &relative)? {
         let entry = entry?;
-        let name = entry.file_name();
-        let path = entry.path();
+        let name = entry.name;
+        let path = directory.join(&name);
         if is_git_metadata(&name) || (!show_dotfiles && is_dotfile(&name)) {
             continue;
         }
-        let kind = entry.file_type()?;
-        let is_directory = kind.is_dir();
-        if (!is_directory && !kind.is_file()) || matches_ignore(&rules[0], &path, is_directory) {
+        let Some(is_directory) = entry.directory else {
+            continue;
+        };
+        if matches_ignore(&rules[0], &path, is_directory) {
             continue;
         }
         let Some((name, path)) = name.to_str().zip(
@@ -239,7 +240,8 @@ pub fn list_directory(
             name: name.into(),
             path: path.into(),
             directory: is_directory,
-            ignored: inherited_git_ignore || matches_ignore(&rules[1], &entry.path(), is_directory),
+            ignored: inherited_git_ignore
+                || matches_ignore(&rules[1], &directory.join(name), is_directory),
         });
     }
     let probe = std::process::Command::new("git")
@@ -417,7 +419,10 @@ impl Search<'_> {
         let [shepherd, git] = rules.each_ref().map(Vec::len);
         let outcome = (|| {
             load_rules(self.root, directory, rules)?;
-            for entry in fs::read_dir(directory)? {
+            let relative = directory
+                .strip_prefix(self.root)
+                .map_err(|_| FileError::InvalidPath)?;
+            for entry in workspace_directory_entries(self.root, relative)? {
                 self.check_cancelled()?;
                 if self.at_limit() {
                     self.result.incomplete = true;
@@ -425,7 +430,7 @@ impl Search<'_> {
                 }
                 self.visited += 1;
                 match entry {
-                    Ok(entry) => match self.entry(&entry, rules, depth) {
+                    Ok(entry) => match self.entry(directory, entry, rules, depth) {
                         Err(FileError::Cancelled) => return Err(FileError::Cancelled),
                         Err(_) => self.result.incomplete = true,
                         Ok(()) => {}
@@ -443,13 +448,21 @@ impl Search<'_> {
 
     fn entry(
         &mut self,
-        entry: &DirEntry,
+        directory: &Path,
+        entry: WorkspaceDirectoryEntry,
         rules: &mut IgnoreRules,
         depth: usize,
     ) -> Result<(), FileError> {
-        let path = entry.path();
-        let name = entry.file_name();
-        match visible_entry(entry, &name, &path, rules, self.show_dotfiles)? {
+        let name = entry.name;
+        let path = directory.join(&name);
+        let visible = if is_git_metadata(&name) || (!self.show_dotfiles && is_dotfile(&name)) {
+            None
+        } else {
+            entry
+                .directory
+                .filter(|directory| !is_ignored(rules, &path, *directory))
+        };
+        match visible {
             Some(true) => self.directory(&path, rules, depth + 1),
             Some(false) => {
                 let relative = path
@@ -589,19 +602,76 @@ fn check_directory(path: &Path) -> Result<(), FileError> {
     Ok(())
 }
 
-fn visible_entry(
-    entry: &DirEntry,
-    name: &std::ffi::OsStr,
-    path: &Path,
-    rules: &IgnoreRules,
-    show_dotfiles: bool,
-) -> io::Result<Option<bool>> {
-    if is_git_metadata(name) || (!show_dotfiles && is_dotfile(name)) {
-        return Ok(None);
+struct WorkspaceDirectoryEntry {
+    name: std::ffi::OsString,
+    directory: Option<bool>,
+}
+
+#[cfg(unix)]
+fn workspace_directory_entries(
+    root: &Path,
+    relative: &Path,
+) -> Result<impl Iterator<Item = io::Result<WorkspaceDirectoryEntry>>, FileError> {
+    use rustix::fs::{AtFlags, Dir, FileType, Mode, OFlags, open, openat, statat};
+    use std::os::unix::ffi::OsStringExt;
+
+    let flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::DIRECTORY;
+    let mut descriptor = open(root, flags, Mode::empty()).map_err(io::Error::from)?;
+    for name in relative {
+        descriptor = openat(&descriptor, name, flags, Mode::empty()).map_err(io::Error::from)?;
     }
-    let kind = entry.file_type()?;
-    let directory = kind.is_dir();
-    Ok(((directory || kind.is_file()) && !is_ignored(rules, path, directory)).then_some(directory))
+    let mut directory = Dir::new(descriptor).map_err(io::Error::from)?;
+    Ok(std::iter::from_fn(move || {
+        loop {
+            let entry = match directory.next()? {
+                Ok(entry) => entry,
+                Err(error) => return Some(Err(error.into())),
+            };
+            let name = entry.file_name();
+            if name.to_bytes() == b"." || name.to_bytes() == b".." {
+                continue;
+            }
+            let result = directory
+                .fd()
+                .and_then(|fd| statat(fd, name, AtFlags::SYMLINK_NOFOLLOW));
+            return Some(
+                result
+                    .map(|metadata| {
+                        let directory = match FileType::from_raw_mode(metadata.st_mode) {
+                            FileType::Directory => Some(true),
+                            FileType::RegularFile => Some(false),
+                            _ => None,
+                        };
+                        WorkspaceDirectoryEntry {
+                            name: std::ffi::OsString::from_vec(name.to_bytes().to_vec()),
+                            directory,
+                        }
+                    })
+                    .map_err(io::Error::from),
+            );
+        }
+    }))
+}
+
+#[cfg(not(unix))]
+fn workspace_directory_entries(
+    root: &Path,
+    relative: &Path,
+) -> Result<impl Iterator<Item = io::Result<WorkspaceDirectoryEntry>>, FileError> {
+    Ok(fs::read_dir(root.join(relative))?.map(|entry| {
+        let entry = entry?;
+        let kind = entry.file_type()?;
+        Ok(WorkspaceDirectoryEntry {
+            name: entry.file_name(),
+            directory: if kind.is_dir() {
+                Some(true)
+            } else if kind.is_file() {
+                Some(false)
+            } else {
+                None
+            },
+        })
+    }))
 }
 
 fn load_rules(root: &Path, directory: &Path, rules: &mut IgnoreRules) -> Result<(), FileError> {
@@ -1088,6 +1158,28 @@ mod tests {
                 .collect::<String>(),
             "match"
         );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn directory_enumeration_stays_on_open_directory_after_symlink_swap()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let root = directory.path().join("workspace");
+        let outside = directory.path().join("outside");
+        fs::create_dir_all(root.join("folder"))?;
+        fs::create_dir(&outside)?;
+        fs::write(root.join("folder/inside.txt"), "inside")?;
+        fs::write(outside.join("private.txt"), "private")?;
+        let entries = workspace_directory_entries(&root, Path::new("folder"))?;
+        fs::rename(root.join("folder"), root.join("old-folder"))?;
+        std::os::unix::fs::symlink(&outside, root.join("folder"))?;
+        let names = entries
+            .map(|entry| entry.map(|entry| entry.name))
+            .collect::<io::Result<Vec<_>>>()?;
+        assert_eq!(names, [std::ffi::OsString::from("inside.txt")]);
+        assert!(workspace_directory_entries(&root, Path::new("folder")).is_err());
         Ok(())
     }
 
