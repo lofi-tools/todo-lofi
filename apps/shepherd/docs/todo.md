@@ -1260,7 +1260,8 @@ placeholder tabs and no unearned state badges.
   are rejected above 8 MiB while reading, with a protocol error. Event queues
   and other buffer limits still need review. Codex app-server, exec and
   handshake protocol lines have the same limit; oversized exec output fails
-  the turn and stops its process. Exec keeps draining output while it makes
+  the turn and stops its process group, including a descendant in the local
+  fixture. Exec keeps draining output while it makes
   progress after process exit, with a 10-second limit and prompt cancellation.
   It fails the turn if the output pipe stalls or exceeds that limit instead of
   reporting incomplete output as successful. Codex version and help

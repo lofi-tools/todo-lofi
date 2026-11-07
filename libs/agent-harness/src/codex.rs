@@ -4202,6 +4202,7 @@ sleep 30
             &directory,
             "oversized-exec",
             r##"#!/usr/bin/env bash
+(sleep 3; printf escaped > escaped) &
 python3 -c 'import sys; sys.stdout.write("x" * (8 * 1024 * 1024 + 2)); sys.stdout.flush()'
 sleep 30
 "##,
@@ -4225,6 +4226,8 @@ sleep 30
             "{events:?}"
         );
         harness.shutdown().await?;
+        tokio::time::sleep(Duration::from_millis(3300)).await;
+        assert!(!directory.path().join("escaped").exists());
         Ok(())
     }
 
