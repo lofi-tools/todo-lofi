@@ -30,6 +30,9 @@ pub enum Command {
     DiscardDraft {
         task_id: TaskId,
     },
+    DeleteTask {
+        task_id: TaskId,
+    },
     SendPrompt {
         task_id: TaskId,
         input: PromptInput,

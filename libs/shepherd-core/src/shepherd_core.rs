@@ -90,8 +90,10 @@ pub enum CoreError {
     },
     #[error("task {id} is not a draft")]
     NotADraft { id: String },
-    #[error("Close the task's running terminals before discarding it.")]
-    DraftTerminalsRunning,
+    #[error("Close the task's running terminals before deleting it.")]
+    TaskTerminalsRunning,
+    #[error("Task {id} is {state}; stop its active turn before deleting it.")]
+    TaskDeletionBusy { id: String, state: &'static str },
     #[error("task {id} is {state}; it cannot accept a prompt")]
     TaskNotReady { id: String, state: &'static str },
     #[error("task {id} is {state}; it has nothing to resume")]
@@ -625,6 +627,7 @@ impl Core {
                 self.set_draft_agent(&task_id, agent).await
             }
             Command::DiscardDraft { task_id } => self.discard_draft(&task_id).await,
+            Command::DeleteTask { task_id } => self.delete_task(&task_id).await,
             Command::SendPrompt { task_id, input } => self.send_prompt(&task_id, input).await,
             Command::SetSessionMode { task_id, mode } => {
                 self.set_session_mode(&task_id, &mode).await
@@ -1112,6 +1115,35 @@ impl Core {
                 id: task_id.as_str().to_string(),
             });
         }
+        self.delete_task_records(task_id).await
+    }
+
+    async fn delete_task(&mut self, task_id: &TaskId) -> Result<CommandResult, CoreError> {
+        let task = self.task(task_id)?;
+        if matches!(
+            task.state,
+            TaskState::Starting | TaskState::Working | TaskState::Waiting | TaskState::Queued
+        ) {
+            return Err(CoreError::TaskDeletionBusy {
+                id: task_id.to_string(),
+                state: task.state.as_str(),
+            });
+        }
+        if self.terminals.values().any(|terminal| {
+            terminal.task_id.as_ref() == Some(task_id) && terminal.ended_at.is_none()
+        }) {
+            return Err(CoreError::TaskTerminalsRunning);
+        }
+        if let Some(session) = self.sessions.get_mut(task_id)
+            && !session.is_closed()
+        {
+            session.shutdown().await?;
+        }
+        self.delete_task_records(task_id).await
+    }
+
+    async fn delete_task_records(&mut self, task_id: &TaskId) -> Result<CommandResult, CoreError> {
+        let task = self.task(task_id)?;
         let project_id = task.project_id.clone();
         let terminals: Vec<_> = self
             .terminals
@@ -1119,7 +1151,7 @@ impl Core {
             .filter(|terminal| terminal.task_id.as_ref() == Some(task_id))
             .collect();
         if terminals.iter().any(|terminal| terminal.ended_at.is_none()) {
-            return Err(CoreError::DraftTerminalsRunning);
+            return Err(CoreError::TaskTerminalsRunning);
         }
         let terminal_ids: std::collections::BTreeSet<String> = terminals
             .iter()
@@ -1140,7 +1172,11 @@ impl Core {
         self.store.delete_task(task_id).await?;
         self.tasks.remove(task_id);
         self.workspace_layouts.remove(task_id);
-        self.sessions.remove(task_id);
+        if self.sessions.remove(task_id).is_some() {
+            self.emit(Event::ProjectApprovalsChanged {
+                project_id: project_id.clone(),
+            });
+        }
         self.detached_transcripts.remove(task_id);
         self.session_records.remove(task_id);
         self.turn_baselines.remove(task_id);
@@ -3194,7 +3230,7 @@ mod tests {
                 task_id: task.clone()
             })
             .await,
-            Err(CoreError::DraftTerminalsRunning)
+            Err(CoreError::TaskTerminalsRunning)
         ));
         core.end_terminal(&scoped.id, None).await?;
         core.execute(Command::DiscardDraft { task_id: task })
@@ -3206,6 +3242,102 @@ mod tests {
             })
         );
         assert_eq!(core.terminals_for(&project).len(), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn deleting_a_saved_task_preserves_its_worktree_and_branch()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let repository = TestRepository::new()?;
+        let database = TestDatabase::new()?;
+        let uri = database.uri();
+        let mut core = Core::with_services(
+            Box::new(TursoStore::open(&uri).await?),
+            Box::new(FakeHarnessFactory::new(vec![vec![FakeTurn::new(vec![
+                FakeStep::WriteFile {
+                    path: "notes.txt".into(),
+                    contents: "Keep this work".into(),
+                },
+            ])]])),
+        );
+        let project = add_project(&mut core, repository.path().to_path_buf()).await?;
+        let draft = workspace_of(
+            core.execute(Command::CreateDraft {
+                project_id: project.clone(),
+                title: "Keep work".into(),
+                agent: Agent::Codex,
+            })
+            .await?,
+        );
+        let task_id = TaskId::new(draft.task.id);
+        let task = workspace_of(
+            core.execute(Command::SendPrompt {
+                task_id: task_id.clone(),
+                input: PromptInput::text("Edit notes"),
+            })
+            .await?,
+        );
+        assert_eq!(task.task.state, TaskState::Review);
+        let worktree = PathBuf::from(task.task.worktree_path.ok_or("missing worktree")?);
+        let branch = task.task.branch.ok_or("missing branch")?;
+        assert!(!core.store.load_transcript(&task_id).await?.is_empty());
+        core.execute(Command::DeleteTask {
+            task_id: task_id.clone(),
+        })
+        .await?;
+        assert!(core.task_list(&project)?.tasks.is_empty());
+        assert!(core.store.load_transcript(&task_id).await?.is_empty());
+        assert_eq!(
+            std::fs::read_to_string(worktree.join("notes.txt"))?,
+            "Keep this work"
+        );
+        assert!(git_in(&repository, &["branch", "--list", &branch]).contains(&branch));
+        drop(core);
+        let store = TursoStore::open(&uri).await?;
+        assert!(store.load_tasks().await?.is_empty());
+        assert!(store.load_sessions().await?.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn deleting_a_task_with_an_active_turn_is_rejected()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let repository = TestRepository::new()?;
+        let mut core = Core::with_services(
+            Box::new(MemoryStore::new()),
+            Box::new(FakeHarnessFactory::new(vec![vec![FakeTurn::new(vec![
+                FakeStep::approval("approval", "Run"),
+            ])]])),
+        );
+        let project = add_project(&mut core, repository.path().to_path_buf()).await?;
+        let draft = workspace_of(
+            core.execute(Command::CreateDraft {
+                project_id: project,
+                title: "Active".into(),
+                agent: Agent::Codex,
+            })
+            .await?,
+        );
+        let task_id = TaskId::new(draft.task.id);
+        let task = workspace_of(
+            core.execute(Command::SendPrompt {
+                task_id: task_id.clone(),
+                input: PromptInput::text("go"),
+            })
+            .await?,
+        );
+        assert_eq!(task.task.state, TaskState::Waiting);
+        assert!(matches!(
+            core.execute(Command::DeleteTask {
+                task_id: task_id.clone()
+            })
+            .await,
+            Err(CoreError::TaskDeletionBusy { .. })
+        ));
+        assert_eq!(
+            core.task_workspace(&task_id)?.task.state,
+            TaskState::Waiting
+        );
         Ok(())
     }
 

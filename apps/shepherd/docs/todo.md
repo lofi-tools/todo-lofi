@@ -1110,6 +1110,9 @@ and the task header never overstates the tier.
   layout records are removed while another task and shared terminal remain.
   Draft discard stops its task terminals and removes their panes while leaving
   shared terminals running; core and PTY fixtures cover this cleanup.
+  Core saved-task deletion rejects active turns, closes an idle agent session,
+  removes its durable records, and preserves the worktree and branch. Desktop
+  deletion and attachment-cache cleanup remain to be connected.
   Saved-task deletion is not yet exposed by the app, so removal of its cached
   files cannot yet be verified end to end.
 - [x] Corrupt settings file falls back with a banner and backup.
