@@ -1221,8 +1221,7 @@ impl Core {
         let mut updated_project = project.clone();
         updated_project.last_task_id = Some(task_id.clone());
 
-        self.store.save_project(&updated_project).await?;
-        self.store.save_task(&task).await?;
+        self.store.save_draft(&updated_project, &task).await?;
 
         self.projects.insert(project_id.clone(), updated_project);
         self.tasks.insert(task_id.clone(), task);

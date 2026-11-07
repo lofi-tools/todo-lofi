@@ -74,6 +74,7 @@ pub trait Store: Send + Sync {
     async fn load_processes(&self) -> Result<Vec<ProcessRecord>, StoreError>;
     async fn load_projects(&self) -> Result<Vec<Project>, StoreError>;
     async fn save_project(&self, project: &Project) -> Result<(), StoreError>;
+    async fn save_draft(&self, project: &Project, task: &Task) -> Result<(), StoreError>;
     async fn load_tasks(&self) -> Result<Vec<Task>, StoreError>;
     async fn save_task(&self, task: &Task) -> Result<(), StoreError>;
     async fn save_task_with_transcript(
@@ -480,6 +481,40 @@ async fn write_task(
     Ok(())
 }
 
+async fn write_project(
+    executor: &mut dyn toasty::db::Executor,
+    project: &Project,
+) -> Result<(), StoreError> {
+    let last_task_id = project
+        .last_task_id
+        .as_ref()
+        .map(|task_id| task_id.as_str())
+        .unwrap_or_default();
+    toasty::sql::statement(
+        "INSERT INTO projects (id, path, name, missing, last_task_id, created_at, preview_url) \
+         VALUES (?1, ?2, ?3, ?4, NULLIF(?5, ''), ?6, NULLIF(?7, '')) \
+         ON CONFLICT (id) DO UPDATE SET \
+            path = excluded.path, name = excluded.name, missing = excluded.missing, \
+            last_task_id = excluded.last_task_id, created_at = excluded.created_at, preview_url = excluded.preview_url",
+    ).bind(project.id.as_str()).bind(project.path.to_string_lossy().as_ref())
+        .bind(&project.name).bind(i64::from(project.missing)).bind(last_task_id)
+        .bind(project.created_at as i64).bind(project.preview_url.as_ref().map(url::Url::as_str).unwrap_or_default())
+        .exec(executor).await?;
+    Ok(())
+}
+
+fn validate_draft_owner(project: &Project, task: &Task) -> Result<(), StoreError> {
+    if task.project_id != project.id
+        || project.last_task_id.as_ref() != Some(&task.id)
+        || task.state != TaskState::Draft
+    {
+        return Err(StoreError::InvalidRow(
+            "draft and selected project do not match".into(),
+        ));
+    }
+    Ok(())
+}
+
 async fn write_terminal_layout(
     executor: &mut dyn toasty::db::Executor,
     project_id: &ProjectId,
@@ -809,37 +844,27 @@ impl Store for TursoStore {
 
     async fn save_project(&self, project: &Project) -> Result<(), StoreError> {
         let mut db = self.db.lock().await;
-        let last_task_id = project
-            .last_task_id
-            .as_ref()
-            .map(|task_id| task_id.as_str())
-            .unwrap_or_default();
-        toasty::sql::statement(
-            "INSERT INTO projects (id, path, name, missing, last_task_id, created_at, preview_url) \
-             VALUES (?1, ?2, ?3, ?4, NULLIF(?5, ''), ?6, NULLIF(?7, '')) \
-             ON CONFLICT (id) DO UPDATE SET \
-                path = excluded.path, \
-                name = excluded.name, \
-                missing = excluded.missing, \
-                last_task_id = excluded.last_task_id, \
-                created_at = excluded.created_at, \
-                preview_url = excluded.preview_url",
-        )
-        .bind(project.id.as_str())
-        .bind(project.path.to_string_lossy().as_ref())
-        .bind(&project.name)
-        .bind(i64::from(project.missing))
-        .bind(last_task_id)
-        .bind(project.created_at as i64)
-        .bind(
-            project
-                .preview_url
-                .as_ref()
-                .map(url::Url::as_str)
-                .unwrap_or_default(),
-        )
-        .exec(&mut *db)
-        .await?;
+        write_project(&mut *db, project).await
+    }
+
+    async fn save_draft(&self, project: &Project, task: &Task) -> Result<(), StoreError> {
+        validate_draft_owner(project, task)?;
+        let mut db = self.db.lock().await;
+        let mut transaction = db.transaction().await?;
+        let result = async {
+            write_project(&mut transaction, project).await?;
+            write_task(&mut transaction, task).await
+        }
+        .await;
+        if let Err(error) = result {
+            if let Err(rollback) = transaction.rollback().await {
+                return Err(StoreError::Backend(format!(
+                    "draft creation failed: {error}; rollback failed: {rollback}"
+                )));
+            }
+            return Err(error);
+        }
+        transaction.commit().await?;
         Ok(())
     }
 
@@ -1633,6 +1658,15 @@ impl Store for MemoryStore {
         Ok(())
     }
 
+    async fn save_draft(&self, project: &Project, task: &Task) -> Result<(), StoreError> {
+        validate_draft_owner(project, task)?;
+        let mut projects = self.projects.write().await;
+        let mut tasks = self.tasks.write().await;
+        projects.insert(project.id.as_str().to_string(), project.clone());
+        tasks.insert(task.id.as_str().to_string(), task.clone());
+        Ok(())
+    }
+
     async fn load_tasks(&self) -> Result<Vec<Task>, StoreError> {
         let tasks = self.tasks.read().await;
         Ok(tasks.values().cloned().collect())
@@ -1810,6 +1844,64 @@ mod tests {
     use super::*;
     use crate::search::{SearchField, TaskSearch};
     use crate::test_support::{TestDatabase, TestDirectory};
+
+    #[tokio::test]
+    async fn draft_creation_rolls_back_project_selection_on_failure()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database = TestDatabase::new()?;
+        let store = TursoStore::open(&database.uri()).await?;
+        let project = Project::new(database.path().to_path_buf());
+        let task = Task::draft(project.id.clone(), "Draft", database.path());
+        store.save_project(&project).await?;
+        let mut selected = project.clone();
+        selected.last_task_id = Some(task.id.clone());
+        {
+            let mut db = store.db.lock().await;
+            toasty::sql::statement("ALTER TABLE tasks RENAME TO tasks_unavailable")
+                .exec(&mut *db)
+                .await?;
+        }
+        assert!(store.save_draft(&selected, &task).await.is_err());
+        {
+            let mut db = store.db.lock().await;
+            toasty::sql::statement("ALTER TABLE tasks_unavailable RENAME TO tasks")
+                .exec(&mut *db)
+                .await?;
+        }
+        assert_eq!(
+            store
+                .load_projects()
+                .await?
+                .first()
+                .and_then(|project| project.last_task_id.as_ref()),
+            None
+        );
+        assert!(store.load_tasks().await?.is_empty());
+        store.save_draft(&selected, &task).await?;
+        assert_eq!(
+            store
+                .load_projects()
+                .await?
+                .first()
+                .and_then(|project| project.last_task_id.as_ref()),
+            Some(&task.id)
+        );
+        assert_eq!(store.load_tasks().await?.len(), 1);
+        let memory = MemoryStore::new();
+        memory.save_project(&project).await?;
+        assert!(memory.save_draft(&project, &task).await.is_err());
+        assert!(memory.load_tasks().await?.is_empty());
+        memory.save_draft(&selected, &task).await?;
+        assert_eq!(
+            memory
+                .load_projects()
+                .await?
+                .first()
+                .and_then(|project| project.last_task_id.as_ref()),
+            Some(&task.id)
+        );
+        Ok(())
+    }
 
     async fn table_names(store: &TursoStore) -> Result<Vec<String>, StoreError> {
         let mut db = store.db.lock().await;
