@@ -1262,15 +1262,7 @@ impl AgentHarness for CodexHarness {
         let code = match self.child.take() {
             Some(child) => {
                 let mut child = child.lock().await;
-                #[cfg(unix)]
-                if let Some(group) = child.id().and_then(|id| libc::pid_t::try_from(id).ok())
-                    && unsafe { libc::killpg(group, libc::SIGKILL) } != 0
-                {
-                    let error = std::io::Error::last_os_error();
-                    if error.raw_os_error() != Some(libc::ESRCH) {
-                        tracing::warn!(%error, "could not stop the Codex app-server process group");
-                    }
-                }
+                stop_app_server_group(&child);
                 match child.kill().await.and_then(|()| child.try_wait()) {
                     Ok(status) => status.and_then(|status| status.code()),
                     Err(error) => {
@@ -2147,6 +2139,7 @@ fn spawn_reader(
         let outcome = {
             let mut child = child.lock().await;
             if let Some(message) = protocol_failure {
+                stop_app_server_group(&child);
                 if let Err(error) = child.kill().await {
                     tracing::debug!(%error, "could not stop Codex after invalid protocol output");
                 }
@@ -2156,6 +2149,7 @@ fn spawn_reader(
                     Ok(Ok(status)) => Ok(status.code()),
                     Ok(Err(error)) => Err(format!("Could not read the Codex exit status: {error}")),
                     Err(_) => {
+                        stop_app_server_group(&child);
                         if let Err(error) = child.kill().await {
                             tracing::debug!(%error, "could not stop Codex after stdout closed");
                         }
@@ -2191,6 +2185,20 @@ fn spawn_reader(
         }
         pending.lock().await.responses.clear();
     })
+}
+
+fn stop_app_server_group(child: &Child) {
+    #[cfg(unix)]
+    if let Some(group) = child.id().and_then(|id| libc::pid_t::try_from(id).ok())
+        && unsafe { libc::killpg(group, libc::SIGKILL) } != 0
+    {
+        let error = std::io::Error::last_os_error();
+        if error.raw_os_error() != Some(libc::ESRCH) {
+            tracing::warn!(%error, "could not stop the Codex app-server process group");
+        }
+    }
+    #[cfg(not(unix))]
+    let _child = child;
 }
 
 fn spawn_stderr_reader(
@@ -3438,6 +3446,52 @@ esac
         assert_ne!(unsafe { libc::getpgrp() }, pid);
         drop(child);
         harness.shutdown().await?;
+        tokio::time::sleep(Duration::from_millis(1300)).await;
+        assert!(!directory.path().join("escaped").exists());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn malformed_app_server_output_stops_descendants()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = TempDir::new()?;
+        let stub = write_stub(
+            &directory,
+            "codex-invalid.sh",
+            "#!/bin/sh\n(sleep 1; printf escaped > escaped) &\nprintf 'not-json\\n'\nsleep 30\n",
+        );
+        let mut harness = CodexHarness::new();
+        assert!(
+            timeout(
+                Duration::from_secs(5),
+                harness.start(spec(&stub, directory.path()))
+            )
+            .await?
+            .is_err()
+        );
+        tokio::time::sleep(Duration::from_millis(1300)).await;
+        assert!(!directory.path().join("escaped").exists());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn closed_app_server_output_stops_descendants() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let directory = TempDir::new()?;
+        let stub = write_stub(
+            &directory,
+            "codex-closed.sh",
+            "#!/bin/sh\n(sleep 1; printf escaped > escaped) >/dev/null &\nexec 1>&-\nsleep 30\n",
+        );
+        let mut harness = CodexHarness::new();
+        assert!(
+            timeout(
+                Duration::from_secs(5),
+                harness.start(spec(&stub, directory.path()))
+            )
+            .await?
+            .is_err()
+        );
         tokio::time::sleep(Duration::from_millis(1300)).await;
         assert!(!directory.path().join("escaped").exists());
         Ok(())

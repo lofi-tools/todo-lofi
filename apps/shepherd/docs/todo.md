@@ -1164,7 +1164,9 @@ placeholder tabs and no unearned state badges.
   and shutdown, and report signal termination in the ACP exit status. Agent
   Codex app-server and OpenCode's native server now run in their own process
   groups and stop those groups on normal shutdown; local fixtures check that
-  descendants cannot outlive shutdown. OpenCode also stops its group on a
+  descendants cannot outlive shutdown. Codex also stops the group on malformed
+  output or a closed output stream while the server is still running; local
+  fixtures exercise both. OpenCode also stops its group on a
   disconnected turn. OpenCode stops the process group if server initialization
   fails or is cancelled, and on subscription failure or cancellation; local
   fixtures cover initialization, subscription, and project-mode discovery
