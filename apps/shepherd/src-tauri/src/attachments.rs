@@ -74,6 +74,25 @@ pub(crate) fn remove_task(path: &Path) -> io::Result<()> {
     }
 }
 
+pub(crate) fn stage_task(path: &Path) -> io::Result<Option<PathBuf>> {
+    match task_directory(path, false) {
+        Ok(()) => {}
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    }
+    let root = path
+        .parent()
+        .ok_or_else(|| invalid("Missing attachment root."))?;
+    let staged = root.join(format!(".deleting-{}", uuid::Uuid::new_v4()));
+    fs::rename(path, &staged)?;
+    Ok(Some(staged))
+}
+
+pub(crate) fn restore_task(staged: &Path, path: &Path) -> io::Result<()> {
+    task_directory(staged, false)?;
+    fs::rename(staged, path)
+}
+
 pub(crate) fn persist_prompt_file(path: &Path, name: &str, bytes: &[u8]) -> io::Result<String> {
     if name.is_empty()
         || name.len() > 255
@@ -225,6 +244,19 @@ mod tests {
         assert!(prompt_file(&root.path().join("attachments/other-task"), &id).is_err());
         remove_task(&task)?;
         assert!(!file.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn staged_deletion_can_restore_cached_files() -> io::Result<()> {
+        let root = tempfile::tempdir()?;
+        let task = root.path().join("attachments/task");
+        let id = persist_prompt_file(&task, "notes.txt", b"keep")?;
+        let staged = stage_task(&task)?.ok_or_else(|| io::Error::other("missing staged cache"))?;
+        assert!(!task.exists());
+        restore_task(&staged, &task)?;
+        assert_eq!(fs::read(prompt_file(&task, &id)?)?, b"keep");
+        assert!(!staged.exists());
         Ok(())
     }
 

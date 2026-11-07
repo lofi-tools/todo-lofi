@@ -773,14 +773,34 @@ impl ShellState {
     }
 
     pub async fn discard_draft(&self, task_id: String) -> Result<(), BridgeError> {
+        self.remove_task(task_id, true).await
+    }
+
+    pub async fn delete_task(&self, task_id: String) -> Result<(), BridgeError> {
+        self.remove_task(task_id, false).await
+    }
+
+    async fn remove_task(&self, task_id: String, draft_only: bool) -> Result<(), BridgeError> {
         let attachments = self.task_attachment_directory(&task_id);
         let _guard = self.terminal_lifecycle.lock().await;
         let task_id = TaskId::new(task_id);
         let mut core = self.core.lock().await;
         let workspace = core.task_workspace(&task_id)?;
-        if workspace.task.state != TaskState::Draft {
+        if draft_only && workspace.task.state != TaskState::Draft {
             return Err(CoreError::NotADraft {
                 id: task_id.to_string(),
+            }
+            .into());
+        }
+        if !draft_only
+            && matches!(
+                workspace.task.state,
+                TaskState::Starting | TaskState::Working | TaskState::Waiting | TaskState::Queued
+            )
+        {
+            return Err(CoreError::TaskDeletionBusy {
+                id: task_id.to_string(),
+                state: workspace.task.state.as_str(),
             }
             .into());
         }
@@ -799,24 +819,76 @@ impl ShellState {
                 .await?;
             core.end_terminal(&terminal, None).await?;
         }
-        let result = core.execute(Command::DiscardDraft { task_id }).await;
+        let staged = if let Some(path) = attachments.as_ref() {
+            let path = path.clone();
+            tokio::task::spawn_blocking(move || attachments::stage_task(&path))
+                .await
+                .map_err(|error| {
+                    BridgeError::new(
+                        "attachments",
+                        format!("Could not prepare attachment removal: {error}"),
+                    )
+                })?
+                .map_err(|error| {
+                    BridgeError::new(
+                        "attachments",
+                        format!("Could not prepare attachment removal: {error}"),
+                    )
+                })?
+        } else {
+            None
+        };
+        let command = if draft_only {
+            Command::DiscardDraft { task_id }
+        } else {
+            Command::DeleteTask { task_id }
+        };
+        let result = core
+            .execute(command)
+            .await
+            .map_err(BridgeError::from)
+            .and_then(|result| match result {
+                CommandResult::Ack => Ok(()),
+                other => Err(unexpected(&other)),
+            });
         Self::broadcast_core_events(&mut core, &self.events);
         drop(core);
-        match result? {
-            CommandResult::Ack => {
-                if let Some(path) = attachments {
-                    match tokio::task::spawn_blocking(move || attachments::remove_task(&path)).await
-                    {
-                        Ok(Ok(())) => {}
-                        Ok(Err(error)) => {
-                            tracing::warn!(%error, "could not remove discarded draft attachments")
-                        }
-                        Err(error) => tracing::warn!(%error, "attachment removal worker failed"),
-                    }
+        match result {
+            Err(error) => {
+                if let (Some(staged), Some(original)) = (staged, attachments) {
+                    let display = staged.display().to_string();
+                    tokio::task::spawn_blocking(move || {
+                        attachments::restore_task(&staged, &original)
+                    })
+                    .await
+                    .map_err(|restore| {
+                        BridgeError::new(
+                            "attachments",
+                            format!(
+                                "{error}; could not restore attachments from {display}: {restore}"
+                            ),
+                        )
+                    })?
+                    .map_err(|restore| {
+                        BridgeError::new(
+                            "attachments",
+                            format!(
+                                "{error}; could not restore attachments from {display}: {restore}"
+                            ),
+                        )
+                    })?;
+                }
+                Err(error)
+            }
+            Ok(()) => {
+                if let Some(path) = staged {
+                    let display = path.display().to_string();
+                    tokio::task::spawn_blocking(move || attachments::remove_task(&path)).await
+                        .map_err(|error| BridgeError::new("attachments", format!("Task deleted, but attachment cleanup failed at {display}: {error}")))?
+                        .map_err(|error| BridgeError::new("attachments", format!("Task deleted, but attachment cleanup failed at {display}: {error}")))?;
                 }
                 Ok(())
             }
-            other => Err(unexpected(&other)),
         }
     }
 
@@ -1835,6 +1907,14 @@ pub mod commands {
         task_id: String,
     ) -> Result<(), BridgeError> {
         state.inner().discard_draft(task_id).await
+    }
+
+    #[tauri::command]
+    pub async fn delete_task(
+        state: State<'_, ShellState>,
+        task_id: String,
+    ) -> Result<(), BridgeError> {
+        state.inner().delete_task(task_id).await
     }
 
     #[tauri::command]
@@ -3120,6 +3200,83 @@ mod tests {
         assert_eq!(
             state.terminal_list(project.id.clone()).await.revision,
             ended.revision
+        );
+        state.quit(true).await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn deleting_saved_task_removes_its_cache_and_preserves_other_work()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = TestDirectory::new()?;
+        let repository = TestRepository::new()?;
+        let state = ShellState::load(
+            directory.path(),
+            Box::new(ScriptedHarnessFactory),
+            TerminalHost::default(),
+        )
+        .await?;
+        let projects = state
+            .add_project(repository.path().display().to_string())
+            .await?;
+        let project = projects.projects.first().ok_or("missing project")?;
+        let draft = state
+            .create_draft(project.id.clone(), "Saved".into(), Agent::Codex)
+            .await?;
+        let task = draft.task.id;
+        let other = state
+            .create_draft(project.id.clone(), "Other".into(), Agent::Codex)
+            .await?
+            .task
+            .id;
+        let id = state
+            .save_prompt_file(task.clone(), "notes.txt".into(), b"task notes")
+            .await?;
+        let other_id = state
+            .save_prompt_file(other.clone(), "notes.txt".into(), b"other notes")
+            .await?;
+        let screenshot = state
+            .save_preview_screenshot(task.clone(), include_bytes!("../icons/128x128.png"))
+            .await?;
+        let sent = state
+            .send_prompt_with_files(
+                task.clone(),
+                "Read this".into(),
+                vec![id],
+                CodexTurnOptions::default(),
+                None,
+            )
+            .await?;
+        let worktree = PathBuf::from(sent.task.worktree_path.ok_or("missing worktree")?);
+        let task_directory = directory.path().join("attachments").join(&task);
+        let other_directory = directory.path().join("attachments").join(&other);
+        let other_file = attachments::prompt_file(&other_directory, &other_id)?;
+        assert!(state.delete_task(task.clone()).await.is_err());
+        assert!(task_directory.is_dir());
+        assert!(screenshot.is_file());
+        state
+            .resolve_approval(task.clone(), "approval-1".into(), Decision::Allow)
+            .await?;
+        state.delete_task(task.clone()).await?;
+        assert!(!task_directory.exists());
+        assert!(!screenshot.exists());
+        assert_eq!(std::fs::read(other_file)?, b"other notes");
+        assert!(worktree.is_dir());
+        assert!(
+            state
+                .core
+                .lock()
+                .await
+                .task_workspace(&TaskId::new(task))
+                .is_err()
+        );
+        assert!(
+            state
+                .core
+                .lock()
+                .await
+                .task_workspace(&TaskId::new(other))
+                .is_ok()
         );
         state.quit(true).await?;
         Ok(())

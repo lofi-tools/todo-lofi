@@ -236,6 +236,7 @@ pub fn run() -> Result<(), tauri::Error> {
             bridge::commands::opencode_configured,
             bridge::commands::claude_configured,
             bridge::commands::discard_draft,
+            bridge::commands::delete_task,
             bridge::commands::send_prompt,
             bridge::commands::set_session_mode,
             bridge::commands::resolve_approval,

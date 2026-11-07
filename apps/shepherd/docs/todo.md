@@ -1111,10 +1111,10 @@ and the task header never overstates the tier.
   Draft discard stops its task terminals and removes their panes while leaving
   shared terminals running; core and PTY fixtures cover this cleanup.
   Core saved-task deletion rejects active turns, closes an idle agent session,
-  removes its durable records, and preserves the worktree and branch. Desktop
-  deletion and attachment-cache cleanup remain to be connected.
-  Saved-task deletion is not yet exposed by the app, so removal of its cached
-  files cannot yet be verified end to end.
+  removes its durable records, and preserves the worktree and branch. The desktop
+  bridge stages and deletes the attachment cache, restoring it if core deletion
+  fails; fixtures verify saved-task cleanup and isolation. The desktop deletion
+  control and optional worktree removal remain to be connected.
 - [x] Corrupt settings file falls back with a banner and backup.
   Rust verifies the exact backup bytes and read-only fallback. Chromium
   verifies the warning and that defaults are usable.
