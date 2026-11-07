@@ -3859,6 +3859,181 @@ mod tests {
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[tokio::test]
+    async fn abrupt_shell_death_leaves_a_verifiable_terminal_record()
+    -> Result<(), Box<dyn std::error::Error>> {
+        if let Some(data) = std::env::var_os("SHEPHERD_ORPHAN_FIXTURE_DATA") {
+            let data = PathBuf::from(data);
+            let repository = PathBuf::from(
+                std::env::var_os("SHEPHERD_ORPHAN_FIXTURE_REPOSITORY")
+                    .ok_or("missing repository")?,
+            );
+            let ready = PathBuf::from(
+                std::env::var_os("SHEPHERD_ORPHAN_FIXTURE_READY").ok_or("missing ready path")?,
+            );
+            let terminal_ready = data.join("terminal-ready");
+            let state = ShellState::load(
+                &data,
+                Box::new(ScriptedHarnessFactory),
+                TerminalHost::default(),
+            )
+            .await?;
+            let projects = state.add_project(repository.display().to_string()).await?;
+            let project = projects.projects.first().ok_or("missing project")?;
+            let id = TerminalId::new("crash-terminal");
+            let record = TerminalRecord::project_shared(
+                id.clone(),
+                ProjectId::new(project.id.clone()),
+                "Crash terminal",
+                repository.clone(),
+                "/bin/sh",
+                1,
+            );
+            state
+                .spawn_terminal(
+                    TerminalSpec {
+                        id,
+                        columns: 80,
+                        rows: 24,
+                        cwd: repository,
+                        command: "/bin/sh".into(),
+                        args: vec![
+                            "-c".into(),
+                            "trap '' HUP; printf x > \"$1\"; exec sleep 30".into(),
+                            "sh".into(),
+                            terminal_ready.display().to_string(),
+                        ],
+                        environment: BTreeMap::new(),
+                    },
+                    Some(record),
+                )
+                .await?;
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while !terminal_ready.exists() {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await?;
+            let process = state
+                .core
+                .lock()
+                .await
+                .recorded_processes()
+                .await?
+                .into_iter()
+                .next()
+                .ok_or("missing process record")?;
+            let temporary = ready.with_extension("tmp");
+            std::fs::write(
+                &temporary,
+                format!("{} {}", process.pid, process.started_at),
+            )?;
+            std::fs::rename(temporary, ready)?;
+            std::future::pending::<()>().await;
+            return Ok(());
+        }
+
+        struct ProcessGuard {
+            pid: libc::pid_t,
+            started_at: u64,
+            stopped: bool,
+        }
+        impl ProcessGuard {
+            fn stop(&mut self) -> std::io::Result<()> {
+                if !self.stopped
+                    && crate::pty_terminal::process_start_time(self.pid) == Some(self.started_at)
+                {
+                    if unsafe { libc::kill(self.pid, libc::SIGKILL) } != 0 {
+                        let error = std::io::Error::last_os_error();
+                        if error.raw_os_error() != Some(libc::ESRCH) {
+                            return Err(error);
+                        }
+                    }
+                }
+                self.stopped = true;
+                Ok(())
+            }
+        }
+        impl Drop for ProcessGuard {
+            fn drop(&mut self) {
+                if let Err(error) = self.stop() {
+                    eprintln!("could not stop crash fixture process: {error}");
+                }
+            }
+        }
+
+        if crate::pty_terminal::boot_id().is_none() {
+            return Ok(());
+        }
+        let data = TestDirectory::new()?;
+        let repository = TestRepository::new()?;
+        let ready = data.join("crash-ready");
+        let mut child = tokio::process::Command::new(std::env::current_exe()?)
+            .args([
+                "--exact",
+                "bridge::tests::abrupt_shell_death_leaves_a_verifiable_terminal_record",
+                "--nocapture",
+            ])
+            .env("SHEPHERD_ORPHAN_FIXTURE_DATA", data.path())
+            .env("SHEPHERD_ORPHAN_FIXTURE_REPOSITORY", repository.path())
+            .env("SHEPHERD_ORPHAN_FIXTURE_READY", &ready)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .kill_on_drop(true)
+            .spawn()?;
+        let contents = tokio::time::timeout(Duration::from_secs(20), async {
+            loop {
+                match std::fs::read_to_string(&ready) {
+                    Ok(contents) => break Ok::<_, Box<dyn std::error::Error>>(contents),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => break Err(error.into()),
+                }
+                if let Some(status) = child.try_wait()? {
+                    break Err(format!("fixture exited before ready: {status}").into());
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await??;
+        let mut fields = contents.split_whitespace();
+        let pid: libc::pid_t = fields.next().ok_or("missing pid")?.parse()?;
+        let started_at = fields.next().ok_or("missing start time")?.parse()?;
+        if pid <= 1 || u32::try_from(pid).ok() == Some(std::process::id()) {
+            return Err("invalid crash fixture process id".into());
+        }
+        let mut guard = ProcessGuard {
+            pid,
+            started_at,
+            stopped: false,
+        };
+        child.kill().await?;
+        use std::os::unix::process::ExitStatusExt as _;
+        assert_eq!(child.wait().await?.signal(), Some(libc::SIGKILL));
+        let reopened = ShellState::load(
+            data.path(),
+            Box::new(ScriptedHarnessFactory),
+            TerminalHost::default(),
+        )
+        .await?;
+        let records = reopened.previous_processes.clone();
+        assert_eq!(records.len(), 1);
+        assert_eq!(
+            records.first().map(|record| record.pid),
+            u32::try_from(pid).ok()
+        );
+        let inspection = serde_json::to_value(crate::orphan_process::inspect(records))?;
+        assert_eq!(
+            inspection
+                .get(0)
+                .and_then(|item| item.get("status"))
+                .and_then(serde_json::Value::as_str),
+            Some("matching")
+        );
+        guard.stop()?;
+        Ok(())
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[tokio::test]
     async fn terminal_exit_records_a_surviving_background_job()
     -> Result<(), Box<dyn std::error::Error>> {
         if crate::pty_terminal::boot_id().is_none() {

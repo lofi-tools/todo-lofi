@@ -1150,6 +1150,8 @@ placeholder tabs and no unearned state badges.
   task interrupted without inventing the unfinished answer.
   PTY process-group shutdown checks each member's recorded start time before
   signalling; a fixture rejects a matching PID with a different start time.
+  A headless SIGKILL fixture verifies that a surviving PTY process is recognised
+  from its persisted identity after restart, then cleans up that test process.
   Project and task terminal launches now persist PID, start time, process group,
   session, and boot identity per launch. On exit, remaining background jobs
   are recorded before the leader record is removed; PTY fixtures verify
