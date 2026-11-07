@@ -1247,9 +1247,10 @@ placeholder tabs and no unearned state badges.
   for task launches and model and mode discovery. A scripted task fixture
   verifies that a local process receives the resolved value while the workspace
   snapshot and reopened database files do not contain it. Launch-spec debug
-  output omits environment values. Agent stderr can still echo those values
-  into diagnostics or failure events; redact it before treating log handling
-  as verified. Live-adapter behavior remains to be verified.
+  output omits environment values. Core sessions with launch environment values
+  hide adapter stderr and failure details while preserving failure categories;
+  a fixture covers exit events and errors. Adapter-internal logs, discovery
+  processes and live-adapter behavior remain to be audited.
 - [ ] Packaging and CI: macOS 13+, Ubuntu 24.04+, pinned Zig, Tauri build,
   platform smoke.
 - [ ] v2/GPUI explicitly not started until v1 is feature complete.
