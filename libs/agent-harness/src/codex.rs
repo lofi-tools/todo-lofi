@@ -1377,6 +1377,7 @@ pub struct ExecHarness {
 /// a natural exit cannot both reap the same process.
 struct ExecRun {
     waiter: JoinHandle<()>,
+    waiter_failure: Option<String>,
     reader: tokio::task::AbortHandle,
     kill: Option<oneshot::Sender<()>>,
     finished: Arc<AtomicBool>,
@@ -1385,6 +1386,50 @@ struct ExecRun {
 static EXEC_SESSION_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 impl ExecHarness {
+    async fn shutdown_with_timeout(&mut self, deadline: Duration) -> HarnessResult<()> {
+        if !self.started {
+            return Ok(());
+        }
+        if let Some(run) = self.run.as_mut() {
+            if let Some(error) = &run.waiter_failure {
+                return Err(HarnessError::Protocol(error.clone()));
+            }
+            if !run.finished.load(Ordering::Relaxed)
+                && let Some(kill) = run.kill.take()
+                && kill.send(()).is_err()
+            {
+                tracing::debug!("the codex exec process was already gone");
+            }
+            match timeout(deadline, &mut run.waiter).await {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => {
+                    let message = format!("Codex exec shutdown failed: {error}");
+                    run.waiter_failure = Some(message.clone());
+                    return Err(HarnessError::Protocol(message));
+                }
+                Err(_) => {
+                    return Err(HarnessError::Protocol(
+                        "Codex exec did not stop before the shutdown deadline".into(),
+                    ));
+                }
+            }
+        }
+        if let Some(run) = self.run.take() {
+            run.reader.abort();
+        }
+        if let Some(task) = self.stderr_task.take() {
+            task.abort();
+        }
+        self.started = false;
+        self.session_id = None;
+        self.sender
+            .send(HarnessEvent::Exited {
+                code: Some(0),
+                stderr: stderr_tail(&self.stderr),
+            })
+            .map_err(|_| HarnessError::ChannelClosed)
+    }
+
     pub fn new() -> Self {
         let (sender, receiver) = mpsc::unbounded_channel();
         Self {
@@ -1586,6 +1631,7 @@ impl AgentHarness for ExecHarness {
         );
         self.run = Some(ExecRun {
             waiter,
+            waiter_failure: None,
             reader: reader_abort,
             kill: Some(kill),
             finished,
@@ -1635,39 +1681,7 @@ impl AgentHarness for ExecHarness {
     }
 
     async fn shutdown(&mut self) -> HarnessResult<()> {
-        if !self.started {
-            return Ok(());
-        }
-
-        if let Some(mut run) = self.run.take() {
-            if !run.finished.load(Ordering::Relaxed)
-                && let Some(kill) = run.kill.take()
-                && kill.send(()).is_err()
-            {
-                tracing::debug!("the codex exec process was already gone");
-            }
-            let joined = timeout(Duration::from_secs(5), &mut run.waiter)
-                .await
-                .is_ok();
-            if !joined {
-                tracing::warn!("the codex exec process did not stop within 5s");
-                run.waiter.abort();
-            }
-            run.reader.abort();
-        }
-
-        if let Some(task) = self.stderr_task.take() {
-            task.abort();
-        }
-        self.started = false;
-        self.session_id = None;
-
-        self.sender
-            .send(HarnessEvent::Exited {
-                code: Some(0),
-                stderr: stderr_tail(&self.stderr),
-            })
-            .map_err(|_| HarnessError::ChannelClosed)
+        self.shutdown_with_timeout(Duration::from_secs(5)).await
     }
 }
 
@@ -4541,6 +4555,67 @@ sleep 30
         );
         harness.shutdown().await?;
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn exec_shutdown_timeout_can_be_retried() -> Result<(), Box<dyn std::error::Error>> {
+        let mut harness = ExecHarness::new();
+        harness.started = true;
+        let (release, wait) = oneshot::channel::<()>();
+        let waiter = tokio::spawn(async move { assert!(wait.await.is_ok()) });
+        let reader = tokio::spawn(std::future::pending::<()>()).abort_handle();
+        harness.run = Some(ExecRun {
+            waiter,
+            waiter_failure: None,
+            reader,
+            kill: None,
+            finished: Arc::new(AtomicBool::new(false)),
+        });
+
+        assert!(
+            harness
+                .shutdown_with_timeout(Duration::from_millis(30))
+                .await
+                .is_err()
+        );
+        assert!(harness.started && harness.run.is_some());
+        assert!(matches!(
+            harness.receiver.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+        release.send(()).map_err(|_| "waiter already stopped")?;
+        harness
+            .shutdown_with_timeout(Duration::from_secs(1))
+            .await?;
+        assert!(!harness.started && harness.run.is_none());
+        assert!(matches!(
+            harness.receiver.try_recv(),
+            Ok(HarnessEvent::Exited { .. })
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn exec_shutdown_waiter_failure_is_stable_on_retry() {
+        let mut harness = ExecHarness::new();
+        harness.started = true;
+        let waiter = tokio::spawn(async { panic!("fixture waiter failed") });
+        let reader = tokio::spawn(std::future::pending::<()>()).abort_handle();
+        harness.run = Some(ExecRun {
+            waiter,
+            waiter_failure: None,
+            reader,
+            kill: None,
+            finished: Arc::new(AtomicBool::new(false)),
+        });
+
+        let first = harness.shutdown_with_timeout(Duration::from_secs(1)).await;
+        let second = harness.shutdown_with_timeout(Duration::from_secs(1)).await;
+        assert!(first.is_err() && second.is_err());
+        assert!(harness.started && harness.run.is_some());
+        if let Some(run) = harness.run.take() {
+            run.reader.abort();
+        }
     }
 
     #[tokio::test]

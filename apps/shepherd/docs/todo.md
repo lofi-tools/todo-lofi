@@ -1247,6 +1247,9 @@ placeholder tabs and no unearned state badges.
   retains the child handle for retry. An injected group-signal failure verifies
   the handle is retained and a later shutdown stops the process group; direct
   child-stop failure injection remains.
+  Codex exec shutdown retains its waiter after a timeout so a later quit can
+  retry, and reports a waiter failure on subsequent attempts. Local fixtures
+  cover both paths. Propagating process-stop errors from the waiter remains.
   OpenCode shutdown retains its server when stopping it fails; an injected
   group-signal failure verifies the process remains available for a retry.
 - [ ] Bounded transcript, stderr, search and frame buffers.
