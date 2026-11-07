@@ -1267,6 +1267,9 @@ placeholder tabs and no unearned state badges.
   warnings. A full clean build and the release checklist on macOS 13 are still
   needed before claiming compatibility. The terminal
   uses the recorded Alacritty fallback rather than the planned Zig engine.
+  A manually dispatched `shepherd-package-smoke` workflow builds a macOS app
+  and Ubuntu Debian package on clean runners and checks their metadata; it has
+  not yet been run, and package portability remains unverified.
 - [ ] v2/GPUI explicitly not started until v1 is feature complete.
 
 ### Proof

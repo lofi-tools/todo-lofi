@@ -25,6 +25,8 @@ starts empty again.
 Build the app bundle with `direnv exec . pnpm --dir apps/shepherd build`.
 The build script sets the macOS deployment target to 13.0; use a clean target
 directory when checking a release so older cached objects cannot change it.
+The manually dispatched **Shepherd package smoke** workflow builds debug macOS
+and Ubuntu bundles on clean runners without launching the app.
 
 Choose the Send button color under **Settings → Appearance**. The choice is
 saved between launches for `shep` and lasts for the window session in
