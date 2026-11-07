@@ -2519,6 +2519,43 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(unix)]
+    async fn failed_backup_blocks_migration_and_allows_retry()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("shepherd.db");
+        let mut db = toasty::Db::builder()
+            .build(Turso::file(&path).experimental_index_method(true))
+            .await?;
+        let (last, previous) = MIGRATIONS.split_last().ok_or("missing migrations")?;
+        apply_migration_set(&mut db, previous).await?;
+        drop(db);
+        std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o500))?;
+        let failed = TursoStore::open_at(&path).await;
+        std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700))?;
+        assert!(matches!(failed, Err(StoreError::Backup { .. })));
+        let mut old = toasty::Db::builder()
+            .build(Turso::file(&path).experimental_index_method(true))
+            .await?;
+        let rows = toasty::sql::query("SELECT name FROM _migrations_history WHERE name = ?1")
+            .column_types([Type::String])
+            .bind(last.name)
+            .exec(&mut old)
+            .await?;
+        assert!(rows.is_empty());
+        drop(old);
+        let migrated = TursoStore::open_at(&path).await?;
+        let rows = toasty::sql::query("SELECT name FROM _migrations_history WHERE name = ?1")
+            .column_types([Type::String])
+            .bind(last.name)
+            .exec(&mut *migrated.db.lock().await)
+            .await?;
+        assert_eq!(rows.len(), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn backs_up_old_database_before_migrating_and_preserves_rows()
     -> Result<(), Box<dyn std::error::Error>> {
         let directory = tempfile::tempdir()?;
