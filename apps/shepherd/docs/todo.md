@@ -1235,6 +1235,8 @@ placeholder tabs and no unearned state badges.
   startup restores caches for surviving tasks and finishes removal for deleted
   tasks. Conflicting paths stop recovery, and older unidentified staging
   directories are left untouched. Local fixtures cover restart and lock cases.
+  Separate headless SIGKILL fixtures interrupt both worktree and attachment
+  deletion before and after the task transaction, then verify recovery.
   If an opened agent session cannot be recorded, the core stops it before
   retrying; a database-trigger fixture verifies cleanup and a subsequent start.
   A second fixture makes cleanup fail twice and verifies that the session is

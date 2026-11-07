@@ -1151,6 +1151,10 @@ impl ShellState {
         } else {
             None
         };
+        #[cfg(test)]
+        let fixture_task_id = task_id.clone();
+        #[cfg(test)]
+        pause_attachment_deletion_fixture("staged", &fixture_task_id).await?;
         let command = if draft_only {
             Command::DiscardDraft { task_id }
         } else {
@@ -1160,6 +1164,10 @@ impl ShellState {
             }
         };
         let result = core.execute(command).await;
+        #[cfg(test)]
+        if result.is_ok() {
+            pause_attachment_deletion_fixture("committed", &fixture_task_id).await?;
+        }
         let committed = matches!(&result, Err(CoreError::TaskDeletedCleanupPending { .. }));
         let result = result
             .map_err(BridgeError::from)
@@ -3067,6 +3075,26 @@ pub mod commands {
 }
 
 #[cfg(test)]
+async fn pause_attachment_deletion_fixture(
+    phase: &str,
+    task_id: &TaskId,
+) -> Result<(), BridgeError> {
+    if std::env::var("SHEPHERD_ATTACHMENT_CRASH_PHASE")
+        .ok()
+        .as_deref()
+        == Some(phase)
+    {
+        let path = std::env::var_os("SHEPHERD_ATTACHMENT_CRASH_READY")
+            .map(PathBuf::from)
+            .ok_or_else(|| BridgeError::new("attachments", "missing fixture ready path"))?;
+        std::fs::write(&path, task_id.as_str())
+            .map_err(|error| BridgeError::new("attachments", error.to_string()))?;
+        std::future::pending::<()>().await;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
 mod tests {
     use shepherd_core::store::MemoryStore;
     use shepherd_core::test_support::{TestDirectory, TestRepository};
@@ -4713,6 +4741,118 @@ mod tests {
                 .await?
                 .is_empty()
         );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn killed_attachment_deletion_recovers_before_and_after_commit()
+    -> Result<(), Box<dyn std::error::Error>> {
+        if let Some(data) = std::env::var_os("SHEPHERD_ATTACHMENT_CRASH_DATA") {
+            let data = PathBuf::from(data);
+            let repository = PathBuf::from(
+                std::env::var_os("SHEPHERD_ATTACHMENT_CRASH_REPOSITORY")
+                    .ok_or("missing repository")?,
+            );
+            let state = ShellState::load(
+                &data,
+                Box::new(ScriptedHarnessFactory),
+                TerminalHost::default(),
+            )
+            .await?;
+            let projects = state.add_project(repository.display().to_string()).await?;
+            let project = projects.projects.first().ok_or("missing project")?;
+            let task = state
+                .create_draft(project.id.clone(), "Crash attachment".into(), Agent::Codex)
+                .await?
+                .task
+                .id;
+            let id = state
+                .save_prompt_file(task.clone(), "notes.txt".into(), b"important attachment")
+                .await?;
+            std::fs::write(data.join("fixture-attachment-id"), id)?;
+            state.discard_draft(task).await?;
+            return Err("attachment deletion fixture unexpectedly finished".into());
+        }
+        use std::os::unix::process::ExitStatusExt as _;
+        for phase in ["staged", "committed"] {
+            let directory = TestDirectory::new()?;
+            let repository = TestRepository::new()?;
+            let ready = directory.path().join("attachment-crash-ready");
+            let mut child = tokio::process::Command::new(std::env::current_exe()?)
+                .args([
+                    "--exact",
+                    "bridge::tests::killed_attachment_deletion_recovers_before_and_after_commit",
+                    "--nocapture",
+                ])
+                .env("SHEPHERD_ATTACHMENT_CRASH_DATA", directory.path())
+                .env("SHEPHERD_ATTACHMENT_CRASH_REPOSITORY", repository.path())
+                .env("SHEPHERD_ATTACHMENT_CRASH_READY", &ready)
+                .env("SHEPHERD_ATTACHMENT_CRASH_PHASE", phase)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .kill_on_drop(true)
+                .spawn()?;
+            let task = tokio::time::timeout(Duration::from_secs(20), async {
+                loop {
+                    match std::fs::read_to_string(&ready) {
+                        Ok(id) if !id.is_empty() => break Ok::<_, Box<dyn std::error::Error>>(id),
+                        Ok(_) => {}
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                        Err(error) => break Err(error.into()),
+                    }
+                    if let Some(status) = child.try_wait()? {
+                        break Err(
+                            format!("attachment deletion fixture exited early: {status}").into(),
+                        );
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await??;
+            child.kill().await?;
+            assert_eq!(child.wait().await?.signal(), Some(9));
+            let id = std::fs::read_to_string(directory.path().join("fixture-attachment-id"))?;
+            let root = directory.path().join("attachments");
+            let staged = root.join(format!(".shepherd-deleting-task-{task}"));
+            assert_eq!(
+                std::fs::read(attachments::prompt_file(&staged, &id)?)?,
+                b"important attachment"
+            );
+            let state = ShellState::load(
+                directory.path(),
+                Box::new(ScriptedHarnessFactory),
+                TerminalHost::default(),
+            )
+            .await?;
+            assert!(!staged.exists());
+            let original = root.join(&task);
+            if phase == "staged" {
+                assert_eq!(
+                    std::fs::read(attachments::prompt_file(&original, &id)?)?,
+                    b"important attachment"
+                );
+                assert!(
+                    state
+                        .core
+                        .lock()
+                        .await
+                        .task_workspace(&TaskId::new(&task))
+                        .is_ok()
+                );
+            } else {
+                assert!(!original.exists());
+                assert!(
+                    state
+                        .core
+                        .lock()
+                        .await
+                        .task_workspace(&TaskId::new(&task))
+                        .is_err()
+                );
+            }
+            state.quit(true).await?;
+        }
         Ok(())
     }
 

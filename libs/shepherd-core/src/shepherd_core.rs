@@ -1563,10 +1563,14 @@ impl Core {
                     .await);
             }
         }
+        #[cfg(test)]
+        pause_worktree_deletion_fixture("staged", task_id).await?;
         let result = match self.delete_task_records(task_id).await {
             Ok(result) => result,
             Err(error) => return Err(self.rollback_worktree_deletion(&deletion, error).await),
         };
+        #[cfg(test)]
+        pause_worktree_deletion_fixture("committed", task_id).await?;
         self.recover_worktree_deletion_locked(&deletion)
             .await
             .map_err(|error| CoreError::TaskDeletedCleanupPending {
@@ -3675,6 +3679,28 @@ mod streaming {
 }
 
 #[cfg(test)]
+async fn pause_worktree_deletion_fixture(phase: &str, task_id: &TaskId) -> Result<(), CoreError> {
+    if std::env::var("SHEPHERD_DELETION_CRASH_PHASE")
+        .ok()
+        .as_deref()
+        == Some(phase)
+    {
+        let path = std::env::var_os("SHEPHERD_DELETION_CRASH_READY")
+            .map(PathBuf::from)
+            .ok_or_else(|| CoreError::Io {
+                path: "deletion fixture".into(),
+                source: std::io::Error::other("missing ready path"),
+            })?;
+        std::fs::write(&path, task_id.as_str()).map_err(|source| CoreError::Io {
+            path: path.display().to_string(),
+            source,
+        })?;
+        std::future::pending::<()>().await;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
 mod tests {
     use std::path::PathBuf;
 
@@ -4570,6 +4596,126 @@ mod tests {
                 .iter()
                 .any(|summary| summary.contains("done"))
         );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn killed_deletion_recovers_worktree_before_and_after_commit()
+    -> Result<(), Box<dyn std::error::Error>> {
+        if let Some(uri) = std::env::var_os("SHEPHERD_DELETION_CRASH_DATABASE") {
+            let uri = uri.into_string().map_err(|_| "database URI is not UTF-8")?;
+            let repository_path = PathBuf::from(
+                std::env::var_os("SHEPHERD_DELETION_CRASH_REPOSITORY")
+                    .ok_or("missing repository")?,
+            );
+            let mut core = Core::with_services(
+                Box::new(TursoStore::open(&uri).await?),
+                Box::new(FakeHarnessFactory::new(vec![vec![FakeTurn::new(vec![])]])),
+            );
+            let project_id = add_project(&mut core, repository_path.clone()).await?;
+            let draft = workspace_of(
+                core.execute(Command::CreateDraft {
+                    project_id,
+                    title: "Crash deletion".into(),
+                    agent: Agent::Codex,
+                })
+                .await?,
+            );
+            let task_id = TaskId::new(draft.task.id);
+            let workspace = workspace_of(
+                core.execute(Command::SendPrompt {
+                    task_id: task_id.clone(),
+                    input: PromptInput::text("fixture"),
+                })
+                .await?,
+            );
+            let worktree = PathBuf::from(workspace.task.worktree_path.ok_or("missing worktree")?);
+            let repository = GitService::discover(&repository_path)?;
+            std::fs::write(repository.git_dir.join("info/exclude"), "ignored.txt\n")?;
+            std::fs::write(worktree.join("ignored.txt"), "important ignored data")?;
+            core.execute(Command::DeleteTask {
+                task_id,
+                remove_worktree: true,
+            })
+            .await?;
+            return Err("deletion fixture unexpectedly finished".into());
+        }
+
+        use std::os::unix::process::ExitStatusExt as _;
+        use std::time::Duration;
+        for phase in ["staged", "committed"] {
+            let repository = TestRepository::new()?;
+            let database = TestDatabase::new()?;
+            let uri = database.uri();
+            let ready = database.path().join("deletion-ready");
+            let mut child = tokio::process::Command::new(std::env::current_exe()?)
+                .args([
+                    "--exact",
+                    "tests::killed_deletion_recovers_worktree_before_and_after_commit",
+                    "--nocapture",
+                ])
+                .env("SHEPHERD_DELETION_CRASH_DATABASE", &uri)
+                .env("SHEPHERD_DELETION_CRASH_REPOSITORY", repository.path())
+                .env("SHEPHERD_DELETION_CRASH_READY", &ready)
+                .env("SHEPHERD_DELETION_CRASH_PHASE", phase)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .kill_on_drop(true)
+                .spawn()?;
+            let task_id = tokio::time::timeout(Duration::from_secs(20), async {
+                loop {
+                    match std::fs::read_to_string(&ready) {
+                        Ok(id) if !id.is_empty() => {
+                            break Ok::<_, Box<dyn std::error::Error>>(TaskId::new(id));
+                        }
+                        Ok(_) => {}
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                        Err(error) => break Err(error.into()),
+                    }
+                    if let Some(status) = child.try_wait()? {
+                        break Err(format!(
+                            "deletion fixture exited before becoming ready: {status}"
+                        )
+                        .into());
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await??;
+            child.kill().await?;
+            assert_eq!(child.wait().await?.signal(), Some(9));
+            let store = TursoStore::open(&uri).await?;
+            let deletion = store
+                .load_worktree_deletions()
+                .await?
+                .into_iter()
+                .next()
+                .ok_or("missing deletion journal")?;
+            assert_eq!(deletion.task_id, task_id);
+            assert_eq!(
+                std::fs::read_to_string(deletion.staged_path.join("ignored.txt"))?,
+                "important ignored data"
+            );
+            drop(store);
+            let core = Core::load(
+                Box::new(TursoStore::open(&uri).await?),
+                Box::new(UnavailableHarnessFactory),
+            )
+            .await?;
+            assert!(core.store.load_worktree_deletions().await?.is_empty());
+            assert!(!deletion.staged_path.exists());
+            if phase == "staged" {
+                assert!(core.tasks.contains_key(&task_id));
+                assert_eq!(
+                    std::fs::read_to_string(deletion.original_path.join("ignored.txt"))?,
+                    "important ignored data"
+                );
+            } else {
+                assert!(!core.tasks.contains_key(&task_id));
+                assert!(!deletion.original_path.exists());
+            }
+        }
         Ok(())
     }
 
