@@ -7,12 +7,24 @@ use std::path::{Path, PathBuf};
 use crate::AcpError;
 
 /// A resolved process launch: program, arguments, working directory, env.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct SpawnSpec {
     pub program: PathBuf,
     pub args: Vec<String>,
     pub cwd: PathBuf,
     pub env: BTreeMap<String, String>,
+}
+
+impl std::fmt::Debug for SpawnSpec {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SpawnSpec")
+            .field("program", &self.program)
+            .field("args", &self.args)
+            .field("cwd", &self.cwd)
+            .field("environment_keys", &self.env.keys().collect::<Vec<_>>())
+            .finish()
+    }
 }
 
 impl SpawnSpec {
@@ -171,6 +183,19 @@ fn is_executable(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn launch_debug_hides_environment_values() {
+        let spec = SpawnSpec {
+            program: "/agent".into(),
+            args: Vec::new(),
+            cwd: "/project".into(),
+            env: BTreeMap::from([("TOKEN".into(), "fixture-secret".into())]),
+        };
+        let debug = format!("{spec:?}");
+        assert!(debug.contains("TOKEN"));
+        assert!(!debug.contains("fixture-secret"));
+    }
 
     #[test]
     fn version_output_selects_the_integration() {

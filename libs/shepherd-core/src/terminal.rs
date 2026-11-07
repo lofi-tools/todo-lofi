@@ -253,7 +253,7 @@ impl TerminalSplit {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct TerminalSpec {
     pub id: TerminalId,
     pub columns: u16,
@@ -262,6 +262,24 @@ pub struct TerminalSpec {
     pub command: String,
     pub args: Vec<String>,
     pub environment: BTreeMap<String, String>,
+}
+
+impl std::fmt::Debug for TerminalSpec {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("TerminalSpec")
+            .field("id", &self.id)
+            .field("columns", &self.columns)
+            .field("rows", &self.rows)
+            .field("cwd", &self.cwd)
+            .field("command", &self.command)
+            .field("args", &self.args)
+            .field(
+                "environment_keys",
+                &self.environment.keys().collect::<Vec<_>>(),
+            )
+            .finish()
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -310,4 +328,25 @@ pub trait TerminalService: Send {
         rows: u16,
     ) -> Result<(), TerminalError>;
     fn close(&mut self, terminal_id: &TerminalId) -> Result<(), TerminalError>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn launch_debug_hides_environment_values() {
+        let spec = TerminalSpec {
+            id: TerminalId::new("terminal"),
+            columns: 80,
+            rows: 24,
+            cwd: "/project".into(),
+            command: "shell".into(),
+            args: Vec::new(),
+            environment: BTreeMap::from([("TOKEN".into(), "fixture-secret".into())]),
+        };
+        let debug = format!("{spec:?}");
+        assert!(debug.contains("TOKEN"));
+        assert!(!debug.contains("fixture-secret"));
+    }
 }

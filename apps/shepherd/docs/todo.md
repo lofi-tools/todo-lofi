@@ -1246,8 +1246,8 @@ placeholder tabs and no unearned state badges.
   supply per-agent maps with project overrides
   for task launches and model and mode discovery. A scripted task fixture
   verifies that a local process receives the resolved value while the workspace
-  snapshot and reopened database files do not contain it. Launch-spec debug
-  output omits environment values. Core sessions with launch environment values
+  snapshot and reopened database files do not contain it. Agent, ACP and terminal
+  launch-spec debug output omits environment values. Core sessions with launch environment values
   hide adapter stderr and failure details while preserving failure categories;
   a fixture covers exit events and errors. Discovery failures also hide details
   when environment values are present, with local Codex and OpenCode fixtures.
