@@ -1,7 +1,7 @@
 import { For, Show, createEffect, createMemo, createResource, createSignal, onCleanup, onMount } from 'solid-js'
 
 import { actOnWorkspaceFile, cancelFileSearch, listFiles, readWorkspaceFile, reserveFileSearch, searchWorkspaceFiles, watchWorkspaceFiles, type DirectoryListing, type FileAction, type FileChange, type FileSearchQuery, type FileSearchResult, type WorkspaceFileEntry } from './bridge'
-import { FolderIcon } from './ProjectRow'
+import iconTheme from './charmed-icons.json'
 
 interface FileLocation {
   projectId: string
@@ -54,6 +54,7 @@ function FileBrowser(props: FileLocation & { showDotfiles: boolean; initialPath?
   const [treeRevision, setTreeRevision] = createSignal(0)
   const changesByPath = createMemo(() => new Map(changes().map((change) => [change.path, change])))
   const changeFor = (path: string) => changesByPath().get(path)
+  const directoryChangeFor = (path: string) => changes().find((change) => change.path.startsWith(`${path}/`))
   const deleted = () => changes().filter((change) => change.kind === 'deleted'
     && (props.showDotfiles || !change.path.split('/').some((part) => part.startsWith('.'))))
   let active: PendingSearch | undefined
@@ -138,7 +139,7 @@ function FileBrowser(props: FileLocation & { showDotfiles: boolean; initialPath?
       <Show when={watchError()}>{(message) => <p class="error" role="alert">{message()}</p>}</Show>
       <div class="files-pane__tree" aria-label="File tree" hidden={!!query().trim()}>
         <FolderContents projectId={props.projectId} taskId={props.taskId} path="" showDotfiles={props.showDotfiles}
-          revision={treeRevision()} changeFor={changeFor} selected={selected()?.path ?? null}
+          revision={treeRevision()} changeFor={changeFor} directoryChangeFor={directoryChangeFor} selected={selected()?.path ?? null}
           openPath={openPath()} onToggleFolder={(path) => setOpenPath((current) =>
             current === path || current.startsWith(`${path}/`) ? parentPath(path) : path)}
           onSelect={(path) => { setOpenPath(parentPath(path)); setSelected({ path, line: null }) }} />
@@ -147,7 +148,7 @@ function FileBrowser(props: FileLocation & { showDotfiles: boolean; initialPath?
             <summary>Deleted files</summary>
             <ul class="files-tree">
               <For each={deleted()}>{(file) => (
-                <li class="files-tree__label"><span>{file.path}</span><FileChangeBadge change={file} /></li>
+                <li class="files-tree__label files-tree__deleted-row" data-kind={file.kind}><FileIcon name={file.path} /><span>{file.path}</span><FileChangeBadge change={file} /></li>
               )}</For>
             </ul>
           </details>
@@ -163,10 +164,10 @@ function FileBrowser(props: FileLocation & { showDotfiles: boolean; initialPath?
               <ul class="files-tree">
                 <For each={result().matches}>{(match) => (
                   <li>
-                    <button type="button" class="files-tree__entry" onClick={() => { setOpenPath(parentPath(match.path)); setSelected(match) }}
+                    <button type="button" class="files-tree__entry" data-kind={changeFor(match.path)?.kind} onClick={() => { setOpenPath(parentPath(match.path)); setSelected(match) }}
                       aria-pressed={selected()?.path === match.path && selected()?.line === match.line}>
                       <span class="files-tree__label">
-                        <span>{match.path}{match.line === null ? '' : `:${match.line}`}</span>
+                        <span class="files-tree__name"><FileIcon name={match.path} /><span>{match.path}{match.line === null ? '' : `:${match.line}`}</span></span>
                         <FileChangeBadge change={changeFor(match.path)} />
                       </span>
                       <Show when={match.excerpt}>{(excerpt) => <span class="files-search__excerpt">{excerpt()}</span>}</Show>
@@ -194,6 +195,7 @@ interface FolderProps extends FileLocation {
   onToggleFolder: (path: string) => void
   revision: number
   changeFor: (path: string) => FileChange | undefined
+  directoryChangeFor: (path: string) => FileChange | undefined
 }
 
 function FolderContents(props: FolderProps & { path: string }) {
@@ -231,13 +233,13 @@ function FileRow(props: FolderProps & { entry: WorkspaceFileEntry }) {
   return (
     <li>
       <Show when={props.entry.directory} fallback={
-        <button type="button" class="files-tree__entry" aria-pressed={props.selected === props.entry.path}
+        <button type="button" class="files-tree__entry" data-kind={props.changeFor(props.entry.path)?.kind} aria-pressed={props.selected === props.entry.path}
           onClick={() => props.onSelect(props.entry.path)}>
-          <span class="files-tree__label"><span>{props.entry.name}</span><FileChangeBadge change={props.changeFor(props.entry.path)} /></span>
+          <span class="files-tree__label"><span class="files-tree__name"><FileIcon name={props.entry.name} /><span>{props.entry.name}</span></span><FileChangeBadge change={props.changeFor(props.entry.path)} /></span>
         </button>
       }>
-        <button type="button" class="files-tree__entry files-tree__directory" aria-expanded={expanded()} onClick={() => props.onToggleFolder(props.entry.path)}>
-          <FolderIcon size={14} /><span>{props.entry.name}</span>
+        <button type="button" class="files-tree__entry files-tree__directory" data-kind={props.directoryChangeFor(props.entry.path)?.kind} aria-expanded={expanded()} onClick={() => props.onToggleFolder(props.entry.path)}>
+          <img class="files-tree__icon" src={`${import.meta.env.BASE_URL}charmed-icons/${expanded() ? '_folder_open' : '_folder'}.svg`} alt="" /><span>{props.entry.name}</span>
         </button>
         <Show when={expanded()}>
           <FolderContents {...props} path={props.entry.path} />
@@ -250,6 +252,21 @@ function FileRow(props: FolderProps & { entry: WorkspaceFileEntry }) {
 function parentPath(path: string): string {
   const separator = path.lastIndexOf('/')
   return separator < 0 ? '' : path.slice(0, separator)
+}
+
+function FileIcon(props: { name: string }) {
+  const icon = () => {
+    const name = (props.name.split('/').pop() ?? '').toLowerCase()
+    const stems: Record<string, string> = iconTheme.stems
+    const suffixes: Record<string, string> = iconTheme.suffixes
+    if (Object.hasOwn(stems, name)) return stems[name]
+    for (let index = name.indexOf('.'); index >= 0; index = name.indexOf('.', index + 1)) {
+      const suffix = name.slice(index + 1)
+      if (Object.hasOwn(suffixes, suffix)) return suffixes[suffix]
+    }
+    return '_file'
+  }
+  return <img class="files-tree__icon" src={`${import.meta.env.BASE_URL}charmed-icons/${icon()}.svg`} alt="" />
 }
 
 const FILE_CHANGE_LABELS: Record<FileChange['kind'], string> = {

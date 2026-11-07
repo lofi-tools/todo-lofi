@@ -83,7 +83,10 @@ current layout and give future changes a point of comparison.
   in a read-only, line-numbered viewer inside the inspector. **Find files**
   filters filenames as the user types. **Search contents** and Enter start a
   cancellable literal search. Selecting a content match opens its line.
-  Show Git change badges beside visible paths and list deleted paths below the
+  Use muted default text and Warm Charmed file type icons. Colour changed paths
+  and their ancestor folders using the Aura Dark or One Light Git status colours
+  for the active appearance. Let the tree use the available inspector height,
+  with scrolling for longer lists. Show Git change badges beside visible paths and list deleted paths below the
   tree. Refresh Git status and open folders after a debounced workspace change.
   Put **Open in external editor** and **Reveal in file manager** above the file
   preview. **Open in Files** from a Git or Review diff selects and focuses the

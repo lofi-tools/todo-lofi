@@ -2160,9 +2160,11 @@ textarea {
 }
 
 .files-pane {
-  display: grid;
+  display: flex;
+  flex-direction: column;
   gap: 10px;
-  align-content: start;
+  height: 100%;
+  min-height: 0;
   min-width: 0;
 }
 
@@ -2182,8 +2184,20 @@ textarea {
 }
 
 .files-pane__tree {
-  max-height: 32vh;
+  flex: 1 1 0;
+  min-height: 0;
   overflow: auto;
+  --file-added: #61ffca;
+  --file-modified: #ffca85;
+  --file-deleted: #ff6767;
+  --file-renamed: #82e2ff;
+}
+
+:root[data-theme='light'] .files-pane__tree {
+  --file-added: #669f59;
+  --file-modified: #a48819;
+  --file-deleted: #d36151;
+  --file-renamed: #5c78e2;
 }
 
 .files-tree {
@@ -2202,7 +2216,7 @@ textarea {
   border: 0;
   border-radius: 4px;
   background: transparent;
-  color: var(--text);
+  color: var(--text-muted);
   font: inherit;
   font-size: 12px;
   text-align: start;
@@ -2220,8 +2234,18 @@ textarea {
   gap: 4px;
 }
 
-.files-tree__directory svg {
+.files-tree__icon {
   flex: none;
+  width: 14px;
+  height: 14px;
+  opacity: .8;
+}
+
+.files-tree__name {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
 }
 
 .files-tree__label {
@@ -2240,10 +2264,10 @@ textarea {
   font-size: 11px;
 }
 
-.files-tree__change[data-kind='added'] { color: var(--success-text); }
-.files-tree__change[data-kind='modified'] { color: var(--attention); }
-.files-tree__change[data-kind='deleted'] { color: var(--error-text); }
-.files-tree__change[data-kind='renamed'] { color: var(--info-text); }
+.files-tree__entry[data-kind='added'], .files-tree__change[data-kind='added'] { color: var(--file-added); }
+.files-tree__entry[data-kind='modified'], .files-tree__change[data-kind='modified'] { color: var(--file-modified); }
+.files-tree__deleted-row[data-kind='deleted'], .files-tree__change[data-kind='deleted'] { color: var(--file-deleted); }
+.files-tree__entry[data-kind='renamed'], .files-tree__change[data-kind='renamed'] { color: var(--file-renamed); }
 
 .files-tree__deleted {
   padding: 4px 6px;
@@ -2256,6 +2280,9 @@ textarea {
   gap: 6px;
   min-width: 0;
   overflow-wrap: anywhere;
+  flex: 0 1 auto;
+  max-height: 50%;
+  overflow: auto;
 }
 
 .files-viewer__source {

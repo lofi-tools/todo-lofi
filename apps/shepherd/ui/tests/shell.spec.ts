@@ -604,6 +604,10 @@ test.beforeEach(async ({ context }) => {
             return 'fixture diff'
           case 'list_files': {
             fileListings.push(args.path)
+            if (options.has('many-files')) return {
+              entries: Array.from({ length: 80 }, (_, index) => ({ name: `file-${index}.txt`, path: `file-${index}.txt`, directory: false })),
+              incomplete: false,
+            }
             if (options.has('folder-tree')) {
               const entries: Record<string, Array<{ name: string; path: string; directory: boolean }>> = {
                 '': [{ name: 'src', path: 'src', directory: true }, { name: 'docs', path: 'docs', directory: true }, { name: 'root.txt', path: 'root.txt', directory: false }],
@@ -1560,11 +1564,13 @@ test('keeps only one expanded folder path in the file tree', async ({ page }) =>
   const src = files.getByRole('button', { name: 'src', exact: true })
   const docs = files.getByRole('button', { name: 'docs', exact: true })
   await expect(src).toHaveText('src')
-  await expect(src.locator('svg')).toHaveCount(1)
+  await expect(src.locator('img')).toHaveAttribute('src', /_folder\.svg$/)
   await src.click()
   await files.getByRole('button', { name: 'lib', exact: true }).click()
+  await expect(src.locator('img')).toHaveAttribute('src', /_folder_open\.svg$/)
   await expect(src).toHaveAttribute('aria-expanded', 'true')
   await expect(files.getByRole('button', { name: 'deep.txt' })).toBeVisible()
+  await expect(files.getByRole('button', { name: 'deep.txt' }).locator('img')).toHaveAttribute('src', /text\.svg$/)
   await files.getByRole('button', { name: 'bin', exact: true }).click()
   await expect(files.getByRole('button', { name: 'lib', exact: true })).toHaveAttribute('aria-expanded', 'false')
   await expect(files.getByRole('button', { name: 'deep.txt' })).toHaveCount(0)
@@ -1575,6 +1581,18 @@ test('keeps only one expanded folder path in the file tree', async ({ page }) =>
   await files.getByRole('button', { name: 'root.txt' }).click()
   await expect(docs).toHaveAttribute('aria-expanded', 'false')
   await expect(files.getByRole('button', { name: 'guide.txt' })).toHaveCount(0)
+})
+
+test('uses the inspector height and scrolls to the end of a long file tree', async ({ page }) => {
+  await page.goto('/?many-files')
+  await page.getByRole('tab', { name: 'Files' }).click()
+  const tree = page.getByLabel('File tree')
+  await expect(tree.getByRole('button', { name: 'file-79.txt' })).toBeAttached()
+  const dimensions = await tree.evaluate((element) => ({ height: element.clientHeight, scrollHeight: element.scrollHeight, viewport: window.innerHeight }))
+  expect(dimensions.height).toBeGreaterThan(dimensions.viewport * 0.32)
+  expect(dimensions.scrollHeight).toBeGreaterThan(dimensions.height)
+  await tree.getByRole('button', { name: 'file-79.txt' }).scrollIntoViewIfNeeded()
+  await expect(tree.getByRole('button', { name: 'file-79.txt' })).toBeInViewport()
 })
 
 test('filters by name, cancels content searches, and opens matches at their line', async ({ page }) => {
@@ -1649,6 +1667,9 @@ test('shares worktree status with Files and stops watching unused roots', async 
     { path: 'retired.md', kind: 'deleted', originalPath: null },
   ])
   await expect(files.getByRole('button', { name: /main\.rs/ }).getByRole('img', { name: 'Modified' })).toBeVisible()
+  await expect(files.getByRole('button', { name: /main\.rs/ })).toHaveCSS('color', 'rgb(255, 202, 133)')
+  await expect(folder).toHaveCSS('color', 'rgb(255, 202, 133)')
+  await expect(files.getByRole('button', { name: /main\.rs/ }).locator('img')).toHaveAttribute('src', /rust\.svg$/)
   await expect(files.getByRole('button', { name: /added\.rs/ }).getByRole('img', { name: 'Added' })).toBeVisible()
   await expect(files.getByRole('button', { name: /renamed\.rs/ }).getByRole('img', { name: 'Renamed from src/old.rs' })).toBeVisible()
   await expect(files.getByText('retired.md')).toBeVisible()
