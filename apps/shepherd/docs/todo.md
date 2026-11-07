@@ -1171,9 +1171,11 @@ placeholder tabs and no unearned state badges.
   to at most one write per minute per activity source. Older databases
   initialize it from task update time. ACP agent terminals carry their task
   identity; their output and user input refresh that task's worktree usage.
-  A fixture forces the final database write to fail after checkout removal:
-  the issue survives restart and reopening the task restores the retained tip.
-  Automatic collection does not yet finalize this missing-path record.
+  Collection records its intent before removal. If the final database write
+  fails, startup verifies the retained Git reference before finishing the
+  missing-path record. Fixtures cover this recovery, a missing retained ref,
+  an unrelated missing checkout, and a worktree that became dirty while a
+  collection was interrupted.
 - [ ] Database backup, migration checks, malformed migration handling and
   transactional writes.
   Existing file databases receive a retained Turso snapshot in a private

@@ -196,6 +196,10 @@ const MIGRATIONS: &[Migration] = &[
         name: "0013_worktree_last_used.sql",
         sql: include_str!("../toasty/migrations/0013_worktree_last_used.sql"),
     },
+    Migration {
+        name: "0014_worktree_collection.sql",
+        sql: include_str!("../toasty/migrations/0014_worktree_collection.sql"),
+    },
 ];
 
 /// The durable store used by the application. The database handle is guarded
@@ -439,10 +443,10 @@ async fn write_task(
             "INSERT INTO tasks (\
                 id, project_id, title, state, tier, proposed_worktree_path, \
                 proposed_branch, worktree_path, branch, base_branch, error, \
-                created_at, updated_at, branch_tip_sha, agent, worktree_last_used_at\
+                created_at, updated_at, branch_tip_sha, agent, worktree_last_used_at, collection_pending\
              ) VALUES (\
                 ?1, ?2, ?3, ?4, ?5, ?6, ?7, \
-                NULLIF(?8, ''), NULLIF(?9, ''), NULLIF(?10, ''), NULLIF(?11, ''), ?12, ?13, NULLIF(?14, ''), ?15, ?16\
+                NULLIF(?8, ''), NULLIF(?9, ''), NULLIF(?10, ''), NULLIF(?11, ''), ?12, ?13, NULLIF(?14, ''), ?15, ?16, ?17\
              ) ON CONFLICT (id) DO UPDATE SET \
                 project_id = excluded.project_id, \
                 title = excluded.title, \
@@ -458,7 +462,8 @@ async fn write_task(
                 updated_at = excluded.updated_at, \
                 branch_tip_sha = excluded.branch_tip_sha, \
                 agent = excluded.agent, \
-                worktree_last_used_at = excluded.worktree_last_used_at",
+                worktree_last_used_at = excluded.worktree_last_used_at, \
+                collection_pending = excluded.collection_pending",
         )
         .bind(task.id.as_str())
         .bind(task.project_id.as_str())
@@ -476,6 +481,7 @@ async fn write_task(
         .bind(task.branch_tip_sha.as_deref().unwrap_or_default())
         .bind(task.agent.as_str())
         .bind(task.worktree_last_used_at as i64)
+        .bind(i64::from(task.collection_pending))
         .exec(&mut *executor)
         .await?;
     Ok(())
@@ -873,7 +879,7 @@ impl Store for TursoStore {
         let rows = toasty::sql::query(
             "SELECT id, project_id, title, state, tier, proposed_worktree_path, \
                     proposed_branch, worktree_path, branch, base_branch, error, \
-                    created_at, updated_at, branch_tip_sha, agent, worktree_last_used_at \
+                    created_at, updated_at, branch_tip_sha, agent, worktree_last_used_at, collection_pending \
              FROM tasks ORDER BY created_at, id",
         )
         .column_types([
@@ -892,6 +898,7 @@ impl Store for TursoStore {
             Type::I64,
             Type::String,
             Type::String,
+            Type::I64,
             Type::I64,
         ])
         .exec(&mut *db)
@@ -1382,6 +1389,7 @@ fn parse_task(value: Value) -> Result<Task, StoreError> {
         created_at: required_u64(record.get(11))?,
         updated_at: required_u64(record.get(12))?,
         worktree_last_used_at: required_u64(record.get(15))?,
+        collection_pending: required_u64(record.get(16))? != 0,
         branch_tip_sha: optional_string(record.get(13))?,
     })
 }
@@ -2193,6 +2201,99 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn resumed_collection_rechecks_existing_worktree_before_removal()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use crate::Core;
+        use crate::git::GitService;
+        use crate::harness::UnavailableHarnessFactory;
+        use crate::test_support::TestRepository;
+
+        let repository = TestRepository::new()?;
+        let database = TestDatabase::new()?;
+        let store = TursoStore::open(&database.uri()).await?;
+        let project = Project::new(repository.path().to_path_buf());
+        let mut task = Task::draft(
+            project.id.clone(),
+            "Interrupted",
+            &repository.repository().git_dir,
+        );
+        GitService.create_worktree(
+            repository.repository(),
+            &task.proposed_worktree_path,
+            &task.proposed_branch,
+            "main",
+        )?;
+        let tip =
+            GitService.checked_out_tip(&task.proposed_worktree_path, &task.proposed_branch)?;
+        GitService.retain_task_tip(repository.repository(), task.id.as_str(), &tip)?;
+        task.worktree_path = Some(task.proposed_worktree_path.clone());
+        task.branch = Some(task.proposed_branch.clone());
+        task.branch_tip_sha = Some(tip);
+        task.collection_pending = true;
+        task.state = TaskState::Done;
+        task.updated_at = crate::projects::now_millis().saturating_sub(31 * 24 * 60 * 60 * 1000);
+        task.worktree_last_used_at = task.updated_at;
+        std::fs::write(task.proposed_worktree_path.join("new-file"), "keep")?;
+        store.save_project(&project).await?;
+        store.save_task(&task).await?;
+        let core = Core::load(Box::new(store), Box::new(UnavailableHarnessFactory)).await?;
+        assert_eq!(core.archived_worktree_issues().len(), 1);
+        assert!(task.proposed_worktree_path.join("new-file").exists());
+        drop(core);
+        let store = TursoStore::open(&database.uri()).await?;
+        assert!(
+            !store
+                .load_tasks()
+                .await?
+                .first()
+                .ok_or("missing task")?
+                .collection_pending
+        );
+        std::fs::remove_dir_all(&task.proposed_worktree_path)?;
+        let core = Core::load(Box::new(store), Box::new(UnavailableHarnessFactory)).await?;
+        assert_eq!(core.archived_worktree_issues().len(), 1);
+        assert!(core.task_workspace(&task.id)?.task.worktree_path.is_some());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn unrelated_missing_archived_checkout_is_not_marked_collected()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use crate::Core;
+        use crate::git::GitService;
+        use crate::harness::UnavailableHarnessFactory;
+        use crate::test_support::TestRepository;
+
+        let repository = TestRepository::new()?;
+        let database = TestDatabase::new()?;
+        let store = TursoStore::open(&database.uri()).await?;
+        let project = Project::new(repository.path().to_path_buf());
+        let mut task = Task::draft(
+            project.id.clone(),
+            "Missing",
+            &repository.repository().git_dir,
+        );
+        GitService.create_worktree(
+            repository.repository(),
+            &task.proposed_worktree_path,
+            &task.proposed_branch,
+            "main",
+        )?;
+        task.worktree_path = Some(task.proposed_worktree_path.clone());
+        task.branch = Some(task.proposed_branch.clone());
+        task.state = TaskState::Done;
+        task.updated_at = crate::projects::now_millis().saturating_sub(31 * 24 * 60 * 60 * 1000);
+        task.worktree_last_used_at = task.updated_at;
+        store.save_project(&project).await?;
+        store.save_task(&task).await?;
+        std::fs::remove_dir_all(&task.proposed_worktree_path)?;
+        let core = Core::load(Box::new(store), Box::new(UnavailableHarnessFactory)).await?;
+        assert_eq!(core.archived_worktree_issues().len(), 1);
+        assert!(core.task_workspace(&task.id)?.task.worktree_path.is_some());
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn failed_collection_save_keeps_a_recoverable_task()
     -> Result<(), Box<dyn std::error::Error>> {
         use crate::git::GitService;
@@ -2248,12 +2349,30 @@ mod tests {
                 .await?;
         }
         drop(core);
+        let reference = format!("refs/shepherd/tasks/{}", task.id.as_str());
+        crate::git::run_git(repository.path(), &["update-ref", "-d", &reference])?;
+        let blocked = Core::load(
+            Box::new(TursoStore::open(&database.uri()).await?),
+            Box::new(UnavailableHarnessFactory),
+        )
+        .await?;
+        assert_eq!(blocked.archived_worktree_issues().len(), 1);
+        assert!(
+            blocked
+                .task_workspace(&task.id)?
+                .task
+                .worktree_path
+                .is_some()
+        );
+        drop(blocked);
+        GitService.retain_task_tip(repository.repository(), task.id.as_str(), &tip)?;
         let mut core = Core::load(
             Box::new(TursoStore::open(&database.uri()).await?),
             Box::new(UnavailableHarnessFactory),
         )
         .await?;
-        assert_eq!(core.archived_worktree_issues().len(), 1);
+        assert!(core.archived_worktree_issues().is_empty());
+        assert!(core.task_workspace(&task.id)?.task.worktree_path.is_none());
         let restored = core
             .execute(Command::ReviewTask {
                 task_id: task.id.clone(),
@@ -2859,7 +2978,10 @@ mod tests {
             .await?;
         toasty::sql::statement("CREATE TABLE _migrations_history (name TEXT NOT NULL PRIMARY KEY, checksum TEXT NOT NULL)")
             .exec(&mut db).await?;
-        for migration in MIGRATIONS.iter().take(MIGRATIONS.len() - 1) {
+        for migration in MIGRATIONS
+            .iter()
+            .take_while(|migration| migration.name != "0013_worktree_last_used.sql")
+        {
             for statement in parse_migration(migration)? {
                 toasty::sql::statement(statement).exec(&mut db).await?;
             }

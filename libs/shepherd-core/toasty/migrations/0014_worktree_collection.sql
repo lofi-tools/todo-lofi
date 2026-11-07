@@ -1,0 +1,1 @@
+ALTER TABLE tasks ADD COLUMN collection_pending INTEGER NOT NULL DEFAULT 0;

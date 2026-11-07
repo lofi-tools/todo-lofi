@@ -415,6 +415,57 @@ impl Core {
     }
 
     async fn collect_archived_worktree(&mut self, task_id: &TaskId) -> Result<(), CoreError> {
+        let task = self.task(task_id)?.clone();
+        if task.collection_pending
+            && let Some(path) = &task.worktree_path
+        {
+            match path.symlink_metadata() {
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    let repository = GitService::discover(&self.project_path(&task.project_id)?)?;
+                    if path != &task.proposed_worktree_path
+                        || path.parent()
+                            != Some(repository.git_dir.join("shepherd/worktrees").as_path())
+                    {
+                        return Err(GitError::InvalidWorktree { path: path.clone() }.into());
+                    }
+                    let tip = task.branch_tip_sha.as_deref().ok_or_else(|| {
+                        CoreError::CollectionBranchMissing {
+                            id: task_id.to_string(),
+                        }
+                    })?;
+                    let reference = format!("refs/shepherd/tasks/{}", task_id.as_str());
+                    if git::run_git(&repository.root, &["rev-parse", "--verify", &reference])?
+                        != tip
+                    {
+                        return Err(CoreError::Io {
+                            path: path.display().to_string(),
+                            source: std::io::Error::other(
+                                "retained task tip does not match the interrupted collection",
+                            ),
+                        });
+                    }
+                    GitService.prune_worktrees(&repository)?;
+                    let mut updated = task;
+                    updated.worktree_path = None;
+                    updated.collection_pending = false;
+                    self.store.save_task(&updated).await?;
+                    self.tasks.insert(task_id.clone(), updated);
+                    return Ok(());
+                }
+                Err(error) => {
+                    return Err(CoreError::Io {
+                        path: path.display().to_string(),
+                        source: error,
+                    });
+                }
+                Ok(_) => {
+                    let mut updated = task.clone();
+                    updated.collection_pending = false;
+                    self.store.save_task(&updated).await?;
+                    self.tasks.insert(task_id.clone(), updated);
+                }
+            }
+        }
         let (task, repository, path) = self.task_git_worktree(task_id)?;
         let mut updated = task.clone();
         let Some(branch) = task.branch.as_deref() else {
@@ -431,16 +482,43 @@ impl Core {
         let tip = GitService.checked_out_tip(path, branch)?;
         GitService.retain_task_tip(&repository, task_id.as_str(), &tip)?;
         updated.branch_tip_sha = Some(tip);
+        updated.collection_pending = true;
         self.store.save_task(&updated).await?;
         self.tasks.insert(task_id.clone(), updated.clone());
         let Some(path) = updated.worktree_path.as_deref() else {
             return Ok(());
         };
-        GitService.remove_clean_worktree(&repository, path)?;
+        if let Err(error) = GitService.remove_clean_worktree(&repository, path) {
+            match path.symlink_metadata() {
+                Ok(_) => {
+                    updated.collection_pending = false;
+                    if let Err(save_error) = self.store.save_task(&updated).await {
+                        return Err(CoreError::Io {
+                            path: path.display().to_string(),
+                            source: std::io::Error::other(format!(
+                                "collection failed: {error}; could not clear collection state: {save_error}"
+                            )),
+                        });
+                    }
+                    self.tasks.insert(task_id.clone(), updated);
+                }
+                Err(source) if source.kind() == std::io::ErrorKind::NotFound => {}
+                Err(source) => {
+                    return Err(CoreError::Io {
+                        path: path.display().to_string(),
+                        source: std::io::Error::other(format!(
+                            "collection failed: {error}; could not inspect the checkout: {source}"
+                        )),
+                    });
+                }
+            }
+            return Err(error.into());
+        }
+        GitService.prune_worktrees(&repository)?;
         updated.worktree_path = None;
+        updated.collection_pending = false;
         self.store.save_task(&updated).await?;
         self.tasks.insert(task_id.clone(), updated);
-        GitService.prune_worktrees(&repository)?;
         Ok(())
     }
 
@@ -449,6 +527,7 @@ impl Core {
         if task.state == TaskState::Done && task.worktree_path.is_some() {
             let mut updated = task.clone();
             updated.worktree_last_used_at = projects::now_millis();
+            updated.collection_pending = false;
             self.store.save_task(&updated).await?;
             self.tasks.insert(task_id.clone(), updated);
         }
@@ -462,7 +541,8 @@ impl Core {
         let task = self.task(task_id)?;
         if task.state == TaskState::Done
             && task.worktree_path.is_some()
-            && projects::now_millis().saturating_sub(task.worktree_last_used_at) >= 60_000
+            && (task.collection_pending
+                || projects::now_millis().saturating_sub(task.worktree_last_used_at) >= 60_000)
         {
             self.touch_archived_worktree(task_id).await?;
         }
@@ -1396,6 +1476,7 @@ impl Core {
                     task.worktree_path = Some(task.proposed_worktree_path.clone());
                 }
                 self.restore_task_worktree(&task)?;
+                task.collection_pending = false;
             }
             ReviewAction::SendNote { text } => {
                 if text.trim().is_empty() {

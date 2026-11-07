@@ -189,6 +189,7 @@ pub struct Task {
     pub created_at: u64,
     pub updated_at: u64,
     pub worktree_last_used_at: u64,
+    pub collection_pending: bool,
 }
 
 impl Task {
@@ -216,6 +217,7 @@ impl Task {
             created_at: now,
             updated_at: now,
             worktree_last_used_at: now,
+            collection_pending: false,
         }
     }
 
