@@ -1354,15 +1354,10 @@ impl Core {
             self.publish_terminal_list(&project_id);
         }
 
-        let mut updated_project = None;
         if let Some(project) = self.projects.get_mut(&project_id)
             && project.last_task_id.as_ref() == Some(task_id)
         {
             project.last_task_id = None;
-            updated_project = Some(project.clone());
-        }
-        if let Some(project) = updated_project {
-            self.store.save_project(&project).await?;
         }
 
         self.emit(Event::TaskListChanged(self.task_list(&project_id)?));

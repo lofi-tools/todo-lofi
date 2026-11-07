@@ -83,6 +83,7 @@ pub trait Store: Send + Sync {
         entries: &[&Entry],
     ) -> Result<(), StoreError>;
     async fn archive_tasks(&self, tasks: &[Task]) -> Result<(), StoreError>;
+    /// Remove the task and its durable state, clearing any last-task reference atomically.
     async fn delete_task(&self, task_id: &TaskId) -> Result<(), StoreError>;
     async fn load_workspace_layouts(&self) -> Result<Vec<(TaskId, WorkspaceLayout)>, StoreError>;
     async fn save_workspace_layout(
@@ -897,6 +898,7 @@ impl Store for TursoStore {
         let mut db = self.db.lock().await;
         let mut transaction = db.transaction().await?;
         for statement in [
+            "UPDATE projects SET last_task_id = NULL WHERE last_task_id = ?1",
             "DELETE FROM attachments WHERE task_id = ?1",
             "DELETE FROM entries WHERE task_id = ?1",
             "DELETE FROM sessions WHERE task_id = ?1",
@@ -1673,6 +1675,11 @@ impl Store for MemoryStore {
     }
 
     async fn delete_task(&self, task_id: &TaskId) -> Result<(), StoreError> {
+        for project in self.projects.write().await.values_mut() {
+            if project.last_task_id.as_ref() == Some(task_id) {
+                project.last_task_id = None;
+            }
+        }
         self.tasks.write().await.remove(task_id.as_str());
         self.workspace_layouts.write().await.remove(task_id);
         self.transcripts.write().await.remove(task_id);
@@ -1940,9 +1947,10 @@ mod tests {
         store: &dyn Store,
         root: &Path,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let project = Project::new(root.to_path_buf());
+        let mut project = Project::new(root.to_path_buf());
         let removed = Task::draft(project.id.clone(), "Removed", root);
         let kept = Task::draft(project.id.clone(), "Kept", root);
+        project.last_task_id = Some(removed.id.clone());
         store.save_project(&project).await?;
         store.save_task(&removed).await?;
         store.save_task(&kept).await?;
@@ -1987,6 +1995,14 @@ mod tests {
             store.save_terminal(terminal).await?;
         }
         store.delete_task(&removed.id).await?;
+        assert_eq!(
+            store
+                .load_projects()
+                .await?
+                .first()
+                .and_then(|project| project.last_task_id.as_ref()),
+            None
+        );
         assert_eq!(
             store
                 .load_tasks()
@@ -2043,8 +2059,9 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let database = TestDatabase::new()?;
         let store = TursoStore::open(&database.uri()).await?;
-        let project = Project::new(database.path().to_path_buf());
+        let mut project = Project::new(database.path().to_path_buf());
         let task = Task::draft(project.id.clone(), "Keep on failure", database.path());
+        project.last_task_id = Some(task.id.clone());
         let session = SessionRecord::started(task.id.clone(), "codex", None);
         let mut transcript = agent_harness::Transcript::default();
         transcript.push_user_message_with_attachments(
@@ -2076,10 +2093,26 @@ mod tests {
                 .await?;
         }
         assert_eq!(store.load_tasks().await?.len(), 1);
+        assert_eq!(
+            store
+                .load_projects()
+                .await?
+                .first()
+                .and_then(|project| project.last_task_id.as_ref()),
+            Some(&task.id)
+        );
         assert_eq!(store.load_sessions().await?.len(), 1);
         assert_eq!(store.load_transcript(&task.id).await?, transcript.entries());
         store.delete_task(&task.id).await?;
         assert!(store.load_tasks().await?.is_empty());
+        assert_eq!(
+            store
+                .load_projects()
+                .await?
+                .first()
+                .and_then(|project| project.last_task_id.as_ref()),
+            None
+        );
         assert!(store.load_transcript(&task.id).await?.is_empty());
         Ok(())
     }
