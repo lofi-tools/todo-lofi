@@ -1189,7 +1189,9 @@ placeholder tabs and no unearned state badges.
   tail. ACP terminal output honors smaller requested limits and caps larger
   requests at 1 MiB per terminal. ACP terminal output has a shared 64-event
   backpressure limit with 8 KiB chunks; release or shutdown unblocks a stalled
-  pump. Other critical event queues still need backpressure.
+  pump. OpenCode decodes event-stream chunks one event at a time instead of
+  queuing every decoded event from a network read. Other critical event queues
+  still need backpressure.
 - [ ] Multiple agents and projects: three agents across two projects, no state
   bleed, no polling.
 - [ ] Performance: cold start under 1.2 s, streaming while a large diff renders,

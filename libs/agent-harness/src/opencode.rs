@@ -914,27 +914,32 @@ enum OpenCodeDecision {
 pub struct OpenCodeEvents {
     response: Response,
     decoder: EventDecoder,
-    pending: VecDeque<HarnessResult<OpenCodeEvent>>,
+    pending: bytes::Bytes,
 }
 
 impl OpenCodeEvents {
     pub async fn next(&mut self) -> HarnessResult<OpenCodeEvent> {
         loop {
-            if let Some(event) = self.pending.pop_front() {
-                return event;
+            if !self.pending.is_empty() {
+                let (consumed, event) = self.decoder.push(&self.pending)?;
+                self.pending = self.pending.slice(consumed..);
+                if let Some(event) = event {
+                    return Ok(event);
+                }
             }
-            let chunk = self.response.chunk().await.map_err(|error| {
-                HarnessError::TransportClosed(format!(
-                    "Could not read the OpenCode event stream: {}",
-                    error.without_url()
-                ))
-            })?;
-            let chunk = chunk.ok_or_else(|| {
-                HarnessError::TransportClosed("The OpenCode event stream disconnected.".into())
-            })?;
-            if let Err(error) = self.decoder.push(&chunk, &mut self.pending) {
-                self.pending.push_back(Err(error));
-            }
+            self.pending = self
+                .response
+                .chunk()
+                .await
+                .map_err(|error| {
+                    HarnessError::TransportClosed(format!(
+                        "Could not read the OpenCode event stream: {}",
+                        error.without_url()
+                    ))
+                })?
+                .ok_or_else(|| {
+                    HarnessError::TransportClosed("The OpenCode event stream disconnected.".into())
+                })?;
         }
     }
 }
@@ -946,12 +951,10 @@ struct EventDecoder {
 }
 
 impl EventDecoder {
-    fn push(
-        &mut self,
-        chunk: &[u8],
-        events: &mut VecDeque<HarnessResult<OpenCodeEvent>>,
-    ) -> HarnessResult<()> {
+    fn push(&mut self, chunk: &[u8]) -> HarnessResult<(usize, Option<OpenCodeEvent>)> {
+        let mut consumed = 0;
         for fragment in chunk.split_inclusive(|byte| *byte == b'\n') {
+            consumed += fragment.len();
             if self.line.len().saturating_add(fragment.len()) > MAX_RESPONSE_BYTES {
                 return Err(HarnessError::Protocol(
                     "OpenCode event line is too large".into(),
@@ -967,8 +970,9 @@ impl EventDecoder {
                 let event = serde_json::from_slice(&self.data).map_err(|error| {
                     protocol_error("could not parse OpenCode stream event", error)
                 })?;
-                events.push_back(Ok(event));
                 self.data.clear();
+                self.line.clear();
+                return Ok((consumed, Some(event)));
             } else if let Some(data) = line.strip_prefix(b"data:") {
                 let data = data.strip_prefix(b" ").unwrap_or(data);
                 if self.data.len().saturating_add(data.len()).saturating_add(1) > MAX_RESPONSE_BYTES
@@ -984,7 +988,7 @@ impl EventDecoder {
             }
             self.line.clear();
         }
-        Ok(())
+        Ok((consumed, None))
     }
 }
 
@@ -1137,7 +1141,7 @@ impl OpenCodeServer {
             let mut events = OpenCodeEvents {
                 response,
                 decoder: EventDecoder::default(),
-                pending: VecDeque::new(),
+                pending: bytes::Bytes::new(),
             };
             if events.next().await?.kind != "server.connected" {
                 return Err(HarnessError::Protocol(
@@ -1614,26 +1618,45 @@ exec sleep 60
     fn decodes_split_event_lines_and_preserves_events_before_failure()
     -> Result<(), Box<dyn std::error::Error>> {
         let mut decoder = EventDecoder::default();
-        let mut events = VecDeque::new();
+        let mut events = Vec::new();
         for byte in ": heartbeat\n\r\ndata: {\"type\":\"session.text.delta\",\r\n\
                      data: \"data\":{\"delta\":\"héllo\"}}\r\n\r\n"
             .as_bytes()
             .chunks(1)
         {
-            decoder.push(byte, &mut events)?;
+            let (_, event) = decoder.push(byte)?;
+            events.extend(event);
         }
-        let error = decoder.push(
-            b"data: {\"type\":\"session.execution.succeeded\",\"data\":{}}\n\n\
-              event: effect/httpapi/stream/failure\n",
-            &mut events,
-        );
-        let text = events.pop_front().ok_or("expected text event")??;
-        assert_eq!(text.kind, "session.text.delta");
-        assert_eq!(text.data, json!({"delta": "héllo"}));
-        let finished = events.pop_front().ok_or("expected execution event")??;
-        assert_eq!(finished.kind, "session.execution.succeeded");
-        assert!(events.is_empty());
-        assert!(error.is_err());
+        let input = b"data: {\"type\":\"session.execution.succeeded\",\"data\":{}}\n\n\
+              event: effect/httpapi/stream/failure\n";
+        let (consumed, event) = decoder.push(input)?;
+        events.extend(event);
+        assert!(decoder.push(&input[consumed..]).is_err());
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].kind, "session.text.delta");
+        assert_eq!(events[0].data, json!({"delta": "héllo"}));
+        assert_eq!(events[1].kind, "session.execution.succeeded");
+        Ok(())
+    }
+
+    #[test]
+    fn decodes_one_event_at_a_time_from_a_large_chunk() -> Result<(), Box<dyn std::error::Error>> {
+        let mut decoder = EventDecoder::default();
+        let input =
+            b"data: {\"type\":\"session.execution.succeeded\",\"data\":{}}\n\n".repeat(1000);
+        let mut remaining = input.as_slice();
+        let mut count = 0;
+        while !remaining.is_empty() {
+            let (consumed, event) = decoder.push(remaining)?;
+            assert!(consumed > 0);
+            assert_eq!(
+                event.ok_or("expected an event")?.kind,
+                "session.execution.succeeded"
+            );
+            remaining = &remaining[consumed..];
+            count += 1;
+        }
+        assert_eq!(count, 1000);
         Ok(())
     }
 
