@@ -12,23 +12,31 @@ function errorDetails(error: unknown): { message: string; details: string } {
   const seen = new Set<unknown>()
   const parts: string[] = []
   const messages: string[] = []
-  let current: unknown = error
-  while (current !== undefined && current !== null && !seen.has(current)) {
-    seen.add(current)
+  const pending: unknown[] = [error]
+  while (pending.length) {
+    const current = pending.pop()
+    if (current === undefined || current === null) continue
     if (typeof current === 'object') {
+      if (seen.has(current)) continue
+      seen.add(current)
+      if (Array.isArray(current)) {
+        for (let index = current.length - 1; index >= 0; index--) pending.push(current[index])
+        continue
+      }
       const value = current as { message?: unknown; cause?: unknown; causes?: unknown; stack?: unknown; code?: unknown }
       if (value.message) { messages.push(String(value.message)); parts.push(String(value.message)) }
       else {
         try { messages.push(JSON.stringify(current)); parts.push(JSON.stringify(current)) } catch { messages.push(String(current)); parts.push(String(current)) }
       }
       if (value.code) parts.push(`Code: ${String(value.code)}`)
-      if (Array.isArray(value.causes)) parts.push(...value.causes.map(String))
       if (value.stack) parts.push(String(value.stack))
-      current = value.cause
+      if (value.cause !== undefined) pending.push(value.cause)
+      if (Array.isArray(value.causes)) {
+        for (let index = value.causes.length - 1; index >= 0; index--) pending.push(value.causes[index])
+      }
     } else {
       messages.push(String(current))
       parts.push(String(current))
-      break
     }
   }
   const meaningful = messages.find((part) => part && part !== 'Unknown error' && part !== '{}')

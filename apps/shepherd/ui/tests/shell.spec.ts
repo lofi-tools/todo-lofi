@@ -1815,6 +1815,28 @@ test('preserves diagnostic context for distinct errors with the same message', a
   expect(records[2].details).toContain('second cause')
 })
 
+test('records nested aggregate error causes without looping on cycles', async ({ page }) => {
+  await page.goto('/')
+  await expect(page.getByText('ready to go', { exact: true })).toBeVisible()
+  const record = await page.evaluate(async () => {
+    let captured: { message: string; details: string } | undefined
+    const listener = (event: Event) => { captured = (event as CustomEvent).detail }
+    window.addEventListener('shepherd-diagnostic', listener)
+    const modulePath = '/src/diagnostics.ts'
+    const { reportError } = await import(/* @vite-ignore */ modulePath)
+    const cause: { message: string; code: string; cause?: unknown } = { message: 'Permission denied', code: 'EACCES' }
+    cause.cause = cause
+    reportError('watch_workspace_files', { message: 'Watcher failed', causes: [cause, { message: 'Other cause' }] })
+    window.removeEventListener('shepherd-diagnostic', listener)
+    return captured
+  })
+  expect(record?.message).toBe('Watcher failed')
+  expect(record?.details).toContain('Permission denied')
+  expect(record?.details).toContain('Code: EACCES')
+  expect(record?.details).toContain('Other cause')
+  expect(record?.details).not.toContain('[object Object]')
+})
+
 test('opens error details above the project picker', async ({ page }) => {
   await page.goto('/?project-scan-error')
   await page.getByRole('button', { name: 'Add project' }).click()
