@@ -1249,7 +1249,8 @@ placeholder tabs and no unearned state badges.
   child-stop failure injection remains.
   Codex exec shutdown retains its waiter after a timeout so a later quit can
   retry, and reports a waiter failure on subsequent attempts. Local fixtures
-  cover both paths. Propagating process-stop errors from the waiter remains.
+  cover both paths and verify that shutdown stops a real descendant process.
+  Propagating process-stop errors from the waiter remains.
   OpenCode shutdown retains its server when stopping it fails; an injected
   group-signal failure verifies the process remains available for a retry.
 - [ ] Bounded transcript, stderr, search and frame buffers.

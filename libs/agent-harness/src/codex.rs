@@ -4558,6 +4558,28 @@ sleep 30
     }
 
     #[tokio::test]
+    async fn exec_shutdown_stops_its_process_group() -> Result<(), Box<dyn std::error::Error>> {
+        let directory = TempDir::new()?;
+        let stub = write_stub(
+            &directory,
+            "codex-exec-group.sh",
+            "#!/bin/sh\n(sleep 1; printf escaped > escaped) &\nprintf ready > ready\nsleep 30\n",
+        );
+        let (mut harness, _) = start_exec(&stub, directory.path()).await;
+        harness.prompt(PromptInput::text("go")).await?;
+        timeout(Duration::from_secs(5), async {
+            while !directory.path().join("ready").exists() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await?;
+        harness.shutdown().await?;
+        tokio::time::sleep(Duration::from_millis(1300)).await;
+        assert!(!directory.path().join("escaped").exists());
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn exec_shutdown_timeout_can_be_retried() -> Result<(), Box<dyn std::error::Error>> {
         let mut harness = ExecHarness::new();
         harness.started = true;
