@@ -888,6 +888,8 @@ If Pi’s RPC probe is blocked, proceed with ACP while resolving it.
   Shutdown reports process-group signal failures while retaining the unreaped
   leader, so another shutdown can safely retry; an injected-failure fixture
   verifies the leader remains available and the retry succeeds.
+  A failed child wait is also reported and retried without signalling the
+  group again; a local fixture verifies that the child handle is retained.
   Descendants surviving an already-reaped leader still need recovery.
   Startup waits for the exit report so it can retain process diagnostics.
   The installed Nix-profile Pi 0.75.4 passed the isolated dialog smoke, but its

@@ -1,6 +1,8 @@
 //! Pi's byte-framed stdio RPC transport.
 
 use std::collections::HashMap;
+use std::future::Future;
+use std::pin::Pin;
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
@@ -80,6 +82,13 @@ struct Reply {
 }
 
 type Replies = Arc<Mutex<ReplyState>>;
+type ChildWaitFuture<'a> =
+    Pin<Box<dyn Future<Output = std::io::Result<std::process::ExitStatus>> + Send + 'a>>;
+type ChildWait = for<'a> fn(&'a mut Child) -> ChildWaitFuture<'a>;
+
+fn boxed_wait_for_child(child: &mut Child) -> ChildWaitFuture<'_> {
+    Box::pin(child.wait())
+}
 
 #[derive(Default)]
 struct ReplyState {
@@ -95,6 +104,14 @@ impl PiRpc {
     async fn start_with_terminator(
         spec: &SpawnSpec,
         terminate: fn(&Child) -> std::io::Result<()>,
+    ) -> HarnessResult<(Self, PiSessionState)> {
+        Self::start_with_supervision(spec, terminate, boxed_wait_for_child).await
+    }
+
+    async fn start_with_supervision(
+        spec: &SpawnSpec,
+        terminate: fn(&Child) -> std::io::Result<()>,
+        wait: ChildWait,
     ) -> HarnessResult<(Self, PiSessionState)> {
         let mut command = Command::new(&spec.program);
         command
@@ -154,6 +171,7 @@ impl PiRpc {
                     replies.closed = true;
                     replies.pending.clear();
                 }
+                let mut group_stopped = stopped;
                 if protocol_error.is_some() {
                     if let Err(error) =
                         stop_with_retry(&child, terminate, &mut shutdown, &stop_errors).await
@@ -163,45 +181,70 @@ impl PiRpc {
                                 "could not stop the Pi process group after an RPC error: {error}"
                             )
                         });
+                    } else {
+                        group_stopped = true;
                     }
                     if let Err(error) = child.start_kill() {
                         tracing::debug!(%error, "could not stop Pi after an RPC framing error");
                     }
                 }
-                let waiting = if stopped {
-                    timeout(SHUTDOWN_TIMEOUT, child.wait()).await
+                let waiting = if group_stopped {
+                    timeout(SHUTDOWN_TIMEOUT, wait(&mut child)).await
                 } else {
                     tokio::select! {
-                        result = timeout(SHUTDOWN_TIMEOUT, child.wait()) => result,
+                        result = timeout(SHUTDOWN_TIMEOUT, wait(&mut child)) => result,
                         _ = shutdown.recv() => {
                             if let Err(error) = stop_with_retry(&child, terminate, &mut shutdown, &stop_errors).await {
                                 cleanup_error = Some(format!("could not signal Pi during shutdown after output closed: {error}"));
                                 if let Err(error) = child.start_kill() {
                                     tracing::warn!(%error, "could not stop Pi after a group signal failure");
                                 }
+                            } else {
+                                group_stopped = true;
                             }
-                            timeout(SHUTDOWN_TIMEOUT, child.wait()).await
+                            timeout(SHUTDOWN_TIMEOUT, wait(&mut child)).await
                         }
                     }
                 };
-                let status = match waiting {
+                let mut status = match waiting {
                     Ok(status) => status,
                     Err(_) => {
-                        if let Err(error) =
-                            stop_with_retry(&child, terminate, &mut shutdown, &stop_errors).await
-                        {
-                            cleanup_error.get_or_insert_with(|| {
-                                format!(
-                                    "could not stop the Pi process group after timeout: {error}"
-                                )
-                            });
+                        if !group_stopped {
+                            if let Err(error) =
+                                stop_with_retry(&child, terminate, &mut shutdown, &stop_errors)
+                                    .await
+                            {
+                                cleanup_error.get_or_insert_with(|| {
+                                    format!(
+                                        "could not stop the Pi process group after timeout: {error}"
+                                    )
+                                });
+                            }
                         }
                         match child.start_kill() {
-                            Ok(()) => child.wait().await,
+                            Ok(()) => wait(&mut child).await,
                             Err(error) => Err(error),
                         }
                     }
                 };
+                while let Err(error) = &status {
+                    let message = format!("could not get the Pi exit status: {error}");
+                    if stop_errors.send(message.clone()).is_err() || shutdown.recv().await.is_none()
+                    {
+                        cleanup_error.get_or_insert(message);
+                        if let Err(error) = child.start_kill() {
+                            tracing::warn!(%error, "could not stop the abandoned Pi child");
+                        }
+                        break;
+                    }
+                    status = match timeout(SHUTDOWN_TIMEOUT, wait(&mut child)).await {
+                        Ok(status) => status,
+                        Err(_) => Err(std::io::Error::new(
+                            std::io::ErrorKind::TimedOut,
+                            "Pi did not exit after a retry",
+                        )),
+                    };
+                }
                 let code = match status {
                     Ok(status) => status.code(),
                     Err(error) => {
@@ -707,6 +750,56 @@ exec sleep 30
 
     #[cfg(unix)]
     #[tokio::test]
+    async fn shutdown_retries_a_failed_child_wait() -> Result<(), Box<dyn std::error::Error>> {
+        static WAIT_ATTEMPTS: std::sync::atomic::AtomicUsize =
+            std::sync::atomic::AtomicUsize::new(0);
+        fn flaky_wait(child: &mut Child) -> ChildWaitFuture<'_> {
+            if WAIT_ATTEMPTS.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                Box::pin(async { Err(std::io::Error::other("fixture wait failure")) })
+            } else {
+                boxed_wait_for_child(child)
+            }
+        }
+        WAIT_ATTEMPTS.store(0, std::sync::atomic::Ordering::SeqCst);
+        let directory = tempfile::tempdir()?;
+        let script = directory.path().join("pi-wait.sh");
+        std::fs::write(
+            &script,
+            r#"
+printf '%s' "$$" > leader-pid
+IFS= read -r state || exit 3
+state_id=$(printf '%s\n' "$state" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
+printf '{"type":"response","id":"%s","command":"get_state","success":true,"data":{"sessionId":"pi-fixture","sessionFile":null,"isStreaming":false,"isCompacting":false,"pendingMessageCount":0}}\n' "$state_id"
+exec sleep 30
+"#,
+        )?;
+        let spec = SpawnSpec {
+            program: "/bin/sh".into(),
+            args: vec![script.to_string_lossy().into_owned()],
+            cwd: directory.path().to_owned(),
+            ..SpawnSpec::default()
+        };
+        let (mut rpc, _) = PiRpc::start_with_supervision(&spec, terminate, flaky_wait).await?;
+        let error = match timeout(Duration::from_secs(5), rpc.shutdown())
+            .await
+            .map_err(|_| "initial wait failure was not reported in time")?
+        {
+            Ok(()) => return Err("wait failure was not reported".into()),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("fixture wait failure"));
+        let leader: libc::pid_t =
+            std::fs::read_to_string(directory.path().join("leader-pid"))?.parse()?;
+        assert_eq!(unsafe { libc::kill(leader, 0) }, 0);
+        timeout(Duration::from_secs(5), rpc.shutdown())
+            .await
+            .map_err(|_| "wait retry did not finish in time")??;
+        assert_eq!(WAIT_ATTEMPTS.load(std::sync::atomic::Ordering::SeqCst), 2);
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn closed_input_fails_pending_request_and_stops_descendants()
     -> Result<(), Box<dyn std::error::Error>> {
         let directory = tempfile::tempdir()?;
@@ -717,8 +810,8 @@ exec sleep 30
 IFS= read -r state || exit 3
 state_id=$(printf '%s\n' "$state" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
 printf '{"type":"response","id":"%s","command":"get_state","success":true,"data":{"sessionId":"pi-fixture","sessionFile":null,"isStreaming":false,"isCompacting":false,"pendingMessageCount":0}}\n' "$state_id"
-(sleep 1; printf survived > child-survived) </dev/null >/dev/null 2>&1 &
 exec 0<&-
+(sleep 1; printf survived > child-survived) </dev/null >/dev/null 2>&1 &
 printf '%s\n' '{"type":"fixture_input_closed"}'
 exec sleep 30
 "#,
@@ -731,15 +824,21 @@ exec sleep 30
         };
         let (mut rpc, _) = PiRpc::start(&spec).await?;
         assert!(matches!(
-            timeout(Duration::from_secs(1), rpc.next_event()).await?,
+            timeout(Duration::from_secs(5), rpc.next_event()).await.map_err(|_| "input-close event timed out")?,
             Some(PiRpcEvent::Record(record)) if record["type"] == "fixture_input_closed"
         ));
         assert!(matches!(
-            timeout(Duration::from_secs(1), rpc.request("get_state", Map::new())).await?,
+            timeout(Duration::from_secs(5), rpc.request("get_state", Map::new()))
+                .await
+                .map_err(|_| format!(
+                    "pending request did not fail (writer finished: {}, supervisor finished: {})",
+                    rpc.writer.is_finished(),
+                    rpc.supervisor.is_finished()
+                ))?,
             Err(HarnessError::ChannelClosed)
         ));
         assert!(matches!(
-            timeout(Duration::from_secs(2), rpc.next_event()).await?,
+            timeout(Duration::from_secs(5), rpc.next_event()).await.map_err(|_| "input-close exit timed out")?,
             Some(PiRpcEvent::Exited { protocol_error: Some(error), .. })
                 if error.contains("could not write Pi RPC frame")
         ));
