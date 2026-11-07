@@ -1241,7 +1241,9 @@ placeholder tabs and no unearned state badges.
   attachment grants open every path component without following symlinks and
   retain the opened file for the duration of the prompt. Agent launch environment
   commands resolve at spawn with a five-second timeout and bounded output; errors
-  exclude their output. Settings supply per-agent maps with project overrides
+  exclude their output. Oversized output and failed commands with inherited
+  stdout fail promptly; any process-group cleanup failure is reported. Settings
+  supply per-agent maps with project overrides
   for task launches and model and mode discovery. A scripted task fixture
   verifies that a local process receives the resolved value while the workspace
   snapshot and reopened database files do not contain it. Log handling and

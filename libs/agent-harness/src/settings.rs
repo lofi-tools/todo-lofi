@@ -47,29 +47,38 @@ async fn resolve_environment_with_timeout(
             HarnessError::Protocol(format!("Could not capture environment command for {key}"))
         })?;
         let capture = async {
-            let mut output = Vec::new();
-            let mut stdout = stdout.take(MAX_ENVIRONMENT_OUTPUT + 1);
-            let (read, status) = tokio::join!(stdout.read_to_end(&mut output), child.wait());
-            read.map_err(|error| {
-                HarnessError::Protocol(format!(
-                    "Could not read environment command for {key}: {error}"
-                ))
-            })?;
-            let status = status.map_err(|error| {
-                HarnessError::Protocol(format!(
-                    "Could not wait for environment command for {key}: {error}"
-                ))
-            })?;
-            if !status.success() {
-                return Err(HarnessError::Protocol(format!(
-                    "Environment command for {key} failed ({status})"
-                )));
-            }
-            if output.len() as u64 > MAX_ENVIRONMENT_OUTPUT {
-                return Err(HarnessError::Protocol(format!(
-                    "Environment command for {key} produced too much output"
-                )));
-            }
+            let read = async {
+                let mut output = Vec::new();
+                stdout
+                    .take(MAX_ENVIRONMENT_OUTPUT + 1)
+                    .read_to_end(&mut output)
+                    .await
+                    .map_err(|error| {
+                        HarnessError::Protocol(format!(
+                            "Could not read environment command for {key}: {error}"
+                        ))
+                    })?;
+                if output.len() as u64 > MAX_ENVIRONMENT_OUTPUT {
+                    return Err(HarnessError::Protocol(format!(
+                        "Environment command for {key} produced too much output"
+                    )));
+                }
+                Ok(output)
+            };
+            let wait = async {
+                let status = child.wait().await.map_err(|error| {
+                    HarnessError::Protocol(format!(
+                        "Could not wait for environment command for {key}: {error}"
+                    ))
+                })?;
+                if !status.success() {
+                    return Err(HarnessError::Protocol(format!(
+                        "Environment command for {key} failed ({status})"
+                    )));
+                }
+                Ok(())
+            };
+            let (output, ()) = tokio::try_join!(read, wait)?;
             let mut output = String::from_utf8(output).map_err(|_| {
                 HarnessError::Protocol(format!(
                     "Environment command for {key} did not produce UTF-8"
@@ -87,7 +96,7 @@ async fn resolve_environment_with_timeout(
         };
         let outcome = tokio::time::timeout(deadline, capture).await;
         #[cfg(unix)]
-        if outcome.is_err()
+        if !matches!(outcome, Ok(Ok(_)))
             && let Some(group) = group
         {
             // Commands can leave descendants holding stdout after the shell exits.
@@ -95,8 +104,13 @@ async fn resolve_environment_with_timeout(
             if result != 0 {
                 let error = std::io::Error::last_os_error();
                 if error.raw_os_error() != Some(libc::ESRCH) {
+                    let reason = match &outcome {
+                        Err(_) => format!("Environment command for {key} timed out"),
+                        Ok(Err(reason)) => reason.to_string(),
+                        Ok(Ok(_)) => format!("Environment command for {key} finished"),
+                    };
                     return Err(HarnessError::Protocol(format!(
-                        "Could not stop environment command for {key}: {error}"
+                        "{reason}; could not stop environment command for {key}: {error}"
                     )));
                 }
             }
@@ -231,6 +245,19 @@ mod tests {
         .await
         .expect_err("must time out");
         assert!(error.to_string().contains("timed out"));
+        for (command, expected) in [
+            ("!yes x", "too much output"),
+            ("!sleep 30 & exit 1", "failed"),
+        ] {
+            let mut values = BTreeMap::from([("TOKEN".into(), command.into())]);
+            let result = tokio::time::timeout(
+                std::time::Duration::from_secs(3),
+                resolve_environment(&mut values, directory.path()),
+            )
+            .await?;
+            let error = result.expect_err("command must fail");
+            assert!(error.to_string().contains(expected), "{error}");
+        }
         Ok(())
     }
 
