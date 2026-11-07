@@ -79,7 +79,10 @@ impl HarnessFactory for DesktopHarnessFactory {
         agent: Agent,
         cwd: PathBuf,
     ) -> Result<(Box<dyn AgentHarness>, SpawnSpec), CoreError> {
-        self.launch_with_terminals(agent, cwd, self.terminals.for_task(task_id.clone()))
+        let (mut harness, spec) =
+            self.launch_with_terminals(agent, cwd, self.terminals.for_task(task_id.clone()))?;
+        harness.set_process_tracker(self.terminals.agent_process_tracker(task_id));
+        Ok((harness, spec))
     }
 }
 

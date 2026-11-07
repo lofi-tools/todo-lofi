@@ -842,6 +842,8 @@ pub struct CodexHarness {
     receiver: mpsc::UnboundedReceiver<HarnessEvent>,
     outgoing: Option<mpsc::UnboundedSender<Value>>,
     child: Option<Arc<AsyncMutex<Child>>>,
+    process_tracker: Option<Arc<dyn crate::AgentProcessTracker>>,
+    process_record: Option<String>,
     pending: Arc<AsyncMutex<Pending>>,
     stderr: Arc<Mutex<VecDeque<String>>>,
     closed: Arc<AtomicBool>,
@@ -871,6 +873,8 @@ impl CodexHarness {
             receiver,
             outgoing: None,
             child: None,
+            process_tracker: None,
+            process_record: None,
             pending: Arc::new(AsyncMutex::new(Pending::default())),
             stderr: Arc::new(Mutex::new(VecDeque::new())),
             closed: Arc::new(AtomicBool::new(false)),
@@ -1053,6 +1057,16 @@ impl CodexHarness {
         let child = Arc::new(AsyncMutex::new(child));
         let mut startup_group = AppServerStartupGroup(Some(Arc::downgrade(&child)));
         self.child = Some(child.clone());
+        if let Some(tracker) = &self.process_tracker {
+            let pid = child.lock().await.id().ok_or_else(|| {
+                HarnessError::Protocol("Codex app-server has no process ID".into())
+            })?;
+            self.process_record = Some(tracker.started(pid).await.map_err(|error| {
+                HarnessError::Protocol(format!(
+                    "Could not record Codex app-server process: {error}"
+                ))
+            })?);
+        }
 
         let (outgoing, outgoing_receiver) = mpsc::unbounded_channel();
         self.writer_task = Some(spawn_writer(
@@ -1156,6 +1170,15 @@ impl CodexHarness {
         };
         self.child = None;
 
+        if let (Some(tracker), Some(record)) = (&self.process_tracker, &self.process_record) {
+            tracker.stopped(record).await.map_err(|error| {
+                HarnessError::Protocol(format!(
+                    "Could not clear Codex app-server process record: {error}"
+                ))
+            })?;
+            self.process_record = None;
+        }
+
         if let Some(task) = self.stdout_task.take() {
             task.abort();
         }
@@ -1187,6 +1210,10 @@ impl Default for CodexHarness {
 
 #[async_trait]
 impl AgentHarness for CodexHarness {
+    fn set_process_tracker(&mut self, tracker: Arc<dyn crate::AgentProcessTracker>) {
+        self.process_tracker = Some(tracker);
+    }
+
     fn events(&mut self) -> &mut mpsc::UnboundedReceiver<HarnessEvent> {
         &mut self.receiver
     }
@@ -3734,6 +3761,81 @@ esac
             probe.methods
         );
         assert!(!probe.supports("thread/archive"));
+    }
+
+    #[tokio::test]
+    async fn app_server_process_record_is_retained_until_cleanup_succeeds()
+    -> Result<(), Box<dyn std::error::Error>> {
+        struct Tracker {
+            pid: Mutex<Option<u32>>,
+            fail_start: bool,
+            fail_clear: AtomicBool,
+        }
+        #[async_trait]
+        impl crate::AgentProcessTracker for Tracker {
+            async fn started(&self, pid: u32) -> Result<String, String> {
+                *self.pid.lock().map_err(|error| error.to_string())? = Some(pid);
+                if self.fail_start {
+                    return Err("fixture save failure".into());
+                }
+                Ok("record".into())
+            }
+
+            async fn stopped(&self, record_id: &str) -> Result<(), String> {
+                assert_eq!(record_id, "record");
+                if self.fail_clear.swap(false, Ordering::SeqCst) {
+                    return Err("fixture storage failure".into());
+                }
+                *self.pid.lock().map_err(|error| error.to_string())? = None;
+                Ok(())
+            }
+        }
+        let directory = TempDir::new()?;
+        let stub = write_stub(&directory, "codex-tracked.sh", PROTOCOL_STUB);
+        let tracker = Arc::new(Tracker {
+            pid: Mutex::new(None),
+            fail_start: false,
+            fail_clear: AtomicBool::new(true),
+        });
+        let mut harness = CodexHarness::new();
+        harness.set_process_tracker(tracker.clone());
+        harness.start(spec(&stub, directory.path())).await?;
+        assert!(
+            tracker
+                .pid
+                .lock()
+                .map_err(|error| error.to_string())?
+                .is_some()
+        );
+        let error = harness
+            .shutdown()
+            .await
+            .expect_err("fixture cleanup must fail");
+        assert!(error.to_string().contains("fixture storage failure"));
+        assert!(harness.started && harness.process_record.is_some());
+        harness.shutdown().await?;
+        assert!(
+            tracker
+                .pid
+                .lock()
+                .map_err(|error| error.to_string())?
+                .is_none()
+        );
+        let failing = Arc::new(Tracker {
+            pid: Mutex::new(None),
+            fail_start: true,
+            fail_clear: AtomicBool::new(false),
+        });
+        let mut harness = CodexHarness::new();
+        harness.set_process_tracker(failing);
+        let error = harness
+            .start(spec(&stub, directory.path()))
+            .await
+            .expect_err("recording must fail");
+        assert!(error.to_string().contains("fixture save failure"));
+        let child = harness.child.as_ref().ok_or("missing child")?;
+        tokio::time::timeout(Duration::from_secs(3), child.lock().await.wait()).await??;
+        Ok(())
     }
 
     #[tokio::test]

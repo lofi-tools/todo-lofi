@@ -232,6 +232,57 @@ pub(crate) struct TerminalHost {
     core: Arc<OnceLock<std::sync::Weak<Mutex<Core>>>>,
 }
 
+struct AgentProcessStore {
+    store: Arc<OnceLock<Arc<dyn Store>>>,
+    task_id: String,
+}
+
+#[async_trait]
+impl agent_harness::AgentProcessTracker for AgentProcessStore {
+    async fn started(&self, pid: u32) -> Result<String, String> {
+        let store = self.store.get().ok_or("process storage is unavailable")?;
+        #[cfg(unix)]
+        let record = {
+            let pid = libc::pid_t::try_from(pid).map_err(|error| error.to_string())?;
+            crate::pty_terminal::capture_process_record(pid, "agent", &self.task_id)
+                .ok_or("could not capture agent process identity")?
+        };
+        #[cfg(not(unix))]
+        return Err(format!(
+            "agent process identity is unavailable for PID {pid}"
+        ));
+        #[cfg(unix)]
+        {
+            store
+                .save_process(&record)
+                .await
+                .map_err(|error| error.to_string())?;
+            Ok(record.id)
+        }
+    }
+
+    async fn stopped(&self, record_id: &str) -> Result<(), String> {
+        self.store
+            .get()
+            .ok_or("process storage is unavailable")?
+            .remove_process(record_id)
+            .await
+            .map_err(|error| error.to_string())
+    }
+}
+
+impl TerminalHost {
+    pub(crate) fn agent_process_tracker(
+        &self,
+        task_id: &TaskId,
+    ) -> Arc<dyn agent_harness::AgentProcessTracker> {
+        Arc::new(AgentProcessStore {
+            store: self.process_store.clone(),
+            task_id: task_id.to_string(),
+        })
+    }
+}
+
 impl Default for TerminalHost {
     fn default() -> Self {
         Self {
@@ -4206,6 +4257,42 @@ mod tests {
             Ok::<(), CoreError>(())
         })
         .await??;
+        Ok(())
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[tokio::test]
+    async fn agent_process_tracker_persists_and_removes_identity()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = TestDirectory::new()?;
+        let database = directory.path().join("shepherd.db");
+        let store = Arc::new(TursoStore::open_at(&database).await?);
+        let slot = Arc::new(OnceLock::new());
+        slot.set(store.clone() as Arc<dyn Store>)
+            .map_err(|_| "store already set")?;
+        let tracker = Arc::new(AgentProcessStore {
+            store: slot,
+            task_id: "task-fixture".into(),
+        });
+        use agent_harness::AgentHarness;
+        let mut harness = agent_harness::codex::CodexHarness::new();
+        harness.set_process_tracker(tracker);
+        harness.start(agent_harness::SpawnSpec {
+            program: "/bin/sh".into(),
+            args: vec!["-c".into(), "while IFS= read -r line; do case \"$line\" in *initialize*) printf '{\"id\":1,\"result\":{}}\\n';; esac; done".into()],
+            cwd: directory.path().to_path_buf(),
+            ..Default::default()
+        }).await?;
+        let records = TursoStore::open_at(&database)
+            .await?
+            .load_processes()
+            .await?;
+        assert_eq!(records.len(), 1);
+        assert!(records[0].pid > 1);
+        assert_eq!(records[0].kind, "agent");
+        assert_eq!(records[0].owner_id, "task-fixture");
+        harness.shutdown().await?;
+        assert!(store.load_processes().await?.is_empty());
         Ok(())
     }
 

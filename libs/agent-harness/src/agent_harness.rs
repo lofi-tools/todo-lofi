@@ -585,6 +585,12 @@ pub trait ProjectApprovalPolicy: Send + Sync {
     async fn remember(&self, key: &str, request: &ApprovalRequest) -> Result<(), String>;
 }
 
+#[async_trait]
+pub trait AgentProcessTracker: Send + Sync {
+    async fn started(&self, pid: u32) -> Result<String, String>;
+    async fn stopped(&self, record_id: &str) -> Result<(), String>;
+}
+
 /// Everything an adapter reports to the core, in one ordered stream.
 #[derive(Clone, Debug)]
 pub enum HarnessEvent {
@@ -1288,6 +1294,8 @@ pub trait AgentHarness: Send {
     }
 
     fn set_project_approval_policy(&mut self, _policy: Arc<dyn ProjectApprovalPolicy>) {}
+
+    fn set_process_tracker(&mut self, _tracker: Arc<dyn AgentProcessTracker>) {}
 
     fn session_approvals(&self) -> Vec<SessionApproval> {
         Vec::new()
