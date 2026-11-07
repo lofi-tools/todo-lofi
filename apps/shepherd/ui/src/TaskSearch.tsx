@@ -2,6 +2,7 @@ import { For, Show, createEffect, createSignal, createUniqueId, on, onCleanup } 
 
 import { cancelTaskSearch, reserveTaskSearch, searchTasks, type TaskSearchHit } from './bridge'
 import { displayChord } from './keybindings'
+import { reportError } from './diagnostics'
 
 export function TaskSearch(props: {
   open: boolean
@@ -17,7 +18,7 @@ export function TaskSearch(props: {
   const [query, setQuery] = createSignal('')
   const [hits, setHits] = createSignal<TaskSearchHit[]>([])
   const [searching, setSearching] = createSignal(false)
-  const [error, setError] = createSignal('')
+  const [failed, setFailed] = createSignal(false)
   const [active, setActive] = createSignal(0)
   const listId = createUniqueId()
   const popupOpen = () => props.open && !!query().trim()
@@ -26,7 +27,7 @@ export function TaskSearch(props: {
   createEffect(on(query, (value) => {
     setHits([])
     setActive(0)
-    setError('')
+    setFailed(false)
     setSearching(!!value.trim())
     if (!value.trim()) return
     let disposed = false
@@ -44,8 +45,7 @@ export function TaskSearch(props: {
         const found = await searchTasks(id, value)
         if (!disposed) setHits(found)
       } catch (failure) {
-        if (!disposed) setError(typeof failure === 'object' && failure !== null && 'message' in failure
-          ? String(failure.message) : String(failure))
+        if (!disposed) { setFailed(true); reportError('search_tasks', failure) }
       } finally {
         id = undefined
         if (!disposed) setSearching(false)
@@ -109,10 +109,7 @@ export function TaskSearch(props: {
       </Show>
       <Show when={popupOpen()}>
         <div class="task-search__results">
-          <Show when={error()}>
-            {(message) => <p class="picker__root" role="alert">{message()}</p>}
-          </Show>
-          <Show when={searching() || (!error() && !hits().length)}>
+          <Show when={searching() || (!failed() && !hits().length)}>
             <p class="picker__root" role="status">{searching() ? 'Searching tasks…' : 'No tasks match.'}</p>
           </Show>
           <ul class="picker__list" id={listId} role="listbox" aria-label="Task search results" aria-busy={searching()}>

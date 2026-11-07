@@ -1,6 +1,7 @@
 import { For, Show, createEffect, createSignal, createUniqueId, on, onCleanup } from 'solid-js'
 
 import { cancelFileSearch, reserveFileSearch, searchWorkspaceFiles } from './bridge'
+import { reportError } from './diagnostics'
 
 interface ComposerInputProps {
   value: string
@@ -21,7 +22,7 @@ export function ComposerInput(props: ComposerInputProps) {
   const [files, setFiles] = createSignal<string[]>([])
   const [active, setActive] = createSignal(0)
   const [searching, setSearching] = createSignal(false)
-  const [error, setError] = createSignal('')
+  const [failed, setFailed] = createSignal(false)
   const listId = createUniqueId()
   let input: HTMLTextAreaElement | undefined
 
@@ -36,7 +37,7 @@ export function ComposerInput(props: ComposerInputProps) {
   createEffect(on([() => props.projectId, () => props.taskId, () => mention()?.query], ([projectId, taskId, query]) => {
     setFiles([])
     setActive(0)
-    setError('')
+    setFailed(false)
     setSearching(query !== undefined)
     if (!projectId || query === undefined) return
     let disposed = false
@@ -54,8 +55,7 @@ export function ComposerInput(props: ComposerInputProps) {
         const result = await searchWorkspaceFiles(searchId, projectId, taskId, { mode: 'path', query, showDotfiles: false })
         if (!disposed) setFiles(result.matches.slice(0, 12).map((file) => file.path))
       } catch (failure) {
-        if (!disposed) setError(typeof failure === 'object' && failure !== null && 'message' in failure
-          ? String(failure.message) : String(failure))
+        if (!disposed) { setFailed(true); reportError('search_workspace_files', failure) }
       } finally {
         searchId = undefined
         if (!disposed) setSearching(false)
@@ -146,8 +146,8 @@ export function ComposerInput(props: ComposerInputProps) {
       />
       <Show when={mention()}>
         <div class="composer__mentions">
-          <Show when={error() || searching() || !files().length}>
-            <p class="picker__root" role="status">{error() || (searching() ? 'Searching workspace files…' : 'No workspace files match.')}</p>
+          <Show when={searching() || (!failed() && !files().length)}>
+            <p class="picker__root" role="status">{searching() ? 'Searching workspace files…' : 'No workspace files match.'}</p>
           </Show>
           <ul class="picker__list" id={listId} role="listbox" aria-label="Mention a workspace file" aria-busy={searching()}>
             <For each={files()}>{(path, index) =>

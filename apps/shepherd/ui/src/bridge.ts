@@ -109,7 +109,7 @@ export function reserveTaskSearch(): Promise<string> {
 }
 
 export function searchTasks(searchId: string, query: string): Promise<TaskSearchHit[]> {
-  return invoke<TaskSearchHit[]>('search_tasks', { searchId, query })
+  return nativeInvoke<TaskSearchHit[]>('search_tasks', { searchId, query })
 }
 
 export function cancelTaskSearch(searchId: string): Promise<void> {
@@ -902,7 +902,7 @@ export function reserveFileSearch(): Promise<string> {
 }
 
 export function searchWorkspaceFiles(searchId: string, projectId: string, taskId: string | null, query: FileSearchQuery): Promise<FileSearchResult> {
-  return invoke('search_workspace_files', { searchId, projectId, taskId, query })
+  return nativeInvoke('search_workspace_files', { searchId, projectId, taskId, query })
 }
 
 export function cancelFileSearch(searchId: string): Promise<void> {

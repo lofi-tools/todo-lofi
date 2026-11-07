@@ -581,8 +581,10 @@ test.beforeEach(async ({ context }) => {
             return null
           case 'search_tasks': {
             taskSearches.push({ id: args.searchId, query: args.query })
+            if (options.has('search-failure') && args.query === 'broken') throw { message: 'Task search failed', code: 'search' }
             if (args.query === 'slow') {
               await new Promise<void>((resolve) => window.addEventListener('release-task-search', () => resolve(), { once: true }))
+              if (options.has('stale-search-error')) throw { message: 'Superseded search failed', code: 'search' }
               return [{ projectId: 'project-1', taskId: 'task-1', entryId: 'entry-1', projectName: 'demo',
                 taskTitle: 'Stale result', snippet: { before: '', matched: 'ready', after: '', field: 'entry' } }]
             }
@@ -670,6 +672,7 @@ test.beforeEach(async ({ context }) => {
             return `search-${nextFileSearch++}`
           case 'search_workspace_files': {
             fileSearches.push({ id: args.searchId, taskId: args.taskId, mode: args.query.mode })
+            if (options.has('search-failure') && args.query.query === 'broken') throw { message: 'Workspace search failed', code: 'files' }
             if (args.query.mode === 'name') {
               const matches = 'main.rs'.includes(args.query.query)
                 ? [{ path: 'src/main.rs', line: null, excerpt: null }] : []
@@ -1697,6 +1700,34 @@ test('opens error details above the project picker', async ({ page }) => {
   await expect(history).toBeVisible()
   await history.getByRole('button', { name: 'Close' }).click()
   await expect(page.getByRole('dialog', { name: 'Add project' })).toBeVisible()
+})
+
+test('search failures use the error toast and allow a new query', async ({ page }) => {
+  await page.goto('/?task-search&search-failure')
+  const search = page.getByRole('combobox', { name: 'Search across tasks' })
+  await search.fill('broken')
+  await expect(page.getByRole('alert')).toContainText('Task search failed')
+  await expect(page.locator('.task-search__results').getByRole('alert')).toHaveCount(0)
+  await search.fill('archive')
+  await expect(page.getByRole('option', { name: /Archived answer/ })).toBeVisible()
+
+  const prompt = page.getByRole('textbox', { name: 'Prompt' })
+  await prompt.fill('@broken')
+  await expect(page.getByRole('alert')).toContainText('Workspace search failed')
+  await expect(page.locator('.composer__mentions')).not.toContainText('Workspace search failed')
+  await prompt.fill('@main')
+  await expect(page.getByRole('option', { name: 'src/main.rs' })).toBeVisible()
+})
+
+test('does not show an error for a superseded task search', async ({ page }) => {
+  await page.goto('/?task-search&stale-search-error')
+  const search = page.getByRole('combobox', { name: 'Search across tasks' })
+  await search.fill('slow')
+  await expect.poll(() => page.evaluate(() => window.__taskSearches)).toHaveLength(1)
+  await search.fill('archive')
+  await expect(page.getByRole('option', { name: /Archived answer/ })).toBeVisible()
+  await page.evaluate(() => window.dispatchEvent(new Event('release-task-search')))
+  await expect(page.getByRole('alert')).toHaveCount(0)
 })
 
 test('reports Git failures in the toast while keeping retry controls', async ({ page }) => {
