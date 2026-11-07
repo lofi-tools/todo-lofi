@@ -1186,7 +1186,8 @@ placeholder tabs and no unearned state badges.
   the turn and stops its process. Codex version and help probes limit both
   stdout and stderr and time out if the command does not finish. ACP keeps
   only 64 unread stderr notifications while retaining its latest diagnostic
-  tail. Critical event queues still need backpressure.
+  tail. ACP terminal output honors smaller requested limits and caps larger
+  requests at 1 MiB per terminal. Critical event queues still need backpressure.
 - [ ] Multiple agents and projects: three agents across two projects, no state
   bleed, no polling.
 - [ ] Performance: cold start under 1.2 s, streaming while a large diff renders,

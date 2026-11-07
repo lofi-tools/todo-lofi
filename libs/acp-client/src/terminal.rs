@@ -21,6 +21,7 @@ use crate::{AcpEvent, fs::SessionRoots};
 
 /// Default retained output per terminal when the agent does not ask for a limit.
 const DEFAULT_OUTPUT_LIMIT: usize = 256 * 1024;
+const MAX_OUTPUT_LIMIT: usize = 1024 * 1024;
 
 pub struct TerminalLaunch {
     pub id: String,
@@ -106,7 +107,11 @@ impl TerminalRegistry {
         let key = terminal_id.0.to_string();
         let byte_limit = request
             .output_byte_limit
-            .map(|limit| usize::try_from(limit).unwrap_or(usize::MAX))
+            .map(|limit| {
+                usize::try_from(limit)
+                    .unwrap_or(MAX_OUTPUT_LIMIT)
+                    .min(MAX_OUTPUT_LIMIT)
+            })
             .unwrap_or(DEFAULT_OUTPUT_LIMIT);
         if let Some(backend) = &self.backend {
             let closed = self.closed.lock().await;
@@ -453,4 +458,68 @@ fn shell_command(command: &str, args: &[String]) -> String {
         line.push('\'');
     }
     line
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct IdleBackend;
+
+    #[async_trait]
+    impl TerminalBackend for IdleBackend {
+        async fn spawn(
+            &self,
+            _launch: TerminalLaunch,
+            _events: tokio::sync::mpsc::Sender<TerminalProcessEvent>,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+        async fn stop(&self, _id: &str) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn terminal_output_limits_agent_requests_and_keeps_character_boundaries()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let root = directory.path().canonicalize()?;
+        let (events, _receiver) = tokio::sync::mpsc::unbounded_channel();
+        let registry = TerminalRegistry::new(
+            SessionRoots::new([root.clone()]),
+            &events,
+            Some(Arc::new(IdleBackend)),
+        );
+        let request = CreateTerminalRequest::new("session", "echo")
+            .cwd(root.clone())
+            .output_byte_limit(u64::MAX);
+        let terminal = registry
+            .create(request)
+            .await
+            .map_err(std::io::Error::other)?
+            .terminal_id;
+        registry.push(
+            terminal.0.as_ref(),
+            format!("{}界", "x".repeat(MAX_OUTPUT_LIMIT)),
+        );
+        let output = registry.output(&terminal);
+        assert!(output.truncated);
+        assert!(output.output.len() <= MAX_OUTPUT_LIMIT);
+        assert!(output.output.ends_with('界'));
+
+        let request = CreateTerminalRequest::new("session", "echo")
+            .cwd(root)
+            .output_byte_limit(4_u64);
+        let terminal = registry
+            .create(request)
+            .await
+            .map_err(std::io::Error::other)?
+            .terminal_id;
+        registry.push(terminal.0.as_ref(), "界界".into());
+        let output = registry.output(&terminal);
+        assert!(output.truncated);
+        assert_eq!(output.output, "界");
+        Ok(())
+    }
 }
