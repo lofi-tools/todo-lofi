@@ -1236,8 +1236,8 @@ placeholder tabs and no unearned state badges.
   following symlinks on Unix. Fixtures cover traversal, static symlinks and a
   directory replaced by a symlink after opening. External editor paths and the
   remaining filesystem operations still need a confinement audit. ACP file reads
-  also use descriptor-relative opens on Unix; ACP writes still need the same
-  protection. Configured
+  and atomic writes also use descriptor-relative operations on Unix, with
+  fixtures for directory substitution and preserved file permissions. Configured
   environment substitutions and their timeout remain to be implemented and
   verified.
 - [ ] Packaging and CI: macOS 13+, Ubuntu 24.04+, pinned Zig, Tauri build,

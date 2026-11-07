@@ -36,7 +36,7 @@ use futures::io::BufReader;
 use futures::{AsyncBufReadExt as _, AsyncReadExt as _, AsyncWriteExt as _};
 
 use crate::agent::{AgentServer, SpawnSpec};
-use crate::fs::{PromptReads, SessionRoots, write_text_file};
+use crate::fs::{PromptReads, SessionRoots};
 use crate::permissions::{
     PermissionDecision, PermissionReply, ToolPermissions, Verdict, haystack, strongest_allow,
     strongest_reject, tool_key,
@@ -586,18 +586,11 @@ where
                 let roots = roots_for_write.clone();
                 let events = writes.clone();
                 tokio::spawn(async move {
-                    let path = match roots.resolve(&request.path) {
-                        Ok(path) => path,
-                        Err(error) => {
-                            respond_with_error(responder, error, &events, "write")?;
-                            return Ok::<(), acp::Error>(());
-                        }
-                    };
-                    match write_text_file(&path, &request.content) {
+                    match roots.write_text_file(&request.path, &request.content) {
                         Ok(()) => responder.respond(WriteTextFileResponse::new())?,
                         Err(error) => respond_with_error(responder, error, &events, "write")?,
                     }
-                    Ok(())
+                    Ok::<(), acp::Error>(())
                 });
                 Ok(())
             },

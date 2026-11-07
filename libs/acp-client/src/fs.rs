@@ -82,10 +82,34 @@ impl SessionRoots {
         #[cfg(not(unix))]
         read_text_file(&path, line, limit)
     }
+
+    pub(crate) fn write_text_file(&self, requested: &Path, content: &str) -> anyhow::Result<()> {
+        let path = self.resolve(requested)?;
+        #[cfg(unix)]
+        {
+            let root = self
+                .roots
+                .iter()
+                .find(|root| path.starts_with(root))
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "{} is outside the session's directories",
+                        requested.display()
+                    )
+                })?;
+            let (directory, name) = open_confined_parent(root, &path)?;
+            write_confined_file(&directory, &name, content)
+        }
+        #[cfg(not(unix))]
+        write_text_file(&path, content)
+    }
 }
 
 #[cfg(unix)]
-fn open_confined_file(root: &Path, path: &Path) -> anyhow::Result<File> {
+fn open_confined_parent(
+    root: &Path,
+    path: &Path,
+) -> anyhow::Result<(std::os::fd::OwnedFd, std::ffi::OsString)> {
     use rustix::fs::{Mode, OFlags, open, openat};
 
     let relative = path.strip_prefix(root)?;
@@ -100,9 +124,16 @@ fn open_confined_file(root: &Path, path: &Path) -> anyhow::Result<File> {
     for component in parent {
         directory = openat(&directory, component, directory_flags, Mode::empty())?;
     }
+    Ok((directory, name.to_owned()))
+}
+
+#[cfg(unix)]
+fn open_confined_file(root: &Path, path: &Path) -> anyhow::Result<File> {
+    use rustix::fs::{Mode, OFlags, openat};
+    let (directory, name) = open_confined_parent(root, path)?;
     let file = File::from(openat(
         &directory,
-        name,
+        &name,
         OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
         Mode::empty(),
     )?);
@@ -110,6 +141,57 @@ fn open_confined_file(root: &Path, path: &Path) -> anyhow::Result<File> {
         anyhow::bail!("{} is not a regular file", path.display());
     }
     Ok(file)
+}
+
+#[cfg(unix)]
+fn write_confined_file(
+    directory: &std::os::fd::OwnedFd,
+    name: &std::ffi::OsStr,
+    content: &str,
+) -> anyhow::Result<()> {
+    use rustix::fs::{AtFlags, FileType, Mode, OFlags, fchmod, openat, renameat, statat, unlinkat};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT_TEMPORARY: AtomicU64 = AtomicU64::new(0);
+    let mode = match statat(directory, name, AtFlags::SYMLINK_NOFOLLOW) {
+        Ok(metadata) if FileType::from_raw_mode(metadata.st_mode) == FileType::RegularFile => {
+            Some(Mode::from_raw_mode(metadata.st_mode))
+        }
+        Ok(_) => anyhow::bail!("{} is not a regular file", name.to_string_lossy()),
+        Err(rustix::io::Errno::NOENT) => None,
+        Err(error) => return Err(error.into()),
+    };
+    let (temporary_name, mut temporary) = loop {
+        let number = NEXT_TEMPORARY.fetch_add(1, Ordering::Relaxed);
+        let temporary_name = format!(".shepherd-write-{}-{number}", std::process::id());
+        match openat(
+            directory,
+            temporary_name.as_str(),
+            OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+            Mode::RUSR | Mode::WUSR,
+        ) {
+            Ok(file) => break (temporary_name, File::from(file)),
+            Err(rustix::io::Errno::EXIST) => continue,
+            Err(error) => return Err(error.into()),
+        }
+    };
+    let outcome = (|| -> anyhow::Result<()> {
+        if let Some(mode) = mode {
+            fchmod(&temporary, mode)?;
+        }
+        temporary.write_all(content.as_bytes())?;
+        renameat(directory, temporary_name.as_str(), directory, name)?;
+        Ok(())
+    })();
+    if let Err(error) = outcome {
+        return match unlinkat(directory, temporary_name.as_str(), AtFlags::empty()) {
+            Ok(()) => Err(error),
+            Err(cleanup) => {
+                Err(error.context(format!("could not remove temporary file: {cleanup}")))
+            }
+        };
+    }
+    Ok(())
 }
 
 type AttachedFiles = HashMap<PathBuf, Arc<Mutex<File>>>;
@@ -287,6 +369,50 @@ pub fn write_text_file(path: &Path, content: &str) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn confined_write_stays_in_open_directory_after_symlink_swap() -> anyhow::Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir()?;
+        let outside = tempfile::tempdir()?;
+        std::fs::create_dir(root.path().join("folder"))?;
+        std::fs::write(root.path().join("folder/file"), "inside")?;
+        std::fs::set_permissions(
+            root.path().join("folder/file"),
+            std::fs::Permissions::from_mode(0o640),
+        )?;
+        std::fs::write(outside.path().join("file"), "private")?;
+        let roots = SessionRoots::new([root.path().to_owned()]);
+        let resolved = roots.resolve(Path::new("folder/file"))?;
+        let (parent, name) = open_confined_parent(&root.path().canonicalize()?, &resolved)?;
+        std::fs::rename(root.path().join("folder"), root.path().join("old"))?;
+        std::os::unix::fs::symlink(outside.path(), root.path().join("folder"))?;
+        write_confined_file(&parent, &name, "updated\n")?;
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("old/file"))?,
+            "updated\n"
+        );
+        assert_eq!(
+            std::fs::metadata(root.path().join("old/file"))?
+                .permissions()
+                .mode()
+                & 0o777,
+            0o640
+        );
+        assert_eq!(
+            std::fs::read_to_string(outside.path().join("file"))?,
+            "private"
+        );
+        assert!(
+            roots
+                .write_text_file(Path::new("folder/file"), "bad")
+                .is_err()
+        );
+        roots.write_text_file(Path::new("old/new"), "new")?;
+        assert_eq!(std::fs::read_to_string(root.path().join("old/new"))?, "new");
+        Ok(())
+    }
 
     #[cfg(unix)]
     #[test]
