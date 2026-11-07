@@ -1793,6 +1793,28 @@ test('shows file errors as temporary toasts and keeps diagnostic history', async
   await expect(page.getByRole('dialog', { name: 'Error history' })).toContainText('Permission denied opening workspace')
 })
 
+test('preserves diagnostic context for distinct errors with the same message', async ({ page }) => {
+  await page.goto('/')
+  await expect(page.getByText('ready to go', { exact: true })).toBeVisible()
+  const records = await page.evaluate(async () => {
+    const seen: Array<{ operation: string; details: string }> = []
+    const listener = (event: Event) => seen.push((event as CustomEvent).detail)
+    window.addEventListener('shepherd-diagnostic', listener)
+    const modulePath = '/src/diagnostics.ts'
+    const { reportError } = await import(/* @vite-ignore */ modulePath)
+    const shared = { message: 'Permission denied', cause: 'first cause' }
+    reportError('list_files', shared)
+    reportError('list_files', shared)
+    reportError('search_files', { message: 'Permission denied', cause: 'first cause' })
+    reportError('list_files', { message: 'Permission denied', cause: 'second cause' })
+    window.removeEventListener('shepherd-diagnostic', listener)
+    return seen
+  })
+  expect(records.map((record) => record.operation)).toEqual(['list_files', 'search_files', 'list_files'])
+  expect(records[0].details).toContain('first cause')
+  expect(records[2].details).toContain('second cause')
+})
+
 test('opens error details above the project picker', async ({ page }) => {
   await page.goto('/?project-scan-error')
   await page.getByRole('button', { name: 'Add project' }).click()

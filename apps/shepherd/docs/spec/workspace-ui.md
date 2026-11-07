@@ -128,7 +128,8 @@ current layout and give future changes a point of comparison.
   **Error history** in the status bar to inspect earlier messages and their
   operation, timestamp, identifier, and diagnostic details. A damaged history
   record is identified in the list while readable records remain available;
-  new records remain separate from an interrupted final record.
+  new records remain separate from an interrupted final record. Distinct
+  operations and error chains remain separate even when their messages match.
 - After restart, show a dismissible notice for previous process records whose
   identity matches or cannot be verified. Show the PID and inspection status,
   allow a recheck, and explain that a match may belong to another instance.

@@ -35,13 +35,16 @@ function errorDetails(error: unknown): { message: string; details: string } {
   return { message: meaningful ?? 'Unknown error', details: parts.join('\n') || 'No error details were provided.' }
 }
 
-let lastReport: { message: string; time: number } | undefined
+let lastReport: { operation: string; details: string; error: unknown; time: number } | undefined
 
 export function reportError(operation: string, error: unknown) {
   const description = errorDetails(error)
   const now = Date.now()
-  if (lastReport?.message === description.message && now - lastReport.time < 100) return
-  lastReport = { message: description.message, time: now }
+  if (lastReport && now - lastReport.time < 100 && (
+    (typeof error === 'object' && error !== null && lastReport.error === error) ||
+    (lastReport.operation === operation && lastReport.details === description.details)
+  )) return
+  lastReport = { operation, details: description.details, error, time: now }
   const record: Diagnostic = {
     id: crypto.randomUUID(), time: new Date().toISOString(), operation,
     message: description.message, details: description.details,
