@@ -881,7 +881,8 @@ If Pi’s RPC probe is blocked, proceed with ACP while resolving it.
   On Unix the RPC process has its own group; explicit shutdown or dropping an
   active transport stops that group, with a local descendant fixture. The
   supervisor also accepts shutdown while waiting after output closes and stops
-  the group on a wait timeout; a disconnect fixture covers prompt shutdown.
+  the group on a wait timeout; local disconnect fixtures cover prompt shutdown
+  and automatic timeout cleanup of a descendant without a shutdown request.
   Shutdown reports process-group signal failures even if stopping the leader
   succeeds; an injected-failure fixture covers this. A failed stop cannot yet
   be retried through the consumed Pi transport.

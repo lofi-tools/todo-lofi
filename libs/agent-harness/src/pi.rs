@@ -631,6 +631,45 @@ exec sleep 30
 
     #[cfg(unix)]
     #[tokio::test]
+    async fn output_disconnect_timeout_stops_descendants() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let directory = tempfile::tempdir()?;
+        let script = directory.path().join("pi-disconnect-timeout.sh");
+        std::fs::write(
+            &script,
+            r#"
+IFS= read -r state || exit 3
+state_id=$(printf '%s\n' "$state" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
+printf '{"type":"response","id":"%s","command":"get_state","success":true,"data":{"sessionId":"pi-fixture","sessionFile":null,"isStreaming":false,"isCompacting":false,"pendingMessageCount":0}}\n' "$state_id"
+IFS= read -r request || exit 4
+(sleep 5; printf survived > child-survived) >/dev/null 2>&1 &
+exec 1>&-
+exec sleep 30
+"#,
+        )?;
+        let spec = SpawnSpec {
+            program: "/bin/sh".into(),
+            args: vec![script.to_string_lossy().into_owned()],
+            cwd: directory.path().to_owned(),
+            ..SpawnSpec::default()
+        };
+        let (rpc, _) = PiRpc::start(&spec).await?;
+        assert!(matches!(
+            timeout(Duration::from_secs(1), rpc.request("get_state", Map::new())).await?,
+            Err(HarnessError::ChannelClosed)
+        ));
+        assert!(matches!(
+            timeout(Duration::from_secs(5), rpc.next_event()).await?,
+            Some(PiRpcEvent::Exited { .. })
+        ));
+        tokio::time::sleep(Duration::from_millis(2300)).await;
+        assert!(!directory.path().join("child-survived").exists());
+        rpc.shutdown().await?;
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn pending_request_fails_when_output_closes_before_process_exit()
     -> Result<(), Box<dyn std::error::Error>> {
         let directory = tempfile::tempdir()?;
