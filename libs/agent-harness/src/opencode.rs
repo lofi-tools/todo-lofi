@@ -12,6 +12,7 @@ use reqwest::{Client, Method, RequestBuilder, Response, Url};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::{Mutex as AsyncMutex, mpsc};
@@ -727,8 +728,14 @@ pub struct OpenCodeEvent {
 /// Maps one OpenCode turn to Shepherd transcript events.
 pub struct OpenCodeTranscript {
     session: SessionId,
-    fragments: BTreeMap<String, String>,
+    fragments: BTreeMap<String, StreamedPrefix>,
     tools: BTreeMap<String, String>,
+}
+
+#[derive(Default)]
+struct StreamedPrefix {
+    bytes: usize,
+    digest: Sha256,
 }
 
 impl OpenCodeTranscript {
@@ -803,18 +810,27 @@ impl OpenCodeTranscript {
             let delta = part.delta.ok_or_else(|| {
                 HarnessError::Protocol(format!("OpenCode {stream} delta is missing"))
             })?;
-            self.fragments
-                .entry(id.clone())
-                .or_default()
-                .push_str(&delta);
+            let prefix = self.fragments.entry(id.clone()).or_default();
+            prefix.bytes = prefix
+                .bytes
+                .checked_add(delta.len())
+                .ok_or_else(|| HarnessError::Protocol(format!("OpenCode {stream} is too large")))?;
+            prefix.digest.update(delta.as_bytes());
             delta
         } else {
             let text = part.text.ok_or_else(|| {
                 HarnessError::Protocol(format!("OpenCode final {stream} is missing"))
             })?;
             let prefix = self.fragments.remove(&id).unwrap_or_default();
-            // The final event repeats the fragments already delivered live.
-            text.strip_prefix(&prefix)
+            let streamed = text.get(..prefix.bytes).ok_or_else(|| {
+                HarnessError::Protocol(format!("OpenCode final {stream} changed streamed content"))
+            })?;
+            if Sha256::digest(streamed.as_bytes()) != prefix.digest.finalize() {
+                return Err(HarnessError::Protocol(format!(
+                    "OpenCode final {stream} changed streamed content"
+                )));
+            }
+            text.get(prefix.bytes..)
                 .ok_or_else(|| {
                     HarnessError::Protocol(format!(
                         "OpenCode final {stream} changed streamed content"
@@ -2082,6 +2098,27 @@ exec sleep 60
             transcript.entry(1).map(crate::Entry::summary).as_deref(),
             Some("thought: considered")
         );
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_changed_or_split_utf8_streamed_prefix() -> Result<(), Box<dyn std::error::Error>> {
+        for final_text in ["ab!", "b!", "é"] {
+            let mut mapping = OpenCodeTranscript::new(SessionId::new("ses_1"));
+            mapping.apply(OpenCodeEvent {
+                kind: "session.text.delta".into(),
+                data: json!({"sessionID": "ses_1", "assistantMessageID": "msg", "ordinal": 0, "delta": "a"}),
+            })?;
+            let result = mapping.apply(OpenCodeEvent {
+                kind: "session.text.ended".into(),
+                data: json!({"sessionID": "ses_1", "assistantMessageID": "msg", "ordinal": 0, "text": final_text}),
+            });
+            if final_text == "ab!" {
+                assert!(result.is_ok());
+            } else {
+                assert!(result.is_err());
+            }
+        }
         Ok(())
     }
 

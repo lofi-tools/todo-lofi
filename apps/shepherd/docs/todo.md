@@ -1228,6 +1228,8 @@ placeholder tabs and no unearned state badges.
   OpenCode decodes event-stream chunks one event at a time instead of
   queuing every decoded event from a network read. Its 8 MiB line and event
   limits are tested with fragmented lines and accumulated multiline data.
+  It checks streamed text against the final message with a digest and length
+  instead of keeping a second copy of every text fragment.
   Event folding handles at
   most 256 events per session per pass, including during commands, and
   reschedules remaining events so one busy agent cannot monopolize other
