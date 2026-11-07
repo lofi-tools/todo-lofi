@@ -1277,6 +1277,10 @@ placeholder tabs and no unearned state badges.
   verify that shutdown stops a real descendant process. A child-wait error is
   reported without declaring the turn finished, and shutdown retains the child
   for retry; a fixture covers errors before and after cancellation.
+  One exec completion fixture reported an unexpected finish during a combined
+  test run; the same fixture passed 200 isolated repetitions and the exec suite
+  passed ten combined repetitions. Its assertion now prints the event sequence
+  if the failure recurs; the cause remains unconfirmed.
   OpenCode shutdown retains its server when stopping it fails; an injected
   group-signal failure verifies the process remains available for a retry.
 - [ ] Bounded transcript, stderr, search and frame buffers.

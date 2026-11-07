@@ -4639,12 +4639,15 @@ sleep 30
                 ..
             }
         )));
-        assert!(events.iter().any(|event| matches!(
-            event,
-            HarnessEvent::TurnFinished {
-                reason: TurnFinishReason::Completed
-            }
-        )));
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                HarnessEvent::TurnFinished {
+                    reason: TurnFinishReason::Completed
+                }
+            )),
+            "unexpected exec events: {events:?}"
+        );
         assert!(
             !events
                 .iter()
