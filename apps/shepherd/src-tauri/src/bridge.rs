@@ -1320,10 +1320,13 @@ impl ShellState {
         project_id: String,
         task_id: Option<String>,
     ) -> Result<PathBuf, BridgeError> {
-        Ok(self.core.lock().await.workspace_directory(
-            &ProjectId::new(project_id),
-            task_id.map(TaskId::new).as_ref(),
-        )?)
+        let task_id = task_id.map(TaskId::new);
+        let mut core = self.core.lock().await;
+        let directory = core.workspace_directory(&ProjectId::new(project_id), task_id.as_ref())?;
+        if let Some(task_id) = &task_id {
+            core.touch_archived_worktree_if_due(task_id).await?;
+        }
+        Ok(directory)
     }
 
     async fn watch_workspace_files(
@@ -2354,11 +2357,11 @@ pub mod commands {
         task_id: String,
         file: String,
     ) -> Result<shepherd_core::git::GitFileDiff, BridgeError> {
-        Ok(state
-            .core
-            .lock()
-            .await
-            .git_file_diff(&TaskId::new(task_id), &file)?)
+        let task_id = TaskId::new(task_id);
+        let mut core = state.core.lock().await;
+        let diff = core.git_file_diff(&task_id, &file)?;
+        core.touch_archived_worktree_if_due(&task_id).await?;
+        Ok(diff)
     }
 
     #[tauri::command]
@@ -2366,11 +2369,11 @@ pub mod commands {
         state: State<'_, ShellState>,
         task_id: String,
     ) -> Result<shepherd_core::git::GitSnapshot, BridgeError> {
-        Ok(state
-            .core
-            .lock()
-            .await
-            .git_snapshot(&TaskId::new(task_id))?)
+        let task_id = TaskId::new(task_id);
+        let mut core = state.core.lock().await;
+        let snapshot = core.git_snapshot(&task_id)?;
+        core.touch_archived_worktree_if_due(&task_id).await?;
+        Ok(snapshot)
     }
 
     #[tauri::command]
@@ -2512,11 +2515,11 @@ pub mod commands {
         task_id: String,
         file: String,
     ) -> Result<String, BridgeError> {
-        Ok(state
-            .core
-            .lock()
-            .await
-            .review_file_diff(&TaskId::new(task_id), &file)?)
+        let task_id = TaskId::new(task_id);
+        let mut core = state.core.lock().await;
+        let diff = core.review_file_diff(&task_id, &file)?;
+        core.touch_archived_worktree_if_due(&task_id).await?;
+        Ok(diff)
     }
 
     #[tauri::command]
@@ -2524,11 +2527,11 @@ pub mod commands {
         state: State<'_, ShellState>,
         task_id: String,
     ) -> Result<shepherd_core::git::ReviewSnapshot, BridgeError> {
-        Ok(state
-            .core
-            .lock()
-            .await
-            .review_snapshot(&TaskId::new(task_id))?)
+        let task_id = TaskId::new(task_id);
+        let mut core = state.core.lock().await;
+        let snapshot = core.review_snapshot(&task_id)?;
+        core.touch_archived_worktree_if_due(&task_id).await?;
+        Ok(snapshot)
     }
 
     #[tauri::command]
@@ -3377,6 +3380,7 @@ mod tests {
         task.worktree_path = Some(task.proposed_worktree_path.clone());
         task.state = TaskState::Done;
         task.updated_at = now_millis().saturating_sub(29 * 24 * 60 * 60 * 1000);
+        task.worktree_last_used_at = task.updated_at;
         let store = TursoStore::open_at(&directory.path().join("shepherd.db")).await?;
         store.save_task(&task).await?;
         drop(state);
@@ -3387,6 +3391,31 @@ mod tests {
             TerminalHost::default(),
         )
         .await?;
+        assert_eq!(
+            state
+                .files_directory(project_id.clone(), Some(task.id.to_string()))
+                .await?,
+            task.proposed_worktree_path
+        );
+        let after_file_access = store
+            .load_tasks()
+            .await?
+            .first()
+            .ok_or("missing task")?
+            .worktree_last_used_at;
+        assert!(after_file_access > task.worktree_last_used_at);
+        state
+            .files_directory(project_id.clone(), Some(task.id.to_string()))
+            .await?;
+        assert_eq!(
+            store
+                .load_tasks()
+                .await?
+                .first()
+                .ok_or("missing task")?
+                .worktree_last_used_at,
+            after_file_access
+        );
         let terminals = state
             .start_terminal(project_id, Some(task.id.to_string()), 80, 24)
             .await?;
@@ -3401,8 +3430,8 @@ mod tests {
             .await?
             .first()
             .ok_or("missing task")?
-            .updated_at;
-        assert!(after_launch > task.updated_at);
+            .worktree_last_used_at;
+        assert!(after_launch > task.worktree_last_used_at);
         tokio::time::sleep(Duration::from_millis(20)).await;
         state
             .terminal_write(terminal_id.clone(), TerminalInput::Text(" ".into()), true)
@@ -3412,7 +3441,7 @@ mod tests {
             .await?
             .first()
             .ok_or("missing task")?
-            .updated_at;
+            .worktree_last_used_at;
         assert!(after_input > after_launch);
         tokio::time::sleep(Duration::from_millis(20)).await;
         state
@@ -3424,8 +3453,17 @@ mod tests {
                 .await?
                 .first()
                 .ok_or("missing task")?
-                .updated_at,
+                .worktree_last_used_at,
             after_input
+        );
+        assert_eq!(
+            store
+                .load_tasks()
+                .await?
+                .first()
+                .ok_or("missing task")?
+                .updated_at,
+            task.updated_at
         );
         state.close_terminal(terminal_id.clone()).await?;
         tokio::time::timeout(Duration::from_secs(4), async {

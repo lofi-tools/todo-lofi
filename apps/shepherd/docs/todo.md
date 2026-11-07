@@ -1159,9 +1159,10 @@ placeholder tabs and no unearned state badges.
 - [ ] 30-day archived-worktree collection, dirty skip, branch-tip recreation.
   Startup preserves dirty worktrees and lists collection failures with their
   reasons; clean collection retains the tip and prunes Git worktree metadata.
-  Opening and using an archived task terminal refreshes the worktree's last-use
-  time, with repeated input coalesced to one write per minute. Other worktree
-  uses still need review.
+  Opening a task, using its terminal, and accessing its files or Git views
+  refresh a separate last-use timestamp, coalescing repeated input and reads
+  to at most one write per minute per activity source. Older databases
+  initialize it from task update time. Agent terminal activity still needs review.
 - [ ] Database backup, migration checks, malformed migration handling and
   transactional writes.
 - [ ] Bounded transcript, stderr, search and frame buffers.

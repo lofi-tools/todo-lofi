@@ -162,6 +162,10 @@ const MIGRATIONS: &[Migration] = &[
         name: "0012_processes.sql",
         sql: include_str!("../toasty/migrations/0012_processes.sql"),
     },
+    Migration {
+        name: "0013_worktree_last_used.sql",
+        sql: include_str!("../toasty/migrations/0013_worktree_last_used.sql"),
+    },
 ];
 
 /// The durable store used by the application. The database handle is guarded
@@ -581,7 +585,7 @@ impl Store for TursoStore {
         let rows = toasty::sql::query(
             "SELECT id, project_id, title, state, tier, proposed_worktree_path, \
                     proposed_branch, worktree_path, branch, base_branch, error, \
-                    created_at, updated_at, branch_tip_sha, agent \
+                    created_at, updated_at, branch_tip_sha, agent, worktree_last_used_at \
              FROM tasks ORDER BY created_at, id",
         )
         .column_types([
@@ -600,6 +604,7 @@ impl Store for TursoStore {
             Type::I64,
             Type::String,
             Type::String,
+            Type::I64,
         ])
         .exec(&mut *db)
         .await?;
@@ -616,10 +621,10 @@ impl Store for TursoStore {
             "INSERT INTO tasks (\
                 id, project_id, title, state, tier, proposed_worktree_path, \
                 proposed_branch, worktree_path, branch, base_branch, error, \
-                created_at, updated_at, branch_tip_sha, agent\
+                created_at, updated_at, branch_tip_sha, agent, worktree_last_used_at\
              ) VALUES (\
                 ?1, ?2, ?3, ?4, ?5, ?6, ?7, \
-                NULLIF(?8, ''), NULLIF(?9, ''), NULLIF(?10, ''), NULLIF(?11, ''), ?12, ?13, NULLIF(?14, ''), ?15\
+                NULLIF(?8, ''), NULLIF(?9, ''), NULLIF(?10, ''), NULLIF(?11, ''), ?12, ?13, NULLIF(?14, ''), ?15, ?16\
              ) ON CONFLICT (id) DO UPDATE SET \
                 project_id = excluded.project_id, \
                 title = excluded.title, \
@@ -634,7 +639,8 @@ impl Store for TursoStore {
                 created_at = excluded.created_at, \
                 updated_at = excluded.updated_at, \
                 branch_tip_sha = excluded.branch_tip_sha, \
-                agent = excluded.agent",
+                agent = excluded.agent, \
+                worktree_last_used_at = excluded.worktree_last_used_at",
         )
         .bind(task.id.as_str())
         .bind(task.project_id.as_str())
@@ -651,6 +657,7 @@ impl Store for TursoStore {
         .bind(task.updated_at as i64)
         .bind(task.branch_tip_sha.as_deref().unwrap_or_default())
         .bind(task.agent.as_str())
+        .bind(task.worktree_last_used_at as i64)
         .exec(&mut *db)
         .await?;
         Ok(())
@@ -1041,6 +1048,7 @@ fn parse_task(value: Value) -> Result<Task, StoreError> {
         error: optional_string(record.get(10))?,
         created_at: required_u64(record.get(11))?,
         updated_at: required_u64(record.get(12))?,
+        worktree_last_used_at: required_u64(record.get(15))?,
         branch_tip_sha: optional_string(record.get(13))?,
     })
 }
@@ -1983,6 +1991,10 @@ mod tests {
         );
         let tasks = store.load_tasks().await?;
         assert_eq!(tasks.first().map(|task| task.agent), Some(Agent::Codex));
+        assert_eq!(
+            tasks.first().map(|task| task.worktree_last_used_at),
+            Some(1)
+        );
         assert_eq!(
             store.load_transcript(&TaskId::new("task")).await?,
             transcript.entries()

@@ -327,6 +327,7 @@ impl Core {
             .filter(|task| {
                 task.state == TaskState::Done
                     && task.updated_at <= cutoff
+                    && task.worktree_last_used_at <= cutoff
                     && task.worktree_path.is_some()
             })
             .map(|task| task.id.clone())
@@ -389,9 +390,23 @@ impl Core {
         let task = self.task(task_id)?;
         if task.state == TaskState::Done && task.worktree_path.is_some() {
             let mut updated = task.clone();
-            updated.updated_at = projects::now_millis();
+            updated.worktree_last_used_at = projects::now_millis();
             self.store.save_task(&updated).await?;
             self.tasks.insert(task_id.clone(), updated);
+        }
+        Ok(())
+    }
+
+    pub async fn touch_archived_worktree_if_due(
+        &mut self,
+        task_id: &TaskId,
+    ) -> Result<(), CoreError> {
+        let task = self.task(task_id)?;
+        if task.state == TaskState::Done
+            && task.worktree_path.is_some()
+            && projects::now_millis().saturating_sub(task.worktree_last_used_at) >= 60_000
+        {
+            self.touch_archived_worktree(task_id).await?;
         }
         Ok(())
     }
@@ -4361,8 +4376,10 @@ mod tests {
             task.state = TaskState::Done;
         }
         dirty.updated_at = projects::now_millis().saturating_sub(31 * 24 * 60 * 60 * 1000);
+        dirty.worktree_last_used_at = dirty.updated_at;
         recent.updated_at =
             projects::now_millis().saturating_sub(30 * 24 * 60 * 60 * 1000 + 30_000);
+        recent.worktree_last_used_at = recent.updated_at;
         std::fs::write(dirty.proposed_worktree_path.join("draft.txt"), "keep me")?;
         core.store.save_task(&dirty).await?;
         core.store.save_task(&recent).await?;
@@ -4485,6 +4502,7 @@ mod tests {
         let mut archived_record = core.task(&task_id)?.clone();
         archived_record.updated_at =
             projects::now_millis().saturating_sub(31 * 24 * 60 * 60 * 1000);
+        archived_record.worktree_last_used_at = archived_record.updated_at;
         core.store.save_task(&archived_record).await?;
         drop(core);
 

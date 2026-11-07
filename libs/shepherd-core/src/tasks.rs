@@ -188,6 +188,7 @@ pub struct Task {
     pub error: Option<String>,
     pub created_at: u64,
     pub updated_at: u64,
+    pub worktree_last_used_at: u64,
 }
 
 impl Task {
@@ -214,6 +215,7 @@ impl Task {
             error: None,
             created_at: now,
             updated_at: now,
+            worktree_last_used_at: now,
         }
     }
 
