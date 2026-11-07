@@ -75,6 +75,10 @@ pub enum ReviewAction {
     RemoveQueuedNote,
 }
 
+#[allow(
+    clippy::large_enum_variant,
+    reason = "command results carry workspace snapshots directly"
+)]
 #[derive(Clone, Debug)]
 pub enum CommandResult {
     ProjectList(ProjectList),

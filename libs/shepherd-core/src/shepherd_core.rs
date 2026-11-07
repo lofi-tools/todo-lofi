@@ -5310,7 +5310,7 @@ mod tests {
         let text = summaries(&workspace).join("\n");
         assert!(text.contains("persist this prompt"));
         assert!(!text.contains("unfinished answer"));
-        assert!(recovered.sessions.get(&task_id).is_none());
+        assert!(!recovered.sessions.contains_key(&task_id));
         Ok(())
     }
 

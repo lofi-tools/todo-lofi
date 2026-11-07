@@ -643,17 +643,14 @@ impl GitService {
         )?;
         let fields = bytes.split(|byte| *byte == 0).collect::<Vec<_>>();
         Ok(fields
-            .chunks_exact(4)
-            .filter_map(|entry| {
-                let [id, author, time, subject] = entry else {
-                    return None;
-                };
-                Some(GitCommit {
-                    id: String::from_utf8_lossy(id).into_owned(),
-                    author: String::from_utf8_lossy(author).into_owned(),
-                    time: String::from_utf8_lossy(time).into_owned(),
-                    subject: String::from_utf8_lossy(subject).into_owned(),
-                })
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|[id, author, time, subject]| GitCommit {
+                id: String::from_utf8_lossy(id).into_owned(),
+                author: String::from_utf8_lossy(author).into_owned(),
+                time: String::from_utf8_lossy(time).into_owned(),
+                subject: String::from_utf8_lossy(subject).into_owned(),
             })
             .collect())
     }

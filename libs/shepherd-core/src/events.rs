@@ -18,6 +18,10 @@ pub enum ShutdownState {
 
 /// Every change a shell can observe, in one tag/content shape so the frontend
 /// can switch on `type` without a second model.
+#[allow(
+    clippy::large_enum_variant,
+    reason = "events carry workspace snapshots directly"
+)]
 #[derive(Clone, Debug, Serialize)]
 #[serde(
     tag = "type",

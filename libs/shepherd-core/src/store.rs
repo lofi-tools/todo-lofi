@@ -77,6 +77,10 @@ pub struct WorktreeDeletion {
     pub identity: String,
 }
 
+#[allow(
+    clippy::double_must_use,
+    reason = "async_trait generates must-use futures"
+)]
 #[async_trait]
 pub trait Store: Send + Sync {
     async fn save_worktree_deletion(&self, deletion: &WorktreeDeletion) -> Result<(), StoreError>;
@@ -1383,7 +1387,7 @@ pub(crate) fn checksum(input: &str) -> String {
         .collect::<String>()
 }
 
-fn parse_migration<'a>(migration: &'a Migration) -> Result<Vec<&'a str>, StoreError> {
+fn parse_migration(migration: &Migration) -> Result<Vec<&str>, StoreError> {
     let mut parser = turso_parser::parser::Parser::new(migration.sql.as_bytes());
     let mut statements = Vec::new();
     let mut start = 0;
@@ -2298,9 +2302,9 @@ mod tests {
                 .load_tasks()
                 .await?
                 .iter()
-                .map(|task| task.id.clone())
+                .map(|task| &task.id)
                 .collect::<Vec<_>>(),
-            [kept.id.clone()]
+            [&kept.id]
         );
         assert_eq!(
             store.load_workspace_layouts().await?,
@@ -2486,7 +2490,7 @@ mod tests {
         );
         {
             let mut db = toasty::Db::builder()
-                .build(Turso::new(&database.uri())?.experimental_index_method(true))
+                .build(Turso::new(database.uri())?.experimental_index_method(true))
                 .await?;
             toasty::sql::statement("DROP TRIGGER block_collection")
                 .exec(&mut db)
