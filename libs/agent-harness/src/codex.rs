@@ -180,19 +180,25 @@ async fn capture_probe_output(
     description: &str,
     deadline: Duration,
 ) -> HarnessResult<std::process::Output> {
-    let mut child = Command::new(program)
+    let mut command = Command::new(program);
+    command
         .args(args)
         .current_dir(cwd)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()
-        .map_err(|error| spawn_error(program, error))?;
-    let stdout = child.stdout.take().ok_or_else(|| {
+        .kill_on_drop(true);
+    #[cfg(unix)]
+    command.process_group(0);
+    let mut child = ProbeProcess(
+        command
+            .spawn()
+            .map_err(|error| spawn_error(program, error))?,
+    );
+    let stdout = child.0.stdout.take().ok_or_else(|| {
         HarnessError::Protocol(format!("Codex {description} stdout was not captured"))
     })?;
-    let stderr = child.stderr.take().ok_or_else(|| {
+    let stderr = child.0.stderr.take().ok_or_else(|| {
         HarnessError::Protocol(format!("Codex {description} stderr was not captured"))
     })?;
     let capture = async {
@@ -200,7 +206,7 @@ async fn capture_probe_output(
             read_probe_stream(stdout, description, "stdout"),
             read_probe_stream(stderr, description, "stderr"),
             async {
-                child.wait().await.map_err(|error| {
+                child.0.wait().await.map_err(|error| {
                     HarnessError::Protocol(format!(
                         "Could not wait for Codex {description}: {error}"
                     ))
@@ -250,21 +256,25 @@ async fn run_handshake(program: &str, cwd: &Path) -> HarnessResult<Handshake> {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
+    #[cfg(unix)]
+    command.process_group(0);
 
-    let mut child = command
-        .spawn()
-        .map_err(|source| spawn_error(program, source))?;
-    let Some(mut stdin) = child.stdin.take() else {
+    let mut child = ProbeProcess(
+        command
+            .spawn()
+            .map_err(|source| spawn_error(program, source))?,
+    );
+    let Some(mut stdin) = child.0.stdin.take() else {
         return Err(HarnessError::Protocol(
             "codex app-server stdin was not captured".to_string(),
         ));
     };
-    let Some(stdout) = child.stdout.take() else {
+    let Some(stdout) = child.0.stdout.take() else {
         return Err(HarnessError::Protocol(
             "codex app-server stdout was not captured".to_string(),
         ));
     };
-    let Some(stderr) = child.stderr.take() else {
+    let Some(stderr) = child.0.stderr.take() else {
         return Err(HarnessError::Protocol(
             "codex app-server stderr was not captured".to_string(),
         ));
@@ -312,7 +322,6 @@ async fn run_handshake(program: &str, cwd: &Path) -> HarnessResult<Handshake> {
     })
     .await;
 
-    // Dropping the child kills it; the probe never leaves an app-server running.
     drop(stdin);
     stderr_task.abort();
 
@@ -345,6 +354,19 @@ async fn run_handshake(program: &str, cwd: &Path) -> HarnessResult<Handshake> {
                 methods: supported_methods(message.get("result")),
             }),
         },
+    }
+}
+
+struct ProbeProcess(Child);
+
+impl Drop for ProbeProcess {
+    fn drop(&mut self) {
+        stop_app_server_group(&self.0);
+        if self.0.id().is_some()
+            && let Err(error) = self.0.start_kill()
+        {
+            tracing::debug!(%error, "could not stop the Codex probe process");
+        }
     }
 }
 
@@ -3362,6 +3384,40 @@ done
             }
         }
         events
+    }
+
+    #[tokio::test]
+    async fn probes_stop_descendants_after_handshake_or_timeout()
+    -> Result<(), Box<dyn std::error::Error>> {
+        for handshake in [true, false] {
+            let directory = TempDir::new()?;
+            let response = if handshake {
+                "read -r request\nprintf '{\"id\":1,\"result\":{}}\\n'"
+            } else {
+                ":"
+            };
+            let script =
+                format!("#!/bin/sh\n(sleep 1; printf escaped > escaped) &\n{response}\nsleep 30\n");
+            let stub = write_stub(&directory, "codex-probe.sh", &script);
+            if handshake {
+                assert!(run_handshake(&stub, directory.path()).await?.supported);
+            } else {
+                assert!(
+                    capture_probe_output(
+                        &stub,
+                        directory.path(),
+                        &[],
+                        "fixture",
+                        Duration::from_millis(300)
+                    )
+                    .await
+                    .is_err()
+                );
+            }
+            tokio::time::sleep(Duration::from_millis(1300)).await;
+            assert!(!directory.path().join("escaped").exists());
+        }
+        Ok(())
     }
 
     #[tokio::test]
