@@ -189,6 +189,60 @@ pub struct Core {
     event_receiver: mpsc::UnboundedReceiver<Event>,
 }
 
+pub struct TaskGitRead {
+    project_path: PathBuf,
+    worktree_path: PathBuf,
+    task_id: String,
+    state: &'static str,
+    base_branch: Option<String>,
+    branch: Option<String>,
+}
+
+impl TaskGitRead {
+    fn repository(&self) -> Result<git::GitRepository, CoreError> {
+        let repository = GitService::discover(&self.project_path)?;
+        GitService.validate_worktree(&repository, &self.worktree_path)?;
+        Ok(repository)
+    }
+
+    fn base_branch(&self) -> Result<&str, CoreError> {
+        self.base_branch
+            .as_deref()
+            .ok_or_else(|| CoreError::TaskNotReady {
+                id: self.task_id.clone(),
+                state: self.state,
+            })
+    }
+
+    pub fn review_snapshot(&self) -> Result<git::ReviewSnapshot, CoreError> {
+        self.repository()?;
+        Ok(GitService.review(&self.worktree_path, self.base_branch()?)?)
+    }
+
+    pub fn review_file_diff(&self, file: &str) -> Result<String, CoreError> {
+        self.repository()?;
+        Ok(GitService.review_file_diff(&self.worktree_path, self.base_branch()?, file)?)
+    }
+
+    pub fn git_file_diff(&self, file: &str) -> Result<git::GitFileDiff, CoreError> {
+        self.repository()?;
+        Ok(GitService.file_diff(&self.worktree_path, file)?)
+    }
+
+    pub fn git_snapshot(&self) -> Result<git::GitSnapshot, CoreError> {
+        let repository = self.repository()?;
+        let mut snapshot = GitService.snapshot(&self.worktree_path)?;
+        snapshot.project_root = Some(GitService.checkout_status(&repository.root)?);
+        snapshot.merge_blocked = match (&self.base_branch, &self.branch) {
+            (Some(base), Some(branch)) => {
+                GitService.merge_blocked(&repository.root, &self.worktree_path, base, branch)?
+            }
+            _ => Some("The task has no recorded branch.".into()),
+        };
+        Ok(snapshot)
+    }
+}
+
 #[derive(Clone, Debug, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ArchivedWorktreeIssue {
@@ -888,28 +942,31 @@ impl Core {
         Ok((task, repository, path))
     }
 
-    pub fn review_snapshot(&self, task_id: &TaskId) -> Result<git::ReviewSnapshot, CoreError> {
-        let (task, _, path) = self.task_git_worktree(task_id)?;
-        let base = task
-            .base_branch
-            .as_deref()
+    pub fn task_git_read(&self, task_id: &TaskId) -> Result<TaskGitRead, CoreError> {
+        let task = self.task(task_id)?;
+        let worktree_path = task
+            .worktree_path
+            .clone()
             .ok_or_else(|| CoreError::TaskNotReady {
                 id: task.id.to_string(),
                 state: task.state.as_str(),
             })?;
-        Ok(GitService.review(path, base)?)
+        Ok(TaskGitRead {
+            project_path: self.project_path(&task.project_id)?,
+            worktree_path,
+            task_id: task.id.to_string(),
+            state: task.state.as_str(),
+            base_branch: task.base_branch.clone(),
+            branch: task.branch.clone(),
+        })
+    }
+
+    pub fn review_snapshot(&self, task_id: &TaskId) -> Result<git::ReviewSnapshot, CoreError> {
+        self.task_git_read(task_id)?.review_snapshot()
     }
 
     pub fn review_file_diff(&self, task_id: &TaskId, file: &str) -> Result<String, CoreError> {
-        let (task, _, path) = self.task_git_worktree(task_id)?;
-        let base = task
-            .base_branch
-            .as_deref()
-            .ok_or_else(|| CoreError::TaskNotReady {
-                id: task.id.to_string(),
-                state: task.state.as_str(),
-            })?;
-        Ok(GitService.review_file_diff(path, base, file)?)
+        self.task_git_read(task_id)?.review_file_diff(file)
     }
 
     pub fn git_file_diff(
@@ -917,8 +974,7 @@ impl Core {
         task_id: &TaskId,
         file: &str,
     ) -> Result<git::GitFileDiff, CoreError> {
-        let (_, _, path) = self.task_git_worktree(task_id)?;
-        Ok(GitService.file_diff(path, file)?)
+        self.task_git_read(task_id)?.git_file_diff(file)
     }
 
     pub async fn mutate_git(
@@ -973,16 +1029,7 @@ impl Core {
     }
 
     pub fn git_snapshot(&self, task_id: &TaskId) -> Result<git::GitSnapshot, CoreError> {
-        let (task, repository, path) = self.task_git_worktree(task_id)?;
-        let mut snapshot = GitService.snapshot(path)?;
-        snapshot.project_root = Some(GitService.checkout_status(&repository.root)?);
-        snapshot.merge_blocked = match (&task.base_branch, &task.branch) {
-            (Some(base), Some(branch)) => {
-                GitService.merge_blocked(&repository.root, path, base, branch)?
-            }
-            _ => Some("The task has no recorded branch.".into()),
-        };
-        Ok(snapshot)
+        self.task_git_read(task_id)?.git_snapshot()
     }
 
     pub fn task_workspace(&self, task_id: &TaskId) -> Result<TaskWorkspace, CoreError> {

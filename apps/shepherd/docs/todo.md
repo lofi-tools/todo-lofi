@@ -1226,6 +1226,9 @@ placeholder tabs and no unearned state badges.
   a headless fixture streams through 1,000 transcript entries while a 12,000-line
   diff loads. Project snapshots no longer re-query an unchanged attachment limit,
   and a fixture checks that streaming preserves the Files path and preview.
+  Git and Review reads run outside the core lock on blocking workers. A real
+  worktree fixture verifies an agent approval can finish during a stalled read,
+  then checks both ends of a 12,000-line diff.
   End-to-end timing with a real worktree remains unmeasured.
 - [ ] Path confinement, environment `!command` timeout, no secret values in
   logs or storage.

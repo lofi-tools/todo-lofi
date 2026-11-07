@@ -803,6 +803,25 @@ impl ShellState {
         }
     }
 
+    async fn git_read<T: Send + 'static>(
+        &self,
+        task_id: TaskId,
+        read: impl FnOnce(shepherd_core::TaskGitRead) -> Result<T, CoreError> + Send + 'static,
+    ) -> Result<T, BridgeError> {
+        let context = self.core.lock().await.task_git_read(&task_id)?;
+        let result = tokio::task::spawn_blocking(move || read(context))
+            .await
+            .map_err(|error| {
+                BridgeError::new("git", format!("Could not finish the Git read: {error}"))
+            })??;
+        self.core
+            .lock()
+            .await
+            .touch_archived_worktree_if_due(&task_id)
+            .await?;
+        Ok(result)
+    }
+
     pub async fn add_project(&self, path: String) -> Result<ProjectList, BridgeError> {
         match self
             .execute(Command::AddProject { path: path.into() })
@@ -2452,11 +2471,11 @@ pub mod commands {
         task_id: String,
         file: String,
     ) -> Result<shepherd_core::git::GitFileDiff, BridgeError> {
-        let task_id = TaskId::new(task_id);
-        let mut core = state.core.lock().await;
-        let diff = core.git_file_diff(&task_id, &file)?;
-        core.touch_archived_worktree_if_due(&task_id).await?;
-        Ok(diff)
+        state
+            .git_read(TaskId::new(task_id), move |context| {
+                context.git_file_diff(&file)
+            })
+            .await
     }
 
     #[tauri::command]
@@ -2464,11 +2483,9 @@ pub mod commands {
         state: State<'_, ShellState>,
         task_id: String,
     ) -> Result<shepherd_core::git::GitSnapshot, BridgeError> {
-        let task_id = TaskId::new(task_id);
-        let mut core = state.core.lock().await;
-        let snapshot = core.git_snapshot(&task_id)?;
-        core.touch_archived_worktree_if_due(&task_id).await?;
-        Ok(snapshot)
+        state
+            .git_read(TaskId::new(task_id), |context| context.git_snapshot())
+            .await
     }
 
     #[tauri::command]
@@ -2610,11 +2627,11 @@ pub mod commands {
         task_id: String,
         file: String,
     ) -> Result<String, BridgeError> {
-        let task_id = TaskId::new(task_id);
-        let mut core = state.core.lock().await;
-        let diff = core.review_file_diff(&task_id, &file)?;
-        core.touch_archived_worktree_if_due(&task_id).await?;
-        Ok(diff)
+        state
+            .git_read(TaskId::new(task_id), move |context| {
+                context.review_file_diff(&file)
+            })
+            .await
     }
 
     #[tauri::command]
@@ -2622,11 +2639,9 @@ pub mod commands {
         state: State<'_, ShellState>,
         task_id: String,
     ) -> Result<shepherd_core::git::ReviewSnapshot, BridgeError> {
-        let task_id = TaskId::new(task_id);
-        let mut core = state.core.lock().await;
-        let snapshot = core.review_snapshot(&task_id)?;
-        core.touch_archived_worktree_if_due(&task_id).await?;
-        Ok(snapshot)
+        state
+            .git_read(TaskId::new(task_id), |context| context.review_snapshot())
+            .await
     }
 
     #[tauri::command]
@@ -3119,6 +3134,75 @@ mod tests {
 
     fn state_with(core: Core) -> ShellState {
         ShellState::new(core)
+    }
+
+    #[tokio::test]
+    async fn large_git_read_does_not_block_agent_events() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let repository = TestRepository::new()?;
+        let state = std::sync::Arc::new(state_with(Core::with_services(
+            Box::new(MemoryStore::new()),
+            Box::new(ScriptedHarnessFactory),
+        )));
+        let projects = state
+            .add_project(repository.path().display().to_string())
+            .await?;
+        let project_id = projects
+            .projects
+            .first()
+            .ok_or("project not added")?
+            .id
+            .clone();
+        let draft = state
+            .create_draft(project_id, "Large diff".into(), Agent::Codex)
+            .await?;
+        let task_id = draft.task.id;
+        let workspace = state.send_prompt(task_id.clone(), "hello".into()).await?;
+        let worktree = workspace.task.worktree_path.ok_or("missing worktree")?;
+        let content = format!(
+            "first marker\n{}last marker\n",
+            "large diff line\n".repeat(12_000)
+        );
+        std::fs::write(std::path::Path::new(&worktree).join("large.txt"), content)?;
+
+        let (started_sender, started_receiver) = tokio::sync::oneshot::channel();
+        let (release_sender, release_receiver) = std::sync::mpsc::channel();
+        let read = tokio::spawn({
+            let state = state.clone();
+            let task_id = task_id.clone();
+            async move {
+                state
+                    .git_read(TaskId::new(task_id), move |context| {
+                        started_sender.send(()).map_err(|_| CoreError::Io {
+                            path: "test Git read".into(),
+                            source: std::io::Error::other("start receiver dropped"),
+                        })?;
+                        release_receiver.recv().map_err(|error| CoreError::Io {
+                            path: "test Git read".into(),
+                            source: std::io::Error::other(error),
+                        })?;
+                        context.review_file_diff("large.txt")
+                    })
+                    .await
+            }
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(5), started_receiver).await??;
+        let workspace = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            state.resolve_approval(task_id, "approval-1".into(), Decision::Allow),
+        )
+        .await??;
+        assert!(
+            workspace
+                .transcript
+                .iter()
+                .any(|entry| entry.summary().contains("Scripted turn complete."))
+        );
+        release_sender.send(())?;
+        let diff = tokio::time::timeout(std::time::Duration::from_secs(15), read).await???;
+        assert!(diff.contains("first marker"));
+        assert!(diff.contains("last marker"));
+        Ok(())
     }
 
     #[tokio::test]
