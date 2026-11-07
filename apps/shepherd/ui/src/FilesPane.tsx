@@ -23,11 +23,37 @@ interface CachedDirectory {
   value?: DirectoryListing
 }
 
-export function FilesPane(props: { projectId: string; worktreeTaskId: string | null; initialFile?: { taskId: string; path: string } }) {
+export function FilesPane(props: { projectId: string; worktreeTaskId: string | null; initialFile?: { taskId: string; path: string }; showDotfiles: boolean; settingsDisabled: boolean; onShowDotfilesChange: (value: boolean) => void }) {
   const [scope, setScope] = createSignal(props.worktreeTaskId ? 'worktree' : 'project')
-  const [showDotfiles, setShowDotfiles] = createSignal(false)
+  const [settingsOpen, setSettingsOpen] = createSignal(false)
+  const [menuPosition, setMenuPosition] = createSignal({ left: 0, top: 0 })
+  let settingsButton: HTMLButtonElement | undefined
+  let settingsMenu: HTMLDivElement | undefined
   const taskId = () => scope() === 'worktree' ? props.worktreeTaskId : null
   const location = createMemo(() => ({ projectId: props.projectId, taskId: taskId() }))
+
+  function toggleSettings() {
+    if (!settingsOpen() && settingsButton) {
+      const bounds = settingsButton.getBoundingClientRect()
+      const width = 168
+      const left = bounds.right + 4 + width <= window.innerWidth ? bounds.right + 4 : Math.max(8, bounds.left - width - 4)
+      setMenuPosition({ left, top: bounds.top })
+    }
+    setSettingsOpen((open) => !open)
+  }
+
+  createEffect(() => {
+    if (!settingsOpen()) return
+    const dismiss = (event: PointerEvent) => {
+      if (!settingsButton?.contains(event.target as Node) && !settingsMenu?.contains(event.target as Node)) setSettingsOpen(false)
+    }
+    const escape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') { setSettingsOpen(false); settingsButton?.focus() }
+    }
+    document.addEventListener('pointerdown', dismiss)
+    document.addEventListener('keydown', escape)
+    onCleanup(() => { document.removeEventListener('pointerdown', dismiss); document.removeEventListener('keydown', escape) })
+  })
 
   return (
     <section class="files-pane" aria-label="Workspace files">
@@ -40,10 +66,22 @@ export function FilesPane(props: { projectId: string; worktreeTaskId: string | n
           </select>
           <svg aria-hidden="true" width="10" height="10" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="m2.5 4.5 3.5 3.5 3.5-3.5" /></svg>
         </span>
-        <label><input type="checkbox" checked={showDotfiles()} onChange={(event) => setShowDotfiles(event.currentTarget.checked)} /> Show dotfiles</label>
+        <button ref={settingsButton} type="button" class="files-settings-button" aria-label="File explorer settings" title="File explorer settings"
+          aria-haspopup="menu" aria-expanded={settingsOpen()} onClick={toggleSettings}>
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round" aria-hidden="true"><path d="m6 3 .5-1.5h3L10 3l1 .6 1.6-.3 1.5 2.6-1.1 1.2v1.8l1.1 1.2-1.5 2.6-1.6-.3-1 .6-.5 1.5h-3L6 13l-1-.6-1.6.3-1.5-2.6L3 8.9V7.1L1.9 5.9l1.5-2.6L5 3.6Z" /><circle cx="8" cy="8" r="2.1" /></svg>
+        </button>
+        <Show when={settingsOpen()}>
+          <div ref={settingsMenu} class="project-menu files-settings-menu" role="menu" aria-label="File explorer settings"
+            style={{ left: `${menuPosition().left}px`, top: `${menuPosition().top}px` }}>
+            <button type="button" class="nav-item" role="menuitemcheckbox" aria-checked={props.showDotfiles} disabled={props.settingsDisabled}
+              onClick={() => props.onShowDotfilesChange(!props.showDotfiles)}>
+              Show dotfiles <span class="project-menu__switch" aria-hidden="true" />
+            </button>
+          </div>
+        </Show>
       </div>
       <Show when={location()} keyed>
-        {(root) => <FileBrowser {...root} showDotfiles={showDotfiles()}
+        {(root) => <FileBrowser {...root} showDotfiles={props.showDotfiles}
           initialPath={props.initialFile?.taskId === root.taskId ? props.initialFile?.path : undefined} />}
       </Show>
     </section>

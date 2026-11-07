@@ -65,7 +65,7 @@ test.beforeEach(async ({ context }) => {
       const defaults = {
         theme: 'system', 'appearance.density': 'compact',
         'tasks.show_archived': false, 'notifications.enabled': false, 'appearance.send_accent': 'Blue',
-        'attachments.max_file_bytes': 50_000_000, 'terminal.scrollback_lines': 10_000,
+        'attachments.max_file_bytes': 50_000_000, 'terminal.scrollback_lines': 10_000, 'files.show_dotfiles': true,
       }
       const stored = JSON.parse(localStorage.getItem('fixture.settings') ?? '{}')
       const projects = stored.projects ?? (options.has('attachment-cap') ? { '/tmp/demo': { 'attachments.max_file_bytes': 8 } } : {})
@@ -1568,9 +1568,16 @@ test('browses a worktree and project root with preloaded folders and read-only p
   await expect(viewer).toHaveCount(0)
   await expect(files.getByRole('button', { name: 'README.md' })).toBeVisible()
   await expect(files.getByRole('button', { name: 'worktree.txt' })).toHaveCount(0)
-  await expect(files.getByRole('button', { name: '.env.example' })).toHaveCount(0)
-  await files.getByLabel('Show dotfiles').check()
   await expect(files.getByRole('button', { name: '.env.example' })).toBeVisible()
+  await files.getByRole('button', { name: 'File explorer settings' }).click()
+  const showDotfiles = page.getByRole('menuitemcheckbox', { name: 'Show dotfiles' })
+  await expect(showDotfiles).toHaveAttribute('aria-checked', 'true')
+  await showDotfiles.click()
+  await expect(showDotfiles).toHaveAttribute('aria-checked', 'false')
+  await expect(files.getByRole('button', { name: '.env.example' })).toHaveCount(0)
+  await showDotfiles.click()
+  await expect(files.getByRole('button', { name: '.env.example' })).toBeVisible()
+  await page.keyboard.press('Escape')
   await files.getByRole('button', { name: 'README.md' }).click()
   await expect(viewer.getByText('<file>', { exact: true })).toBeVisible()
 })
@@ -1587,6 +1594,21 @@ test('waits for a slow folder before expanding it', async ({ page }) => {
   await page.evaluate(() => window.dispatchEvent(new Event('release-folder-listing')))
   await expect(folder).toHaveAttribute('aria-expanded', 'true')
   await expect(files.getByRole('button', { name: 'main.rs' })).toBeVisible()
+})
+
+test('persists the global file explorer dotfile preference', async ({ page }) => {
+  await page.goto('/')
+  await page.getByRole('tab', { name: 'Files' }).click()
+  const files = page.getByRole('region', { name: 'Workspace files' })
+  await expect(files.getByRole('button', { name: '.env.example' })).toBeVisible()
+  await files.getByRole('button', { name: 'File explorer settings' }).click()
+  await page.getByRole('menuitemcheckbox', { name: 'Show dotfiles' }).click()
+  await expect(files.getByRole('button', { name: '.env.example' })).toHaveCount(0)
+  await page.reload()
+  await page.getByRole('tab', { name: 'Files' }).click()
+  await expect(files.getByRole('button', { name: '.env.example' })).toHaveCount(0)
+  await files.getByRole('button', { name: 'File explorer settings' }).click()
+  await expect(page.getByRole('menuitemcheckbox', { name: 'Show dotfiles' })).toHaveAttribute('aria-checked', 'false')
 })
 
 test('keeps only one expanded folder path in the file tree', async ({ page }) => {

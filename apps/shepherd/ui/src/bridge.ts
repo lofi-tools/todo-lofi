@@ -950,6 +950,7 @@ export interface SettingsValues {
   'notifications.enabled': boolean
   'attachments.max_file_bytes': number
   'terminal.scrollback_lines': number
+  'files.show_dotfiles': boolean
 }
 
 export type SettingKey = keyof SettingsValues

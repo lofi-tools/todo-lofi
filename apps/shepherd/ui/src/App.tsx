@@ -1987,7 +1987,10 @@ export function App() {
               <Show when={selectedProject()?.missing === false && selectedProjectId()} keyed
                 fallback={<p class="empty">Select an available project to browse its files.</p>}>
                 {(projectId) => <FilesPane projectId={projectId} initialFile={fileRequest()}
-                  worktreeTaskId={workspace()?.task.worktreePath && workspace()?.task.id === selectedTaskId() ? selectedTaskId() : null} />}
+                  worktreeTaskId={workspace()?.task.worktreePath && workspace()?.task.id === selectedTaskId() ? selectedTaskId() : null}
+                  showDotfiles={preferences()?.app['files.show_dotfiles'] ?? preferences()?.defaults['files.show_dotfiles'] ?? true}
+                  settingsDisabled={!preferencesEditable() || savingPreference()}
+                  onShowDotfilesChange={(value) => void requestPreference('files.show_dotfiles', value)} />}
               </Show>
             </InspectorPanel>
           </div>

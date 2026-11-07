@@ -81,7 +81,8 @@ current layout and give future changes a point of comparison.
   Show a small folder icon on
   each directory row without an expand caret. Expand folders in place on
   demand, keeping one open path and its ancestors while closing sibling
-  branches with a short eased height transition. Hide dotfiles by default with a
+  branches with a short eased height transition. Show dotfiles by default; a
+  gear opens a compact card beside the button with a global, persistent
   **Show dotfiles** toggle. Open text
   in a read-only, line-numbered viewer inside the inspector. **Find files**
   uses the app's themed input and filters filenames as the user types.

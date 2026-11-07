@@ -30,10 +30,12 @@ pub enum SettingKey {
     AttachmentBytes,
     #[serde(rename = "terminal.scrollback_lines")]
     Scrollback,
+    #[serde(rename = "files.show_dotfiles")]
+    ShowDotfiles,
 }
 
 impl SettingKey {
-    const ALL: [Self; 7] = [
+    const ALL: [Self; 8] = [
         Self::Theme,
         Self::Density,
         Self::ShowArchived,
@@ -41,6 +43,7 @@ impl SettingKey {
         Self::Notifications,
         Self::AttachmentBytes,
         Self::Scrollback,
+        Self::ShowDotfiles,
     ];
 
     fn name(self) -> &'static str {
@@ -52,6 +55,7 @@ impl SettingKey {
             Self::Notifications => "notifications.enabled",
             Self::AttachmentBytes => "attachments.max_file_bytes",
             Self::Scrollback => "terminal.scrollback_lines",
+            Self::ShowDotfiles => "files.show_dotfiles",
         }
     }
 
@@ -60,6 +64,7 @@ impl SettingKey {
             Self::Theme => json!("system"),
             Self::Density => json!("compact"),
             Self::ShowArchived | Self::Notifications => json!(false),
+            Self::ShowDotfiles => json!(true),
             Self::SendAccent => json!("Blue"),
             Self::AttachmentBytes => json!(DEFAULT_ATTACHMENT_BYTES),
             Self::Scrollback => json!(DEFAULT_SCROLLBACK),
@@ -81,7 +86,9 @@ impl SettingKey {
             Self::Density if !matches!(value.as_str(), Some("compact" | "comfortable")) => {
                 "Choose compact or comfortable."
             }
-            Self::ShowArchived | Self::Notifications if !value.is_boolean() => {
+            Self::ShowArchived | Self::Notifications | Self::ShowDotfiles
+                if !value.is_boolean() =>
+            {
                 "Enter true or false."
             }
             Self::SendAccent
@@ -456,6 +463,46 @@ mod tests {
             previous,
             value,
         }
+    }
+
+    #[tokio::test]
+    async fn dotfiles_default_on_and_persist_globally() -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("settings.json");
+        let settings = Settings::new(path.clone());
+        settings.reload().await;
+        assert_eq!(
+            settings.value(None, SettingKey::ShowDotfiles).await,
+            json!(true)
+        );
+        settings
+            .edit(
+                None,
+                edit(SettingKey::ShowDotfiles, None, Some(json!(false))),
+            )
+            .await?;
+        let reopened = Settings::new(path);
+        reopened.reload().await;
+        assert_eq!(
+            reopened.value(None, SettingKey::ShowDotfiles).await,
+            json!(false)
+        );
+        assert_eq!(
+            reopened
+                .value(Some(Path::new("/other")), SettingKey::ShowDotfiles)
+                .await,
+            json!(false)
+        );
+        assert!(
+            reopened
+                .edit(
+                    Some(Path::new("/other")),
+                    edit(SettingKey::ShowDotfiles, None, Some(json!(true)))
+                )
+                .await
+                .is_err()
+        );
+        Ok(())
     }
 
     #[tokio::test]
