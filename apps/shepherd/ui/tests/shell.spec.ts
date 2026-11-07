@@ -604,6 +604,11 @@ test.beforeEach(async ({ context }) => {
             return 'fixture diff'
           case 'list_files': {
             fileListings.push(args.path)
+            if (options.has('ignored-files')) return { entries: args.path === '' ? [
+              { name: 'build', path: 'build', directory: true, ignored: true },
+              { name: 'ignored.rs', path: 'ignored.rs', directory: false, ignored: true },
+              { name: 'tracked.rs', path: 'tracked.rs', directory: false, ignored: false },
+            ] : [{ name: 'output.txt', path: 'build/output.txt', directory: false, ignored: true }], incomplete: false }
             if (options.has('many-files')) return {
               entries: Array.from({ length: 80 }, (_, index) => ({ name: `file-${index}.txt`, path: `file-${index}.txt`, directory: false })),
               incomplete: false,
@@ -1593,6 +1598,19 @@ test('uses the inspector height and scrolls to the end of a long file tree', asy
   expect(dimensions.scrollHeight).toBeGreaterThan(dimensions.height)
   await tree.getByRole('button', { name: 'file-79.txt' }).scrollIntoViewIfNeeded()
   await expect(tree.getByRole('button', { name: 'file-79.txt' })).toBeInViewport()
+})
+
+test('shows ignored entries with dim monochrome icons', async ({ page }) => {
+  await page.goto('/?ignored-files')
+  await page.getByRole('tab', { name: 'Files' }).click()
+  const files = page.getByRole('region', { name: 'Workspace files' })
+  const ignored = files.getByRole('button', { name: 'ignored.rs' })
+  await expect(ignored).toHaveCSS('color', 'rgb(77, 70, 110)')
+  await expect(ignored.locator('.files-tree__icon--ignored')).toHaveCSS('background-color', 'rgb(77, 70, 110)')
+  await expect(files.getByRole('button', { name: 'tracked.rs' }).locator('img')).toHaveAttribute('src', /rust\.svg$/)
+  const folder = files.getByRole('button', { name: 'build' })
+  await folder.click()
+  await expect(files.getByRole('button', { name: 'output.txt' })).toHaveCSS('color', 'rgb(77, 70, 110)')
 })
 
 test('filters by name, cancels content searches, and opens matches at their line', async ({ page }) => {

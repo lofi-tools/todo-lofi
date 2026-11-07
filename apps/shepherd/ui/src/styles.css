@@ -2192,6 +2192,7 @@ textarea {
   --file-modified: #ffca85;
   --file-deleted: #ff6767;
   --file-renamed: #82e2ff;
+  --file-ignored: #4d466e;
 }
 
 :root[data-theme='light'] .files-pane__tree {
@@ -2199,6 +2200,7 @@ textarea {
   --file-modified: #a48819;
   --file-deleted: #d36151;
   --file-renamed: #5c78e2;
+  --file-ignored: #7e8086;
 }
 
 .files-tree {
@@ -2242,6 +2244,14 @@ textarea {
   opacity: .8;
 }
 
+.files-tree__icon--ignored {
+  display: inline-block;
+  background: currentColor;
+  mask-size: contain;
+  mask-repeat: no-repeat;
+  opacity: 1;
+}
+
 .files-tree__name {
   display: inline-flex;
   align-items: center;
@@ -2269,6 +2279,7 @@ textarea {
 .files-tree__entry[data-kind='modified'], .files-tree__change[data-kind='modified'] { color: var(--file-modified); }
 .files-tree__deleted-row[data-kind='deleted'], .files-tree__change[data-kind='deleted'] { color: var(--file-deleted); }
 .files-tree__entry[data-kind='renamed'], .files-tree__change[data-kind='renamed'] { color: var(--file-renamed); }
+.files-tree__entry.files-tree__entry--ignored { color: var(--file-ignored); }
 
 .files-tree__deleted {
   padding: 4px 6px;

@@ -206,7 +206,7 @@ function FolderContents(props: FolderProps & { path: string }) {
       const previous = new Map(value?.entries.map((entry) => [entry.path, entry]))
       return { ...next, entries: next.entries.map((entry) => {
         const prior = previous.get(entry.path)
-        return prior && prior.directory === entry.directory ? prior : entry
+        return prior && prior.directory === entry.directory && prior.ignored === entry.ignored ? prior : entry
       }) }
     },
   )
@@ -233,13 +233,13 @@ function FileRow(props: FolderProps & { entry: WorkspaceFileEntry }) {
   return (
     <li>
       <Show when={props.entry.directory} fallback={
-        <button type="button" class="files-tree__entry" data-kind={props.changeFor(props.entry.path)?.kind} aria-pressed={props.selected === props.entry.path}
+        <button type="button" class="files-tree__entry" classList={{ 'files-tree__entry--ignored': props.entry.ignored }} data-kind={props.changeFor(props.entry.path)?.kind} aria-pressed={props.selected === props.entry.path}
           onClick={() => props.onSelect(props.entry.path)}>
-          <span class="files-tree__label"><span class="files-tree__name"><FileIcon name={props.entry.name} /><span>{props.entry.name}</span></span><FileChangeBadge change={props.changeFor(props.entry.path)} /></span>
+          <span class="files-tree__label"><span class="files-tree__name"><FileIcon name={props.entry.name} ignored={props.entry.ignored} /><span>{props.entry.name}</span></span><FileChangeBadge change={props.changeFor(props.entry.path)} /></span>
         </button>
       }>
-        <button type="button" class="files-tree__entry files-tree__directory" data-kind={props.directoryChangeFor(props.entry.path)?.kind} aria-expanded={expanded()} onClick={() => props.onToggleFolder(props.entry.path)}>
-          <img class="files-tree__icon" src={`${import.meta.env.BASE_URL}charmed-icons/${expanded() ? '_folder_open' : '_folder'}.svg`} alt="" /><span>{props.entry.name}</span>
+        <button type="button" class="files-tree__entry files-tree__directory" classList={{ 'files-tree__entry--ignored': props.entry.ignored }} data-kind={props.directoryChangeFor(props.entry.path)?.kind} aria-expanded={expanded()} onClick={() => props.onToggleFolder(props.entry.path)}>
+          <ThemeIcon icon={expanded() ? '_folder_open' : '_folder'} ignored={props.entry.ignored} /><span>{props.entry.name}</span>
         </button>
         <Show when={expanded()}>
           <FolderContents {...props} path={props.entry.path} />
@@ -254,7 +254,7 @@ function parentPath(path: string): string {
   return separator < 0 ? '' : path.slice(0, separator)
 }
 
-function FileIcon(props: { name: string }) {
+function FileIcon(props: { name: string; ignored?: boolean }) {
   const icon = () => {
     const name = (props.name.split('/').pop() ?? '').toLowerCase()
     const stems: Record<string, string> = iconTheme.stems
@@ -266,7 +266,14 @@ function FileIcon(props: { name: string }) {
     }
     return '_file'
   }
-  return <img class="files-tree__icon" src={`${import.meta.env.BASE_URL}charmed-icons/${icon()}.svg`} alt="" />
+  return <ThemeIcon icon={icon()} ignored={props.ignored} />
+}
+
+function ThemeIcon(props: { icon: string; ignored?: boolean }) {
+  const url = () => `${import.meta.env.BASE_URL}charmed-icons/${props.icon}.svg`
+  return <Show when={props.ignored} fallback={<img class="files-tree__icon" src={url()} alt="" />}>
+    <span class="files-tree__icon files-tree__icon--ignored" aria-hidden="true" style={{ 'mask-image': `url("${url()}")` }} />
+  </Show>
 }
 
 const FILE_CHANGE_LABELS: Record<FileChange['kind'], string> = {

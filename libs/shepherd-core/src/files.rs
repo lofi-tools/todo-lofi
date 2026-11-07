@@ -1,6 +1,6 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, DirEntry, File};
-use std::io::{self, Read};
+use std::io::{self, Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -64,6 +64,7 @@ pub struct FileEntry {
     name: String,
     path: String,
     directory: bool,
+    ignored: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -196,13 +197,15 @@ pub fn list_directory(
     let mut directory = root.clone();
     let mut ancestors = relative.iter();
     let mut rules = [Vec::new(), Vec::new()];
+    let mut inherited_git_ignore = false;
     loop {
         load_rules(&root, &directory, &mut rules)?;
         let Some(name) = ancestors.next() else { break };
         directory.push(name);
-        if (!show_dotfiles && is_dotfile(name)) || is_ignored(&rules, &directory, true) {
+        if (!show_dotfiles && is_dotfile(name)) || matches_ignore(&rules[0], &directory, true) {
             return Err(FileError::HiddenDirectory);
         }
+        inherited_git_ignore |= matches_ignore(&rules[1], &directory, true);
         check_directory(&directory)?;
     }
 
@@ -212,9 +215,14 @@ pub fn list_directory(
         let entry = entry?;
         let name = entry.file_name();
         let path = entry.path();
-        let Some(is_directory) = visible_entry(&entry, &name, &path, &rules, show_dotfiles)? else {
+        if is_git_metadata(&name) || (!show_dotfiles && is_dotfile(&name)) {
             continue;
-        };
+        }
+        let kind = entry.file_type()?;
+        let is_directory = kind.is_dir();
+        if (!is_directory && !kind.is_file()) || matches_ignore(&rules[0], &path, is_directory) {
+            continue;
+        }
         let Some((name, path)) = name.to_str().zip(
             path.strip_prefix(&root)
                 .map_err(|_| FileError::InvalidPath)?
@@ -231,7 +239,48 @@ pub fn list_directory(
             name: name.into(),
             path: path.into(),
             directory: is_directory,
+            ignored: inherited_git_ignore || matches_ignore(&rules[1], &entry.path(), is_directory),
         });
+    }
+    let probe = std::process::Command::new("git")
+        .current_dir(&root)
+        .args(["rev-parse", "--is-inside-work-tree"])
+        .output()?;
+    if probe.status.success() {
+        for chunk in entries.chunks_mut(100) {
+            let mut child = std::process::Command::new("git")
+                .current_dir(&root)
+                .args(["check-ignore", "-z", "--stdin"])
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()?;
+            let mut input = child
+                .stdin
+                .take()
+                .ok_or_else(|| io::Error::other("missing git stdin"))?;
+            let paths: Vec<u8> = chunk
+                .iter()
+                .flat_map(|entry| entry.path.bytes().chain([0]))
+                .collect();
+            let output = std::thread::scope(|scope| -> io::Result<_> {
+                let writer = scope.spawn(move || input.write_all(&paths));
+                let output = child.wait_with_output()?;
+                writer
+                    .join()
+                    .map_err(|_| io::Error::other("git input worker failed"))??;
+                Ok(output)
+            })?;
+            if !output.status.success() && output.status.code() != Some(1) {
+                return Err(FileError::Ignore(
+                    String::from_utf8_lossy(&output.stderr).into_owned(),
+                ));
+            }
+            let ignored: BTreeSet<&[u8]> = output.stdout.split(|byte| *byte == 0).collect();
+            for entry in chunk {
+                entry.ignored = ignored.contains(entry.path.as_bytes());
+            }
+        }
     }
     entries.sort_by(|left, right| {
         right
@@ -573,6 +622,15 @@ fn is_ignored(rules: &IgnoreRules, path: &Path, directory: bool) -> bool {
         .is_some_and(|result| result.is_ignore())
 }
 
+fn matches_ignore(rules: &[Gitignore], path: &Path, directory: bool) -> bool {
+    rules
+        .iter()
+        .rev()
+        .map(|matcher| matcher.matched(path, directory))
+        .find(|result| !result.is_none())
+        .is_some_and(|result| result.is_ignore())
+}
+
 fn read_ignore(root: &Path, directory: &Path, name: &str) -> Result<Option<Gitignore>, FileError> {
     let path = directory.join(name);
     match path.symlink_metadata() {
@@ -801,7 +859,17 @@ mod tests {
                 .collect())
         };
         assert_eq!(paths("", false)?, ["src", "README.md"]);
-        assert_eq!(paths("src", false)?, ["src/nested", "src/main.rs"]);
+        assert_eq!(
+            paths("src", false)?,
+            ["src/nested", "src/build.log", "src/main.rs"]
+        );
+        let listing = list_directory(root, Path::new("src"), false)?;
+        assert!(
+            listing
+                .entries
+                .iter()
+                .any(|entry| entry.path == "src/build.log" && entry.ignored)
+        );
         assert_eq!(paths("src/nested", false)?, ["src/nested/deep.rs"]);
         assert_eq!(
             paths("", true)?,
@@ -817,6 +885,48 @@ mod tests {
             list_directory(root, Path::new(".GIT"), true),
             Err(FileError::InvalidPath)
         ));
+        Ok(())
+    }
+
+    #[test]
+    fn listing_reports_git_ignored_files_and_browsable_folders()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let root = directory.path();
+        run_git(root, &["init"])?;
+        fs::create_dir(root.join("build"))?;
+        fs::write(root.join("build/output.txt"), "output")?;
+        fs::write(root.join(".gitignore"), "build/\ntracked.txt\n")?;
+        fs::write(root.join("tracked.txt"), "tracked")?;
+        run_git(root, &["add", "-f", "tracked.txt"])?;
+        fs::write(root.join(".git/info/exclude"), "local.txt\n")?;
+        fs::write(root.join("local.txt"), "local")?;
+        let listing = list_directory(root, Path::new(""), false)?;
+        assert!(
+            listing
+                .entries
+                .iter()
+                .any(|entry| entry.name == "build" && entry.ignored)
+        );
+        assert!(
+            listing
+                .entries
+                .iter()
+                .any(|entry| entry.name == "local.txt" && entry.ignored)
+        );
+        assert!(
+            listing
+                .entries
+                .iter()
+                .any(|entry| entry.name == "tracked.txt" && !entry.ignored)
+        );
+        let nested = list_directory(root, Path::new("build"), false)?;
+        assert!(
+            nested
+                .entries
+                .iter()
+                .any(|entry| entry.name == "output.txt" && entry.ignored)
+        );
         Ok(())
     }
 

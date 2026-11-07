@@ -793,6 +793,7 @@ export interface WorkspaceFileEntry {
   name: string
   path: string
   directory: boolean
+  ignored: boolean
 }
 
 export interface DirectoryListing {
