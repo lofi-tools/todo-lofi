@@ -695,6 +695,19 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn shutdown_rejects_new_direct_terminals() -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let root = directory.path().canonicalize()?;
+        let (events, _receiver) = tokio::sync::mpsc::unbounded_channel();
+        let registry = TerminalRegistry::new(SessionRoots::new([root.clone()]), &events, None);
+        registry.shutdown().await;
+        let request = CreateTerminalRequest::new("session", "true").cwd(root);
+        let result = registry.create(request).await;
+        assert!(matches!(result, Err(error) if error.contains("connection is closed")));
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn terminal_output_is_retained_when_the_event_receiver_is_gone()
     -> Result<(), Box<dyn std::error::Error>> {
         let directory = tempfile::tempdir()?;
@@ -773,6 +786,40 @@ mod tests {
         .await?;
         assert_eq!(output, "hello");
         assert!(registry.output(&terminal).exit_status.is_some());
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn terminal_exit_wait_does_not_wait_for_inherited_output_pipes()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let root = directory.path().canonicalize()?;
+        let (events, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let registry = TerminalRegistry::new(SessionRoots::new([root.clone()]), &events, None);
+        let request = CreateTerminalRequest::new("session", "/bin/sh")
+            .args(vec!["-c".into(), "sleep 2 &".into()])
+            .cwd(root);
+        let terminal = registry
+            .create(request)
+            .await
+            .map_err(std::io::Error::other)?
+            .terminal_id;
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            registry.wait_for_exit(&terminal),
+        )
+        .await?
+        .map_err(std::io::Error::other)?;
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(100), receiver.recv())
+                .await
+                .is_err()
+        );
+        registry
+            .release(&terminal)
+            .await
+            .map_err(std::io::Error::other)?;
         Ok(())
     }
 }
