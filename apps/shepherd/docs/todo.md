@@ -1172,8 +1172,9 @@ placeholder tabs and no unearned state badges.
   statement rolls back its migration and history entry. Broader transaction
   checks remain. Transcript batches reject missing or mismatched task/session
   owners; fixtures verify failed attachment updates roll back the whole batch.
-  Normal task-state saves commit eligible transcript entries in the same
-  transaction. Shutdown and multi-task archive paths still need review.
+  Normal task-state saves and interrupted shutdowns commit eligible transcript
+  entries in the same transaction. A failed shutdown save retains its session
+  and can be retried while draining. Multi-task archive still needs review.
 - [ ] Bounded transcript, stderr, search and frame buffers.
 - [ ] Multiple agents and projects: three agents across two projects, no state
   bleed, no polling.

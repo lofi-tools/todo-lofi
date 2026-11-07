@@ -183,6 +183,8 @@ pub struct Core {
     store: Arc<dyn Store>,
     harness_factory: Box<dyn HarnessFactory>,
     shutdown: ShutdownState,
+    shutdown_events: BTreeMap<TaskId, Vec<HarnessEvent>>,
+    shutdown_interrupted: BTreeSet<TaskId>,
     events: mpsc::UnboundedSender<Event>,
     event_receiver: mpsc::UnboundedReceiver<Event>,
 }
@@ -233,6 +235,8 @@ impl Core {
             store: Arc::from(store),
             harness_factory,
             shutdown: ShutdownState::Running,
+            shutdown_events: BTreeMap::new(),
+            shutdown_interrupted: BTreeSet::new(),
             events,
             event_receiver,
         }
@@ -673,7 +677,10 @@ impl Core {
     /// bridge; it does not get a second copy of the state model. Git mutations
     /// run here under exclusive access to the core.
     pub async fn execute(&mut self, command: Command) -> Result<CommandResult, CoreError> {
-        if self.shutdown != ShutdownState::Running {
+        if self.shutdown != ShutdownState::Running
+            && !(self.shutdown == ShutdownState::Draining
+                && matches!(&command, Command::Quit { .. }))
+        {
             return Err(CoreError::NotRunning {
                 state: self.shutdown,
             });
@@ -2176,73 +2183,81 @@ impl Core {
 
         let session_tasks: Vec<TaskId> = self.sessions.keys().cloned().collect();
         for task_id in session_tasks {
-            let Some(mut session) = self.sessions.remove(&task_id) else {
-                continue;
-            };
-            if session.is_closed() {
-                if let Some(record) = self.session_records.get(&task_id) {
-                    session
-                        .persist_transcript(
-                            &*self.store,
-                            record,
-                            !self.task(&task_id)?.state.is_live(),
-                            None,
-                        )
-                        .await?;
-                }
-                continue;
-            }
-            let events = match session.shutdown().await {
-                Ok(events) => events,
-                Err(error) => {
-                    tracing::error!(
-                        task_id = task_id.as_str(),
-                        %error,
-                        "failed to stop the agent session during shutdown"
-                    );
+            if !self.shutdown_events.contains_key(&task_id) {
+                let session =
+                    self.sessions
+                        .get_mut(&task_id)
+                        .ok_or_else(|| CoreError::SessionMissing {
+                            id: task_id.to_string(),
+                        })?;
+                let events = if session.is_closed() {
                     Vec::new()
-                }
-            };
+                } else {
+                    match session.shutdown().await {
+                        Ok(events) => events,
+                        Err(error) => {
+                            tracing::error!(task_id = task_id.as_str(), %error, "failed to stop the agent session during shutdown");
+                            Vec::new()
+                        }
+                    }
+                };
+                self.shutdown_events.insert(task_id.clone(), events);
+            }
+            let events = self
+                .shutdown_events
+                .get(&task_id)
+                .cloned()
+                .unwrap_or_default();
+            let mut task = self.task(&task_id)?.clone();
+            let was_live = task.state.is_live();
+            if was_live {
+                task.set_state(TaskState::Interrupted)?;
+            }
             if let Some(record) = self.session_records.get(&task_id) {
-                let settled = !self.task(&task_id)?.state.is_live()
+                let settled = !(was_live || self.shutdown_interrupted.contains(&task_id))
                     || events
                         .iter()
                         .any(|event| matches!(event, HarnessEvent::TurnFinished { .. }));
+                let session =
+                    self.sessions
+                        .get_mut(&task_id)
+                        .ok_or_else(|| CoreError::SessionMissing {
+                            id: task_id.to_string(),
+                        })?;
                 session
-                    .persist_transcript(&*self.store, record, settled, None)
+                    .persist_transcript(&*self.store, record, settled, was_live.then_some(&task))
                     .await?;
+            } else if was_live {
+                self.store.save_task(&task).await?;
+            }
+            if was_live {
+                self.tasks.insert(task_id.clone(), task.clone());
+                self.shutdown_interrupted.insert(task_id.clone());
+                self.emit(Event::TaskChanged(TaskSummary::from(&task)));
             }
             self.end_session_record(&task_id, &events).await?;
+            self.sessions.remove(&task_id);
+            self.shutdown_events.remove(&task_id);
         }
 
-        let mut interrupted_tasks = 0;
-        let mut affected_projects = Vec::new();
         for task_id in live_tasks {
-            let (project_id, summary) = {
-                let task = self
-                    .tasks
-                    .get_mut(&task_id)
-                    .ok_or_else(|| CoreError::TaskNotFound {
-                        id: task_id.as_str().to_string(),
-                    })?;
-                if let Err(error) = task.set_state(TaskState::Interrupted) {
-                    tracing::error!(
-                        task_id = task_id.as_str(),
-                        %error,
-                        "failed to mark live task interrupted during shutdown"
-                    );
-                    continue;
-                }
-                (task.project_id.clone(), TaskSummary::from(&*task))
-            };
-
-            self.save_task(&task_id).await?;
-            interrupted_tasks += 1;
-            if !affected_projects.contains(&project_id) {
-                affected_projects.push(project_id);
+            if self.shutdown_interrupted.contains(&task_id) {
+                continue;
             }
-            self.emit(Event::TaskChanged(summary));
+            let mut task = self.task(&task_id)?.clone();
+            task.set_state(TaskState::Interrupted)?;
+            self.store.save_task(&task).await?;
+            self.tasks.insert(task_id.clone(), task.clone());
+            self.shutdown_interrupted.insert(task_id);
+            self.emit(Event::TaskChanged(TaskSummary::from(&task)));
         }
+
+        let interrupted_tasks = self.shutdown_interrupted.len();
+        let affected_projects: BTreeSet<_> = self
+            .shutdown_interrupted
+            .iter()
+            .filter_map(|task_id| self.tasks.get(task_id).map(|task| task.project_id.clone()))
+            .collect();
 
         self.set_shutdown(ShutdownState::Terminating);
         self.set_shutdown(ShutdownState::Closed);
@@ -3567,6 +3582,77 @@ mod tests {
                 state: ShutdownState::Closed
             })
         ));
+    }
+
+    #[tokio::test]
+    async fn failed_shutdown_persistence_keeps_the_session_for_retry()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let repository = TestRepository::new()?;
+        let mut core = Core::with_services(
+            Box::new(MemoryStore::new()),
+            Box::new(FakeHarnessFactory::new(vec![vec![FakeTurn::new(vec![
+                FakeStep::Message("working".into()),
+                FakeStep::approval("approval", "Run tests"),
+            ])]])),
+        );
+        let project_id = add_project(&mut core, repository.path().to_path_buf()).await?;
+        let draft = workspace_of(
+            core.execute(Command::CreateDraft {
+                project_id,
+                agent: Agent::Codex,
+                title: "Retry shutdown".into(),
+            })
+            .await?,
+        );
+        let task_id = TaskId::new(draft.task.id);
+        let workspace = workspace_of(
+            core.execute(Command::SendPrompt {
+                task_id: task_id.clone(),
+                input: PromptInput::text("go"),
+            })
+            .await?,
+        );
+        assert_eq!(workspace.task.state, TaskState::Waiting);
+        core.sessions
+            .get_mut(&task_id)
+            .ok_or("missing session")?
+            .restore_transcript(workspace.transcript);
+        let record = core
+            .session_records
+            .get_mut(&task_id)
+            .ok_or("missing session record")?;
+        let original_id = std::mem::replace(&mut record.id, "missing-session".into());
+        assert!(core.execute(Command::Quit { force: true }).await.is_err());
+        assert_eq!(core.shutdown_state(), ShutdownState::Draining);
+        assert_eq!(core.task(&task_id)?.state, TaskState::Waiting);
+        assert!(core.sessions.contains_key(&task_id));
+        assert!(matches!(
+            core.execute(Command::AddProject {
+                path: repository.path().to_path_buf()
+            })
+            .await,
+            Err(CoreError::NotRunning {
+                state: ShutdownState::Draining
+            })
+        ));
+        core.session_records
+            .get_mut(&task_id)
+            .ok_or("missing session record")?
+            .id = original_id;
+        let CommandResult::Quit(summary) = core.execute(Command::Quit { force: true }).await?
+        else {
+            return Err("expected quit summary".into());
+        };
+        assert_eq!(summary.interrupted_tasks, 1);
+        assert_eq!(core.task(&task_id)?.state, TaskState::Interrupted);
+        assert!(core.sessions.is_empty());
+        let saved = core.store.load_tasks().await?;
+        assert_eq!(
+            saved.first().ok_or("missing task")?.state,
+            TaskState::Interrupted
+        );
+        assert!(!core.store.load_transcript(&task_id).await?.is_empty());
+        Ok(())
     }
 
     #[tokio::test]
