@@ -1200,7 +1200,8 @@ placeholder tabs and no unearned state badges.
   collection was interrupted. Opening an archived task with a missing checkout
   and a pending collection first completes recovery; failed verification
   preserves the intent for retry. Startup also reconciles pending collections
-  for recently used tasks, keeping any checkout that still exists.
+  for recently used tasks, keeping any checkout that still exists. Reopening
+  an archived task also verifies pending collection recovery first.
 - [ ] Database backup, migration checks, malformed migration handling and
   transactional writes.
   Existing file databases receive a retained Turso snapshot in a private

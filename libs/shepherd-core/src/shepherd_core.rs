@@ -1702,6 +1702,9 @@ impl Core {
         task_id: &TaskId,
         action: ReviewAction,
     ) -> Result<CommandResult, CoreError> {
+        if matches!(action, ReviewAction::Reopen) && self.task(task_id)?.collection_pending {
+            self.touch_archived_worktree(task_id).await?;
+        }
         let mut task = self.task(task_id)?.clone();
         match action {
             ReviewAction::Archive => {
@@ -6145,12 +6148,21 @@ mod tests {
 
         assert!(core.touch_archived_worktree(&task.id).await.is_err());
         assert!(core.task(&task.id)?.collection_pending);
+        assert!(
+            core.review_task(&task.id, ReviewAction::Reopen)
+                .await
+                .is_err()
+        );
+        assert!(core.task(&task.id)?.collection_pending);
+        assert_eq!(core.task(&task.id)?.state, TaskState::Done);
         task.branch_tip_sha = Some(tip);
         core.store.save_task(&task).await?;
         core.tasks.insert(task.id.clone(), task.clone());
         core.touch_archived_worktree(&task.id).await?;
         let recovered = core.task(&task.id)?;
         assert!(!recovered.collection_pending && recovered.worktree_path.is_none());
+        core.review_task(&task.id, ReviewAction::Reopen).await?;
+        assert!(task.proposed_worktree_path.is_dir());
         Ok(())
     }
 
