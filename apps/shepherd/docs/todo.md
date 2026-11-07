@@ -1184,7 +1184,9 @@ placeholder tabs and no unearned state badges.
   and other buffer limits still need review. Codex app-server, exec and
   handshake protocol lines have the same limit; oversized exec output fails
   the turn and stops its process. Codex version and help probes limit both
-  stdout and stderr and time out if the command does not finish.
+  stdout and stderr and time out if the command does not finish. ACP keeps
+  only 64 unread stderr notifications while retaining its latest diagnostic
+  tail. Critical event queues still need backpressure.
 - [ ] Multiple agents and projects: three agents across two projects, no state
   bleed, no polling.
 - [ ] Performance: cold start under 1.2 s, streaming while a large diff renders,

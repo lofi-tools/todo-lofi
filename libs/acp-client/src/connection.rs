@@ -42,11 +42,36 @@ use crate::permissions::{
     strongest_reject, tool_key,
 };
 use crate::terminal::{TerminalBackend, TerminalRegistry};
-use crate::{AcpError, AcpEvent, SessionSpec, schema};
+use crate::{AcpError, AcpEvent, SessionSpec, StderrMessage, schema};
 
 /// How many stderr lines are kept for the error state.
 const STDERR_LINES: usize = 250;
+const PENDING_STDERR_EVENTS: usize = 64;
 const MAX_PROTOCOL_LINE_BYTES: usize = 8 * 1024 * 1024;
+
+fn record_agent_stderr(
+    text: String,
+    buffer: &Mutex<VecDeque<String>>,
+    events: &tokio::sync::mpsc::UnboundedSender<AcpEvent>,
+    permits: &Arc<tokio::sync::Semaphore>,
+) {
+    match buffer.lock() {
+        Ok(mut buffer) => {
+            buffer.push_back(text.clone());
+            while buffer.len() > STDERR_LINES {
+                buffer.pop_front();
+            }
+        }
+        Err(error) => tracing::error!(%error, "could not retain ACP stderr"),
+    }
+    if let Ok(permit) = permits.clone().try_acquire_owned()
+        && events
+            .send(AcpEvent::Stderr(StderrMessage::limited(text, permit)))
+            .is_err()
+    {
+        tracing::debug!("ACP stderr receiver closed");
+    }
+}
 
 async fn read_protocol_line<R: futures::io::AsyncBufRead + Unpin>(
     reader: &mut R,
@@ -781,7 +806,7 @@ fn permission_response(decision: PermissionDecision) -> RequestPermissionRespons
 }
 
 fn terminal_notice(message: String) -> AcpEvent {
-    AcpEvent::Stderr(message)
+    AcpEvent::Stderr(message.into())
 }
 
 fn respond_with_error<T>(
@@ -794,7 +819,7 @@ where
     T: acp::JsonRpcResponse,
 {
     let message = format!("{operation} failed: {error}");
-    drop(events.send(AcpEvent::Stderr(message.clone())));
+    drop(events.send(AcpEvent::Stderr(message.clone().into())));
     responder.respond_with_internal_error(message)
 }
 
@@ -888,19 +913,9 @@ impl ConnectTo<Client> for ProjectAgent {
             Some(tokio::spawn(async move {
                 let mut lines = crate::bounded_lines::BoundedLines::default();
                 let mut bytes = [0u8; 4096];
+                let permits = Arc::new(tokio::sync::Semaphore::new(PENDING_STDERR_EVENTS));
                 let record = |line: crate::bounded_lines::BoundedLine| {
-                    match buffer.lock() {
-                        Ok(mut buffer) => {
-                            buffer.push_back(line.text.clone());
-                            while buffer.len() > STDERR_LINES {
-                                buffer.pop_front();
-                            }
-                        }
-                        Err(error) => tracing::error!(%error, "could not retain ACP stderr"),
-                    }
-                    if events.send(AcpEvent::Stderr(line.text)).is_err() {
-                        tracing::debug!("ACP stderr receiver closed");
-                    }
+                    record_agent_stderr(line.text, &buffer, &events, &permits);
                 };
                 loop {
                     match stderr.read(&mut bytes).await {
@@ -1074,6 +1089,36 @@ pub fn stderr_summary(lines: &[String]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stderr_flood_keeps_a_bounded_queue_and_the_latest_diagnostics()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let buffer = Mutex::new(VecDeque::new());
+        let permits = Arc::new(tokio::sync::Semaphore::new(PENDING_STDERR_EVENTS));
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        for index in 0..10_000 {
+            record_agent_stderr(format!("line {index}"), &buffer, &sender, &permits);
+        }
+        assert_eq!(receiver.len(), PENDING_STDERR_EVENTS);
+        let tail = buffer.lock().map_err(|_| "stderr buffer poisoned")?;
+        assert_eq!(tail.len(), STDERR_LINES);
+        assert_eq!(tail.back().map(String::as_str), Some("line 9999"));
+        drop(tail);
+        sender.send(AcpEvent::ProtocolFailed {
+            message: "failure".into(),
+        })?;
+        assert_eq!(receiver.len(), PENDING_STDERR_EVENTS + 1);
+        drop(receiver.try_recv()?);
+        record_agent_stderr("after drain".into(), &buffer, &sender, &permits);
+        let mut found = false;
+        while let Ok(event) = receiver.try_recv() {
+            if let AcpEvent::Stderr(message) = event {
+                found |= message.as_str() == "after drain";
+            }
+        }
+        assert!(found);
+        Ok(())
+    }
 
     #[tokio::test]
     async fn protocol_lines_are_bounded_and_validate_utf8() -> Result<(), Box<dyn std::error::Error>>

@@ -116,7 +116,7 @@ pub enum AcpEvent {
         signal: Option<String>,
     },
     /// A line captured from the agent's stderr.
-    Stderr(String),
+    Stderr(StderrMessage),
     ProtocolFailed {
         message: String,
     },
@@ -125,6 +125,45 @@ pub enum AcpEvent {
         code: Option<i32>,
         stderr: String,
     },
+}
+
+pub struct StderrMessage {
+    text: String,
+    _permit: Option<tokio::sync::OwnedSemaphorePermit>,
+}
+
+impl StderrMessage {
+    pub fn as_str(&self) -> &str {
+        &self.text
+    }
+
+    pub(crate) fn limited(text: String, permit: tokio::sync::OwnedSemaphorePermit) -> Self {
+        Self {
+            text,
+            _permit: Some(permit),
+        }
+    }
+}
+
+impl From<String> for StderrMessage {
+    fn from(text: String) -> Self {
+        Self {
+            text,
+            _permit: None,
+        }
+    }
+}
+
+impl std::fmt::Display for StderrMessage {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(&self.text, formatter)
+    }
+}
+
+impl std::fmt::Debug for StderrMessage {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Debug::fmt(&self.text, formatter)
+    }
 }
 
 impl std::fmt::Debug for AcpEvent {
