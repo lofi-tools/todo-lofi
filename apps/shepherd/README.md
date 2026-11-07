@@ -283,7 +283,8 @@ Codex scenarios replay the app-server responses and recorded worktree edits
 from `.cache/shepherd-live/codex/terra-low-v1/`. To record a missing scenario,
 add `--features live-codex` to the Cargo command or `--record` to the desktop
 smoke command. Recording uses the ChatGPT login with `gpt-6.1-terra` at `low`
-effort. An existing capture takes precedence when recording is enabled.
+effort. An existing capture takes precedence when recording is enabled. Cache
+files with a different model or effort, or an empty session, are rejected.
 
 ```sh
 direnv exec . cargo test -p agent-harness -- --ignored live_codex

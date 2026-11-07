@@ -168,6 +168,9 @@ impl LiveCodexRun {
                         "cached Codex model or effort differs from the live-test settings".into(),
                     );
                 }
+                if cached.sessions.is_empty() || cached.sessions.values().any(Vec::is_empty) {
+                    return Err("cached Codex run has an empty session capture".into());
+                }
                 eprintln!("replaying Codex responses from {}", cache_path.display());
                 Ok(Some(Self {
                     cache_path: cache_path.to_path_buf(),
@@ -361,6 +364,47 @@ mod tests {
     use super::*;
     use crate::{AgentHarness, PromptInput};
     use std::time::Duration;
+
+    #[test]
+    fn rejects_incompatible_or_empty_cached_runs() -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("fixture.json");
+        for (model, effort) in [("other-model", EFFORT), (MODEL, "high")] {
+            let cached = CachedRun {
+                model: model.into(),
+                effort: effort.into(),
+                version: None,
+                sessions: BTreeMap::from([(
+                    "initial".into(),
+                    vec![WireEntry::Exit(String::new())],
+                )]),
+                note: None,
+            };
+            fs::write(&path, serde_json::to_vec(&cached)?)?;
+            let error = LiveCodexRun::cached(&path)
+                .err()
+                .ok_or("incompatible cache accepted")?;
+            assert!(error.to_string().contains("model or effort"));
+        }
+        for sessions in [
+            BTreeMap::new(),
+            BTreeMap::from([("initial".into(), Vec::new())]),
+        ] {
+            let cached = CachedRun {
+                model: MODEL.into(),
+                effort: EFFORT.into(),
+                version: None,
+                sessions,
+                note: None,
+            };
+            fs::write(&path, serde_json::to_vec(&cached)?)?;
+            let error = LiveCodexRun::cached(&path)
+                .err()
+                .ok_or("empty cache accepted")?;
+            assert!(error.to_string().contains("empty session"));
+        }
+        Ok(())
+    }
 
     #[cfg(not(feature = "live-codex"))]
     #[tokio::test]
