@@ -1,6 +1,6 @@
 import { For, Show, createEffect, createMemo, createResource, createSignal, onCleanup, onMount } from 'solid-js'
 
-import { actOnWorkspaceFile, cancelFileSearch, listFiles, readWorkspaceFile, reserveFileSearch, searchWorkspaceFiles, watchWorkspaceFiles, type DirectoryListing, type FileAction, type FileChange, type FileSearchQuery, type FileSearchResult, type WorkspaceFileEntry } from './bridge'
+import { actOnWorkspaceFile, cancelFileSearch, listFiles, readWorkspaceFile, reserveFileSearch, searchWorkspaceFiles, watchWorkspaceFiles, type DirectoryListing, type FileAction, type FileChange, type FileSearchResult, type WorkspaceFileEntry } from './bridge'
 import iconTheme from './charmed-icons.json'
 import { reportError } from './diagnostics'
 
@@ -25,6 +25,7 @@ interface CachedDirectory {
 
 export function FilesPane(props: { projectId: string; worktreeTaskId: string | null; initialFile?: { taskId: string; path: string }; showDotfiles: boolean; settingsDisabled: boolean; onShowDotfilesChange: (value: boolean) => void }) {
   const [scope, setScope] = createSignal(props.worktreeTaskId ? 'worktree' : 'project')
+  const [query, setQuery] = createSignal('')
   const [settingsOpen, setSettingsOpen] = createSignal(false)
   const [menuPosition, setMenuPosition] = createSignal({ left: 0, top: 0 })
   let settingsButton: HTMLButtonElement | undefined
@@ -57,15 +58,17 @@ export function FilesPane(props: { projectId: string; worktreeTaskId: string | n
 
   return (
     <section class="files-pane" aria-label="Workspace files">
-      <div class="terminal-pane__bar files-pane__toolbar">
+      <div class="terminal-pane__bar files-pane__toolbar files-pane__topbar">
         <span class="files-root-picker">
           <select aria-label="File root" value={taskId() ? 'worktree' : 'project'}
-            onChange={(event) => setScope(event.currentTarget.value)}>
-            <option value="project">Project root</option>
+            onChange={(event) => { setScope(event.currentTarget.value); setQuery('') }}>
+            <option value="project">/</option>
             <Show when={props.worktreeTaskId}><option value="worktree">Task worktree</option></Show>
           </select>
           <svg aria-hidden="true" width="10" height="10" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="m2.5 4.5 3.5 3.5 3.5-3.5" /></svg>
         </span>
+        <input type="search" aria-label="Find files" placeholder="Filter by name" value={query()}
+          onInput={(event) => setQuery(event.currentTarget.value)} />
         <button ref={settingsButton} type="button" class="files-settings-button" aria-label="File explorer settings" title="File explorer settings"
           aria-haspopup="menu" aria-expanded={settingsOpen()} onClick={toggleSettings}>
           <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round" aria-hidden="true"><path d="m6 3 .5-1.5h3L10 3l1 .6 1.6-.3 1.5 2.6-1.1 1.2v1.8l1.1 1.2-1.5 2.6-1.6-.3-1 .6-.5 1.5h-3L6 13l-1-.6-1.6.3-1.5-2.6L3 8.9V7.1L1.9 5.9l1.5-2.6L5 3.6Z" /><circle cx="8" cy="8" r="2.1" /></svg>
@@ -81,19 +84,18 @@ export function FilesPane(props: { projectId: string; worktreeTaskId: string | n
         </Show>
       </div>
       <Show when={location()} keyed>
-        {(root) => <FileBrowser {...root} showDotfiles={props.showDotfiles}
+        {(root) => <FileBrowser {...root} showDotfiles={props.showDotfiles} query={query()}
           initialPath={props.initialFile?.taskId === root.taskId ? props.initialFile?.path : undefined} />}
       </Show>
     </section>
   )
 }
 
-function FileBrowser(props: FileLocation & { showDotfiles: boolean; initialPath?: string }) {
+function FileBrowser(props: FileLocation & { showDotfiles: boolean; initialPath?: string; query: string }) {
   const [selected, setSelected] = createSignal<FileSelection | null>(props.initialPath ? { path: props.initialPath, line: null } : null)
   const [openPath, setOpenPath] = createSignal(props.initialPath ? parentPath(props.initialPath) : '')
-  const [query, setQuery] = createSignal('')
   const [results, setResults] = createSignal<FileSearchResult>()
-  const [status, setStatus] = createSignal<'idle' | 'searching' | 'cancelled'>('idle')
+  const [status, setStatus] = createSignal<'idle' | 'searching'>('idle')
   const [changes, setChanges] = createSignal<FileChange[]>([])
   const [treeRevision, setTreeRevision] = createSignal(0)
   const directories = new Map<string, CachedDirectory>()
@@ -183,14 +185,14 @@ function FileBrowser(props: FileLocation & { showDotfiles: boolean; initialPath?
     if (previous?.id) void cancelFileSearch(previous.id).catch((failure) => console.warn('Could not cancel the file search', failure))
   }
 
-  function search(mode: FileSearchQuery['mode']) {
+  function search() {
     stopSearch()
-    const text = query().trim()
+    const text = props.query.trim()
     setResults(undefined)
     setStatus(text ? 'searching' : 'idle')
     if (!text) return
     const request: PendingSearch = {}
-    const parameters = { mode, query: text, showDotfiles: props.showDotfiles }
+    const parameters = { mode: 'name' as const, query: text, showDotfiles: props.showDotfiles }
     active = request
     async function run() {
       try {
@@ -212,27 +214,15 @@ function FileBrowser(props: FileLocation & { showDotfiles: boolean; initialPath?
         }
       }
     }
-    if (mode === 'name') request.timer = window.setTimeout(() => void run(), 80)
-    else void run()
+    request.timer = window.setTimeout(() => void run(), 80)
   }
 
-  createEffect(() => search('name'))
+  createEffect(() => search())
   onCleanup(stopSearch)
 
   return (
     <>
-      <form class="terminal-pane__bar files-pane__toolbar" onSubmit={(event) => {
-        event.preventDefault()
-        search('contents')
-      }}>
-        <input type="search" aria-label="Find files" placeholder="Filter by name" value={query()}
-          onInput={(event) => setQuery(event.currentTarget.value)} />
-        <button type="submit" disabled={!query().trim()}>Search contents</button>
-        <Show when={status() === 'searching'}>
-          <button type="button" onClick={() => { stopSearch(); setStatus('cancelled') }}>Cancel search</button>
-        </Show>
-      </form>
-      <div class="files-pane__tree" aria-label="File tree" hidden={!!query().trim()}>
+      <div class="files-pane__tree" aria-label="File tree" hidden={!!props.query.trim()}>
         <FolderContents projectId={props.projectId} taskId={props.taskId} path="" showDotfiles={props.showDotfiles}
           revision={treeRevision()} changeFor={changeFor} directoryChangeFor={directoryChangeFor} selected={selected()?.path ?? null}
           loadDirectory={loadDirectory} cachedDirectory={cachedDirectory} preloadDirectories={preloadDirectories}
@@ -249,10 +239,9 @@ function FileBrowser(props: FileLocation & { showDotfiles: boolean; initialPath?
           </details>
         </Show>
       </div>
-      <Show when={query().trim()}>
+      <Show when={props.query.trim()}>
         <section class="files-pane__tree" aria-label="File search results">
           <Show when={status() === 'searching'}><p class="empty empty--tight" role="status">Searching files…</p></Show>
-          <Show when={status() === 'cancelled'}><p class="empty empty--tight" role="status">Search cancelled.</p></Show>
           <Show when={results()}>{(result) => <>
             <Show when={result().matches.length} fallback={<p class="empty empty--tight">No matching files.</p>}>
               <ul class="files-tree">

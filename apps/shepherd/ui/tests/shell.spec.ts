@@ -1692,7 +1692,7 @@ test('opens error details above the project picker', async ({ page }) => {
   await expect(page.getByRole('dialog', { name: 'Add project' })).toBeVisible()
 })
 
-test('filters by name, cancels content searches, and opens matches at their line', async ({ page }) => {
+test('filters filenames as the user types and opens a match', async ({ page }) => {
   await page.goto('/')
   await expect(page.getByRole('region', { name: 'Task chat' }).getByText('ready to go')).toBeVisible()
   await page.getByRole('tab', { name: 'Files' }).click()
@@ -1700,40 +1700,24 @@ test('filters by name, cancels content searches, and opens matches at their line
   const query = files.getByRole('searchbox', { name: 'Find files' })
   const results = files.getByRole('region', { name: 'File search results' })
   const searches = () => page.evaluate(() => window.__fileSearches)
-  const cancelled = () => page.evaluate(() => window.__cancelledFileSearches)
-  const contentRequest = async (count: number) => {
-    await expect.poll(async () => (await searches()).filter((request) => request.mode === 'contents').length).toBe(count)
-    const request = (await searches()).filter((request) => request.mode === 'contents').at(-1)
-    if (!request) throw new Error('Expected a content search')
-    return request.id
-  }
-  const finish = (id: string) => page.evaluate((searchId) => window.__finishFileSearch(searchId), id)
+  const root = files.getByLabel('File root')
+  const gear = files.getByRole('button', { name: 'File explorer settings' })
+  const bounds = await Promise.all([root, query, gear].map((element) => element.boundingBox()))
+  expect(bounds.every((box) => box !== null)).toBe(true)
+  expect(Math.abs(bounds[0]!.y - bounds[1]!.y)).toBeLessThan(8)
+  expect(Math.abs(bounds[2]!.y - bounds[1]!.y)).toBeLessThan(8)
+  expect(bounds[0]!.x).toBeLessThan(bounds[1]!.x)
+  expect(bounds[1]!.x).toBeLessThan(bounds[2]!.x)
+  await expect(files.getByRole('button', { name: 'Search contents' })).toHaveCount(0)
+  await expect(root.locator('option[value="project"]')).toHaveText('/')
 
   await query.fill('main')
   await expect(results.getByRole('button', { name: 'src/main.rs' })).toBeVisible()
   expect(await searches()).toEqual([{ id: 'search-1', taskId: 'task-1', mode: 'name' }])
 
-  await query.press('Enter')
-  const first = await contentRequest(1)
-  await files.getByRole('button', { name: 'Cancel search' }).click()
-  await expect.poll(cancelled).toContain(first)
-  await finish(first)
-  await expect(results.getByRole('status')).toHaveText('Search cancelled.')
-  await expect(results.getByText('// second line')).toHaveCount(0)
-
-  await files.getByRole('button', { name: 'Search contents' }).click()
-  await finish(await contentRequest(2))
-  await expect(results.getByText('Some files or results were skipped.')).toBeVisible()
-  await results.getByRole('button', { name: /src\/main\.rs:120/ }).click()
-  const match = files.locator('.files-viewer__line[aria-current="location"]')
-  await expect(match).toContainText('// second line')
-  await expect(match.locator('.files-viewer__number')).toHaveText('120')
-
-  await files.getByRole('button', { name: 'Search contents' }).click()
-  const third = await contentRequest(3)
-  await files.getByLabel('File root').selectOption('project')
-  await expect.poll(cancelled).toContain(third)
-  await finish(third)
+  await results.getByRole('button', { name: 'src/main.rs' }).click()
+  await expect(files.getByRole('region', { name: 'File preview' })).toContainText('fn main() {}')
+  await root.selectOption('project')
   await expect(results).toHaveCount(0)
   await query.fill('main')
   await expect(results.getByRole('button', { name: 'src/main.rs' })).toBeVisible()

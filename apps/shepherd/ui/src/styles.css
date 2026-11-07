@@ -2173,6 +2173,11 @@ textarea {
   flex-wrap: wrap;
 }
 
+.files-pane__topbar {
+  flex-wrap: nowrap;
+  min-width: 0;
+}
+
 .files-settings-button {
   display: inline-flex;
   align-items: center;
@@ -2183,6 +2188,8 @@ textarea {
   background: transparent;
   color: var(--text-muted);
   cursor: pointer;
+  flex: none;
+  margin-inline-start: auto;
 }
 
 .files-settings-button:hover,

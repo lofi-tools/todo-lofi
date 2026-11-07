@@ -77,7 +77,9 @@ current layout and give future changes a point of comparison.
   Resize the inspector at its left edge by dragging or with the arrow keys
   while the separator is focused. Save the chosen width with the task.
 - In Files, name the active root above the tree and let the user choose the
-  project root or the selected task's worktree using a compact, themed picker.
+  project root or the selected task's worktree using a compact, themed picker;
+  label the project root `/`. Put it, the filename filter, and the settings gear
+  on one row, with the gear at the right.
   Show a small folder icon on
   each directory row without an expand caret. Expand folders in place on
   demand, keeping one open path and its ancestors while closing sibling
@@ -86,8 +88,7 @@ current layout and give future changes a point of comparison.
   **Show dotfiles** toggle. Open text
   in a read-only, line-numbered viewer inside the inspector. **Find files**
   uses the app's themed input and filters filenames as the user types.
-  **Search contents** and Enter start a
-  cancellable literal search. Selecting a content match opens its line.
+  Filtering starts as the user types.
   Use muted default text and Warm Charmed file type icons. Colour changed paths
   and their ancestor folders using the Aura Dark or One Light Git status colours
   for the active appearance. Let the tree use the available inspector height,
