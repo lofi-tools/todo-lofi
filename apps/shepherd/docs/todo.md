@@ -1218,6 +1218,8 @@ placeholder tabs and no unearned state badges.
   with the session retained; a fixture verifies that a later quit retries it.
   Codex app-server shutdown propagates process-group and child-stop errors and
   retains the child handle for retry; operating-system failure injection remains.
+  OpenCode shutdown retains its server when stopping it fails; an injected
+  group-signal failure verifies the process remains available for a retry.
 - [ ] Bounded transcript, stderr, search and frame buffers.
   Codex, OpenCode and ACP stderr readers cap each line while draining the
   process, including newline-free output. OpenCode omits overlong lines to

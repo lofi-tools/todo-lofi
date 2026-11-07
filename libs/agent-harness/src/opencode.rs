@@ -605,11 +605,10 @@ impl AgentHarness for OpenCodeHarness {
             return fallback.shutdown().await;
         }
         self.turn = None;
-        self.session = None;
-        self.modes = None;
-        if let Some(server) = self.server.take() {
+        if let Some(server) = &self.server {
             self.diagnostics.stderr_tail = server.stderr_tail();
             server.shutdown().await?;
+            self.server = None;
             publish(
                 &self.sender,
                 HarnessEvent::Exited {
@@ -618,6 +617,8 @@ impl AgentHarness for OpenCodeHarness {
                 },
             )?;
         }
+        self.session = None;
+        self.modes = None;
         Ok(())
     }
 }
@@ -1107,6 +1108,12 @@ impl Drop for StartupProcessGroup {
 }
 
 async fn stop_server(child: &mut tokio::process::Child) -> std::io::Result<()> {
+    stop_server_with(child, signal_server_group).await
+}
+
+fn signal_server_group(child: &Child) -> std::io::Result<()> {
+    #[cfg(not(unix))]
+    let _child = child;
     #[cfg(unix)]
     let group_error = child
         .id()
@@ -1118,17 +1125,19 @@ async fn stop_server(child: &mut tokio::process::Child) -> std::io::Result<()> {
             let error = std::io::Error::last_os_error();
             (error.raw_os_error() != Some(libc::ESRCH)).then_some(error)
         });
-    let child_result = child.kill().await;
     #[cfg(unix)]
     if let Some(error) = group_error {
-        return Err(match child_result {
-            Ok(()) => error,
-            Err(child_error) => std::io::Error::other(format!(
-                "could not stop process group: {error}; could not stop server: {child_error}"
-            )),
-        });
+        return Err(error);
     }
-    child_result
+    Ok(())
+}
+
+async fn stop_server_with(
+    child: &mut Child,
+    signal_group: impl FnOnce(&Child) -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    signal_group(child)?;
+    child.kill().await
 }
 
 impl OpenCodeServer {
@@ -1407,7 +1416,7 @@ impl OpenCodeServer {
         Ok(())
     }
 
-    pub async fn shutdown(self) -> HarnessResult<()> {
+    pub async fn shutdown(&self) -> HarnessResult<()> {
         stop_server(&mut *self.child.lock().await)
             .await
             .map_err(|error| protocol_error("could not stop OpenCode server", error))
@@ -1619,6 +1628,25 @@ mod tests {
         stop_server(&mut child).await?;
         tokio::time::sleep(Duration::from_millis(1300)).await;
         assert!(!directory.path().join("escaped").exists());
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn failed_group_signal_keeps_server_for_shutdown_retry()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut command = Command::new("/bin/sleep");
+        command.arg("30").process_group(0).kill_on_drop(true);
+        let mut child = command.spawn()?;
+        let failure = stop_server_with(&mut child, |_| {
+            Err(std::io::Error::other("fixture signal failure"))
+        })
+        .await;
+        assert!(failure.is_err());
+        assert!(child.id().is_some());
+        assert!(child.try_wait()?.is_none());
+        stop_server(&mut child).await?;
+        assert!(child.try_wait()?.is_some());
         Ok(())
     }
 
