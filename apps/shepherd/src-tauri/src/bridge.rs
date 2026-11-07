@@ -621,6 +621,7 @@ struct TerminalSubscription {
 pub struct ShellState {
     core: Arc<Mutex<Core>>,
     agent_events: Arc<tokio::sync::Notify>,
+    pump_lifetime: watch::Sender<()>,
     attachment_root: Option<PathBuf>,
     pub(crate) preferences: Settings,
     pub(crate) codex_program: Option<PathBuf>,
@@ -664,9 +665,11 @@ impl ShellState {
         if terminals.core.set(Arc::downgrade(&core)).is_err() {
             tracing::error!("terminal host is already bound to a core");
         }
+        let (pump_lifetime, _) = watch::channel(());
         Self {
             core,
             agent_events: Arc::new(tokio::sync::Notify::new()),
+            pump_lifetime,
             attachment_root: None,
             preferences: Settings::default(),
             codex_program: None,
@@ -738,13 +741,20 @@ impl ShellState {
     /// Fold agent activity between commands. A streaming turn must reach the
     /// window without waiting for the next invoke.
     pub fn start_event_pump(&self) {
-        let core = self.core.clone();
+        let core = Arc::downgrade(&self.core);
         let events = self.events.clone();
         let agent_events = self.agent_events.clone();
+        let mut lifetime = self.pump_lifetime.subscribe();
         tauri::async_runtime::spawn(async move {
             agent_events.notify_one();
             loop {
-                agent_events.notified().await;
+                tokio::select! {
+                    _ = agent_events.notified() => {}
+                    _ = lifetime.changed() => break,
+                }
+                let Some(core) = core.upgrade() else {
+                    break;
+                };
                 let mut core = core.lock().await;
                 let retry = if let Err(error) = core.pump().await {
                     tracing::warn!(%error, "could not fold agent activity");
@@ -753,6 +763,9 @@ impl ShellState {
                     false
                 };
                 Self::broadcast_core_events(&mut core, &events);
+                if core.shutdown_state() == shepherd_core::ShutdownState::Closed {
+                    break;
+                }
                 core.arm_agent_events(&agent_events);
                 drop(core);
                 if retry {
@@ -768,6 +781,9 @@ impl ShellState {
         let result = core.execute(command).await;
         Self::broadcast_core_events(&mut core, &self.events);
         core.arm_agent_events(&self.agent_events);
+        if core.shutdown_state() == shepherd_core::ShutdownState::Closed {
+            self.agent_events.notify_one();
+        }
         result.map_err(BridgeError::from)
     }
 
@@ -2888,6 +2904,40 @@ mod tests {
     use shepherd_core::{TaskState, TaskSummary};
 
     use super::*;
+
+    #[tokio::test]
+    async fn dropping_shell_releases_the_event_pump_and_core()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let state = ShellState::new(Core::new());
+        let core = Arc::downgrade(&state.core);
+        let mut events = state.subscribe();
+        state.start_event_pump();
+        tokio::task::yield_now().await;
+        drop(state);
+        let result = tokio::time::timeout(Duration::from_secs(2), events.recv()).await?;
+        assert!(matches!(
+            result,
+            Err(tokio::sync::broadcast::error::RecvError::Closed)
+        ));
+        assert!(core.upgrade().is_none());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn completed_shutdown_stops_the_event_pump() -> Result<(), Box<dyn std::error::Error>> {
+        let state = ShellState::new(Core::new());
+        state.start_event_pump();
+        assert_eq!(state.events.strong_count(), 2);
+        state.quit(true).await?;
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while state.events.strong_count() > 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await?;
+        assert_eq!(state.events.strong_count(), 1);
+        Ok(())
+    }
 
     #[tokio::test]
     async fn agent_events_reach_subscribers_without_a_followup_command()
