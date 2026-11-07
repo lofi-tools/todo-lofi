@@ -80,6 +80,15 @@ impl ProjectApprovalPolicy for ProjectApprovals {
 pub trait HarnessFactory: Send + Sync {
     fn create(&self) -> Result<Box<dyn AgentHarness>, CoreError>;
 
+    fn launch_for_task(
+        &self,
+        _task_id: &crate::TaskId,
+        agent: Agent,
+        cwd: PathBuf,
+    ) -> Result<(Box<dyn AgentHarness>, SpawnSpec), CoreError> {
+        self.launch(agent, cwd)
+    }
+
     fn launch(
         &self,
         agent: Agent,

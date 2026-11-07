@@ -21,7 +21,7 @@ pub struct DesktopHarnessFactory {
     pub codex: Box<dyn HarnessFactory>,
     pub opencode: Result<Option<SpawnSpec>, HarnessError>,
     pub claude: Result<Option<ConfiguredCommand>, HarnessError>,
-    pub terminals: Arc<dyn TerminalBackend>,
+    pub terminals: Arc<crate::bridge::TerminalHost>,
 }
 
 impl HarnessFactory for DesktopHarnessFactory {
@@ -38,12 +38,32 @@ impl HarnessFactory for DesktopHarnessFactory {
         agent: Agent,
         cwd: PathBuf,
     ) -> Result<(Box<dyn AgentHarness>, SpawnSpec), CoreError> {
+        self.launch_with_terminals(agent, cwd, self.terminals.clone())
+    }
+
+    fn launch_for_task(
+        &self,
+        task_id: &shepherd_core::TaskId,
+        agent: Agent,
+        cwd: PathBuf,
+    ) -> Result<(Box<dyn AgentHarness>, SpawnSpec), CoreError> {
+        self.launch_with_terminals(agent, cwd, self.terminals.for_task(task_id.clone()))
+    }
+}
+
+impl DesktopHarnessFactory {
+    fn launch_with_terminals(
+        &self,
+        agent: Agent,
+        cwd: PathBuf,
+        terminals: Arc<dyn TerminalBackend>,
+    ) -> Result<(Box<dyn AgentHarness>, SpawnSpec), CoreError> {
         let (harness, executable, args): (Box<dyn AgentHarness>, &Path, Vec<String>) = match agent {
             Agent::Codex => return self.codex.launch(agent, cwd),
             Agent::OpenCode => {
                 let launch = require_configured(&self.opencode, "agents.opencode.executable")?;
                 return Ok((
-                    Box::new(OpenCodeHarness::default().with_terminals(self.terminals.clone())),
+                    Box::new(OpenCodeHarness::default().with_terminals(terminals)),
                     SpawnSpec {
                         cwd,
                         ..launch.clone()
@@ -53,7 +73,7 @@ impl HarnessFactory for DesktopHarnessFactory {
             Agent::Claude => {
                 let command = require_configured(&self.claude, "agents.claude.executable")?;
                 (
-                    Box::new(AcpHarness::default().with_terminals(self.terminals.clone())),
+                    Box::new(AcpHarness::default().with_terminals(terminals)),
                     &command.executable,
                     command.args.clone(),
                 )

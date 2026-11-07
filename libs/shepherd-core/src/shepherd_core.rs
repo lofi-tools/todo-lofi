@@ -1839,7 +1839,10 @@ impl Core {
             Some(worktree_path) => worktree_path,
             None => self.project_path(&task.project_id)?,
         };
-        let (mut harness, spec) = match self.harness_factory.launch(task.agent, cwd) {
+        let (mut harness, spec) = match self
+            .harness_factory
+            .launch_for_task(task_id, task.agent, cwd)
+        {
             Ok(launch) => launch,
             Err(error) => {
                 let mut transcript = Transcript::default();

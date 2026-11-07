@@ -229,6 +229,7 @@ pub(crate) struct TerminalHost {
     screens: Arc<Mutex<BTreeMap<String, Arc<Mutex<ScreenSlot>>>>>,
     appearance: Arc<Mutex<TerminalAppearance>>,
     process_store: Arc<OnceLock<Arc<dyn Store>>>,
+    core: Arc<OnceLock<std::sync::Weak<Mutex<Core>>>>,
 }
 
 impl Default for TerminalHost {
@@ -238,6 +239,7 @@ impl Default for TerminalHost {
             screens: Arc::new(Mutex::new(BTreeMap::new())),
             appearance: Arc::new(Mutex::new(TerminalAppearance::default())),
             process_store: Arc::new(OnceLock::new()),
+            core: Arc::new(OnceLock::new()),
         }
     }
 }
@@ -322,6 +324,7 @@ impl TerminalHost {
     ) {
         let engine = self.engine.clone();
         let screens = self.screens.clone();
+        let core = self.core.get().cloned();
         let PreparedTerminal {
             id,
             process: _,
@@ -332,6 +335,7 @@ impl TerminalHost {
             let mut pending = None;
             let mut deadline = None;
             let mut protocol = protocol;
+            let mut last_activity = None::<Instant>;
             loop {
                 let event = if let Some(event) = pending.take() {
                     Ok(Some(event))
@@ -418,6 +422,24 @@ impl TerminalHost {
                         break;
                     }
                 }
+                if protocol.is_some()
+                    && !batch.is_empty()
+                    && last_activity.is_none_or(|last| last.elapsed() >= Duration::from_secs(60))
+                    && let Some(core) = core.as_ref().and_then(std::sync::Weak::upgrade)
+                    && let Some(task_id) = slot.lock().await.task_id.clone()
+                {
+                    last_activity = Some(Instant::now());
+                    tauri::async_runtime::spawn(async move {
+                        if let Err(error) = core
+                            .lock()
+                            .await
+                            .touch_archived_worktree_if_due(&task_id)
+                            .await
+                        {
+                            tracing::warn!(%error, "could not record agent terminal activity");
+                        }
+                    });
+                }
                 let (replies, bell) = {
                     let mut slot = slot.lock().await;
                     if batch.is_empty() {
@@ -475,12 +497,19 @@ impl TerminalHost {
     }
 }
 
-#[async_trait]
-impl TerminalBackend for TerminalHost {
-    async fn spawn(
+impl TerminalHost {
+    pub(crate) fn for_task(&self, task_id: TaskId) -> Arc<dyn TerminalBackend> {
+        Arc::new(TaskTerminalHost {
+            host: self.clone(),
+            task_id,
+        })
+    }
+
+    async fn spawn_for_task(
         &self,
         launch: TerminalLaunch,
         events: mpsc::Sender<TerminalProcessEvent>,
+        task_id: Option<TaskId>,
     ) -> Result<(), String> {
         let terminal = self
             .prepare(
@@ -497,6 +526,7 @@ impl TerminalBackend for TerminalHost {
             )
             .await
             .map_err(|error| error.to_string())?;
+        terminal.slot.lock().await.task_id = task_id;
         let store = self
             .process_store
             .get()
@@ -538,6 +568,39 @@ impl TerminalBackend for TerminalHost {
         };
         self.observe(terminal, None, Some(events), Some(tracked));
         Ok(())
+    }
+}
+
+struct TaskTerminalHost {
+    host: TerminalHost,
+    task_id: TaskId,
+}
+
+#[async_trait]
+impl TerminalBackend for TaskTerminalHost {
+    async fn spawn(
+        &self,
+        launch: TerminalLaunch,
+        events: mpsc::Sender<TerminalProcessEvent>,
+    ) -> Result<(), String> {
+        self.host
+            .spawn_for_task(launch, events, Some(self.task_id.clone()))
+            .await
+    }
+
+    async fn stop(&self, id: &str) -> Result<(), String> {
+        self.host.stop(id).await
+    }
+}
+
+#[async_trait]
+impl TerminalBackend for TerminalHost {
+    async fn spawn(
+        &self,
+        launch: TerminalLaunch,
+        events: mpsc::Sender<TerminalProcessEvent>,
+    ) -> Result<(), String> {
+        self.spawn_for_task(launch, events, None).await
     }
 
     async fn stop(&self, id: &str) -> Result<(), String> {
@@ -597,6 +660,9 @@ impl ShellState {
             tracing::error!("terminal host is already bound to a core");
         }
         let core = Arc::new(Mutex::new(core));
+        if terminals.core.set(Arc::downgrade(&core)).is_err() {
+            tracing::error!("terminal host is already bound to a core");
+        }
         Self {
             core,
             attachment_root: None,
@@ -3391,6 +3457,59 @@ mod tests {
             TerminalHost::default(),
         )
         .await?;
+        let agent_terminal = state.terminals.for_task(task.id.clone());
+        let (events, mut output) = mpsc::channel(32);
+        agent_terminal
+            .spawn(
+                TerminalLaunch {
+                    id: "archived-agent-terminal".into(),
+                    cwd: task.proposed_worktree_path.clone(),
+                    command: "/bin/sh".into(),
+                    args: vec!["-c".into(), "printf ready; sleep 30".into()],
+                    environment: BTreeMap::new(),
+                },
+                events,
+            )
+            .await
+            .map_err(std::io::Error::other)?;
+        tokio::time::timeout(Duration::from_secs(4), async {
+            while let Some(event) = output.recv().await {
+                if matches!(event, TerminalProcessEvent::Output(_)) {
+                    return Ok::<_, std::io::Error>(());
+                }
+            }
+            Err(std::io::Error::other("agent terminal ended before output"))
+        })
+        .await??;
+        let after_agent = tokio::time::timeout(Duration::from_secs(4), async {
+            loop {
+                let saved = store
+                    .load_tasks()
+                    .await?
+                    .into_iter()
+                    .next()
+                    .ok_or("missing task")?;
+                if saved.worktree_last_used_at > task.worktree_last_used_at {
+                    return Ok::<_, Box<dyn std::error::Error>>(saved.worktree_last_used_at);
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await??;
+        assert_eq!(
+            state
+                .screen_slot("archived-agent-terminal")
+                .await?
+                .lock()
+                .await
+                .task_id
+                .as_ref(),
+            Some(&task.id)
+        );
+        agent_terminal
+            .stop("archived-agent-terminal")
+            .await
+            .map_err(std::io::Error::other)?;
         assert_eq!(
             state
                 .files_directory(project_id.clone(), Some(task.id.to_string()))
@@ -3404,6 +3523,7 @@ mod tests {
             .ok_or("missing task")?
             .worktree_last_used_at;
         assert!(after_file_access > task.worktree_last_used_at);
+        assert_eq!(after_file_access, after_agent);
         state
             .files_directory(project_id.clone(), Some(task.id.to_string()))
             .await?;

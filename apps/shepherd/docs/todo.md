@@ -1164,7 +1164,8 @@ placeholder tabs and no unearned state badges.
   Opening a task, using its terminal, and accessing its files or Git views
   refresh a separate last-use timestamp, coalescing repeated input and reads
   to at most one write per minute per activity source. Older databases
-  initialize it from task update time. Agent terminal activity still needs review.
+  initialize it from task update time. ACP agent terminals carry their task
+  identity; their output and user input refresh that task's worktree usage.
 - [ ] Database backup, migration checks, malformed migration handling and
   transactional writes.
   Existing file databases receive a retained Turso snapshot in a private
