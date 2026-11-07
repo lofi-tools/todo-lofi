@@ -67,8 +67,19 @@ pub struct ProjectApproval {
     pub paths: Vec<PathBuf>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WorktreeDeletion {
+    pub task_id: TaskId,
+    pub repository_root: PathBuf,
+    pub original_path: PathBuf,
+    pub staged_path: PathBuf,
+}
+
 #[async_trait]
 pub trait Store: Send + Sync {
+    async fn save_worktree_deletion(&self, deletion: &WorktreeDeletion) -> Result<(), StoreError>;
+    async fn load_worktree_deletions(&self) -> Result<Vec<WorktreeDeletion>, StoreError>;
+    async fn remove_worktree_deletion(&self, task_id: &TaskId) -> Result<(), StoreError>;
     async fn save_process(&self, process: &ProcessRecord) -> Result<(), StoreError>;
     async fn remove_process(&self, id: &str) -> Result<(), StoreError>;
     async fn load_processes(&self) -> Result<Vec<ProcessRecord>, StoreError>;
@@ -199,6 +210,10 @@ const MIGRATIONS: &[Migration] = &[
     Migration {
         name: "0014_worktree_collection.sql",
         sql: include_str!("../toasty/migrations/0014_worktree_collection.sql"),
+    },
+    Migration {
+        name: "0015_worktree_deletions.sql",
+        sql: include_str!("../toasty/migrations/0015_worktree_deletions.sql"),
     },
 ];
 
@@ -537,6 +552,51 @@ async fn write_terminal_layout(
 
 #[async_trait]
 impl Store for TursoStore {
+    async fn save_worktree_deletion(&self, deletion: &WorktreeDeletion) -> Result<(), StoreError> {
+        let path = |path: &Path| {
+            path.to_str()
+                .map(str::to_owned)
+                .ok_or_else(|| StoreError::Backend("worktree deletion paths must be UTF-8".into()))
+        };
+        let repository = path(&deletion.repository_root)?;
+        let original = path(&deletion.original_path)?;
+        let staged = path(&deletion.staged_path)?;
+        let mut db = self.db.lock().await;
+        toasty::sql::statement("INSERT INTO worktree_deletions (task_id, repository_root, original_path, staged_path) VALUES (?1, ?2, ?3, ?4)")
+            .bind(deletion.task_id.as_str()).bind(repository).bind(original).bind(staged).exec(&mut *db).await?;
+        Ok(())
+    }
+
+    async fn load_worktree_deletions(&self) -> Result<Vec<WorktreeDeletion>, StoreError> {
+        let mut db = self.db.lock().await;
+        let rows = toasty::sql::query("SELECT task_id, repository_root, original_path, staged_path FROM worktree_deletions ORDER BY task_id")
+            .column_types([Type::String, Type::String, Type::String, Type::String]).exec(&mut *db).await?;
+        rows.into_iter()
+            .map(|row| {
+                let Value::Record(fields) = row else {
+                    return Err(StoreError::InvalidRow(
+                        "expected a worktree deletion record".into(),
+                    ));
+                };
+                Ok(WorktreeDeletion {
+                    task_id: TaskId::new(required_string(fields.first())?),
+                    repository_root: PathBuf::from(required_string(fields.get(1))?),
+                    original_path: PathBuf::from(required_string(fields.get(2))?),
+                    staged_path: PathBuf::from(required_string(fields.get(3))?),
+                })
+            })
+            .collect()
+    }
+
+    async fn remove_worktree_deletion(&self, task_id: &TaskId) -> Result<(), StoreError> {
+        let mut db = self.db.lock().await;
+        toasty::sql::statement("DELETE FROM worktree_deletions WHERE task_id = ?1")
+            .bind(task_id.as_str())
+            .exec(&mut *db)
+            .await?;
+        Ok(())
+    }
+
     async fn save_process(&self, process: &ProcessRecord) -> Result<(), StoreError> {
         let mut db = self.db.lock().await;
         let started_at = i64::try_from(process.started_at)
@@ -1526,6 +1586,7 @@ fn validate_attachments(entries: &[&Entry]) -> Result<(), StoreError> {
 /// A non-durable store used to test the boundary before a database is opened.
 #[derive(Default)]
 pub struct MemoryStore {
+    worktree_deletions: RwLock<BTreeMap<TaskId, WorktreeDeletion>>,
     processes: RwLock<BTreeMap<String, ProcessRecord>>,
     projects: RwLock<BTreeMap<String, Project>>,
     tasks: RwLock<BTreeMap<String, Task>>,
@@ -1545,6 +1606,32 @@ impl MemoryStore {
 
 #[async_trait]
 impl Store for MemoryStore {
+    async fn save_worktree_deletion(&self, deletion: &WorktreeDeletion) -> Result<(), StoreError> {
+        let mut deletions = self.worktree_deletions.write().await;
+        if deletions.contains_key(&deletion.task_id) {
+            return Err(StoreError::Backend(
+                "worktree deletion is already recorded".into(),
+            ));
+        }
+        deletions.insert(deletion.task_id.clone(), deletion.clone());
+        Ok(())
+    }
+
+    async fn load_worktree_deletions(&self) -> Result<Vec<WorktreeDeletion>, StoreError> {
+        Ok(self
+            .worktree_deletions
+            .read()
+            .await
+            .values()
+            .cloned()
+            .collect())
+    }
+
+    async fn remove_worktree_deletion(&self, task_id: &TaskId) -> Result<(), StoreError> {
+        self.worktree_deletions.write().await.remove(task_id);
+        Ok(())
+    }
+
     async fn save_process(&self, process: &ProcessRecord) -> Result<(), StoreError> {
         self.processes
             .write()
@@ -2047,6 +2134,44 @@ mod tests {
             directory.path(),
         )
         .await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn worktree_deletion_journal_survives_task_deletion_and_reopen()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database = TestDatabase::new()?;
+        let uri = database.uri();
+        let project = Project::new(database.path().to_path_buf());
+        let task = Task::draft(project.id.clone(), "Staged", database.path());
+        let deletion = WorktreeDeletion {
+            task_id: task.id.clone(),
+            repository_root: database.path().join("repo"),
+            original_path: database.path().join("original"),
+            staged_path: database.path().join("staged"),
+        };
+        for store in [
+            Box::new(MemoryStore::new()) as Box<dyn Store>,
+            Box::new(TursoStore::open(&uri).await?),
+        ] {
+            store.save_project(&project).await?;
+            store.save_task(&task).await?;
+            store.save_worktree_deletion(&deletion).await?;
+            assert!(store.save_worktree_deletion(&deletion).await.is_err());
+            store.delete_task(&task.id, None).await?;
+            assert!(store.load_tasks().await?.is_empty());
+            assert_eq!(
+                store.load_worktree_deletions().await?,
+                vec![deletion.clone()]
+            );
+        }
+        let reopened = TursoStore::open(&uri).await?;
+        assert_eq!(
+            reopened.load_worktree_deletions().await?,
+            vec![deletion.clone()]
+        );
+        reopened.remove_worktree_deletion(&task.id).await?;
+        assert!(reopened.load_worktree_deletions().await?.is_empty());
         Ok(())
     }
 
