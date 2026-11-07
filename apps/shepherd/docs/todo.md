@@ -1271,9 +1271,11 @@ placeholder tabs and no unearned state badges.
   lock, preventing registration after disconnect cleanup; a fixture covers
   the contested lock case.
   Codex exec shutdown retains its waiter after a timeout so a later quit can
-  retry, and reports a waiter failure on subsequent attempts. Local fixtures
-  cover both paths and verify that shutdown stops a real descendant process.
-  Propagating process-stop errors from the waiter remains.
+  retry, and reports a waiter failure on subsequent attempts. Cancellation and
+  shutdown also report process-group or child-stop errors while retaining the
+  child for retry. Local fixtures inject stop failures, cover both paths and
+  verify that shutdown stops a real descendant process. Reporting an error
+  while waiting for the child exit still needs review.
   OpenCode shutdown retains its server when stopping it fails; an injected
   group-signal failure verifies the process remains available for a retry.
 - [ ] Bounded transcript, stderr, search and frame buffers.

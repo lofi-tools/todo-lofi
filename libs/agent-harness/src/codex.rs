@@ -1394,7 +1394,8 @@ struct ExecRun {
     waiter: JoinHandle<()>,
     waiter_failure: Option<String>,
     reader: tokio::task::AbortHandle,
-    kill: Option<oneshot::Sender<()>>,
+    kill: Option<mpsc::UnboundedSender<oneshot::Sender<Result<(), String>>>>,
+    stopping: bool,
     finished: Arc<AtomicBool>,
 }
 
@@ -1409,13 +1410,26 @@ impl ExecHarness {
             if let Some(error) = &run.waiter_failure {
                 return Err(HarnessError::Protocol(error.clone()));
             }
+            let deadline = Instant::now() + deadline;
             if !run.finished.load(Ordering::Relaxed)
-                && let Some(kill) = run.kill.take()
-                && kill.send(()).is_err()
+                && !run.stopping
+                && let Some(kill) = &run.kill
             {
-                tracing::debug!("the codex exec process was already gone");
+                let (reply, result) = oneshot::channel();
+                if kill.send(reply).is_ok() {
+                    match timeout_at(deadline, result).await {
+                        Ok(Ok(Ok(()))) => run.stopping = true,
+                        Ok(Ok(Err(error))) => return Err(HarnessError::Protocol(error)),
+                        Ok(Err(_)) => {}
+                        Err(_) => {
+                            return Err(HarnessError::Protocol(
+                                "Codex exec did not stop before the shutdown deadline".into(),
+                            ));
+                        }
+                    }
+                }
             }
-            match timeout(deadline, &mut run.waiter).await {
+            match timeout_at(deadline, &mut run.waiter).await {
                 Ok(Ok(())) => {}
                 Ok(Err(error)) => {
                     let message = format!("Codex exec shutdown failed: {error}");
@@ -1629,26 +1643,30 @@ impl AgentHarness for ExecHarness {
 
         let turn_id = TurnId::new(format!("exec-turn-{}", self.next_turn));
         self.next_turn += 1;
-        let (kill, kill_receiver) = oneshot::channel();
+        let (kill, kill_receiver) = mpsc::unbounded_channel();
         let finished = Arc::new(AtomicBool::new(false));
         let progress = Arc::new(AtomicU64::new(0));
         let reader = spawn_exec_reader(stdout, self.sender.clone(), progress.clone());
         let reader_abort = reader.abort_handle();
         let waiter = spawn_exec_waiter(
-            child,
-            kill_receiver,
-            self.sender.clone(),
-            Arc::clone(&self.stderr),
-            stderr_drained,
-            Arc::clone(&finished),
-            reader,
-            progress,
+            ExecWaiter {
+                child,
+                kill: kill_receiver,
+                sender: self.sender.clone(),
+                stderr: Arc::clone(&self.stderr),
+                stderr_drained,
+                finished: Arc::clone(&finished),
+                reader,
+                progress,
+            },
+            stop_exec_child,
         );
         self.run = Some(ExecRun {
             waiter,
             waiter_failure: None,
             reader: reader_abort,
             kill: Some(kill),
+            stopping: false,
             finished,
         });
 
@@ -1674,14 +1692,27 @@ impl AgentHarness for ExecHarness {
                 "the codex exec turn already finished".to_string(),
             ));
         }
-        let Some(kill) = run.kill.take() else {
+        if run.stopping {
             return Err(HarnessError::Protocol(
                 "the codex exec turn is already stopping".to_string(),
             ));
-        };
-        kill.send(()).map_err(|_| {
+        }
+        let kill = run.kill.as_ref().ok_or_else(|| {
+            HarnessError::Protocol("the codex exec process already exited".into())
+        })?;
+        let (reply, result) = oneshot::channel();
+        kill.send(reply).map_err(|_| {
             HarnessError::Protocol("the codex exec process already exited".to_string())
         })?;
+        result
+            .await
+            .map_err(|_| {
+                HarnessError::Protocol(
+                    "the codex exec process stopped before confirming cancellation".into(),
+                )
+            })?
+            .map_err(HarnessError::Protocol)?;
+        run.stopping = true;
         Ok(())
     }
 
@@ -1700,45 +1731,78 @@ impl AgentHarness for ExecHarness {
     }
 }
 
-fn spawn_exec_waiter(
-    mut child: Child,
-    mut kill: oneshot::Receiver<()>,
+struct ExecWaiter {
+    child: Child,
+    kill: mpsc::UnboundedReceiver<oneshot::Sender<Result<(), String>>>,
     sender: mpsc::UnboundedSender<HarnessEvent>,
     stderr: Arc<Mutex<VecDeque<String>>>,
     stderr_drained: oneshot::Receiver<()>,
     finished: Arc<AtomicBool>,
-    mut reader: JoinHandle<Result<(), String>>,
+    reader: JoinHandle<Result<(), String>>,
     progress: Arc<AtomicU64>,
+}
+
+fn spawn_exec_waiter(
+    waiter: ExecWaiter,
+    mut stop: impl FnMut(&mut Child) -> Result<(), String> + Send + 'static,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
+        let ExecWaiter {
+            mut child,
+            mut kill,
+            sender,
+            stderr,
+            stderr_drained,
+            finished,
+            mut reader,
+            progress,
+        } = waiter;
         let mut reader_finished = false;
         let mut protocol_error = None;
-        let outcome = tokio::select! {
-            status = child.wait() => Some(status),
-            _ = &mut kill => None,
-            result = &mut reader => {
-                reader_finished = true;
-                match result {
-                    Ok(Ok(())) => tokio::select! {
-                        status = child.wait() => Some(status),
-                        _ = &mut kill => None,
-                    },
-                    Ok(Err(error)) => { protocol_error = Some(error); None },
-                    Err(error) => { protocol_error = Some(format!("Codex exec reader failed: {error}")); None },
+        let mut cancelled = false;
+        let mut kill_open = true;
+        let status = loop {
+            tokio::select! {
+                status = child.wait() => break status,
+                request = kill.recv(), if kill_open => {
+                    let result = stop(&mut child);
+                    if result.is_ok() && protocol_error.is_none() {
+                        cancelled = true;
+                    }
+                    match request {
+                        Some(reply) => {
+                            if reply.send(result).is_err() {
+                                tracing::debug!("the codex exec stop requester disconnected");
+                            }
+                        }
+                        None => {
+                            kill_open = false;
+                            if let Err(error) = result {
+                                tracing::warn!(%error, "could not stop the abandoned Codex exec process");
+                                if let Err(error) = child.start_kill() {
+                                    tracing::warn!(%error, "could not stop the abandoned Codex exec child");
+                                }
+                            }
+                        }
+                    }
                 }
-            },
-        };
-        let mut cancelled = outcome.is_none() && protocol_error.is_none();
-        let status = match outcome {
-            Some(status) => status,
-            None => {
-                if let Err(error) = stop_codex_process_group(&child) {
-                    tracing::warn!(%error, "could not stop the Codex exec process group");
+                result = &mut reader, if !reader_finished => {
+                    reader_finished = true;
+                    let error = match result {
+                        Ok(Ok(())) => None,
+                        Ok(Err(error)) => Some(error),
+                        Err(error) => Some(format!("Codex exec reader failed: {error}")),
+                    };
+                    if let Some(error) = error {
+                        protocol_error = Some(error);
+                        if let Err(error) = stop(&mut child) {
+                            let text = format!("Could not stop Codex exec after an output failure: {error}");
+                            if sender.send(HarnessEvent::TurnError { kind: FailureKind::Protocol, text }).is_err() {
+                                tracing::debug!("the core stopped listening to codex errors");
+                            }
+                        }
+                    }
                 }
-                if let Err(error) = child.kill().await {
-                    tracing::debug!(%error, "could not kill the codex exec process");
-                }
-                child.wait().await
             }
         };
 
@@ -1812,7 +1876,7 @@ fn spawn_exec_waiter(
 async fn drain_exec_reader(
     reader: &mut JoinHandle<Result<(), String>>,
     progress: &AtomicU64,
-    kill: &mut oneshot::Receiver<()>,
+    kill: &mut mpsc::UnboundedReceiver<oneshot::Sender<Result<(), String>>>,
     cancelled: bool,
     idle_timeout: Duration,
     total_timeout: Duration,
@@ -1823,8 +1887,11 @@ async fn drain_exec_reader(
         let next_check = (Instant::now() + idle_timeout).min(deadline);
         let result = tokio::select! {
             result = timeout_at(next_check, &mut *reader) => result,
-            _ = &mut *kill, if !cancelled => {
+            Some(reply) = kill.recv(), if !cancelled => {
                 reader.abort();
+                if reply.send(Ok(())).is_err() {
+                    tracing::debug!("the codex exec stop requester disconnected");
+                }
                 return Ok(true);
             }
         };
@@ -1842,6 +1909,20 @@ async fn drain_exec_reader(
             }
         }
     }
+}
+
+fn stop_exec_child(child: &mut Child) -> Result<(), String> {
+    stop_exec_child_with(child, stop_codex_process_group, Child::start_kill)
+}
+
+fn stop_exec_child_with(
+    child: &mut Child,
+    stop_group: impl FnOnce(&Child) -> std::io::Result<()>,
+    stop_child: impl FnOnce(&mut Child) -> std::io::Result<()>,
+) -> Result<(), String> {
+    stop_group(child)
+        .map_err(|error| format!("Could not stop the Codex exec process group: {error}"))?;
+    stop_child(child).map_err(|error| format!("Could not stop the Codex exec process: {error}"))
 }
 
 fn spawn_exec_reader(
@@ -4379,7 +4460,7 @@ exit 0
     async fn exec_post_exit_drain_has_a_limit_even_with_continuous_progress()
     -> Result<(), Box<dyn std::error::Error>> {
         let progress = Arc::new(AtomicU64::new(0));
-        let (_kill_sender, mut kill) = oneshot::channel();
+        let (_kill_sender, mut kill) = mpsc::unbounded_channel();
         let mut reader: JoinHandle<Result<(), String>> = tokio::spawn({
             let progress = progress.clone();
             async move {
@@ -4407,11 +4488,12 @@ exit 0
     async fn cancellation_interrupts_the_post_exit_drain() -> Result<(), Box<dyn std::error::Error>>
     {
         let progress = AtomicU64::new(0);
-        let (sender, mut kill) = oneshot::channel();
+        let (sender, mut kill) = mpsc::unbounded_channel();
         let mut reader = tokio::spawn(std::future::pending::<Result<(), String>>());
+        let (reply, response) = oneshot::channel();
         sender
-            .send(())
-            .map_err(|()| "cancellation receiver closed")?;
+            .send(reply)
+            .map_err(|_| "cancellation receiver closed")?;
         assert!(
             drain_exec_reader(
                 &mut reader,
@@ -4423,6 +4505,7 @@ exit 0
             )
             .await?
         );
+        response.await??;
         assert!(reader.await.is_err_and(|error| error.is_cancelled()));
         Ok(())
     }
@@ -4658,6 +4741,7 @@ sleep 30
             waiter_failure: None,
             reader,
             kill: None,
+            stopping: false,
             finished: Arc::new(AtomicBool::new(false)),
         });
 
@@ -4685,6 +4769,87 @@ sleep 30
     }
 
     #[tokio::test]
+    async fn failed_exec_stop_retains_the_child_for_shutdown_retry()
+    -> Result<(), Box<dyn std::error::Error>> {
+        for (cancel_first, child_failure) in
+            [(false, false), (true, false), (false, true), (true, true)]
+        {
+            let mut command = Command::new("/bin/sh");
+            command.args(["-c", "sleep 30"]).kill_on_drop(true);
+            #[cfg(unix)]
+            command.process_group(0);
+            let child = command.spawn()?;
+            #[cfg(unix)]
+            let pid = libc::pid_t::try_from(child.id().ok_or("missing child PID")?)?;
+            let mut harness = ExecHarness::new();
+            harness.started = true;
+            let (kill, requests) = mpsc::unbounded_channel();
+            let (_stderr_done, stderr_drained) = oneshot::channel();
+            let finished = Arc::new(AtomicBool::new(false));
+            let reader = tokio::spawn(std::future::pending::<Result<(), String>>());
+            let reader_abort = reader.abort_handle();
+            let mut attempts = 0;
+            let waiter = spawn_exec_waiter(
+                ExecWaiter {
+                    child,
+                    kill: requests,
+                    sender: harness.sender.clone(),
+                    stderr: Arc::clone(&harness.stderr),
+                    stderr_drained,
+                    finished: Arc::clone(&finished),
+                    reader,
+                    progress: Arc::new(AtomicU64::new(0)),
+                },
+                move |child| {
+                    attempts += 1;
+                    if attempts == 1 {
+                        stop_exec_child_with(
+                            child,
+                            |_| {
+                                if child_failure {
+                                    Ok(())
+                                } else {
+                                    Err(std::io::Error::other("fixture stop failure"))
+                                }
+                            },
+                            |_| Err(std::io::Error::other("fixture stop failure")),
+                        )
+                    } else {
+                        stop_exec_child(child)
+                    }
+                },
+            );
+            harness.run = Some(ExecRun {
+                waiter,
+                waiter_failure: None,
+                reader: reader_abort,
+                kill: Some(kill),
+                stopping: false,
+                finished,
+            });
+            let failure = if cancel_first {
+                harness.cancel().await
+            } else {
+                harness.shutdown_with_timeout(Duration::from_secs(3)).await
+            };
+            let error = failure.expect_err("the injected stop must fail");
+            assert!(error.to_string().contains("fixture stop failure"));
+            assert!(harness.started && harness.run.is_some());
+            #[cfg(unix)]
+            assert_eq!(unsafe { libc::kill(pid, 0) }, 0);
+            assert!(matches!(
+                harness.receiver.try_recv(),
+                Err(mpsc::error::TryRecvError::Empty)
+            ));
+            harness
+                .shutdown_with_timeout(Duration::from_secs(3))
+                .await?;
+            assert!(!harness.started && harness.run.is_none());
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn exec_shutdown_waiter_failure_is_stable_on_retry() {
         let mut harness = ExecHarness::new();
         harness.started = true;
@@ -4695,6 +4860,7 @@ sleep 30
             waiter_failure: None,
             reader,
             kill: None,
+            stopping: false,
             finished: Arc::new(AtomicBool::new(false)),
         });
 
