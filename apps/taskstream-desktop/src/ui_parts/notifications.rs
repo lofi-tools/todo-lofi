@@ -7,9 +7,9 @@
 //! Every error and warning is also shown as a toast when it is recorded;
 //! informational messages stay in the pane and the footer's indicator.
 
-use gpui::{px, rgb, App, Global, Styled};
-use gpui_component::notification::Notification;
+use gpui::{App, Global, Styled, px, rgb};
 use gpui_component::IconName;
+use gpui_component::notification::Notification;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
 use crate::theme;

@@ -4,7 +4,7 @@
 
 use gpui::{
     AppContext, Context, Entity, EventEmitter, IntoElement, ParentElement, Render, Styled,
-    Subscription, Window, div, px, rgb, prelude::FluentBuilder,
+    Subscription, Window, div, prelude::FluentBuilder, px, rgb,
 };
 use gpui_component::Disableable;
 use gpui_component::Sizable;
@@ -72,7 +72,12 @@ fn format_minutes(minutes: u64) -> String {
     format!("{:02}:{:02}", minutes / 60, minutes % 60)
 }
 
-const PRESETS: [(u64, &str); 4] = [(1, "Daily"), (7, "Weekly"), (30, "Monthly"), (365, "Yearly")];
+const PRESETS: [(u64, &str); 4] = [
+    (1, "Daily"),
+    (7, "Weekly"),
+    (30, "Monthly"),
+    (365, "Yearly"),
+];
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Choice {
@@ -98,13 +103,21 @@ impl RepeatPicker {
         cx: &mut Context<Self>,
     ) -> Self {
         let initial_custom_days = match &current {
-            Some(template) if !PRESETS.iter().any(|(days, _)| *days == template.interval_days) => {
+            Some(template)
+                if !PRESETS
+                    .iter()
+                    .any(|(days, _)| *days == template.interval_days) =>
+            {
                 template.interval_days
             }
             _ => 7,
         };
         let choice = match &current {
-            Some(template) if PRESETS.iter().any(|(days, _)| *days == template.interval_days) => {
+            Some(template)
+                if PRESETS
+                    .iter()
+                    .any(|(days, _)| *days == template.interval_days) =>
+            {
                 Choice::Preset(template.interval_days)
             }
             Some(_) => Choice::Custom,
@@ -231,15 +244,10 @@ impl Render for RepeatPicker {
                     .child("Repeat"),
             )
             .when_some(current.as_ref(), |this, template| {
-                this.child(
-                    div()
-                        .text_xs()
-                        .text_color(rgb(0xa3a3a3))
-                        .child(format!(
-                            "Currently: {}",
-                            repeat_label(template.interval_days, template.time_of_day)
-                        )),
-                )
+                this.child(div().text_xs().text_color(rgb(0xa3a3a3)).child(format!(
+                    "Currently: {}",
+                    repeat_label(template.interval_days, template.time_of_day)
+                )))
             })
             .child(
                 div()
@@ -256,9 +264,7 @@ impl Render for RepeatPicker {
                     .gap_1()
                     .child(div().text_xs().text_color(rgb(0xa3a3a3)).child("Every"))
                     .child(div().w(px(56.)).children(
-                        custom_input.map(|input| {
-                            Input::new(&input).small().appearance(false)
-                        }),
+                        custom_input.map(|input| Input::new(&input).small().appearance(false)),
                     ))
                     .child(div().text_xs().text_color(rgb(0xa3a3a3)).child("days")),
             )
@@ -268,11 +274,13 @@ impl Render for RepeatPicker {
                     .items_center()
                     .gap_1()
                     .child(div().text_xs().text_color(rgb(0xa3a3a3)).child("at"))
-                    .child(div().w(px(56.)).children(
-                        self.time_input.clone().map(|input| {
-                            Input::new(&input).small().appearance(false)
-                        }),
-                    ))
+                    .child(
+                        div().w(px(56.)).children(
+                            self.time_input
+                                .clone()
+                                .map(|input| Input::new(&input).small().appearance(false)),
+                        ),
+                    )
                     .child(
                         div()
                             .text_xs()

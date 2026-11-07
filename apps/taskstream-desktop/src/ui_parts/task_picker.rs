@@ -2,16 +2,16 @@
 //! navigation (↑/↓/Enter/Esc) and mouse selection.
 
 use gpui::{
-    div, px, rgb, AppContext, Context, Entity, EventEmitter, FocusHandle, Focusable,
-    InteractiveElement, IntoElement, KeyBinding, ParentElement, Render, StatefulInteractiveElement,
-    Styled, Window,
+    AppContext, Context, Entity, EventEmitter, FocusHandle, Focusable, InteractiveElement,
+    IntoElement, KeyBinding, ParentElement, Render, StatefulInteractiveElement, Styled, Window,
+    div, px, rgb,
 };
+use gpui_component::Sizable;
+use gpui_component::StyledExt;
 use gpui_component::input::{
     Input, InputEvent, InputState, MoveDown as InputMoveDown, MoveUp as InputMoveUp,
 };
 use gpui_component::scroll::ScrollableElement;
-use gpui_component::Sizable;
-use gpui_component::StyledExt;
 
 const CONTEXT: &str = "TaskPicker";
 

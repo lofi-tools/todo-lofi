@@ -380,11 +380,13 @@ mod tests {
         assert_eq!(coding.session_mode(), Some(V2_CODING_AGENT_NAME));
         assert_eq!(V2_CODING_AGENT_NAME, "build");
         assert_eq!(coding.id(), "opencode-coding-v2");
-        assert!(!coding
-            .spawn_spec(Path::new("/tmp"))
-            .expect("opencode resolves")
-            .env
-            .contains_key(OPENCODE_CONFIG_CONTENT));
+        assert!(
+            !coding
+                .spawn_spec(Path::new("/tmp"))
+                .expect("opencode resolves")
+                .env
+                .contains_key(OPENCODE_CONFIG_CONTENT)
+        );
     }
 
     #[test]

@@ -8,7 +8,7 @@
 
 use gpui::{
     App, AppContext, Context, Entity, EventEmitter, InteractiveElement, IntoElement, ParentElement,
-    StatefulInteractiveElement, Styled, Task, Window, div, px, rgb, prelude::FluentBuilder,
+    StatefulInteractiveElement, Styled, Task, Window, div, prelude::FluentBuilder, px, rgb,
 };
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::input::*;
@@ -313,7 +313,13 @@ impl TravelPanel {
                 this.child(Input::new(&self.custom_days).with_size(Size::Small))
             })
             .child(field_label("Activities"))
-            .child(div().h_flex().items_center().gap_1p5().children(activity_chips))
+            .child(
+                div()
+                    .h_flex()
+                    .items_center()
+                    .gap_1p5()
+                    .children(activity_chips),
+            )
             .child(
                 // No tooltip here: the popover unmounts the moment this is
                 // clicked, orphaning any visible tooltip on screen.
@@ -352,11 +358,29 @@ fn chip(
         .py_0p5()
         .rounded_md()
         .border_1()
-        .border_color(if selected { rgb(0x4a6fa5) } else { rgb(HAIRLINE) })
-        .bg(if selected { rgb(0x2f4057) } else { rgb(0x242424) })
+        .border_color(if selected {
+            rgb(0x4a6fa5)
+        } else {
+            rgb(HAIRLINE)
+        })
+        .bg(if selected {
+            rgb(0x2f4057)
+        } else {
+            rgb(0x242424)
+        })
         .text_sm()
-        .text_color(if selected { rgb(0xdbe6f5) } else { rgb(0xa3a3a3) })
-        .hover(|s| s.bg(if selected { rgb(0x2f4057) } else { rgb(0x2a2a2a) }))
+        .text_color(if selected {
+            rgb(0xdbe6f5)
+        } else {
+            rgb(0xa3a3a3)
+        })
+        .hover(|s| {
+            s.bg(if selected {
+                rgb(0x2f4057)
+            } else {
+                rgb(0x2a2a2a)
+            })
+        })
         .on_click(on_click)
         .child(label)
         .into_any_element()

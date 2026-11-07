@@ -144,7 +144,10 @@ async fn push_github_capture(store: &mut TodoStore, task_id: u64) -> anyhow::Res
         }
         let token = crate::github_auth::access_token().await?;
         let client = storage::GithubHttpClient::new(token);
-        store.push_github_new_task(&client, task_id).await.map(|_| ())
+        store
+            .push_github_new_task(&client, task_id)
+            .await
+            .map(|_| ())
     }
     .await;
     log_sync_op(
@@ -272,7 +275,13 @@ async fn push_patch(
     let token = crate::todoist_auth::access_token().await?;
     for link in links {
         store
-            .push_todoist_patch(&token, link.integration_id, &link.external_id, task_id, &patch)
+            .push_todoist_patch(
+                &token,
+                link.integration_id,
+                &link.external_id,
+                task_id,
+                &patch,
+            )
             .await?;
     }
     Ok(true)
@@ -313,7 +322,9 @@ async fn push_github_completion(store: &mut TodoStore, task_id: u64) -> anyhow::
     }
     let token = crate::github_auth::access_token().await?;
     let client = storage::GithubHttpClient::new(token);
-    store.close_issue_for_completed_task(&client, task_id).await?;
+    store
+        .close_issue_for_completed_task(&client, task_id)
+        .await?;
     Ok(())
 }
 
@@ -381,11 +392,17 @@ async fn push_task_done(store: &mut TodoStore, task_id: u64, done: bool) {
     {
         // No Todoist task to tell: there is no operation to record either.
         Ok(false) => {}
-        Ok(true) => {
-            log_sync_op(store, "todoist", kind, task_id, payload.clone(), &Ok(())).await
-        }
+        Ok(true) => log_sync_op(store, "todoist", kind, task_id, payload.clone(), &Ok(())).await,
         Err(error) => {
-            log_sync_op(store, "todoist", kind, task_id, payload.clone(), &Err(error)).await
+            log_sync_op(
+                store,
+                "todoist",
+                kind,
+                task_id,
+                payload.clone(),
+                &Err(error),
+            )
+            .await
         }
     }
 
@@ -585,15 +602,24 @@ impl Store {
             let mut s = store.lock().await;
             s.update_task_title(task_id, &title).await?;
             s.stamp_local_issue_field(task_id, "title").await?;
-            push_patch(&mut s, task_id, storage::todoist::TaskPatch {
-                content: Some(title.clone()),
-                ..Default::default()
-            })
+            push_patch(
+                &mut s,
+                task_id,
+                storage::todoist::TaskPatch {
+                    content: Some(title.clone()),
+                    ..Default::default()
+                },
+            )
             .await?;
-            push_github_patch(&mut s, task_id, storage::IssuePatch {
-                title: Some(title),
-                ..Default::default()
-            }, &["title"])
+            push_github_patch(
+                &mut s,
+                task_id,
+                storage::IssuePatch {
+                    title: Some(title),
+                    ..Default::default()
+                },
+                &["title"],
+            )
             .await?;
             Ok(())
         })
@@ -611,15 +637,24 @@ impl Store {
             s.update_task_description(task_id, description.clone())
                 .await?;
             s.stamp_local_issue_field(task_id, "body").await?;
-            push_patch(&mut s, task_id, storage::todoist::TaskPatch {
-                description: Some(description.clone()),
-                ..Default::default()
-            })
+            push_patch(
+                &mut s,
+                task_id,
+                storage::todoist::TaskPatch {
+                    description: Some(description.clone()),
+                    ..Default::default()
+                },
+            )
             .await?;
-            push_github_patch(&mut s, task_id, storage::IssuePatch {
-                body: Some(description.clone().unwrap_or_default()),
-                ..Default::default()
-            }, &["body"])
+            push_github_patch(
+                &mut s,
+                task_id,
+                storage::IssuePatch {
+                    body: Some(description.clone().unwrap_or_default()),
+                    ..Default::default()
+                },
+                &["body"],
+            )
             .await?;
             Ok(())
         })
@@ -811,18 +846,15 @@ impl Store {
         let store = self.0.clone();
         gpui_tokio::Tokio::spawn_result(cx, async move {
             let mut s = store.lock().await;
-            Ok(s
-                .set_repeat(task_id, name, interval_days, time_of_day, start_time_of_day)
-                .await?)
+            Ok(
+                s.set_repeat(task_id, name, interval_days, time_of_day, start_time_of_day)
+                    .await?,
+            )
         })
     }
 
     /// Delete the repeat template that `task_id` is an occurrence of.
-    pub fn remove_repeat(
-        &self,
-        task_id: u64,
-        cx: &impl AppContext,
-    ) -> Task<anyhow::Result<()>> {
+    pub fn remove_repeat(&self, task_id: u64, cx: &impl AppContext) -> Task<anyhow::Result<()>> {
         let store = self.0.clone();
         gpui_tokio::Tokio::spawn_result(cx, async move {
             let mut s = store.lock().await;
@@ -1053,9 +1085,14 @@ impl Store {
         let store = self.0.clone();
         gpui_tokio::Tokio::spawn_result(cx, async move {
             let mut s = store.lock().await;
-            Ok(s
-                .link_tag(integration_id, &external_id, tag_id, &source_kind, namespaced)
-                .await?)
+            Ok(s.link_tag(
+                integration_id,
+                &external_id,
+                tag_id,
+                &source_kind,
+                namespaced,
+            )
+            .await?)
         })
     }
 
@@ -1067,8 +1104,7 @@ impl Store {
         let store = self.0.clone();
         gpui_tokio::Tokio::spawn_result(cx, async move {
             let mut s = store.lock().await;
-            Ok(s
-                .list_integrations()
+            Ok(s.list_integrations()
                 .await?
                 .into_iter()
                 .find(|i| i.provider == "todoist"))
@@ -1724,10 +1760,7 @@ impl Store {
 
     /// Materialize repeat occurrences startable or due within the next
     /// 2 days. Idempotent; safe to call on startup and date rollovers.
-    pub fn materialize_due_occurrences(
-        &self,
-        cx: &impl AppContext,
-    ) -> Task<anyhow::Result<usize>> {
+    pub fn materialize_due_occurrences(&self, cx: &impl AppContext) -> Task<anyhow::Result<usize>> {
         let store = self.0.clone();
         gpui_tokio::Tokio::spawn_result(cx, async move {
             let mut s = store.lock().await;
@@ -1737,11 +1770,9 @@ impl Store {
                 .unwrap_or(0);
             Ok(s.materialize_daily_occurrences(now_secs).await?)
         })
-    }    /// Runs entirely on the Tokio runtime (network + DB).
-    pub fn sync_todoist(
-        &self,
-        cx: &impl AppContext,
-    ) -> Task<anyhow::Result<storage::SyncSummary>> {
+    }
+    /// Runs entirely on the Tokio runtime (network + DB).
+    pub fn sync_todoist(&self, cx: &impl AppContext) -> Task<anyhow::Result<storage::SyncSummary>> {
         let store = self.0.clone();
         gpui_tokio::Tokio::spawn_result(cx, async move {
             let token = crate::todoist_auth::access_token().await?;
@@ -1776,7 +1807,11 @@ impl Store {
     /// Start the `coding-task` run whose root is `task_id` (the feature task).
     /// Returns the new run id. Fails when the task already has an active run;
     /// runs on other feature tasks of the same project are allowed.
-    pub fn start_coding_run(&self, task_id: u64, cx: &impl AppContext) -> Task<anyhow::Result<u64>> {
+    pub fn start_coding_run(
+        &self,
+        task_id: u64,
+        cx: &impl AppContext,
+    ) -> Task<anyhow::Result<u64>> {
         let store = self.0.clone();
         gpui_tokio::Tokio::spawn_result(cx, async move {
             let mut s = store.lock().await;
@@ -1842,11 +1877,14 @@ impl Store {
             }
             s.append_run_note(view.run.id, "spec", "interview", "interview", "Spec saved")
                 .await?;
-            if let Some(step) = view.steps.iter().find(|step| {
-                step.node.id == "interview" && !step.task.done
-            }) {
+            if let Some(step) = view
+                .steps
+                .iter()
+                .find(|step| step.node.id == "interview" && !step.task.done)
+            {
                 let step_id = step.task.id;
-                s.complete_workflow_step(step_id, serde_json::json!({})).await?;
+                s.complete_workflow_step(step_id, serde_json::json!({}))
+                    .await?;
             }
             Ok(())
         })
@@ -1917,10 +1955,9 @@ impl Store {
                     Self::create_run_worktrees(&repos, &desired, &fallback, run_id)
                 })
                 .await??;
-                let primary = plans
-                    .first()
-                    .cloned()
-                    .ok_or_else(|| anyhow::anyhow!("this project has no git repository to work in"))?;
+                let primary = plans.first().cloned().ok_or_else(|| {
+                    anyhow::anyhow!("this project has no git repository to work in")
+                })?;
                 for plan in &plans {
                     s.insert_run_worktree(&NewRunWorktree {
                         run_id,
@@ -2139,7 +2176,8 @@ impl Store {
                 .await?;
             // The parent's coverage line counts it as covered: its own run is
             // where the work and its spec now live.
-            s.cover_subtask_at(sub_task_id, jiff::Timestamp::now()).await?;
+            s.cover_subtask_at(sub_task_id, jiff::Timestamp::now())
+                .await?;
             Ok(run.id)
         })
     }
@@ -2247,7 +2285,10 @@ impl Store {
                 worktree_path = repo_dir.join("worktrees").join(format!("{slug}-{run_id}"));
             }
             if worktree_path.exists() {
-                anyhow::bail!("{} already exists; remove it first", worktree_path.display());
+                anyhow::bail!(
+                    "{} already exists; remove it first",
+                    worktree_path.display()
+                );
             }
             // The claim goes on first: git records it for a branch that does
             // not exist yet, so a repo whose config cannot be written fails
@@ -2299,7 +2340,9 @@ impl Store {
             // Leave the tree clean so the user can resolve the conflict in the
             // agent pane and merge again.
             if let Err(abort) = coding_git::abort_merge(dir) {
-                return Err(anyhow::anyhow!("{error} (and the merge could not be aborted: {abort})"));
+                return Err(anyhow::anyhow!(
+                    "{error} (and the merge could not be aborted: {abort})"
+                ));
             }
             return Err(error);
         }
@@ -2324,7 +2367,11 @@ impl Store {
         let title = store.get_task(task_id).await?.title;
         let slug = normalize_branch_name(&title).to_lowercase();
         let slug = slug.rsplit('/').next().unwrap_or_default().to_string();
-        let slug = if slug.is_empty() { "task".to_string() } else { slug };
+        let slug = if slug.is_empty() {
+            "task".to_string()
+        } else {
+            slug
+        };
         Ok(format!("feature/{}-{slug}", view.run.id))
     }
 
@@ -2403,7 +2450,9 @@ impl Store {
     ) -> anyhow::Result<Vec<std::path::PathBuf>> {
         let dirs = Self::project_dirs(store, task_id).await?;
         tokio::task::spawn_blocking(move || {
-            dirs.into_iter().filter(|dir| coding_git::is_repo(dir)).collect()
+            dirs.into_iter()
+                .filter(|dir| coding_git::is_repo(dir))
+                .collect()
         })
         .await
         .map_err(Into::into)
@@ -2430,10 +2479,7 @@ impl Store {
     /// Bind every project tag whose directory resolves a github.com remote
     /// and has no target yet, persisting the detection so it is stable and
     /// overridable (spec decision 5). Returns how many tags were bound.
-    pub fn bind_detected_github_repos(
-        &self,
-        cx: &impl AppContext,
-    ) -> Task<anyhow::Result<usize>> {
+    pub fn bind_detected_github_repos(&self, cx: &impl AppContext) -> Task<anyhow::Result<usize>> {
         let store = self.0.clone();
         gpui_tokio::Tokio::spawn_result(cx, async move {
             let ids: Vec<u64> = {
@@ -2577,8 +2623,7 @@ impl Store {
         let store = self.0.clone();
         gpui_tokio::Tokio::spawn_result(cx, async move {
             let mut s = store.lock().await;
-            Ok(s
-                .bound_repos(integration_id)
+            Ok(s.bound_repos(integration_id)
                 .await?
                 .into_iter()
                 .filter(|bound| bound.tag_id == tag_id)
@@ -2782,10 +2827,7 @@ impl Store {
     /// lock is taken twice around it — read the candidates, then record what
     /// git found — and never held while git runs, which would freeze every
     /// other store caller for the length of the pass.
-    async fn bind_detected_repos(
-        store: &StoreLock,
-        integration_id: u64,
-    ) -> anyhow::Result<usize> {
+    async fn bind_detected_repos(store: &StoreLock, integration_id: u64) -> anyhow::Result<usize> {
         let candidates = {
             let mut s = store.lock().await;
             Self::unbound_repo_tag_dirs(&mut s).await?
@@ -3541,7 +3583,8 @@ impl Store {
                 fetched.push((pull_request, outcome));
             }
             let mut s = store.lock().await;
-            let mut resolved_runs: std::collections::HashSet<u64> = std::collections::HashSet::new();
+            let mut resolved_runs: std::collections::HashSet<u64> =
+                std::collections::HashSet::new();
             let mut changed = 0;
             for (pull_request, outcome) in fetched {
                 match outcome {

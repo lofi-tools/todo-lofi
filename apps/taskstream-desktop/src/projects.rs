@@ -44,11 +44,7 @@ impl Project {
     /// Get-or-create the tag backing this project folder: a unique name
     /// derived from the canonical absolute path plus the directory name as
     /// display name. Runs on the tokio runtime.
-    pub fn tag(
-        &self,
-        store: &Store,
-        cx: &impl AppContext,
-    ) -> Task<anyhow::Result<storage::Tag>> {
+    pub fn tag(&self, store: &Store, cx: &impl AppContext) -> Task<anyhow::Result<storage::Tag>> {
         let store = store.clone();
         let path = self.path.clone();
         gpui_tokio::Tokio::spawn_result(cx, async move {

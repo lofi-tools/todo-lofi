@@ -4,9 +4,9 @@ use gpui::{
     StatefulInteractiveElement, Styled, Subscription, Svg, Transformation, Window, div,
     prelude::FluentBuilder, px, radians, rgb, svg,
 };
-use gpui_component::WindowExt;
-use gpui_component::StyledExt;
 use gpui_component::ActiveTheme;
+use gpui_component::StyledExt;
+use gpui_component::WindowExt;
 use gpui_component::button::{Button, ButtonRounded, ButtonVariants};
 use gpui_component::input::*;
 use gpui_component::scroll::ScrollableElement;
@@ -25,19 +25,19 @@ use projects::Project;
 use store::Store;
 use theme::APP_BG;
 use ui_parts::agent_pane::{AgentPane, AgentPaneEvent, AgentProject, build_task_context};
-use ui_parts::navbar::{NavBar, NavBarEvent, NavDestination};
-use ui_parts::settings::SettingsView;
-use ui_parts::automations::{AutomationsEvent, AutomationsPanel};
 use ui_parts::apps::{AppSettings, AppSettingsEvent};
+use ui_parts::automations::{AutomationsEvent, AutomationsPanel};
 use ui_parts::integrations::{IntegrationsEvent, IntegrationsView, since_label};
+use ui_parts::navbar::{NavBar, NavBarEvent, NavDestination};
 use ui_parts::notifications::{
     Notice, NoticeFeed, NoticeFilter, NoticeLayer, NoticeLevel, NoticeLog, NoticeSink, error_toast,
 };
 use ui_parts::project_picker::{ProjectPicker, ProjectPickerEvent};
+use ui_parts::settings::SettingsView;
 use ui_parts::sync_history::{SyncHistoryPanel, failed_badge, history_icon, history_tooltip};
+use ui_parts::tag_settings::{TagSettingsEvent, TagSettingsPanel};
 use ui_parts::task_details::{TaskDetails, TaskDetailsEvent};
 use ui_parts::task_list::{TaskListEvent, TaskListView};
-use ui_parts::tag_settings::{TagSettingsEvent, TagSettingsPanel};
 use ui_parts::travel::{TravelPanel, TravelPanelEvent};
 
 mod coding_agent;
@@ -56,14 +56,14 @@ mod ui_parts {
     pub mod integrations;
     pub mod navbar;
     pub mod notifications;
-    pub mod settings;
-    pub mod sync_history;
     pub mod project_picker;
     pub mod repeat_picker;
+    pub mod settings;
+    pub mod sync_history;
+    pub mod tag_settings;
     pub mod task_details;
     pub mod task_list;
     pub mod task_picker;
-    pub mod tag_settings;
     pub mod task_row;
     pub mod todoist_sync;
     pub mod travel;
@@ -415,9 +415,7 @@ impl Layout {
                 AgentPaneEvent::BusyChanged { tag_name, busy } => {
                     let tag_name = tag_name.clone();
                     let busy = *busy;
-                    nav_for_agent.update(cx, |nav, cx| {
-                        nav.set_agent_busy(&tag_name, busy, cx)
-                    });
+                    nav_for_agent.update(cx, |nav, cx| nav.set_agent_busy(&tag_name, busy, cx));
                 }
                 // A session that is gone leaves no usable token behind: the
                 // binding died with the process.
@@ -430,18 +428,16 @@ impl Layout {
                 // the message can be edited first.
                 AgentPaneEvent::AttachTaskRequested => {
                     if let Some(context) = this.task_context(cx) {
-                        this.agent_pane.update(cx, |pane, cx| {
-                            pane.insert_prompt_text(context, window, cx)
-                        });
+                        this.agent_pane
+                            .update(cx, |pane, cx| pane.insert_prompt_text(context, window, cx));
                     }
                 }
             },
         );
         // The managed-tag panel is created up front (it needs a window for
         // its input) and reconfigured when a managed tag is selected.
-        let travel_panel = cx.new(|cx| {
-            TravelPanel::new(store.clone(), 0, 0, String::new(), window, cx)
-        });
+        let travel_panel =
+            cx.new(|cx| TravelPanel::new(store.clone(), 0, 0, String::new(), window, cx));
         let tag_settings = cx.new(|cx| TagSettingsPanel::new(store.clone(), window, cx));
         // Captured by the nav subscription below: managed-tag detection is
         // async (a DB lookup), so it spawns on the app executor and
@@ -485,9 +481,8 @@ impl Layout {
                         // tasks arrive with the view rather than at the
                         // poller's next tick.
                         if let Some(tag_name) = path.last().cloned() {
-                            this.integrations.update(cx, |view, cx| {
-                                view.project_opened(tag_name, cx)
-                            });
+                            this.integrations
+                                .update(cx, |view, cx| view.project_opened(tag_name, cx));
                         }
                     }
                     NavDestination::AllTasks => {
@@ -580,7 +575,8 @@ impl Layout {
         let _busy_subscription = cx.subscribe(&agent_pane, move |_this, pane, event, cx| {
             if matches!(event, AgentPaneEvent::BusyChanged { .. }) {
                 let busy = pane.read(cx).is_busy();
-                details_for_busy.update(cx, |details, cx| details.set_coding_phase_running(busy, cx));
+                details_for_busy
+                    .update(cx, |details, cx| details.set_coding_phase_running(busy, cx));
             }
         });
         // One ownership-settings entity, embedded by the panels below.
@@ -622,8 +618,7 @@ impl Layout {
             }
         })
         .detach();
-        let integrations =
-            cx.new(|cx| IntegrationsView::new(store.clone(), apps.clone(), cx));
+        let integrations = cx.new(|cx| IntegrationsView::new(store.clone(), apps.clone(), cx));
         // Attaching, detaching, or removing an app changes tag ownership
         // (and can delete tags outright): refresh the tree, the lists, and
         // the panels that show ownership.
@@ -672,11 +667,13 @@ impl Layout {
                     // and the selected run: a merge completes the run and
                     // removes its worktrees, which moves the agent pane too.
                     this.task_list.update(cx, |list, cx| list.refresh(cx));
-                    this.details.update(cx, |details, cx| details.refresh_coding(cx));
+                    this.details
+                        .update(cx, |details, cx| details.refresh_coding(cx));
                     // A sync can pull remote field edits (e.g. the
                     // description) into the selected task: reload the pane
                     // so it shows what GitHub has.
-                    this.details.update(cx, |details, cx| details.refresh_selected(cx));
+                    this.details
+                        .update(cx, |details, cx| details.refresh_selected(cx));
                     this.sync_agent_checkout_for_selection(cx);
                 }
                 // A pass that brought something back is logged as an incoming
@@ -714,8 +711,7 @@ impl Layout {
                 }
             }
             TaskListEvent::Deselected => {
-                let deferred =
-                    details_for_list.update(cx, |details, cx| details.request_clear(cx));
+                let deferred = details_for_list.update(cx, |details, cx| details.request_clear(cx));
                 if !deferred {
                     list_for_deselect.update(cx, |list, cx| list.clear_selection(cx));
                     cx.notify();
@@ -824,9 +820,8 @@ impl Layout {
                     // profile.
                     match this.start_coding_profile(phase, *task_id, cx) {
                         Ok(()) => {
-                            this.agent_pane.update(cx, |pane, cx| {
-                                pane.insert_prompt_text(prompt, window, cx)
-                            });
+                            this.agent_pane
+                                .update(cx, |pane, cx| pane.insert_prompt_text(prompt, window, cx));
                             this.show_run_split(window, cx);
                         }
                         Err(error) => {
@@ -857,8 +852,8 @@ impl Layout {
         // window-wide, unlike `on_key_down` listeners which only run along
         // the focus path. Skipped while the project picker modal is open so
         // Esc there only dismisses the dialog.
-        let escape_observer = cx.observe_keystrokes(
-            move |layout: &mut Layout, event, window, cx| {
+        let escape_observer =
+            cx.observe_keystrokes(move |layout: &mut Layout, event, window, cx| {
                 if event.keystroke.key == "escape" {
                     if layout._picker_subscription.is_some() {
                         return;
@@ -866,9 +861,7 @@ impl Layout {
                     // The history pane is a full-height overlay: Escape takes
                     // it back down before anything underneath reacts.
                     if layout.sync_history.read(cx).is_open() {
-                        layout
-                            .sync_history
-                            .update(cx, |panel, cx| panel.close(cx));
+                        layout.sync_history.update(cx, |panel, cx| panel.close(cx));
                         return;
                     }
                     // The agent pane takes Escape while it holds the focus: an
@@ -886,9 +879,7 @@ impl Layout {
                         return;
                     }
                     if layout.tag_settings.read(cx).is_open() {
-                        layout
-                            .tag_settings
-                            .update(cx, |panel, cx| panel.close(cx));
+                        layout.tag_settings.update(cx, |panel, cx| panel.close(cx));
                         return;
                     }
                     if layout.travel_panel.read(cx).is_adding() {
@@ -910,9 +901,7 @@ impl Layout {
                     // back to the destination it was opened from (the tag
                     // pane, normally) rather than to a fixed panel.
                     if !layout.nav_bar.read(cx).destination().is_tasks() {
-                        let went_back = layout
-                            .nav_bar
-                            .update(cx, |nav, cx| nav.navigate_back(cx));
+                        let went_back = layout.nav_bar.update(cx, |nav, cx| nav.navigate_back(cx));
                         if !went_back {
                             layout.nav_bar.update(cx, |nav, cx| {
                                 nav.navigate_to(NavDestination::AllTasks, cx)
@@ -939,21 +928,21 @@ impl Layout {
                         return;
                     }
                     if layout.details.read(cx).after_picker_open() {
-                        layout.details.update(cx, |details, cx| {
-                            details.close_after_picker_and_notify(cx)
-                        });
+                        layout
+                            .details
+                            .update(cx, |details, cx| details.close_after_picker_and_notify(cx));
                         return;
                     }
                     if layout.details.read(cx).until_panel_open() {
-                        layout.details.update(cx, |details, cx| {
-                            details.close_until_panel_and_notify(cx)
-                        });
+                        layout
+                            .details
+                            .update(cx, |details, cx| details.close_until_panel_and_notify(cx));
                         return;
                     }
                     if layout.details.read(cx).repeat_picker_open() {
-                        layout.details.update(cx, |details, cx| {
-                            details.close_repeat_picker_and_notify(cx)
-                        });
+                        layout
+                            .details
+                            .update(cx, |details, cx| details.close_repeat_picker_and_notify(cx));
                         return;
                     }
                     if layout.task_list.read(cx).is_editing() {
@@ -977,8 +966,7 @@ impl Layout {
                         .update(cx, |list, cx| list.clear_selection(cx));
                     cx.notify();
                 }
-            },
-        );
+            });
 
         Self {
             task_list,
@@ -1015,26 +1003,26 @@ impl Layout {
         }
     }
 
-/// Resolve the selected tag to its managing automation, if any.
-async fn lookup_managed_tag(
-    store: &Store,
-    tag_name: &str,
-    cx: &mut AsyncApp,
-) -> Option<ManagedTag> {
-    let Ok(Some(tag)) = store.get_tag_by_name(tag_name.to_string(), cx).await else {
-        return None;
-    };
-    let recipe = store
-        .managed_recipe_for_tag(tag.id, cx)
-        .await
-        .ok()
-        .flatten()?;
-    Some(ManagedTag {
-        tag_id: tag.id,
-        recipe_id: recipe,
-        label: tag.label(),
-    })
-}
+    /// Resolve the selected tag to its managing automation, if any.
+    async fn lookup_managed_tag(
+        store: &Store,
+        tag_name: &str,
+        cx: &mut AsyncApp,
+    ) -> Option<ManagedTag> {
+        let Ok(Some(tag)) = store.get_tag_by_name(tag_name.to_string(), cx).await else {
+            return None;
+        };
+        let recipe = store
+            .managed_recipe_for_tag(tag.id, cx)
+            .await
+            .ok()
+            .flatten()?;
+        Some(ManagedTag {
+            tag_id: tag.id,
+            recipe_id: recipe,
+            label: tag.label(),
+        })
+    }
 
     /// Look up the selected tag; if an automation owns it, show its
     /// special panel instead of the task list. Async so the navbar keeps
@@ -1070,41 +1058,40 @@ async fn lookup_managed_tag(
                     // Drop a retried result if the user navigated elsewhere
                     // while waiting.
                     if retried
-                        && this.nav_bar.read(cx).destination()
-                            != &NavDestination::Tag(path.clone())
+                        && this.nav_bar.read(cx).destination() != &NavDestination::Tag(path.clone())
                     {
                         return;
                     }
                     let changed = this.managed_tag.as_ref().map(|m| m.tag_id)
                         != managed.as_ref().map(|m| m.tag_id);
                     this.managed_tag = managed;
-                if let Some(managed) = &this.managed_tag {
-                    this.travel_panel.update(cx, |panel, cx| {
-                        panel.set_tag(
-                            managed.recipe_id,
-                            managed.tag_id,
-                            managed.label.clone(),
-                            cx,
-                        );
-                    });
-                    // Managed tag: the "+ New trip" button moves into the
-                    // task list's title row, and the empty list offers it
-                    // where the checklist rows would appear.
-                    this.task_list.update(cx, |list, cx| {
-                        list.set_travel_panel(Some(this.travel_panel.clone()), cx);
-                        list.set_empty_action(Some("+ New trip".to_string()), cx);
-                    });
-                } else {
-                    this.task_list.update(cx, |list, cx| {
-                        list.set_travel_panel(None, cx);
-                        list.set_empty_action(None, cx);
-                    });
-                }
-                if changed {
-                    cx.notify();
-                }
-            })
-            .ok();
+                    if let Some(managed) = &this.managed_tag {
+                        this.travel_panel.update(cx, |panel, cx| {
+                            panel.set_tag(
+                                managed.recipe_id,
+                                managed.tag_id,
+                                managed.label.clone(),
+                                cx,
+                            );
+                        });
+                        // Managed tag: the "+ New trip" button moves into the
+                        // task list's title row, and the empty list offers it
+                        // where the checklist rows would appear.
+                        this.task_list.update(cx, |list, cx| {
+                            list.set_travel_panel(Some(this.travel_panel.clone()), cx);
+                            list.set_empty_action(Some("+ New trip".to_string()), cx);
+                        });
+                    } else {
+                        this.task_list.update(cx, |list, cx| {
+                            list.set_travel_panel(None, cx);
+                            list.set_empty_action(None, cx);
+                        });
+                    }
+                    if changed {
+                        cx.notify();
+                    }
+                })
+                .ok();
         })
         .detach();
     }
@@ -1414,7 +1401,9 @@ async fn lookup_managed_tag(
             // selected task's run: re-selecting a tag must not drop the pane
             // back onto the project directory mid-run (§6.3).
             layout
-                .update(cx, |layout, cx| layout.sync_agent_checkout_for_selection(cx))
+                .update(cx, |layout, cx| {
+                    layout.sync_agent_checkout_for_selection(cx)
+                })
                 .ok();
             // Clicking a busy project's row opens it with the agent focused.
             if busy {
@@ -1643,11 +1632,7 @@ async fn lookup_managed_tag(
     /// reported, newest first, filtered to failures unless asked for more. It
     /// uses a fixed pixel height derived from the current viewport, with its
     /// entries scrolling underneath the header.
-    fn render_notifications_pane(
-        &self,
-        pane_height: Pixels,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
+    fn render_notifications_pane(&self, pane_height: Pixels, cx: &mut Context<Self>) -> AnyElement {
         let filter = self.notice_filter;
         let now = jiff::Timestamp::now();
         let shown: Vec<(usize, &Notice)> = self
@@ -1740,13 +1725,7 @@ async fn lookup_managed_tag(
                         )
                     })),
             )
-            .child(
-                div()
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scrollbar()
-                    .child(list),
-            )
+            .child(div().flex_1().min_h_0().overflow_y_scrollbar().child(list))
             .into_any_element()
     }
 
@@ -1875,53 +1854,49 @@ async fn lookup_managed_tag(
         let input_for_enter = input.clone();
         let parent_for_enter = parent_name.clone();
         let store_for_enter = self.store.clone();
-        let enter_sub = cx.subscribe_in(
-            &input,
-            window,
-            move |this, _, event, window, cx| {
-                if !matches!(event, InputEvent::PressEnter { .. }) {
-                    return;
-                }
-                let name = input_for_enter.read(cx).value().trim().to_string();
-                if name.is_empty() {
-                    return;
-                }
-                window.close_dialog(cx);
-                this._add_subtag_subscription = None;
-                let store = store_for_enter.clone();
-                let parent = parent_for_enter.clone();
-                cx.spawn(async move |this, cx| {
-                    let created = match store.create_tag(name, cx).await {
-                        Ok(tag) => tag,
-                        Err(error) => {
-                            tracing::error!("Failed to create sub-tag: {error}");
-                            return;
-                        }
-                    };
-                    if let Err(error) = store
-                        .set_tag_parents(created.id, vec![parent.clone()], cx)
-                        .await
-                    {
-                        tracing::error!("Failed to place sub-tag: {error}");
+        let enter_sub = cx.subscribe_in(&input, window, move |this, _, event, window, cx| {
+            if !matches!(event, InputEvent::PressEnter { .. }) {
+                return;
+            }
+            let name = input_for_enter.read(cx).value().trim().to_string();
+            if name.is_empty() {
+                return;
+            }
+            window.close_dialog(cx);
+            this._add_subtag_subscription = None;
+            let store = store_for_enter.clone();
+            let parent = parent_for_enter.clone();
+            cx.spawn(async move |this, cx| {
+                let created = match store.create_tag(name, cx).await {
+                    Ok(tag) => tag,
+                    Err(error) => {
+                        tracing::error!("Failed to create sub-tag: {error}");
                         return;
                     }
-                    this.update(cx, |this, cx| {
-                        this.nav_bar.update(cx, |nav, cx| nav.refresh_tags(cx));
-                        if let Some(path) = this
-                            .nav_bar
-                            .read(cx)
-                            .path_for_tag_name(&parent)
-                            .map(|p| p.to_vec())
-                        {
-                            this.nav_bar
-                                .update(cx, |nav, cx| nav.navigate_to(NavDestination::Tag(path), cx));
-                        }
-                    })
-                    .ok();
+                };
+                if let Err(error) = store
+                    .set_tag_parents(created.id, vec![parent.clone()], cx)
+                    .await
+                {
+                    tracing::error!("Failed to place sub-tag: {error}");
+                    return;
+                }
+                this.update(cx, |this, cx| {
+                    this.nav_bar.update(cx, |nav, cx| nav.refresh_tags(cx));
+                    if let Some(path) = this
+                        .nav_bar
+                        .read(cx)
+                        .path_for_tag_name(&parent)
+                        .map(|p| p.to_vec())
+                    {
+                        this.nav_bar
+                            .update(cx, |nav, cx| nav.navigate_to(NavDestination::Tag(path), cx));
+                    }
                 })
-                .detach();
-            },
-        );
+                .ok();
+            })
+            .detach();
+        });
         self._add_subtag_subscription = Some(enter_sub);
 
         window.open_dialog(cx, move |dialog, _, _| {
@@ -1929,8 +1904,9 @@ async fn lookup_managed_tag(
             let layout = layout.clone();
             let store = store.clone();
             let parent = parent_for_create.clone();
-            dialog.title(format!("Add sub-tag under {parent_for_title}")).content(
-                move |content, _, _| {
+            dialog
+                .title(format!("Add sub-tag under {parent_for_title}"))
+                .content(move |content, _, _| {
                     let input = input.clone();
                     let layout = layout.clone();
                     let store = store.clone();
@@ -1941,65 +1917,70 @@ async fn lookup_managed_tag(
                             .gap_3()
                             .child(Input::new(&input).with_size(Size::Medium))
                             .child(
-                                div()
-                                    .h_flex()
-                                    .justify_end()
-                                    .gap_2()
-                                    .child(
-                                        Button::new("create-sub-tag")
-                                            .compact()
-                                            .label("Create")
-                                            .on_click(move |_, window, cx| {
-                                                let name = input
-                                                    .read(cx)
-                                                    .value()
-                                                    .trim()
-                                                    .to_string();
-                                                if name.is_empty() {
-                                                    return;
-                                                }
-                                                window.close_dialog(cx);
-                                                let layout = layout.clone();
-                                                let store = store.clone();
-                                                let parent = parent.clone();
-                                                cx.spawn(async move |cx| {
-                                                    let created = match store.create_tag(name, cx).await {
-                                                        Ok(tag) => tag,
-                                                        Err(error) => {
-                                                            tracing::error!("Failed to create sub-tag: {error}");
-                                                            return;
-                                                        }
-                                                    };
-                                                    if let Err(error) = store
-                                                        .set_tag_parents(created.id, vec![parent.clone()], cx)
-                                                        .await
-                                                    {
-                                                        tracing::error!("Failed to place sub-tag: {error}");
+                                div().h_flex().justify_end().gap_2().child(
+                                    Button::new("create-sub-tag")
+                                        .compact()
+                                        .label("Create")
+                                        .on_click(move |_, window, cx| {
+                                            let name = input.read(cx).value().trim().to_string();
+                                            if name.is_empty() {
+                                                return;
+                                            }
+                                            window.close_dialog(cx);
+                                            let layout = layout.clone();
+                                            let store = store.clone();
+                                            let parent = parent.clone();
+                                            cx.spawn(async move |cx| {
+                                                let created = match store.create_tag(name, cx).await
+                                                {
+                                                    Ok(tag) => tag,
+                                                    Err(error) => {
+                                                        tracing::error!(
+                                                            "Failed to create sub-tag: {error}"
+                                                        );
                                                         return;
                                                     }
-                                                    layout
-                                                        .update(cx, |this, cx| {
-                                                            this.nav_bar.update(cx, |nav, cx| nav.refresh_tags(cx));
-                                                            if let Some(path) = this
-                                                                .nav_bar
-                                                                .read(cx)
-                                                                .path_for_tag_name(&parent)
-                                                                .map(|p| p.to_vec())
-                                                            {
-                                                                this.nav_bar.update(cx, |nav, cx| {
-                                                                    nav.navigate_to(NavDestination::Tag(path), cx);
-                                                                });
-                                                            }
-                                                        })
-                                                        .ok();
-                                                })
-                                                .detach();
-                                            }),
-                                    ),
+                                                };
+                                                if let Err(error) = store
+                                                    .set_tag_parents(
+                                                        created.id,
+                                                        vec![parent.clone()],
+                                                        cx,
+                                                    )
+                                                    .await
+                                                {
+                                                    tracing::error!(
+                                                        "Failed to place sub-tag: {error}"
+                                                    );
+                                                    return;
+                                                }
+                                                layout
+                                                    .update(cx, |this, cx| {
+                                                        this.nav_bar.update(cx, |nav, cx| {
+                                                            nav.refresh_tags(cx)
+                                                        });
+                                                        if let Some(path) = this
+                                                            .nav_bar
+                                                            .read(cx)
+                                                            .path_for_tag_name(&parent)
+                                                            .map(|p| p.to_vec())
+                                                        {
+                                                            this.nav_bar.update(cx, |nav, cx| {
+                                                                nav.navigate_to(
+                                                                    NavDestination::Tag(path),
+                                                                    cx,
+                                                                );
+                                                            });
+                                                        }
+                                                    })
+                                                    .ok();
+                                            })
+                                            .detach();
+                                        }),
+                                ),
                             ),
                     )
-                },
-            )
+                })
         });
     }
 
@@ -2110,9 +2091,8 @@ async fn lookup_managed_tag(
             let owned_by = owned_by.clone();
             let (layout, store) = (layout.clone(), store.clone());
             let (external_id, name) = (external_id.clone(), name.clone());
-            dialog
-                .title(format!("\"{name}\" already exists"))
-                .content(move |content, _window, _cx| {
+            dialog.title(format!("\"{name}\" already exists")).content(
+                move |content, _window, _cx| {
                     let (same_layout, remap_layout) = (layout.clone(), layout.clone());
                     let (same_store, remap_store) = (store.clone(), store.clone());
                     let (same_id, remap_id) = (external_id.clone(), external_id.clone());
@@ -2121,16 +2101,11 @@ async fn lookup_managed_tag(
                         div()
                             .v_flex()
                             .gap_3()
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .text_color(rgb(0xa3a3a3))
-                                    .child(format!(
-                                        "#{same_name} is managed by {owned_by}. Sync the Todoist \
+                            .child(div().text_sm().text_color(rgb(0xa3a3a3)).child(format!(
+                                "#{same_name} is managed by {owned_by}. Sync the Todoist \
                                          project into the same tag, or remap it to a new \
                                          \"todoist/{same_name}\" tag."
-                                    )),
-                            )
+                            )))
                             .child(
                                 div()
                                     .h_flex()
@@ -2172,7 +2147,8 @@ async fn lookup_managed_tag(
                                     ),
                             ),
                     )
-                })
+                },
+            )
         });
     }
 
@@ -2230,17 +2206,15 @@ async fn lookup_managed_tag(
             };
             Ok::<_, anyhow::Error>((tag_id, summary))
         });
-        cx.spawn(async move |cx| {
-            match flow.await {
-                Ok(_) => {
-                    layout
-                        .update(cx, |this, cx| {
-                            this.nav_bar.update(cx, |nav, cx| nav.refresh_tags(cx));
-                        })
-                        .ok();
-                }
-                Err(error) => tracing::error!("Todoist sync after project pick failed: {error}"),
+        cx.spawn(async move |cx| match flow.await {
+            Ok(_) => {
+                layout
+                    .update(cx, |this, cx| {
+                        this.nav_bar.update(cx, |nav, cx| nav.refresh_tags(cx));
+                    })
+                    .ok();
             }
+            Err(error) => tracing::error!("Todoist sync after project pick failed: {error}"),
         })
         .detach();
     }
@@ -2268,7 +2242,13 @@ impl Render for Layout {
             .root::<gpui_component::Root>()
             .flatten()
             .and_then(|root| {
-                if root.read(cx).notification.read(cx).notifications().is_empty() {
+                if root
+                    .read(cx)
+                    .notification
+                    .read(cx)
+                    .notifications()
+                    .is_empty()
+                {
                     None
                 } else {
                     gpui_component::Root::render_notification_layer(window, cx)
@@ -2305,11 +2285,9 @@ impl Render for Layout {
                                 .compact()
                                 // The one arrow glyph, turned around for
                                 // "back".
-                                .child(
-                                    history_arrow(can_go_back, cx).with_transformation(
-                                        Transformation::rotate(radians(std::f32::consts::PI)),
-                                    ),
-                                )
+                                .child(history_arrow(can_go_back, cx).with_transformation(
+                                    Transformation::rotate(radians(std::f32::consts::PI)),
+                                ))
                                 .disabled(!can_go_back)
                                 .tooltip("Previous task")
                                 .on_click(cx.listener(|this, _, _, cx| {
@@ -2349,8 +2327,7 @@ impl Render for Layout {
                                 .toggled(sync_history_open)
                                 .tooltip(history_tooltip(sync_history_failed))
                                 .on_click(cx.listener(|this, _, _, cx| {
-                                    this.sync_history
-                                        .update(cx, |panel, cx| panel.toggle(cx));
+                                    this.sync_history.update(cx, |panel, cx| panel.toggle(cx));
                                 })),
                         ),
                 ),
@@ -2366,7 +2343,13 @@ impl Render for Layout {
                     // clamp to the remaining window height instead.
                     .min_h_0()
                     .relative()
-                    .child(div().w_auto().max_w(px(256.)).flex_none().child(self.nav_bar.clone()))
+                    .child(
+                        div()
+                            .w_auto()
+                            .max_w(px(256.))
+                            .flex_none()
+                            .child(self.nav_bar.clone()),
+                    )
                     .child(match self.nav_bar.read(cx).destination().clone() {
                         // Only a tag can be automation-managed, so the special
                         // panel is reached through the tag destination alone.
@@ -2417,9 +2400,7 @@ impl Render for Layout {
                             // A launched phase docks the agent inside the
                             // details pane: the same right-anchored column,
                             // holding both.
-                            .when(run_split_open, |this| {
-                                this.child(self.render_run_split(cx))
-                            })
+                            .when(run_split_open, |this| this.child(self.render_run_split(cx)))
                             // The popover is the LAST child so GPUI paints it
                             // above the task list (paint order follows tree
                             // order).
@@ -2491,9 +2472,7 @@ impl Render for Layout {
                             // A launched phase docks the agent inside the
                             // details pane: the same right-anchored column,
                             // holding both.
-                            .when(run_split_open, |this| {
-                                this.child(self.render_run_split(cx))
-                            })
+                            .when(run_split_open, |this| this.child(self.render_run_split(cx)))
                             // The popover is the LAST child so GPUI paints it
                             // above the task list (paint order follows tree
                             // order).
@@ -2745,8 +2724,8 @@ fn main() {
                                         input_state
                                     });
 
-                                    let mini = cx
-                                        .new(|cx| Layout::new(input, store, notices, window, cx));
+                                    let mini =
+                                        cx.new(|cx| Layout::new(input, store, notices, window, cx));
 
                                     // Handed to the Dock-click path, which
                                     // adopts it rather than building a second
@@ -2802,7 +2781,8 @@ fn watch_for_foreground_hangs(cx: &mut App) {
     std::thread::Builder::new()
         .name("hang-watch".to_string())
         .spawn(move || {
-            let mut detector = gpui::profiler::hang::HangDetector::new(journal, STALL, FRAME_BUDGET);
+            let mut detector =
+                gpui::profiler::hang::HangDetector::new(journal, STALL, FRAME_BUDGET);
             loop {
                 for incident in detector.poll() {
                     let (start, end) = incident.active_window();
@@ -2858,9 +2838,11 @@ mod layout_tests {
 
     impl Render for NoticeFilterPills {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-            div().h_flex().children(NoticeFilter::options().map(|option| {
-                Layout::notice_filter_pill(option, option == NoticeFilter::All, |_, _, _| {})
-            }))
+            div()
+                .h_flex()
+                .children(NoticeFilter::options().map(|option| {
+                    Layout::notice_filter_pill(option, option == NoticeFilter::All, |_, _, _| {})
+                }))
         }
     }
 

@@ -7,8 +7,7 @@
 
 use gpui::{
     AnyElement, AppContext, Context, Entity, InteractiveElement, IntoElement, ParentElement,
-    Render, SharedString, StatefulInteractiveElement, Styled, Task, Window, div,
-    px, rgb,
+    Render, SharedString, StatefulInteractiveElement, Styled, Task, Window, div, px, rgb,
 };
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::scroll::ScrollableElement;
@@ -218,10 +217,7 @@ impl SettingsView {
             let mut accounts: HashMap<u64, (String, Option<String>, u64)> = HashMap::new();
             if let Ok(integrations) = store.list_integrations(cx).await {
                 for integration in integrations {
-                    if let Ok(Some(app)) = store
-                        .app_for_integration(integration.id, cx)
-                        .await
-                    {
+                    if let Ok(Some(app)) = store.app_for_integration(integration.id, cx).await {
                         accounts.insert(
                             app.id,
                             (
@@ -252,9 +248,8 @@ impl SettingsView {
                         }
                     })
                     .collect();
-                this.app_list.sort_by(|a, b| {
-                    Self::nav_sort_key(a).cmp(&Self::nav_sort_key(b))
-                });
+                this.app_list
+                    .sort_by(|a, b| Self::nav_sort_key(a).cmp(&Self::nav_sort_key(b)));
                 this.github_maps
                     .retain(|app_id, _| this.app_list.iter().any(|app| &app.id == app_id));
                 this._load = None;
@@ -264,8 +259,7 @@ impl SettingsView {
             // The GitHub tag mapping loads after the list (it needs the
             // integration ids): a separate task, so a slow map never holds
             // the list load open.
-            this.update(cx, |this, cx| this.load_github_maps(cx))
-                .ok();
+            this.update(cx, |this, cx| this.load_github_maps(cx)).ok();
         }));
     }
 
@@ -535,10 +529,8 @@ impl SettingsView {
                                 .items_center()
                                 .gap_1p5()
                                 .child(
-                                    Icon::new(
-                                        gpui_component_assets::IconName::Github,
-                                    )
-                                    .with_size(Size::Small),
+                                    Icon::new(gpui_component_assets::IconName::Github)
+                                        .with_size(Size::Small),
                                 )
                                 .child(
                                     div()
@@ -650,26 +642,27 @@ impl SettingsView {
 
     fn theme_row(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let theme = self.file.general.theme;
-        let chip = |id: &str, label: &str, active: bool, value: ThemeChoice, cx: &mut Context<Self>| {
-            div()
-                .id(SharedString::from(id.to_string()))
-                .px_2()
-                .py_0p5()
-                .rounded_md()
-                .border_1()
-                .border_color(if active { rgb(0x4a6fa5) } else { rgb(0x3a3a3a) })
-                .bg(if active { rgb(0x2f4057) } else { rgb(0x242424) })
-                .text_xs()
-                .text_color(if active { rgb(0xdbe6f5) } else { rgb(0xa3a3a3) })
-                .hover(|this| this.bg(rgb(0x2a2a2a)))
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.file.general.theme = value;
-                    this.persist();
-                    cx.notify();
-                }))
-                .child(label.to_string())
-                .into_any_element()
-        };
+        let chip =
+            |id: &str, label: &str, active: bool, value: ThemeChoice, cx: &mut Context<Self>| {
+                div()
+                    .id(SharedString::from(id.to_string()))
+                    .px_2()
+                    .py_0p5()
+                    .rounded_md()
+                    .border_1()
+                    .border_color(if active { rgb(0x4a6fa5) } else { rgb(0x3a3a3a) })
+                    .bg(if active { rgb(0x2f4057) } else { rgb(0x242424) })
+                    .text_xs()
+                    .text_color(if active { rgb(0xdbe6f5) } else { rgb(0xa3a3a3) })
+                    .hover(|this| this.bg(rgb(0x2a2a2a)))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.file.general.theme = value;
+                        this.persist();
+                        cx.notify();
+                    }))
+                    .child(label.to_string())
+                    .into_any_element()
+            };
         let row = div().h_flex().items_center().gap_1().child(chip(
             "settings-theme-system",
             "System",
@@ -825,14 +818,9 @@ impl SettingsView {
             .v_flex()
             .gap_4()
             .child(div().text_xl().font_semibold().child("Apps"))
-            .child(
-                div()
-                    .text_sm()
-                    .text_color(rgb(0xa3a3a3))
-                    .child(format!(
-                        "{count} app(s) installed. Pick one on the left for its own settings."
-                    )),
-            )
+            .child(div().text_sm().text_color(rgb(0xa3a3a3)).child(format!(
+                "{count} app(s) installed. Pick one on the left for its own settings."
+            )))
             .child(Self::section(
                 "Defaults",
                 vec![Self::row(
@@ -894,12 +882,7 @@ impl SettingsView {
             .v_flex()
             .gap_0p5()
             .child(div().text_xl().font_semibold().child(label.clone()))
-            .child(
-                div()
-                    .text_sm()
-                    .text_color(rgb(0xa3a3a3))
-                    .child(subtitle),
-            );
+            .child(div().text_sm().text_color(rgb(0xa3a3a3)).child(subtitle));
         let preferences = Self::section(
             "Preferences",
             vec![Self::row(
@@ -937,9 +920,9 @@ impl SettingsView {
             if slug.starts_with("todoist") {
                 let picker_id = format!("settings-sync-{slug}");
                 let picker = self.sync_picker(&slug, window, cx);
-                let disabled = self
-                    .apps
-                    .read_with(cx, |apps, _| apps.app(app_id).is_some_and(|app| !app.enabled));
+                let disabled = self.apps.read_with(cx, |apps, _| {
+                    apps.app(app_id).is_some_and(|app| !app.enabled)
+                });
                 let mut rows = vec![
                     div()
                         .text_xs()
@@ -960,8 +943,8 @@ impl SettingsView {
                 page = page.child(Self::section("Synced tags", rows));
             } else {
                 let is_github = entry.provider.as_deref() == Some("github");
-                let github_rows = is_github
-                    .then(|| self.github_maps.get(&app_id).cloned().unwrap_or_default());
+                let github_rows =
+                    is_github.then(|| self.github_maps.get(&app_id).cloned().unwrap_or_default());
                 let picker_id = format!("settings-tags-{slug}");
                 let picker = self.tag_picker(&slug, app_id, true, window, cx);
                 let mut synced = vec![
@@ -983,11 +966,10 @@ impl SettingsView {
                 page = page.child(Self::section("Synced tags", synced));
             }
         }
-        let block = self.apps.update(cx, |settings, cx| {
-            settings.settings_block(app_id, 1, cx)
-        });
-        page
-            .child(Self::section("Tags & runs", vec![block]))
+        let block = self
+            .apps
+            .update(cx, |settings, cx| settings.settings_block(app_id, 1, cx));
+        page.child(Self::section("Tags & runs", vec![block]))
             .into_any_element()
     }
 
@@ -1220,7 +1202,10 @@ mod tests {
                 .map(Vec::len)
                 .unwrap_or(0)
         });
-        assert_eq!(initial_rows, 0, "nothing is connected before the tag is bound");
+        assert_eq!(
+            initial_rows, 0,
+            "nothing is connected before the tag is bound"
+        );
 
         // Bind the tag after that load, the way repo detection does: no
         // picker event announces it, so only re-opening the leaf refreshes it.
@@ -1300,12 +1285,7 @@ mod tests {
                 .expect("the repo binding");
             let attached = store.create_tag("attached").await.expect("the picker tag");
             store
-                .attach_app_to_tag(
-                    app.id,
-                    attached.id,
-                    storage::BindingRole::Partial,
-                    false,
-                )
+                .attach_app_to_tag(app.id, attached.id, storage::BindingRole::Partial, false)
                 .await
                 .expect("the picker attachment");
             let targeted = store.create_tag("targeted").await.expect("the sync tag");
@@ -1338,12 +1318,21 @@ mod tests {
         for _ in 0..400 {
             if let Some(map) = rows.take() {
                 assert_eq!(map.len(), 3);
-                let bound = map.iter().find(|(label, _, _)| label == "bound").expect("bound");
+                let bound = map
+                    .iter()
+                    .find(|(label, _, _)| label == "bound")
+                    .expect("bound");
                 assert_eq!(bound.1, vec!["octocat/hello-world".to_string()]);
                 assert_eq!(bound.2, vec!["/repos/hello-world".to_string()]);
-                let attached = map.iter().find(|(label, _, _)| label == "attached").expect("attached");
+                let attached = map
+                    .iter()
+                    .find(|(label, _, _)| label == "attached")
+                    .expect("attached");
                 assert!(attached.1.is_empty());
-                let targeted = map.iter().find(|(label, _, _)| label == "targeted").expect("targeted");
+                let targeted = map
+                    .iter()
+                    .find(|(label, _, _)| label == "targeted")
+                    .expect("targeted");
                 assert_eq!(targeted.1, vec!["octocat/solo".to_string()]);
                 return;
             }

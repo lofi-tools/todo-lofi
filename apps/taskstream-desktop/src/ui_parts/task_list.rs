@@ -4,11 +4,11 @@ use gpui::{
     StatefulInteractiveElement, Styled, Subscription, WeakEntity, Window, div, list,
     prelude::FluentBuilder, px, rgb,
 };
-use gpui_component::scroll::Scrollbar;
-use gpui_component::{IconName, Sizable, Size};
 use gpui_component::StyledExt;
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::input::*;
+use gpui_component::scroll::Scrollbar;
+use gpui_component::{IconName, Sizable, Size};
 use storage::TaskWithMeta;
 use storage::task::TaskCreate;
 
@@ -22,7 +22,10 @@ use std::rc::Rc;
 pub enum TaskListEvent {
     Selected(TaskWithMeta),
     Deselected,
-    TitleCommitted { task_id: u64, title: String },
+    TitleCommitted {
+        task_id: u64,
+        title: String,
+    },
     /// The empty-list action button was clicked (managed tags).
     EmptyActionRequested,
     /// The gear beside the tag title was clicked: open tag settings for the
@@ -388,17 +391,18 @@ impl TaskListView {
             });
         }
         self.selected = Some(task.clone());
-        self.editing = self
-            .task_views
-            .iter()
-            .any(|row| row.read(cx).is_editing());
+        self.editing = self.task_views.iter().any(|row| row.read(cx).is_editing());
         cx.emit(TaskListEvent::Selected(task));
     }
 
     /// Select a task by id, fetching it when it is not in the current list
     /// (e.g. a blocker from another tag's view).
     pub fn select_task_by_id(&mut self, task_id: u64, cx: &mut Context<Self>) {
-        if self.selected.as_ref().is_some_and(|task| task.id == task_id) {
+        if self
+            .selected
+            .as_ref()
+            .is_some_and(|task| task.id == task_id)
+        {
             return;
         }
         if let Some(task) = self.task_views.iter().find_map(|row| {
@@ -409,15 +413,12 @@ impl TaskListView {
             return;
         }
         let fetch = self.store.get_task_meta(task_id, cx);
-        cx.spawn(async move |this, cx| {
-            match fetch.await {
-                Ok(task) => {
-                    this.update(cx, |this, cx| this.select(task, true, cx))
-                        .ok();
-                }
-                Err(e) => {
-                    tracing::error!("Failed to fetch task {task_id}: {e}");
-                }
+        cx.spawn(async move |this, cx| match fetch.await {
+            Ok(task) => {
+                this.update(cx, |this, cx| this.select(task, true, cx)).ok();
+            }
+            Err(e) => {
+                tracing::error!("Failed to fetch task {task_id}: {e}");
             }
         })
         .detach();
@@ -482,11 +483,7 @@ impl TaskListView {
         // Dependants of `task_id` are blocked iff any of their blockers is
         // still open.
         let mut changed: Vec<(u64, bool)> = Vec::new();
-        if let Some(dependants) = self
-            .blocking_map
-            .get(&task_id)
-            .cloned()
-        {
+        if let Some(dependants) = self.blocking_map.get(&task_id).cloned() {
             for dependant in dependants {
                 let still_blocked = self
                     .blockers_map
@@ -506,7 +503,11 @@ impl TaskListView {
                 task.blocked = *blocked;
             }
         }
-        for blocked_task in self.blocking_map.values_mut().flat_map(|map| map.iter_mut()) {
+        for blocked_task in self
+            .blocking_map
+            .values_mut()
+            .flat_map(|map| map.iter_mut())
+        {
             if let Some((_, blocked)) = changed.iter().find(|(id, _)| *id == blocked_task.id) {
                 blocked_task.blocked = *blocked;
             }
@@ -567,9 +568,8 @@ impl TaskListView {
     /// a row shift until just after it, so no click lands mid-animation.
     /// Shared by the done-toggle jump and the periodic time-based re-sort.
     fn set_locked(&mut self, locked: bool, cx: &mut Context<Self>) {
-        self.locked_until = locked.then(|| {
-            std::time::Instant::now() + std::time::Duration::from_millis(1300)
-        });
+        self.locked_until =
+            locked.then(|| std::time::Instant::now() + std::time::Duration::from_millis(1300));
         for row in self.task_views.clone() {
             row.update(cx, |row, cx| row.set_locked(locked, cx));
         }
@@ -610,8 +610,14 @@ impl TaskListView {
         std::collections::HashMap<u64, Vec<TaskWithMeta>>,
     ) {
         let ids: Vec<u64> = tasks.iter().map(|t| t.id).collect();
-        let blockers = store.blockers_map(ids.clone(), cx).await.unwrap_or_default();
-        let blocking = store.blocking_map(ids.clone(), cx).await.unwrap_or_default();
+        let blockers = store
+            .blockers_map(ids.clone(), cx)
+            .await
+            .unwrap_or_default();
+        let blocking = store
+            .blocking_map(ids.clone(), cx)
+            .await
+            .unwrap_or_default();
         let subtasks = store.subtasks_map(ids, cx).await.unwrap_or_default();
         (blockers, blocking, subtasks)
     }
@@ -675,20 +681,18 @@ impl TaskListView {
             return;
         }
         let fetch = self.store.task_section_groups(tag_name, task_ids, cx);
-        self._fetch_sections = Some(cx.spawn(async move |this, cx| {
-            match fetch.await {
-                Ok((order, map)) => {
-                    this.update(cx, |this, cx| {
-                        this.section_order = order;
-                        this.task_section = map;
-                        this._fetch_sections = None;
-                        cx.notify();
-                    })
-                    .ok();
-                }
-                Err(e) => {
-                    tracing::error!("Failed to load sections: {e}");
-                }
+        self._fetch_sections = Some(cx.spawn(async move |this, cx| match fetch.await {
+            Ok((order, map)) => {
+                this.update(cx, |this, cx| {
+                    this.section_order = order;
+                    this.task_section = map;
+                    this._fetch_sections = None;
+                    cx.notify();
+                })
+                .ok();
+            }
+            Err(e) => {
+                tracing::error!("Failed to load sections: {e}");
             }
         }));
     }
@@ -697,23 +701,21 @@ impl TaskListView {
     /// can show the folder icon, and hand them to the rows already built.
     fn load_project_tags(&mut self, cx: &mut Context<Self>) {
         let fetch = self.store.directory_backed_tag_labels(cx);
-        self._project_tags_fetch = Some(cx.spawn(async move |this, cx| {
-            match fetch.await {
-                Ok(project_tags) => {
-                    this.update(cx, |this, cx| {
-                        this.project_tags = project_tags.clone();
-                        let rows = this.task_views.clone();
-                        for row in rows {
-                            let project_tags = project_tags.clone();
-                            row.update(cx, |row, cx| row.set_project_tags(project_tags, cx));
-                        }
-                        this._project_tags_fetch = None;
-                        cx.notify();
-                    })
-                    .ok();
-                }
-                Err(error) => tracing::error!("Failed to fetch project tags: {error}"),
+        self._project_tags_fetch = Some(cx.spawn(async move |this, cx| match fetch.await {
+            Ok(project_tags) => {
+                this.update(cx, |this, cx| {
+                    this.project_tags = project_tags.clone();
+                    let rows = this.task_views.clone();
+                    for row in rows {
+                        let project_tags = project_tags.clone();
+                        row.update(cx, |row, cx| row.set_project_tags(project_tags, cx));
+                    }
+                    this._project_tags_fetch = None;
+                    cx.notify();
+                })
+                .ok();
             }
+            Err(error) => tracing::error!("Failed to fetch project tags: {error}"),
         }));
     }
 
@@ -1274,8 +1276,7 @@ impl TaskListView {
         blocking_map: &std::collections::HashMap<u64, Vec<TaskWithMeta>>,
         subtasks_map: &std::collections::HashMap<u64, Vec<TaskWithMeta>>,
     ) -> Vec<RowSpec> {
-        let visible_ids: std::collections::HashSet<u64> =
-            tasks.iter().map(|t| t.id).collect();
+        let visible_ids: std::collections::HashSet<u64> = tasks.iter().map(|t| t.id).collect();
         // A task is hidden when its parent is a task in this view (its
         // subtask row collapses under the parent) or when exactly one of
         // its *open* blockers is a task in this view (blocker chain
@@ -1287,15 +1288,13 @@ impl TaskListView {
                 let is_subtask = task
                     .parent_id
                     .is_some_and(|parent_id| visible_ids.contains(&parent_id));
-                let is_exclusively_blocked = blockers_map
-                    .get(&task.id)
-                    .is_some_and(|blockers| {
-                        blockers
-                            .iter()
-                            .filter(|b| !b.done && visible_ids.contains(&b.id))
-                            .count()
-                            == 1
-                    });
+                let is_exclusively_blocked = blockers_map.get(&task.id).is_some_and(|blockers| {
+                    blockers
+                        .iter()
+                        .filter(|b| !b.done && visible_ids.contains(&b.id))
+                        .count()
+                        == 1
+                });
                 is_subtask || is_exclusively_blocked
             })
             .map(|task| task.id)
@@ -1467,10 +1466,7 @@ mod tests {
         cx: &mut gpui::VisualTestContext,
     ) -> Vec<gpui::EntityId> {
         view.read_with(cx, |view, _| {
-            view.task_views
-                .iter()
-                .map(|row| row.entity_id())
-                .collect()
+            view.task_views.iter().map(|row| row.entity_id()).collect()
         })
     }
 
@@ -1488,15 +1484,7 @@ mod tests {
         view.update(cx, |view, cx| {
             view.selected_path = path.to_vec();
             let (blockers, blocking, subtasks) = maps();
-            view.set_tasks_with_path(
-                tasks,
-                path,
-                &[],
-                blockers,
-                blocking,
-                subtasks,
-                cx,
-            );
+            view.set_tasks_with_path(tasks, path, &[], blockers, blocking, subtasks, cx);
         });
     }
 
@@ -1703,9 +1691,7 @@ mod tests {
         cx.update(|window, cx| window.draw(cx).clear(cx));
         let item = cx.debug_bounds("row-item").expect("row item measured");
         let strip = cx.debug_bounds("strip").expect("strip measured");
-        let zone = cx
-            .debug_bounds("strip-click")
-            .expect("click zone measured");
+        let zone = cx.debug_bounds("strip-click").expect("click zone measured");
         let overlay = cx.debug_bounds("overlay").expect("overlay measured");
         let task_item = cx.debug_bounds("task-item").expect("task item measured");
         // The strip contributes no height: the item is the task item plus
@@ -1759,10 +1745,12 @@ mod tests {
                     hit_zone: gap_band()
                         .id("strip")
                         .child(
-                            gap_click_zone().id("strip-click").on_click(move |_, _, cx| {
-                                cx.stop_propagation();
-                                inserted.set(true);
-                            }),
+                            gap_click_zone()
+                                .id("strip-click")
+                                .on_click(move |_, _, cx| {
+                                    cx.stop_propagation();
+                                    inserted.set(true);
+                                }),
                         )
                         .into_any_element(),
                     drawing: Some(gap_overlay(true).into_any_element()),
@@ -1799,7 +1787,10 @@ mod tests {
         // insert.
         for (label, x) in [
             ("the + square", GAP_PLUS_SIZE / 2.),
-            ("the band right of the +", GAP_PLUS_SIZE + GAP_CLICK_WIDTH / 2.),
+            (
+                "the band right of the +",
+                GAP_PLUS_SIZE + GAP_CLICK_WIDTH / 2.,
+            ),
         ] {
             inserted.set(false);
             let in_the_zone = gpui::point(task_item.left() + px(x), item.top() - px(4.));
@@ -1823,8 +1814,10 @@ mod tests {
         // the click it is under.
         inserted.set(false);
         selected.set(false);
-        let over_the_item =
-            gpui::point(task_item.left() + px(GAP_PLUS_SIZE / 2.), task_item.top() + px(2.));
+        let over_the_item = gpui::point(
+            task_item.left() + px(GAP_PLUS_SIZE / 2.),
+            task_item.top() + px(2.),
+        );
         cx.simulate_click(over_the_item, gpui::Modifiers::none());
         assert!(selected.get(), "the task item takes the click it is under");
         assert!(!inserted.get(), "the strip must not insert over the item");
@@ -1832,20 +1825,10 @@ mod tests {
 
     #[test]
     fn test_unchanged_prefix_only_remeasures_the_changed_tail() {
-        let old = vec![
-            header("Pack"),
-            gap(1, 2),
-            gap(2, 3),
-            header("Completed"),
-        ];
+        let old = vec![header("Pack"), gap(1, 2), gap(2, 3), header("Completed")];
         // A reload that reorders the tail re-measures from the first
         // difference on; the items above it keep their cached heights.
-        let new = vec![
-            header("Pack"),
-            gap(1, 2),
-            gap(2, 4),
-            header("Completed"),
-        ];
+        let new = vec![header("Pack"), gap(1, 2), gap(2, 4), header("Completed")];
         assert_eq!(unchanged_prefix(&old, &new), 2);
         // An identical run re-measures nothing at all.
         assert_eq!(unchanged_prefix(&old, &old.clone()), old.len());
@@ -1903,17 +1886,22 @@ mod tests {
 
     #[test]
     fn test_sectioned_order_groups() {
-        let section_of: std::collections::HashMap<usize, String> =
-            [(1, "B".to_string()), (2, "A".to_string()), (4, "B".to_string())]
-                .into_iter()
-                .collect();
+        let section_of: std::collections::HashMap<usize, String> = [
+            (1, "B".to_string()),
+            (2, "A".to_string()),
+            (4, "B".to_string()),
+        ]
+        .into_iter()
+        .collect();
         let order = vec!["A".to_string(), "B".to_string()];
         let indices: Vec<usize> = (0..5).collect();
         let chunks = sectioned_order(&indices, &section_of, &order);
         assert_eq!(chunks.len(), 3);
         assert!(matches!(&chunks[0], RowChunk::Rows(rows) if rows == &[0, 3]));
         assert!(matches!(&chunks[1], RowChunk::Section(name, rows) if name == "A" && rows == &[2]));
-        assert!(matches!(&chunks[2], RowChunk::Section(name, rows) if name == "B" && rows == &[1, 4]));
+        assert!(
+            matches!(&chunks[2], RowChunk::Section(name, rows) if name == "B" && rows == &[1, 4])
+        );
     }
 
     #[test]
@@ -1954,10 +1942,18 @@ mod tests {
         let indices: Vec<usize> = (0..4).collect();
         let chunks = sectioned_order(&indices, &section_of, &order);
         assert_eq!(chunks.len(), 4);
-        assert!(matches!(&chunks[0], RowChunk::Section(name, rows) if name == "Pack" && rows == &[0]));
-        assert!(matches!(&chunks[1], RowChunk::Section(name, rows) if name == "Pack / stay" && rows == &[1]));
-        assert!(matches!(&chunks[2], RowChunk::Section(name, rows) if name == "Pack / food" && rows == &[3]));
-        assert!(matches!(&chunks[3], RowChunk::Section(name, rows) if name == "Before leaving" && rows == &[2]));
+        assert!(
+            matches!(&chunks[0], RowChunk::Section(name, rows) if name == "Pack" && rows == &[0])
+        );
+        assert!(
+            matches!(&chunks[1], RowChunk::Section(name, rows) if name == "Pack / stay" && rows == &[1])
+        );
+        assert!(
+            matches!(&chunks[2], RowChunk::Section(name, rows) if name == "Pack / food" && rows == &[3])
+        );
+        assert!(
+            matches!(&chunks[3], RowChunk::Section(name, rows) if name == "Before leaving" && rows == &[2])
+        );
     }
 
     #[test]
@@ -2069,12 +2065,8 @@ mod tests {
         let mut subtasks_map = std::collections::HashMap::new();
         subtasks_map.insert(parent.id, vec![child_with_parent.clone()]);
 
-        let specs = TaskListView::compute_row_specs(
-            &tasks,
-            &blockers_map,
-            &blocking_map,
-            &subtasks_map,
-        );
+        let specs =
+            TaskListView::compute_row_specs(&tasks, &blockers_map, &blocking_map, &subtasks_map);
         assert_eq!(specs.len(), 2);
         // The child has no row of its own and nests under the parent.
         assert!(specs.iter().all(|spec| spec.task.id != child.id));
@@ -2111,10 +2103,16 @@ mod tests {
             .find(|spec| spec.task.title == "Implement task CRUD")
             .expect("CRUD task should be a visible row");
         assert!(
-            specs.iter().all(|spec| spec.task.title != "Write migration tests"),
+            specs
+                .iter()
+                .all(|spec| spec.task.title != "Write migration tests"),
             "Write migration tests must not have its own row"
         );
-        assert_eq!(crud.blocks.len(), 2, "CRUD blocks two tasks -> blocks-2 chip");
+        assert_eq!(
+            crud.blocks.len(),
+            2,
+            "CRUD blocks two tasks -> blocks-2 chip"
+        );
 
         // "Migrate database schema" is a subtask of CRUD: no own row, and
         // it nests under CRUD as its (only) collapsed subtask.
@@ -2138,7 +2136,9 @@ mod tests {
         // Single dependant: no blocks-N chip (needs more than one).
         assert_eq!(review.blocks.len(), 1);
         assert!(
-            specs.iter().all(|spec| spec.task.title != "Deploy to production"),
+            specs
+                .iter()
+                .all(|spec| spec.task.title != "Deploy to production"),
             "Deploy to production must not have its own row"
         );
 
@@ -2408,7 +2408,9 @@ fn list_entry(entry: &ListEntry, view: &WeakEntity<TaskListView>, cx: &mut App) 
             divided,
             distant,
             show_all,
-        } => list_header(top, sub.as_deref(), *divided, *distant, *show_all, view).into_any_element(),
+        } => {
+            list_header(top, sub.as_deref(), *divided, *distant, *show_all, view).into_any_element()
+        }
         // A strip that leads no row: its hit zone is the only in-flow child
         // of a zero-height item, so the items it sits between keep their
         // own spacing, and its drawing is painted over them.
@@ -2427,9 +2429,8 @@ fn list_entry(entry: &ListEntry, view: &WeakEntity<TaskListView>, cx: &mut App) 
         }
         // One task-list row.
         ListEntry::Row { gap, view: row, .. } => list_row(
-            gap.as_ref().map(|gap| {
-                gap_strip(gap.above, gap.below, gap.input.clone(), view, cx)
-            }),
+            gap.as_ref()
+                .map(|gap| gap_strip(gap.above, gap.below, gap.input.clone(), view, cx)),
             row.clone().into_any_element(),
         ),
         // Plain breathing room: no hover affordance, no input.
@@ -2651,11 +2652,7 @@ fn gap_strip(
     view: &WeakEntity<TaskListView>,
     cx: &App,
 ) -> GapStrip {
-    let key = format!(
-        "insert-gap-{}-{}",
-        above.unwrap_or(0),
-        below.unwrap_or(0)
-    );
+    let key = format!("insert-gap-{}-{}", above.unwrap_or(0), below.unwrap_or(0));
     if let Some(input) = input {
         // Align with row titles/tags: row px_3 (12) + checkbox (22) +
         // title gap_3 (12) = 46px; right side matches the row px_3.
@@ -2689,20 +2686,14 @@ fn gap_strip(
             // the band reaches over the row below it and over the previous
             // row's bottom border, and a click in either belongs to the row
             // it is on.
-            .child(
-                gap_click_zone()
-                    .id(click_key)
-                    .when(hovered, move |this| {
-                        this.cursor_pointer().on_click(move |_, window, cx| {
-                            cx.stop_propagation();
-                            view_for_click
-                                .update(cx, |this, cx| {
-                                    this.begin_insert(above, below, window, cx)
-                                })
-                                .ok();
-                        })
-                    }),
-            )
+            .child(gap_click_zone().id(click_key).when(hovered, move |this| {
+                this.cursor_pointer().on_click(move |_, window, cx| {
+                    cx.stop_propagation();
+                    view_for_click
+                        .update(cx, |this, cx| this.begin_insert(above, below, window, cx))
+                        .ok();
+                })
+            }))
             .into_any_element(),
         drawing: Some(gap_overlay(hovered).into_any_element()),
     }
@@ -2773,9 +2764,9 @@ impl Render for TaskListView {
                             .when_some(
                                 self.travel_panel.clone(),
                                 |this, panel: Entity<super::travel::TravelPanel>| {
-                                    this.child(panel.update(cx, |panel, cx| {
-                                        panel.new_trip_button(cx)
-                                    }))
+                                    this.child(
+                                        panel.update(cx, |panel, cx| panel.new_trip_button(cx)),
+                                    )
                                 },
                             )
                             // Tag settings live behind the gear: what the tag is
@@ -2831,9 +2822,7 @@ impl TaskListView {
         // truth for emptiness; the views mirror it one-to-one.
         let empty = self.row_specs.is_empty();
         let empty_action = self.empty_action_label.clone();
-        if empty
-            && let Some(label) = empty_action
-        {
+        if empty && let Some(label) = empty_action {
             return div()
                 .flex_1()
                 .v_flex()
@@ -2902,9 +2891,9 @@ impl TaskListView {
             .collect();
         self.entries = entries;
         if let Some((task_id, offset)) = anchor
-            && let Some(index) = self.entries.iter().position(|entry| {
-                matches!(entry, ListEntry::Row { task_id: id, .. } if *id == task_id)
-            })
+            && let Some(index) = self.entries.iter().position(
+                |entry| matches!(entry, ListEntry::Row { task_id: id, .. } if *id == task_id),
+            )
         {
             self.list_state.scroll_to(ListOffset {
                 item_ix: index,
@@ -2943,13 +2932,14 @@ impl TaskListView {
             .enumerate()
             .partition(|(_, spec)| spec.task.done);
         let done: Vec<usize> = done_pairs.into_iter().map(|(i, _)| i).collect();
-        let (upcoming_pairs, current_pairs): (Vec<_>, Vec<_>) = rest_pairs
-            .into_iter()
-            .partition(|(_, spec)| spec.task.blocked_until.is_some_and(|until| until > now_secs));
-        let (near_upcoming, distant): (Vec<usize>, Vec<usize>) = upcoming_pairs
-            .into_iter()
-            .map(|(i, _)| i)
-            .partition(|&i| {
+        let (upcoming_pairs, current_pairs): (Vec<_>, Vec<_>) =
+            rest_pairs.into_iter().partition(|(_, spec)| {
+                spec.task
+                    .blocked_until
+                    .is_some_and(|until| until > now_secs)
+            });
+        let (near_upcoming, distant): (Vec<usize>, Vec<usize>) =
+            upcoming_pairs.into_iter().map(|(i, _)| i).partition(|&i| {
                 self.row_specs[i]
                     .task
                     .blocked_until
@@ -3052,10 +3042,7 @@ impl TaskListView {
             // Bottom of the normal section: one insert gap after its last
             // row when a query chunk (Upcoming, Completed) follows, taking
             // the place of the suppressed gap above that chunk's first row.
-            let main = matches!(
-                chunk,
-                RowChunk::Rows(_) | RowChunk::Section(..)
-            );
+            let main = matches!(chunk, RowChunk::Rows(_) | RowChunk::Section(..));
             let next_main = chunks
                 .get(chunk_ix + 1)
                 .is_some_and(|next| matches!(next, RowChunk::Rows(_) | RowChunk::Section(..)));
@@ -3127,7 +3114,11 @@ impl TaskListView {
 
     /// The inline insert input open in this gap, if the open input is
     /// anchored to it.
-    fn inserting_input(&self, above: Option<u64>, below: Option<u64>) -> Option<Entity<InputState>> {
+    fn inserting_input(
+        &self,
+        above: Option<u64>,
+        below: Option<u64>,
+    ) -> Option<Entity<InputState>> {
         self.inserting
             .as_ref()
             .filter(|pending| pending.anchor.is_gap(above, below))
@@ -3182,12 +3173,20 @@ fn sectioned_order(
         std::collections::HashMap::new();
     for name in by_section.keys() {
         let (top, _) = split_subsection(name);
-        by_top.entry(top.to_string()).or_default().push(name.clone());
+        by_top
+            .entry(top.to_string())
+            .or_default()
+            .push(name.clone());
     }
     for names in by_top.values_mut() {
         names.sort_by_key(|name| {
             let (top, sub) = split_subsection(name);
-            (sub.is_some(), position_of(name), name.clone(), top.to_string())
+            (
+                sub.is_some(),
+                position_of(name),
+                name.clone(),
+                top.to_string(),
+            )
         });
     }
     let mut tops: Vec<String> = by_top.keys().cloned().collect();

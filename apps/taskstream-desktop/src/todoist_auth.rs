@@ -126,7 +126,10 @@ async fn register_client() -> anyhow::Result<ClientFile> {
             "Client registration failed ({status}): {body}"
         ));
     }
-    if let Some(method) = body.get("token_endpoint_auth_method").and_then(|m| m.as_str()) {
+    if let Some(method) = body
+        .get("token_endpoint_auth_method")
+        .and_then(|m| m.as_str())
+    {
         tracing::info!("Registered client auth method: {method}");
         if method != "none" {
             return Err(anyhow::anyhow!(
@@ -153,10 +156,7 @@ async fn register_client() -> anyhow::Result<ClientFile> {
         from_env: false,
     };
     save_client_file(&registered)?;
-    tracing::info!(
-        "Registered Todoist OAuth client {}",
-        registered.client_id
-    );
+    tracing::info!("Registered Todoist OAuth client {}", registered.client_id);
     Ok(registered)
 }
 
@@ -203,8 +203,7 @@ fn code_verifier() -> String {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
     use std::time::SystemTime;
-    const ALPHABET: &[u8] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~";
+    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~";
     let mut out = String::with_capacity(64);
     let mut counter = 0u64;
     while out.len() < 64 {
@@ -232,8 +231,7 @@ fn code_challenge(verifier: &str) -> String {
 }
 
 fn base64url_no_pad(bytes: &[u8]) -> String {
-    const ALPHABET: &[u8] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
     let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
     let (full, rest) = bytes.split_at(bytes.len() / 3 * 3);
     for chunk in full.chunks_exact(3) {
@@ -269,9 +267,7 @@ pub async fn connect() -> anyhow::Result<String> {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:53682")
         .await
         .map_err(|e| {
-            anyhow::anyhow!(
-                "Could not listen on the Todoist callback port (127.0.0.1:53682): {e}"
-            )
+            anyhow::anyhow!("Could not listen on the Todoist callback port (127.0.0.1:53682): {e}")
         })?;
     let verifier = code_verifier();
     let state = code_verifier();
@@ -379,7 +375,12 @@ async fn wait_for_code(
 
     let code = match (code, state, error) {
         (Some(code), Some(state), _) if state == expected_state => {
-            respond(&mut socket, "200 OK", "Connected! You can return to the app.").await?;
+            respond(
+                &mut socket,
+                "200 OK",
+                "Connected! You can return to the app.",
+            )
+            .await?;
             code
         }
         (_, _, Some(message)) => {
@@ -387,8 +388,7 @@ async fn wait_for_code(
             return Err(anyhow::anyhow!("Todoist authorization failed: {message}"));
         }
         _ => {
-            let _ =
-                respond(&mut socket, "400 Bad Request", "Missing code or state.").await;
+            let _ = respond(&mut socket, "400 Bad Request", "Missing code or state.").await;
             return Err(anyhow::anyhow!("Todoist redirect was missing code/state"));
         }
     };
@@ -567,11 +567,7 @@ pub async fn list_projects() -> anyhow::Result<Vec<TodoistProject>> {
 
 /// Exchange the code for tokens as a PKCE public client: client ID, code,
 /// redirect URI and verifier — no client secret.
-async fn exchange_code(
-    config: &OAuthConfig,
-    code: &str,
-    verifier: &str,
-) -> anyhow::Result<Tokens> {
+async fn exchange_code(config: &OAuthConfig, code: &str, verifier: &str) -> anyhow::Result<Tokens> {
     let client = reqwest::Client::new();
     let body = format!(
         "client_id={}&code={}&redirect_uri={}&code_verifier={}",
@@ -690,15 +686,13 @@ mod tests {
             "refresh_token": "rt",
             "expires_in": 3600,
         });
-        let tokens =
-            parse_tokens(&full, reqwest::StatusCode::OK).unwrap();
+        let tokens = parse_tokens(&full, reqwest::StatusCode::OK).unwrap();
         assert_eq!(tokens.refresh_token.as_deref(), Some("rt"));
         assert!(tokens.expires_at.is_some());
 
         // Grace-window retry: no refresh_token means "keep the stored one".
         let retry = serde_json::json!({ "access_token": "at2" });
-        let tokens =
-            parse_tokens(&retry, reqwest::StatusCode::OK).unwrap();
+        let tokens = parse_tokens(&retry, reqwest::StatusCode::OK).unwrap();
         assert_eq!(tokens.access_token, "at2");
         assert!(tokens.refresh_token.is_none());
     }

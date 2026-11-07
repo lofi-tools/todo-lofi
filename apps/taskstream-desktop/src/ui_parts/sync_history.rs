@@ -31,10 +31,7 @@ pub(crate) const HISTORY_SVG: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/sv
 /// color of its own, so the caller's foreground has to be applied here rather
 /// than inherited from the button that holds it.
 pub(crate) fn history_icon(size: Pixels, color: impl Into<Hsla>) -> Svg {
-    svg()
-        .size(size)
-        .data(HISTORY_SVG)
-        .text_color(color.into())
+    svg().size(size).data(HISTORY_SVG).text_color(color.into())
 }
 
 /// The count of pushes still owed, as a small pill beside the history glyph in
@@ -400,13 +397,7 @@ impl Render for SyncHistoryPanel {
             .bg(rgb(theme::PANEL_BG))
             .shadow_md()
             .child(self.header(cx))
-            .child(
-                div()
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scrollbar()
-                    .child(list),
-            )
+            .child(div().flex_1().min_h_0().overflow_y_scrollbar().child(list))
     }
 }
 

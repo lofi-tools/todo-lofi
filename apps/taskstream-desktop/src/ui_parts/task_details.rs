@@ -1,17 +1,17 @@
+use gpui::Focusable as _;
 use gpui::{
     AnyElement, App, AppContext, BoxShadow, ClickEvent, Context, Div, Entity, EventEmitter,
     InteractiveElement, IntoElement, KeyBinding, ParentElement, Render, StatefulInteractiveElement,
     Styled, Subscription, Window, deferred, div, hsla, phi, prelude::FluentBuilder, px, relative,
     rems, rgb, svg,
 };
-use gpui::Focusable as _;
 use gpui_component::Disableable;
-use gpui_component::{Icon, IconName};
 use gpui_component::Sizable;
 use gpui_component::StyledExt;
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
 use gpui_component::scroll::ScrollableElement;
+use gpui_component::{Icon, IconName};
 use storage::TaskWithMeta;
 use storage::prelude::{
     CODING_PHASES, RunNote, RunStepView, RunView, SubtaskCoverage, coverage_summary, run_notes,
@@ -380,10 +380,7 @@ fn coverage_clause(subtasks: &[TaskWithMeta]) -> Option<(String, bool)> {
         return None;
     }
     Some((
-        format!(
-            "spec covers {}/{} subtasks",
-            summary.covered, summary.total
-        ),
+        format!("spec covers {}/{} subtasks", summary.covered, summary.total),
         summary.covered < summary.total,
     ))
 }
@@ -924,19 +921,20 @@ impl TaskDetails {
             Err(e) => tracing::error!("Failed to fetch the GitHub issue: {e}"),
         }));
         let project_tags_fetch = self.store.directory_backed_tag_labels(cx);
-        self._project_tags_fetch = Some(cx.spawn(async move |this, cx| {
-            match project_tags_fetch.await {
-                Ok(project_tags) => {
-                    this.update(cx, |this, cx| {
-                        this.project_tags = project_tags;
-                        this._project_tags_fetch = None;
-                        cx.notify();
-                    })
-                    .ok();
-                }
-                Err(e) => tracing::error!("Failed to fetch project tags: {e}"),
-            }
-        }));
+        self._project_tags_fetch =
+            Some(
+                cx.spawn(async move |this, cx| match project_tags_fetch.await {
+                    Ok(project_tags) => {
+                        this.update(cx, |this, cx| {
+                            this.project_tags = project_tags;
+                            this._project_tags_fetch = None;
+                            cx.notify();
+                        })
+                        .ok();
+                    }
+                    Err(e) => tracing::error!("Failed to fetch project tags: {e}"),
+                }),
+            );
         self.close_coding_notes();
         self.close_coding_spec();
         self.close_blocker_picker();
@@ -1098,13 +1096,8 @@ impl TaskDetails {
                 .as_ref()
                 .map(|view| view.steps.iter().map(|step| step.task.id).collect())
                 .unwrap_or_default();
-            let (step_subtasks, run_worktrees, run_pull_requests) = load_run_extras(
-                &store,
-                view.as_ref().map(|view| view.run.id),
-                step_ids,
-                cx,
-            )
-            .await;
+            let (step_subtasks, run_worktrees, run_pull_requests) =
+                load_run_extras(&store, view.as_ref().map(|view| view.run.id), step_ids, cx).await;
             let subtasks = match store.run_subtasks(task_id, cx).await {
                 Ok(subtasks) => subtasks,
                 Err(error) => {
@@ -1478,7 +1471,8 @@ impl TaskDetails {
         .detach();
     }
 
-    pub fn clear(&mut self, cx: &mut Context<Self>) {        self.selected = None;
+    pub fn clear(&mut self, cx: &mut Context<Self>) {
+        self.selected = None;
         self.issue = None;
         self.blockers = Vec::new();
         self.after_tasks = Vec::new();
@@ -1525,9 +1519,7 @@ impl TaskDetails {
             return;
         };
         match field {
-            EditedField::Title | EditedField::Description => {
-                self.abandon_text_edit(field)
-            }
+            EditedField::Title | EditedField::Description => self.abandon_text_edit(field),
             EditedField::Tags => self.abandon_tags(),
         }
     }
@@ -1746,10 +1738,9 @@ impl TaskDetails {
     fn text_input(&self, field: EditedField) -> Option<Entity<TextareaState>> {
         match field {
             EditedField::Title => self.title.as_ref().map(|editor| editor.input.clone()),
-            EditedField::Description => self
-                .description
-                .as_ref()
-                .map(|editor| editor.input.clone()),
+            EditedField::Description => {
+                self.description.as_ref().map(|editor| editor.input.clone())
+            }
             EditedField::Tags => None,
         }
     }
@@ -1760,11 +1751,7 @@ impl TaskDetails {
             return false;
         };
         let (editing, editor, saved) = match field {
-            EditedField::Title => (
-                self.editing_title,
-                self.title.as_ref(),
-                task.title.clone(),
-            ),
+            EditedField::Title => (self.editing_title, self.title.as_ref(), task.title.clone()),
             EditedField::Description => (
                 self.editing_description,
                 self.description.as_ref(),
@@ -1788,13 +1775,7 @@ impl TaskDetails {
         let Some(task) = self.selected.clone() else {
             return;
         };
-        self.begin_text_edit(
-            EditedField::Title,
-            &task.title,
-            TITLE_MAX_LINES,
-            window,
-            cx,
-        );
+        self.begin_text_edit(EditedField::Title, &task.title, TITLE_MAX_LINES, window, cx);
     }
 
     fn commit_title_edit(&mut self, cx: &mut Context<Self>) {
@@ -1836,10 +1817,7 @@ impl TaskDetails {
         }
         let modifiers = keystroke.modifiers;
         let platform_only = modifiers.platform
-            && !(modifiers.shift
-                || modifiers.control
-                || modifiers.alt
-                || modifiers.function);
+            && !(modifiers.shift || modifiers.control || modifiers.alt || modifiers.function);
         if !platform_only {
             return false;
         }
@@ -1977,12 +1955,13 @@ impl TaskDetails {
         });
         // As with the title and description editors, a blur caused by leaving
         // the window is not the user leaving the tags field.
-        let subscription = cx.subscribe_in(&input, window, |this, _, event, window, cx| match event {
-            InputEvent::PressEnter { .. } => this.on_tag_input_enter(cx),
-            InputEvent::Change => this.on_tag_input_change(cx),
-            InputEvent::Blur if window.is_window_active() => this.commit_tags_edit(cx),
-            _ => {}
-        });
+        let subscription =
+            cx.subscribe_in(&input, window, |this, _, event, window, cx| match event {
+                InputEvent::PressEnter { .. } => this.on_tag_input_enter(cx),
+                InputEvent::Change => this.on_tag_input_change(cx),
+                InputEvent::Blur if window.is_window_active() => this.commit_tags_edit(cx),
+                _ => {}
+            });
         self.tags_input = Some(input.clone());
         self._tags_subscription = Some(subscription);
         window.on_next_frame(move |window, cx| {
@@ -3254,9 +3233,9 @@ impl TaskDetails {
             .as_ref()
             .map(|view| view.run.id)
             .and_then(|run_id| {
-                self.run_worktrees.iter().find(|worktree| {
-                    worktree.run_id == run_id && worktree.removed_at.is_none()
-                })
+                self.run_worktrees
+                    .iter()
+                    .find(|worktree| worktree.run_id == run_id && worktree.removed_at.is_none())
             })
             .map(|worktree| worktree.worktree_path.clone())
             .filter(|path| !path.is_empty());
@@ -3468,43 +3447,43 @@ impl TaskDetails {
             .as_ref()
             .map(|template| repeat_label(template.interval_days, template.time_of_day));
         let mut row = div().h_flex().flex_wrap().items_center().gap_3();
-        row = match deadline {
-            Some(deadline) => {
-                let label = format_deadline(deadline);
-                row.child(
-                    div()
-                        .id(("details-deadline", deadline))
-                        .h_flex()
-                        .items_center()
-                        .gap_1p5()
-                        .text_sm()
-                        .text_color(rgb(0xe5e5e5))
-                        .cursor_pointer()
-                        .tooltip(move |window, cx| {
-                            gpui_component::tooltip::Tooltip::new("due at").build(window, cx)
-                        })
-                        .child(
-                            svg()
-                                .data(DEADLINE_ICON_SVG)
-                                .size(px(14.))
-                                .text_color(rgb(0xa3a3a3)),
-                        )
-                        .child(label)
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            if this.deadline_picker_open() {
-                                this.close_deadline_picker_and_notify(cx);
-                            } else if this.take_recent_deadline_outside_close() {
-                                // The mousedown before this click already
-                                // closed the card; don't reopen it.
-                            } else {
-                                this.open_deadline_picker(window, cx);
-                            }
-                        })),
-                )
-            }
-            None => row.child(
-                relation_button("add-deadline", "+ deadline").on_click(cx.listener(
-                    |this, _, window, cx| {
+        row =
+            match deadline {
+                Some(deadline) => {
+                    let label = format_deadline(deadline);
+                    row.child(
+                        div()
+                            .id(("details-deadline", deadline))
+                            .h_flex()
+                            .items_center()
+                            .gap_1p5()
+                            .text_sm()
+                            .text_color(rgb(0xe5e5e5))
+                            .cursor_pointer()
+                            .tooltip(move |window, cx| {
+                                gpui_component::tooltip::Tooltip::new("due at").build(window, cx)
+                            })
+                            .child(
+                                svg()
+                                    .data(DEADLINE_ICON_SVG)
+                                    .size(px(14.))
+                                    .text_color(rgb(0xa3a3a3)),
+                            )
+                            .child(label)
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                if this.deadline_picker_open() {
+                                    this.close_deadline_picker_and_notify(cx);
+                                } else if this.take_recent_deadline_outside_close() {
+                                    // The mousedown before this click already
+                                    // closed the card; don't reopen it.
+                                } else {
+                                    this.open_deadline_picker(window, cx);
+                                }
+                            })),
+                    )
+                }
+                None => row.child(relation_button("add-deadline", "+ deadline").on_click(
+                    cx.listener(|this, _, window, cx| {
                         if this.deadline_picker_open() {
                             this.close_deadline_picker_and_notify(cx);
                         } else if this.take_recent_deadline_outside_close() {
@@ -3513,59 +3492,60 @@ impl TaskDetails {
                         } else {
                             this.open_deadline_picker(window, cx);
                         }
-                    },
+                    }),
                 )),
-            ),
-        };
+            };
         row = match repeat {
             Some(label) => {
                 let label_for_hover = label.clone();
                 row.child(
                     div()
-                    .id("details-repeat")
-                    .h_flex()
-                    .items_center()
-                    .gap_1p5()
-                    .text_sm()
-                    .text_color(rgb(0xe5e5e5))
-                    .cursor_pointer()
-                    .tooltip(move |window, cx| {
-                        gpui_component::tooltip::Tooltip::new(format!(
-                            "Repeats {label_for_hover}"
-                        ))
-                        .build(window, cx)
-                    })
-                    .child(
-                        svg()
-                            .data(REFRESH_ICON_SVG)
-                            .size(px(14.))
-                            .text_color(rgb(0xa3a3a3)),
-                    )
-                    .child(label)
-                    .on_click(cx.listener(|this, _, window, cx| {
+                        .id("details-repeat")
+                        .h_flex()
+                        .items_center()
+                        .gap_1p5()
+                        .text_sm()
+                        .text_color(rgb(0xe5e5e5))
+                        .cursor_pointer()
+                        .tooltip(move |window, cx| {
+                            gpui_component::tooltip::Tooltip::new(format!(
+                                "Repeats {label_for_hover}"
+                            ))
+                            .build(window, cx)
+                        })
+                        .child(
+                            svg()
+                                .data(REFRESH_ICON_SVG)
+                                .size(px(14.))
+                                .text_color(rgb(0xa3a3a3)),
+                        )
+                        .child(label)
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            if this.repeat_picker_open() {
+                                this.close_repeat_picker_and_notify(cx);
+                            } else if this.take_recent_repeat_outside_close() {
+                                // The mousedown before this click already closed
+                                // the card; don't reopen it.
+                            } else {
+                                this.open_repeat_picker(window, cx);
+                            }
+                        })),
+                )
+            }
+            None => row.child(
+                relation_button("add-repeat", "+ repeat").on_click(cx.listener(
+                    |this, _, window, cx| {
                         if this.repeat_picker_open() {
                             this.close_repeat_picker_and_notify(cx);
                         } else if this.take_recent_repeat_outside_close() {
-                            // The mousedown before this click already closed
-                            // the card; don't reopen it.
+                            // The mousedown before this click already closed the
+                            // card; don't reopen it.
                         } else {
                             this.open_repeat_picker(window, cx);
                         }
-                    })),
-                )
-            }
-            None => row.child(relation_button("add-repeat", "+ repeat").on_click(
-                cx.listener(|this, _, window, cx| {
-                    if this.repeat_picker_open() {
-                        this.close_repeat_picker_and_notify(cx);
-                    } else if this.take_recent_repeat_outside_close() {
-                        // The mousedown before this click already closed the
-                        // card; don't reopen it.
-                    } else {
-                        this.open_repeat_picker(window, cx);
-                    }
-                }),
-            )),
+                    },
+                )),
+            ),
         };
         let _ = window;
         // Blocked-by, blocked-until and after-task live on the same
@@ -3866,12 +3846,7 @@ impl TaskDetails {
             })
             .collect::<Vec<_>>();
         if !after_this_rows.is_empty() {
-            lists = lists.child(
-                div()
-                    .text_xs()
-                    .text_color(rgb(0xa3a3a3))
-                    .child("then"),
-            );
+            lists = lists.child(div().text_xs().text_color(rgb(0xa3a3a3)).child("then"));
             lists = lists.child(div().v_flex().gap_1().ml_2().children(after_this_rows));
         }
 
@@ -3904,28 +3879,23 @@ impl TaskDetails {
                 .flex_wrap()
                 .items_center()
                 .gap_2()
-                .child(relation_button("add-subtask", "+ subtask").on_click(
-                    cx.listener(|this, _, window, cx| {
-                        this.begin_subtask(window, cx);
-                    }),
-                ))
                 .child(
-                    relation_button("add-follow-up", "+ follow-up task").on_click(
-                        cx.listener(|this, _, window, cx| {
+                    relation_button("add-subtask", "+ subtask").on_click(cx.listener(
+                        |this, _, window, cx| {
+                            this.begin_subtask(window, cx);
+                        },
+                    )),
+                )
+                .child(
+                    relation_button("add-follow-up", "+ follow-up task").on_click(cx.listener(
+                        |this, _, window, cx| {
                             this.begin_follow_up(window, cx);
-                        }),
-                    ),
+                        },
+                    )),
                 ),
         );
 
-        section =
-            section.child(
-                div()
-                    .v_flex()
-                    .gap_2()
-                    .child(lists)
-                    .child(actions),
-            );
+        section = section.child(div().v_flex().gap_2().child(lists).child(actions));
 
         section
     }
@@ -4065,7 +4035,12 @@ fn format_deadline(deadline: u64) -> String {
                 jiff::Timestamp::from_second(now_secs)
                     .ok()
                     .map(|now| now.to_zoned(zone).date())
-                    .map(|today| dl.date().since(today).map(|span| span.get_days()).unwrap_or(0))
+                    .map(|today| {
+                        dl.date()
+                            .since(today)
+                            .map(|span| span.get_days())
+                            .unwrap_or(0)
+                    })
             })
             .unwrap_or(0)
             .max(0);
@@ -4214,10 +4189,7 @@ impl TaskDetails {
     /// nothing to interrupt, so it rewinds directly; once a phase is open a
     /// confirm names what stops (decision #28).
     fn request_reopen_interview(&mut self, root_task_id: u64, cx: &mut Context<Self>) {
-        let source = self
-            .coding
-            .as_ref()
-            .or(self.subtask_parent_run.as_ref());
+        let source = self.coding.as_ref().or(self.subtask_parent_run.as_ref());
         let at_interview = source
             .and_then(|view| current_step(&view.steps))
             .is_some_and(|step| step.node.id == "interview");
@@ -4290,9 +4262,8 @@ impl TaskDetails {
     /// it, as covered, and the work moves into the nested run.
     fn promote_subtask(&mut self, sub_task_id: u64, cx: &mut Context<Self>) {
         let store = self.store.clone();
-        let action = cx.spawn(async move |_, cx| {
-            store.promote_subtask(sub_task_id, cx).await.map(|_| ())
-        });
+        let action =
+            cx.spawn(async move |_, cx| store.promote_subtask(sub_task_id, cx).await.map(|_| ()));
         self.run_coding_action(action, cx);
     }
 
@@ -4416,7 +4387,12 @@ impl TaskDetails {
     /// complete (decision 25).
     fn waive_remaining_pull_requests(&mut self, run_id: u64, cx: &mut Context<Self>) {
         let store = self.store.clone();
-        let action = cx.spawn(async move |_, cx| store.waive_remaining_pull_requests(run_id, cx).await.map(|_| ()));
+        let action = cx.spawn(async move |_, cx| {
+            store
+                .waive_remaining_pull_requests(run_id, cx)
+                .await
+                .map(|_| ())
+        });
         self.run_coding_action(action, cx);
     }
 
@@ -4610,12 +4586,7 @@ impl TaskDetails {
         // action on its own row. The section is the run's Workflow — steps are
         // never subtasks (decisions #4/#25).
         section = section
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(rgb(0xa3a3a3))
-                    .child("Workflow"),
-            )
+            .child(div().text_xs().text_color(rgb(0xa3a3a3)).child("Workflow"))
             .child(self.coding_steps(task, &view, window, cx));
 
         let mut meta = div().h_flex().items_center().gap_2().flex_wrap();
@@ -4818,9 +4789,7 @@ impl TaskDetails {
                             .compact()
                             .with_size(gpui_component::Size::Small)
                             .label("Stop")
-                            .tooltip(
-                                "Stop this phase's agent turn; the branch keeps what it wrote",
-                            )
+                            .tooltip("Stop this phase's agent turn; the branch keeps what it wrote")
                             .on_click(cx.listener(|_this, _, _, cx| {
                                 cx.emit(TaskDetailsEvent::CodingStopPhase);
                             })),
@@ -5209,11 +5178,14 @@ impl TaskDetails {
                 // The PR step refused over uncommitted work: list it and offer
                 // to commit and continue (§6.7).
                 if open_subtasks.is_empty() && !self.coding_dirty.is_empty() {
-                    let mut block = div().v_flex().gap_1().w_full().child(
-                        div().text_xs().text_color(rgb(0xfbbf24)).child(
+                    let mut block =
+                        div()
+                            .v_flex()
+                            .gap_1()
+                            .w_full()
+                            .child(div().text_xs().text_color(rgb(0xfbbf24)).child(
                             "Commit the work in the run's worktrees before opening a pull request:",
-                        ),
-                    );
+                        ));
                     for (path, changed) in &self.coding_dirty {
                         block = block.child(
                             div()
@@ -5248,12 +5220,11 @@ impl TaskDetails {
                         } else {
                             conflict.paths.join(", ")
                         };
-                        block = block.child(
-                            div().text_xs().text_color(rgb(0x737373)).child(format!(
+                        block =
+                            block.child(div().text_xs().text_color(rgb(0x737373)).child(format!(
                                 "{} onto {} — {clashed}",
                                 conflict.worktree_path, conflict.base_branch
-                            )),
-                        );
+                            )));
                     }
                     actions = actions.child(block);
                 }
@@ -5454,29 +5425,25 @@ impl TaskDetails {
             .v_flex()
             .gap_1()
             .child(
-                div()
-                    .h_flex()
-                    .items_center()
-                    .gap_2()
-                    .child(
-                        div()
-                            .id("coding-spec-toggle")
-                            .text_xs()
-                            .text_color(rgb(0xa3a3a3))
-                            .cursor_pointer()
-                            .child(format!(
-                                "{} Spec ({lines} lines)",
-                                if self.coding_spec_expanded {
-                                    "▾"
-                                } else {
-                                    "▸"
-                                }
-                            ))
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.coding_spec_expanded = !this.coding_spec_expanded;
-                                cx.notify();
-                            })),
-                    ),
+                div().h_flex().items_center().gap_2().child(
+                    div()
+                        .id("coding-spec-toggle")
+                        .text_xs()
+                        .text_color(rgb(0xa3a3a3))
+                        .cursor_pointer()
+                        .child(format!(
+                            "{} Spec ({lines} lines)",
+                            if self.coding_spec_expanded {
+                                "▾"
+                            } else {
+                                "▸"
+                            }
+                        ))
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.coding_spec_expanded = !this.coding_spec_expanded;
+                            cx.notify();
+                        })),
+                ),
             )
             .when(self.coding_spec_expanded, |this| {
                 this.child(
@@ -5498,7 +5465,10 @@ impl TaskDetails {
             .coding_subtasks
             .iter()
             .filter_map(|subtask| {
-                let spec = subtask.spec.clone().filter(|spec| !spec.trim().is_empty())?;
+                let spec = subtask
+                    .spec
+                    .clone()
+                    .filter(|spec| !spec.trim().is_empty())?;
                 let lines = spec.lines().count();
                 Some((subtask.id, subtask.title.clone(), spec, lines))
             })
@@ -5561,11 +5531,7 @@ impl TaskDetails {
     /// and the four ways to fix it. Rendered only for a non-step subtask of a
     /// feature task that has a run; a step stays invisible here by construction
     /// (decision #31).
-    fn subtask_spec_section(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
+    fn subtask_spec_section(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let Some(task) = self.selected.clone() else {
             return div().into_any_element();
         };
@@ -5589,16 +5555,12 @@ impl TaskDetails {
         } else {
             ("No spec yet".to_string(), true)
         };
-        let mut block = div()
-            .v_flex()
-            .gap_1()
-            .child(field_label("Spec"))
-            .child(
-                div()
-                    .text_sm()
-                    .text_color(rgb(if uncovered { 0xfbbf24 } else { 0xa3a3a3 }))
-                    .child(state),
-            );
+        let mut block = div().v_flex().gap_1().child(field_label("Spec")).child(
+            div()
+                .text_sm()
+                .text_color(rgb(if uncovered { 0xfbbf24 } else { 0xa3a3a3 }))
+                .child(state),
+        );
         let run_active = parent_run.run.status == "active";
         let current_phase = current_step(&parent_run.steps)
             .and_then(|step| step.node.phase.clone())
@@ -5812,12 +5774,7 @@ impl TaskDetails {
                             .child(div().text_sm().text_color(rgb(0xa3a3a3)).child(author))
                     })
                     .when_some(transition, |this, transition| {
-                        this.child(
-                            div()
-                                .text_sm()
-                                .text_color(rgb(0x737373))
-                                .child(transition),
-                        )
+                        this.child(div().text_sm().text_color(rgb(0x737373)).child(transition))
                     }),
             );
         if issue.state.tombstoned {
@@ -5922,15 +5879,12 @@ impl TaskDetails {
                     .px_2()
                     .py_1()
                     .child(
-                        div()
-                            .text_size(px(10.))
-                            .text_color(rgb(0x737373))
-                            .child(
-                                comment
-                                    .author
-                                    .clone()
-                                    .unwrap_or_else(|| "someone".to_string()),
-                            ),
+                        div().text_size(px(10.)).text_color(rgb(0x737373)).child(
+                            comment
+                                .author
+                                .clone()
+                                .unwrap_or_else(|| "someone".to_string()),
+                        ),
                     )
                     .child(
                         div()
@@ -6120,7 +6074,8 @@ impl Render for TaskDetails {
                                             .gap_1()
                                             .children(self.tag_draft.iter().enumerate().map(
                                                 |(idx, tag)| {
-                                                    let is_project = self.project_tags.contains(tag);
+                                                    let is_project =
+                                                        self.project_tags.contains(tag);
                                                     tag_chip(tag, is_project)
                                                         .id(("tag-chip", idx))
                                                         .h_flex()
@@ -6210,8 +6165,11 @@ impl Render for TaskDetails {
                             ),
                     );
                 } else {
-                    let rows =
-                        details_tag_rows(&task.direct_tags, &task.inferred_tags, &self.project_tags);
+                    let rows = details_tag_rows(
+                        &task.direct_tags,
+                        &task.inferred_tags,
+                        &self.project_tags,
+                    );
                     let has_rows = !rows.is_empty();
                     header = header.child(
                         div()
@@ -6297,8 +6255,9 @@ impl Render for TaskDetails {
                                             let entity = entity.clone();
                                             let new_done = *new_done;
                                             cx.spawn(async move |cx| {
-                                                if let Err(e) =
-                                                    store.toggle_task_done(task_id, new_done, cx).await
+                                                if let Err(e) = store
+                                                    .toggle_task_done(task_id, new_done, cx)
+                                                    .await
                                                 {
                                                     tracing::error!(?e, "Failed toggle_task_done");
                                                 }
@@ -6317,50 +6276,40 @@ impl Render for TaskDetails {
                                         }),
                                 ),
                         )
-                        .child(
-                            if let Some(input) = self.text_input(EditedField::Title) {
-                                div()
-                                    .id(("details-title-edit", task_id))
-                                    .flex_1()
-                                    .min_w_0()
-                                    .child(
-                                        Textarea::new(&input)
-                                            .appearance(false)
-                                            .bg(rgb(APP_BG))
-                                            .border_1()
-                                            .border_color(rgb(HAIRLINE))
-                                            .rounded_md(),
-                                    )
-                            } else {
-                                div()
-                                    .id(("details-title", task_id))
-                                    // `min_w_0` lets the flex item shrink below
-                                    // its content width, so a long title wraps
-                                    // inside the pane instead of pushing out
-                                    // past its right edge.
-                                    .flex_1()
-                                    .min_w_0()
-                                    .text_xl()
-                                    .font_bold()
-                                    .cursor_pointer()
-                                    .text_color(if done {
-                                        rgb(0x666666)
-                                    } else {
-                                        rgb(0xe5e5e5)
-                                    })
-                                    .when(done, |this| this.line_through())
-                                    .child(task.title.clone())
-                                    // A single click opens the editor, matching
-                                    // the description below it.
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.request_begin_field(
-                                            EditedField::Title,
-                                            window,
-                                            cx,
-                                        );
-                                    }))
-                            },
-                        )
+                        .child(if let Some(input) = self.text_input(EditedField::Title) {
+                            div()
+                                .id(("details-title-edit", task_id))
+                                .flex_1()
+                                .min_w_0()
+                                .child(
+                                    Textarea::new(&input)
+                                        .appearance(false)
+                                        .bg(rgb(APP_BG))
+                                        .border_1()
+                                        .border_color(rgb(HAIRLINE))
+                                        .rounded_md(),
+                                )
+                        } else {
+                            div()
+                                .id(("details-title", task_id))
+                                // `min_w_0` lets the flex item shrink below
+                                // its content width, so a long title wraps
+                                // inside the pane instead of pushing out
+                                // past its right edge.
+                                .flex_1()
+                                .min_w_0()
+                                .text_xl()
+                                .font_bold()
+                                .cursor_pointer()
+                                .text_color(if done { rgb(0x666666) } else { rgb(0xe5e5e5) })
+                                .when(done, |this| this.line_through())
+                                .child(task.title.clone())
+                                // A single click opens the editor, matching
+                                // the description below it.
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.request_begin_field(EditedField::Title, window, cx);
+                                }))
+                        })
                         .child(self.json_copy_control(task_id, cx)),
                 );
                 details = details.child(header);
@@ -6522,21 +6471,17 @@ impl Render for TaskDetails {
             // Deselect the current task (closing the pane) from the top
             // right, next to the scrollbar gutter.
             .child(
-                div()
-                    .absolute()
-                    .top(px(8.))
-                    .right(px(20.))
-                    .child(
-                        Button::new("details-close")
-                            .ghost()
-                            .compact()
-                            .cursor_pointer()
-                            .label("×")
-                            .tooltip("Close details")
-                            .on_click(cx.listener(|_, _, _, cx| {
-                                cx.emit(TaskDetailsEvent::Deselected);
-                            })),
-                    ),
+                div().absolute().top(px(8.)).right(px(20.)).child(
+                    Button::new("details-close")
+                        .ghost()
+                        .compact()
+                        .cursor_pointer()
+                        .label("×")
+                        .tooltip("Close details")
+                        .on_click(cx.listener(|_, _, _, cx| {
+                            cx.emit(TaskDetailsEvent::Deselected);
+                        })),
+                ),
             )
             .when(self.confirming, |this| {
                 this.child(
@@ -6762,8 +6707,11 @@ mod tags_row_tests {
     #[test]
     fn project_tags_marked() {
         let project_tags: HashSet<String> = ["about-me".to_string()].into_iter().collect();
-        let rows =
-            details_tag_rows(&labels(&["about-me"]), &labels(&["about-me"]), &project_tags);
+        let rows = details_tag_rows(
+            &labels(&["about-me"]),
+            &labels(&["about-me"]),
+            &project_tags,
+        );
         assert_eq!(rows.len(), 1);
         assert!(rows[0].is_project);
         assert!(!rows[0].is_inferred);
@@ -6883,13 +6831,7 @@ mod coding_tests {
         let mut task = feature("Add OAuth", None);
         task.spec = Some("Spec body".to_string());
         let notes = vec![note("annotation", "Guard the empty-input case.")];
-        let prompt = phase_prompt(
-            &task,
-            &notes,
-            Some("feature/7-add-oauth"),
-            "implement",
-            &[],
-        );
+        let prompt = phase_prompt(&task, &notes, Some("feature/7-add-oauth"), "implement", &[]);
         assert!(prompt.contains("feature/7-add-oauth"), "{prompt}");
         assert!(prompt.contains("Spec body"), "{prompt}");
         assert!(prompt.contains("Guard the empty-input case."), "{prompt}");
@@ -6915,10 +6857,16 @@ mod coding_tests {
             subtask(43, "Already done", true),
         ];
         let prompt = phase_prompt(&task, &[], None, "interview", &subtasks);
-        assert!(prompt.contains("This feature has 2 open subtasks"), "{prompt}");
+        assert!(
+            prompt.contains("This feature has 2 open subtasks"),
+            "{prompt}"
+        );
         assert!(prompt.contains("- #41 Add token refresh"), "{prompt}");
         assert!(prompt.contains("- #42 Wire the callback URL"), "{prompt}");
-        assert!(!prompt.contains("#43"), "a done subtask is not in scope: {prompt}");
+        assert!(
+            !prompt.contains("#43"),
+            "a done subtask is not in scope: {prompt}"
+        );
 
         let plain = phase_prompt(&task, &[], None, "interview", &[]);
         assert!(
@@ -6953,10 +6901,16 @@ mod coding_tests {
             "{prompt}"
         );
         assert!(prompt.contains("Refresh the token every hour"), "{prompt}");
-        assert!(prompt.contains("### Bump the changelog (subtask #43)"), "{prompt}");
+        assert!(
+            prompt.contains("### Bump the changelog (subtask #43)"),
+            "{prompt}"
+        );
         // The covered one contributes its title only: its detail is the
         // umbrella's job.
-        assert!(prompt.contains("- Wire the callback URL (subtask #42)"), "{prompt}");
+        assert!(
+            prompt.contains("- Wire the callback URL (subtask #42)"),
+            "{prompt}"
+        );
     }
 
     /// The GitHub row's age reads the way GitHub's header does, and widens its
@@ -7395,8 +7349,7 @@ mod coding_tests {
     #[gpui::test]
     fn switching_windows_keeps_the_description_editor_open(cx: &mut gpui::TestAppContext) {
         cx.update(gpui_component::init);
-        let (store, _runtime, task) =
-            store_with_task(cx, Some("Sign in with Google."), None);
+        let (store, _runtime, task) = store_with_task(cx, Some("Sign in with Google."), None);
         let (details, mut cx) = cx.add_window_view(|_, cx| TaskDetails::new(store, cx));
         let typed = "Sign in with Google.\nAnd with GitHub.";
         activate_window(&mut cx);
@@ -7435,8 +7388,7 @@ mod coding_tests {
     #[gpui::test]
     fn a_blur_in_front_still_saves_the_description(cx: &mut gpui::TestAppContext) {
         cx.update(gpui_component::init);
-        let (store, _runtime, task) =
-            store_with_task(cx, Some("Sign in with Google."), None);
+        let (store, _runtime, task) = store_with_task(cx, Some("Sign in with Google."), None);
         let (details, mut cx) = cx.add_window_view(|_, cx| TaskDetails::new(store, cx));
         let typed = "Sign in with Google.\nAnd with GitHub.";
         activate_window(&mut cx);
@@ -7516,8 +7468,7 @@ mod coding_tests {
     fn the_header_copy_control_copies_the_task_as_json(cx: &mut gpui::TestAppContext) {
         cx.update(gpui_component::init);
         let spec = "# Add OAuth\n\nSign in with Google.";
-        let (store, _runtime, task) =
-            store_with_task(cx, Some("Sign in with Google."), Some(spec));
+        let (store, _runtime, task) = store_with_task(cx, Some("Sign in with Google."), Some(spec));
         let (details, cx) = cx.add_window_view(|_, cx| TaskDetails::new(store, cx));
         cx.update(|_, cx| {
             details.update(cx, |details, cx| {
@@ -7568,8 +7519,7 @@ mod coding_tests {
     #[gpui::test]
     fn the_description_copy_control_copies_the_description(cx: &mut gpui::TestAppContext) {
         cx.update(gpui_component::init);
-        let (store, _runtime, _task) =
-            store_with_task(cx, Some("Sign in with Google."), None);
+        let (store, _runtime, _task) = store_with_task(cx, Some("Sign in with Google."), None);
         let (details, cx) = cx.add_window_view(|_, cx| TaskDetails::new(store, cx));
         cx.update(|_, cx| {
             details.update(cx, |details, cx| {
@@ -7622,8 +7572,8 @@ mod coding_tests {
         let project_tags: std::collections::HashSet<String> =
             ["about-me".to_string()].into_iter().collect();
 
-        let json: serde_json::Value = serde_json::from_str(&task_json(&task, &project_tags))
-            .expect("the copy is JSON");
+        let json: serde_json::Value =
+            serde_json::from_str(&task_json(&task, &project_tags)).expect("the copy is JSON");
         assert_eq!(json["title"], "Add OAuth");
         assert_eq!(json["description"], "Sign in with Google.");
         assert_eq!(json["spec"], "# Add OAuth");

@@ -414,9 +414,11 @@ impl AppSettings {
                                             .label("Disable and delete unfinished items")
                                             .on_click(move |_, window, cx| {
                                                 window.close_dialog(cx);
-                                                if let Err(error) = with_items.update(cx, |this, cx| {
-                                                    this.disable(app_id, true, cx)
-                                                }) {
+                                                if let Err(error) = with_items
+                                                    .update(cx, |this, cx| {
+                                                        this.disable(app_id, true, cx)
+                                                    })
+                                                {
                                                     tracing::error!(
                                                         %error,
                                                         "could not disable the app"
@@ -432,12 +434,7 @@ impl AppSettings {
 
     /// The gear that expands one app's settings. The embedding panel renders
     /// it to the right of the app's title.
-    pub fn gear_button(
-        &self,
-        app_id: u64,
-        caption: &str,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
+    pub fn gear_button(&self, app_id: u64, caption: &str, cx: &mut Context<Self>) -> AnyElement {
         let expanded = self.is_expanded(app_id);
         Button::new(format!("app-settings-{app_id}"))
             .ghost()
@@ -539,31 +536,30 @@ impl AppSettings {
                 } else {
                     format!("{active_runs} active runs")
                 };
-                lines.push(self.line(
-                    "Active runs",
-                    div()
-                        .h_flex()
-                        .items_center()
-                        .gap_2()
-                        .child(
-                            div()
-                                .text_sm()
-                                .text_color(rgb(SUCCESS))
-                                .child(label),
-                        )
-                        .child(
-                            Button::new(format!("stop-runs-{app_id}"))
-                                .ghost()
-                                .compact()
-                                .with_size(Size::Small)
-                                .label("Stop")
-                                .tooltip("Cancel this automation's active runs and hide its steps")
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.stop_runs(recipe_id, cx);
-                                })),
-                        )
-                        .into_any_element(),
-                ));
+                lines.push(
+                    self.line(
+                        "Active runs",
+                        div()
+                            .h_flex()
+                            .items_center()
+                            .gap_2()
+                            .child(div().text_sm().text_color(rgb(SUCCESS)).child(label))
+                            .child(
+                                Button::new(format!("stop-runs-{app_id}"))
+                                    .ghost()
+                                    .compact()
+                                    .with_size(Size::Small)
+                                    .label("Stop")
+                                    .tooltip(
+                                        "Cancel this automation's active runs and hide its steps",
+                                    )
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.stop_runs(recipe_id, cx);
+                                    })),
+                            )
+                            .into_any_element(),
+                    ),
+                );
             }
         }
 
@@ -713,18 +709,17 @@ impl AppSettings {
                         this.toggle_picker(app_id, cx);
                     })),
             )
-            .when(picking, |this| this.child(self.tag_list(app_id, app_label, cx)));
+            .when(picking, |this| {
+                this.child(self.tag_list(app_id, app_label, cx))
+            });
         self.line("Add a tag", picker.into_any_element())
     }
 
     /// The list of eligible tags, under the picker button.
     fn tag_list(&mut self, app_id: u64, app_label: &str, cx: &mut Context<Self>) -> AnyElement {
         let own_tag = self.recipe_id_for(app_id);
-        let mut tags: Vec<(u64, String)> = self
-            .tags
-            .iter()
-            .map(|tag| (tag.id, tag.label()))
-            .collect();
+        let mut tags: Vec<(u64, String)> =
+            self.tags.iter().map(|tag| (tag.id, tag.label())).collect();
         tags.sort_by_key(|(_, label)| label.to_lowercase());
 
         let mut rows: Vec<AnyElement> = Vec::new();
@@ -965,7 +960,9 @@ impl TagAttachPicker {
             .all_tags
             .iter()
             .filter(|(id, _)| !self.attached.iter().any(|(attached, _)| attached == id))
-            .filter_map(|(id, label)| rank_tag(&query, label).map(|rank| (rank, *id, label.clone())))
+            .filter_map(|(id, label)| {
+                rank_tag(&query, label).map(|rank| (rank, *id, label.clone()))
+            })
             .collect();
         ranked.sort();
         ranked

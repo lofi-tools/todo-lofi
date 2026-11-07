@@ -6,8 +6,8 @@
 //! `on_select_day` callback.
 
 use gpui::{
-    div, px, rgb, App, InteractiveElement, IntoElement, ParentElement, StatefulInteractiveElement,
-    Styled, Window,
+    App, InteractiveElement, IntoElement, ParentElement, StatefulInteractiveElement, Styled,
+    Window, div, px, rgb,
 };
 use gpui_component::StyledExt;
 use std::rc::Rc;

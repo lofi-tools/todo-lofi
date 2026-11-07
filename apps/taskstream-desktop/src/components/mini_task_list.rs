@@ -80,10 +80,14 @@ impl RenderOnce for MiniTaskItem {
         let glyph = match on_toggle.filter(|_| !blocked) {
             // The glyph is the row's affordance, so a mini task list needs
             // no checkbox of its own.
-            Some(on_toggle) => glyph.cursor_pointer().on_click(move |_: &ClickEvent, window, cx| {
-                cx.stop_propagation();
-                on_toggle(!done, window, cx);
-            }),
+            Some(on_toggle) => {
+                glyph
+                    .cursor_pointer()
+                    .on_click(move |_: &ClickEvent, window, cx| {
+                        cx.stop_propagation();
+                        on_toggle(!done, window, cx);
+                    })
+            }
             None => glyph,
         };
         let title = div()
@@ -94,16 +98,18 @@ impl RenderOnce for MiniTaskItem {
             .text_color(if done { rgb(0x666666) } else { rgb(0xe5e5e5) })
             .child(title);
         let title = match on_select {
-            Some(on_select) => title.cursor_pointer().on_click(
-                move |event: &ClickEvent, window, cx| {
-                    // Only the first click of a double click selects, so
-                    // the row behind keeps its own double-click meaning.
-                    if matches!(event, ClickEvent::Mouse(m) if m.up.click_count == 1) {
-                        cx.stop_propagation();
-                        on_select(event, window, cx);
-                    }
-                },
-            ),
+            Some(on_select) => {
+                title
+                    .cursor_pointer()
+                    .on_click(move |event: &ClickEvent, window, cx| {
+                        // Only the first click of a double click selects, so
+                        // the row behind keeps its own double-click meaning.
+                        if matches!(event, ClickEvent::Mouse(m) if m.up.click_count == 1) {
+                            cx.stop_propagation();
+                            on_select(event, window, cx);
+                        }
+                    })
+            }
             None => title,
         };
         div()

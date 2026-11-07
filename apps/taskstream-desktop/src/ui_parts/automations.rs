@@ -8,7 +8,7 @@
 
 use gpui::{
     Context, Entity, EventEmitter, IntoElement, ParentElement, Render, Styled, Task, Window, div,
-    px, rgb, prelude::FluentBuilder,
+    prelude::FluentBuilder, px, rgb,
 };
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::scroll::ScrollableElement;
@@ -217,9 +217,9 @@ impl AutomationsPanel {
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let recipe_id = meta.id;
-        let app = self
-            .settings
-            .read_with(cx, |settings, _| settings.app_for_recipe_slug(&meta.slug).cloned());
+        let app = self.settings.read_with(cx, |settings, _| {
+            settings.app_for_recipe_slug(&meta.slug).cloned()
+        });
         let app_id = app.as_ref().map(|app| app.id);
         let expanded = app_id.is_some_and(|app_id| {
             self.settings
@@ -295,12 +295,8 @@ impl AutomationsPanel {
         };
 
         let mut header_controls = div().h_flex().items_center().gap_2();
-        header_controls = header_controls.child(
-            div()
-                .text_sm()
-                .text_color(rgb(status.1))
-                .child(status.0),
-        );
+        header_controls =
+            header_controls.child(div().text_sm().text_color(rgb(status.1)).child(status.0));
         if let Some(enable) = enable {
             header_controls = header_controls.child(enable);
         }
@@ -357,10 +353,7 @@ impl AutomationsPanel {
                             .child(div().font_semibold().child(meta.name.clone()))
                             .when_some(meta.description.clone(), |this, description| {
                                 this.child(
-                                    div()
-                                        .text_sm()
-                                        .text_color(rgb(0xa3a3a3))
-                                        .child(description),
+                                    div().text_sm().text_color(rgb(0xa3a3a3)).child(description),
                                 )
                             })
                             .when(bound_tags > 1, |this| {
@@ -560,10 +553,8 @@ impl AutomationsPanel {
 
         if !done {
             if let Some(event_edge) = &step.incoming_event
-                && let Some(event_name) = event_edge
-                    .condition_value
-                    .as_ref()
-                    .and_then(|v| v.as_str())
+                && let Some(event_name) =
+                    event_edge.condition_value.as_ref().and_then(|v| v.as_str())
             {
                 let run_id = view.run.id;
                 let event_name = event_name.to_string();
@@ -577,16 +568,20 @@ impl AutomationsPanel {
                             this.fire_event(run_id, event_name.clone(), cx);
                         })),
                 );
-            } else if step.outgoing.iter().any(|e| e.condition_type == "on_result") {
+            } else if step
+                .outgoing
+                .iter()
+                .any(|e| e.condition_type == "on_result")
+            {
                 let values: Vec<serde_json::Value> = step
                     .outgoing
                     .iter()
                     .filter(|e| e.condition_type == "on_result")
                     .filter_map(|e| e.condition_value.clone())
                     .collect();
-                let any_approval = values.iter().any(|v| {
-                    v.as_object().is_some_and(|m| m.contains_key("approved"))
-                });
+                let any_approval = values
+                    .iter()
+                    .any(|v| v.as_object().is_some_and(|m| m.contains_key("approved")));
                 if any_approval {
                     for value in values {
                         let label = result_label(&value);

@@ -3,15 +3,15 @@
 //! with epoch seconds; persistence stays with the caller.
 
 use gpui::{
-    div, px, rgb, AppContext, Context, Entity, EventEmitter, InteractiveElement, IntoElement,
-    ParentElement, Render, ScrollHandle, StatefulInteractiveElement, Styled, Subscription, Window,
+    AppContext, Context, Entity, EventEmitter, InteractiveElement, IntoElement, ParentElement,
+    Render, ScrollHandle, StatefulInteractiveElement, Styled, Subscription, Window, div, px, rgb,
 };
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::scroll::ScrollableElement;
 use gpui_component::{Sizable, StyledExt};
 
-use super::calendar::{month_block, month_title, weekday_header, MONTH_BLOCK_PX};
+use super::calendar::{MONTH_BLOCK_PX, month_block, month_title, weekday_header};
 use crate::theme::HAIRLINE;
 
 #[derive(Clone, Copy, Debug)]

@@ -1,11 +1,11 @@
 use gpui::{
-    div, hsla, prelude::FluentBuilder as _, relative, rgb, AnyElement, App, Div, ElementId,
-    InteractiveElement, IntoElement, ParentElement, RenderOnce, StatefulInteractiveElement,
-    StyleRefinement, Styled, Window,
+    AnyElement, App, Div, ElementId, InteractiveElement, IntoElement, ParentElement, RenderOnce,
+    StatefulInteractiveElement, StyleRefinement, Styled, Window, div, hsla,
+    prelude::FluentBuilder as _, relative, rgb,
 };
 use gpui_component::{
-    text::Text, v_flex, ActiveTheme, Disableable, Selectable, Sizable, Size, StyleSized,
-    StyledExt as _,
+    ActiveTheme, Disableable, Selectable, Sizable, Size, StyleSized, StyledExt as _, text::Text,
+    v_flex,
 };
 use std::rc::Rc;
 

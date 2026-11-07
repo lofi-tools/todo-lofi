@@ -11,8 +11,8 @@ use gpui::{
     div, px, rgb,
 };
 use gpui_component::button::{Button, ButtonVariants};
+use gpui_component::input::MoveUp as InputMoveUp;
 use gpui_component::input::{Input, InputEvent, InputState, MoveDown as InputMoveDown};
-use gpui_component::input::{MoveUp as InputMoveUp};
 use gpui_component::scroll::ScrollableElement;
 use gpui_component::{Sizable, StyledExt};
 
@@ -134,11 +134,9 @@ impl ProjectPicker {
             state.set_placeholder("Tag name...", window, cx);
             state
         });
-        let tag_subscription = cx.subscribe(&tag_input, |this, _, event, cx| {
-            match event {
-                InputEvent::PressEnter { .. } => this.submit_tag(cx),
-                InputEvent::Change | InputEvent::Focus | InputEvent::Blur => {}
-            }
+        let tag_subscription = cx.subscribe(&tag_input, |this, _, event, cx| match event {
+            InputEvent::PressEnter { .. } => this.submit_tag(cx),
+            InputEvent::Change | InputEvent::Focus | InputEvent::Blur => {}
         });
         let mut this = Self {
             store,
@@ -173,9 +171,8 @@ impl ProjectPicker {
                 Ok(list) => list.into_iter().any(|i| i.provider == "todoist"),
                 Err(e) => {
                     this.update(cx, |this, cx| {
-                        this.todoist_state = TodoistState::Failed(format!(
-                            "Could not load integrations: {e}"
-                        ));
+                        this.todoist_state =
+                            TodoistState::Failed(format!("Could not load integrations: {e}"));
                         this._load = None;
                         cx.notify();
                     })
@@ -193,9 +190,10 @@ impl ProjectPicker {
                 return;
             }
             let fetch =
-                gpui_tokio::Tokio::spawn_result(cx, async move {
-                    todoist_auth::list_projects().await
-                });
+                gpui_tokio::Tokio::spawn_result(
+                    cx,
+                    async move { todoist_auth::list_projects().await },
+                );
             match fetch.await {
                 Ok(projects) => {
                     this.update(cx, |this, cx| {
@@ -209,9 +207,8 @@ impl ProjectPicker {
                 }
                 Err(e) => {
                     this.update(cx, |this, cx| {
-                        this.todoist_state = TodoistState::Failed(format!(
-                            "Could not load Todoist projects: {e}"
-                        ));
+                        this.todoist_state =
+                            TodoistState::Failed(format!("Could not load Todoist projects: {e}"));
                         this._load = None;
                         cx.notify();
                     })
@@ -459,18 +456,15 @@ impl Render for ProjectPicker {
                 body = body
                     .child(Input::new(&self.tag_input).with_size(gpui_component::Size::Medium))
                     .child(
-                        div()
-                            .h_flex()
-                            .justify_end()
-                            .child(
-                                Button::new("create-tag")
-                                    .ghost()
-                                    .compact()
-                                    .label("Create tag")
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.submit_tag(cx);
-                                    })),
-                            ),
+                        div().h_flex().justify_end().child(
+                            Button::new("create-tag")
+                                .ghost()
+                                .compact()
+                                .label("Create tag")
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.submit_tag(cx);
+                                })),
+                        ),
                     )
                     .child(
                         div()
@@ -504,7 +498,8 @@ impl Render for ProjectPicker {
                             .text_sm()
                             .text_color(rgb(0xff6b6b))
                             .child(message.clone()),
-                        TodoistState::Loaded | TodoistState::Hidden => div().text_xs()
+                        TodoistState::Loaded | TodoistState::Hidden => div()
+                            .text_xs()
                             .text_color(rgb(0x666666))
                             .child("↑/↓ navigate · Enter select · Esc cancel"),
                     });

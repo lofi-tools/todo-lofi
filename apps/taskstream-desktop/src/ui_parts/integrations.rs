@@ -348,9 +348,7 @@ impl IntegrationsView {
                         let repos = store
                             .github_bound_repos(integration.id, cx)
                             .await
-                            .map(|repos| {
-                                repos.into_iter().map(|repo| repo.external_id()).collect()
-                            })
+                            .map(|repos| repos.into_iter().map(|repo| repo.external_id()).collect())
                             .unwrap_or_default();
                         (last_sync, repos)
                     }
@@ -699,16 +697,16 @@ impl IntegrationsView {
                 let changed = !summary.is_empty();
                 this.update(cx, |this, cx| {
                     this.github_syncing = false;
-                        this.github_last_sync = Some(jiff::Timestamp::now());
-                        this.github_status = Some(format!("GitHub synced — {message}"));
-                        if changed {
-                            cx.emit(IntegrationsEvent::Synced(IncomingChange::new(
-                                "github",
-                                message.clone(),
-                            )));
-                            cx.emit(IntegrationsEvent::Changed);
-                        }
-                        cx.notify();
+                    this.github_last_sync = Some(jiff::Timestamp::now());
+                    this.github_status = Some(format!("GitHub synced — {message}"));
+                    if changed {
+                        cx.emit(IntegrationsEvent::Synced(IncomingChange::new(
+                            "github",
+                            message.clone(),
+                        )));
+                        cx.emit(IntegrationsEvent::Changed);
+                    }
+                    cx.notify();
                 })
                 .ok();
             }
@@ -1316,11 +1314,11 @@ impl IntegrationsView {
                         } else {
                             "Connect"
                         })
-                .on_click(cx.listener(|this, _, _, cx| {
-                    cx.stop_propagation();
-                    this.start_github_connect(cx);
-                })),
-            )
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            cx.stop_propagation();
+                            this.start_github_connect(cx);
+                        })),
+                )
         };
         let controls = controls.flex_none();
 

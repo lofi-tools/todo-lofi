@@ -19,7 +19,7 @@ use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::scroll::ScrollableElement;
 use gpui_component::switch::Switch;
-use gpui_component::{Disableable, IconName, Size, Sizable, StyledExt, WindowExt};
+use gpui_component::{Disableable, IconName, Sizable, Size, StyledExt, WindowExt};
 use std::collections::HashSet;
 use std::path::PathBuf;
 use storage::prelude::*;
@@ -113,13 +113,14 @@ impl TagSettingsPanel {
             state.set_placeholder("Add parent tag…", window, cx);
             state
         });
-        let _placements_input_sub = cx.subscribe(&placements_input, |this, _, event, cx| match event {
-            InputEvent::PressEnter { .. } => this.flush_placement_pending(cx),
-            InputEvent::Change => cx.notify(),
-            InputEvent::Blur => this.commit_placements(cx),
-            _ => {}
-        });
-let dir_picker_input = cx.new(|cx| {
+        let _placements_input_sub =
+            cx.subscribe(&placements_input, |this, _, event, cx| match event {
+                InputEvent::PressEnter { .. } => this.flush_placement_pending(cx),
+                InputEvent::Change => cx.notify(),
+                InputEvent::Blur => this.commit_placements(cx),
+                _ => {}
+            });
+        let dir_picker_input = cx.new(|cx| {
             let mut state = InputState::new(window, cx);
             state.set_placeholder("Search directories…", window, cx);
             state
@@ -294,7 +295,8 @@ let dir_picker_input = cx.new(|cx| {
                 this.all_tags = all_tags;
                 if this.placements_reload {
                     this.placements_reload = false;
-                    this.placements_draft = this.parents.iter().map(|parent| parent.label()).collect();
+                    this.placements_draft =
+                        this.parents.iter().map(|parent| parent.label()).collect();
                     this.placement_suggest_cursor = 0;
                     this.placement_suggest_active = false;
                 }
@@ -407,8 +409,7 @@ let dir_picker_input = cx.new(|cx| {
             .any(|label| label.eq_ignore_ascii_case(&text))
         {
             let blocked = self.all_tags.iter().any(|(id, label)| {
-                (*id == tag.id || self.blocked.contains(id))
-                    && label.eq_ignore_ascii_case(&text)
+                (*id == tag.id || self.blocked.contains(id)) && label.eq_ignore_ascii_case(&text)
             });
             if blocked {
                 self.notice =
@@ -477,7 +478,10 @@ let dir_picker_input = cx.new(|cx| {
             })
             .collect();
         ranked.sort_by(|a, b| a.0.cmp(&b.0).then(a.2.cmp(&b.2)));
-        ranked.into_iter().map(|(_, id, label)| (id, label)).collect()
+        ranked
+            .into_iter()
+            .map(|(_, id, label)| (id, label))
+            .collect()
     }
 
     /// Add `label` to the draft unless it is already there or blocked.
@@ -493,11 +497,9 @@ let dir_picker_input = cx.new(|cx| {
         {
             return;
         }
-        let blocked = self
-            .all_tags
-            .iter()
-            .any(|(id, candidate)| (*id == tag.id || self.blocked.contains(id))
-                && candidate.to_lowercase() == lower);
+        let blocked = self.all_tags.iter().any(|(id, candidate)| {
+            (*id == tag.id || self.blocked.contains(id)) && candidate.to_lowercase() == lower
+        });
         if blocked {
             self.notice = Some("A tag can't be placed under itself or its own child.".to_string());
             return;
@@ -606,20 +608,18 @@ let dir_picker_input = cx.new(|cx| {
                                             .label("Remove")
                                             .on_click(move |_, window, cx| {
                                                 window.close_dialog(cx);
-                                                if let Err(error) =
-                                                    panel.update(cx, |panel, cx| {
-                                                        if let Some(pos) = panel
-                                                            .placements_draft
-                                                            .iter()
-                                                            .position(|draft| {
-                                                                draft.eq_ignore_ascii_case(&label)
-                                                            })
-                                                        {
-                                                            panel.placements_draft.remove(pos);
-                                                            cx.notify();
-                                                        }
-                                                    })
-                                                {
+                                                if let Err(error) = panel.update(cx, |panel, cx| {
+                                                    if let Some(pos) = panel
+                                                        .placements_draft
+                                                        .iter()
+                                                        .position(|draft| {
+                                                            draft.eq_ignore_ascii_case(&label)
+                                                        })
+                                                    {
+                                                        panel.placements_draft.remove(pos);
+                                                        cx.notify();
+                                                    }
+                                                }) {
                                                     tracing::error!(
                                                         %error,
                                                         "could not remove the placement"
@@ -690,7 +690,9 @@ let dir_picker_input = cx.new(|cx| {
         };
         // Quiet: the switch position plus its label says the state, so no
         // echo at the card bottom.
-        let action = self.store.set_tag_isolated_build_cache(tag.id, isolated, cx);
+        let action = self
+            .store
+            .set_tag_isolated_build_cache(tag.id, isolated, cx);
         self.run_quiet(action, cx);
     }
 
@@ -864,14 +866,7 @@ let dir_picker_input = cx.new(|cx| {
                         gpui_component::Icon::new(gpui_component_assets::IconName::Github)
                             .with_size(Size::Small),
                     )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .text_sm()
-                            .child(repo),
-                    )
+                    .child(div().flex_1().min_w_0().truncate().text_sm().child(repo))
                     .child(
                         div()
                             .text_xs()
@@ -1044,9 +1039,7 @@ let dir_picker_input = cx.new(|cx| {
     }
 
     fn on_dir_picker_enter(&mut self, cx: &mut Context<Self>) {
-        let results = self.dir_picker_results(
-            &self.dir_picker_input.read(cx).text().to_string(),
-        );
+        let results = self.dir_picker_results(&self.dir_picker_input.read(cx).text().to_string());
         if let Some(path) = results.get(self.dir_picker_cursor) {
             let value = path.display().to_string();
             self.dir_picker_open = false;
@@ -1055,15 +1048,12 @@ let dir_picker_input = cx.new(|cx| {
     }
 
     fn move_dir_picker_cursor(&mut self, delta: isize, cx: &mut Context<Self>) {
-        let results = self.dir_picker_results(
-            &self.dir_picker_input.read(cx).text().to_string(),
-        );
+        let results = self.dir_picker_results(&self.dir_picker_input.read(cx).text().to_string());
         if results.is_empty() {
             return;
         }
         self.dir_picker_cursor =
-            (self.dir_picker_cursor as isize + delta).rem_euclid(results.len() as isize)
-                as usize;
+            (self.dir_picker_cursor as isize + delta).rem_euclid(results.len() as isize) as usize;
         cx.notify();
     }
 
@@ -1196,7 +1186,12 @@ let dir_picker_input = cx.new(|cx| {
             .gap_1()
             .flex_wrap()
             .children(chips)
-            .child(div().flex_1().min_w_0().child(Input::new(&input).appearance(false)));
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .child(Input::new(&input).appearance(false)),
+            );
 
         let mut root = div().relative().child(field);
         if !suggestions.is_empty() {
@@ -1436,9 +1431,9 @@ let dir_picker_input = cx.new(|cx| {
                             .ghost()
                             .compact()
                             .label("Detach")
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.detach_app(app_id, cx)
-                            })),
+                            .on_click(
+                                cx.listener(move |this, _, _, cx| this.detach_app(app_id, cx)),
+                            ),
                     )
                     .into_any_element()
             })
@@ -1446,7 +1441,13 @@ let dir_picker_input = cx.new(|cx| {
 
         let isolated_row = self.isolated_cache_row(cx);
         let placements_empty = self.placements_draft.is_empty()
-            && self.placements_input.read(cx).text().to_string().trim().is_empty();
+            && self
+                .placements_input
+                .read(cx)
+                .text()
+                .to_string()
+                .trim()
+                .is_empty();
         let body = div()
             .id("tag-settings-body")
             .v_flex()
@@ -1555,10 +1556,7 @@ let dir_picker_input = cx.new(|cx| {
                                                 .child(Input::new(&input).appearance(false)),
                                         )
                                         .child(
-                                            div()
-                                                .v_flex()
-                                                .overflow_y_scrollbar()
-                                                .children(rows),
+                                            div().v_flex().overflow_y_scrollbar().children(rows),
                                         ),
                                 ))
                             }),
@@ -1584,9 +1582,12 @@ let dir_picker_input = cx.new(|cx| {
                             .h_flex()
                             .items_center()
                             .gap_2()
-                            .child(div().flex_1().min_w_0().child(
-                                Input::new(&self.section_name).with_size(Size::Small),
-                            ))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .child(Input::new(&self.section_name).with_size(Size::Small)),
+                            )
                             .child(
                                 Button::new("tag-settings-add-section")
                                     .compact()
@@ -1616,12 +1617,7 @@ let dir_picker_input = cx.new(|cx| {
 
         let mut card = card.child(heading).child(body);
         if let Some(notice) = self.notice.clone() {
-            card = card.child(
-                div()
-                    .text_xs()
-                    .text_color(rgb(TEXT_MUTED))
-                    .child(notice),
-            );
+            card = card.child(div().text_xs().text_color(rgb(TEXT_MUTED)).child(notice));
         }
         card.into_any_element()
     }
@@ -1720,7 +1716,8 @@ fn list_box(children: Vec<AnyElement>) -> AnyElement {
         .into_any_element()
 }
 
-fn section_label(text: &str) -> AnyElement {    div()
+fn section_label(text: &str) -> AnyElement {
+    div()
         .text_xs()
         .font_semibold()
         .text_color(rgb(TEXT_MUTED))

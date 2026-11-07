@@ -125,9 +125,7 @@ where
     loop {
         match attempt().await {
             Ok(value) => return Ok(value),
-            Err(error)
-                if error.is_retryable() && failed_attempts + 1 < CONNECT_ATTEMPTS =>
-            {
+            Err(error) if error.is_retryable() && failed_attempts + 1 < CONNECT_ATTEMPTS => {
                 note_retryable_failure(&mut failed_attempts).await;
             }
             Err(error) => return Err(error),
@@ -152,7 +150,9 @@ async fn read_json_response(
 ) -> Result<(reqwest::StatusCode, serde_json::Value), AttemptError> {
     let status = response.status();
     let text = response.text().await.map_err(|error| {
-        AttemptError::retryable(anyhow::anyhow!("{source} response could not be read: {error}"))
+        AttemptError::retryable(anyhow::anyhow!(
+            "{source} response could not be read: {error}"
+        ))
     })?;
     let body = serde_json::from_str(&text).map_err(|error| {
         let error = anyhow::anyhow!("{source} response was not JSON: {error}");
@@ -331,7 +331,10 @@ fn token_error(body: &serde_json::Value) -> Option<String> {
         return None;
     }
     Some(
-        match body.get("error_description").and_then(|value| value.as_str()) {
+        match body
+            .get("error_description")
+            .and_then(|value| value.as_str())
+        {
             Some(description) if !description.is_empty() => format!("{code}: {description}"),
             _ => code.to_string(),
         },
@@ -349,7 +352,9 @@ fn parse_token_grant(
         .and_then(|token| token.as_str())
         .filter(|token| !token.is_empty())
         .map(str::to_owned)
-        .ok_or_else(|| anyhow::anyhow!("GitHub token response had no access token ({status}): {body}"))?;
+        .ok_or_else(|| {
+            anyhow::anyhow!("GitHub token response had no access token ({status}): {body}")
+        })?;
     Ok(TokenGrant {
         access_token,
         refresh_token: body
@@ -557,8 +562,7 @@ pub async fn complete(login: DeviceLogin) -> anyhow::Result<String> {
                     let personal_token = existing
                         .as_ref()
                         .and_then(|file| file.personal_token.clone());
-                    let poll_interval_secs =
-                        existing.and_then(|file| file.poll_interval_secs);
+                    let poll_interval_secs = existing.and_then(|file| file.poll_interval_secs);
                     save_at(
                         &client_file_path()?,
                         &GithubFile {
@@ -663,9 +667,7 @@ fn has_usable_credentials_at(path: &std::path::Path) -> bool {
 /// personal token is returned as-is because GitHub does not refresh it.
 /// Runs on the Tokio runtime; never on GPUI's executor.
 pub async fn access_token() -> anyhow::Result<String> {
-    active_credential()
-        .await
-        .map(|credential| credential.token)
+    active_credential().await.map(|credential| credential.token)
 }
 
 /// Same as `access_token`, keeping which secret was selected.
@@ -677,7 +679,11 @@ async fn active_credential_at(path: &std::path::Path) -> anyhow::Result<ActiveCr
     let Some(file) = load_at(path)? else {
         return Err(anyhow::anyhow!("Connect GitHub first"));
     };
-    if let Some(token) = file.personal_token.clone().filter(|token| !token.is_empty()) {
+    if let Some(token) = file
+        .personal_token
+        .clone()
+        .filter(|token| !token.is_empty())
+    {
         return Ok(ActiveCredential {
             token,
             kind: CredentialKind::Personal,
@@ -691,10 +697,12 @@ async fn active_credential_at(path: &std::path::Path) -> anyhow::Result<ActiveCr
             kind: CredentialKind::OAuth,
         });
     }
-    refresh_oauth_token_at(path).await.map(|token| ActiveCredential {
-        token,
-        kind: CredentialKind::OAuth,
-    })
+    refresh_oauth_token_at(path)
+        .await
+        .map(|token| ActiveCredential {
+            token,
+            kind: CredentialKind::OAuth,
+        })
 }
 
 /// Whether an expiring OAuth token should be renewed before use. A missing
@@ -720,7 +728,10 @@ fn refresh_lock() -> &'static tokio::sync::Mutex<()> {
 /// rotated earns a `bad_refresh_token`, so a waiting attempt takes the fresh
 /// pair that landed instead.
 fn superseding_access_token(file: &GithubFile, replacing: Option<&str>) -> Option<String> {
-    let stored = file.access_token.clone().filter(|token| !token.is_empty())?;
+    let stored = file
+        .access_token
+        .clone()
+        .filter(|token| !token.is_empty())?;
     if Some(stored.as_str()) == replacing || access_token_expired(file.access_token_expires_at) {
         return None;
     }
@@ -746,9 +757,7 @@ async fn refresh_oauth_token_at(path: &std::path::Path) -> anyhow::Result<String
 /// The refresh itself, serialized against every other attempt: a caller that
 /// waited for one already in flight is answered with the pair that landed,
 /// so the rotated refresh token is spent exactly once.
-async fn try_refresh_oauth_token_at(
-    path: &std::path::Path,
-) -> Result<String, AttemptError> {
+async fn try_refresh_oauth_token_at(path: &std::path::Path) -> Result<String, AttemptError> {
     let replacing = load_at(path)
         .map_err(AttemptError::permanent)?
         .and_then(|file| file.access_token)
@@ -767,8 +776,7 @@ async fn try_refresh_oauth_token_at(
     if let Some(token) = superseding_access_token(&file, replacing.as_deref()) {
         return Ok(token);
     }
-    let Some(refresh_token) = file.refresh_token.clone().filter(|token| !token.is_empty())
-    else {
+    let Some(refresh_token) = file.refresh_token.clone().filter(|token| !token.is_empty()) else {
         return Err(AttemptError::permanent(anyhow::anyhow!(
             "GitHub token expired and no refresh token is stored; reconnect GitHub"
         )));
@@ -779,17 +787,17 @@ async fn try_refresh_oauth_token_at(
         )));
     }
     let client_id = file.client_id.clone();
-    match retry_connection_result(|| {
-        refresh_request(client_id.clone(), refresh_token.clone())
-    })
-    .await
+    match retry_connection_result(|| refresh_request(client_id.clone(), refresh_token.clone()))
+        .await
     {
         Ok(tokens) => {
-            let mut file = load_at(path).map_err(AttemptError::permanent)?.ok_or_else(|| {
-                AttemptError::permanent(anyhow::anyhow!(
-                    "GitHub connection disappeared while refreshing; reconnect GitHub"
-                ))
-            })?;
+            let mut file = load_at(path)
+                .map_err(AttemptError::permanent)?
+                .ok_or_else(|| {
+                    AttemptError::permanent(anyhow::anyhow!(
+                        "GitHub connection disappeared while refreshing; reconnect GitHub"
+                    ))
+                })?;
             apply_refreshed_tokens(&mut file, &tokens);
             save_at(path, &file).map_err(AttemptError::permanent)?;
             Ok(tokens.access_token)
@@ -864,7 +872,9 @@ async fn recover_from_rejected_token_at(
     };
     if file.personal_token.as_deref() == Some(rejected_token) {
         invalidate_token_at(path, rejected_token)?;
-        return active_credential_at(path).await.map(|credential| credential.token);
+        return active_credential_at(path)
+            .await
+            .map(|credential| credential.token);
     }
     if file.access_token.as_deref() == Some(rejected_token) {
         return match try_refresh_oauth_token_at(path).await {
@@ -891,16 +901,17 @@ async fn recover_from_rejected_token_at(
         .map(|credential| credential.token)
 }
 
-fn invalidate_token_at(
-    path: &std::path::Path,
-    rejected_token: &str,
-) -> anyhow::Result<bool> {
+fn invalidate_token_at(path: &std::path::Path, rejected_token: &str) -> anyhow::Result<bool> {
     let Some(mut file) = load_at(path)? else {
         return Ok(false);
     };
     if file.personal_token.as_deref() == Some(rejected_token) {
         file.personal_token = None;
-        if file.access_token.as_deref().is_none_or(|token| token.is_empty()) {
+        if file
+            .access_token
+            .as_deref()
+            .is_none_or(|token| token.is_empty())
+        {
             file.login = None;
         }
         save_at(&path, &file)?;
@@ -996,7 +1007,9 @@ pub fn has_personal_token() -> bool {
 /// the rest of the connection file. Resolves the account the token belongs
 /// to so the card can label it. Runs on the Tokio runtime.
 pub async fn save_personal_token(token: Option<String>) -> anyhow::Result<Option<String>> {
-    let token = token.map(|token| token.trim().to_string()).filter(|token| !token.is_empty());
+    let token = token
+        .map(|token| token.trim().to_string())
+        .filter(|token| !token.is_empty());
     let path = client_file_path()?;
     let mut file = load_at(&path)?.unwrap_or(GithubFile {
         client_id: String::new(),
@@ -1016,9 +1029,9 @@ pub async fn save_personal_token(token: Option<String>) -> anyhow::Result<Option
     let Some(token) = token else {
         return Ok(None);
     };
-    let login = account_login(&token).await.map_err(|e| {
-        anyhow::anyhow!("The token was saved but GitHub would not accept it: {e}")
-    })?;
+    let login = account_login(&token)
+        .await
+        .map_err(|e| anyhow::anyhow!("The token was saved but GitHub would not accept it: {e}"))?;
     file.login = Some(login.clone());
     save_at(&path, &file)?;
     Ok(Some(login))
@@ -1214,11 +1227,13 @@ mod tests {
         .unwrap();
         assert_eq!(grant.access_token, "gho_new");
         assert_eq!(grant.refresh_token.as_deref(), Some("ghr_new"));
-        let access_expires_at =
-            grant.access_expires_at.expect("an expiring token records its expiry");
+        let access_expires_at = grant
+            .access_expires_at
+            .expect("an expiring token records its expiry");
         assert!((started + 28_799..=started + 28_800).contains(&access_expires_at));
-        let refresh_expires_at =
-            grant.refresh_expires_at.expect("a refresh token records its expiry");
+        let refresh_expires_at = grant
+            .refresh_expires_at
+            .expect("a refresh token records its expiry");
         assert!((started + 15_897_599..=started + 15_897_600).contains(&refresh_expires_at));
     }
 
@@ -1271,8 +1286,7 @@ mod tests {
 
     #[test]
     fn refreshed_tokens_replace_the_stored_pair_but_keep_the_rest() {
-        let dir =
-            std::env::temp_dir().join(format!("todo2-github-refresh-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("todo2-github-refresh-{}", std::process::id()));
         std::fs::remove_dir_all(&dir).ok();
         let path = dir.join("github.json");
         save_at(&path, &token_file_fixture()).unwrap();
@@ -1303,8 +1317,7 @@ mod tests {
 
     #[test]
     fn fresh_oauth_tokens_are_returned_without_a_refresh() {
-        let dir =
-            std::env::temp_dir().join(format!("todo2-github-fresh-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("todo2-github-fresh-{}", std::process::id()));
         std::fs::remove_dir_all(&dir).ok();
         let path = dir.join("github.json");
         let mut file = token_file_fixture();
@@ -1321,8 +1334,7 @@ mod tests {
 
     #[test]
     fn personal_tokens_skip_oauth_expiry() {
-        let dir =
-            std::env::temp_dir().join(format!("todo2-github-pat-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("todo2-github-pat-{}", std::process::id()));
         std::fs::remove_dir_all(&dir).ok();
         let path = dir.join("github.json");
         let mut file = token_file_fixture();
@@ -1339,8 +1351,7 @@ mod tests {
 
     #[test]
     fn expired_oauth_without_refresh_needs_reconnect() {
-        let dir =
-            std::env::temp_dir().join(format!("todo2-github-expired-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("todo2-github-expired-{}", std::process::id()));
         std::fs::remove_dir_all(&dir).ok();
         let path = dir.join("github.json");
         let mut file = token_file_fixture();
@@ -1349,7 +1360,9 @@ mod tests {
         file.refresh_token = None;
         save_at(&path, &file).unwrap();
 
-        let error = block_on(active_credential_at(&path)).unwrap_err().to_string();
+        let error = block_on(active_credential_at(&path))
+            .unwrap_err()
+            .to_string();
         assert!(error.contains("reconnect"), "{error}");
 
         std::fs::remove_dir_all(&dir).ok();
@@ -1384,8 +1397,7 @@ mod tests {
 
     #[test]
     fn expired_tokens_without_refresh_are_not_usable() {
-        let dir =
-            std::env::temp_dir().join(format!("todo2-github-usable-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("todo2-github-usable-{}", std::process::id()));
         std::fs::remove_dir_all(&dir).ok();
         let path = dir.join("github.json");
 
@@ -1424,8 +1436,7 @@ mod tests {
         // A token saved before refresh support has no expiry and no refresh
         // token. Once GitHub rejects it, recovery must delete the dead
         // secret so the poller stops instead of failing every tick.
-        let dir =
-            std::env::temp_dir().join(format!("todo2-github-recover-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("todo2-github-recover-{}", std::process::id()));
         std::fs::remove_dir_all(&dir).ok();
         let path = dir.join("github.json");
         save_at(
@@ -1464,8 +1475,7 @@ mod tests {
         // The request that got the 401 used a token another refresh has
         // since replaced. The connection is alive, so recovery returns the
         // current credential for the retry rather than a reconnect prompt.
-        let dir =
-            std::env::temp_dir().join(format!("todo2-github-rotated-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("todo2-github-rotated-{}", std::process::id()));
         std::fs::remove_dir_all(&dir).ok();
         let path = dir.join("github.json");
         let mut file = token_file_fixture();
@@ -1607,10 +1617,7 @@ mod tests {
 
             // The environment still wins over the file.
             unsafe { std::env::set_var("GITHUB_CLIENT_ID", "from-env") };
-            assert_eq!(
-                client_id_at(&path).unwrap(),
-                ("from-env".to_string(), true)
-            );
+            assert_eq!(client_id_at(&path).unwrap(), ("from-env".to_string(), true));
             unsafe { std::env::remove_var("GITHUB_CLIENT_ID") };
         } else {
             assert_eq!(

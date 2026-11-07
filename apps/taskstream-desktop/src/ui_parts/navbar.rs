@@ -2,9 +2,9 @@ use gpui::{
     Animation, AnimationExt, Context, EventEmitter, InteractiveElement, IntoElement, ParentElement,
     Render, StatefulInteractiveElement, Styled, Task, Window, div, prelude::FluentBuilder, px, rgb,
 };
+use gpui_component::IconName;
 use gpui_component::StyledExt;
 use gpui_component::button::{Button, ButtonVariants};
-use gpui_component::IconName;
 use gpui_component::menu::{ContextMenuExt, PopupMenuItem};
 use gpui_component::scroll::ScrollableElement;
 use std::collections::{HashMap, HashSet};
@@ -77,7 +77,8 @@ impl NavHistory {
         if self.current == destination {
             return false;
         }
-        self.back.push(std::mem::replace(&mut self.current, destination));
+        self.back
+            .push(std::mem::replace(&mut self.current, destination));
         true
     }
 
@@ -350,124 +351,132 @@ impl Render for NavBar {
                                 this.navigate_to(NavDestination::AllTasks, cx);
                             })),
                     )
-                    .children(rows.into_iter().filter_map(|row| {
-                        row_visible(&row.path, &expanded_path).then_some(row)
-                    }).map(|row| {
-                        let TagTreeRow {
-                            tag,
-                            depth,
-                            path,
-                            is_directory_backed,
-                            is_section: _is_section,
-                        } = row;
-                        let tag_id = tag.id;
-                        let tag_name = tag.name.clone();
-                        let label = tag.label();
-                        let is_selected = destination == NavDestination::Tag(path.clone());
-                        let busy = busy_tags.contains(&tag_name);
-                        // A duplicated row (the same project under several
-                        // parents) must not reuse an element id, so the path
-                        // identifies the row rather than the tag.
-                        let row_id = format!("tag-row:{}", path.join("/"));
+                    .children(
+                        rows.into_iter()
+                            .filter_map(|row| row_visible(&row.path, &expanded_path).then_some(row))
+                            .map(|row| {
+                                let TagTreeRow {
+                                    tag,
+                                    depth,
+                                    path,
+                                    is_directory_backed,
+                                    is_section: _is_section,
+                                } = row;
+                                let tag_id = tag.id;
+                                let tag_name = tag.name.clone();
+                                let label = tag.label();
+                                let is_selected = destination == NavDestination::Tag(path.clone());
+                                let busy = busy_tags.contains(&tag_name);
+                                // A duplicated row (the same project under several
+                                // parents) must not reuse an element id, so the path
+                                // identifies the row rather than the tag.
+                                let row_id = format!("tag-row:{}", path.join("/"));
 
-                        let prefix: gpui::AnyElement = if is_directory_backed {
-                            div()
-                                .w(px(16.))
-                                .flex_none()
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .text_color(rgb(TEXT_FAINT))
-                                .child(IconName::Folder)
-                                .into_any_element()
-                        } else {
-                            let badge = linked_providers.get(&tag_id).map(|provider| provider.as_str());
-                            div()
-                                .w(px(16.))
-                                .flex_none()
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .text_color(rgb(TEXT_FAINT))
-                                .child(
+                                let prefix: gpui::AnyElement = if is_directory_backed {
                                     div()
-                                        .relative()
-                                        .child("#")
-                                        .when_some(badge, |this, provider| {
-                                            this.child(sync_badge(provider))
-                                        }),
-                                )
-                                .into_any_element()
-                        };
+                                        .w(px(16.))
+                                        .flex_none()
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .text_color(rgb(TEXT_FAINT))
+                                        .child(IconName::Folder)
+                                        .into_any_element()
+                                } else {
+                                    let badge = linked_providers
+                                        .get(&tag_id)
+                                        .map(|provider| provider.as_str());
+                                    div()
+                                        .w(px(16.))
+                                        .flex_none()
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .text_color(rgb(TEXT_FAINT))
+                                        .child(
+                                            div()
+                                                .relative()
+                                                .child("#")
+                                                .when_some(badge, |this, provider| {
+                                                    this.child(sync_badge(provider))
+                                                }),
+                                        )
+                                        .into_any_element()
+                                };
 
-                        let click_path = path.clone();
-                        let menu_tag_name = tag_name.clone();
-                        let menu_nav = nav.clone();
-                        div()
-                            .h_flex()
-                            .items_center()
-                            .ml(px(depth as f32 * 8.0))
-                            .child(
+                                let click_path = path.clone();
+                                let menu_tag_name = tag_name.clone();
+                                let menu_nav = nav.clone();
                                 div()
-                                    .id(row_id)
-                                    .flex_1()
                                     .h_flex()
                                     .items_center()
-                                    .gap_1p5()
-                                    .child(prefix)
-                                    .child(div().flex_1().min_w_0().truncate().child(label))
-                                    .when(busy, |this| this.child(busy_dot()))
-                                    .px_2()
-                                    .py_0p5()
-                                    .rounded_md()
-                                    .bg(if is_selected {
-                                        rgb(0x2a2a2a)
-                                    } else {
-                                        rgb(0x1e1e1e)
-                                    })
-                                    .hover(|s| s.bg(rgb(0x2a2a2a)))
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.navigate_to(
-                                            NavDestination::Tag(click_path.clone()),
-                                            cx,
-                                        );
-                                    }))
-                                    .context_menu(move |menu, _window, _cx| {
-                                        let nav = menu_nav.clone();
-                                        let tag_name = menu_tag_name.clone();
-                                        let sub_nav = nav.clone();
-                                        let sub_tag_name = tag_name.clone();
-                                        menu.item(PopupMenuItem::new("Add sub-tag…").on_click(
-                                            move |_, _window, cx| {
-                                                sub_nav
-                                                    .update(cx, |_this, cx| {
-                                                        cx.emit(NavBarEvent::OpenAddSubTag(
-                                                            sub_tag_name.clone(),
-                                                        ));
-                                                    })
-                                                    .ok();
-                                            },
-                                        ))
-                                        .item(PopupMenuItem::new("Tag settings…").on_click(
-                                            move |_, _window, cx| {
-                                                nav.update(cx, |_this, cx| {
-                                                    cx.emit(NavBarEvent::OpenTagSettings(
-                                                        tag_name.clone(),
-                                                    ));
-                                                })
-                                                .ok();
-                                            },
-                                        ))
-                                    }),
-                            )
-                    })),
+                                    .ml(px(depth as f32 * 8.0))
+                                    .child(
+                                        div()
+                                            .id(row_id)
+                                            .flex_1()
+                                            .h_flex()
+                                            .items_center()
+                                            .gap_1p5()
+                                            .child(prefix)
+                                            .child(div().flex_1().min_w_0().truncate().child(label))
+                                            .when(busy, |this| this.child(busy_dot()))
+                                            .px_2()
+                                            .py_0p5()
+                                            .rounded_md()
+                                            .bg(if is_selected {
+                                                rgb(0x2a2a2a)
+                                            } else {
+                                                rgb(0x1e1e1e)
+                                            })
+                                            .hover(|s| s.bg(rgb(0x2a2a2a)))
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                this.navigate_to(
+                                                    NavDestination::Tag(click_path.clone()),
+                                                    cx,
+                                                );
+                                            }))
+                                            .context_menu(move |menu, _window, _cx| {
+                                                let nav = menu_nav.clone();
+                                                let tag_name = menu_tag_name.clone();
+                                                let sub_nav = nav.clone();
+                                                let sub_tag_name = tag_name.clone();
+                                                menu.item(
+                                                    PopupMenuItem::new("Add sub-tag…").on_click(
+                                                        move |_, _window, cx| {
+                                                            sub_nav
+                                                                .update(cx, |_this, cx| {
+                                                                    cx.emit(
+                                                                        NavBarEvent::OpenAddSubTag(
+                                                                            sub_tag_name.clone(),
+                                                                        ),
+                                                                    );
+                                                                })
+                                                                .ok();
+                                                        },
+                                                    ),
+                                                )
+                                                .item(PopupMenuItem::new("Tag settings…").on_click(
+                                                    move |_, _window, cx| {
+                                                        nav.update(cx, |_this, cx| {
+                                                            cx.emit(NavBarEvent::OpenTagSettings(
+                                                                tag_name.clone(),
+                                                            ));
+                                                        })
+                                                        .ok();
+                                                    },
+                                                ))
+                                            }),
+                                    )
+                            }),
+                    ),
             )
             .child(
                 div()
                     .flex_none()
                     .border_t_1()
                     .border_color(rgb(0x333333))
-.pt_3()
+                    .pt_3()
                     .v_flex()
                     .gap_0p5()
                     .child(nav_footer_row(
@@ -552,7 +561,11 @@ fn nav_footer_row(
         .py_1()
         .rounded_md()
         .text_color(rgb(TEXT_MUTED))
-        .bg(if active { rgb(PANEL_HOVER) } else { rgb(PANEL_BG) })
+        .bg(if active {
+            rgb(PANEL_HOVER)
+        } else {
+            rgb(PANEL_BG)
+        })
         .hover(|s| s.bg(rgb(PANEL_HOVER)))
         .child(
             div()

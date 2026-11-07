@@ -1,11 +1,11 @@
 use gpui::{
-    App, AppContext, AnyElement, ClickEvent, Context, Entity, EventEmitter, InteractiveElement,
+    AnyElement, App, AppContext, ClickEvent, Context, Entity, EventEmitter, InteractiveElement,
     IntoElement, ParentElement, Render, StatefulInteractiveElement, Styled, Subscription, Window,
     div, prelude::FluentBuilder, px, rgb, svg,
 };
+use gpui_component::Disableable;
 use gpui_component::Sizable;
 use gpui_component::StyledExt;
-use gpui_component::Disableable;
 use gpui_component::input::{Input, InputEvent, InputState};
 use storage::TaskWithMeta;
 
@@ -18,15 +18,25 @@ pub enum TaskRowEvent {
     Selected(TaskWithMeta),
     EditStarted,
     EditEnded,
-    TitleCommitted { task_id: u64, title: String },
-    DoneToggled { task_id: u64, done: bool },
+    TitleCommitted {
+        task_id: u64,
+        title: String,
+    },
+    DoneToggled {
+        task_id: u64,
+        done: bool,
+    },
     /// The row's N/M counter was clicked; the list decides which row (if
     /// any) stays expanded, since only one may be expanded at a time.
-    SubtasksToggled { task_id: u64 },
+    SubtasksToggled {
+        task_id: u64,
+    },
     /// The row's own content changed height (an expanded list opened or
     /// closed, inline editing started or ended). The list measures rows
     /// once, so it has to be told to measure this one again.
-    LayoutChanged { task_id: u64 },
+    LayoutChanged {
+        task_id: u64,
+    },
 }
 
 /// One level of a "task blocks X (which blocks Y)" chain, rendered inline
@@ -208,16 +218,14 @@ impl TaskRow {
             false
         }
         let changed = update_chain(&mut self.blocking.blocked, task_id, blocked)
-            || self
-                .blocking
-                .blocks
-                .iter_mut()
-                .any(|task| if task.id == task_id {
+            || self.blocking.blocks.iter_mut().any(|task| {
+                if task.id == task_id {
                     task.blocked = blocked;
                     true
                 } else {
                     false
-                });
+                }
+            });
         if changed {
             cx.notify();
         }
@@ -429,7 +437,9 @@ impl TaskRow {
         self._edit_subscription = Some(subscription);
         self.editing = true;
         cx.emit(TaskRowEvent::EditStarted);
-        cx.emit(TaskRowEvent::LayoutChanged { task_id: self.task.id });
+        cx.emit(TaskRowEvent::LayoutChanged {
+            task_id: self.task.id,
+        });
         cx.notify();
         window.on_next_frame(move |window, cx| {
             input.update(cx, |state, cx| state.focus(window, cx));
@@ -475,7 +485,8 @@ impl TaskRow {
 impl EventEmitter<TaskRowEvent> for TaskRow {}
 
 impl Render for TaskRow {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {        let task_id = self.task.id;
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let task_id = self.task.id;
         let done = self.task.done;
         let store = self.store.clone();
         // The checkbox closure needs its own copy: it is `move`, so it
@@ -560,32 +571,34 @@ impl Render for TaskRow {
                     .when(has_subrow, |this| this.min_h(px(38.)))
                     .child(
                         Checkbox::new(("checkbox", task_id))
-                    .with_size(px(20.))
-                    .mt(px(4.))
-                    .checked(done)
-                    .disabled(self.task.blocked && !done)
-                    .on_click(move |new_done, _window, cx| {
-                        if locked {
-                            return;
-                        }
-                        let store = store_for_checkbox.clone();
-                        let entity = entity_for_checkbox.clone();
-                        let new_done = *new_done;
-                        cx.spawn(async move |cx| {
-                            if let Err(e) = store.toggle_task_done(task_id, new_done, cx).await {
-                                tracing::error!(?e, "Failed toggle_task_done");
-                            }
-                            entity.update(cx, |this, cx| {
-                                this.task.task.done = new_done;
-                                cx.emit(TaskRowEvent::DoneToggled {
-                                    task_id,
-                                    done: new_done,
-                                });
-                                cx.notify();
-                            });
-                        })
-                        .detach();
-                    }),
+                            .with_size(px(20.))
+                            .mt(px(4.))
+                            .checked(done)
+                            .disabled(self.task.blocked && !done)
+                            .on_click(move |new_done, _window, cx| {
+                                if locked {
+                                    return;
+                                }
+                                let store = store_for_checkbox.clone();
+                                let entity = entity_for_checkbox.clone();
+                                let new_done = *new_done;
+                                cx.spawn(async move |cx| {
+                                    if let Err(e) =
+                                        store.toggle_task_done(task_id, new_done, cx).await
+                                    {
+                                        tracing::error!(?e, "Failed toggle_task_done");
+                                    }
+                                    entity.update(cx, |this, cx| {
+                                        this.task.task.done = new_done;
+                                        cx.emit(TaskRowEvent::DoneToggled {
+                                            task_id,
+                                            done: new_done,
+                                        });
+                                        cx.notify();
+                                    });
+                                })
+                                .detach();
+                            }),
                     )
                     .child(
                         div()
@@ -597,18 +610,18 @@ impl Render for TaskRow {
                             // title never wraps.
                             .min_w_0()
                             .v_flex()
-            .child(if let Some(input) = self.edit_input.clone() {
-                div().id(("task-title-edit", task_id)).pt_1().child(
-                    Input::new(&input)
-                        .small()
-                        .appearance(false)
-                        .bg(rgb(APP_BG))
-                        .border_1()
-                        .border_color(rgb(HAIRLINE))
-                        .rounded_md(),
-                )
-            } else {
-                div()
+                            .child(if let Some(input) = self.edit_input.clone() {
+                                div().id(("task-title-edit", task_id)).pt_1().child(
+                                    Input::new(&input)
+                                        .small()
+                                        .appearance(false)
+                                        .bg(rgb(APP_BG))
+                                        .border_1()
+                                        .border_color(rgb(HAIRLINE))
+                                        .rounded_md(),
+                                )
+                            } else {
+                                div()
                     .id(("task-title", task_id))
                     .h_flex()
                     .items_center()
@@ -745,135 +758,145 @@ impl Render for TaskRow {
                     .when_some(self.inline_subtask(), |this, task| {
                         this.child(subtask_inline(task, &store, &entity))
                     })
-            })
-                    // The sub-row under the title: start chip, tags and the
-                    // "blocks N" chip. Only the chip is clickable; the rest
-                    // is display-only. A row with nothing to put here skips
-                    // the sub-row entirely so the header stays short.
-                    .when(has_subrow, |this| {
-                        this.child(
-                            div()
-                                .h_flex()
-                                .items_center()
-                                .gap_1()
-                                .when_some(start_chip(&self.task), |this, chip| this.child(chip))
-                                .children(visible_tags.iter().map(|tag| {
-                                    tag_chip(tag, self.project_tags.contains(tag))
-                                }))
-                                .when(self.blocking.blocks.len() > 1, |this| {
-                                    this.child(
-                                        div()
-                                            .h_flex()
-                                            .items_center()
-                                            .gap_0p5()
-                                            // The arrow is tinted to match the
-                                            // chip text; kept outside the
-                                            // badge so it is not part of the pill.
-                                            .child(arrow_svg(0xa3a3a3))
-                                            .child(
+                            })
+                            // The sub-row under the title: start chip, tags and the
+                            // "blocks N" chip. Only the chip is clickable; the rest
+                            // is display-only. A row with nothing to put here skips
+                            // the sub-row entirely so the header stays short.
+                            .when(has_subrow, |this| {
+                                this.child(
+                                    div()
+                                        .h_flex()
+                                        .items_center()
+                                        .gap_1()
+                                        .when_some(start_chip(&self.task), |this, chip| {
+                                            this.child(chip)
+                                        })
+                                        .children(visible_tags.iter().map(|tag| {
+                                            tag_chip(tag, self.project_tags.contains(tag))
+                                        }))
+                                        .when(self.blocking.blocks.len() > 1, |this| {
+                                            this.child(
                                                 div()
-                                                    .id(("blocks-chip", task_id))
                                                     .h_flex()
                                                     .items_center()
                                                     .gap_0p5()
-                                                    .px(px(4.))
-                                                    .rounded(px(2.))
-                                                    .bg(rgb(0x2a2a2a))
-                                                    .text_color(rgb(0xa3a3a3))
-                                                    .text_size(px(10.))
-                                                    .cursor_pointer()
-                                                    .on_click(cx.listener(|this, _, _, cx| {
-                                                        cx.stop_propagation();
-                                                        this.toggle_blocks(cx);
-                                                    }))
-                                                    .child(format!(
-                                                        "blocks {}",
-                                                        self.blocking.blocks.len()
-                                                    ))
-                                                    .child(if self.blocks_expanded { "▾" } else { "▸" }),
-                                            ),
-                                    )
-                                }),
-                        )
-                    })
-                )
+                                                    // The arrow is tinted to match the
+                                                    // chip text; kept outside the
+                                                    // badge so it is not part of the pill.
+                                                    .child(arrow_svg(0xa3a3a3))
+                                                    .child(
+                                                        div()
+                                                            .id(("blocks-chip", task_id))
+                                                            .h_flex()
+                                                            .items_center()
+                                                            .gap_0p5()
+                                                            .px(px(4.))
+                                                            .rounded(px(2.))
+                                                            .bg(rgb(0x2a2a2a))
+                                                            .text_color(rgb(0xa3a3a3))
+                                                            .text_size(px(10.))
+                                                            .cursor_pointer()
+                                                            .on_click(cx.listener(
+                                                                |this, _, _, cx| {
+                                                                    cx.stop_propagation();
+                                                                    this.toggle_blocks(cx);
+                                                                },
+                                                            ))
+                                                            .child(format!(
+                                                                "blocks {}",
+                                                                self.blocking.blocks.len()
+                                                            ))
+                                                            .child(if self.blocks_expanded {
+                                                                "▾"
+                                                            } else {
+                                                                "▸"
+                                                            }),
+                                                    ),
+                                            )
+                                        }),
+                                )
+                            }),
+                    ),
             )
             // Expanded lists sit below the header, stacked vertically in
             // the row — never beside it — so the header never moves.
-            .when(self.blocks_expanded && self.blocking.blocks.len() > 1, |this| {
-                this.child(
-                    div()
-                        .h_flex()
-                        .gap_3()
-                        .child(div().w(px(22.)).flex_none())
-                        .child(
-                            div()
-                                .flex_1()
-                                .v_flex()
-                                .child(
-                                    div()
-                                        .id(("blocks-list", task_id))
-                                        .v_flex()
-                                        .pl_4()
-                                        .children(self.blocking.blocks.iter().map(|task| {
-                                            blocked_title(task.clone(), &entity)
-                                        })),
+            .when(
+                self.blocks_expanded && self.blocking.blocks.len() > 1,
+                |this| {
+                    this.child(
+                        div()
+                            .h_flex()
+                            .gap_3()
+                            .child(div().w(px(22.)).flex_none())
+                            .child(
+                                div().flex_1().v_flex().child(
+                                    div().id(("blocks-list", task_id)).v_flex().pl_4().children(
+                                        self.blocking
+                                            .blocks
+                                            .iter()
+                                            .map(|task| blocked_title(task.clone(), &entity)),
+                                    ),
                                 ),
-                        ),
-                )
-            })
-            .when(self.subtasks_expanded && !self.subtasks.is_empty(), |this| {
-                // The subtasks read like the workflow items the details
-                // pane shows for a run's steps, indented under the title
-                // like the expanded "blocks N" list beside it.
-                this.child(
-                    div()
-                        .h_flex()
-                        .gap_3()
-                        .child(div().w(px(22.)).flex_none())
-                        .child(
-                            mini_task_list(self.subtasks.iter().map(|task| {
-                                let task = task.clone();
-                                let task_id = task.id;
-                                let done = task.done;
-                                let entity_for_toggle = entity.clone();
-                                let entity_for_select = entity.clone();
-                                let store = store.clone();
-                                MiniTaskItem::new(task_id, task.title.clone(), done)
-                                    // A blocked subtask cannot be ticked
-                                    // off yet.
-                                    .blocked(task.blocked && !done)
-                                    .on_toggle(move |new_done, _window, cx| {
-                                        let store = store.clone();
-                                        let entity = entity_for_toggle.clone();
-                                        cx.spawn(async move |cx| {
-                                            if let Err(e) = store
-                                                .toggle_task_done(task_id, new_done, cx)
-                                                .await
-                                            {
-                                                tracing::error!(?e, "Failed toggle_task_done");
-                                            }
-                                            entity.update(cx, |_row, cx| {
-                                                cx.emit(TaskRowEvent::DoneToggled {
-                                                    task_id,
-                                                    done: new_done,
+                            ),
+                    )
+                },
+            )
+            .when(
+                self.subtasks_expanded && !self.subtasks.is_empty(),
+                |this| {
+                    // The subtasks read like the workflow items the details
+                    // pane shows for a run's steps, indented under the title
+                    // like the expanded "blocks N" list beside it.
+                    this.child(
+                        div()
+                            .h_flex()
+                            .gap_3()
+                            .child(div().w(px(22.)).flex_none())
+                            .child(
+                                mini_task_list(self.subtasks.iter().map(|task| {
+                                    let task = task.clone();
+                                    let task_id = task.id;
+                                    let done = task.done;
+                                    let entity_for_toggle = entity.clone();
+                                    let entity_for_select = entity.clone();
+                                    let store = store.clone();
+                                    MiniTaskItem::new(task_id, task.title.clone(), done)
+                                        // A blocked subtask cannot be ticked
+                                        // off yet.
+                                        .blocked(task.blocked && !done)
+                                        .on_toggle(move |new_done, _window, cx| {
+                                            let store = store.clone();
+                                            let entity = entity_for_toggle.clone();
+                                            cx.spawn(async move |cx| {
+                                                if let Err(e) = store
+                                                    .toggle_task_done(task_id, new_done, cx)
+                                                    .await
+                                                {
+                                                    tracing::error!(?e, "Failed toggle_task_done");
+                                                }
+                                                entity.update(cx, |_row, cx| {
+                                                    cx.emit(TaskRowEvent::DoneToggled {
+                                                        task_id,
+                                                        done: new_done,
+                                                    });
+                                                    cx.notify();
                                                 });
-                                                cx.notify();
+                                            })
+                                            .detach();
+                                        })
+                                        .on_select(move |_event, _window, cx| {
+                                            entity_for_select.update(cx, |_row, cx| {
+                                                cx.emit(TaskRowEvent::Selected(task.clone()));
                                             });
                                         })
-                                        .detach();
-                                    })
-                                    .on_select(move |_event, _window, cx| {
-                                        entity_for_select.update(cx, |_row, cx| {
-                                            cx.emit(TaskRowEvent::Selected(task.clone()));
-                                        });
-                                    })
-                            }))
-                            .id(("subtask-list", task_id))
-                            .flex_1(),
-                        ),
-                )
-            })
+                                }))
+                                .id(("subtask-list", task_id))
+                                .flex_1(),
+                            ),
+                    )
+                },
+            )
     }
 }
 
@@ -962,7 +985,11 @@ fn subtask_icon(color: u32) -> impl IntoElement {
 /// metadata. Its round checkbox mirrors the main one at px(14.) vs px(22.);
 /// clicking it toggles the subtask, while the title itself stays
 /// display-only and selects the main task.
-fn subtask_inline(task: TaskWithMeta, store: &Store, row_entity: &Entity<TaskRow>) -> impl IntoElement {
+fn subtask_inline(
+    task: TaskWithMeta,
+    store: &Store,
+    row_entity: &Entity<TaskRow>,
+) -> impl IntoElement {
     let muted = task.done || task.blocked;
     let color = blocked_color(muted);
     let subtask_id = task.id;
@@ -986,9 +1013,7 @@ fn subtask_inline(task: TaskWithMeta, store: &Store, row_entity: &Entity<TaskRow
                     let row_entity = row_entity.clone();
                     let new_done = *new_done;
                     cx.spawn(async move |cx| {
-                        if let Err(e) =
-                            store.toggle_task_done(subtask_id, new_done, cx).await
-                        {
+                        if let Err(e) = store.toggle_task_done(subtask_id, new_done, cx).await {
                             tracing::error!(?e, "Failed toggle_task_done");
                         }
                         row_entity.update(cx, |_row, cx| {
@@ -1086,14 +1111,16 @@ fn blocked_title(task: TaskWithMeta, row_entity: &Entity<TaskRow>) -> impl IntoE
                 .when(task.done, |this| this.line_through())
                 .child(task.title.clone())
                 .cursor_pointer()
-                .on_click(move |event: &ClickEvent, _window: &mut Window, cx: &mut App| {
-                    if matches!(event, ClickEvent::Mouse(m) if m.up.click_count == 1) {
-                        cx.stop_propagation();
-                        row_entity_for_click.update(cx, |_row, cx| {
-                            cx.emit(TaskRowEvent::Selected(task.clone()));
-                        });
-                    }
-                }),
+                .on_click(
+                    move |event: &ClickEvent, _window: &mut Window, cx: &mut App| {
+                        if matches!(event, ClickEvent::Mouse(m) if m.up.click_count == 1) {
+                            cx.stop_propagation();
+                            row_entity_for_click.update(cx, |_row, cx| {
+                                cx.emit(TaskRowEvent::Selected(task.clone()));
+                            });
+                        }
+                    },
+                ),
         )
 }
 
@@ -1305,11 +1332,7 @@ mod tests {
                 )
             })
         });
-        cx.update(|cx| {
-            row.update(cx, |row, cx| {
-                row.set_subtasks(vec![task(2, "subtask")], cx)
-            })
-        });
+        cx.update(|cx| row.update(cx, |row, cx| row.set_subtasks(vec![task(2, "subtask")], cx)));
         assert_eq!(
             *relayouts.borrow(),
             vec![1, 1],
@@ -1363,9 +1386,7 @@ mod tests {
         // The same subtask, re-read: no height to re-measure.
         let mut re_read = subtask.clone();
         re_read.task.updated_at = jiff::Timestamp::now();
-        cx.update(|cx| {
-            row.update(cx, |row, cx| row.set_subtasks(vec![re_read.clone()], cx))
-        });
+        cx.update(|cx| row.update(cx, |row, cx| row.set_subtasks(vec![re_read.clone()], cx)));
         assert!(
             relayouts.borrow().is_empty(),
             "a re-read subtask changes nothing"
@@ -1374,9 +1395,7 @@ mod tests {
         // A renamed subtask can wrap: the row re-measures.
         let mut renamed = subtask.clone();
         renamed.task.title = "Subtask renamed".to_string();
-        cx.update(|cx| {
-            row.update(cx, |row, cx| row.set_subtasks(vec![renamed.clone()], cx))
-        });
+        cx.update(|cx| row.update(cx, |row, cx| row.set_subtasks(vec![renamed.clone()], cx)));
         assert_eq!(*relayouts.borrow(), vec![1]);
 
         // A second subtask is a taller row: the list has to measure it too.
@@ -1413,6 +1432,10 @@ mod tests {
                 row.set_view_context(Vec::new(), labels(&["pack", "travel"]), cx)
             })
         });
-        assert_eq!(*relayouts.borrow(), vec![1], "a new label set can add chips");
+        assert_eq!(
+            *relayouts.borrow(),
+            vec![1],
+            "a new label set can add chips"
+        );
     }
 }

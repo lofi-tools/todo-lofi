@@ -81,8 +81,16 @@ pub fn changed_paths(dir: &Path) -> anyhow::Result<Vec<String>> {
 
 /// Whether a local branch of that name already exists.
 pub fn branch_exists(dir: &Path, branch: &str) -> bool {
-    run_git(dir, &["show-ref", "--verify", "--quiet", &format!("refs/heads/{branch}")])
-        .is_ok()
+    run_git(
+        dir,
+        &[
+            "show-ref",
+            "--verify",
+            "--quiet",
+            &format!("refs/heads/{branch}"),
+        ],
+    )
+    .is_ok()
 }
 
 /// Check out an existing branch.
@@ -306,7 +314,10 @@ pub fn resolve_remote(dir: &Path) -> Option<RemoteRef> {
 pub fn git_common_dir(dir: &Path) -> anyhow::Result<PathBuf> {
     let raw = run_git(dir, &["rev-parse", "--git-common-dir"])?;
     if raw.is_empty() {
-        anyhow::bail!("git could not report the common directory of {}", dir.display());
+        anyhow::bail!(
+            "git could not report the common directory of {}",
+            dir.display()
+        );
     }
     let path = Path::new(&raw);
     Ok(if path.is_absolute() {
@@ -345,12 +356,7 @@ pub fn ensure_excluded(repo_dir: &Path) -> anyhow::Result<()> {
 
 /// Add a worktree at `path` on a new `branch` cut from `base`, excluded from
 /// git's view first so the main checkout never shows the new files.
-pub fn worktree_add(
-    repo_dir: &Path,
-    path: &Path,
-    branch: &str,
-    base: &str,
-) -> anyhow::Result<()> {
+pub fn worktree_add(repo_dir: &Path, path: &Path, branch: &str, base: &str) -> anyhow::Result<()> {
     ensure_excluded(repo_dir)?;
     let path = path.to_string_lossy().to_string();
     run_git(repo_dir, &["worktree", "add", &path, "-b", branch, base]).map(|_| ())
@@ -407,10 +413,8 @@ mod tests {
 
     impl TempRepo {
         fn new(name: &str) -> Self {
-            let dir = std::env::temp_dir().join(format!(
-                "todo2-coding-git-{name}-{}",
-                std::process::id()
-            ));
+            let dir = std::env::temp_dir()
+                .join(format!("todo2-coding-git-{name}-{}", std::process::id()));
             if dir.exists() {
                 std::fs::remove_dir_all(&dir).expect("clean temp dir");
             }
@@ -533,8 +537,18 @@ mod tests {
     #[test]
     fn resolves_the_github_remote_even_without_an_origin() {
         let repo = TempRepo::new("remote-pushdefault");
-        repo.git(&["remote", "add", "github", "git@github.com:lofi-tools/taskstream.git"]);
-        repo.git(&["remote", "add", "gitlab", "git@gitlab.com:lofi-tools/taskstream.git"]);
+        repo.git(&[
+            "remote",
+            "add",
+            "github",
+            "git@github.com:lofi-tools/taskstream.git",
+        ]);
+        repo.git(&[
+            "remote",
+            "add",
+            "gitlab",
+            "git@gitlab.com:lofi-tools/taskstream.git",
+        ]);
         repo.git(&["config", "remote.pushDefault", "github"]);
 
         let resolved = resolve_remote(&repo.dir).expect("github remote");
@@ -550,7 +564,12 @@ mod tests {
     #[test]
     fn resolves_origin_before_the_rest_and_the_branchs_remote_first() {
         let repo = TempRepo::new("remote-order");
-        repo.git(&["remote", "add", "upstream", "git@github.com:upstream/api.git"]);
+        repo.git(&[
+            "remote",
+            "add",
+            "upstream",
+            "git@github.com:upstream/api.git",
+        ]);
         repo.git(&["remote", "add", "origin", "git@github.com:me/api.git"]);
         assert_eq!(resolve_remote(&repo.dir).unwrap().name, "origin");
 
@@ -614,7 +633,9 @@ mod tests {
         worktree_add(&repo.dir, &worktree, "feature/dirty", "main").unwrap();
         std::fs::write(worktree.join("uncommitted.txt"), "wip").unwrap();
 
-        let error = worktree_remove(&repo.dir, &worktree).unwrap_err().to_string();
+        let error = worktree_remove(&repo.dir, &worktree)
+            .unwrap_err()
+            .to_string();
         assert!(error.contains("uncommitted.txt"), "{error}");
         assert!(worktree.is_dir(), "a refused removal leaves the checkout");
 
@@ -644,10 +665,8 @@ mod tests {
     #[test]
     fn pushes_a_branch_to_the_remote_it_was_resolved_from() {
         let repo = TempRepo::new("push");
-        let bare = std::env::temp_dir().join(format!(
-            "todo2-coding-git-bare-{}",
-            std::process::id()
-        ));
+        let bare =
+            std::env::temp_dir().join(format!("todo2-coding-git-bare-{}", std::process::id()));
         std::fs::remove_dir_all(&bare).ok();
         std::fs::create_dir_all(&bare).expect("create bare repo");
         run_git(&bare, &["init", "-q", "--bare"]).expect("init bare");

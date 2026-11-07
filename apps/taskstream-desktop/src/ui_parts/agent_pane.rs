@@ -18,16 +18,16 @@ use acp_client::schema::{
     SessionModeId, SessionModeState, ToolCallUpdate,
 };
 use acp_client::{
-    AcpConnection, AcpError, AcpEvent, Activity, AgentServer, AuthMethodRow, ConnectOptions, EntryKind,
-    NoticeLevel, OpenCodeAgent, PermissionChoice, PermissionDecision, PermissionRecord,
+    AcpConnection, AcpError, AcpEvent, Activity, AgentServer, AuthMethodRow, ConnectOptions,
+    EntryKind, NoticeLevel, OpenCodeAgent, PermissionChoice, PermissionDecision, PermissionRecord,
     PermissionReply, PermissionRule, SessionRoots, SessionSpec, SessionStore, SpawnSpec,
     StoredSession, ToolPermissions, ToolStatus, Transcript, connect,
 };
 use gpui::{
     AnyElement, App, AppContext, Context, ElementId, Entity, EventEmitter, FocusHandle, Focusable,
-    InteractiveElement, IntoElement, KeyBinding, ListAlignment, ListOffset, ListState, ParentElement,
-    Render, SharedString, StatefulInteractiveElement, Styled, Subscription, Task, WeakEntity, Window,
-    actions, div, list, px, rgb, prelude::FluentBuilder,
+    InteractiveElement, IntoElement, KeyBinding, ListAlignment, ListOffset, ListState,
+    ParentElement, Render, SharedString, StatefulInteractiveElement, Styled, Subscription, Task,
+    WeakEntity, Window, actions, div, list, prelude::FluentBuilder, px, rgb,
 };
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
@@ -311,12 +311,7 @@ pub fn build_task_context(task: &storage::TaskWithMeta) -> String {
 /// `id` is the task's own id, stated so a tool call can name the task it means
 /// instead of guessing: the coding tools resolve a run from a task id, and a
 /// prompt that gives the title alone leaves the model to invent one.
-fn task_context_text(
-    id: u64,
-    title: &str,
-    description: Option<&str>,
-    tags: &[String],
-) -> String {
+fn task_context_text(id: u64, title: &str, description: Option<&str>, tags: &[String]) -> String {
     let mut context = format!("Task #{id}: {}", title.trim());
     if let Some(description) = description
         .map(str::trim)
@@ -552,11 +547,7 @@ pub struct AgentPane {
 }
 
 impl AgentPane {
-    pub fn new(
-        session_store: SessionStore,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Self {
+    pub fn new(session_store: SessionStore, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let prompt = cx.new(|cx| {
             let mut state = TextareaState::new(window, cx);
             state.set_placeholder("Ask the agent to do something…", window, cx);
@@ -819,12 +810,7 @@ impl AgentPane {
     }
 
     /// Refresh a project's entry from a newly resolved project description.
-    fn refresh_entry(
-        &mut self,
-        project: AgentProject,
-        resumable: bool,
-        cx: &mut Context<Self>,
-    ) {
+    fn refresh_entry(&mut self, project: AgentProject, resumable: bool, cx: &mut Context<Self>) {
         let tag_name = project.tag_name.clone();
         let resolution = project.resolve();
         let tool_permissions = self
@@ -837,8 +823,7 @@ impl AgentPane {
             // A brand-new project starts on the default profile with no MCP
             // endpoint: only a coding run attaches one, and it does so through
             // `start_run_session` (spec decision #3, scope).
-            let mut entry =
-                ProjectEntry::new(project, tool_permissions, self.agent.clone(), None);
+            let mut entry = ProjectEntry::new(project, tool_permissions, self.agent.clone(), None);
             entry.state = match &resolution {
                 Some((cwd, _)) => {
                     let command = entry.agent.command_line(cwd);
@@ -915,7 +900,11 @@ impl AgentPane {
         let Some(tag_name) = self.active.clone() else {
             return;
         };
-        let Some(project) = self.projects.get(&tag_name).map(|entry| entry.project.clone()) else {
+        let Some(project) = self
+            .projects
+            .get(&tag_name)
+            .map(|entry| entry.project.clone())
+        else {
             return;
         };
         // A checkout only ever applies to its own project; anything else means
@@ -1067,15 +1056,12 @@ impl AgentPane {
                         }
                         Err(error) => {
                             tracing::warn!("could not resume ACP session: {error}");
-                            let notice =
-                                format!("Could not resume session {}: {error}", previous.session_id);
-                            let (session_id, modes, config_options) = create_session(
-                                &connection,
-                                &cwd,
-                                &additional,
-                                mcp_servers,
-                            )
-                            .await?;
+                            let notice = format!(
+                                "Could not resume session {}: {error}",
+                                previous.session_id
+                            );
+                            let (session_id, modes, config_options) =
+                                create_session(&connection, &cwd, &additional, mcp_servers).await?;
                             Ok((session_id, modes, config_options, Some(notice)))
                         }
                     }
@@ -1122,9 +1108,7 @@ impl AgentPane {
                             .requester
                             .set_config_option(
                                 &session_id,
-                                SessionConfigId::new(
-                                    crate::coding_agent::V2_MODE_CONFIG_ID,
-                                ),
+                                SessionConfigId::new(crate::coding_agent::V2_MODE_CONFIG_ID),
                                 SessionConfigOptionValue::value_id(mode),
                             )
                             .await?;
@@ -1212,10 +1196,9 @@ impl AgentPane {
                 detail,
             }) => {
                 let events = forward_events(&mut connection, tag_name, cx);
-                entry.transcript.push_error_entry(
-                    "Authentication required",
-                    detail,
-                );
+                entry
+                    .transcript
+                    .push_error_entry("Authentication required", detail);
                 entry.transcript.push_auth_required(methods);
                 entry.state = PaneState::AuthRequired(Box::new(LiveSession {
                     connection,
@@ -1290,10 +1273,8 @@ impl AgentPane {
         let tag_owned = tag_name.to_string();
         let task = cx.spawn(async move |this, cx| {
             let result = turn.await;
-            this.update(cx, |pane, cx| {
-                pane.on_turn_finished(&tag_owned, result, cx)
-            })
-            .ok();
+            this.update(cx, |pane, cx| pane.on_turn_finished(&tag_owned, result, cx))
+                .ok();
         });
         if let Some(entry) = self.projects.get_mut(tag_name) {
             if let Some(live) = entry.live_mut() {
@@ -1551,12 +1532,7 @@ impl AgentPane {
 
     /// Apply one batch of agent events. Batched on purpose: the transcript is
     /// notified once per batch instead of once per streamed chunk.
-    fn on_agent_events(
-        &mut self,
-        tag_name: &str,
-        events: Vec<AcpEvent>,
-        cx: &mut Context<Self>,
-    ) {
+    fn on_agent_events(&mut self, tag_name: &str, events: Vec<AcpEvent>, cx: &mut Context<Self>) {
         let Some(entry) = self.projects.get_mut(tag_name) else {
             return;
         };
@@ -1626,7 +1602,9 @@ impl AgentPane {
                 AcpEvent::Stderr(line) => {
                     tracing::debug!("agent stderr: {line}");
                 }
-                AcpEvent::ProtocolFailed { message } => tracing::warn!(%message, "ACP transport failed"),
+                AcpEvent::ProtocolFailed { message } => {
+                    tracing::warn!(%message, "ACP transport failed")
+                }
                 AcpEvent::Exited { code, .. } => {
                     let detail = entry
                         .live()
@@ -1765,12 +1743,7 @@ impl AgentPane {
         self.projects.get_mut(&tag_name)
     }
 
-    fn on_input_event(
-        &mut self,
-        event: &InputEvent,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn on_input_event(&mut self, event: &InputEvent, window: &mut Window, cx: &mut Context<Self>) {
         match event {
             InputEvent::Change => {
                 if !self.slash_open(cx) {
@@ -1803,9 +1776,7 @@ impl AgentPane {
         if !self.slash_open(cx) {
             return None;
         }
-        self.matching_commands(cx)
-            .get(self.slash_index)
-            .cloned()
+        self.matching_commands(cx).get(self.slash_index).cloned()
     }
 
     fn matching_commands(&self, cx: &App) -> Vec<String> {
@@ -1829,8 +1800,9 @@ impl AgentPane {
 
     /// Fill the prompt with `/name ` so arguments can be appended.
     fn accept_command(&mut self, name: String, window: &mut Window, cx: &mut Context<Self>) {
-        self.prompt
-            .update(cx, |state, cx| state.set_value(format!("/{name} "), window, cx));
+        self.prompt.update(cx, |state, cx| {
+            state.set_value(format!("/{name} "), window, cx)
+        });
         self.slash_index = 0;
         cx.notify();
     }
@@ -1864,12 +1836,7 @@ impl AgentPane {
     /// selector button works because the outside-mousedown that precedes the
     /// click only closes; the click itself is swallowed when it arrives
     /// within the ignore window (same idiom as the task-details pickers).
-    fn open_overlay(
-        &mut self,
-        overlay: Overlay,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn open_overlay(&mut self, overlay: Overlay, window: &mut Window, cx: &mut Context<Self>) {
         if self.overlay.as_ref() == Some(&overlay) {
             self.overlay = None;
         } else if self.take_recent_overlay_outside_close(&overlay) {
@@ -1936,10 +1903,7 @@ impl AgentPane {
     fn overlay_rows(&self, overlay: &Overlay, cx: &App) -> Option<OverlayRows> {
         let (title, values, current) = match overlay {
             Overlay::Model => {
-                let chip = self
-                    .select_chips()
-                    .into_iter()
-                    .find(|chip| chip.is_model)?;
+                let chip = self.select_chips().into_iter().find(|chip| chip.is_model)?;
                 (chip.name.clone(), chip.values.clone(), chip.current.clone())
             }
             Overlay::Mode => match self.mode_source()? {
@@ -2001,12 +1965,7 @@ impl AgentPane {
     /// through the option standing in for them when it reports mode that way,
     /// everything else (models included) is a select-valued config option on
     /// its chip.
-    fn select_overlay_value(
-        &mut self,
-        overlay: Overlay,
-        value: String,
-        cx: &mut Context<Self>,
-    ) {
+    fn select_overlay_value(&mut self, overlay: Overlay, value: String, cx: &mut Context<Self>) {
         match overlay {
             // A pick is the change the mode actually came from: advertised
             // session modes go through `session/set_mode`, and a mode the agent
@@ -2019,11 +1978,7 @@ impl AgentPane {
             },
             Overlay::Config(config_id) => self.select_config_value(config_id, value, cx),
             Overlay::Model => {
-                if let Some(chip) = self
-                    .select_chips()
-                    .into_iter()
-                    .find(|chip| chip.is_model)
-                {
+                if let Some(chip) = self.select_chips().into_iter().find(|chip| chip.is_model) {
                     self.select_config_value(chip.id, value, cx);
                 }
             }
@@ -2100,13 +2055,15 @@ impl AgentPane {
         let Some(tag_name) = self.active.clone() else {
             return;
         };
-        let request = self.projects.get(&tag_name).and_then(|entry| entry.live()).and_then(
-            |live| {
+        let request = self
+            .projects
+            .get(&tag_name)
+            .and_then(|entry| entry.live())
+            .and_then(|live| {
                 live.session_id
                     .clone()
                     .map(|session_id| (live.connection.requester.clone(), session_id))
-            },
-        );
+            });
         let Some((requester, session_id)) = request else {
             return;
         };
@@ -2161,8 +2118,11 @@ impl AgentPane {
         let Some(tag_name) = self.active.clone() else {
             return;
         };
-        let request = self.projects.get(&tag_name).and_then(|entry| entry.live()).and_then(
-            |live| {
+        let request = self
+            .projects
+            .get(&tag_name)
+            .and_then(|entry| entry.live())
+            .and_then(|live| {
                 live.session_id.clone().map(|session_id| {
                     (
                         live.connection.requester.clone(),
@@ -2172,8 +2132,7 @@ impl AgentPane {
                             .map(|entry| entry.agent.opencode_version()),
                     )
                 })
-            },
-        );
+            });
         let Some((requester, session_id, version)) = request else {
             return;
         };
@@ -2380,9 +2339,7 @@ fn forward_events(
             }
             let drained = std::mem::take(&mut batch);
             if this
-                .update(cx, |pane, cx| {
-                    pane.on_agent_events(&tag_owned, drained, cx)
-                })
+                .update(cx, |pane, cx| pane.on_agent_events(&tag_owned, drained, cx))
                 .is_err()
             {
                 break;
@@ -2397,7 +2354,11 @@ async fn create_session(
     cwd: &std::path::Path,
     additional: &[PathBuf],
     mcp_servers: Vec<McpServer>,
-) -> anyhow::Result<(SessionId, Option<SessionModeState>, Vec<SessionConfigOption>)> {
+) -> anyhow::Result<(
+    SessionId,
+    Option<SessionModeState>,
+    Vec<SessionConfigOption>,
+)> {
     let (session_id, modes, config_options) = connection
         .requester
         .new_session(cwd.to_path_buf(), additional.to_vec(), mcp_servers)
@@ -2697,29 +2658,23 @@ impl AgentPane {
                     .gap_1()
                     .py_1();
                 if is_first_agent_message(&entry.transcript, index) {
-                    element = element.child(
-                        div()
-                            .text_xs()
-                            .text_color(rgb(TEXT_FAINT))
-                            .child(format!(
+                    element =
+                        element.child(div().text_xs().text_color(rgb(TEXT_FAINT)).child(format!(
                                 "{}{}",
                                 entry.agent.display_name(),
                                 self.model_label()
                                     .map(|model| format!(" · {model}"))
                                     .unwrap_or_default()
-                            )),
-                    );
+                            )));
                 }
                 element
                     .child(
-                        div()
-                            .w_full()
-                            .child(
-                                TextView::markdown(format!("agent-{entry_id}"), text.clone())
-                                    .selectable(false)
-                                    .text_size(px(REPLY_FONT_SIZE))
-                                    .style(message_markdown_style(REPLY_FONT_SIZE)),
-                            ),
+                        div().w_full().child(
+                            TextView::markdown(format!("agent-{entry_id}"), text.clone())
+                                .selectable(false)
+                                .text_size(px(REPLY_FONT_SIZE))
+                                .style(message_markdown_style(REPLY_FONT_SIZE)),
+                        ),
                     )
                     // Last child, and absolutely placed: it paints over the
                     // first line's tail, which its own surface hides, instead
@@ -2805,17 +2760,11 @@ impl AgentPane {
                     }));
                 if expanded || live {
                     element = element.child(
-                        div()
-                            .text_xs()
-                            .text_color(rgb(TEXT_MUTED))
-                            .child(
-                                TextView::markdown(
-                                    format!("thought-{entry_id}"),
-                                    text.clone(),
-                                )
+                        div().text_xs().text_color(rgb(TEXT_MUTED)).child(
+                            TextView::markdown(format!("thought-{entry_id}"), text.clone())
                                 .selectable(false)
                                 .style(message_markdown_style(PROMPT_FONT_SIZE)),
-                            ),
+                        ),
                     );
                 }
                 element.into_any_element()
@@ -2977,9 +2926,7 @@ impl AgentPane {
                     .into_any_element(),
                 NoticeLevel::Error => render_error_notice(entry_id, text),
             },
-            EntryKind::Error { title, detail } => {
-                render_error(weak, title, detail, true)
-            }
+            EntryKind::Error { title, detail } => render_error(weak, title, detail, true),
             EntryKind::AuthRequired { methods } => render_auth(weak, methods),
             EntryKind::Usage { used, size, cost } => {
                 let mut label = format!("{used}/{size} tokens");
@@ -3114,9 +3061,12 @@ impl AgentPane {
                 .flex()
                 .flex_col()
                 .child(render_error(&weak, title, detail, true))
-                .child(div().flex_1().min_h_0().child(
-                    self.render_transcript(&weak, cx),
-                ))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_h_0()
+                        .child(self.render_transcript(&weak, cx)),
+                )
                 .into_any_element(),
             PaneState::Ready(_) | PaneState::AuthRequired(_) if entry.transcript.is_empty() => {
                 let project = entry.project.label.clone();
@@ -3126,9 +3076,7 @@ impl AgentPane {
                     .unwrap_or_else(|| "no directory".to_string());
                 centred_hint(format!("Ask the agent about {project}\n{dirs}"))
             }
-            PaneState::Ready(_) | PaneState::AuthRequired(_) => {
-                self.render_transcript(&weak, cx)
-            }
+            PaneState::Ready(_) | PaneState::AuthRequired(_) => self.render_transcript(&weak, cx),
         }
     }
 
@@ -3282,9 +3230,17 @@ impl AgentPane {
                 .color(rgb(TEXT_MUTED).into())
                 .into_any_element()
         } else {
-            div().text_xs().text_color(rgb(TEXT_FAINT)).child("●").into_any_element()
+            div()
+                .text_xs()
+                .text_color(rgb(TEXT_FAINT))
+                .child("●")
+                .into_any_element()
         });
-        let label_color = if self.esc_armed { TEXT_STRONG } else { TEXT_MUTED };
+        let label_color = if self.esc_armed {
+            TEXT_STRONG
+        } else {
+            TEXT_MUTED
+        };
         Some(
             row.child(div().text_xs().text_color(rgb(label_color)).child(label))
                 .into_any_element(),
@@ -3299,11 +3255,7 @@ impl AgentPane {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let chips = self.select_chips();
-        let models: Vec<SelectChip> = chips
-            .iter()
-            .filter(|chip| chip.is_model)
-            .cloned()
-            .collect();
+        let models: Vec<SelectChip> = chips.iter().filter(|chip| chip.is_model).cloned().collect();
         let others: Vec<SelectChip> = chips
             .iter()
             .filter(|chip| !chip.is_model && !chip.is_mode)
@@ -3376,12 +3328,10 @@ impl AgentPane {
                         .text_xs()
                         .text_color(rgb(TEXT_MUTED))
                         .child(format!("Queued · {queue_len}"))
-                        .child(icon_button(
-                            "agent-queue-clear",
-                            IconName::Close,
-                            "Clear the queue",
-                        )
-                        .on_click(cx.listener(|this, _, _, cx| this.clear_queue(cx)))),
+                        .child(
+                            icon_button("agent-queue-clear", IconName::Close, "Clear the queue")
+                                .on_click(cx.listener(|this, _, _, cx| this.clear_queue(cx))),
+                        ),
                 )
             })
             .child(
@@ -3401,7 +3351,7 @@ impl AgentPane {
                     "Stop the turn · Ctrl-C or Esc twice",
                 )
                 .on_click(cx.listener(|this, _, _, cx| this.stop(cx)))
-                    .into_any_element()
+                .into_any_element()
             } else {
                 Button::new("agent-send")
                     .primary()
@@ -3725,26 +3675,21 @@ fn block(text: &str, max_lines: Option<usize>) -> AnyElement {
 }
 
 fn render_diff(diff: &acp_client::thread::FileDiff) -> AnyElement {
-    let mut element = div()
-        .w_full()
-        .flex()
-        .flex_col()
-        .gap_1()
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .gap_1()
-                .child(icon(IconName::FileText, TEXT_MUTED))
-                .child(
-                    div()
-                        .min_w_0()
-                        .truncate()
-                        .text_xs()
-                        .text_color(rgb(TEXT_MUTED))
-                        .child(diff.path.clone()),
-                ),
-        );
+    let mut element = div().w_full().flex().flex_col().gap_1().child(
+        div()
+            .flex()
+            .items_center()
+            .gap_1()
+            .child(icon(IconName::FileText, TEXT_MUTED))
+            .child(
+                div()
+                    .min_w_0()
+                    .truncate()
+                    .text_xs()
+                    .text_color(rgb(TEXT_MUTED))
+                    .child(diff.path.clone()),
+            ),
+    );
     let lines = diff_lines(diff.old_text.as_deref(), &diff.new_text);
     let shown = if lines.len() > 200 {
         &lines[lines.len() - 200..]
@@ -3820,12 +3765,7 @@ fn render_terminal(
                         .text_color(rgb(TEXT_MUTED))
                         .child(terminal_id.to_string()),
                 )
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(rgb(status_color))
-                        .child(status),
-                )
+                .child(div().text_xs().text_color(rgb(status_color)).child(status))
                 .when(output.lines().count() > TERMINAL_TAIL_LINES, |this| {
                     this.child(
                         div()
@@ -3887,7 +3827,11 @@ fn render_permission(
             .bg(rgb(PANEL_BG))
             .rounded_md()
             .text_xs()
-            .text_color(rgb(if decision.is_allow() { TEXT_MUTED } else { DANGER }))
+            .text_color(rgb(if decision.is_allow() {
+                TEXT_MUTED
+            } else {
+                DANGER
+            }))
             .child(format!("{label} · {title}"))
             .into_any_element();
     }
@@ -3924,11 +3868,10 @@ fn render_permission(
                 .children(options.iter().enumerate().map(|(index, option)| {
                     let option = option.clone();
                     let allowed = option.is_allow();
-                    let mut button = Button::new(SharedString::from(format!(
-                        "permission-{entry_id}-{index}"
-                    )))
-                    .compact()
-                    .label(option.name.clone());
+                    let mut button =
+                        Button::new(SharedString::from(format!("permission-{entry_id}-{index}")))
+                            .compact()
+                            .label(option.name.clone());
                     button = if allowed {
                         button.primary()
                     } else {
@@ -3959,38 +3902,42 @@ fn render_permission(
                 .items_center()
                 .gap_2()
                 .child(
-                    Button::new(SharedString::from(format!("permission-always-allow-{entry_id}")))
-                        .ghost()
-                        .compact()
-                        .with_size(gpui_component::Size::Small)
-                        .label("Always allow")
-                        .tooltip("Remember allow for this tool in this project")
-                        .on_click({
-                            let weak = weak.clone();
-                            move |_, _, cx: &mut App| {
-                                weak.update(cx, |pane, cx| {
-                                    pane.remember_permission(entry_id, true, cx)
-                                })
-                                .ok();
-                            }
-                        }),
+                    Button::new(SharedString::from(format!(
+                        "permission-always-allow-{entry_id}"
+                    )))
+                    .ghost()
+                    .compact()
+                    .with_size(gpui_component::Size::Small)
+                    .label("Always allow")
+                    .tooltip("Remember allow for this tool in this project")
+                    .on_click({
+                        let weak = weak.clone();
+                        move |_, _, cx: &mut App| {
+                            weak.update(cx, |pane, cx| {
+                                pane.remember_permission(entry_id, true, cx)
+                            })
+                            .ok();
+                        }
+                    }),
                 )
                 .child(
-                    Button::new(SharedString::from(format!("permission-always-deny-{entry_id}")))
-                        .ghost()
-                        .compact()
-                        .with_size(gpui_component::Size::Small)
-                        .label("Always deny")
-                        .tooltip("Remember deny for this tool in this project")
-                        .on_click({
-                            let weak = weak.clone();
-                            move |_, _, cx: &mut App| {
-                                weak.update(cx, |pane, cx| {
-                                    pane.remember_permission(entry_id, false, cx)
-                                })
-                                .ok();
-                            }
-                        }),
+                    Button::new(SharedString::from(format!(
+                        "permission-always-deny-{entry_id}"
+                    )))
+                    .ghost()
+                    .compact()
+                    .with_size(gpui_component::Size::Small)
+                    .label("Always deny")
+                    .tooltip("Remember deny for this tool in this project")
+                    .on_click({
+                        let weak = weak.clone();
+                        move |_, _, cx: &mut App| {
+                            weak.update(cx, |pane, cx| {
+                                pane.remember_permission(entry_id, false, cx)
+                            })
+                            .ok();
+                        }
+                    }),
                 ),
         )
         .child(
@@ -4008,34 +3955,36 @@ fn render_error(
     detail: &str,
     retryable: bool,
 ) -> AnyElement {
-    let mut children = vec![div()
-        .flex()
-        .items_center()
-        .gap_2()
-        .child(icon(IconName::CircleX, DANGER))
-        .child(
-            div()
-                .min_w_0()
-                .text_sm()
-                .font_semibold()
-                .text_color(rgb(TEXT_STRONG))
-                .child(title.to_string()),
-        )
-        .child(div().flex_1())
-        .when(!detail.trim().is_empty(), |this| {
-            let detail = detail.to_string();
-            this.child(
-                Button::new("agent-error-copy")
-                    .ghost()
-                    .compact()
-                    .icon(IconName::Copy)
-                    .tooltip("Copy the error text")
-                    .on_click(move |_, _, cx: &mut App| {
-                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(detail.clone()));
-                    }),
+    let mut children = vec![
+        div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .child(icon(IconName::CircleX, DANGER))
+            .child(
+                div()
+                    .min_w_0()
+                    .text_sm()
+                    .font_semibold()
+                    .text_color(rgb(TEXT_STRONG))
+                    .child(title.to_string()),
             )
-        })
-        .into_any_element()];
+            .child(div().flex_1())
+            .when(!detail.trim().is_empty(), |this| {
+                let detail = detail.to_string();
+                this.child(
+                    Button::new("agent-error-copy")
+                        .ghost()
+                        .compact()
+                        .icon(IconName::Copy)
+                        .tooltip("Copy the error text")
+                        .on_click(move |_, _, cx: &mut App| {
+                            cx.write_to_clipboard(gpui::ClipboardItem::new_string(detail.clone()));
+                        }),
+                )
+            })
+            .into_any_element(),
+    ];
     if !detail.trim().is_empty() {
         children.push(render_error_detail(detail));
     }
@@ -4118,31 +4067,27 @@ fn render_auth(weak: &WeakEntity<AgentPane>, methods: &[AuthMethodRow]) -> AnyEl
             .into_any_element(),
     ];
     for (index, method) in methods.iter().enumerate() {
-        let mut row = div()
-            .flex()
-            .items_center()
-            .gap_2()
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .flex()
-                    .flex_col()
-                    .child(
+        let mut row = div().flex().items_center().gap_2().child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(TEXT_STRONG))
+                        .child(method.name.clone()),
+                )
+                .when_some(method.description.clone(), |this, description| {
+                    this.child(
                         div()
                             .text_xs()
-                            .text_color(rgb(TEXT_STRONG))
-                            .child(method.name.clone()),
+                            .text_color(rgb(TEXT_MUTED))
+                            .child(description),
                     )
-                    .when_some(method.description.clone(), |this, description| {
-                        this.child(
-                            div()
-                                .text_xs()
-                                .text_color(rgb(TEXT_MUTED))
-                                .child(description),
-                        )
-                    }),
-            );
+                }),
+        );
         if method.is_terminal() {
             row = row.child(
                 div()
@@ -4159,10 +4104,8 @@ fn render_auth(weak: &WeakEntity<AgentPane>, methods: &[AuthMethodRow]) -> AnyEl
                     .on_click({
                         let weak = weak.clone();
                         move |_, _, cx: &mut App| {
-                            weak.update(cx, |pane, cx| {
-                                pane.sign_in(method_id.clone(), cx)
-                            })
-                            .ok();
+                            weak.update(cx, |pane, cx| pane.sign_in(method_id.clone(), cx))
+                                .ok();
                         }
                     }),
             );
@@ -4222,10 +4165,7 @@ fn render_launching(name: &str, command: &str, cwd: &std::path::Path) -> AnyElem
                     .child(format!("Starting {name}…")),
             )
             .into_any_element(),
-        block(
-            &format!("{command}\n{}", cwd.display()),
-            None,
-        ),
+        block(&format!("{command}\n{}", cwd.display()), None),
     ])
 }
 
@@ -4576,7 +4516,8 @@ mod tests {
         cx.update(gpui_component::init);
         let (pane, cx) = cx.add_window_view(|window, cx| {
             let mut pane = AgentPane::new(test_store("escape-cancel"), window, cx);
-            pane.projects.insert(PROJECT.to_string(), busy_entry_with_a_queued_message());
+            pane.projects
+                .insert(PROJECT.to_string(), busy_entry_with_a_queued_message());
             pane.active = Some(PROJECT.to_string());
             pane
         });
@@ -4587,9 +4528,8 @@ mod tests {
         cx.update(|window, cx| window.focus(&focus, cx));
         cx.update(|window, cx| window.draw(cx).clear(cx));
 
-        let handled = cx.update(|window, cx| {
-            pane.update(cx, |pane, cx| pane.on_escape(window, cx))
-        });
+        let handled =
+            cx.update(|window, cx| pane.update(cx, |pane, cx| pane.on_escape(window, cx)));
         assert!(handled, "the running turn takes the first Escape");
         cx.update(|_, cx| {
             let pane = pane.read(cx);
@@ -4598,9 +4538,8 @@ mod tests {
             assert_eq!(pane.queue_len(), 1, "nothing is cancelled yet");
         });
 
-        let handled = cx.update(|window, cx| {
-            pane.update(cx, |pane, cx| pane.on_escape(window, cx))
-        });
+        let handled =
+            cx.update(|window, cx| pane.update(cx, |pane, cx| pane.on_escape(window, cx)));
         assert!(handled, "the second Escape is the cancel");
         cx.update(|_, cx| {
             let pane = pane.read(cx);
@@ -4652,7 +4591,9 @@ mod tests {
 
         let interrupt = ctrl_c();
         let handled = cx.update(|window, cx| {
-            pane.update(cx, |pane, cx| pane.on_intercepted_key(&interrupt, window, cx))
+            pane.update(cx, |pane, cx| {
+                pane.on_intercepted_key(&interrupt, window, cx)
+            })
         });
         assert!(handled, "Ctrl-C interrupts from inside the pane");
         cx.update(|_, cx| {
@@ -4678,7 +4619,8 @@ mod tests {
         cx.update(gpui_component::init);
         let (pane, cx) = cx.add_window_view(|window, cx| {
             let mut pane = AgentPane::new(test_store("ctrl-c-copy"), window, cx);
-            pane.projects.insert(PROJECT.to_string(), busy_entry_with_a_queued_message());
+            pane.projects
+                .insert(PROJECT.to_string(), busy_entry_with_a_queued_message());
             pane.active = Some(PROJECT.to_string());
             pane
         });
@@ -4697,7 +4639,9 @@ mod tests {
 
         let interrupt = ctrl_c();
         let handled = cx.update(|window, cx| {
-            pane.update(cx, |pane, cx| pane.on_intercepted_key(&interrupt, window, cx))
+            pane.update(cx, |pane, cx| {
+                pane.on_intercepted_key(&interrupt, window, cx)
+            })
         });
         assert!(!handled, "Ctrl-C with a selection is the box's copy");
         cx.update(|_, cx| {
@@ -4712,7 +4656,9 @@ mod tests {
             });
         });
         let handled = cx.update(|window, cx| {
-            pane.update(cx, |pane, cx| pane.on_intercepted_key(&interrupt, window, cx))
+            pane.update(cx, |pane, cx| {
+                pane.on_intercepted_key(&interrupt, window, cx)
+            })
         });
         assert!(handled, "an empty prompt box is not a selection to copy");
         cx.update(|_, cx| {
@@ -4727,7 +4673,8 @@ mod tests {
         cx.update(gpui_component::init);
         let (pane, cx) = cx.add_window_view(|window, cx| {
             let mut pane = AgentPane::new(test_store("hint-click"), window, cx);
-            pane.projects.insert(PROJECT.to_string(), busy_entry_with_a_queued_message());
+            pane.projects
+                .insert(PROJECT.to_string(), busy_entry_with_a_queued_message());
             pane.active = Some(PROJECT.to_string());
             pane.esc_armed = true;
             pane
@@ -4931,7 +4878,8 @@ mod tests {
         cx.update(gpui_component::init);
         let (pane, cx) = cx.add_window_view(|window, cx| {
             let mut pane = AgentPane::new(test_store("batch-append"), window, cx);
-            pane.projects.insert(PROJECT.to_string(), project_entry(PROJECT));
+            pane.projects
+                .insert(PROJECT.to_string(), project_entry(PROJECT));
             pane.active = Some(PROJECT.to_string());
             pane
         });
@@ -4972,7 +4920,8 @@ mod tests {
         cx.update(gpui_component::init);
         let (pane, cx) = cx.add_window_view(|window, cx| {
             let mut pane = AgentPane::new(test_store("background"), window, cx);
-            pane.projects.insert(PROJECT.to_string(), project_entry(PROJECT));
+            pane.projects
+                .insert(PROJECT.to_string(), project_entry(PROJECT));
             pane.projects
                 .insert("project:other".to_string(), project_entry("project:other"));
             pane.active = Some(PROJECT.to_string());
@@ -5128,7 +5077,12 @@ mod tests {
         cx.update(|window, cx| {
             let pane = pane.read(cx);
             assert_eq!(pane.overlay_query.read(cx).value().to_string(), "");
-            assert!(pane.overlay_query.read(cx).focus_handle(cx).is_focused(window));
+            assert!(
+                pane.overlay_query
+                    .read(cx)
+                    .focus_handle(cx)
+                    .is_focused(window)
+            );
         });
     }
 
@@ -5142,7 +5096,9 @@ mod tests {
         let (pane, cx) = cx.add_window_view(|window, cx| {
             let mut pane = AgentPane::new(test_store("model-set"), window, cx);
             let mut entry = project_entry(PROJECT);
-            entry.transcript.seed_controls(None, vec![model_option("a")]);
+            entry
+                .transcript
+                .seed_controls(None, vec![model_option("a")]);
             pane.projects.insert(PROJECT.to_string(), entry);
             pane.active = Some(PROJECT.to_string());
             pane
@@ -5166,7 +5122,9 @@ mod tests {
         // An answer that carries no options leaves the chips as they were
         // rather than emptying them.
         cx.update(|_, cx| {
-            pane.update(cx, |pane, cx| pane.on_config_answer(PROJECT, Ok(Vec::new()), cx));
+            pane.update(cx, |pane, cx| {
+                pane.on_config_answer(PROJECT, Ok(Vec::new()), cx)
+            });
         });
         assert_eq!(
             cx.update(|_, cx| pane.read(cx).model_label()),
@@ -5205,7 +5163,9 @@ mod tests {
         let (pane, cx) = cx.add_window_view(|window, cx| {
             let mut pane = AgentPane::new(test_store("mode-option"), window, cx);
             let mut entry = project_entry(PROJECT);
-            entry.transcript.seed_controls(None, vec![mode_option("plan")]);
+            entry
+                .transcript
+                .seed_controls(None, vec![mode_option("plan")]);
             pane.projects.insert(PROJECT.to_string(), entry);
             pane.active = Some(PROJECT.to_string());
             pane
@@ -5262,7 +5222,9 @@ mod tests {
         let (pane, cx) = cx.add_window_view(|window, cx| {
             let mut pane = AgentPane::new(test_store("mode-click"), window, cx);
             let mut entry = project_entry(PROJECT);
-            entry.transcript.seed_controls(Some(session_modes("ask")), Vec::new());
+            entry
+                .transcript
+                .seed_controls(Some(session_modes("ask")), Vec::new());
             pane.projects.insert(PROJECT.to_string(), entry);
             pane.active = Some(PROJECT.to_string());
             pane
@@ -5300,7 +5262,9 @@ mod tests {
         let (pane, cx) = cx.add_window_view(|window, cx| {
             let mut pane = AgentPane::new(test_store("mode-refusal"), window, cx);
             let mut entry = project_entry(PROJECT);
-            entry.transcript.seed_controls(Some(session_modes("ask")), Vec::new());
+            entry
+                .transcript
+                .seed_controls(Some(session_modes("ask")), Vec::new());
             pane.projects.insert(PROJECT.to_string(), entry);
             pane.active = Some(PROJECT.to_string());
             pane
@@ -5336,10 +5300,8 @@ mod tests {
     /// A scratch tree with a repo, a sibling directory, and a worktree inside
     /// the repo, so `resolve()` runs against real directories.
     fn checkout_fixture(name: &str) -> (PathBuf, PathBuf, PathBuf, PathBuf) {
-        let scratch = std::env::temp_dir().join(format!(
-            "todo2-agent-pane-{name}-{}",
-            std::process::id()
-        ));
+        let scratch =
+            std::env::temp_dir().join(format!("todo2-agent-pane-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&scratch);
         let repo_dir = scratch.join("repo");
         let sibling = scratch.join("docs");

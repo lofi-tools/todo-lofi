@@ -207,7 +207,11 @@ fn serve(
         return write_response(&mut stream, 401, None);
     };
     let Ok(request) = serde_json::from_slice::<Value>(&body) else {
-        return write_response(&mut stream, 400, Some(error_response(Value::Null, -32700, "parse error")));
+        return write_response(
+            &mut stream,
+            400,
+            Some(error_response(Value::Null, -32700, "parse error")),
+        );
     };
     let id = request.get("id").cloned().unwrap_or(Value::Null);
     let method = request
@@ -665,7 +669,8 @@ async fn set_spec(
         .run
         .root_task_id
         .ok_or_else(|| "this run has no feature task".to_string())?;
-    let content = arg_str(arguments, "content").ok_or_else(|| "`content` is required".to_string())?;
+    let content =
+        arg_str(arguments, "content").ok_or_else(|| "`content` is required".to_string())?;
     let subtask_specs = arg_subtask_specs(arguments)?;
     let covered = arg_covered_ids(arguments);
     let awaiting_interview = view
@@ -720,8 +725,7 @@ fn arg_covered_ids(arguments: &Value) -> Vec<u64> {
 
 async fn create_sub_task(store: &mut TodoStore, arguments: &Value) -> Result<Value, String> {
     let requested_parent = arg_u64(arguments, "parent_task_id")?;
-    let title =
-        arg_str(arguments, "title").ok_or_else(|| "`title` is required".to_string())?;
+    let title = arg_str(arguments, "title").ok_or_else(|| "`title` is required".to_string())?;
     let description = arg_str(arguments, "description");
     let nested = arguments
         .get("nested")
@@ -777,7 +781,10 @@ async fn resolve_subtask_parent(store: &mut TodoStore, requested: u64) -> Result
         .unwrap_or(requested))
 }
 
-async fn request_sub_task_interview(store: &mut TodoStore, arguments: &Value) -> Result<Value, String> {
+async fn request_sub_task_interview(
+    store: &mut TodoStore,
+    arguments: &Value,
+) -> Result<Value, String> {
     let sub_task_id = arg_u64(arguments, "sub_task_id")?;
     let reason = arg_str(arguments, "reason").unwrap_or_default();
     let recipe_id = store
@@ -864,7 +871,10 @@ async fn complete_phase(
     if !CODING_PHASES.contains(&phase.as_str()) {
         return Err(format!("`{phase}` is not a coding phase"));
     }
-    if let Some(summary) = summary.as_deref().filter(|summary| !summary.trim().is_empty()) {
+    if let Some(summary) = summary
+        .as_deref()
+        .filter(|summary| !summary.trim().is_empty())
+    {
         store
             .append_run_note(run.id, "annotation", &phase, &step.node.id, summary)
             .await
@@ -1004,16 +1014,24 @@ mod tests {
             .expect("get spec");
         assert_eq!(read["spec"], "# Spec");
         // An unknown task is a tool error, never a silent null.
-        assert!(dispatch(&mut store, "get_spec", json!({ "task_id": 9999 })).await.is_err());
+        assert!(
+            dispatch(&mut store, "get_spec", json!({ "task_id": 9999 }))
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]
     async fn context_reports_the_open_phase() {
         let mut store = store().await;
         let (task_id, _) = started_run(&mut store).await;
-        let context = dispatch(&mut store, "get_coding_context", json!({ "task_id": task_id }))
-            .await
-            .expect("context");
+        let context = dispatch(
+            &mut store,
+            "get_coding_context",
+            json!({ "task_id": task_id }),
+        )
+        .await
+        .expect("context");
         assert_eq!(context["phase"], "interview");
         assert_eq!(context["round"], 1);
         assert!(context["spec"].is_null());
@@ -1033,9 +1051,13 @@ mod tests {
         assert_eq!(saved["phase_advanced"], "spec");
         let spec = store.get_task_spec(task_id).await.expect("spec");
         assert_eq!(spec.as_deref(), Some("# Spec"));
-        let context = dispatch(&mut store, "get_coding_context", json!({ "task_id": task_id }))
-            .await
-            .expect("context");
+        let context = dispatch(
+            &mut store,
+            "get_coding_context",
+            json!({ "task_id": task_id }),
+        )
+        .await
+        .expect("context");
         assert_eq!(context["phase"], "spec");
     }
 
@@ -1069,9 +1091,13 @@ mod tests {
                 .map(|run| run.id),
             Some(nested_run_id)
         );
-        let context = dispatch(&mut store, "get_coding_context", json!({ "task_id": task_id }))
-            .await
-            .expect("context");
+        let context = dispatch(
+            &mut store,
+            "get_coding_context",
+            json!({ "task_id": task_id }),
+        )
+        .await
+        .expect("context");
         let sub_tasks = context["sub_tasks"].as_array().expect("sub tasks");
         assert_eq!(sub_tasks.len(), 2);
     }
@@ -1154,9 +1180,13 @@ mod tests {
     async fn context_reports_each_subtask_state() {
         let mut store = store().await;
         let (task_id, _, owned, covered) = started_run_with_subtasks(&mut store).await;
-        let context = dispatch(&mut store, "get_coding_context", json!({ "task_id": task_id }))
-            .await
-            .expect("context");
+        let context = dispatch(
+            &mut store,
+            "get_coding_context",
+            json!({ "task_id": task_id }),
+        )
+        .await
+        .expect("context");
         let sub_tasks = context["sub_tasks"].as_array().expect("sub tasks");
         assert_eq!(sub_tasks.len(), 2);
         // Both start unspecced, so the model is told to decide.
@@ -1179,9 +1209,13 @@ mod tests {
         )
         .await
         .expect("set spec");
-        let context = dispatch(&mut store, "get_coding_context", json!({ "task_id": task_id }))
-            .await
-            .expect("context");
+        let context = dispatch(
+            &mut store,
+            "get_coding_context",
+            json!({ "task_id": task_id }),
+        )
+        .await
+        .expect("context");
         let sub_tasks = context["sub_tasks"].as_array().expect("sub tasks");
         assert_eq!(sub_tasks[0]["spec"].as_str(), Some("own"));
         assert_eq!(sub_tasks[1]["spec"].as_str(), Some("covered"));
@@ -1199,9 +1233,13 @@ mod tests {
         let (task_id, _, owned, _) = started_run_with_subtasks(&mut store).await;
         // A step id is not a subtask, so the whole call fails and nothing is
         // written (decision #31).
-        let context = dispatch(&mut store, "get_coding_context", json!({ "task_id": task_id }))
-            .await
-            .expect("context");
+        let context = dispatch(
+            &mut store,
+            "get_coding_context",
+            json!({ "task_id": task_id }),
+        )
+        .await
+        .expect("context");
         let step_id = context["phases"][0]["task_id"].as_u64().expect("step id");
         let refused = dispatch(
             &mut store,
@@ -1225,9 +1263,13 @@ mod tests {
     async fn create_sub_task_under_a_step_lands_on_the_run_root() {
         let mut store = store().await;
         let (task_id, _) = started_run(&mut store).await;
-        let context = dispatch(&mut store, "get_coding_context", json!({ "task_id": task_id }))
-            .await
-            .expect("context");
+        let context = dispatch(
+            &mut store,
+            "get_coding_context",
+            json!({ "task_id": task_id }),
+        )
+        .await
+        .expect("context");
         let step_id = context["phases"][0]["task_id"].as_u64().expect("step id");
         let created = dispatch(
             &mut store,
@@ -1263,9 +1305,13 @@ mod tests {
         .await
         .expect("complete interview");
         assert_eq!(interview["advanced"], true);
-        let context = dispatch(&mut store, "get_coding_context", json!({ "task_id": task_id }))
-            .await
-            .expect("context");
+        let context = dispatch(
+            &mut store,
+            "get_coding_context",
+            json!({ "task_id": task_id }),
+        )
+        .await
+        .expect("context");
         assert_eq!(context["phase"], "spec");
     }
 
@@ -1447,31 +1493,51 @@ mod tests {
         let server = start(Store::new(store), handle, None).expect("start server");
         let coding_token = server.open_session(CODING_PROFILE, task_id);
 
-        let initialize = request(server.url(), &coding_token, &json!({
-            "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}
-        }));
+        let initialize = request(
+            server.url(),
+            &coding_token,
+            &json!({
+                "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}
+            }),
+        );
         assert_eq!(
-            initialize.pointer("/result/protocolVersion").and_then(Value::as_str),
+            initialize
+                .pointer("/result/protocolVersion")
+                .and_then(Value::as_str),
             Some("2024-11-05")
         );
 
-        let tools = request(server.url(), &coding_token, &json!({
-            "jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}
-        }));
+        let tools = request(
+            server.url(),
+            &coding_token,
+            &json!({
+                "jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}
+            }),
+        );
         assert_eq!(
-            tools.pointer("/result/tools").and_then(Value::as_array).map(Vec::len),
+            tools
+                .pointer("/result/tools")
+                .and_then(Value::as_array)
+                .map(Vec::len),
             Some(9)
         );
 
         // No `task_id`: the token this session was handed names the task.
-        let call = request(server.url(), &coding_token, &json!({
-            "jsonrpc": "2.0",
-            "id": 3,
-            "method": "tools/call",
-            "params": { "name": "get_coding_context", "arguments": {} }
-        }));
+        let call = request(
+            server.url(),
+            &coding_token,
+            &json!({
+                "jsonrpc": "2.0",
+                "id": 3,
+                "method": "tools/call",
+                "params": { "name": "get_coding_context", "arguments": {} }
+            }),
+        );
         assert!(call.get("result").is_some(), "{call}");
-        let text = call.pointer("/result/content/0/text").and_then(Value::as_str).expect("text");
+        let text = call
+            .pointer("/result/content/0/text")
+            .and_then(Value::as_str)
+            .expect("text");
         let context: Value = serde_json::from_str(text).expect("the payload is JSON");
         assert_eq!(context["phase"], "interview");
         assert_eq!(
@@ -1481,17 +1547,25 @@ mod tests {
         );
 
         // A wrong token is rejected before any tool runs.
-        let unauthorized = raw_request(server.url(), "not-the-token", &json!({
-            "jsonrpc": "2.0", "id": 4, "method": "tools/list", "params": {}
-        }));
+        let unauthorized = raw_request(
+            server.url(),
+            "not-the-token",
+            &json!({
+                "jsonrpc": "2.0", "id": 4, "method": "tools/list", "params": {}
+            }),
+        );
         assert!(unauthorized.starts_with("HTTP/1.1 401"), "{unauthorized}");
 
         // Every session gets its own token, and each is accepted.
         let interview_token = server.open_session(INTERVIEW_PROFILE, task_id);
         assert_ne!(interview_token, coding_token);
-        let interview_tools = request(server.url(), &interview_token, &json!({
-            "jsonrpc": "2.0", "id": 5, "method": "tools/list", "params": {}
-        }));
+        let interview_tools = request(
+            server.url(),
+            &interview_token,
+            &json!({
+                "jsonrpc": "2.0", "id": 5, "method": "tools/list", "params": {}
+            }),
+        );
         assert!(interview_tools.get("result").is_some());
         assert!(
             !server.close_session("nope"),
@@ -1501,9 +1575,13 @@ mod tests {
         // Retiring a session takes its token with it: a replaced or torn-down
         // process cannot call tools afterwards.
         assert!(server.close_session(&coding_token));
-        let retired = raw_request(server.url(), &coding_token, &json!({
-            "jsonrpc": "2.0", "id": 6, "method": "tools/list", "params": {}
-        }));
+        let retired = raw_request(
+            server.url(),
+            &coding_token,
+            &json!({
+                "jsonrpc": "2.0", "id": 6, "method": "tools/list", "params": {}
+            }),
+        );
         assert!(retired.starts_with("HTTP/1.1 401"), "{retired}");
     }
 
