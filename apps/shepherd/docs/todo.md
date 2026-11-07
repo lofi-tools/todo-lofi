@@ -1188,8 +1188,9 @@ placeholder tabs and no unearned state badges.
   roll back failures and permit immediate retry. A failed shutdown save retains
   its session and can be retried while draining. Multi-task archive rolls back on a
   mid-batch database error and can be retried. Task deletion clears the project's
-  last-task reference in the same transaction and rolls back a mid-deletion
-  failure, preserving the reference, transcripts and attachments for retry.
+  last-task reference and changed terminal layout in the same transaction and
+  rolls back a mid-deletion failure, preserving those records, transcripts and
+  attachments for retry.
 - [ ] Bounded transcript, stderr, search and frame buffers.
   Codex, OpenCode and ACP stderr readers cap each line while draining the
   process, including newline-free output. OpenCode omits overlong lines to

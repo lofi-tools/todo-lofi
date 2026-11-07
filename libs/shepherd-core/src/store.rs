@@ -83,8 +83,12 @@ pub trait Store: Send + Sync {
         entries: &[&Entry],
     ) -> Result<(), StoreError>;
     async fn archive_tasks(&self, tasks: &[Task]) -> Result<(), StoreError>;
-    /// Remove the task and its durable state, clearing any last-task reference atomically.
-    async fn delete_task(&self, task_id: &TaskId) -> Result<(), StoreError>;
+    /// Remove the task and its durable state with the last-task reference and any changed terminal layout.
+    async fn delete_task(
+        &self,
+        task_id: &TaskId,
+        layout: Option<(&ProjectId, &TerminalLayout)>,
+    ) -> Result<(), StoreError>;
     async fn load_workspace_layouts(&self) -> Result<Vec<(TaskId, WorkspaceLayout)>, StoreError>;
     async fn save_workspace_layout(
         &self,
@@ -473,6 +477,20 @@ async fn write_task(
         .bind(task.worktree_last_used_at as i64)
         .exec(&mut *executor)
         .await?;
+    Ok(())
+}
+
+async fn write_terminal_layout(
+    executor: &mut dyn toasty::db::Executor,
+    project_id: &ProjectId,
+    layout: &TerminalLayout,
+) -> Result<(), StoreError> {
+    let json =
+        serde_json::to_string(layout).map_err(|error| StoreError::Backend(error.to_string()))?;
+    toasty::sql::statement(
+        "INSERT INTO terminal_layouts (project_id, layout_json, updated_at) VALUES (?1, ?2, ?3)
+         ON CONFLICT (project_id) DO UPDATE SET layout_json = excluded.layout_json, updated_at = excluded.updated_at",
+    ).bind(project_id.as_str()).bind(json).bind(crate::projects::now_millis() as i64).exec(executor).await?;
     Ok(())
 }
 
@@ -894,7 +912,11 @@ impl Store for TursoStore {
         Ok(())
     }
 
-    async fn delete_task(&self, task_id: &TaskId) -> Result<(), StoreError> {
+    async fn delete_task(
+        &self,
+        task_id: &TaskId,
+        layout: Option<(&ProjectId, &TerminalLayout)>,
+    ) -> Result<(), StoreError> {
         let mut db = self.db.lock().await;
         let mut transaction = db.transaction().await?;
         for statement in [
@@ -918,6 +940,16 @@ impl Store for TursoStore {
                 }
                 return Err(error.into());
             }
+        }
+        if let Some((project_id, layout)) = layout
+            && let Err(error) = write_terminal_layout(&mut transaction, project_id, layout).await
+        {
+            if let Err(rollback_error) = transaction.rollback().await {
+                return Err(StoreError::Backend(format!(
+                    "task deletion failed: {error}; rollback failed: {rollback_error}"
+                )));
+            }
+            return Err(error);
         }
         transaction.commit().await?;
         Ok(())
@@ -1063,14 +1095,8 @@ impl Store for TursoStore {
         project_id: &ProjectId,
         layout: &TerminalLayout,
     ) -> Result<(), StoreError> {
-        let json = serde_json::to_string(layout)
-            .map_err(|error| StoreError::Backend(error.to_string()))?;
         let mut db = self.db.lock().await;
-        toasty::sql::statement(
-            "INSERT INTO terminal_layouts (project_id, layout_json, updated_at) VALUES (?1, ?2, ?3)
-             ON CONFLICT (project_id) DO UPDATE SET layout_json = excluded.layout_json, updated_at = excluded.updated_at",
-        ).bind(project_id.as_str()).bind(json).bind(crate::projects::now_millis() as i64).exec(&mut *db).await?;
-        Ok(())
+        write_terminal_layout(&mut *db, project_id, layout).await
     }
 
     async fn load_sessions(&self) -> Result<Vec<SessionRecord>, StoreError> {
@@ -1674,7 +1700,17 @@ impl Store for MemoryStore {
         Ok(())
     }
 
-    async fn delete_task(&self, task_id: &TaskId) -> Result<(), StoreError> {
+    async fn delete_task(
+        &self,
+        task_id: &TaskId,
+        layout: Option<(&ProjectId, &TerminalLayout)>,
+    ) -> Result<(), StoreError> {
+        if let Some((project_id, layout)) = layout {
+            self.terminal_layouts
+                .write()
+                .await
+                .insert(project_id.clone(), layout.clone());
+        }
         for project in self.projects.write().await.values_mut() {
             if project.last_task_id.as_ref() == Some(task_id) {
                 project.last_task_id = None;
@@ -1994,7 +2030,17 @@ mod tests {
         for terminal in [&shared, &removed_terminal, &kept_terminal] {
             store.save_terminal(terminal).await?;
         }
-        store.delete_task(&removed.id).await?;
+        let terminal_layout = TerminalLayout {
+            revision: 3,
+            ..TerminalLayout::default()
+        };
+        store
+            .delete_task(&removed.id, Some((&project.id, &terminal_layout)))
+            .await?;
+        assert_eq!(
+            store.load_terminal_layouts().await?,
+            vec![(project.id.clone(), terminal_layout)]
+        );
         assert_eq!(
             store
                 .load_projects()
@@ -2076,6 +2122,17 @@ mod tests {
         store.save_project(&project).await?;
         store.save_task(&task).await?;
         store.save_session(&session).await?;
+        let original_layout = TerminalLayout {
+            revision: 1,
+            ..TerminalLayout::default()
+        };
+        let updated_layout = TerminalLayout {
+            revision: 2,
+            ..TerminalLayout::default()
+        };
+        store
+            .save_terminal_layout(&project.id, &original_layout)
+            .await?;
         store
             .save_transcript_entries(&session, &[transcript.entry(0).ok_or("missing entry")?])
             .await?;
@@ -2085,7 +2142,7 @@ mod tests {
                 .exec(&mut *db)
                 .await?;
         }
-        assert!(store.delete_task(&task.id).await.is_err());
+        assert!(store.delete_task(&task.id, None).await.is_err());
         {
             let mut db = store.db.lock().await;
             toasty::sql::statement("ALTER TABLE terminals_unavailable RENAME TO terminals")
@@ -2103,7 +2160,41 @@ mod tests {
         );
         assert_eq!(store.load_sessions().await?.len(), 1);
         assert_eq!(store.load_transcript(&task.id).await?, transcript.entries());
-        store.delete_task(&task.id).await?;
+        {
+            let mut db = store.db.lock().await;
+            toasty::sql::statement(
+                "ALTER TABLE terminal_layouts RENAME TO terminal_layouts_unavailable",
+            )
+            .exec(&mut *db)
+            .await?;
+        }
+        assert!(
+            store
+                .delete_task(&task.id, Some((&project.id, &updated_layout)))
+                .await
+                .is_err()
+        );
+        {
+            let mut db = store.db.lock().await;
+            toasty::sql::statement(
+                "ALTER TABLE terminal_layouts_unavailable RENAME TO terminal_layouts",
+            )
+            .exec(&mut *db)
+            .await?;
+        }
+        assert_eq!(store.load_tasks().await?.len(), 1);
+        assert_eq!(store.load_transcript(&task.id).await?, transcript.entries());
+        assert_eq!(
+            store.load_terminal_layouts().await?,
+            vec![(project.id.clone(), original_layout)]
+        );
+        store
+            .delete_task(&task.id, Some((&project.id, &updated_layout)))
+            .await?;
+        assert_eq!(
+            store.load_terminal_layouts().await?,
+            vec![(project.id.clone(), updated_layout)]
+        );
         assert!(store.load_tasks().await?.is_empty());
         assert_eq!(
             store
@@ -2223,7 +2314,7 @@ mod tests {
                 .map(|hit| hit.entry_id.as_str()),
             Some(entry.id.as_str())
         );
-        reopened.delete_task(&exact.id).await?;
+        reopened.delete_task(&exact.id, None).await?;
         assert!(search.search("replac").await?.is_empty());
         Ok(())
     }
@@ -2376,7 +2467,7 @@ mod tests {
             reopened.load_transcript(&task.id).await?,
             transcript.entries()
         );
-        reopened.delete_task(&task.id).await?;
+        reopened.delete_task(&task.id, None).await?;
         let mut db = reopened.db.lock().await;
         let rows = toasty::sql::query("SELECT id FROM attachments WHERE task_id = ?1")
             .column_types([Type::String])

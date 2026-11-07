@@ -1324,6 +1324,7 @@ impl Core {
             .iter()
             .map(|terminal| terminal.id.as_str().to_owned())
             .collect();
+        let mut updated_layout = None;
         if !terminal_ids.is_empty() {
             let mut layout = self.terminal_layout(&project_id)?;
             let previous = layout.root.clone();
@@ -1333,10 +1334,18 @@ impl Core {
                     .revision
                     .checked_add(1)
                     .ok_or(CoreError::TerminalLayoutChanged)?;
-                self.persist_terminal_layout(&project_id, &layout).await?;
+                updated_layout = Some(layout);
             }
         }
-        self.store.delete_task(task_id).await?;
+        self.store
+            .delete_task(
+                task_id,
+                updated_layout.as_ref().map(|layout| (&project_id, layout)),
+            )
+            .await?;
+        if let Some(layout) = updated_layout {
+            self.terminal_layouts.insert(project_id.clone(), layout);
+        }
         self.tasks.remove(task_id);
         self.workspace_layouts.remove(task_id);
         if self.sessions.remove(task_id).is_some() {
