@@ -631,7 +631,14 @@ impl Store for TursoStore {
         }
         let mut db = self.db.lock().await;
         let mut transaction = db.transaction().await?;
-        write_transcript_entries(&mut transaction, session, entries).await?;
+        if let Err(error) = write_transcript_entries(&mut transaction, session, entries).await {
+            if let Err(rollback_error) = transaction.rollback().await {
+                return Err(StoreError::Backend(format!(
+                    "transcript save failed: {error}; rollback failed: {rollback_error}"
+                )));
+            }
+            return Err(error);
+        }
         transaction.commit().await?;
         Ok(())
     }
@@ -650,9 +657,21 @@ impl Store for TursoStore {
         }
         let mut db = self.db.lock().await;
         let mut transaction = db.transaction().await?;
-        write_task(&mut transaction, task).await?;
-        if !entries.is_empty() {
-            write_transcript_entries(&mut transaction, session, entries).await?;
+        let result = async {
+            write_task(&mut transaction, task).await?;
+            if !entries.is_empty() {
+                write_transcript_entries(&mut transaction, session, entries).await?;
+            }
+            Ok::<(), StoreError>(())
+        }
+        .await;
+        if let Err(error) = result {
+            if let Err(rollback_error) = transaction.rollback().await {
+                return Err(StoreError::Backend(format!(
+                    "task and transcript save failed: {error}; rollback failed: {rollback_error}"
+                )));
+            }
+            return Err(error);
         }
         transaction.commit().await?;
         Ok(())
@@ -2300,6 +2319,10 @@ mod tests {
                 .await
                 .is_err()
         );
+        assert_eq!(store.load_transcript(&task.id).await?, transcript.entries());
+        store
+            .save_transcript_entries(&session, &[first, second])
+            .await?;
         drop(store);
 
         let reopened = TursoStore::open(&uri).await?;

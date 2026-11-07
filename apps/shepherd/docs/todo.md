@@ -1176,8 +1176,9 @@ placeholder tabs and no unearned state badges.
   checks remain. Transcript batches reject missing or mismatched task/session
   owners; fixtures verify failed attachment updates roll back the whole batch.
   Normal task-state saves and interrupted shutdowns commit eligible transcript
-  entries in the same transaction. A failed shutdown save retains its session
-  and can be retried while draining. Multi-task archive rolls back on a
+  entries in the same transaction. Both transcript write paths explicitly
+  roll back failures and permit immediate retry. A failed shutdown save retains
+  its session and can be retried while draining. Multi-task archive rolls back on a
   mid-batch database error and can be retried. Task deletion explicitly rolls
   back a mid-deletion failure, preserving transcripts and attachments for retry.
 - [ ] Bounded transcript, stderr, search and frame buffers.
