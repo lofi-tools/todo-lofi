@@ -1224,6 +1224,9 @@ placeholder tabs and no unearned state badges.
   A deletion journal now survives task deletion and database reopen in both
   store implementations. A Git worktree move primitive preserves ignored
   files and registration while rejecting unsafe or occupied destinations.
+  The journal can also record a random marker in the worktree's Git admin
+  directory; a fixture verifies that the marker survives a move and rejects
+  a different worktree identity.
   Staging and startup recovery are not yet connected to deletion.
   If an opened agent session cannot be recorded, the core stops it before
   retrying; a database-trigger fixture verifies cleanup and a subsequent start.

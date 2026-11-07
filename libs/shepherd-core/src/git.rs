@@ -35,6 +35,8 @@ pub enum GitError {
     },
     #[error("not a Shepherd worktree: {path:?}")]
     InvalidWorktree { path: PathBuf },
+    #[error("worktree deletion identity does not match: {path:?}")]
+    WorktreeIdentityMismatch { path: PathBuf },
     #[error("worktree has staged, unstaged or untracked changes: {path:?}")]
     DirtyWorktree { path: PathBuf },
     #[error("task branch {branch} is missing and has no recorded tip")]
@@ -252,6 +254,78 @@ impl GitService {
             &["worktree", "move", "--", source, destination],
         )?;
         Ok(())
+    }
+
+    pub fn mark_worktree_deletion(
+        &self,
+        repository: &GitRepository,
+        path: &Path,
+        identity: &str,
+    ) -> Result<PathBuf, GitError> {
+        let git_dir = self.worktree_git_dir(repository, path)?;
+        let marker = deletion_marker(&git_dir, identity)?;
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(marker)
+            .map_err(|source| GitError::Io { source })?;
+        Ok(git_dir)
+    }
+
+    pub fn verify_worktree_deletion(
+        &self,
+        repository: &GitRepository,
+        path: &Path,
+        expected_git_dir: &Path,
+        identity: &str,
+    ) -> Result<(), GitError> {
+        let git_dir = self.worktree_git_dir(repository, path)?;
+        if git_dir != expected_git_dir {
+            return Err(GitError::WorktreeIdentityMismatch {
+                path: path.to_path_buf(),
+            });
+        }
+        let marker = deletion_marker(&git_dir, identity)?;
+        if !marker
+            .symlink_metadata()
+            .map_err(|source| GitError::Io { source })?
+            .is_file()
+        {
+            return Err(GitError::WorktreeIdentityMismatch {
+                path: path.to_path_buf(),
+            });
+        }
+        Ok(())
+    }
+
+    pub fn clear_worktree_deletion_marker(
+        &self,
+        repository: &GitRepository,
+        path: &Path,
+        expected_git_dir: &Path,
+        identity: &str,
+    ) -> Result<(), GitError> {
+        self.verify_worktree_deletion(repository, path, expected_git_dir, identity)?;
+        std::fs::remove_file(deletion_marker(expected_git_dir, identity)?)
+            .map_err(|source| GitError::Io { source })
+    }
+
+    fn worktree_git_dir(
+        &self,
+        repository: &GitRepository,
+        path: &Path,
+    ) -> Result<PathBuf, GitError> {
+        self.validate_worktree(repository, path)?;
+        let git_dir = canonicalize(Path::new(&run_git(
+            path,
+            &["rev-parse", "--absolute-git-dir"],
+        )?))?;
+        if git_dir.parent() != Some(repository.git_dir.join("worktrees").as_path()) {
+            return Err(GitError::InvalidWorktree {
+                path: path.to_path_buf(),
+            });
+        }
+        Ok(git_dir)
     }
 
     pub fn prune_worktrees(&self, repository: &GitRepository) -> Result<(), GitError> {
@@ -940,6 +1014,18 @@ fn canonicalize(path: &Path) -> Result<PathBuf, GitError> {
         .map_err(|source| GitError::Io { source })
 }
 
+fn deletion_marker(git_dir: &Path, identity: &str) -> Result<PathBuf, GitError> {
+    let id = uuid::Uuid::parse_str(identity).map_err(|_| GitError::WorktreeIdentityMismatch {
+        path: git_dir.to_path_buf(),
+    })?;
+    if id.to_string() != identity {
+        return Err(GitError::WorktreeIdentityMismatch {
+            path: git_dir.to_path_buf(),
+        });
+    }
+    Ok(git_dir.join(format!("shepherd-deletion-{id}")))
+}
+
 pub(crate) fn run_git(cwd: &Path, args: &[&str]) -> Result<String, GitError> {
     Ok(String::from_utf8_lossy(&git_bytes(cwd, args)?)
         .trim()
@@ -1306,6 +1392,8 @@ mod tests {
         std::fs::write(repository.git_dir.join("info/exclude"), "ignored.txt\n")?;
         std::fs::write(original.join("ignored.txt"), "keep me")?;
         assert!(!GitService.has_changes(&original)?);
+        let identity = uuid::Uuid::new_v4().to_string();
+        let git_dir = GitService.mark_worktree_deletion(repository, &original, &identity)?;
         GitService.move_worktree(repository, &original, &staged)?;
         assert!(!original.exists());
         assert_eq!(
@@ -1313,6 +1401,27 @@ mod tests {
             "keep me"
         );
         GitService.validate_worktree(repository, &staged)?;
+        GitService.verify_worktree_deletion(repository, &staged, &git_dir, &identity)?;
+        assert!(
+            GitService
+                .verify_worktree_deletion(
+                    repository,
+                    &staged,
+                    &git_dir,
+                    &uuid::Uuid::new_v4().to_string()
+                )
+                .is_err()
+        );
+        assert!(
+            GitService
+                .verify_worktree_deletion(
+                    repository,
+                    &staged,
+                    repository.git_dir.as_path(),
+                    &identity
+                )
+                .is_err()
+        );
         assert!(
             GitService
                 .move_worktree(
@@ -1335,6 +1444,12 @@ mod tests {
             "keep me"
         );
         GitService.validate_worktree(repository, &original)?;
+        GitService.clear_worktree_deletion_marker(repository, &original, &git_dir, &identity)?;
+        assert!(
+            GitService
+                .verify_worktree_deletion(repository, &original, &git_dir, &identity)
+                .is_err()
+        );
         Ok(())
     }
 

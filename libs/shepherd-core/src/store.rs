@@ -73,6 +73,8 @@ pub struct WorktreeDeletion {
     pub repository_root: PathBuf,
     pub original_path: PathBuf,
     pub staged_path: PathBuf,
+    pub worktree_git_dir: PathBuf,
+    pub identity: String,
 }
 
 #[async_trait]
@@ -214,6 +216,10 @@ const MIGRATIONS: &[Migration] = &[
     Migration {
         name: "0015_worktree_deletions.sql",
         sql: include_str!("../toasty/migrations/0015_worktree_deletions.sql"),
+    },
+    Migration {
+        name: "0016_worktree_deletion_identity.sql",
+        sql: include_str!("../toasty/migrations/0016_worktree_deletion_identity.sql"),
     },
 ];
 
@@ -561,16 +567,17 @@ impl Store for TursoStore {
         let repository = path(&deletion.repository_root)?;
         let original = path(&deletion.original_path)?;
         let staged = path(&deletion.staged_path)?;
+        let git_dir = path(&deletion.worktree_git_dir)?;
         let mut db = self.db.lock().await;
-        toasty::sql::statement("INSERT INTO worktree_deletions (task_id, repository_root, original_path, staged_path) VALUES (?1, ?2, ?3, ?4)")
-            .bind(deletion.task_id.as_str()).bind(repository).bind(original).bind(staged).exec(&mut *db).await?;
+        toasty::sql::statement("INSERT INTO worktree_deletions (task_id, repository_root, original_path, staged_path, worktree_git_dir, identity) VALUES (?1, ?2, ?3, ?4, ?5, ?6)")
+            .bind(deletion.task_id.as_str()).bind(repository).bind(original).bind(staged).bind(git_dir).bind(&deletion.identity).exec(&mut *db).await?;
         Ok(())
     }
 
     async fn load_worktree_deletions(&self) -> Result<Vec<WorktreeDeletion>, StoreError> {
         let mut db = self.db.lock().await;
-        let rows = toasty::sql::query("SELECT task_id, repository_root, original_path, staged_path FROM worktree_deletions ORDER BY task_id")
-            .column_types([Type::String, Type::String, Type::String, Type::String]).exec(&mut *db).await?;
+        let rows = toasty::sql::query("SELECT task_id, repository_root, original_path, staged_path, worktree_git_dir, identity FROM worktree_deletions ORDER BY task_id")
+            .column_types([Type::String, Type::String, Type::String, Type::String, Type::String, Type::String]).exec(&mut *db).await?;
         rows.into_iter()
             .map(|row| {
                 let Value::Record(fields) = row else {
@@ -583,6 +590,8 @@ impl Store for TursoStore {
                     repository_root: PathBuf::from(required_string(fields.get(1))?),
                     original_path: PathBuf::from(required_string(fields.get(2))?),
                     staged_path: PathBuf::from(required_string(fields.get(3))?),
+                    worktree_git_dir: PathBuf::from(required_string(fields.get(4))?),
+                    identity: required_string(fields.get(5))?,
                 })
             })
             .collect()
@@ -2149,6 +2158,8 @@ mod tests {
             repository_root: database.path().join("repo"),
             original_path: database.path().join("original"),
             staged_path: database.path().join("staged"),
+            worktree_git_dir: database.path().join("worktree-git-dir"),
+            identity: "fixture-identity".into(),
         };
         for store in [
             Box::new(MemoryStore::new()) as Box<dyn Store>,
