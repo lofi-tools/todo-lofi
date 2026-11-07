@@ -257,7 +257,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn failed_environment_group_signal_keeps_identity_for_retry() -> std::io::Result<()> {
-        let mut group = EnvironmentProcessGroup(Some(42));
+        let mut group = std::mem::ManuallyDrop::new(EnvironmentProcessGroup(Some(42)));
         assert!(
             group
                 .stop_with(|_| Err(std::io::Error::other("fixture failure")))
