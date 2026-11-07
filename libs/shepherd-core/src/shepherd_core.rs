@@ -5059,6 +5059,70 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn missing_worktree_is_repaired_before_the_next_turn()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let repository = TestRepository::new()?;
+        let database = TestDatabase::new()?;
+        let scripts = vec![
+            vec![FakeTurn::new(vec![FakeStep::Message("first reply".into())])],
+            vec![FakeTurn::new(vec![FakeStep::Message(
+                "second reply".into(),
+            )])],
+        ];
+        let mut core = Core::with_services(
+            Box::new(TursoStore::open(&database.uri()).await?),
+            Box::new(FakeHarnessFactory::new(scripts)),
+        );
+        let project_id = add_project(&mut core, repository.path().to_path_buf()).await?;
+        let draft = workspace_of(
+            core.execute(Command::CreateDraft {
+                project_id,
+                title: "repair".into(),
+                agent: Agent::Codex,
+            })
+            .await?,
+        );
+        let task_id = TaskId::new(draft.task.id);
+        let first = workspace_of(
+            core.execute(Command::SendPrompt {
+                task_id: task_id.clone(),
+                input: PromptInput::text("first prompt"),
+            })
+            .await?,
+        );
+        let path = PathBuf::from(first.task.worktree_path.ok_or("missing worktree")?);
+        let branch = first.task.branch.ok_or("missing branch")?;
+        let tip = crate::git::run_git(&path, &["rev-parse", "HEAD"])?;
+        std::fs::remove_dir_all(&path)?;
+        let second = workspace_of(
+            core.execute(Command::SendPrompt {
+                task_id: task_id.clone(),
+                input: PromptInput::text("second prompt"),
+            })
+            .await?,
+        );
+        assert_eq!(second.task.state, TaskState::Ready);
+        assert_eq!(crate::git::run_git(&path, &["rev-parse", "HEAD"])?, tip);
+        assert_eq!(
+            crate::git::run_git(&path, &["branch", "--show-current"])?,
+            branch
+        );
+        let transcript = summaries(&second).join("\n");
+        assert!(transcript.contains("first reply"));
+        assert!(transcript.contains("second reply"));
+        drop(core);
+        let mut reopened = Core::load(
+            Box::new(TursoStore::open(&database.uri()).await?),
+            Box::new(UnavailableHarnessFactory),
+        )
+        .await?;
+        let transcript = summaries(&reopened.open_task_workspace(&task_id).await?).join("\n");
+        assert!(transcript.contains("first reply"));
+        assert!(transcript.contains("second reply"));
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn startup_keeps_dirty_and_recent_archived_worktrees()
     -> Result<(), Box<dyn std::error::Error>> {
         let repository = TestRepository::new()?;

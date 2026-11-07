@@ -1267,7 +1267,11 @@ placeholder tabs and no unearned state badges.
 - [ ] Chaos: kill -9 mid-turn, restart, resume or fail honestly.
   A local scripted approval-wait fixture covers SIGKILL and interrupted recovery;
   live-agent crash and resume behavior still needs verification.
-- [ ] Missing worktree repair; archived worktree collection; dirty skip.
+- [x] Missing worktree repair; archived worktree collection; dirty skip.
+  A task fixture deletes its checkout between turns and verifies restoration of
+  the same branch and transcript across restart. The review lifecycle fixture
+  collects an old clean worktree and restores its recorded tip; the startup
+  fixture retains dirty and recently used worktrees.
 - [ ] Large transcript and large diff with no dropped state.
   The headless UI fixture checks all streamed chunks and both ends of a large
   mocked diff while 1,000 earlier transcript entries remain present.
