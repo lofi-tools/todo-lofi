@@ -49,6 +49,7 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const PROBE_TIMEOUT: Duration = Duration::from_secs(20);
 const STDERR_TAIL_LINES: usize = 20;
 const MAX_PROTOCOL_LINE_BYTES: usize = 8 * 1024 * 1024;
+const MAX_PROBE_OUTPUT_BYTES: usize = 256 * 1024;
 
 async fn read_protocol_line<R: AsyncBufRead + Unpin>(
     reader: &mut R,
@@ -109,22 +110,19 @@ impl CodexProbe {
 /// broken handshake are errors; a build without the subcommand is the `Exec`
 /// tier, which the caller offers as the fallback.
 pub async fn probe(program: &str, cwd: &Path) -> HarnessResult<CodexProbe> {
-    let version = read_version(program).await;
+    let version = read_version(program, cwd).await;
     let handshake = run_handshake(program, cwd).await?;
     let images = if handshake.supported {
         true
     } else {
-        let output = timeout(
+        let output = capture_probe_output(
+            program,
+            cwd,
+            &["exec", "--help"],
+            "exec help",
             PROBE_TIMEOUT,
-            Command::new(program)
-                .args(["exec", "--help"])
-                .current_dir(cwd)
-                .kill_on_drop(true)
-                .output(),
         )
-        .await
-        .map_err(|_| HarnessError::Protocol("Codex exec help probe timed out".into()))?
-        .map_err(|error| spawn_error(program, error))?;
+        .await?;
         let help = String::from_utf8_lossy(&output.stdout);
         let has_flag = |name| {
             help.split_whitespace()
@@ -154,20 +152,89 @@ struct Handshake {
     methods: Vec<String>,
 }
 
-async fn read_version(program: &str) -> Option<String> {
-    let output = match Command::new(program).arg("--version").output().await {
-        Ok(output) => output,
-        Err(error) => {
-            tracing::debug!(program, %error, "could not read the codex version");
-            return None;
-        }
-    };
+async fn read_version(program: &str, cwd: &Path) -> Option<String> {
+    let output =
+        match capture_probe_output(program, cwd, &["--version"], "version", PROBE_TIMEOUT).await {
+            Ok(output) => output,
+            Err(error) => {
+                tracing::debug!(program, %error, "could not read the codex version");
+                return None;
+            }
+        };
     if !output.status.success() {
         tracing::debug!(program, status = ?output.status, "the version command failed");
         return None;
     }
     let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
     if text.is_empty() { None } else { Some(text) }
+}
+
+async fn capture_probe_output(
+    program: &str,
+    cwd: &Path,
+    args: &[&str],
+    description: &str,
+    deadline: Duration,
+) -> HarnessResult<std::process::Output> {
+    let mut child = Command::new(program)
+        .args(args)
+        .current_dir(cwd)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|error| spawn_error(program, error))?;
+    let stdout = child.stdout.take().ok_or_else(|| {
+        HarnessError::Protocol(format!("Codex {description} stdout was not captured"))
+    })?;
+    let stderr = child.stderr.take().ok_or_else(|| {
+        HarnessError::Protocol(format!("Codex {description} stderr was not captured"))
+    })?;
+    let capture = async {
+        let (stdout, stderr, status) = tokio::try_join!(
+            read_probe_stream(stdout, description, "stdout"),
+            read_probe_stream(stderr, description, "stderr"),
+            async {
+                child.wait().await.map_err(|error| {
+                    HarnessError::Protocol(format!(
+                        "Could not wait for Codex {description}: {error}"
+                    ))
+                })
+            },
+        )?;
+        Ok(std::process::Output {
+            status,
+            stdout,
+            stderr,
+        })
+    };
+    timeout(deadline, capture)
+        .await
+        .map_err(|_| HarnessError::Protocol(format!("Codex {description} probe timed out")))?
+}
+
+async fn read_probe_stream(
+    stream: impl AsyncRead + Unpin,
+    description: &str,
+    name: &str,
+) -> HarnessResult<Vec<u8>> {
+    let mut bytes = Vec::new();
+    stream
+        .take((MAX_PROBE_OUTPUT_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)
+        .await
+        .map_err(|error| {
+            HarnessError::Protocol(format!(
+                "Could not read Codex {description} {name}: {error}"
+            ))
+        })?;
+    if bytes.len() > MAX_PROBE_OUTPUT_BYTES {
+        return Err(HarnessError::Protocol(format!(
+            "Codex {description} {name} exceeds {MAX_PROBE_OUTPUT_BYTES} bytes"
+        )));
+    }
+    Ok(bytes)
 }
 
 async fn run_handshake(program: &str, cwd: &Path) -> HarnessResult<Handshake> {
@@ -3038,6 +3105,89 @@ done
             }
         }
         events
+    }
+
+    #[tokio::test]
+    async fn probe_capture_limits_both_streams_and_times_out()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = TempDir::new()?;
+        let stub = write_stub(
+            &directory,
+            "probe-limits",
+            r##"#!/usr/bin/env bash
+case "$1" in
+  stdout) exec python3 -c 'import sys; sys.stdout.write("x" * (256 * 1024 + 1))' ;;
+  stderr) exec python3 -c 'import sys; sys.stderr.write("x" * (256 * 1024 + 1))' ;;
+  slow) exec sleep 30 ;;
+  normal) printf 'ok'; printf 'note' >&2 ;;
+esac
+"##,
+        );
+        let output = capture_probe_output(
+            &stub,
+            directory.path(),
+            &["normal"],
+            "fixture",
+            Duration::from_secs(5),
+        )
+        .await?;
+        assert_eq!(output.stdout, b"ok");
+        assert_eq!(output.stderr, b"note");
+        for stream in ["stdout", "stderr"] {
+            let Err(error) = capture_probe_output(
+                &stub,
+                directory.path(),
+                &[stream],
+                "fixture",
+                Duration::from_secs(5),
+            )
+            .await
+            else {
+                return Err(format!("oversized {stream} was accepted").into());
+            };
+            assert!(
+                error
+                    .to_string()
+                    .contains(&format!("{stream} exceeds {MAX_PROBE_OUTPUT_BYTES} bytes")),
+                "{error}"
+            );
+        }
+        let Err(error) = capture_probe_output(
+            &stub,
+            directory.path(),
+            &["slow"],
+            "fixture",
+            Duration::from_millis(100),
+        )
+        .await
+        else {
+            return Err("slow probe succeeded".into());
+        };
+        assert!(error.to_string().contains("timed out"), "{error}");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn probe_rejects_oversized_help_and_skips_oversized_version()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = TempDir::new()?;
+        let flood = "python3 -c 'import sys; sys.stdout.write(\"x\" * (256 * 1024 + 1))'";
+        let version_script = PROTOCOL_STUB.replace("echo \"codex-cli 9.9.9\"", flood);
+        let version_stub = write_stub(&directory, "oversized-version", &version_script);
+        let result = probe(&version_stub, directory.path()).await?;
+        assert!(result.version.is_none());
+        assert_eq!(result.tier, CodexTier::AppServer);
+
+        let help_script = UNSUPPORTED_STUB.replace("echo \"  --json\"", flood);
+        let help_stub = write_stub(&directory, "oversized-help", &help_script);
+        let Err(error) = probe(&help_stub, directory.path()).await else {
+            return Err("oversized help was accepted".into());
+        };
+        assert!(
+            error.to_string().contains("exec help stdout exceeds"),
+            "{error}"
+        );
+        Ok(())
     }
 
     #[tokio::test]
