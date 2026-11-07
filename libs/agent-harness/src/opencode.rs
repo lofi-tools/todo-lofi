@@ -844,11 +844,14 @@ impl OpenCodeTranscript {
             .filter_map(|part| part["text"].as_str())
             .collect::<Vec<_>>()
             .join("\n");
-        let output = if output.is_empty() {
+        let mut output = if output.is_empty() {
             tool.error["message"].as_str().map(str::to_owned)
         } else {
             Some(output)
         };
+        if let Some(output) = &mut output {
+            crate::limit_command_output(output);
+        }
         Ok(HarnessEvent::ToolCall {
             tool_call_id: ToolCallId::new(id),
             title,
@@ -2057,6 +2060,34 @@ exec sleep 60
             transcript.entry(1).map(crate::Entry::summary).as_deref(),
             Some("thought: considered")
         );
+        Ok(())
+    }
+
+    #[test]
+    fn limits_queued_tool_output_and_error_to_utf8_tails() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let mut mapping = OpenCodeTranscript::new(SessionId::new("ses_1"));
+        let large = format!("{}tail", "界".repeat(crate::MAX_COMMAND_OUTPUT_BYTES));
+        for data in [
+            json!({"sessionID": "ses_1", "assistantMessageID": "msg_1", "id": "call_1", "content": [{"type": "text", "text": large}]}),
+            json!({"sessionID": "ses_1", "assistantMessageID": "msg_1", "id": "call_1", "error": {"message": large}}),
+        ] {
+            let event = mapping.apply(OpenCodeEvent {
+                kind: "session.tool.success".into(),
+                data,
+            })?;
+            match event {
+                Some(HarnessEvent::ToolCall {
+                    output: Some(output),
+                    ..
+                }) => {
+                    assert!(output.len() <= crate::MAX_COMMAND_OUTPUT_BYTES);
+                    assert!(output.ends_with("tail"));
+                    assert!(output.starts_with("[… earlier command output omitted …]"));
+                }
+                _ => return Err("expected tool output".into()),
+            }
+        }
         Ok(())
     }
 

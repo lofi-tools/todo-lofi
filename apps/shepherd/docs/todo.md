@@ -1231,9 +1231,9 @@ placeholder tabs and no unearned state badges.
   reschedules remaining events so one busy agent cannot monopolize other
   sessions. Shutdown drains the remaining events. Critical event
   queues still need backpressure.
-  Codex exec and app-server bound completed command output to the transcript's
-  existing 64 KiB tail before placing it on the event queue, avoiding larger
-  queued copies without changing the retained output.
+  Codex exec and app-server, and OpenCode tool events, bound output to the
+  transcript's existing 64 KiB tail before placing it on the event queue,
+  avoiding larger queued copies without changing the retained output.
 - [ ] Multiple agents and projects: three agents across two projects, no state
   bleed, no polling.
   A three-session fixture holds Codex, OpenCode and Claude tasks at approvals
