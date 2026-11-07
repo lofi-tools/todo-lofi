@@ -37,7 +37,7 @@ struct Session {
 struct TerminalProcessGroup {
     group: libc::pid_t,
     session: libc::pid_t,
-    members: Vec<libc::pid_t>,
+    members: Vec<ProcessIdentity>,
 }
 
 #[cfg(unix)]
@@ -47,14 +47,17 @@ impl TerminalProcessGroup {
         processes: impl IntoIterator<Item = libc::pid_t>,
     ) -> Vec<Self> {
         let own_group = unsafe { libc::getpgrp() };
-        let mut groups = BTreeMap::<libc::pid_t, Vec<libc::pid_t>>::new();
+        let mut groups = BTreeMap::<libc::pid_t, Vec<ProcessIdentity>>::new();
         for process in processes {
             if process <= 1 || unsafe { libc::getsid(process) } != session {
                 continue;
             }
             let group = unsafe { libc::getpgid(process) };
-            if group > 1 && group != own_group {
-                groups.entry(group).or_default().push(process);
+            if group > 1
+                && group != own_group
+                && let Some(identity) = ProcessIdentity::new(process)
+            {
+                groups.entry(group).or_default().push(identity);
             }
         }
         groups
@@ -70,8 +73,9 @@ impl TerminalProcessGroup {
     fn still_owned(&self) -> bool {
         self.group > 1
             && self.group != unsafe { libc::getpgrp() }
-            && self.members.iter().any(|&process| unsafe {
-                libc::getsid(process) == self.session && libc::getpgid(process) == self.group
+            && self.members.iter().any(|process| {
+                process.is_in_session(self.session)
+                    && unsafe { libc::getpgid(process.pid) == self.group }
             })
     }
 
@@ -311,7 +315,6 @@ impl TerminalSessions {
                 .process_groups(&terminal_processes())
                 .into_iter()
                 .flat_map(|group| group.members)
-                .filter_map(ProcessIdentity::new)
                 .filter(|member| unsafe { libc::getsid(member.pid) == session_id })
                 .collect();
             if !members.is_empty() {
@@ -681,6 +684,22 @@ mod tests {
 
     use super::*;
 
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn process_identity_rejects_a_reused_pid() -> Result<(), Box<dyn std::error::Error>> {
+        let pid = libc::pid_t::try_from(std::process::id())?;
+        let identity = ProcessIdentity::new(pid).ok_or("could not read process start time")?;
+        let session = unsafe { libc::getsid(pid) };
+        assert!(session > 0);
+        assert!(identity.is_in_session(session));
+        let reused = ProcessIdentity {
+            pid,
+            started_at: identity.started_at.wrapping_add(1),
+        };
+        assert!(!reused.is_in_session(session));
+        Ok(())
+    }
+
     #[test]
     fn a_pty_reports_its_output_and_exit_code() {
         let mut engine = PtyTerminals::new();
@@ -780,6 +799,22 @@ mod tests {
         )?;
         let ready = tokio::time::timeout(Duration::from_secs(3), receiver.recv()).await?;
         assert!(matches!(ready, Some(TerminalEvent::Output(bytes)) if bytes == b"ready"));
+
+        let session_id = engine
+            .sessions()?
+            .live
+            .get(terminal_id.as_str())
+            .and_then(|session| session.session_id)
+            .ok_or("missing terminal session")?;
+        let mut groups = TerminalProcessGroup::for_session(session_id, terminal_processes());
+        assert!(!groups.is_empty());
+        assert!(groups.iter().any(TerminalProcessGroup::still_owned));
+        for group in &mut groups {
+            for member in &mut group.members {
+                member.started_at = member.started_at.wrapping_add(1);
+            }
+            assert!(!group.still_owned());
+        }
 
         engine.close(&terminal_id)?;
         assert!(

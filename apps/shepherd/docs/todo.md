@@ -1145,6 +1145,9 @@ placeholder tabs and no unearned state badges.
 
 - [ ] Crash and kill tests: interrupted state, orphan detection, recorded PID
   plus start time, reused-PID refusal.
+  PTY process-group shutdown checks each member's recorded start time before
+  signalling; a fixture rejects a matching PID with a different start time.
+  Persisted agent and PTY identities and restart-time orphan handling remain.
 - [ ] 30-day archived-worktree collection, dirty skip, branch-tip recreation.
 - [ ] Database backup, migration checks, malformed migration handling and
   transactional writes.
