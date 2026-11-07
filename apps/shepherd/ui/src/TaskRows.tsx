@@ -1,4 +1,4 @@
-import { For, Show, onCleanup, onMount } from 'solid-js'
+import { For, Show, createSignal, onCleanup, onMount } from 'solid-js'
 
 import type { TaskSummary } from './bridge'
 
@@ -69,4 +69,43 @@ export function ReviewArchiveDialog(props: { count: number; onCancel: () => void
       </header>
     </dialog>
   )
+}
+
+export function DeleteTaskDialog(props: { title: string; worktreePath: string | null; pending: boolean; onCancel: () => void; onConfirm: (removeWorktree: boolean) => void }) {
+  const [removeWorktree, setRemoveWorktree] = createSignal(false)
+  let cancel: HTMLButtonElement | undefined
+  let dialog: HTMLElement | undefined
+  onMount(() => {
+    const opener = document.activeElement instanceof HTMLElement ? document.activeElement : undefined
+    cancel?.focus()
+    onCleanup(() => opener?.focus())
+  })
+  return <div class="picker-backdrop" onClick={() => { if (!props.pending) props.onCancel() }}>
+  <section ref={dialog} class="picker picker-dialog" role="dialog" aria-modal="true" aria-label="Delete task"
+    onClick={(event) => event.stopPropagation()}
+    onKeyDown={(event) => {
+      if (event.key === 'Escape' && !props.pending) { event.preventDefault(); props.onCancel(); return }
+      if (event.key !== 'Tab' || !dialog) return
+      const controls = Array.from(dialog.querySelectorAll<HTMLElement>('button:not(:disabled), input:not(:disabled)'))
+      if (!controls.length) return
+      const index = controls.indexOf(document.activeElement as HTMLElement)
+      if ((event.shiftKey && index <= 0) || (!event.shiftKey && index === controls.length - 1)) {
+        event.preventDefault()
+        ;(event.shiftKey ? controls.at(-1) : controls[0])?.focus()
+      }
+    }}>
+    <header class="picker__header"><h3>Delete {props.title}?</h3></header>
+    <div class="settings__project">
+      <p>The task, conversation, and attachments will be deleted. Its branch will be kept.</p>
+      <Show when={props.worktreePath}>
+        {(path) => <label><input type="checkbox" checked={removeWorktree()} disabled={props.pending}
+          onChange={(event) => setRemoveWorktree(event.currentTarget.checked)} /> Remove the clean worktree at <code>{path()}</code></label>}
+      </Show>
+      <p class="empty">Dirty worktrees cannot be removed.</p>
+      <div class="terminal-pane__bar">
+        <button type="button" ref={cancel} disabled={props.pending} onClick={props.onCancel}>Cancel</button>
+        <button type="button" disabled={props.pending} onClick={() => props.onConfirm(removeWorktree())}>Delete task</button>
+      </div>
+    </div>
+  </section></div>
 }

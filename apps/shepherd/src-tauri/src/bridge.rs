@@ -773,14 +773,23 @@ impl ShellState {
     }
 
     pub async fn discard_draft(&self, task_id: String) -> Result<(), BridgeError> {
-        self.remove_task(task_id, true).await
+        self.remove_task(task_id, true, false).await
     }
 
-    pub async fn delete_task(&self, task_id: String) -> Result<(), BridgeError> {
-        self.remove_task(task_id, false).await
+    pub async fn delete_task(
+        &self,
+        task_id: String,
+        remove_worktree: bool,
+    ) -> Result<(), BridgeError> {
+        self.remove_task(task_id, false, remove_worktree).await
     }
 
-    async fn remove_task(&self, task_id: String, draft_only: bool) -> Result<(), BridgeError> {
+    async fn remove_task(
+        &self,
+        task_id: String,
+        draft_only: bool,
+        remove_worktree: bool,
+    ) -> Result<(), BridgeError> {
         let attachments = self.task_attachment_directory(&task_id);
         let _guard = self.terminal_lifecycle.lock().await;
         let task_id = TaskId::new(task_id);
@@ -803,6 +812,9 @@ impl ShellState {
                 state: workspace.task.state.as_str(),
             }
             .into());
+        }
+        if remove_worktree {
+            core.check_task_worktree_removal(&task_id)?;
         }
         let project_id = ProjectId::new(workspace.task.project_id);
         let running = core
@@ -841,7 +853,10 @@ impl ShellState {
         let command = if draft_only {
             Command::DiscardDraft { task_id }
         } else {
-            Command::DeleteTask { task_id }
+            Command::DeleteTask {
+                task_id,
+                remove_worktree,
+            }
         };
         let result = core
             .execute(command)
@@ -1913,8 +1928,9 @@ pub mod commands {
     pub async fn delete_task(
         state: State<'_, ShellState>,
         task_id: String,
+        remove_worktree: bool,
     ) -> Result<(), BridgeError> {
-        state.inner().delete_task(task_id).await
+        state.inner().delete_task(task_id, remove_worktree).await
     }
 
     #[tauri::command]
@@ -3251,13 +3267,17 @@ mod tests {
         let task_directory = directory.path().join("attachments").join(&task);
         let other_directory = directory.path().join("attachments").join(&other);
         let other_file = attachments::prompt_file(&other_directory, &other_id)?;
-        assert!(state.delete_task(task.clone()).await.is_err());
+        assert!(state.delete_task(task.clone(), false).await.is_err());
         assert!(task_directory.is_dir());
         assert!(screenshot.is_file());
         state
             .resolve_approval(task.clone(), "approval-1".into(), Decision::Allow)
             .await?;
-        state.delete_task(task.clone()).await?;
+        std::fs::write(worktree.join("uncommitted.txt"), "preserve")?;
+        assert!(state.delete_task(task.clone(), true).await.is_err());
+        assert!(task_directory.is_dir());
+        assert!(worktree.join("uncommitted.txt").is_file());
+        state.delete_task(task.clone(), false).await?;
         assert!(!task_directory.exists());
         assert!(!screenshot.exists());
         assert_eq!(std::fs::read(other_file)?, b"other notes");

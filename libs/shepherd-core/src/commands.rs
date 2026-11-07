@@ -32,6 +32,7 @@ pub enum Command {
     },
     DeleteTask {
         task_id: TaskId,
+        remove_worktree: bool,
     },
     SendPrompt {
         task_id: TaskId,

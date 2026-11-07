@@ -1091,7 +1091,7 @@ and the task header never overstates the tier.
   and a failed screenshot save that preserves the queue for retry.
   Hidden macOS WebKit smokes verify element injection and saving a screenshot
   from the blocked-frame fallback through the desktop bridge.
-- [ ] Attachment cap, redirect and deletion tests.
+- [x] Attachment cap, redirect and deletion tests.
   Rust fixtures cover the default file cap, task isolation, symlink rejection
   and draft cleanup, including isolation from another draft's cached files.
   Headless Chromium checks the composer queue and upload.
@@ -1114,7 +1114,9 @@ and the task header never overstates the tier.
   removes its durable records, and preserves the worktree and branch. The desktop
   bridge stages and deletes the attachment cache, restoring it if core deletion
   fails; fixtures verify saved-task cleanup and isolation. The desktop deletion
-  control and optional worktree removal remain to be connected.
+  dialog keeps the worktree by default and offers removal of a clean worktree;
+  core fixtures verify dirty refusal and branch preservation, and Chromium
+  verifies confirmation and retry behaviour.
 - [x] Corrupt settings file falls back with a banner and backup.
   Rust verifies the exact backup bytes and read-only fallback. Chromium
   verifies the warning and that defaults are usable.

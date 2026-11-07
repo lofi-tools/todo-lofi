@@ -22,7 +22,7 @@ import { ReviewPane } from './ReviewPane'
 import { SEND_ACCENTS, SettingsPane } from './SettingsPane'
 import { FreebuffPane, TerminalPane, type TerminalCommands } from './TerminalPane'
 import { TaskSearch } from './TaskSearch'
-import { ReviewArchiveDialog, TaskRows } from './TaskRows'
+import { DeleteTaskDialog, ReviewArchiveDialog, TaskRows } from './TaskRows'
 import { ErrorNotifications } from './ErrorNotifications'
 import { reportError } from './diagnostics'
 
@@ -153,6 +153,7 @@ export function App() {
   const [loadedTasksFor, setLoadedTasksFor] = createSignal<string>()
   const [selectedTaskId, setSelectedTaskId] = createSignal<string | null>(null)
   const [workspace, setWorkspace] = createSignal<bridge.TaskWorkspace | null>(null)
+  const [deleteRequest, setDeleteRequest] = createSignal<bridge.TaskDetail>()
   const [searchOpen, setSearchOpen] = createSignal(false)
   const [palette, setPalette] = createSignal<PaletteKind>()
   const [commandRegistry, setCommandRegistry] = createSignal<bridge.CommandRegistry>()
@@ -1309,6 +1310,22 @@ export function App() {
     })
   }
 
+  function deleteTask(removeWorktree: boolean) {
+    const task = deleteRequest()
+    if (!task || pending()) return
+    void run(async () => {
+      await bridge.deleteTask(task.id, removeWorktree)
+      clearTurnOptions(task.id)
+      clearPromptFiles(task.id)
+      setDeleteRequest(undefined)
+      if (selectedTaskId() === task.id) {
+        setWorkspace(null)
+        setSelectedTaskId(null)
+      }
+      await loadTasks(task.projectId)
+    })
+  }
+
   function sendPrompt() {
     const projectId = selectedProjectId()
     const current = workspace()
@@ -1727,6 +1744,10 @@ export function App() {
                   {(tier) => <span class="chat__adapter">{TIER_LABELS[tier()]}{current().diagnostics?.fallbackReason && ' · fallback'}</span>}
                 </Show>
                 <span class="chat__state">{current().task.state}</span>
+                <Show when={current().task.state !== 'draft'}>
+                  <button type="button" class="project-action" disabled={pending() || LIVE_STATES.includes(current().task.state)}
+                    onClick={() => setDeleteRequest(current().task)}>Delete task…</button>
+                </Show>
                 <Show when={canCancel()}>
                   <button type="button" class="project-action" onClick={cancelTurn}
                     aria-keyshortcuts={chordFor('cancelTurn')}
@@ -2004,6 +2025,10 @@ export function App() {
       <Show when={archiveConfirmation()}>
         {(selection) => <ReviewArchiveDialog count={selection().length}
           onCancel={dismissArchiveConfirmation} onConfirm={archiveSelectedTasks} />}
+      </Show>
+      <Show when={deleteRequest()} keyed>
+        {(task) => <DeleteTaskDialog title={task.title} worktreePath={task.worktreePath} pending={pending()}
+          onCancel={() => setDeleteRequest(undefined)} onConfirm={deleteTask} />}
       </Show>
 
       <Show when={pickerOpen()}>

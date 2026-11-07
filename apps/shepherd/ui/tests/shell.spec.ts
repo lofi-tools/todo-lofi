@@ -29,6 +29,7 @@ test.beforeEach(async ({ context }) => {
     const windowTitles: string[] = []
     const terminalAppearances: Array<{ light: boolean; moreContrast: boolean }> = []
     const archiveRequests: string[][] = []
+    const deletions: Array<{ taskId: string; removeWorktree: boolean }> = []
     const gitMutations: GitMutation[] = []
     let failedReviewSnapshot = false
     const gitState = () => {
@@ -745,6 +746,14 @@ test.beforeEach(async ({ context }) => {
             transcripts[id] = []
             return workspace(id)
           }
+          case 'delete_task': {
+            deletions.push({ taskId: args.taskId, removeWorktree: args.removeWorktree })
+            if (options.has('dirty-delete') && args.removeWorktree) throw { message: 'Worktree contains changes', code: 'git' }
+            const index = tasks.findIndex((task) => task.id === args.taskId)
+            if (index < 0) throw { message: 'Task not found', code: 'core' }
+            tasks.splice(index, 1)
+            return null
+          }
           case 'set_draft_agent': {
             const task = tasks.find((candidate) => candidate.id === args.taskId)
             if (!task || task.state !== 'draft') throw new Error('Task is not a draft')
@@ -960,6 +969,7 @@ test.beforeEach(async ({ context }) => {
     window.__closedTerminals = closedTerminals
     window.__subscriptions = subscriptions
     window.__fileListings = fileListings
+    ;(window as unknown as { __deletions: typeof deletions }).__deletions = deletions
     window.__fileActions = fileActions
     window.__unwatchedFiles = unwatchedFiles
     window.__fileWatchIds = () => [...fileWatchers.keys()]
@@ -1755,6 +1765,34 @@ test('reports Review loading failures and permits refresh', async ({ page }) => 
   await expect(review.getByRole('alert')).toHaveCount(0)
   await review.getByRole('button', { name: 'Refresh' }).click()
   await expect(review.getByText('src/main.rs')).toBeVisible()
+})
+
+test('confirms saved task deletion and keeps its worktree by default', async ({ page }) => {
+  await page.goto('/')
+  await page.getByRole('button', { name: 'Delete task…' }).click()
+  const dialog = page.getByRole('dialog', { name: 'Delete task' })
+  await expect(dialog.getByRole('button', { name: 'Cancel' })).toBeFocused()
+  await expect(dialog.getByRole('checkbox')).not.toBeChecked()
+  await dialog.getByRole('button', { name: 'Cancel' }).click()
+  expect(await page.evaluate(() => (window as unknown as { __deletions: unknown[] }).__deletions)).toEqual([])
+  await page.getByRole('button', { name: 'Delete task…' }).click()
+  await dialog.getByRole('button', { name: 'Delete task', exact: true }).click()
+  await expect(dialog).toHaveCount(0)
+  expect(await page.evaluate(() => (window as unknown as { __deletions: unknown[] }).__deletions)).toEqual([{ taskId: 'task-1', removeWorktree: false }])
+})
+
+test('keeps the task and confirmation open when a dirty worktree cannot be removed', async ({ page }) => {
+  await page.goto('/?dirty-delete')
+  await page.getByRole('button', { name: 'Delete task…' }).click()
+  const dialog = page.getByRole('dialog', { name: 'Delete task' })
+  await dialog.getByRole('checkbox').check()
+  await dialog.getByRole('button', { name: 'Delete task', exact: true }).click()
+  await expect(page.getByRole('alert')).toContainText('Worktree contains changes')
+  await expect(dialog).toBeVisible()
+  await expect(dialog.getByRole('checkbox')).toBeChecked()
+  await dialog.getByRole('checkbox').uncheck()
+  await dialog.getByRole('button', { name: 'Delete task', exact: true }).click()
+  await expect(dialog).toHaveCount(0)
 })
 
 test('filters filenames as the user types and opens a match', async ({ page }) => {

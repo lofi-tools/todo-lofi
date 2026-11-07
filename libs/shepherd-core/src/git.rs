@@ -218,6 +218,11 @@ impl GitService {
         Ok(())
     }
 
+    pub fn prune_worktrees(&self, repository: &GitRepository) -> Result<(), GitError> {
+        run_git(&repository.root, &["worktree", "prune"])?;
+        Ok(())
+    }
+
     pub fn turn_baseline(&self, path: &Path) -> Result<TurnBaseline, GitError> {
         let status = git_bytes(
             path,

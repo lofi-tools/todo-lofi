@@ -627,7 +627,10 @@ impl Core {
                 self.set_draft_agent(&task_id, agent).await
             }
             Command::DiscardDraft { task_id } => self.discard_draft(&task_id).await,
-            Command::DeleteTask { task_id } => self.delete_task(&task_id).await,
+            Command::DeleteTask {
+                task_id,
+                remove_worktree,
+            } => self.delete_task(&task_id, remove_worktree).await,
             Command::SendPrompt { task_id, input } => self.send_prompt(&task_id, input).await,
             Command::SetSessionMode { task_id, mode } => {
                 self.set_session_mode(&task_id, &mode).await
@@ -1118,7 +1121,11 @@ impl Core {
         self.delete_task_records(task_id).await
     }
 
-    async fn delete_task(&mut self, task_id: &TaskId) -> Result<CommandResult, CoreError> {
+    async fn delete_task(
+        &mut self,
+        task_id: &TaskId,
+        remove_worktree: bool,
+    ) -> Result<CommandResult, CoreError> {
         let task = self.task(task_id)?;
         if matches!(
             task.state,
@@ -1134,12 +1141,31 @@ impl Core {
         }) {
             return Err(CoreError::TaskTerminalsRunning);
         }
+        if remove_worktree {
+            self.check_task_worktree_removal(task_id)?;
+        }
         if let Some(session) = self.sessions.get_mut(task_id)
             && !session.is_closed()
         {
             session.shutdown().await?;
         }
+        if remove_worktree {
+            let (_, repository, path) = self.task_git_worktree(task_id)?;
+            GitService.remove_clean_worktree(&repository, path)?;
+            GitService.prune_worktrees(&repository)?;
+        }
         self.delete_task_records(task_id).await
+    }
+
+    pub fn check_task_worktree_removal(&self, task_id: &TaskId) -> Result<(), CoreError> {
+        let (_, _, path) = self.task_git_worktree(task_id)?;
+        if GitService.has_changes(path)? {
+            return Err(GitError::DirtyWorktree {
+                path: path.to_path_buf(),
+            }
+            .into());
+        }
+        Ok(())
     }
 
     async fn delete_task_records(&mut self, task_id: &TaskId) -> Result<CommandResult, CoreError> {
@@ -3281,8 +3307,18 @@ mod tests {
         let worktree = PathBuf::from(task.task.worktree_path.ok_or("missing worktree")?);
         let branch = task.task.branch.ok_or("missing branch")?;
         assert!(!core.store.load_transcript(&task_id).await?.is_empty());
+        assert!(matches!(
+            core.execute(Command::DeleteTask {
+                task_id: task_id.clone(),
+                remove_worktree: true
+            })
+            .await,
+            Err(CoreError::Git(GitError::DirtyWorktree { .. }))
+        ));
+        assert!(core.task_workspace(&task_id).is_ok());
         core.execute(Command::DeleteTask {
             task_id: task_id.clone(),
+            remove_worktree: false,
         })
         .await?;
         assert!(core.task_list(&project)?.tasks.is_empty());
@@ -3329,7 +3365,8 @@ mod tests {
         assert_eq!(task.task.state, TaskState::Waiting);
         assert!(matches!(
             core.execute(Command::DeleteTask {
-                task_id: task_id.clone()
+                task_id: task_id.clone(),
+                remove_worktree: false,
             })
             .await,
             Err(CoreError::TaskDeletionBusy { .. })
@@ -3338,6 +3375,43 @@ mod tests {
             core.task_workspace(&task_id)?.task.state,
             TaskState::Waiting
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn deleting_a_task_can_remove_a_clean_worktree_without_removing_its_branch()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let repository = TestRepository::new()?;
+        let mut core = Core::with_services(
+            Box::new(MemoryStore::new()),
+            Box::new(FakeHarnessFactory::new(vec![vec![FakeTurn::new(vec![])]])),
+        );
+        let project = add_project(&mut core, repository.path().to_path_buf()).await?;
+        let draft = workspace_of(
+            core.execute(Command::CreateDraft {
+                project_id: project,
+                title: "Clean".into(),
+                agent: Agent::Codex,
+            })
+            .await?,
+        );
+        let task_id = TaskId::new(draft.task.id);
+        let task = workspace_of(
+            core.execute(Command::SendPrompt {
+                task_id: task_id.clone(),
+                input: PromptInput::text("hello"),
+            })
+            .await?,
+        );
+        let worktree = PathBuf::from(task.task.worktree_path.ok_or("missing worktree")?);
+        let branch = task.task.branch.ok_or("missing branch")?;
+        core.execute(Command::DeleteTask {
+            task_id,
+            remove_worktree: true,
+        })
+        .await?;
+        assert!(!worktree.exists());
+        assert!(git_in(&repository, &["branch", "--list", &branch]).contains(&branch));
         Ok(())
     }
 

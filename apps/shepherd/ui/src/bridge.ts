@@ -415,6 +415,10 @@ export function discardDraft(taskId: string): Promise<void> {
   return invoke<void>('discard_draft', { taskId })
 }
 
+export function deleteTask(taskId: string, removeWorktree: boolean): Promise<void> {
+  return invoke<void>('delete_task', { taskId, removeWorktree })
+}
+
 export interface CodexTurnOptions {
   model?: string
   effort?: string

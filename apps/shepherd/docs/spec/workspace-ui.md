@@ -241,6 +241,9 @@ current layout and give future changes a point of comparison.
 
 ## Conversation lifecycle
 
+- Saved tasks offer **Delete task** in the conversation header. Confirm deletion
+  in a dialog; keep the worktree by default, and offer removal only when it is
+  clean. The task branch is retained. Active turns cannot be deleted.
 - Show **Needs input** on waiting task rows and an attention dot on the
   selected task's composer. Review rows have a ring and **Needs review** badge.
 - Show the negotiated adapter tier in the conversation header after a session
