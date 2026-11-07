@@ -1199,7 +1199,8 @@ placeholder tabs and no unearned state badges.
   an unrelated missing checkout, and a worktree that became dirty while a
   collection was interrupted. Opening an archived task with a missing checkout
   and a pending collection first completes recovery; failed verification
-  preserves the intent for retry.
+  preserves the intent for retry. Startup also reconciles pending collections
+  for recently used tasks, keeping any checkout that still exists.
 - [ ] Database backup, migration checks, malformed migration handling and
   transactional writes.
   Existing file databases receive a retained Turso snapshot in a private

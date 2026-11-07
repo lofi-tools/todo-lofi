@@ -264,6 +264,12 @@ impl Default for Core {
     }
 }
 
+fn archived_worktree_cutoff() -> u64 {
+    // Terminal input timestamps are coalesced for up to a minute.
+    const ARCHIVE_AGE_MILLIS: u64 = 30 * 24 * 60 * 60 * 1000 + 60_000;
+    projects::now_millis().saturating_sub(ARCHIVE_AGE_MILLIS)
+}
+
 impl Core {
     /// A core with in-memory persistence and no agent adapter. Project and draft
     /// commands work; send and resume report [`CoreError::HarnessUnavailable`].
@@ -501,17 +507,15 @@ impl Core {
     }
 
     async fn collect_archived_worktrees(&mut self) {
-        // Terminal input timestamps are coalesced for up to a minute.
-        const ARCHIVE_AGE_MILLIS: u64 = 30 * 24 * 60 * 60 * 1000 + 60_000;
-        let cutoff = projects::now_millis().saturating_sub(ARCHIVE_AGE_MILLIS);
+        let cutoff = archived_worktree_cutoff();
         let candidates: Vec<TaskId> = self
             .tasks
             .values()
             .filter(|task| {
                 task.state == TaskState::Done
-                    && task.updated_at <= cutoff
-                    && task.worktree_last_used_at <= cutoff
                     && task.worktree_path.is_some()
+                    && (task.collection_pending
+                        || (task.updated_at <= cutoff && task.worktree_last_used_at <= cutoff))
             })
             .map(|task| task.id.clone())
             .collect();
@@ -588,6 +592,10 @@ impl Core {
                     updated.collection_pending = false;
                     self.store.save_task(&updated).await?;
                     self.tasks.insert(task_id.clone(), updated);
+                    let cutoff = archived_worktree_cutoff();
+                    if task.updated_at > cutoff || task.worktree_last_used_at > cutoff {
+                        return Ok(());
+                    }
                 }
             }
         }
@@ -6143,6 +6151,56 @@ mod tests {
         core.touch_archived_worktree(&task.id).await?;
         let recovered = core.task(&task.id)?;
         assert!(!recovered.collection_pending && recovered.worktree_path.is_none());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn startup_reconciles_recent_pending_collections_without_removing_live_worktrees()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let repository = TestRepository::new()?;
+        let database = TestDatabase::new()?;
+        let uri = database.uri();
+        let mut core = Core::with_services(
+            Box::new(TursoStore::open(&uri).await?),
+            Box::new(UnavailableHarnessFactory),
+        );
+        let project_id = add_project(&mut core, repository.path().to_path_buf()).await?;
+        let mut missing = Task::draft(
+            project_id.clone(),
+            "Missing",
+            &repository.repository().git_dir,
+        );
+        let mut present = Task::draft(project_id, "Present", &repository.repository().git_dir);
+        for task in [&mut missing, &mut present] {
+            GitService.create_worktree(
+                repository.repository(),
+                &task.proposed_worktree_path,
+                &task.proposed_branch,
+                "main",
+            )?;
+            let tip =
+                GitService.checked_out_tip(&task.proposed_worktree_path, &task.proposed_branch)?;
+            GitService.retain_task_tip(repository.repository(), task.id.as_str(), &tip)?;
+            task.branch_tip_sha = Some(tip);
+            task.branch = Some(task.proposed_branch.clone());
+            task.worktree_path = Some(task.proposed_worktree_path.clone());
+            task.state = TaskState::Done;
+            task.collection_pending = true;
+        }
+        GitService
+            .remove_clean_worktree(repository.repository(), &missing.proposed_worktree_path)?;
+        core.store.save_task(&missing).await?;
+        core.store.save_task(&present).await?;
+        drop(core);
+        let reopened = Core::load(
+            Box::new(TursoStore::open(&uri).await?),
+            Box::new(UnavailableHarnessFactory),
+        )
+        .await?;
+        let recovered = reopened.task(&missing.id)?;
+        assert!(!recovered.collection_pending && recovered.worktree_path.is_none());
+        let kept = reopened.task(&present.id)?;
+        assert!(!kept.collection_pending && kept.proposed_worktree_path.is_dir());
         Ok(())
     }
 
