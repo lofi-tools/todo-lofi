@@ -2336,6 +2336,7 @@ async fn handle_notification(
                 events.push(HarnessEvent::CommandOutput {
                     tool_call_id: ToolCallId::new(id),
                     text: delta.to_string(),
+                    output_permit: None,
                 });
             }
         }

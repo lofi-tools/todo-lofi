@@ -637,8 +637,8 @@ async fn drive_session(
                             show_next_approval(&sender, &mut approvals, &session_grants, project_approvals).await?;
                         }
                     }
-                    Some(AcpEvent::TerminalOutput { terminal_id, chunk, .. }) if prompt.is_some() => {
-                        updates.terminal_output(&sender, terminal_id, chunk)?;
+                    Some(AcpEvent::TerminalOutput { terminal_id, chunk, permit, .. }) if prompt.is_some() => {
+                        updates.terminal_output(&sender, terminal_id, chunk, Arc::new(permit))?;
                     }
                     Some(AcpEvent::TerminalStarted { session_id, terminal_id, title })
                         if session_id == session => {
@@ -1181,7 +1181,14 @@ impl Updates {
         };
         publish(sender, event)?;
         if let Some((tool_call_id, text)) = terminal {
-            publish(sender, HarnessEvent::CommandOutput { tool_call_id, text })?;
+            publish(
+                sender,
+                HarnessEvent::CommandOutput {
+                    tool_call_id,
+                    text,
+                    output_permit: None,
+                },
+            )?;
         }
         Ok(())
     }
@@ -1191,6 +1198,7 @@ impl Updates {
         sender: &mpsc::UnboundedSender<HarnessEvent>,
         terminal_id: String,
         chunk: String,
+        permit: Arc<tokio::sync::OwnedSemaphorePermit>,
     ) -> HarnessResult<()> {
         if let Some(tool_call_id) = self.terminal_tools.get(&terminal_id) {
             publish(
@@ -1198,6 +1206,7 @@ impl Updates {
                 HarnessEvent::CommandOutput {
                     tool_call_id: tool_call_id.clone(),
                     text: chunk,
+                    output_permit: Some(permit),
                 },
             )?;
         } else {
@@ -1311,6 +1320,55 @@ mod tests {
     };
 
     use super::*;
+
+    #[tokio::test]
+    async fn terminal_output_keeps_its_permit_until_the_harness_event_is_consumed()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let permits = Arc::new(tokio::sync::Semaphore::new(1));
+        let permit = permits.clone().acquire_owned().await?;
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        let mut updates = Updates::default();
+        updates
+            .terminal_tools
+            .insert("terminal".into(), ToolCallId::new("tool"));
+        updates.terminal_output(
+            &sender,
+            "terminal".into(),
+            "output".into(),
+            Arc::new(permit),
+        )?;
+        assert_eq!(permits.available_permits(), 0);
+        let event = receiver.recv().await.ok_or("missing output")?;
+        let copy = event.clone();
+        drop(event);
+        assert_eq!(permits.available_permits(), 0);
+        drop(copy);
+        assert_eq!(permits.available_permits(), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn early_terminal_output_releases_its_permit_after_bounded_buffering()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let permits = Arc::new(tokio::sync::Semaphore::new(1));
+        let permit = permits.clone().acquire_owned().await?;
+        let (sender, _receiver) = mpsc::unbounded_channel();
+        let mut updates = Updates::default();
+        updates.terminal_output(
+            &sender,
+            "terminal".into(),
+            "x".repeat(crate::MAX_COMMAND_OUTPUT_BYTES + 10),
+            Arc::new(permit),
+        )?;
+        assert_eq!(permits.available_permits(), 1);
+        let buffered = updates
+            .early_output
+            .get("terminal")
+            .ok_or("missing early output")?;
+        assert!(buffered.len() <= crate::MAX_COMMAND_OUTPUT_BYTES);
+        assert!(buffered.ends_with("xxx"));
+        Ok(())
+    }
 
     async fn fake(
         script: FakeScript,

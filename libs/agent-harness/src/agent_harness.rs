@@ -570,6 +570,8 @@ pub enum HarnessEvent {
     CommandOutput {
         tool_call_id: ToolCallId,
         text: String,
+        /// Retains backpressure until all copies of this output event are consumed.
+        output_permit: Option<Arc<tokio::sync::OwnedSemaphorePermit>>,
     },
     AgentTerminalStarted {
         id: String,
@@ -905,9 +907,9 @@ impl Transcript {
                 diffs.clone(),
                 terminal_id.clone(),
             ),
-            HarnessEvent::CommandOutput { tool_call_id, text } => {
-                self.append_command_output(tool_call_id.as_str(), text)
-            }
+            HarnessEvent::CommandOutput {
+                tool_call_id, text, ..
+            } => self.append_command_output(tool_call_id.as_str(), text),
             HarnessEvent::TurnFinished { .. } | HarnessEvent::Exited { .. } => {
                 self.stop_unfinished_commands()
             }
@@ -1337,10 +1339,12 @@ mod tests {
         transcript.apply(&HarnessEvent::CommandOutput {
             tool_call_id: ToolCallId::new("command-1"),
             text: "界".repeat(MAX_COMMAND_OUTPUT_BYTES),
+            output_permit: None,
         });
         transcript.apply(&HarnessEvent::CommandOutput {
             tool_call_id: ToolCallId::new("command-1"),
             text: "\nlast line\n".to_string(),
+            output_permit: None,
         });
         transcript.apply(&HarnessEvent::TurnFinished {
             reason: TurnFinishReason::Cancelled,
@@ -1350,6 +1354,7 @@ mod tests {
                 .apply(&HarnessEvent::CommandOutput {
                     tool_call_id: ToolCallId::new("command-1"),
                     text: "late output".to_string(),
+                    output_permit: None,
                 })
                 .is_empty()
         );

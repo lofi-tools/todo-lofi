@@ -1194,9 +1194,10 @@ placeholder tabs and no unearned state badges.
   tail. ACP terminal output honors smaller requested limits and caps larger
   requests at 1 MiB per terminal. ACP terminal output has a shared 64-event
   backpressure limit with 8 KiB chunks; release or shutdown unblocks a stalled
-  pump. A direct terminal's exit wait completes even if a descendant keeps an
-  output pipe open, and shutdown rejects new terminals. OpenCode decodes
-  event-stream chunks one event at a time instead of
+  pump. Output permits remain held through the harness queue until the core
+  consumes the events. A direct terminal's exit wait completes even if a
+  descendant keeps an output pipe open, and shutdown rejects new terminals.
+  OpenCode decodes event-stream chunks one event at a time instead of
   queuing every decoded event from a network read. Event folding handles at
   most 256 events per session per pass, including during commands, and
   reschedules remaining events so one busy agent cannot monopolize other
