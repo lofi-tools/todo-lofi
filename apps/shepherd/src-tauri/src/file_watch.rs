@@ -11,6 +11,8 @@ use tokio::time::{Instant, sleep_until};
 
 const DEBOUNCE: Duration = Duration::from_millis(150);
 const MAX_DEBOUNCE: Duration = Duration::from_secs(1);
+const MAX_PENDING_ERROR_BYTES: usize = 8192;
+const OMITTED_ERRORS: &str = "\nAdditional watcher error details omitted; see the process log.";
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum WatchError {
@@ -142,16 +144,13 @@ impl WorkspaceWatch {
                 changed = self.notifications.changed() => changed.map_err(|_| WatchError::Closed)?,
             }
         }
-        let error = self.notifications.borrow_and_update().clone();
+        self.notifications.borrow_and_update();
+        let mut error = None;
+        self.changed.send_if_modified(|pending| {
+            error = pending.take();
+            error.is_some()
+        });
         if let Some(error) = error {
-            self.changed.send_if_modified(|pending| {
-                if pending.as_ref() == Some(&error) {
-                    *pending = None;
-                    true
-                } else {
-                    false
-                }
-            });
             Err(WatchError::Notification(error))
         } else {
             Ok(())
@@ -162,8 +161,27 @@ impl WorkspaceWatch {
 fn record_notification(sender: &watch::Sender<Option<String>>, error: Option<String>) {
     sender.send_modify(|pending| {
         match (pending.as_mut(), error) {
-            (None, error) => *pending = error,
-            (Some(_), Some(error)) => tracing::warn!(%error, "additional file watcher error while a previous error is pending"),
+            (None, Some(error)) => {
+                let end = error.floor_char_boundary(error.len().min(MAX_PENDING_ERROR_BYTES));
+                let mut message = error[..end].to_owned();
+                if end < error.len() {
+                    tracing::warn!(%error, "watcher error exceeded the notification limit");
+                    message.push_str(OMITTED_ERRORS);
+                }
+                *pending = Some(message);
+            }
+            (None, None) => {}
+            (Some(message), Some(error)) => {
+                tracing::warn!(%error, "additional file watcher error while a previous error is pending");
+                if !message.ends_with(OMITTED_ERRORS) {
+                    if message.len().saturating_add(error.len()).saturating_add(1) <= MAX_PENDING_ERROR_BYTES {
+                        message.push('\n');
+                        message.push_str(&error);
+                    } else {
+                        message.push_str(OMITTED_ERRORS);
+                    }
+                }
+            }
             (Some(_), None) => {}
         }
     });
@@ -227,16 +245,30 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn watcher_error_aggregation_is_bounded_and_utf8_safe() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let (sender, receiver) = watch::channel(None);
+        record_notification(&sender, Some("é".repeat(MAX_PENDING_ERROR_BYTES)));
+        record_notification(&sender, Some("another error".into()));
+        let pending = receiver.borrow();
+        let message = pending.as_deref().ok_or("expected watcher error")?;
+        assert!(message.len() <= MAX_PENDING_ERROR_BYTES + OMITTED_ERRORS.len());
+        assert!(message.ends_with(OMITTED_ERRORS));
+        Ok(())
+    }
+
     #[tokio::test]
     async fn watcher_error_survives_later_file_events_and_is_reported_once()
     -> Result<(), Box<dyn std::error::Error>> {
         let directory = tempfile::tempdir()?;
         let mut watcher = WorkspaceWatch::start(directory.path().to_path_buf())?;
         record_notification(&watcher.changed, Some("fixture watcher error".into()));
+        record_notification(&watcher.changed, Some("second watcher error".into()));
         record_notification(&watcher.changed, None);
         let result = tokio::time::timeout(Duration::from_secs(3), watcher.next_refresh()).await?;
         assert!(
-            matches!(result, Err(WatchError::Notification(message)) if message == "fixture watcher error")
+            matches!(result, Err(WatchError::Notification(message)) if message.contains("fixture watcher error") && message.contains("second watcher error"))
         );
         record_notification(&watcher.changed, None);
         tokio::time::timeout(Duration::from_secs(3), watcher.next_refresh()).await??;

@@ -968,7 +968,7 @@ and the task header never overstates the tier.
   missing external Git metadata directory is skipped, while inspection errors
   are reported rather than silently disabling that part of the watcher. A
   pending watcher error survives subsequent file events during debounce;
-  additional errors are logged while the first awaits delivery. After a
+  additional errors are included up to a bounded limit and logged. After a
   notification error the bridge reports it and continues watching; a fixture
   checks a subsequent real worktree change. A
   separate list shows deleted paths. The preview opens files in the default
