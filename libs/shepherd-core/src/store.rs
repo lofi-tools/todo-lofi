@@ -19,7 +19,7 @@ use crate::search::{RESULT_LIMIT, SearchHit, SearchQuery, entry_text};
 use crate::session::SessionRecord;
 use crate::snapshots::WorkspaceLayout;
 use crate::tasks::{Agent, AgentTier, Task, TaskId, TaskState};
-use crate::terminal::{TerminalId, TerminalLayout, TerminalRecord, TerminalScope};
+use crate::terminal::{ProcessRecord, TerminalId, TerminalLayout, TerminalRecord, TerminalScope};
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
@@ -51,6 +51,9 @@ pub struct ProjectApproval {
 
 #[async_trait]
 pub trait Store: Send + Sync {
+    async fn save_process(&self, process: &ProcessRecord) -> Result<(), StoreError>;
+    async fn remove_process(&self, id: &str) -> Result<(), StoreError>;
+    async fn load_processes(&self) -> Result<Vec<ProcessRecord>, StoreError>;
     async fn load_projects(&self) -> Result<Vec<Project>, StoreError>;
     async fn save_project(&self, project: &Project) -> Result<(), StoreError>;
     async fn load_tasks(&self) -> Result<Vec<Task>, StoreError>;
@@ -155,6 +158,10 @@ const MIGRATIONS: &[Migration] = &[
         name: "0011_attachments.sql",
         sql: include_str!("../toasty/migrations/0011_attachments.sql"),
     },
+    Migration {
+        name: "0012_processes.sql",
+        sql: include_str!("../toasty/migrations/0012_processes.sql"),
+    },
 ];
 
 /// The durable store used by the application. The database handle is guarded
@@ -189,6 +196,52 @@ impl TursoStore {
 
 #[async_trait]
 impl Store for TursoStore {
+    async fn save_process(&self, process: &ProcessRecord) -> Result<(), StoreError> {
+        let mut db = self.db.lock().await;
+        let started_at = i64::try_from(process.started_at)
+            .map_err(|error| StoreError::Backend(error.to_string()))?;
+        toasty::sql::statement("INSERT INTO processes (id, kind, owner_id, pid, started_at, process_group, session_id, boot_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)")
+            .bind(&process.id).bind(&process.kind).bind(&process.owner_id).bind(i64::from(process.pid))
+            .bind(started_at).bind(i64::from(process.process_group)).bind(i64::from(process.session_id)).bind(&process.boot_id)
+            .exec(&mut *db).await?;
+        Ok(())
+    }
+
+    async fn remove_process(&self, id: &str) -> Result<(), StoreError> {
+        let mut db = self.db.lock().await;
+        toasty::sql::statement("DELETE FROM processes WHERE id = ?1")
+            .bind(id)
+            .exec(&mut *db)
+            .await?;
+        Ok(())
+    }
+
+    async fn load_processes(&self) -> Result<Vec<ProcessRecord>, StoreError> {
+        let mut db = self.db.lock().await;
+        let rows = toasty::sql::query("SELECT id, kind, owner_id, pid, started_at, process_group, session_id, boot_id FROM processes ORDER BY id")
+            .column_types([Type::String, Type::String, Type::String, Type::I64, Type::I64, Type::I64, Type::I64, Type::String])
+            .exec(&mut *db).await?;
+        rows.into_iter()
+            .map(|row| {
+                let Value::Record(fields) = row else {
+                    return Err(StoreError::InvalidRow("expected a process record".into()));
+                };
+                Ok(ProcessRecord {
+                    id: required_string(fields.first())?,
+                    kind: required_string(fields.get(1))?,
+                    owner_id: required_string(fields.get(2))?,
+                    pid: u32::try_from(required_u64(fields.get(3))?)
+                        .map_err(|error| StoreError::InvalidRow(error.to_string()))?,
+                    started_at: required_u64(fields.get(4))?,
+                    process_group: u32::try_from(required_u64(fields.get(5))?)
+                        .map_err(|error| StoreError::InvalidRow(error.to_string()))?,
+                    session_id: u32::try_from(required_u64(fields.get(6))?)
+                        .map_err(|error| StoreError::InvalidRow(error.to_string()))?,
+                    boot_id: required_string(fields.get(7))?,
+                })
+            })
+            .collect()
+    }
     async fn search_entries(&self, query: &SearchQuery) -> Result<Vec<SearchHit>, StoreError> {
         let mut db = self.db.lock().await;
         let rows = toasty::sql::query(SEARCH_SQL)
@@ -1101,6 +1154,7 @@ fn optional_path(path: Option<&PathBuf>) -> String {
 /// A non-durable store used to test the boundary before a database is opened.
 #[derive(Default)]
 pub struct MemoryStore {
+    processes: RwLock<BTreeMap<String, ProcessRecord>>,
     projects: RwLock<BTreeMap<String, Project>>,
     tasks: RwLock<BTreeMap<String, Task>>,
     workspace_layouts: RwLock<BTreeMap<TaskId, WorkspaceLayout>>,
@@ -1119,6 +1173,22 @@ impl MemoryStore {
 
 #[async_trait]
 impl Store for MemoryStore {
+    async fn save_process(&self, process: &ProcessRecord) -> Result<(), StoreError> {
+        self.processes
+            .write()
+            .await
+            .insert(process.id.clone(), process.clone());
+        Ok(())
+    }
+
+    async fn remove_process(&self, id: &str) -> Result<(), StoreError> {
+        self.processes.write().await.remove(id);
+        Ok(())
+    }
+
+    async fn load_processes(&self) -> Result<Vec<ProcessRecord>, StoreError> {
+        Ok(self.processes.read().await.values().cloned().collect())
+    }
     async fn load_transcript(&self, task_id: &TaskId) -> Result<Vec<Entry>, StoreError> {
         Ok(self
             .transcripts
@@ -1346,6 +1416,35 @@ mod tests {
                 required_string(record.first())
             })
             .collect()
+    }
+
+    #[tokio::test]
+    async fn process_identity_survives_store_reopen_until_removed()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database = TestDatabase::new()?;
+        let uri = database.uri();
+        let process = ProcessRecord {
+            id: "launch-1".into(),
+            kind: "terminal".into(),
+            owner_id: "terminal-1".into(),
+            pid: 123,
+            started_at: 456,
+            process_group: 123,
+            session_id: 123,
+            boot_id: "boot-a".into(),
+        };
+        for store in [
+            Box::new(MemoryStore::new()) as Box<dyn Store>,
+            Box::new(TursoStore::open(&uri).await?),
+        ] {
+            store.save_process(&process).await?;
+            assert_eq!(store.load_processes().await?, vec![process.clone()]);
+        }
+        let reopened = TursoStore::open(&uri).await?;
+        assert_eq!(reopened.load_processes().await?, vec![process.clone()]);
+        reopened.remove_process(&process.id).await?;
+        assert!(reopened.load_processes().await?.is_empty());
+        Ok(())
     }
 
     async fn verify_task_deletion(

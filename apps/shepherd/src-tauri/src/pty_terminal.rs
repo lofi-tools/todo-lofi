@@ -11,8 +11,8 @@ use std::time::Duration;
 
 use portable_pty::{ChildKiller, CommandBuilder, MasterPty, PtySize, native_pty_system};
 use shepherd_core::terminal::{
-    TerminalError, TerminalEvent, TerminalId, TerminalService, TerminalSpec, TerminalWrite,
-    validate_size,
+    ProcessRecord, TerminalError, TerminalEvent, TerminalId, TerminalService, TerminalSpec,
+    TerminalWrite, validate_size,
 };
 use tokio::sync::{mpsc, oneshot};
 
@@ -31,6 +31,7 @@ struct Session {
     master: Box<dyn MasterPty + Send>,
     #[cfg(unix)]
     session_id: Option<libc::pid_t>,
+    process: Option<ProcessRecord>,
 }
 
 #[cfg(unix)]
@@ -162,6 +163,39 @@ fn process_start_time(pid: libc::pid_t) -> Option<u64> {
 
 #[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
 fn process_start_time(_: libc::pid_t) -> Option<u64> {
+    None
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn boot_id() -> Option<String> {
+    std::fs::read_to_string("/proc/sys/kernel/random/boot_id")
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn boot_id() -> Option<String> {
+    let mut value = std::mem::MaybeUninit::<libc::timeval>::uninit();
+    let mut size = std::mem::size_of::<libc::timeval>();
+    let result = unsafe {
+        libc::sysctlbyname(
+            c"kern.boottime".as_ptr(),
+            value.as_mut_ptr().cast(),
+            &mut size,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if result != 0 || size != std::mem::size_of::<libc::timeval>() {
+        return None;
+    }
+    let value = unsafe { value.assume_init() };
+    Some(format!("{}:{}", value.tv_sec, value.tv_usec))
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+pub(crate) fn boot_id() -> Option<String> {
     None
 }
 
@@ -434,6 +468,74 @@ impl PtyTerminals {
             .lock()
             .map_err(|_| TerminalError::Backend("the terminal table is poisoned".to_string()))
     }
+
+    pub fn process_record(
+        &self,
+        terminal_id: &TerminalId,
+    ) -> Result<Option<ProcessRecord>, TerminalError> {
+        Ok(self
+            .sessions()?
+            .live
+            .get(terminal_id.as_str())
+            .and_then(|session| session.process.clone()))
+    }
+
+    pub fn lingering_process_records(
+        &self,
+        terminal_id: &TerminalId,
+    ) -> Result<Vec<ProcessRecord>, TerminalError> {
+        #[cfg(unix)]
+        {
+            let sessions = self.sessions()?;
+            if !sessions
+                .exited
+                .values()
+                .any(|session| session.terminal_id == terminal_id.as_str())
+            {
+                return Ok(Vec::new());
+            }
+            let boot_id = boot_id().ok_or_else(|| {
+                TerminalError::Backend("could not identify the current boot".into())
+            })?;
+            let mut records = Vec::new();
+            for (&session_id, session) in &sessions.exited {
+                if session.terminal_id != terminal_id.as_str() {
+                    continue;
+                }
+                for member in &session.members {
+                    if !member.is_in_session(session_id) {
+                        continue;
+                    }
+                    let group = unsafe { libc::getpgid(member.pid) };
+                    if group <= 1 {
+                        continue;
+                    }
+                    let (Ok(pid), Ok(process_group)) =
+                        (u32::try_from(member.pid), u32::try_from(group))
+                    else {
+                        continue;
+                    };
+                    records.push(ProcessRecord {
+                        id: uuid::Uuid::new_v4().to_string(),
+                        kind: "terminal".into(),
+                        owner_id: terminal_id.as_str().to_owned(),
+                        pid,
+                        started_at: member.started_at,
+                        process_group,
+                        session_id: u32::try_from(session_id)
+                            .map_err(|error| TerminalError::Backend(error.to_string()))?,
+                        boot_id: boot_id.clone(),
+                    });
+                }
+            }
+            Ok(records)
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = terminal_id;
+            Ok(Vec::new())
+        }
+    }
 }
 
 impl Drop for PtyTerminals {
@@ -540,6 +642,27 @@ impl TerminalService for PtyTerminals {
         let session_id = child
             .process_id()
             .and_then(|pid| libc::pid_t::try_from(pid).ok());
+        #[cfg(unix)]
+        let process = session_id.and_then(|pid| {
+            let identity = ProcessIdentity::new(pid)?;
+            let group = unsafe { libc::getpgid(pid) };
+            let session = unsafe { libc::getsid(pid) };
+            if pid <= 1 || group <= 1 || session <= 1 {
+                return None;
+            }
+            Some(ProcessRecord {
+                id: uuid::Uuid::new_v4().to_string(),
+                kind: "terminal".into(),
+                owner_id: terminal_id.as_str().to_owned(),
+                pid: u32::try_from(pid).ok()?,
+                started_at: identity.started_at,
+                process_group: u32::try_from(group).ok()?,
+                session_id: u32::try_from(session).ok()?,
+                boot_id: boot_id()?,
+            })
+        });
+        #[cfg(not(unix))]
+        let process = None;
         self.sessions()?.live.insert(
             terminal_id.as_str().to_string(),
             Session {
@@ -549,6 +672,7 @@ impl TerminalService for PtyTerminals {
                 master: pair.master,
                 #[cfg(unix)]
                 session_id,
+                process,
             },
         );
 
@@ -905,6 +1029,13 @@ mod tests {
             .await?;
             assert_eq!(exit_code, Some(23));
             assert_eq!(unsafe { libc::getsid(process) }, session);
+            let records = engine.lingering_process_records(&terminal_id)?;
+            assert!(
+                records
+                    .iter()
+                    .any(|record| i64::from(record.pid) == i64::from(process)
+                        && i64::from(record.process_group) == i64::from(group))
+            );
             engine.terminate_all();
         } else {
             engine.close(&terminal_id)?;

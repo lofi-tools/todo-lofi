@@ -48,7 +48,8 @@ use crate::session::SessionRecord;
 use crate::snapshots::{SessionRecovery, TaskApproval};
 use crate::store::{MemoryStore, Store, StoreError};
 use crate::terminal::{
-    InspectorTab, TerminalId, TerminalLayout, TerminalList, TerminalRecord, TerminalSnapshot,
+    InspectorTab, ProcessRecord, TerminalId, TerminalLayout, TerminalList, TerminalRecord,
+    TerminalSnapshot,
 };
 
 /// A failure reported by the core. Errors are returned to the caller; the core
@@ -224,10 +225,8 @@ impl Core {
         }
     }
 
-    /// Open a core from durable records. No agent process survives a restart, so
-    /// every task that was live when the previous run ended is loaded as
-    /// `interrupted`: resuming starts a new session rather than pretending the
-    /// old one is still attached.
+    /// Open durable records. A previously live task is loaded as `interrupted`
+    /// because the new process cannot assume its agent is still attached.
     pub async fn load(
         store: Box<dyn Store>,
         harness_factory: Box<dyn HarnessFactory>,
@@ -285,8 +284,8 @@ impl Core {
         }
 
         for mut terminal in core.store.load_terminals().await? {
-            // No PTY outlives the process, so a record without an end time is
-            // loaded as ended instead of being shown as still running.
+            // An old PTY is not attached to this instance, even if its process
+            // survived the previous instance.
             if terminal.ended_at.is_none() {
                 terminal.ended_at = Some(crate::projects::now_millis());
                 core.store.save_terminal(&terminal).await?;
@@ -506,6 +505,20 @@ impl Core {
             .ok_or_else(|| CoreError::TerminalNotFound {
                 id: id.as_str().into(),
             })
+    }
+
+    pub async fn record_process(&mut self, process: &ProcessRecord) -> Result<(), CoreError> {
+        self.store.save_process(process).await?;
+        Ok(())
+    }
+
+    pub async fn remove_process(&mut self, id: &str) -> Result<(), CoreError> {
+        self.store.remove_process(id).await?;
+        Ok(())
+    }
+
+    pub async fn recorded_processes(&mut self) -> Result<Vec<ProcessRecord>, CoreError> {
+        Ok(self.store.load_processes().await?)
     }
 
     pub async fn record_terminal(&mut self, terminal: &TerminalRecord) -> Result<(), CoreError> {

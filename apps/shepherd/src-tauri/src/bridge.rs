@@ -27,8 +27,8 @@ use shepherd_core::git::GitService;
 use shepherd_core::harness::HarnessFactory;
 use shepherd_core::store::TursoStore;
 use shepherd_core::terminal::{
-    InspectorTab, TerminalEvent, TerminalId, TerminalList, TerminalRecord, TerminalService,
-    TerminalSpec,
+    InspectorTab, ProcessRecord, TerminalEvent, TerminalId, TerminalList, TerminalRecord,
+    TerminalService, TerminalSpec,
 };
 use shepherd_core::{
     Agent, Command, CommandResult, Core, CoreError, Event, ProjectApprovalsSnapshot, ProjectId,
@@ -240,12 +240,14 @@ impl Default for TerminalHost {
 
 struct PreparedTerminal {
     id: TerminalId,
+    process: Option<ProcessRecord>,
     slot: Arc<Mutex<ScreenSlot>>,
     output: mpsc::Receiver<TerminalEvent>,
 }
 
 struct RecordedTerminal {
     record: TerminalRecord,
+    process_id: Option<String>,
     core: Arc<Mutex<Core>>,
     events: broadcast::Sender<Event>,
 }
@@ -265,6 +267,12 @@ impl TerminalHost {
             .await
             .spawn(spec, events)
             .map_err(|error| BridgeError::new("terminal", error.to_string()))?;
+        let process = self
+            .engine
+            .lock()
+            .await
+            .process_record(&id)
+            .map_err(|error| BridgeError::new("terminal", error.to_string()))?;
         let mut screen =
             Screen::with_scrollback(usize::from(columns), usize::from(rows), scrollback);
         screen.set_appearance(*self.appearance.lock().await);
@@ -275,7 +283,12 @@ impl TerminalHost {
             frames,
         }));
         screens.insert(id.as_str().to_string(), slot.clone());
-        Ok(PreparedTerminal { id, slot, output })
+        Ok(PreparedTerminal {
+            id,
+            process,
+            slot,
+            output,
+        })
     }
 
     async fn set_appearance(&self, appearance: TerminalAppearance) {
@@ -299,6 +312,7 @@ impl TerminalHost {
         let screens = self.screens.clone();
         let PreparedTerminal {
             id,
+            process: _,
             slot,
             mut output,
         } = terminal;
@@ -351,11 +365,33 @@ impl TerminalHost {
                             tracing::debug!("ACP terminal output listener closed before exit");
                         }
                         if let Some(recorded) = &recorded {
+                            let lingering = engine.lock().await.lingering_process_records(&id);
                             let mut core = recorded.core.lock().await;
                             if let Err(error) = core.end_terminal(&id, exit_code).await
                                 && !matches!(error, CoreError::TerminalNotFound { .. })
                             {
                                 tracing::warn!(%error, "could not mark the terminal ended");
+                            }
+                            let mut captured = true;
+                            match lingering {
+                                Ok(processes) => {
+                                    for process in processes {
+                                        if let Err(error) = core.record_process(&process).await {
+                                            captured = false;
+                                            tracing::warn!(%error, "could not record remaining terminal process");
+                                        }
+                                    }
+                                }
+                                Err(error) => {
+                                    captured = false;
+                                    tracing::warn!(%error, "could not inspect remaining terminal processes");
+                                }
+                            }
+                            if captured
+                                && let Some(id) = &recorded.process_id
+                                && let Err(error) = core.remove_process(id).await
+                            {
+                                tracing::warn!(%error, "could not clear terminal process record");
                             }
                             for event in core.drain_events() {
                                 if let Err(error) = recorded.events.send(event) {
@@ -521,8 +557,8 @@ impl ShellState {
     }
 
     /// Open the durable core in the app data directory. A first run creates the
-    /// database and schema; a later run marks every live task `interrupted`,
-    /// because no agent process survives the previous shutdown.
+    /// database and schema; a later run marks every previously live task
+    /// `interrupted` because its agent is no longer attached to this instance.
     pub async fn load(
         data_directory: &Path,
         harness_factory: Box<dyn HarnessFactory>,
@@ -1482,21 +1518,66 @@ impl ShellState {
         };
         let terminal = self.terminals.prepare(spec, scrollback).await?;
         let terminal_id = terminal.id.clone();
-        if let Some(record) = &record
-            && let Err(error) = self.core.lock().await.record_terminal(record).await
-        {
-            self.terminals
-                .screens
-                .lock()
-                .await
-                .remove(terminal_id.as_str());
-            if let Err(close_error) = self.terminals.stop_terminal_process(terminal_id).await {
-                tracing::warn!(%close_error, "could not roll back terminal spawn");
+        if record.is_some() {
+            if let Some(process) = &terminal.process {
+                let result = { self.core.lock().await.record_process(process).await };
+                if let Err(error) = result {
+                    self.terminals
+                        .screens
+                        .lock()
+                        .await
+                        .remove(terminal_id.as_str());
+                    if let Err(close_error) = self
+                        .terminals
+                        .stop_terminal_process(terminal_id.clone())
+                        .await
+                    {
+                        return Err(BridgeError::new(
+                            "terminal",
+                            format!(
+                                "{error}; could not stop terminal after recording failed: {close_error}"
+                            ),
+                        ));
+                    }
+                    return Err(error.into());
+                }
+            } else {
+                tracing::warn!(
+                    terminal_id = terminal_id.as_str(),
+                    "could not capture terminal process identity"
+                );
             }
-            return Err(error.into());
+        }
+        if let Some(record) = &record {
+            let result = { self.core.lock().await.record_terminal(record).await };
+            if let Err(error) = result {
+                self.terminals
+                    .screens
+                    .lock()
+                    .await
+                    .remove(terminal_id.as_str());
+                let close = self.terminals.stop_terminal_process(terminal_id).await;
+                let recorded = RecordedTerminal {
+                    record: record.clone(),
+                    process_id: terminal.process.as_ref().map(|process| process.id.clone()),
+                    core: Arc::clone(&self.core),
+                    events: self.events.clone(),
+                };
+                self.terminals.observe(terminal, Some(recorded), None);
+                if let Err(close_error) = close {
+                    return Err(BridgeError::new(
+                        "terminal",
+                        format!(
+                            "{error}; could not stop terminal after recording failed: {close_error}"
+                        ),
+                    ));
+                }
+                return Err(error.into());
+            }
         }
         let recorded = record.map(|record| RecordedTerminal {
             record,
+            process_id: terminal.process.as_ref().map(|process| process.id.clone()),
             core: Arc::clone(&self.core),
             events: self.events.clone(),
         });
@@ -3077,6 +3158,129 @@ mod tests {
                 .await??
                 .is_err()
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn terminal_process_identity_is_durable_until_exit()
+    -> Result<(), Box<dyn std::error::Error>> {
+        if crate::pty_terminal::boot_id().is_none() {
+            eprintln!("Skipping process identity check: the OS boot identifier is unavailable");
+            return Ok(());
+        }
+        let directory = TestDirectory::new()?;
+        let repository = TestRepository::new()?;
+        let state = ShellState::load(
+            directory.path(),
+            Box::new(ScriptedHarnessFactory),
+            TerminalHost::default(),
+        )
+        .await?;
+        let projects = state
+            .add_project(repository.path().display().to_string())
+            .await?;
+        let project = projects.projects.first().ok_or("missing project")?;
+        let list = state
+            .start_terminal(project.id.clone(), None, 80, 24)
+            .await?;
+        let terminal = list.terminals.first().ok_or("missing terminal")?;
+        let recorded = state.core.lock().await.recorded_processes().await?;
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(recorded[0].owner_id, terminal.id);
+        assert!(recorded[0].pid > 1);
+        assert!(recorded[0].process_group > 1);
+        assert!(recorded[0].session_id > 1);
+        assert!(!recorded[0].boot_id.is_empty());
+        let path = directory.path().join("shepherd.db");
+        let reopened = TursoStore::open_at(&path).await?;
+        use shepherd_core::store::Store;
+        assert_eq!(reopened.load_processes().await?, recorded);
+        state.close_terminal(terminal.id.clone()).await?;
+        tokio::time::timeout(Duration::from_secs(4), async {
+            loop {
+                if state
+                    .core
+                    .lock()
+                    .await
+                    .recorded_processes()
+                    .await?
+                    .is_empty()
+                {
+                    return Ok::<(), CoreError>(());
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await??;
+        state.quit(true).await?;
+        Ok(())
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[tokio::test]
+    async fn terminal_exit_records_a_surviving_background_job()
+    -> Result<(), Box<dyn std::error::Error>> {
+        if crate::pty_terminal::boot_id().is_none() {
+            eprintln!("Skipping process identity check: the OS boot identifier is unavailable");
+            return Ok(());
+        }
+        let directory = TestDirectory::new()?;
+        let repository = TestRepository::new()?;
+        let state = ShellState::load(
+            directory.path(),
+            Box::new(ScriptedHarnessFactory),
+            TerminalHost::default(),
+        )
+        .await?;
+        let projects = state
+            .add_project(repository.path().display().to_string())
+            .await?;
+        let project = projects.projects.first().ok_or("missing project")?;
+        let id = TerminalId::new("background-record-test");
+        let record = TerminalRecord::project_shared(
+            id.clone(),
+            ProjectId::new(project.id.clone()),
+            "Background",
+            repository.path().to_path_buf(),
+            "/bin/sh",
+            1,
+        );
+        state.spawn_terminal(TerminalSpec {
+            id: id.clone(), columns: 80, rows: 24, cwd: repository.path().to_path_buf(), command: "/bin/sh".into(),
+            args: vec!["-c".into(), "python3 -c 'import os,signal,time; os.setpgid(0,0); signal.signal(signal.SIGHUP,signal.SIG_IGN); time.sleep(10)' & sleep 1; exit".into()],
+            environment: BTreeMap::new(),
+        }, Some(record)).await?;
+        let leader = state
+            .core
+            .lock()
+            .await
+            .recorded_processes()
+            .await?
+            .into_iter()
+            .next()
+            .ok_or("missing leader")?;
+        let remaining = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let mut core = state.core.lock().await;
+                let terminal = core.terminal_record(&id)?;
+                let processes = core.recorded_processes().await?;
+                if terminal.ended_at.is_some()
+                    && processes.iter().any(|process| process.pid != leader.pid)
+                {
+                    return Ok::<_, CoreError>(processes);
+                }
+                drop(core);
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await??;
+        assert!(
+            remaining
+                .iter()
+                .all(|process| process.owner_id == id.as_str())
+        );
+        assert!(remaining.iter().all(|process| process.pid != leader.pid));
+        state.quit(true).await?;
         Ok(())
     }
 

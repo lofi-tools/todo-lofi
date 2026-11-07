@@ -64,6 +64,18 @@ pub struct TerminalRecord {
     pub exit_code: Option<i32>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProcessRecord {
+    pub id: String,
+    pub kind: String,
+    pub owner_id: String,
+    pub pid: u32,
+    pub started_at: u64,
+    pub process_group: u32,
+    pub session_id: u32,
+    pub boot_id: String,
+}
+
 impl TerminalRecord {
     pub fn project_shared(
         id: TerminalId,
