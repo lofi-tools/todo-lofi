@@ -512,6 +512,10 @@ impl Core {
         Ok(())
     }
 
+    pub fn process_store(&self) -> Arc<dyn Store> {
+        self.store.clone()
+    }
+
     pub async fn remove_process(&mut self, id: &str) -> Result<(), CoreError> {
         self.store.remove_process(id).await?;
         Ok(())
