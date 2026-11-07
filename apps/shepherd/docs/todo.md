@@ -1371,12 +1371,10 @@ placeholder tabs and no unearned state badges.
   Codex stderr is retained in the bounded diagnostic tail without logging its
   contents; a debug-log fixture checks that agent output is not exposed.
   Other adapter-internal logs and live-adapter behavior remain to be audited.
-  The default headless agent-harness suite passed 111 tests (two live tests
-  ignored) and the core suite passed 116 tests (three tests ignored) on
-  macOS after the confinement, environment and shutdown-recovery changes.
-  The default desktop-backend suite also passed 85 tests on macOS after the
-  terminal and attachment recovery changes; one local throughput benchmark
-  was ignored.
+  On 2026-11-07 the default offline headless agent-harness suite passed 124
+  tests (two live tests ignored), the core suite passed 120 tests (three
+  ignored), and the desktop-backend suite passed 95 tests (one local throughput
+  benchmark ignored) on macOS. No live agent or UI window was used.
 - [ ] Packaging and CI: macOS 13+, Ubuntu 24.04+, pinned Zig, Tauri build,
   platform smoke.
   The local macOS debug app bundle declares macOS 13.0 in both Info.plist and
