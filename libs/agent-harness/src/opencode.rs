@@ -72,9 +72,27 @@ pub async fn project_modes(spec: &SpawnSpec) -> HarnessResult<Vec<AgentMode>> {
     };
     let shutdown = server.shutdown().await;
     startup_group.disarm();
-    let modes = modes.map_err(|error| crate::protect_discovery_error(error, hide_diagnostics))?;
-    shutdown.map_err(|error| crate::protect_discovery_error(error, hide_diagnostics))?;
-    Ok(modes)
+    finish_mode_discovery(modes, shutdown, hide_diagnostics)
+}
+
+fn finish_mode_discovery(
+    modes: HarnessResult<Vec<AgentMode>>,
+    shutdown: HarnessResult<()>,
+    hide_diagnostics: bool,
+) -> HarnessResult<Vec<AgentMode>> {
+    match (modes, shutdown) {
+        (Ok(modes), Ok(())) => Ok(modes),
+        (Err(error), Ok(())) | (Ok(_), Err(error)) => {
+            Err(crate::protect_discovery_error(error, hide_diagnostics))
+        }
+        (Err(discovery), Err(cleanup)) => {
+            let discovery = crate::protect_discovery_error(discovery, hide_diagnostics);
+            let cleanup = crate::protect_discovery_error(cleanup, hide_diagnostics);
+            Err(HarnessError::Protocol(format!(
+                "OpenCode mode discovery failed: {discovery}; cleanup failed: {cleanup}"
+            )))
+        }
+    }
 }
 
 fn require_absolute_executable(path: &Path) -> HarnessResult<()> {
@@ -1642,6 +1660,25 @@ mod tests {
         "/api/session/{sessionID}/interrupt": {"post": {}},
         "/api/session/{sessionID}/permission/{requestID}/reply": {"post": {}}
     }}"#;
+
+    #[test]
+    fn mode_discovery_reports_both_failures_without_exposing_environment() {
+        let failures = || {
+            (
+                Err(HarnessError::Protocol("discovery secret".into())),
+                Err(HarnessError::Protocol("cleanup secret".into())),
+            )
+        };
+        let (modes, shutdown) = failures();
+        let error =
+            finish_mode_discovery(modes, shutdown, false).expect_err("both operations fail");
+        assert!(error.to_string().contains("discovery secret"));
+        assert!(error.to_string().contains("cleanup secret"));
+        let (modes, shutdown) = failures();
+        let error = finish_mode_discovery(modes, shutdown, true).expect_err("both operations fail");
+        assert!(!error.to_string().contains("secret"));
+        assert!(error.to_string().contains("cleanup failed"));
+    }
 
     #[cfg(unix)]
     #[tokio::test]

@@ -1168,7 +1168,9 @@ placeholder tabs and no unearned state badges.
   disconnected turn. OpenCode stops the process group if server initialization
   fails or is cancelled, and on subscription failure or cancellation; local
   fixtures cover initialization, subscription, and project-mode discovery
-  cancellation. Agent process identities and stopping surviving processes remain.
+  cancellation. Discovery reports simultaneous request and cleanup failures
+  while hiding configured launch environment details. Agent process identities
+  and stopping surviving processes remain.
 - [ ] 30-day archived-worktree collection, dirty skip, branch-tip recreation.
   Startup preserves dirty worktrees and lists collection failures with their
   reasons; clean collection retains the tip and prunes Git worktree metadata.
