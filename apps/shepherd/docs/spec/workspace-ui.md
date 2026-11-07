@@ -79,7 +79,8 @@ current layout and give future changes a point of comparison.
 - In Files, name the active root above the tree and let the user choose the
   project root or the selected task's worktree using a compact, themed picker;
   label the project root `/`. Put it, the filename filter, and the settings gear
-  on one row, with the gear at the right.
+  on one row, with the gear at the right. Match the filter height to the root
+  picker. Keep the gear transparent and borderless until hovered.
   Show a small folder icon on
   each directory row without an expand caret. Expand folders in place on
   demand, keeping one open path and its ancestors while closing sibling
