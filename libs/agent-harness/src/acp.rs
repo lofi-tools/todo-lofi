@@ -40,6 +40,7 @@ pub struct AcpHarness {
     runtime: Option<Runtime>,
     project_approvals: Option<Arc<dyn ProjectApprovalPolicy>>,
     terminals: Option<Arc<dyn TerminalBackend>>,
+    process_tracker: Option<Arc<dyn crate::AgentProcessTracker>>,
     replay: Vec<Entry>,
     sender: mpsc::UnboundedSender<HarnessEvent>,
     events: mpsc::UnboundedReceiver<HarnessEvent>,
@@ -55,10 +56,24 @@ impl Default for AcpHarness {
             runtime: None,
             project_approvals: None,
             terminals: None,
+            process_tracker: None,
             replay: Vec::new(),
             sender,
             events,
         }
+    }
+}
+
+struct AcpProcessTracker(Arc<dyn crate::AgentProcessTracker>);
+
+#[async_trait]
+impl acp_client::connection::ProcessTracker for AcpProcessTracker {
+    async fn started(&self, pid: u32) -> Result<String, String> {
+        self.0.started(pid).await
+    }
+
+    async fn stopped(&self, record_id: &str) -> Result<(), String> {
+        self.0.stopped(record_id).await
     }
 }
 
@@ -107,6 +122,10 @@ impl AcpHarness {
 
 #[async_trait]
 impl AgentHarness for AcpHarness {
+    fn set_process_tracker(&mut self, tracker: Arc<dyn crate::AgentProcessTracker>) {
+        self.process_tracker = Some(tracker);
+    }
+
     fn events(&mut self) -> &mut mpsc::UnboundedReceiver<HarnessEvent> {
         &mut self.events
     }
@@ -195,6 +214,15 @@ impl AgentHarness for AcpHarness {
             tool_permissions: ToolPermissions::default(),
         };
         let connection = session_request("initialize", async {
+            if let Some(tracker) = &self.process_tracker {
+                return acp_client::connection::connect_spawn_tracked(
+                    launch,
+                    options,
+                    self.terminals.clone(),
+                    Arc::new(AcpProcessTracker(tracker.clone())),
+                )
+                .await;
+            }
             match &self.terminals {
                 Some(terminals) => {
                     acp_client::connect_spawn_with_terminals(launch, options, terminals.clone())
@@ -1674,6 +1702,109 @@ done
             }}))?,
         )?;
         configured_claude_session(&settings).await
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn acp_process_record_is_retained_until_cleanup_succeeds()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        struct Tracker {
+            pid: std::sync::Mutex<Option<u32>>,
+            fail_start: bool,
+            fail_clear: AtomicBool,
+        }
+        #[async_trait]
+        impl crate::AgentProcessTracker for Tracker {
+            async fn started(&self, pid: u32) -> Result<String, String> {
+                *self.pid.lock().map_err(|error| error.to_string())? = Some(pid);
+                if self.fail_start {
+                    return Err("fixture save failure".into());
+                }
+                Ok("fixture-record".into())
+            }
+            async fn stopped(&self, id: &str) -> Result<(), String> {
+                assert_eq!(id, "fixture-record");
+                if self.fail_clear.swap(false, Ordering::SeqCst) {
+                    return Err("fixture clear failure".into());
+                }
+                *self.pid.lock().map_err(|error| error.to_string())? = None;
+                Ok(())
+            }
+        }
+        let directory = tempfile::tempdir()?;
+        let script = directory.path().join("tracked-acp.sh");
+        std::fs::write(
+            &script,
+            r#"
+while IFS= read -r request; do
+    case "$request" in
+        *'"method":"initialize"'*)
+            id=$(printf '%s\n' "$request" | sed -nE 's/.*"id":("[^"]+"|[0-9]+).*/\1/p')
+            printf '{"jsonrpc":"2.0","id":%s,"result":{"protocolVersion":1}}\n' "$id";;
+    esac
+done
+"#,
+        )?;
+        let spec = SpawnSpec {
+            program: "/bin/sh".into(),
+            args: vec![script.to_string_lossy().into_owned()],
+            cwd: directory.path().to_owned(),
+            ..Default::default()
+        };
+        let tracker = Arc::new(Tracker {
+            pid: std::sync::Mutex::new(None),
+            fail_start: false,
+            fail_clear: AtomicBool::new(true),
+        });
+        let mut harness = AcpHarness::default();
+        harness.set_process_tracker(tracker.clone());
+        harness.start(spec.clone()).await?;
+        assert!(
+            tracker
+                .pid
+                .lock()
+                .map_err(|error| error.to_string())?
+                .is_some()
+        );
+        let error = harness
+            .shutdown()
+            .await
+            .expect_err("cleanup must fail once");
+        assert!(error.to_string().contains("fixture clear failure"));
+        assert!(harness.connection.is_some());
+        harness.shutdown().await?;
+        assert!(
+            tracker
+                .pid
+                .lock()
+                .map_err(|error| error.to_string())?
+                .is_none()
+        );
+        let failing = Arc::new(Tracker {
+            pid: std::sync::Mutex::new(None),
+            fail_start: true,
+            fail_clear: AtomicBool::new(false),
+        });
+        let mut harness = AcpHarness::default();
+        harness.set_process_tracker(failing.clone());
+        let error = harness.start(spec).await.expect_err("recording must fail");
+        assert!(error.to_string().contains("fixture save failure"));
+        let pid = failing
+            .pid
+            .lock()
+            .map_err(|error| error.to_string())?
+            .ok_or("missing PID")?;
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                if unsafe { libc::kill(libc::pid_t::try_from(pid)?, 0) } != 0 {
+                    break Ok::<(), Box<dyn std::error::Error>>(());
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await??;
+        Ok(())
     }
 
     #[cfg(unix)]

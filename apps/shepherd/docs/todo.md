@@ -1203,8 +1203,11 @@ placeholder tabs and no unearned state badges.
   is also recorded before its startup handshake; a failed record write blocks
   ACP fallback, and a failed record removal can be retried. A local HTTP
   fixture covers the lifecycle. Records from interrupted startup may remain for
-  inspection. Codex exec, OpenCode's ACP fallback, Claude ACP, and stopping
-  surviving processes remain.
+  inspection. ACP task launches, including OpenCode fallback and Claude, now
+  record their process before protocol initialization and clear the record
+  after the child is reaped. Save failures stop startup, and failed removal
+  can be retried; local fixtures cover both and durable storage. Codex exec,
+  surviving descendants, and stopping surviving processes remain.
   ACP supervision reports a failed process-group signal even if killing the
   leader succeeds, with an injected-failure fixture. ACP quit now waits for
   process supervision and reports its failure; timeout retains the connection

@@ -397,6 +397,9 @@ impl AgentHarness for OpenCodeHarness {
                 spec.environment
                     .insert("OPENCODE_DISABLE_AUTOUPDATE".into(), "1".into());
                 let mut fallback = AcpHarness::default();
+                if let Some(tracker) = &self.process_tracker {
+                    fallback.set_process_tracker(tracker.clone());
+                }
                 if let Some(terminals) = self.terminals.take() {
                     fallback = fallback.with_terminals(terminals);
                 }
@@ -1238,13 +1241,22 @@ impl OpenCodeServer {
                 kind: FailureKind::Protocol,
                 message: "OpenCode server has no process ID".into(),
             })?;
-            let id = tracker
-                .started(pid)
-                .await
-                .map_err(|error| HarnessError::Reported {
-                    kind: FailureKind::Protocol,
-                    message: format!("Could not record OpenCode server process: {error}"),
-                })?;
+            let id = match tracker.started(pid).await {
+                Ok(id) => id,
+                Err(error) => match child.try_wait() {
+                    Ok(Some(_)) => {
+                        return Err(HarnessError::Protocol(
+                            "OpenCode server exited during startup".into(),
+                        ));
+                    }
+                    _ => {
+                        return Err(HarnessError::Reported {
+                            kind: FailureKind::Protocol,
+                            message: format!("Could not record OpenCode server process: {error}"),
+                        });
+                    }
+                },
+            };
             Some((tracker, id))
         } else {
             None
@@ -2891,6 +2903,20 @@ exec sleep 60
     #[cfg(unix)]
     #[tokio::test]
     async fn falls_back_to_acp_and_streams_a_turn() -> Result<(), Box<dyn std::error::Error>> {
+        struct Tracker {
+            starts: std::sync::atomic::AtomicUsize,
+            stops: std::sync::atomic::AtomicUsize,
+        }
+        #[async_trait]
+        impl crate::AgentProcessTracker for Tracker {
+            async fn started(&self, _pid: u32) -> Result<String, String> {
+                Ok(self.starts.fetch_add(1, Ordering::SeqCst).to_string())
+            }
+            async fn stopped(&self, _id: &str) -> Result<(), String> {
+                self.stops.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }
+        }
         let root = tempfile::tempdir()?;
         let program = fixture_launcher(
             root.path(),
@@ -2921,6 +2947,11 @@ done
             ..configured_launch(&settings)?.ok_or("expected a configured launch")?
         };
         let mut harness = OpenCodeHarness::default();
+        let tracker = Arc::new(Tracker {
+            starts: std::sync::atomic::AtomicUsize::new(0),
+            stops: std::sync::atomic::AtomicUsize::new(0),
+        });
+        harness.set_process_tracker(tracker.clone());
         harness.start(spec).await?;
         assert_eq!(harness.tier(), AdapterTier::Acp);
         let diagnostics = harness.diagnostics();
@@ -2938,6 +2969,8 @@ done
             Some("agent: ACP fixture reply")
         );
         harness.shutdown().await?;
+        assert_eq!(tracker.starts.load(Ordering::SeqCst), 2);
+        assert_eq!(tracker.stops.load(Ordering::SeqCst), 1);
         Ok(())
     }
 

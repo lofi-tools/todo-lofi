@@ -440,6 +440,12 @@ pub struct ConnectOptions {
     pub tool_permissions: ToolPermissions,
 }
 
+#[async_trait::async_trait]
+pub trait ProcessTracker: Send + Sync {
+    async fn started(&self, pid: u32) -> Result<String, String>;
+    async fn stopped(&self, record_id: &str) -> Result<(), String>;
+}
+
 /// Connect to an agent process launched in the project directory.
 pub async fn connect(
     agent: Arc<dyn AgentServer>,
@@ -456,7 +462,7 @@ pub async fn connect_spawn(
     spawn: SpawnSpec,
     options: ConnectOptions,
 ) -> Result<AcpConnection, AcpError> {
-    connect_spawn_inner(spawn, options, None).await
+    connect_spawn_inner(spawn, options, None, None).await
 }
 
 pub async fn connect_spawn_with_terminals(
@@ -464,13 +470,23 @@ pub async fn connect_spawn_with_terminals(
     options: ConnectOptions,
     terminals: Arc<dyn TerminalBackend>,
 ) -> Result<AcpConnection, AcpError> {
-    connect_spawn_inner(spawn, options, Some(terminals)).await
+    connect_spawn_inner(spawn, options, Some(terminals), None).await
+}
+
+pub async fn connect_spawn_tracked(
+    spawn: SpawnSpec,
+    options: ConnectOptions,
+    terminals: Option<Arc<dyn TerminalBackend>>,
+    tracker: Arc<dyn ProcessTracker>,
+) -> Result<AcpConnection, AcpError> {
+    connect_spawn_inner(spawn, options, terminals, Some(tracker)).await
 }
 
 async fn connect_spawn_inner(
     spawn: SpawnSpec,
     options: ConnectOptions,
     terminals: Option<Arc<dyn TerminalBackend>>,
+    tracker: Option<Arc<dyn ProcessTracker>>,
 ) -> Result<AcpConnection, AcpError> {
     let (completion, results) = tokio::sync::mpsc::unbounded_channel();
     let (retry, retry_requests) = tokio::sync::mpsc::unbounded_channel();
@@ -479,6 +495,7 @@ async fn connect_spawn_inner(
             ProjectAgent::new(spawn)
                 .with_stderr_reporting(events, stderr)
                 .with_supervision(completion, retry_requests)
+                .with_process_tracker(tracker)
         },
         options,
         terminals,
@@ -889,6 +906,7 @@ pub struct ProjectAgent {
     spec: SpawnSpec,
     events: Option<tokio::sync::mpsc::UnboundedSender<AcpEvent>>,
     stderr: Option<Arc<Mutex<VecDeque<String>>>>,
+    tracker: Option<Arc<dyn ProcessTracker>>,
     supervision: Option<(
         tokio::sync::mpsc::UnboundedSender<Result<(), String>>,
         tokio::sync::mpsc::UnboundedReceiver<()>,
@@ -901,8 +919,14 @@ impl ProjectAgent {
             spec,
             events: None,
             stderr: None,
+            tracker: None,
             supervision: None,
         }
+    }
+
+    fn with_process_tracker(mut self, tracker: Option<Arc<dyn ProcessTracker>>) -> Self {
+        self.tracker = tracker;
+        self
     }
 
     fn with_supervision(
@@ -958,6 +982,43 @@ impl ProjectAgent {
     }
 }
 
+struct StartupProcessGroup(#[cfg(unix)] Option<libc::pid_t>);
+
+impl StartupProcessGroup {
+    fn new(child: &async_process::Child) -> Self {
+        #[cfg(unix)]
+        {
+            Self(libc::pid_t::try_from(child.id()).ok())
+        }
+        #[cfg(not(unix))]
+        {
+            let _child = child;
+            Self()
+        }
+    }
+
+    fn disarm(&mut self) {
+        #[cfg(unix)]
+        {
+            self.0 = None;
+        }
+    }
+}
+
+#[cfg(unix)]
+impl Drop for StartupProcessGroup {
+    fn drop(&mut self) {
+        if let Some(group) = self.0.take()
+            && unsafe { libc::killpg(group, libc::SIGKILL) } != 0
+        {
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() != Some(libc::ESRCH) {
+                tracing::warn!(%error, "could not stop the ACP startup process group");
+            }
+        }
+    }
+}
+
 impl ConnectTo<Client> for ProjectAgent {
     async fn connect_to(self, client: impl ConnectTo<Agent>) -> Result<(), acp::Error> {
         let mut child = self.spawn_child().map_err(|error| {
@@ -966,6 +1027,25 @@ impl ConnectTo<Client> for ProjectAgent {
                 self.spec.command_line()
             ))
         })?;
+        let mut startup_group = StartupProcessGroup::new(&child);
+        let process_record = if let Some(tracker) = self.tracker {
+            let id = tracker.started(child.id()).await.map_err(|error| {
+                let message = format!("Could not record ACP agent process: {error}");
+                if let Some(events) = &self.events
+                    && events
+                        .send(AcpEvent::ProtocolFailed {
+                            message: message.clone(),
+                        })
+                        .is_err()
+                {
+                    tracing::debug!("ACP protocol failure receiver closed");
+                }
+                acp::Error::internal_error().data(message)
+            })?;
+            Some((tracker, id))
+        } else {
+            None
+        };
 
         let stdin = child
             .stdin
@@ -1071,10 +1151,12 @@ impl ConnectTo<Client> for ProjectAgent {
                 self.events,
                 self.stderr,
                 self.supervision,
+                process_record,
                 kill_agent_process,
             )
             .await;
         });
+        startup_group.disarm();
         let result = ConnectTo::<Client>::connect_to(Lines::new(outgoing, incoming), client).await;
         if wire_finished.send(()).is_err() {
             tracing::debug!("ACP agent exited before the wire closed");
@@ -1096,6 +1178,7 @@ async fn supervise_agent(
         tokio::sync::mpsc::UnboundedSender<Result<(), String>>,
         tokio::sync::mpsc::UnboundedReceiver<()>,
     )>,
+    process_record: Option<(Arc<dyn ProcessTracker>, String)>,
     mut stop: impl FnMut(&mut async_process::Child) -> std::io::Result<()> + Send,
 ) {
     let mut status = tokio::select! {
@@ -1152,6 +1235,35 @@ async fn supervise_agent(
         };
     }
     let code = status.ok().and_then(|status| status.code());
+    if let Some((tracker, record_id)) = process_record {
+        loop {
+            match tracker.stopped(&record_id).await {
+                Ok(()) => break,
+                Err(error) => {
+                    let message = format!("Could not clear ACP agent process record: {error}");
+                    tracing::warn!(%error, "could not clear ACP agent process record");
+                    if let Some(events) = &events
+                        && events
+                            .send(AcpEvent::ProtocolFailed {
+                                message: message.clone(),
+                            })
+                            .is_err()
+                    {
+                        tracing::debug!("ACP protocol failure receiver closed");
+                    }
+                    let retry = match &mut supervision {
+                        Some((results, retry)) => {
+                            results.send(Err(message)).is_ok() && retry.recv().await.is_some()
+                        }
+                        None => false,
+                    };
+                    if !retry {
+                        return;
+                    }
+                }
+            }
+        }
+    }
     if let Some(stderr_task) = &mut stderr_task
         && tokio::time::timeout(Duration::from_millis(100), &mut *stderr_task)
             .await
@@ -1298,6 +1410,7 @@ mod tests {
             Some(events),
             None,
             Some((results, retries)),
+            None,
             move |child| {
                 attempts += 1;
                 if attempts == 1 {
