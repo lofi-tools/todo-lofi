@@ -1266,8 +1266,11 @@ placeholder tabs and no unearned state badges.
   logs or storage.
   File preview, directory listing and search open each path component without
   following symlinks on Unix. Fixtures cover traversal, static symlinks and a
-  directory replaced by a symlink after opening. External editor paths and the
-  remaining filesystem operations still need a confinement audit. ACP file reads
+  directory replaced by a symlink after opening. Ignore-file metadata is also
+  checked relative to an opened parent on Unix. External editor and file-manager
+  actions pass a validated pathname to another application; a later path swap
+  can change its target, so those actions do not guarantee race-free confinement.
+  The remaining filesystem operations still need a confinement audit. ACP file reads
   and atomic writes also use descriptor-relative operations on Unix, with
   fixtures for directory substitution and preserved file permissions. ACP
   attachment grants open every path component without following symlinks and

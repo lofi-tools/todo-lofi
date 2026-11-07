@@ -705,16 +705,12 @@ fn matches_ignore(rules: &[Gitignore], path: &Path, directory: bool) -> bool {
 
 fn read_ignore(root: &Path, directory: &Path, name: &str) -> Result<Option<Gitignore>, FileError> {
     let path = directory.join(name);
-    match path.symlink_metadata() {
-        Ok(metadata) if metadata.is_file() => {}
-        Ok(_) => return Ok(None),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(error.into()),
-    }
     let relative = path
         .strip_prefix(root)
         .map_err(|_| FileError::InvalidPath)?;
-    let file = open_file(root, relative)?;
+    let Some(file) = open_ignore(root, relative)? else {
+        return Ok(None);
+    };
     if !file.metadata()?.is_file() {
         return Ok(None);
     }
@@ -737,6 +733,43 @@ fn read_ignore(root: &Path, directory: &Path, name: &str) -> Result<Option<Gitig
         .build()
         .map(Some)
         .map_err(|error| FileError::Ignore(error.to_string()))
+}
+
+#[cfg(unix)]
+fn open_ignore(root: &Path, relative: &Path) -> Result<Option<File>, FileError> {
+    use rustix::fs::{AtFlags, FileType, Mode, OFlags, openat, statat};
+    let (directory, name) = match open_parent(root, relative) {
+        Ok(parent) => parent,
+        Err(FileError::Io(error)) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let metadata = match statat(&directory, name, AtFlags::SYMLINK_NOFOLLOW) {
+        Ok(metadata) => metadata,
+        Err(rustix::io::Errno::NOENT) => return Ok(None),
+        Err(error) => return Err(io::Error::from(error).into()),
+    };
+    if FileType::from_raw_mode(metadata.st_mode) != FileType::RegularFile {
+        return Ok(None);
+    }
+    let file = openat(
+        &directory,
+        name,
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK,
+        Mode::empty(),
+    )
+    .map_err(io::Error::from)?;
+    Ok(Some(File::from(file)))
+}
+
+#[cfg(not(unix))]
+fn open_ignore(root: &Path, relative: &Path) -> Result<Option<File>, FileError> {
+    let path = root.join(relative);
+    match path.symlink_metadata() {
+        Ok(metadata) if metadata.is_file() => open_file(root, relative).map(Some),
+        Ok(_) => Ok(None),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
+    }
 }
 
 #[cfg(unix)]
@@ -1243,6 +1276,21 @@ mod tests {
             external_file_path(&root, Path::new("folder")),
             Err(FileError::NotFile)
         ));
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ignore_lookup_rejects_symlinked_ancestor_even_when_ignore_file_is_absent()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let root = directory.path().join("workspace");
+        let outside = directory.path().join("outside");
+        fs::create_dir(&root)?;
+        fs::create_dir(&outside)?;
+        std::os::unix::fs::symlink(&outside, root.join("linked"))?;
+        assert!(read_ignore(&root, &root.join("linked"), ".gitignore").is_err());
+        assert!(read_ignore(&root, &root.join("missing"), ".gitignore")?.is_none());
         Ok(())
     }
 }
