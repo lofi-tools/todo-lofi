@@ -101,6 +101,8 @@ pub enum CoreError {
     TaskNotResumable { id: String, state: &'static str },
     #[error("task {id} is {state}; only archived tasks can be reopened")]
     TaskNotArchived { id: String, state: &'static str },
+    #[error("task {id} has no recorded branch for worktree collection")]
+    CollectionBranchMissing { id: String },
     #[error("task {id} is {state}; it cannot be cancelled")]
     TaskNotCancellable { id: String, state: &'static str },
     #[error("task {id} has no pending approval")]
@@ -177,11 +179,21 @@ pub struct Core {
     terminal_layouts: BTreeMap<ProjectId, TerminalLayout>,
     terminals: BTreeMap<TerminalId, TerminalRecord>,
     terminal_list_revision: u64,
+    archived_worktree_issues: Vec<ArchivedWorktreeIssue>,
     store: Arc<dyn Store>,
     harness_factory: Box<dyn HarnessFactory>,
     shutdown: ShutdownState,
     events: mpsc::UnboundedSender<Event>,
     event_receiver: mpsc::UnboundedReceiver<Event>,
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArchivedWorktreeIssue {
+    pub task_id: String,
+    pub title: String,
+    pub path: String,
+    pub reason: String,
 }
 
 impl Default for Core {
@@ -217,6 +229,7 @@ impl Core {
             terminal_layouts: BTreeMap::new(),
             terminals: BTreeMap::new(),
             terminal_list_revision: 0,
+            archived_worktree_issues: Vec::new(),
             store: Arc::from(store),
             harness_factory,
             shutdown: ShutdownState::Running,
@@ -319,16 +332,35 @@ impl Core {
             .collect();
         for task_id in candidates {
             if let Err(error) = self.collect_archived_worktree(&task_id).await {
-                tracing::info!(%task_id, %error, "kept archived worktree");
+                tracing::info!(%task_id, %error, "archived worktree collection needs attention");
+                if let Some(task) = self.tasks.get(&task_id) {
+                    self.archived_worktree_issues.push(ArchivedWorktreeIssue {
+                        task_id: task_id.to_string(),
+                        title: task.title.clone(),
+                        path: task
+                            .worktree_path
+                            .as_ref()
+                            .unwrap_or(&task.proposed_worktree_path)
+                            .display()
+                            .to_string(),
+                        reason: error.to_string(),
+                    });
+                }
             }
         }
+    }
+
+    pub fn archived_worktree_issues(&self) -> &[ArchivedWorktreeIssue] {
+        &self.archived_worktree_issues
     }
 
     async fn collect_archived_worktree(&mut self, task_id: &TaskId) -> Result<(), CoreError> {
         let (task, repository, path) = self.task_git_worktree(task_id)?;
         let mut updated = task.clone();
         let Some(branch) = task.branch.as_deref() else {
-            return Ok(());
+            return Err(CoreError::CollectionBranchMissing {
+                id: task_id.to_string(),
+            });
         };
         if GitService.has_changes(path)? {
             return Err(GitError::DirtyWorktree {
@@ -348,6 +380,7 @@ impl Core {
         updated.worktree_path = None;
         self.store.save_task(&updated).await?;
         self.tasks.insert(task_id.clone(), updated);
+        GitService.prune_worktrees(&repository)?;
         Ok(())
     }
 
@@ -4295,6 +4328,58 @@ mod tests {
         for task_id in review_ids {
             assert_eq!(reopened.task(&task_id)?.state, TaskState::Done);
         }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn startup_keeps_dirty_and_recent_archived_worktrees()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let repository = TestRepository::new()?;
+        let database = TestDatabase::new()?;
+        let uri = database.uri();
+        let mut core = Core::with_services(
+            Box::new(TursoStore::open(&uri).await?),
+            Box::new(UnavailableHarnessFactory),
+        );
+        let project_id = add_project(&mut core, repository.path().to_path_buf()).await?;
+        let mut dirty = Task::draft(
+            project_id.clone(),
+            "Dirty task",
+            &repository.repository().git_dir,
+        );
+        let mut recent = Task::draft(project_id, "Recent task", &repository.repository().git_dir);
+        for task in [&mut dirty, &mut recent] {
+            GitService.create_worktree(
+                repository.repository(),
+                &task.proposed_worktree_path,
+                &task.proposed_branch,
+                "main",
+            )?;
+            task.worktree_path = Some(task.proposed_worktree_path.clone());
+            task.branch = Some(task.proposed_branch.clone());
+            task.state = TaskState::Done;
+        }
+        dirty.updated_at = projects::now_millis().saturating_sub(31 * 24 * 60 * 60 * 1000);
+        std::fs::write(dirty.proposed_worktree_path.join("draft.txt"), "keep me")?;
+        core.store.save_task(&dirty).await?;
+        core.store.save_task(&recent).await?;
+        drop(core);
+
+        let reopened = Core::load(
+            Box::new(TursoStore::open(&uri).await?),
+            Box::new(UnavailableHarnessFactory),
+        )
+        .await?;
+        assert_eq!(
+            std::fs::read_to_string(dirty.proposed_worktree_path.join("draft.txt"))?,
+            "keep me"
+        );
+        assert!(recent.proposed_worktree_path.is_dir());
+        let [issue] = reopened.archived_worktree_issues() else {
+            return Err("expected one collection issue".into());
+        };
+        assert_eq!(issue.task_id, dirty.id.to_string());
+        assert!(issue.reason.contains("untracked changes"));
         Ok(())
     }
 

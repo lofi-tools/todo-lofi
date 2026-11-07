@@ -399,6 +399,8 @@ test.beforeEach(async ({ context }) => {
       },
       invoke: async (command, args, invokeOptions) => {
         switch (command) {
+          case 'archived_worktree_issues':
+            return options.has('worktree-issues') ? [{ taskId: 'task-1', title: 'Old task', path: '/tmp/worktree', reason: 'worktree has untracked changes' }] : []
           case 'inspect_previous_processes':
             return options.has('recovery') ? [
               { id: 'one', kind: 'terminal', ownerId: 'terminal-1', pid: 321, status: 'matching' },
@@ -1036,6 +1038,15 @@ test.beforeEach(async ({ context }) => {
       window.__emitCoreEvent({ type: 'taskWorkspaceChanged', data: workspace(taskId) })
     }
   }, workspaceCommands)
+})
+
+test('lists archived worktrees kept at startup with their reasons', async ({ page }) => {
+  await page.goto('/?worktree-issues')
+  const notice = page.getByRole('status').filter({ hasText: 'Archived worktree collection needs attention' })
+  await notice.locator('summary').click()
+  await expect(notice).toContainText('Old task · /tmp/worktree · worktree has untracked changes')
+  await notice.getByRole('button', { name: 'Dismiss' }).click()
+  await expect(notice).toHaveCount(0)
 })
 
 test('shows previous processes that need review without reporting ended processes', async ({ page }) => {

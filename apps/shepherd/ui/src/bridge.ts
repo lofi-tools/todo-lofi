@@ -34,6 +34,17 @@ export const AGENT_LABELS: Record<Agent, string> = { codex: 'Codex', opencode: '
 
 export type ShutdownState = 'running' | 'draining' | 'terminating' | 'closed'
 
+export interface ArchivedWorktreeIssue {
+  taskId: string
+  title: string
+  path: string
+  reason: string
+}
+
+export function archivedWorktreeIssues(): Promise<ArchivedWorktreeIssue[]> {
+  return invoke('archived_worktree_issues')
+}
+
 export interface PreviousProcess {
   id: string
   kind: string

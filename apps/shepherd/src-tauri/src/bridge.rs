@@ -1928,6 +1928,13 @@ pub mod commands {
     use super::*;
 
     #[tauri::command]
+    pub async fn archived_worktree_issues(
+        state: State<'_, ShellState>,
+    ) -> Result<Vec<shepherd_core::ArchivedWorktreeIssue>, BridgeError> {
+        Ok(state.core.lock().await.archived_worktree_issues().to_vec())
+    }
+
+    #[tauri::command]
     pub async fn inspect_previous_processes(
         state: State<'_, ShellState>,
     ) -> Result<Vec<crate::orphan_process::ProcessInspection>, BridgeError> {

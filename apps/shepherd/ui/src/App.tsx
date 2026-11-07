@@ -118,6 +118,8 @@ function terminalArrowDestination(inspector: HTMLElement, tab: HTMLButtonElement
 export function App() {
   const [projects, setProjects] = createSignal<bridge.ProjectSnapshot[]>([])
   const [previousProcesses, setPreviousProcesses] = createSignal<bridge.PreviousProcess[]>([])
+  const [worktreeIssues, setWorktreeIssues] = createSignal<bridge.ArchivedWorktreeIssue[]>([])
+  const [worktreeNoticeDismissed, setWorktreeNoticeDismissed] = createSignal(false)
   const [checkingProcesses, setCheckingProcesses] = createSignal(false)
   const [processNoticeDismissed, setProcessNoticeDismissed] = createSignal(false)
   const processesNeedingReview = () => previousProcesses().filter((process) =>
@@ -1101,6 +1103,7 @@ export function App() {
 
   onMount(() => {
     void inspectPreviousProcesses()
+    void bridge.archivedWorktreeIssues().then(setWorktreeIssues).catch((failure) => setError(describe(failure)))
     void homeDir().then(setHomeDirectory).catch((error) => console.warn('Could not resolve the home directory', error))
     void reloadKeybindings().catch((failure) => setError(describe(failure)))
     void bridge.opencodeConfigured().then(setOpencodeConfigured).catch((error) => console.warn('Could not read OpenCode availability', error))
@@ -1530,6 +1533,17 @@ export function App() {
   const workspaceFooter = (
     <>
       <div class="shell__notices">
+        <Show when={!worktreeNoticeDismissed() && worktreeIssues().length > 0}>
+          <div class="banner" role="status">
+            <details class="process-notice__details">
+              <summary>Archived worktree collection needs attention ({worktreeIssues().length})</summary>
+              <ul>
+                <For each={worktreeIssues()}>{(issue) => <li>{issue.title} · {issue.path} · {issue.reason}</li>}</For>
+              </ul>
+            </details>
+            <button type="button" class="banner__quiet" onClick={() => setWorktreeNoticeDismissed(true)}>Dismiss</button>
+          </div>
+        </Show>
         <Show when={!processNoticeDismissed() && processesNeedingReview().length > 0}>
           <div class="banner" role="status">
             <details class="process-notice__details">

@@ -129,6 +129,8 @@ current layout and give future changes a point of comparison.
 - After restart, show a dismissible notice for previous process records whose
   identity matches or cannot be verified. Show the PID and inspection status,
   allow a recheck, and explain that a match may belong to another instance.
+- List archived worktrees that could not be collected at startup with their
+  task, path, and reason in a dismissible notice.
 
 ## Projects sidebar and settings
 
