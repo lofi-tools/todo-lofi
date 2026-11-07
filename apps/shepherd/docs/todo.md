@@ -1253,7 +1253,8 @@ placeholder tabs and no unearned state badges.
   hide adapter stderr and failure details while preserving failure categories;
   a fixture covers exit events and errors. Discovery failures also hide details
   when environment values are present, with local Codex and OpenCode fixtures.
-  ACP connection and OpenCode cleanup warnings omit agent-controlled error text.
+  ACP connection, OpenCode cleanup and Codex exec warnings omit agent-controlled
+  error text; a log-capture fixture checks the Codex exec warning.
   Other adapter-internal logs and live-adapter behavior remain to be audited.
   The headless agent-harness suite passed 87 tests (two live tests ignored) and
   the core suite passed 100 tests (three live tests ignored) on macOS after

@@ -1861,11 +1861,7 @@ fn exec_events(message: &Value) -> Vec<HarnessEvent> {
         "token_count" => exec_usage(event).into_iter().collect(),
         "plan_update" => exec_plan(event).into_iter().collect(),
         "error" | "stream_error" => {
-            let text = event
-                .get("message")
-                .and_then(Value::as_str)
-                .unwrap_or("codex exec reported an error");
-            tracing::warn!(kind, "{text}");
+            tracing::warn!(kind, "codex exec reported an error");
             Vec::new()
         }
         _ => Vec::new(),
@@ -3168,6 +3164,38 @@ done
             ]
         );
         assert_eq!(usage, Some((1200, 128_000)));
+    }
+
+    #[test]
+    fn exec_error_log_omits_agent_text() -> Result<(), Box<dyn std::error::Error>> {
+        #[derive(Clone)]
+        struct Writer(Arc<Mutex<Vec<u8>>>);
+        impl std::io::Write for Writer {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0
+                    .lock()
+                    .map_err(|error| std::io::Error::other(error.to_string()))?
+                    .extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let buffer = Arc::new(Mutex::new(Vec::new()));
+        let writer = Writer(buffer.clone());
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .without_time()
+            .with_writer(move || writer.clone())
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            exec_events(&json!({"msg": {"type": "error", "message": "fixture-private-value"}}));
+        });
+        let output = String::from_utf8(buffer.lock().map_err(|error| error.to_string())?.clone())?;
+        assert!(output.contains("codex exec reported an error"));
+        assert!(!output.contains("fixture-private-value"));
+        Ok(())
     }
 
     async fn collect_until<H, F>(harness: &mut H, reached: F) -> Vec<HarnessEvent>
