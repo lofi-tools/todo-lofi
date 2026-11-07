@@ -761,6 +761,19 @@ impl TerminalService for PtyTerminals {
         let key = terminal_id.as_str();
         #[cfg(unix)]
         let mut groups = Vec::new();
+        #[cfg(unix)]
+        let processes = if sessions.live.contains_key(key)
+            || sessions
+                .exited
+                .values()
+                .any(|session| session.terminal_id == key)
+        {
+            list_processes().map_err(|error| {
+                TerminalError::Backend(format!("could not enumerate terminal processes: {error}"))
+            })?
+        } else {
+            Vec::new()
+        };
         // The waiter owns removal so a failed signal can be retried.
         if let Some(session) = sessions
             .live
@@ -768,7 +781,7 @@ impl TerminalService for PtyTerminals {
             .filter(|session| !session.closing)
         {
             #[cfg(unix)]
-            groups.extend(session.process_groups(&terminal_processes()));
+            groups.extend(session.process_groups(&processes));
             session
                 .hangup(
                     #[cfg(unix)]
@@ -783,7 +796,6 @@ impl TerminalService for PtyTerminals {
             .values()
             .any(|session| session.terminal_id == key)
         {
-            let processes = terminal_processes();
             for (session, exited) in sessions
                 .exited
                 .extract_if(.., |_, exited| exited.terminal_id == key)
