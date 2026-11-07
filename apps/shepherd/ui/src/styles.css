@@ -543,9 +543,10 @@ textarea {
 }
 
 .task-search__keys kbd {
-  padding: 0 3px;
+  padding: 0 2px;
   border: 1px solid var(--border);
   border-radius: 3px;
+  background: color-mix(in srgb, var(--text-muted) 8%, transparent);
   font: inherit;
   line-height: 14px;
 }
