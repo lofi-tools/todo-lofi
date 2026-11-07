@@ -1161,7 +1161,8 @@ placeholder tabs and no unearned state badges.
   ACP terminal launches also record and clear their process identities. A
   startup notice shows matching and uncertain records and allows a recheck.
   Closing an individual terminal reports process-table enumeration failures
-  before changing its session, so it can be retried. Whole-app terminal
+  before changing its session; an injected-failure fixture verifies retry.
+  Whole-app terminal
   cleanup still logs individual stop failures and needs retryable error handling.
   Running direct ACP terminals now signal their process group on kill, release
   and shutdown, and report signal termination in the ACP exit status. Agent

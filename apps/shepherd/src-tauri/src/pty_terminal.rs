@@ -544,6 +544,69 @@ impl Drop for PtyTerminals {
     }
 }
 
+impl PtyTerminals {
+    fn close_with_scan(
+        &mut self,
+        terminal_id: &TerminalId,
+        #[cfg(unix)] scan: impl FnOnce() -> std::io::Result<Vec<libc::pid_t>>,
+    ) -> Result<(), TerminalError> {
+        let mut sessions = self.sessions()?;
+        let key = terminal_id.as_str();
+        #[cfg(unix)]
+        let mut groups = Vec::new();
+        #[cfg(unix)]
+        let processes = if sessions.live.contains_key(key)
+            || sessions
+                .exited
+                .values()
+                .any(|session| session.terminal_id == key)
+        {
+            scan().map_err(|error| {
+                TerminalError::Backend(format!("could not enumerate terminal processes: {error}"))
+            })?
+        } else {
+            Vec::new()
+        };
+        // The waiter owns removal so a failed signal can be retried.
+        if let Some(session) = sessions
+            .live
+            .get_mut(key)
+            .filter(|session| !session.closing)
+        {
+            #[cfg(unix)]
+            groups.extend(session.process_groups(&processes));
+            session
+                .hangup(
+                    #[cfg(unix)]
+                    &groups,
+                )
+                .map_err(|error| TerminalError::Backend(format!("kill failed: {error}")))?;
+            session.closing = true;
+        }
+        #[cfg(unix)]
+        if sessions
+            .exited
+            .values()
+            .any(|session| session.terminal_id == key)
+        {
+            for (session, exited) in sessions
+                .exited
+                .extract_if(.., |_, exited| exited.terminal_id == key)
+            {
+                let orphan_groups = exited.process_groups(session, &processes);
+                for group in &orphan_groups {
+                    group.signal(libc::SIGHUP);
+                }
+                groups.extend(orphan_groups);
+            }
+        }
+        drop(sessions);
+        #[cfg(unix)]
+        TerminalProcessGroup::finish_hangup(groups);
+        Ok(())
+    }
+}
+
 impl TerminalService for PtyTerminals {
     fn spawn(
         &mut self,
@@ -757,60 +820,11 @@ impl TerminalService for PtyTerminals {
     }
 
     fn close(&mut self, terminal_id: &TerminalId) -> Result<(), TerminalError> {
-        let mut sessions = self.sessions()?;
-        let key = terminal_id.as_str();
-        #[cfg(unix)]
-        let mut groups = Vec::new();
-        #[cfg(unix)]
-        let processes = if sessions.live.contains_key(key)
-            || sessions
-                .exited
-                .values()
-                .any(|session| session.terminal_id == key)
-        {
-            list_processes().map_err(|error| {
-                TerminalError::Backend(format!("could not enumerate terminal processes: {error}"))
-            })?
-        } else {
-            Vec::new()
-        };
-        // The waiter owns removal so a failed signal can be retried.
-        if let Some(session) = sessions
-            .live
-            .get_mut(key)
-            .filter(|session| !session.closing)
-        {
+        self.close_with_scan(
+            terminal_id,
             #[cfg(unix)]
-            groups.extend(session.process_groups(&processes));
-            session
-                .hangup(
-                    #[cfg(unix)]
-                    &groups,
-                )
-                .map_err(|error| TerminalError::Backend(format!("kill failed: {error}")))?;
-            session.closing = true;
-        }
-        #[cfg(unix)]
-        if sessions
-            .exited
-            .values()
-            .any(|session| session.terminal_id == key)
-        {
-            for (session, exited) in sessions
-                .exited
-                .extract_if(.., |_, exited| exited.terminal_id == key)
-            {
-                let orphan_groups = exited.process_groups(session, &processes);
-                for group in &orphan_groups {
-                    group.signal(libc::SIGHUP);
-                }
-                groups.extend(orphan_groups);
-            }
-        }
-        drop(sessions);
-        #[cfg(unix)]
-        TerminalProcessGroup::finish_hangup(groups);
-        Ok(())
+            list_processes,
+        )
     }
 }
 
@@ -952,6 +966,17 @@ mod tests {
             assert!(!group.still_owned());
         }
 
+        let failure = engine.close_with_scan(&terminal_id, || {
+            Err(std::io::Error::other("fixture process scan failed"))
+        });
+        assert!(failure.is_err());
+        assert!(
+            engine
+                .sessions()?
+                .live
+                .get(terminal_id.as_str())
+                .is_some_and(|session| !session.closing)
+        );
         engine.close(&terminal_id)?;
         assert!(
             engine.write(&terminal_id, b"x".to_vec()).is_err(),
