@@ -34,6 +34,18 @@ export const AGENT_LABELS: Record<Agent, string> = { codex: 'Codex', opencode: '
 
 export type ShutdownState = 'running' | 'draining' | 'terminating' | 'closed'
 
+export interface PreviousProcess {
+  id: string
+  kind: string
+  ownerId: string
+  pid: number
+  status: 'matching' | 'gone' | 'reused' | 'changed' | 'unknown'
+}
+
+export function inspectPreviousProcesses(): Promise<PreviousProcess[]> {
+  return invoke('inspect_previous_processes')
+}
+
 export type Decision = 'allow' | 'allowSession' | 'allowProject' | 'deny'
 
 export type ShortcutScope = 'window' | 'composer' | 'workspaceTerminal' | 'commitForm'

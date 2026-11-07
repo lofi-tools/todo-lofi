@@ -2062,6 +2062,15 @@ textarea {
   opacity: 0.8;
 }
 
+.process-notice__details {
+  min-width: 0;
+}
+
+.process-notice__details ul {
+  max-height: 10rem;
+  overflow: auto;
+}
+
 .shell__notices {
   grid-area: 3 / 1 / 4 / -1;
 }

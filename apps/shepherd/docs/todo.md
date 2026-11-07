@@ -1153,8 +1153,9 @@ placeholder tabs and no unearned state badges.
   persistence and cleanup. Startup snapshots earlier records for read-only
   inspection against boot, start time, process group, and session identities;
   a match does not establish that another Shepherd instance has released it.
-  ACP terminal launches also record and clear their process identities. Agent
-  process identities and user-facing orphan handling remain.
+  ACP terminal launches also record and clear their process identities. A
+  startup notice shows matching and uncertain records and allows a recheck.
+  Agent process identities and stopping surviving processes remain.
 - [ ] 30-day archived-worktree collection, dirty skip, branch-tip recreation.
 - [ ] Database backup, migration checks, malformed migration handling and
   transactional writes.

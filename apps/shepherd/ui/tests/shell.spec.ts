@@ -399,6 +399,12 @@ test.beforeEach(async ({ context }) => {
       },
       invoke: async (command, args, invokeOptions) => {
         switch (command) {
+          case 'inspect_previous_processes':
+            return options.has('recovery') ? [
+              { id: 'one', kind: 'terminal', ownerId: 'terminal-1', pid: 321, status: 'matching' },
+              { id: 'two', kind: 'acp_terminal', ownerId: 'terminal-2', pid: 456, status: 'unknown' },
+              { id: 'three', kind: 'terminal', ownerId: 'terminal-3', pid: 789, status: 'gone' },
+            ] : []
           case 'command_registry':
             return commandSnapshot(args.platform, readKeybindings())
           case 'set_keybinding': {
@@ -1030,6 +1036,21 @@ test.beforeEach(async ({ context }) => {
       window.__emitCoreEvent({ type: 'taskWorkspaceChanged', data: workspace(taskId) })
     }
   }, workspaceCommands)
+})
+
+test('shows previous processes that need review without reporting ended processes', async ({ page }) => {
+  await page.goto('/?recovery')
+  const notice = page.getByRole('status').filter({ hasText: 'Previously recorded processes need review' })
+  await expect(notice).toContainText('(2)')
+  await notice.locator('summary').click()
+  await expect(notice).toContainText('PID 321 · identity matches')
+  await expect(notice).toContainText('PID 456 · identity could not be verified')
+  await expect(notice).not.toContainText('789')
+  await expect(notice).toContainText('another running Shepherd instance')
+  await notice.getByRole('button', { name: 'Recheck' }).click()
+  await expect(notice).toContainText('(2)')
+  await notice.getByRole('button', { name: 'Dismiss' }).click()
+  await expect(notice).toHaveCount(0)
 })
 
 test('puts the macOS window controls and history buttons in one header row', async ({ page }) => {

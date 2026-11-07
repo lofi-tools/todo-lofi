@@ -117,6 +117,21 @@ function terminalArrowDestination(inspector: HTMLElement, tab: HTMLButtonElement
 
 export function App() {
   const [projects, setProjects] = createSignal<bridge.ProjectSnapshot[]>([])
+  const [previousProcesses, setPreviousProcesses] = createSignal<bridge.PreviousProcess[]>([])
+  const [checkingProcesses, setCheckingProcesses] = createSignal(false)
+  const [processNoticeDismissed, setProcessNoticeDismissed] = createSignal(false)
+  const processesNeedingReview = () => previousProcesses().filter((process) =>
+    process.status === 'matching' || process.status === 'unknown' || process.status === 'changed')
+  async function inspectPreviousProcesses() {
+    setCheckingProcesses(true)
+    try {
+      setPreviousProcesses(await bridge.inspectPreviousProcesses())
+    } catch (failure) {
+      setError(describe(failure))
+    } finally {
+      setCheckingProcesses(false)
+    }
+  }
   const [homeDirectory, setHomeDirectory] = createSignal<string>()
   const [projectsLoaded, setProjectsLoaded] = createSignal(false)
   const [codexAvailable, setCodexAvailable] = createSignal(false)
@@ -1085,6 +1100,7 @@ export function App() {
   }
 
   onMount(() => {
+    void inspectPreviousProcesses()
     void homeDir().then(setHomeDirectory).catch((error) => console.warn('Could not resolve the home directory', error))
     void reloadKeybindings().catch((failure) => setError(describe(failure)))
     void bridge.opencodeConfigured().then(setOpencodeConfigured).catch((error) => console.warn('Could not read OpenCode availability', error))
@@ -1514,6 +1530,21 @@ export function App() {
   const workspaceFooter = (
     <>
       <div class="shell__notices">
+        <Show when={!processNoticeDismissed() && processesNeedingReview().length > 0}>
+          <div class="banner" role="status">
+            <details class="process-notice__details">
+              <summary>Previously recorded processes need review ({processesNeedingReview().length})</summary>
+              <p>A matching process may belong to another running Shepherd instance. Shepherd has not stopped any processes.</p>
+              <ul>
+                <For each={processesNeedingReview()}>{(process) =>
+                  <li>{process.kind === 'acp_terminal' ? 'Agent terminal' : 'Terminal'} · PID {process.pid} · {process.status === 'matching' ? 'identity matches' : process.status === 'changed' ? 'process group or session is unsafe' : 'identity could not be verified'}</li>
+                }</For>
+              </ul>
+            </details>
+            <button type="button" disabled={checkingProcesses()} onClick={() => void inspectPreviousProcesses()}>Recheck</button>
+            <button type="button" class="banner__quiet" onClick={() => setProcessNoticeDismissed(true)}>Dismiss</button>
+          </div>
+        </Show>
         <Show when={preferences()?.warning}>
           {(warning) => <div class="banner banner--error" role="alert"><span>{warning()} Default settings are active.</span></div>}
         </Show>
