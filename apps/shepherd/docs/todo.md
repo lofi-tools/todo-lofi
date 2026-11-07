@@ -1203,8 +1203,9 @@ placeholder tabs and no unearned state badges.
   bleed, no polling.
   A three-session fixture holds Codex, OpenCode and Claude tasks at approvals
   across two projects, resolves identical approval IDs independently, and
-  verifies worktree and persisted transcript isolation. Live adapters and the
-  no-polling requirement still need verification.
+  verifies worktree and persisted transcript isolation. Agent events wake the
+  shell directly instead of using a periodic poll; fixtures cover multiple
+  receivers and delivery between commands. Live adapters remain unverified.
 - [ ] Performance: cold start under 1.2 s, streaming while a large diff renders,
   terminal burst budget.
 - [ ] Path confinement, environment `!command` timeout, no secret values in

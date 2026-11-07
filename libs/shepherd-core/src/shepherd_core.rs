@@ -733,7 +733,7 @@ impl Core {
 
     /// Fold adapter activity that arrived since the last command. Without this,
     /// a streaming turn only appears when the user issues another command; the
-    /// shell calls it on a short tick. Returns whether anything was folded.
+    /// shell calls it when an agent event wakes it. Returns whether anything was folded.
     pub async fn pump(&mut self) -> Result<bool, CoreError> {
         let task_ids: Vec<TaskId> = self.sessions.keys().cloned().collect();
         let mut changed = false;
@@ -785,6 +785,27 @@ impl Core {
             }
         }
         Ok(changed)
+    }
+
+    pub fn arm_agent_events(&mut self, notify: &Arc<tokio::sync::Notify>) {
+        struct EventWake(Arc<tokio::sync::Notify>);
+        impl std::task::Wake for EventWake {
+            fn wake(self: Arc<Self>) {
+                self.0.notify_one();
+            }
+            fn wake_by_ref(self: &Arc<Self>) {
+                self.0.notify_one();
+            }
+        }
+        let waker = std::task::Waker::from(Arc::new(EventWake(notify.clone())));
+        let mut cx = std::task::Context::from_waker(&waker);
+        let mut ready = false;
+        for session in self.sessions.values_mut() {
+            ready |= session.arm_events(&mut cx);
+        }
+        if ready {
+            notify.notify_one();
+        }
     }
 
     pub fn project_list(&self) -> ProjectList {
@@ -2734,7 +2755,8 @@ mod live_restart {
 
 #[cfg(test)]
 mod streaming {
-    use std::sync::Mutex;
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
 
     use agent_harness::{
         AgentHarness, ApprovalId, Capabilities, Decision, DeltaKind, Entry, HarnessEvent,
@@ -2781,6 +2803,80 @@ mod streaming {
         approvals: Vec<SessionApproval>,
         prompts: Option<mpsc::UnboundedSender<(Option<String>, PromptInput)>>,
         mode: Option<String>,
+    }
+
+    #[tokio::test]
+    async fn agent_event_wakeups_cover_multiple_sessions_and_buffered_events()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut core = Core::new();
+        let mut senders = Vec::new();
+        let mut ids = Vec::new();
+        for index in 0..3 {
+            let (sender, events) = mpsc::unbounded_channel();
+            let id = TaskId::new(format!("task-{index}"));
+            core.sessions.insert(
+                id.clone(),
+                HarnessSession::new(Box::new(LateHarness {
+                    events,
+                    approvals: Vec::new(),
+                    prompts: None,
+                    mode: None,
+                })),
+            );
+            senders.push(sender);
+            ids.push(id);
+        }
+        let [first, middle, last] = senders.as_slice() else {
+            return Err("expected three senders".into());
+        };
+        let [first_id, middle_id, last_id] = ids.as_slice() else {
+            return Err("expected three sessions".into());
+        };
+        let notify = Arc::new(tokio::sync::Notify::new());
+        core.arm_agent_events(&notify);
+        middle.send(HarnessEvent::Delta {
+            item_id: ItemId::new("middle"),
+            kind: DeltaKind::Message,
+            text: "first".into(),
+        })?;
+        tokio::time::timeout(Duration::from_secs(1), notify.notified()).await?;
+        let events = core
+            .sessions
+            .get_mut(middle_id)
+            .ok_or("missing session")?
+            .pump();
+        assert_eq!(events.len(), 1);
+        first.send(HarnessEvent::Delta {
+            item_id: ItemId::new("first"),
+            kind: DeltaKind::Message,
+            text: "buffered".into(),
+        })?;
+        core.arm_agent_events(&notify);
+        tokio::time::timeout(Duration::from_secs(1), notify.notified()).await?;
+        assert_eq!(
+            core.sessions
+                .get_mut(first_id)
+                .ok_or("missing session")?
+                .pump()
+                .len(),
+            1
+        );
+        core.arm_agent_events(&notify);
+        last.send(HarnessEvent::Delta {
+            item_id: ItemId::new("last"),
+            kind: DeltaKind::Message,
+            text: "last".into(),
+        })?;
+        tokio::time::timeout(Duration::from_secs(1), notify.notified()).await?;
+        assert_eq!(
+            core.sessions
+                .get_mut(last_id)
+                .ok_or("missing session")?
+                .pump()
+                .len(),
+            1
+        );
+        Ok(())
     }
 
     #[async_trait]

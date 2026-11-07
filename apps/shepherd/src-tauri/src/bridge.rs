@@ -6,7 +6,7 @@
 //!
 //! Core events are drained after every command and broadcast to whatever window
 //! is subscribed. Adapter events that arrive between commands are folded by a
-//! short pump tick ([`ShellState::start_event_pump`]) and broadcast the same way,
+//! event wakeup ([`ShellState::start_event_pump`]) and broadcast the same way,
 //! so a streaming turn paints without waiting for the next invoke.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -620,6 +620,7 @@ struct TerminalSubscription {
 
 pub struct ShellState {
     core: Arc<Mutex<Core>>,
+    agent_events: Arc<tokio::sync::Notify>,
     attachment_root: Option<PathBuf>,
     pub(crate) preferences: Settings,
     pub(crate) codex_program: Option<PathBuf>,
@@ -665,6 +666,7 @@ impl ShellState {
         }
         Self {
             core,
+            agent_events: Arc::new(tokio::sync::Notify::new()),
             attachment_root: None,
             preferences: Settings::default(),
             codex_program: None,
@@ -734,19 +736,29 @@ impl ShellState {
     }
 
     /// Fold agent activity between commands. A streaming turn must reach the
-    /// window without waiting for the next invoke, so this runs on a short tick
-    /// and broadcasts whatever the core emits.
+    /// window without waiting for the next invoke.
     pub fn start_event_pump(&self) {
         let core = self.core.clone();
         let events = self.events.clone();
+        let agent_events = self.agent_events.clone();
         tauri::async_runtime::spawn(async move {
+            agent_events.notify_one();
             loop {
-                tokio::time::sleep(Duration::from_millis(100)).await;
+                agent_events.notified().await;
                 let mut core = core.lock().await;
-                if let Err(error) = core.pump().await {
+                let retry = if let Err(error) = core.pump().await {
                     tracing::warn!(%error, "could not fold agent activity");
-                }
+                    true
+                } else {
+                    false
+                };
                 Self::broadcast_core_events(&mut core, &events);
+                core.arm_agent_events(&agent_events);
+                drop(core);
+                if retry {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    agent_events.notify_one();
+                }
             }
         });
     }
@@ -755,6 +767,7 @@ impl ShellState {
         let mut core = self.core.lock().await;
         let result = core.execute(command).await;
         Self::broadcast_core_events(&mut core, &self.events);
+        core.arm_agent_events(&self.agent_events);
         result.map_err(BridgeError::from)
     }
 
@@ -2875,6 +2888,108 @@ mod tests {
     use shepherd_core::{TaskState, TaskSummary};
 
     use super::*;
+
+    #[tokio::test]
+    async fn agent_events_reach_subscribers_without_a_followup_command()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use agent_harness::{
+            AgentHarness, ApprovalId, Capabilities, DeltaKind, HarnessEvent, HarnessResult, ItemId,
+            SessionId, TurnFinishReason,
+        };
+        use shepherd_core::store::MemoryStore;
+
+        struct Factory(std::sync::Mutex<Option<mpsc::UnboundedReceiver<HarnessEvent>>>);
+        impl HarnessFactory for Factory {
+            fn create(&self) -> Result<Box<dyn AgentHarness>, CoreError> {
+                let events = self
+                    .0
+                    .lock()
+                    .map_err(|_| CoreError::HarnessUnavailable)?
+                    .take()
+                    .ok_or(CoreError::HarnessUnavailable)?;
+                Ok(Box::new(DelayedHarness(events)))
+            }
+        }
+        struct DelayedHarness(mpsc::UnboundedReceiver<HarnessEvent>);
+        #[async_trait]
+        impl AgentHarness for DelayedHarness {
+            fn events(&mut self) -> &mut mpsc::UnboundedReceiver<HarnessEvent> {
+                &mut self.0
+            }
+            async fn start(&mut self, _: SpawnSpec) -> HarnessResult<Capabilities> {
+                Ok(Capabilities::default())
+            }
+            async fn open_session(&mut self, _: Option<SessionId>) -> HarnessResult<SessionId> {
+                Ok(SessionId::new("fixture"))
+            }
+            async fn prompt(&mut self, _: PromptInput) -> HarnessResult<()> {
+                Ok(())
+            }
+            async fn cancel(&mut self) -> HarnessResult<()> {
+                Ok(())
+            }
+            async fn respond(&mut self, _: ApprovalId, _: Decision) -> HarnessResult<()> {
+                Ok(())
+            }
+            async fn shutdown(&mut self) -> HarnessResult<()> {
+                Ok(())
+            }
+        }
+
+        let repository = TestRepository::new()?;
+        let (sender, receiver) = mpsc::unbounded_channel();
+        let state = ShellState::new(Core::with_services(
+            Box::new(MemoryStore::new()),
+            Box::new(Factory(std::sync::Mutex::new(Some(receiver)))),
+        ));
+        state.start_event_pump();
+        let projects = state
+            .add_project(repository.path().display().to_string())
+            .await?;
+        let project = projects.projects.first().ok_or("missing project")?;
+        let draft = state
+            .execute(Command::CreateDraft {
+                project_id: ProjectId::new(project.id.clone()),
+                title: "Wakeup".into(),
+                agent: shepherd_core::Agent::Codex,
+            })
+            .await?;
+        let CommandResult::TaskWorkspace(draft) = draft else {
+            return Err("missing draft".into());
+        };
+        let task_id = TaskId::new(draft.task.id);
+        state
+            .execute(Command::SendPrompt {
+                task_id: task_id.clone(),
+                input: PromptInput::text("hello"),
+            })
+            .await?;
+        let mut events = state.subscribe();
+        sender.send(HarnessEvent::Delta {
+            item_id: ItemId::new("answer"),
+            kind: DeltaKind::Message,
+            text: "delayed answer".into(),
+        })?;
+        sender.send(HarnessEvent::TurnFinished {
+            reason: TurnFinishReason::Completed,
+        })?;
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                if let Event::TaskWorkspaceChanged(workspace) = events.recv().await?
+                    && workspace.task.id == task_id.as_str()
+                    && workspace
+                        .transcript
+                        .iter()
+                        .any(|entry| entry.summary().contains("delayed answer"))
+                    && workspace.task.state == TaskState::Ready
+                {
+                    return Ok::<_, tokio::sync::broadcast::error::RecvError>(());
+                }
+            }
+        })
+        .await??;
+        Ok(())
+    }
 
     #[tokio::test]
     async fn task_search_can_be_cancelled_before_start_or_while_waiting_for_core()

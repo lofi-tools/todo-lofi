@@ -139,6 +139,7 @@ pub struct HarnessSession {
     cancelling: bool,
     failed: bool,
     closed: bool,
+    pending_event: Option<HarnessEvent>,
 }
 
 impl HarnessSession {
@@ -154,6 +155,7 @@ impl HarnessSession {
             cancelling: false,
             failed: false,
             closed: false,
+            pending_event: None,
         }
     }
 
@@ -265,7 +267,11 @@ impl HarnessSession {
     /// well as applying them lets the core forward adapter activity to the shell.
     pub fn pump(&mut self) -> Vec<HarnessEvent> {
         let mut events = Vec::new();
-        while let Ok(event) = self.harness.events().try_recv() {
+        while let Some(event) = self
+            .pending_event
+            .take()
+            .or_else(|| self.harness.events().try_recv().ok())
+        {
             match &event {
                 HarnessEvent::AgentTerminalStarted { id, title } => {
                     self.capabilities.agent_terminals = true;
@@ -341,6 +347,22 @@ impl HarnessSession {
             self.capabilities.mode_picker = self.modes().is_some();
         }
         events
+    }
+
+    pub(crate) fn arm_events(&mut self, cx: &mut std::task::Context<'_>) -> bool {
+        if self.closed {
+            return false;
+        }
+        if self.pending_event.is_some() {
+            return true;
+        }
+        match self.harness.events().poll_recv(cx) {
+            std::task::Poll::Ready(Some(event)) => {
+                self.pending_event = Some(event);
+                true
+            }
+            _ => false,
+        }
     }
 
     pub fn transcript(&self) -> &Transcript {
