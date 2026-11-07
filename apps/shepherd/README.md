@@ -85,6 +85,16 @@ Use the macOS window tests when the change affects the behavior they exercise.
 The smoke uses a separate dev server on port 1432. Set
 `SHEPHERD_DESKTOP_SMOKE_PORT` to use another port.
 
+To measure a real worktree diff while a scripted turn completes, run the
+separate smoke (hidden on macOS):
+
+```sh
+direnv exec . ./scripts/smoke-shepherd-terminal.sh --large-diff
+```
+
+It reports `largeDiffMs` from opening the 12,000-line diff until both the
+rendered diff and scripted response appear.
+
 On Ubuntu 24.04, the **Shepherd terminal smoke** GitHub Actions workflow runs
 the full two-launch suite under Xvfb. A push to `codex/shepherd-terminal-smoke`
 starts the run. Once the workflow is on the default branch, you can also

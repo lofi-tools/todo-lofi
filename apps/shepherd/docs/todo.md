@@ -1324,7 +1324,9 @@ placeholder tabs and no unearned state badges.
   Git and Review reads run outside the core lock on blocking workers. A real
   worktree fixture verifies an agent approval can finish during a stalled read,
   then checks both ends of a 12,000-line diff.
-  End-to-end timing with a real worktree remains unmeasured.
+  A separate hidden desktop smoke loads a real 12,000-line worktree diff while
+  a scripted approval completes; on this Mac the diff and response appeared
+  999 ms after opening the diff. It does not measure live-agent streaming.
 - [ ] Path confinement, environment `!command` timeout, no secret values in
   logs or storage.
   File preview, directory listing and search open each path component without

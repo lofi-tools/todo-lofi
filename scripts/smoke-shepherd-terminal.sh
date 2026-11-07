@@ -85,6 +85,11 @@ EOF
     phases=(codex-approval)
     export SHEPHERD_DEV_CODEX_SMOKE=approval-replay
     ;;
+  --large-diff)
+    command -v python3 >/dev/null
+    phases=(large-diff)
+    export SHEPHERD_DEV_SCRIPTED_HARNESS=1
+    ;;
   --codex-live)
     command -v python3 >/dev/null
     phases=(codex-live)
@@ -113,7 +118,7 @@ EOF
     export SHEPHERD_DEV_CODEX_SMOKE=review-merge
     ;;
   *)
-    printf '%s\n' "Usage: $0 [--macos-window|--linux-ime|--macos-ime [pinyin|british]|--macos-visibility|--codex-approval|--codex-live|--codex-edit|--codex-restart|--codex-exit|--codex-review-merge] [--record for Codex scenarios]" >&2
+    printf '%s\n' "Usage: $0 [--large-diff|--macos-window|--linux-ime|--macos-ime [pinyin|british]|--macos-visibility|--codex-approval|--codex-live|--codex-edit|--codex-restart|--codex-exit|--codex-review-merge] [--record for Codex scenarios]" >&2
     exit 2
     ;;
 esac
@@ -127,7 +132,7 @@ if [[ -n ${SHEPHERD_DEV_CODEX_SMOKE:-} && -n ${2:-} ]]; then
   codex_feature=live-codex
 fi
 
-if [[ $platform == Darwin && ( -z ${1:-} || ${1:-} == --codex-* ) ]]; then
+if [[ $platform == Darwin && ( -z ${1:-} || ${1:-} == --codex-* || ${1:-} == --large-diff ) ]]; then
   export SHEPHERD_DEV_BACKGROUND_SMOKE=1
   window_config=$(cat <<'EOF'
   "app": {

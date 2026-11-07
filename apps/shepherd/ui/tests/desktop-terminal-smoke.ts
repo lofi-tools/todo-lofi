@@ -836,6 +836,35 @@ async function openFixtureProject() {
   return project
 }
 
+async function exerciseLargeDiff() {
+  const project = await openFixtureProject()
+  await openInspectorTab('terminals')
+  ;(await enabledButton('New shared terminal')).click()
+  const terminal = await waitFor('shared terminal', async () =>
+    (await bridge.terminalList(project.id)).terminals.find((entry) => entry.scope === 'project'))
+  await sendPrompt('Prepare the large diff review')
+  await waitFor('scripted approval', () => chatState() === 'waiting')
+  const task = (await bridge.taskList(project.id)).tasks[0]
+  if (!task?.worktreePath) throw new Error('The scripted task has no worktree')
+  const path = `${task.worktreePath}/shepherd-large-diff.txt`
+  await bridge.terminalWrite(terminal.id, `awk 'BEGIN {print "first marker"; for (i=0;i<12000;i++) print "large diff line"; print "last marker"}' > ${shellQuote(path)}; printf 'S4_DIFF_READY\\n'\r`)
+  await waitFor('large diff fixture written', () => terminalOutput().includes('S4_DIFF_READY'))
+  await openInspectorTab('review')
+  const file = await waitFor('large file in Review', () =>
+    Array.from(document.querySelectorAll<HTMLButtonElement>('.git-pane__file'))
+      .find((entry) => entry.textContent?.trim() === 'shepherd-large-diff.txt'))
+  const started = performance.now()
+  file.click()
+  ;(await enabledButton('Allow')).click()
+  await waitFor('scripted response after approval', () =>
+    document.querySelector('.chat__transcript')?.textContent?.includes('Scripted turn complete.'))
+  await waitFor('large real-worktree diff rendered', () => {
+    const text = document.querySelector('[aria-label="File diff"]')?.textContent
+    return text?.includes('first marker') && text.includes('last marker')
+  })
+  return { ok: true, largeDiffMs: Math.round((performance.now() - started) * 10) / 10 }
+}
+
 function waitForCodexApproval(timeout?: number) {
   return waitFor('waiting Codex approval with command arguments', () => {
     if (chatState() === 'failed') {
@@ -1360,6 +1389,9 @@ void (async () => {
         break
       case 'codex-approval':
         result = await replayCodexApproval()
+        break
+      case 'large-diff':
+        result = await exerciseLargeDiff()
         break
       case 'codex-live':
         result = await exerciseLiveCodex()
