@@ -622,7 +622,7 @@ impl Core {
         let Some(path) = updated.worktree_path.as_deref() else {
             return Ok(());
         };
-        if let Err(error) = GitService.remove_clean_worktree(&repository, path) {
+        if let Err(error) = GitService.remove_archived_worktree(&repository, path) {
             match path.symlink_metadata() {
                 Ok(_) => {
                     updated.collection_pending = false;
@@ -6131,6 +6131,58 @@ mod tests {
         let transcript = summaries(&reopened.open_task_workspace(&task_id).await?).join("\n");
         assert!(transcript.contains("first reply"));
         assert!(transcript.contains("second reply"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn archived_collection_keeps_ignored_files_and_clears_its_intent()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let repository = TestRepository::new()?;
+        let database = TestDatabase::new()?;
+        let mut core = Core::with_services(
+            Box::new(TursoStore::open(&database.uri()).await?),
+            Box::new(UnavailableHarnessFactory),
+        );
+        let project_id = add_project(&mut core, repository.path().to_path_buf()).await?;
+        let mut task = Task::draft(
+            project_id,
+            "Archived task",
+            &repository.repository().git_dir,
+        );
+        GitService.create_worktree(
+            repository.repository(),
+            &task.proposed_worktree_path,
+            &task.proposed_branch,
+            "main",
+        )?;
+        std::fs::write(
+            repository.repository().git_dir.join("info/exclude"),
+            "ignored.txt\n",
+        )?;
+        let ignored = task.proposed_worktree_path.join("ignored.txt");
+        std::fs::write(&ignored, "keep this data")?;
+        task.worktree_path = Some(task.proposed_worktree_path.clone());
+        task.branch = Some(task.proposed_branch.clone());
+        task.state = TaskState::Done;
+        core.store.save_task(&task).await?;
+        core.tasks.insert(task.id.clone(), task.clone());
+
+        assert!(matches!(
+            core.collect_archived_worktree(&task.id).await,
+            Err(CoreError::Git(GitError::IgnoredWorktreeFiles { .. }))
+        ));
+        assert_eq!(std::fs::read_to_string(ignored)?, "keep this data");
+        assert!(!core.task(&task.id)?.collection_pending);
+        assert!(
+            !core
+                .store
+                .load_tasks()
+                .await?
+                .into_iter()
+                .find(|saved| saved.id == task.id)
+                .ok_or("missing task")?
+                .collection_pending
+        );
         Ok(())
     }
 

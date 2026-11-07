@@ -1237,6 +1237,10 @@ placeholder tabs and no unearned state badges.
 - [ ] 30-day archived-worktree collection, dirty skip, branch-tip recreation.
   Startup preserves dirty worktrees and lists collection failures with their
   reasons; clean collection retains the tip and prunes Git worktree metadata.
+  Collection also skips worktrees containing Git-ignored files and reports the
+  reason; fixtures check the files and collection journal remain intact. The
+  scan and Git removal are separate operations, so concurrent file creation
+  after the scan is not protected.
   Opening a task, using its terminal, and accessing its files or Git views
   refresh a separate last-use timestamp, coalescing repeated input and reads
   to at most one write per minute per activity source. Older databases

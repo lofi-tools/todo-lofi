@@ -39,6 +39,8 @@ pub enum GitError {
     WorktreeIdentityMismatch { path: PathBuf },
     #[error("worktree has staged, unstaged or untracked changes: {path:?}")]
     DirtyWorktree { path: PathBuf },
+    #[error("archived worktree contains ignored files: {path:?}")]
+    IgnoredWorktreeFiles { path: PathBuf },
     #[error("task branch {branch} is missing and has no recorded tip")]
     MissingBranch { branch: String },
     #[error("git returned an invalid status record")]
@@ -228,6 +230,32 @@ impl GitService {
         })?;
         run_git(&repository.root, &["worktree", "remove", "--", path_text])?;
         Ok(())
+    }
+
+    pub fn remove_archived_worktree(
+        &self,
+        repository: &GitRepository,
+        path: &Path,
+    ) -> Result<(), GitError> {
+        self.validate_worktree(repository, path)?;
+        if !git_bytes(
+            path,
+            &[
+                "ls-files",
+                "--others",
+                "--ignored",
+                "--exclude-standard",
+                "--directory",
+                "-z",
+            ],
+        )?
+        .is_empty()
+        {
+            return Err(GitError::IgnoredWorktreeFiles {
+                path: path.to_path_buf(),
+            });
+        }
+        self.remove_clean_worktree(repository, path)
     }
 
     pub fn move_worktree(
@@ -1408,6 +1436,28 @@ mod tests {
             )
             .is_ok()
         );
+        Ok(())
+    }
+
+    #[test]
+    fn archived_collection_preserves_ignored_files() -> Result<(), Box<dyn std::error::Error>> {
+        let fixture = TestRepository::new()?;
+        let path = task_worktree(&fixture)?;
+        std::fs::write(
+            fixture.repository().git_dir.join("info/exclude"),
+            "ignored.txt\n",
+        )?;
+        let ignored = path.join("ignored.txt");
+        std::fs::write(&ignored, "keep this data")?;
+        assert!(!GitService.has_changes(&path)?);
+        assert!(matches!(
+            GitService.remove_archived_worktree(fixture.repository(), &path),
+            Err(GitError::IgnoredWorktreeFiles { .. })
+        ));
+        assert_eq!(std::fs::read_to_string(&ignored)?, "keep this data");
+        std::fs::remove_file(ignored)?;
+        GitService.remove_archived_worktree(fixture.repository(), &path)?;
+        assert!(!path.exists());
         Ok(())
     }
 
