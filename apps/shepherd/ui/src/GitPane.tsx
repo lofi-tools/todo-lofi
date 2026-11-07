@@ -1,4 +1,4 @@
-import { For, Show, createEffect, createResource, createSignal } from 'solid-js'
+import { For, Show, createEffect, createMemo, createResource, createSignal } from 'solid-js'
 
 import { gitFileDiff, gitSnapshot, mutateGit, type GitMutation } from './bridge'
 import { GitDiffFile, GitDiffText } from './GitDiff'
@@ -13,8 +13,10 @@ export function GitPane(props: {
   taskId: string; revision: number; live: boolean; openTerminal: () => void; openFile: (path: string) => void
   request?: GitRequest; onRequestHandled: (request: GitRequest) => void; commitShortcut?: string
 }) {
+  const taskId = createMemo(() => props.taskId)
+  const revision = createMemo(() => props.revision)
   const [git, { refetch, mutate }] = createResource(
-    () => [props.taskId, props.revision] as const,
+    () => [taskId(), revision()] as const,
     ([taskId]) => gitSnapshot(taskId),
   )
 
@@ -27,7 +29,7 @@ export function GitPane(props: {
   const [fileDiff, { refetch: refetchFile }] = createResource(
     () => {
       const path = selectedFile()
-      return path ? [props.taskId, props.revision, path] as const : false
+      return path ? [taskId(), revision(), path] as const : false
     },
     ([taskId, , path]) => gitFileDiff(taskId, path),
   )

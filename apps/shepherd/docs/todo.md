@@ -1222,6 +1222,9 @@ placeholder tabs and no unearned state badges.
   or shell disposal without retaining the core. Live adapters remain unverified.
 - [ ] Performance: cold start under 1.2 s, streaming while a large diff renders,
   terminal burst budget.
+  Review and Git retain in-flight diff requests across transcript-only updates;
+  a headless fixture streams through 1,000 transcript entries while a 12,000-line
+  diff loads. End-to-end timing with a real worktree remains unmeasured.
 - [ ] Path confinement, environment `!command` timeout, no secret values in
   logs or storage.
 - [ ] Packaging and CI: macOS 13+, Ubuntu 24.04+, pinned Zig, Tauri build,
@@ -1235,6 +1238,8 @@ placeholder tabs and no unearned state badges.
   live-agent crash and resume behavior still needs verification.
 - [ ] Missing worktree repair; archived worktree collection; dirty skip.
 - [ ] Large transcript and large diff with no dropped state.
+  The headless UI fixture checks all streamed chunks and both ends of a large
+  mocked diff while 1,000 earlier transcript entries remain present.
 - [ ] Three-agent/two-project concurrency test.
   The local scripted fixture covers overlapping approval waits and independent
   worktree writes; a live multi-agent run remains unverified.

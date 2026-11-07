@@ -31,6 +31,8 @@ test.beforeEach(async ({ context }) => {
     const archiveRequests: string[][] = []
     const deletions: Array<{ taskId: string; removeWorktree: boolean }> = []
     const gitMutations: GitMutation[] = []
+    const gitRequests = { git: 0, gitDiff: 0, review: 0, reviewDiff: 0 }
+    const taskRevisions = new Map<string, number>()
     let failedReviewSnapshot = false
     const gitState = () => {
       const last = gitMutations.at(-1)?.type
@@ -334,7 +336,7 @@ test.beforeEach(async ({ context }) => {
         proposedBranch: task.branch ?? 'shepherd/new-task',
         proposedWorktreePath: task.worktreePath ?? '/tmp/demo/.git/shepherd/worktrees/new-task',
         baseBranch: task.state === 'draft' ? null : 'main',
-        updatedAt: task.createdAt,
+        updatedAt: taskRevisions.get(task.id) ?? task.createdAt,
       }
     }
 
@@ -606,8 +608,10 @@ test.beforeEach(async ({ context }) => {
             return []
           }
           case 'git_snapshot':
+            gitRequests.git++
             return gitState()
           case 'review_snapshot':
+            gitRequests.review++
             if (options.has('review-load-error') && !failedReviewSnapshot) {
               failedReviewSnapshot = true
               throw { message: 'Could not load review diff', code: 'git' }
@@ -618,8 +622,15 @@ test.beforeEach(async ({ context }) => {
             gitMutations.push(args.mutation)
             return gitState()
           case 'git_file_diff':
+            gitRequests.gitDiff++
             return { staged: '', unstaged: 'fixture diff', revision: 'fixture', canDiscard: true }
           case 'review_file_diff':
+            gitRequests.reviewDiff++
+            if (options.has('large-diff')) {
+              Object.assign(window, { __largeDiffWaiting: true })
+              await new Promise<void>((resolve) => window.addEventListener('release-large-diff', () => resolve(), { once: true }))
+              return Array.from({ length: 12_000 }, (_, index) => `+large diff line ${index.toString().padStart(5, '0')} with representative source content`).join('\n')
+            }
             return 'fixture diff'
           case 'list_files': {
             fileListings.push(args.path)
@@ -1011,6 +1022,10 @@ test.beforeEach(async ({ context }) => {
     Object.assign(window, { __windowTitles: windowTitles })
     window.__archiveRequests = archiveRequests
     window.__gitMutations = gitMutations
+    Object.assign(window, { __gitRequests: gitRequests, __setTaskRevision: (taskId: string, revision: number) => {
+      taskRevisions.set(taskId, revision)
+      window.__emitCoreEvent({ type: 'taskWorkspaceChanged', data: workspace(taskId) })
+    } })
     window.__emitCoreEvent = (event: ShepherdEvent) =>
       callbacks.get(eventChannel)?.({ index: eventIndex++, message: event })
     window.__setTaskState = (taskId: string, state: TaskState) => {
@@ -1033,6 +1048,10 @@ test.beforeEach(async ({ context }) => {
       transcripts[taskId] = [...(transcripts[taskId] ?? []).filter((row) => row.kind.type !== 'toolCall'), ...entries]
       window.__emitCoreEvent({ type: 'taskWorkspaceChanged', data: workspace(taskId) })
     }
+    Object.assign(window, { __setTranscript: (taskId: string, entries: Entry[]) => {
+      transcripts[taskId] = entries
+      window.__emitCoreEvent({ type: 'taskWorkspaceChanged', data: workspace(taskId) })
+    } })
     window.__setAgentTerminals = (taskId: string, terminals: AgentTerminal[]) => {
       agentTerminals.set(taskId, terminals)
       window.__emitCoreEvent({ type: 'taskWorkspaceChanged', data: workspace(taskId) })
@@ -1775,6 +1794,77 @@ test('does not show an error for a superseded task search', async ({ page }) => 
   await expect(page.getByRole('option', { name: /Archived answer/ })).toBeVisible()
   await page.evaluate(() => window.dispatchEvent(new Event('release-task-search')))
   await expect(page.getByRole('alert')).toHaveCount(0)
+})
+
+test('keeps a large transcript and streamed answer while a large diff loads', async ({ page }) => {
+  await page.goto('/?large-diff')
+  await page.getByRole('tab', { name: 'Review', exact: true }).click()
+  await page.getByRole('region', { name: 'Task changes' }).getByRole('button', { name: 'src/main.rs', exact: true }).click()
+  await expect.poll(() => page.evaluate(() => (window as unknown as { __largeDiffWaiting?: boolean }).__largeDiffWaiting)).toBe(true)
+  const requestCounts = () => page.evaluate(() => (window as unknown as { __gitRequests: { review: number; reviewDiff: number } }).__gitRequests)
+  const before = await requestCounts()
+
+  const expected = await page.evaluate(async () => {
+    const fixture = window as unknown as { __setTranscript: (taskId: string, entries: Entry[]) => void }
+    window.__setTaskState('task-1', 'working')
+    const entries: Entry[] = Array.from({ length: 1_000 }, (_, index) => ({
+      id: `bulk-${index}`, sequence: index,
+      kind: { type: 'agentText', data: { text: `previous message ${index}` } },
+    }))
+    let answer = ''
+    for (let index = 0; index < 20; index++) {
+      answer += `chunk-${index.toString().padStart(2, '0')} `
+      fixture.__setTranscript('task-1', [
+        ...entries,
+        { id: 'live-answer', sequence: entries.length, kind: { type: 'agentText', data: { text: answer } } },
+      ])
+      if (index === 9) window.dispatchEvent(new Event('release-large-diff'))
+      await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
+    }
+    return answer.trim()
+  })
+
+  const transcript = page.getByRole('region', { name: 'Transcript' })
+  await expect(transcript.locator('.entry')).toHaveCount(1_001)
+  await expect(transcript.locator('[data-entry-id="bulk-0"]')).toHaveText('previous message 0')
+  await expect(transcript.locator('[data-entry-id="bulk-999"]')).toHaveText('previous message 999')
+  await expect(transcript.locator('[data-entry-id="live-answer"]')).toHaveText(expected)
+  const diff = page.getByRole('region', { name: 'File diff', exact: true })
+  await expect(diff).toContainText('large diff line 00000')
+  await expect(diff).toContainText('large diff line 11999')
+  expect(await requestCounts()).toMatchObject({ review: before.review, reviewDiff: before.reviewDiff })
+})
+
+test('refreshes Git and Review on revision changes but not transcript snapshots', async ({ page }) => {
+  await page.goto('/')
+  const counts = () => page.evaluate(() => (window as unknown as { __gitRequests: { git: number; gitDiff: number; review: number; reviewDiff: number } }).__gitRequests)
+  const updateTranscript = () => page.evaluate(() => {
+    const fixture = window as unknown as { __setTranscript: (taskId: string, entries: Entry[]) => void }
+    fixture.__setTranscript('task-1', [{ id: 'stream', sequence: 0, kind: { type: 'agentText', data: { text: 'streamed update' } } }])
+  })
+  const updateRevision = (revision: number) => page.evaluate((value) => {
+    const fixture = window as unknown as { __setTaskRevision: (taskId: string, revision: number) => void }
+    fixture.__setTaskRevision('task-1', value)
+  }, revision)
+
+  await page.getByRole('tab', { name: 'Review', exact: true }).click()
+  await page.getByRole('region', { name: 'Task changes' }).getByRole('button', { name: 'src/main.rs', exact: true }).click()
+  await expect(page.getByRole('region', { name: 'File diff', exact: true })).toHaveText('fixture diff')
+  const reviewBefore = await counts()
+  await updateTranscript()
+  await expect(page.getByRole('region', { name: 'Transcript' })).toContainText('streamed update')
+  expect(await counts()).toMatchObject({ review: reviewBefore.review, reviewDiff: reviewBefore.reviewDiff })
+  await updateRevision(1_760_000_000_001)
+  await expect.poll(counts).toMatchObject({ review: reviewBefore.review + 1, reviewDiff: reviewBefore.reviewDiff + 1 })
+
+  await page.getByRole('tab', { name: 'Git', exact: true }).click()
+  await page.getByRole('region', { name: 'Git worktree' }).getByRole('button', { name: 'src/main.rs', exact: true }).click()
+  await expect(page.getByRole('region', { name: 'Unstaged diff', exact: true })).toHaveText('fixture diff')
+  const gitBefore = await counts()
+  await updateTranscript()
+  expect(await counts()).toMatchObject({ git: gitBefore.git, gitDiff: gitBefore.gitDiff })
+  await updateRevision(1_760_000_000_002)
+  await expect.poll(counts).toMatchObject({ git: gitBefore.git + 1, gitDiff: gitBefore.gitDiff + 1 })
 })
 
 test('reports Git failures in the toast while keeping retry controls', async ({ page }) => {

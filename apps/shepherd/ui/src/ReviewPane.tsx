@@ -1,12 +1,15 @@
-import { For, Show, createResource, createSignal } from 'solid-js'
+import { For, Show, createMemo, createResource, createSignal } from 'solid-js'
 
 import { reviewFileDiff, reviewSnapshot, type ReviewAction, type TaskDetail } from './bridge'
 import { GitDiffFile, GitDiffText } from './GitDiff'
 import { reportError } from './diagnostics'
 
 export function ReviewPane(props: { task: TaskDetail; queuedNote?: string; openFile: (path: string) => void; onAction: (action: ReviewAction) => Promise<void> }) {
+  const taskId = createMemo(() => props.task.id)
+  const revision = createMemo(() => props.task.updatedAt)
+  const worktreePath = createMemo(() => props.task.worktreePath)
   const [review, { refetch }] = createResource(
-    () => props.task.worktreePath ? [props.task.id, props.task.updatedAt] as const : false,
+    () => worktreePath() ? [taskId(), revision()] as const : false,
     ([taskId]) => reviewSnapshot(taskId),
   )
 
@@ -14,7 +17,7 @@ export function ReviewPane(props: { task: TaskDetail; queuedNote?: string; openF
   const [diff, { refetch: refetchDiff }] = createResource(
     () => {
       const path = selectedFile()
-      return path && props.task.worktreePath ? [props.task.id, props.task.updatedAt, path] as const : false
+      return path && worktreePath() ? [taskId(), revision(), path] as const : false
     },
     ([taskId, , path]) => reviewFileDiff(taskId, path),
   )
