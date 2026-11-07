@@ -532,7 +532,18 @@ impl Search<'_> {
                 self.result.incomplete = true;
                 break;
             }
-            let start = lowercase[..offset].chars().count().saturating_sub(60);
+            let mut lowercase_bytes = 0;
+            let mut original_chars = 0_usize;
+            for character in line.chars() {
+                let next =
+                    lowercase_bytes + character.to_lowercase().map(char::len_utf8).sum::<usize>();
+                if next > offset {
+                    break;
+                }
+                lowercase_bytes = next;
+                original_chars += 1;
+            }
+            let start = original_chars.saturating_sub(60);
             let excerpt = line.chars().skip(start).take(200).collect::<String>();
             self.result.matches.push(FileMatch {
                 path: relative.into(),
@@ -1133,6 +1144,39 @@ mod tests {
             search(FileSearchMode::Contents, "Néedle", false),
             Err(FileError::Cancelled)
         ));
+        Ok(())
+    }
+
+    #[test]
+    fn content_search_excerpt_tracks_unicode_lowercase_expansion()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        fs::write(
+            directory.path().join("unicode.txt"),
+            format!("{}NEEDLE followed by context", "İ".repeat(300)),
+        )?;
+        let result = search_files(
+            directory.path(),
+            FileSearchQuery {
+                mode: FileSearchMode::Contents,
+                query: "needle".into(),
+                show_dotfiles: false,
+            },
+            &AtomicBool::new(false),
+        )?;
+        let excerpt = result
+            .matches
+            .first()
+            .and_then(|hit| hit.excerpt.as_deref())
+            .ok_or("missing search excerpt")?;
+        assert!(excerpt.contains("NEEDLE followed by context"));
+        assert_eq!(
+            excerpt
+                .chars()
+                .take_while(|character| *character == 'İ')
+                .count(),
+            60
+        );
         Ok(())
     }
 

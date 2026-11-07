@@ -975,7 +975,10 @@ and the task header never overstates the tier.
   preview limits. Filename filtering searches the selected root as the user
   types. Submitted content searches run in the background and support cancel,
   and opening a result jumps to its line. Scans cap entries, content bytes and
-  results, and label incomplete results. A debounced watcher refreshes Git
+  results, and label incomplete results.
+  Content-search excerpts map lowercased offsets back to original characters,
+  including lowercase expansions, so long Unicode lines retain the match.
+  A debounced watcher refreshes Git
   badges for the selected root, including changes to the index and HEAD. A
   missing external Git metadata directory is skipped, while inspection errors
   are reported rather than silently disabling that part of the watcher. A
