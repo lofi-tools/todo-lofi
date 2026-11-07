@@ -2193,6 +2193,84 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn failed_collection_save_keeps_a_recoverable_task()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use crate::git::GitService;
+        use crate::harness::UnavailableHarnessFactory;
+        use crate::test_support::TestRepository;
+        use crate::{Command, CommandResult, Core, ReviewAction};
+
+        let repository = TestRepository::new()?;
+        let database = TestDatabase::new()?;
+        let store = TursoStore::open(&database.uri()).await?;
+        let project = Project::new(repository.path().to_path_buf());
+        let mut task = Task::draft(
+            project.id.clone(),
+            "Archived",
+            &repository.repository().git_dir,
+        );
+        GitService.create_worktree(
+            repository.repository(),
+            &task.proposed_worktree_path,
+            &task.proposed_branch,
+            "main",
+        )?;
+        task.worktree_path = Some(task.proposed_worktree_path.clone());
+        task.branch = Some(task.proposed_branch.clone());
+        task.base_branch = Some("main".into());
+        task.state = TaskState::Done;
+        task.updated_at = crate::projects::now_millis().saturating_sub(31 * 24 * 60 * 60 * 1000);
+        task.worktree_last_used_at = task.updated_at;
+        store.save_project(&project).await?;
+        store.save_task(&task).await?;
+        let tip =
+            GitService.checked_out_tip(&task.proposed_worktree_path, &task.proposed_branch)?;
+        {
+            let mut db = store.db.lock().await;
+            toasty::sql::statement("CREATE TRIGGER block_collection BEFORE UPDATE ON tasks WHEN NEW.worktree_path IS NULL BEGIN SELECT RAISE(ABORT, 'collection save blocked'); END").exec(&mut *db).await?;
+        }
+        let core = Core::load(Box::new(store), Box::new(UnavailableHarnessFactory)).await?;
+        assert!(!task.proposed_worktree_path.exists());
+        assert_eq!(core.archived_worktree_issues().len(), 1);
+        assert!(
+            core.archived_worktree_issues()
+                .first()
+                .ok_or("missing issue")?
+                .reason
+                .contains("collection save blocked")
+        );
+        {
+            let mut db = toasty::Db::builder()
+                .build(Turso::new(&database.uri())?.experimental_index_method(true))
+                .await?;
+            toasty::sql::statement("DROP TRIGGER block_collection")
+                .exec(&mut db)
+                .await?;
+        }
+        drop(core);
+        let mut core = Core::load(
+            Box::new(TursoStore::open(&database.uri()).await?),
+            Box::new(UnavailableHarnessFactory),
+        )
+        .await?;
+        assert_eq!(core.archived_worktree_issues().len(), 1);
+        let restored = core
+            .execute(Command::ReviewTask {
+                task_id: task.id.clone(),
+                action: ReviewAction::Reopen,
+            })
+            .await?;
+        assert!(
+            matches!(restored, CommandResult::TaskWorkspace(workspace) if workspace.task.state == TaskState::Review)
+        );
+        assert_eq!(
+            GitService.checked_out_tip(&task.proposed_worktree_path, &task.proposed_branch)?,
+            tip
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn failed_task_deletion_rolls_back_and_can_be_retried()
     -> Result<(), Box<dyn std::error::Error>> {
         let database = TestDatabase::new()?;
