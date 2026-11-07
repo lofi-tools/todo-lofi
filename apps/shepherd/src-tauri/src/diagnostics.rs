@@ -43,7 +43,7 @@ impl DiagnosticLog {
         #[cfg(unix)]
         {
             use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
+            options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
         }
         let mut file = options.open(&self.path)?;
         file.lock()?;
@@ -66,7 +66,14 @@ impl DiagnosticLog {
             .lock
             .lock()
             .map_err(|_| io::Error::other("diagnostic log lock poisoned"))?;
-        let file = match fs::File::open(&self.path) {
+        let mut options = OpenOptions::new();
+        options.read(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.custom_flags(libc::O_NOFOLLOW);
+        }
+        let file = match options.open(&self.path) {
             Ok(file) => file,
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
             Err(error) => return Err(error),
@@ -155,6 +162,28 @@ mod tests {
             details: String::new(),
         })?;
         assert_eq!(std::fs::metadata(path)?.permissions().mode() & 0o077, 0);
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn refuses_a_symlinked_log_file() -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let target = directory.path().join("other.txt");
+        let path = directory.path().join("errors.jsonl");
+        fs::write(&target, "unchanged")?;
+        std::os::unix::fs::symlink(&target, &path)?;
+        let log = DiagnosticLog::new(path);
+        let record = Diagnostic {
+            id: "fixture".into(),
+            time: "fixture".into(),
+            operation: "fixture".into(),
+            message: "fixture error".into(),
+            details: String::new(),
+        };
+        assert!(log.append(&record).is_err());
+        assert!(log.recent().is_err());
+        assert_eq!(fs::read_to_string(target)?, "unchanged");
         Ok(())
     }
 
