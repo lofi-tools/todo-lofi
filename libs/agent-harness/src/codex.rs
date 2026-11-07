@@ -2201,22 +2201,19 @@ fn spawn_stderr_reader(
     tokio::spawn(async move {
         let mut lines = acp_client::bounded_lines::BoundedLines::default();
         let mut bytes = [0u8; 4096];
-        let record = |line: acp_client::bounded_lines::BoundedLine| {
-            tracing::debug!(stream = "codex-stderr", "{}", line.text);
-            match tail.lock() {
-                Ok(mut tail) => {
-                    if tail.len() == STDERR_TAIL_LINES {
-                        tail.pop_front();
-                    }
-                    tail.push_back(line.text);
+        let record = |line: acp_client::bounded_lines::BoundedLine| match tail.lock() {
+            Ok(mut tail) => {
+                if tail.len() == STDERR_TAIL_LINES {
+                    tail.pop_front();
                 }
-                Err(poisoned) => {
-                    let mut tail = poisoned.into_inner();
-                    if tail.len() == STDERR_TAIL_LINES {
-                        tail.pop_front();
-                    }
-                    tail.push_back(line.text);
+                tail.push_back(line.text);
+            }
+            Err(poisoned) => {
+                let mut tail = poisoned.into_inner();
+                if tail.len() == STDERR_TAIL_LINES {
+                    tail.pop_front();
                 }
+                tail.push_back(line.text);
             }
         };
         loop {
@@ -2714,6 +2711,48 @@ mod tests {
         assert!(tail[0].len() < 5000 && tail[0].ends_with(" end"));
         assert_eq!(tail[1], "next");
         assert_eq!(tail[2], "partial");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn stderr_reader_does_not_log_agent_output() -> Result<(), Box<dyn std::error::Error>> {
+        #[derive(Clone)]
+        struct Writer(Arc<Mutex<Vec<u8>>>);
+        impl std::io::Write for Writer {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0
+                    .lock()
+                    .map_err(|error| std::io::Error::other(error.to_string()))?
+                    .extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let logs = Arc::new(Mutex::new(Vec::new()));
+        let writer = Writer(logs.clone());
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .without_time()
+            .with_max_level(tracing::Level::DEBUG)
+            .with_writer(move || writer.clone())
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+        tracing::debug!("fixture subscriber active");
+        let tail = Arc::new(Mutex::new(VecDeque::new()));
+        let task = spawn_stderr_reader(&b"fixture-private-value\n"[..], tail.clone(), None);
+        task.await?;
+        assert_eq!(
+            tail.lock()
+                .map_err(|error| error.to_string())?
+                .front()
+                .map(String::as_str),
+            Some("fixture-private-value")
+        );
+        let output = String::from_utf8(logs.lock().map_err(|error| error.to_string())?.clone())?;
+        assert!(output.contains("fixture subscriber active"));
+        assert!(!output.contains("fixture-private-value"));
         Ok(())
     }
     use crate::{Entry, EntryKind, Transcript};

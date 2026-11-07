@@ -1281,6 +1281,8 @@ placeholder tabs and no unearned state badges.
   when environment values are present, with local Codex and OpenCode fixtures.
   ACP connection, OpenCode cleanup and Codex exec warnings omit agent-controlled
   error text; a log-capture fixture checks the Codex exec warning.
+  Codex stderr is retained in the bounded diagnostic tail without logging its
+  contents; a debug-log fixture checks that agent output is not exposed.
   Other adapter-internal logs and live-adapter behavior remain to be audited.
   The headless agent-harness suite passed 87 tests (two live tests ignored) and
   the core suite passed 100 tests (three live tests ignored) on macOS after
