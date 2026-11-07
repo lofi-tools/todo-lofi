@@ -1260,6 +1260,11 @@ placeholder tabs and no unearned state badges.
   these confinement and environment changes.
 - [ ] Packaging and CI: macOS 13+, Ubuntu 24.04+, pinned Zig, Tauri build,
   platform smoke.
+  The local macOS debug app bundle declares macOS 13.0 in both Info.plist and
+  its executable build metadata. Its linker warned that cached `unicase` and
+  `libm` objects were built for macOS 14.0; rebuild from a clean target and run
+  the release checklist on macOS 13 before claiming compatibility. The terminal
+  uses the recorded Alacritty fallback rather than the planned Zig engine.
 - [ ] v2/GPUI explicitly not started until v1 is feature complete.
 
 ### Proof
