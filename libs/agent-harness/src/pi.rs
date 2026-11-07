@@ -86,7 +86,8 @@ struct ReplyState {
 
 impl PiRpc {
     pub async fn start(spec: &SpawnSpec) -> HarnessResult<(Self, PiSessionState)> {
-        let mut child = Command::new(&spec.program)
+        let mut command = Command::new(&spec.program);
+        command
             .args(&spec.args)
             .args(["--mode", "rpc"])
             .current_dir(&spec.cwd)
@@ -94,12 +95,13 @@ impl PiRpc {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .kill_on_drop(true)
-            .spawn()
-            .map_err(|source| HarnessError::Spawn {
-                program: spec.program.clone(),
-                source,
-            })?;
+            .kill_on_drop(true);
+        #[cfg(unix)]
+        command.process_group(0);
+        let mut child = command.spawn().map_err(|source| HarnessError::Spawn {
+            program: spec.program.clone(),
+            source,
+        })?;
         let (Some(stdin), Some(stdout), Some(stderr)) =
             (child.stdin.take(), child.stdout.take(), child.stderr.take())
         else {
@@ -134,10 +136,13 @@ impl PiRpc {
                     replies.closed = true;
                     replies.pending.clear();
                 }
-                if protocol_error.is_some()
-                    && let Err(error) = child.start_kill()
-                {
-                    tracing::debug!(%error, "could not stop Pi after an RPC framing error");
+                if protocol_error.is_some() {
+                    if let Err(error) = terminate(&child) {
+                        tracing::debug!(%error, "could not stop the Pi process group after an RPC error");
+                    }
+                    if let Err(error) = child.start_kill() {
+                        tracing::debug!(%error, "could not stop Pi after an RPC framing error");
+                    }
                 }
                 let status = match timeout(SHUTDOWN_TIMEOUT, child.wait()).await {
                     Ok(status) => status,
@@ -313,7 +318,7 @@ fn terminate(child: &Child) -> std::io::Result<()> {
     };
     let process = libc::pid_t::try_from(process).map_err(std::io::Error::other)?;
     // The supervisor still owns the unreaped child, so the OS cannot reuse its PID.
-    if unsafe { libc::kill(process, libc::SIGTERM) } == 0 {
+    if unsafe { libc::kill(-process, libc::SIGKILL) } == 0 {
         return Ok(());
     }
     let error = std::io::Error::last_os_error();
@@ -332,7 +337,11 @@ fn terminate(_child: &Child) -> std::io::Result<()> {
 impl Drop for PiRpc {
     fn drop(&mut self) {
         self.writer.abort();
-        self.supervisor.abort();
+        if let Some(request) = self.shutdown_request.take()
+            && request.send(()).is_err()
+        {
+            tracing::debug!("Pi already exited before shutdown");
+        }
     }
 }
 
@@ -501,6 +510,40 @@ mod tests {
         };
         assert!(error.contains("fixture startup failure"), "{error}");
         assert!(error.contains("23"), "{error}");
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn shutdown_and_drop_stop_pi_descendants() -> Result<(), Box<dyn std::error::Error>> {
+        for drop_transport in [false, true] {
+            let directory = tempfile::tempdir()?;
+            let script = directory.path().join("pi-child.sh");
+            std::fs::write(
+                &script,
+                r#"
+(sleep 1; printf survived > child-survived) &
+IFS= read -r state || exit 3
+state_id=$(printf '%s\n' "$state" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
+printf '{"type":"response","id":"%s","command":"get_state","success":true,"data":{"sessionId":"pi-fixture","sessionFile":null,"isStreaming":false,"isCompacting":false,"pendingMessageCount":0}}\n' "$state_id"
+while IFS= read -r line; do :; done
+"#,
+            )?;
+            let spec = SpawnSpec {
+                program: "/bin/sh".into(),
+                args: vec![script.to_string_lossy().into_owned()],
+                cwd: directory.path().to_owned(),
+                ..SpawnSpec::default()
+            };
+            let (rpc, _) = PiRpc::start(&spec).await?;
+            if drop_transport {
+                drop(rpc);
+            } else {
+                rpc.shutdown().await?;
+            }
+            tokio::time::sleep(Duration::from_millis(1500)).await;
+            assert!(!directory.path().join("child-survived").exists());
+        }
         Ok(())
     }
 
