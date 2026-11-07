@@ -333,6 +333,8 @@ pub struct AcpConnection {
     terminals: TerminalRegistry,
     /// Dropping this ends the connection and terminates the process group.
     shutdown: Option<oneshot::Sender<()>>,
+    supervision: Option<tokio::sync::oneshot::Receiver<Result<(), String>>>,
+    supervision_failure: Option<String>,
 }
 
 impl AcpConnection {
@@ -363,6 +365,38 @@ impl AcpConnection {
     /// End the connection now instead of waiting for the drop.
     pub fn close(mut self) {
         self.shutdown_now();
+    }
+
+    pub async fn close_and_wait(&mut self) -> Result<(), AcpError> {
+        self.close_and_wait_with_timeout(Duration::from_secs(5))
+            .await
+    }
+
+    async fn close_and_wait_with_timeout(&mut self, deadline: Duration) -> Result<(), AcpError> {
+        self.shutdown_now();
+        if let Some(error) = &self.supervision_failure {
+            return Err(AcpError::Protocol(error.clone()));
+        }
+        if let Some(supervision) = &mut self.supervision {
+            let result = tokio::time::timeout(deadline, supervision)
+                .await
+                .map_err(|_| {
+                    AcpError::Protocol(
+                        "ACP process did not stop before the shutdown deadline".into(),
+                    )
+                })?;
+            self.supervision = None;
+            let failure = match result {
+                Ok(Ok(())) => None,
+                Ok(Err(error)) => Some(error),
+                Err(_) => Some("ACP process supervision ended without a result".into()),
+            };
+            if let Some(error) = failure {
+                self.supervision_failure = Some(error.clone());
+                return Err(AcpError::Protocol(error));
+            }
+        }
+        Ok(())
     }
 
     pub fn close_terminals(&self) -> impl Future<Output = ()> + Send + 'static {
@@ -408,11 +442,7 @@ pub async fn connect_spawn(
     spawn: SpawnSpec,
     options: ConnectOptions,
 ) -> Result<AcpConnection, AcpError> {
-    connect_over(
-        move |events, stderr| ProjectAgent::new(spawn).with_stderr_reporting(events, stderr),
-        options,
-    )
-    .await
+    connect_spawn_inner(spawn, options, None).await
 }
 
 pub async fn connect_spawn_with_terminals(
@@ -420,16 +450,31 @@ pub async fn connect_spawn_with_terminals(
     options: ConnectOptions,
     terminals: Arc<dyn TerminalBackend>,
 ) -> Result<AcpConnection, AcpError> {
-    connect_over_with_terminals(
-        move |events, stderr| ProjectAgent::new(spawn).with_stderr_reporting(events, stderr),
-        options,
-        Some(terminals),
-    )
-    .await
+    connect_spawn_inner(spawn, options, Some(terminals)).await
 }
 
-/// Connect over any transport. Used by [`connect`] with a real process, and by
-/// tests with an in-process channel.
+async fn connect_spawn_inner(
+    spawn: SpawnSpec,
+    options: ConnectOptions,
+    terminals: Option<Arc<dyn TerminalBackend>>,
+) -> Result<AcpConnection, AcpError> {
+    let (completion, supervision) = tokio::sync::oneshot::channel();
+    let mut connection = connect_over_with_terminals(
+        move |events, stderr| {
+            ProjectAgent::new(spawn)
+                .with_stderr_reporting(events, stderr)
+                .with_supervision(completion)
+        },
+        options,
+        terminals,
+    )
+    .await?;
+    connection.supervision = Some(supervision);
+    Ok(connection)
+}
+
+/// Connect an in-process test transport.
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) async fn connect_over<T>(
     build_transport: impl FnOnce(
         tokio::sync::mpsc::UnboundedSender<AcpEvent>,
@@ -783,6 +828,8 @@ where
         stderr: stderr_buffer,
         terminals,
         shutdown: Some(shutdown_tx),
+        supervision: None,
+        supervision_failure: None,
     })
 }
 
@@ -823,6 +870,7 @@ pub struct ProjectAgent {
     spec: SpawnSpec,
     events: Option<tokio::sync::mpsc::UnboundedSender<AcpEvent>>,
     stderr: Option<Arc<Mutex<VecDeque<String>>>>,
+    supervision: Option<tokio::sync::oneshot::Sender<Result<(), String>>>,
 }
 
 impl ProjectAgent {
@@ -831,7 +879,16 @@ impl ProjectAgent {
             spec,
             events: None,
             stderr: None,
+            supervision: None,
         }
+    }
+
+    fn with_supervision(
+        mut self,
+        completion: tokio::sync::oneshot::Sender<Result<(), String>>,
+    ) -> Self {
+        self.supervision = Some(completion);
+        self
     }
 
     /// Report the child's stderr lines to the UI as they arrive.
@@ -983,13 +1040,15 @@ impl ConnectTo<Client> for ProjectAgent {
         // The SDK may drop the wire future on shutdown. Reaping and reporting
         // the subprocess must outlive that future.
         let (wire_finished, finished) = oneshot::channel();
-        let supervisor = tokio::spawn(supervise_agent(
-            child,
-            finished,
-            stderr_task,
-            self.events,
-            self.stderr,
-        ));
+        let supervisor = tokio::spawn(async move {
+            let result =
+                supervise_agent(child, finished, stderr_task, self.events, self.stderr).await;
+            if let Some(completion) = self.supervision
+                && completion.send(result).is_err()
+            {
+                tracing::debug!("ACP process supervision receiver closed");
+            }
+        });
         let result = ConnectTo::<Client>::connect_to(Lines::new(outgoing, incoming), client).await;
         if wire_finished.send(()).is_err() {
             tracing::debug!("ACP agent exited before the wire closed");
@@ -1007,7 +1066,7 @@ async fn supervise_agent(
     mut stderr_task: Option<tokio::task::JoinHandle<()>>,
     events: Option<tokio::sync::mpsc::UnboundedSender<AcpEvent>>,
     stderr: Option<Arc<Mutex<VecDeque<String>>>>,
-) {
+) -> Result<(), String> {
     let status = tokio::select! {
         status = child.status() => {
             // Give the wire time to deliver any protocol records already in the pipe.
@@ -1028,9 +1087,11 @@ async fn supervise_agent(
             }
         }
     };
+    let mut failure = None;
     let code = match status {
         Ok(status) => status.code(),
         Err(error) => {
+            failure = Some(format!("Could not stop or reap the ACP agent: {error}"));
             tracing::warn!(%error, "could not stop or reap the ACP agent");
             if let Some(events) = &events
                 && events
@@ -1060,6 +1121,10 @@ async fn supervise_agent(
         if let Err(error) = events.send(AcpEvent::Exited { code, stderr }) {
             tracing::debug!(%error, "ACP exit receiver closed");
         }
+    }
+    match failure {
+        Some(error) => Err(error),
+        None => Ok(()),
     }
 }
 
@@ -1107,6 +1172,51 @@ pub fn stderr_summary(lines: &[String]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn close_wait_retains_supervision_failure() -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let options = ConnectOptions {
+            roots: SessionRoots::new([directory.path().to_path_buf()]),
+            tool_permissions: ToolPermissions::default(),
+        };
+        let (mut connection, _) =
+            crate::fake_agent::connect_fake_agent(Default::default(), options).await?;
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        connection.supervision = Some(receiver);
+        sender
+            .send(Err("fixture shutdown failure".into()))
+            .map_err(|_| "receiver closed")?;
+        for _ in 0..2 {
+            let error = connection
+                .close_and_wait()
+                .await
+                .expect_err("failure must persist");
+            assert!(error.to_string().contains("fixture shutdown failure"));
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn close_wait_timeout_can_be_retried() -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let options = ConnectOptions {
+            roots: SessionRoots::new([directory.path().to_path_buf()]),
+            tool_permissions: ToolPermissions::default(),
+        };
+        let (mut connection, _) =
+            crate::fake_agent::connect_fake_agent(Default::default(), options).await?;
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        connection.supervision = Some(receiver);
+        let error = connection
+            .close_and_wait_with_timeout(Duration::from_millis(20))
+            .await
+            .expect_err("the supervisor is still running");
+        assert!(error.to_string().contains("shutdown deadline"));
+        sender.send(Ok(())).map_err(|_| "receiver closed")?;
+        connection.close_and_wait().await?;
+        Ok(())
+    }
 
     #[cfg(unix)]
     #[tokio::test]

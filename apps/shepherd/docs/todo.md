@@ -1206,9 +1206,11 @@ placeholder tabs and no unearned state badges.
   inspection. Codex exec, OpenCode's ACP fallback, Claude ACP, and stopping
   surviving processes remain.
   ACP supervision reports a failed process-group signal even if killing the
-  leader succeeds, with an injected-failure fixture. The ACP harness currently
-  closes asynchronously, so quit still does not wait for or propagate that
-  cleanup result; this must be addressed before treating ACP cleanup as verified.
+  leader succeeds, with an injected-failure fixture. ACP quit now waits for
+  process supervision and reports its failure; timeout retains the connection
+  for retry and a completed supervision failure remains visible. A local
+  subprocess fixture checks that shutdown waits for the child. A failed group
+  signal still needs a retryable process handle and descendant recovery.
 - [ ] 30-day archived-worktree collection, dirty skip, branch-tip recreation.
   Startup preserves dirty worktrees and lists collection failures with their
   reasons; clean collection retains the tip and prunes Git worktree metadata.

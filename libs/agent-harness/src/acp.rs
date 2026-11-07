@@ -318,9 +318,10 @@ impl AgentHarness for AcpHarness {
 
     async fn shutdown(&mut self) -> HarnessResult<()> {
         self.runtime = None;
-        if let Some(connection) = self.connection.take() {
+        if let Some(connection) = self.connection.as_mut() {
             connection.close_terminals().await;
-            connection.close();
+            connection.close_and_wait().await.map_err(acp_error)?;
+            self.connection = None;
             publish(
                 &self.sender,
                 HarnessEvent::Exited {
@@ -1673,6 +1674,43 @@ done
             }}))?,
         )?;
         configured_claude_session(&settings).await
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn shutdown_waits_for_the_acp_process_to_exit() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let directory = tempfile::tempdir()?;
+        let script = directory.path().join("acp-shutdown.sh");
+        std::fs::write(
+            &script,
+            r#"
+while IFS= read -r request; do
+    case "$request" in
+        *'"method":"initialize"'*)
+            id=$(printf '%s\n' "$request" | sed -nE 's/.*"id":("[^"]+"|[0-9]+).*/\1/p')
+            printf '{"jsonrpc":"2.0","id":%s,"result":{"protocolVersion":1}}\n' "$id";;
+    esac
+done
+sleep 0.1
+printf stopped > stopped
+"#,
+        )?;
+        let mut harness = AcpHarness::default();
+        harness
+            .start(SpawnSpec {
+                program: "/bin/sh".into(),
+                args: vec![script.to_string_lossy().into_owned()],
+                cwd: directory.path().to_owned(),
+                ..SpawnSpec::default()
+            })
+            .await?;
+        harness.shutdown().await?;
+        assert_eq!(
+            std::fs::read_to_string(directory.path().join("stopped"))?,
+            "stopped"
+        );
+        Ok(())
     }
 
     #[cfg(unix)]
