@@ -1,4 +1,14 @@
-import { Channel, invoke } from '@tauri-apps/api/core'
+import { Channel, invoke as nativeInvoke, type InvokeArgs, type InvokeOptions } from '@tauri-apps/api/core'
+import { reportError } from './diagnostics'
+
+async function invoke<T>(command: string, args?: InvokeArgs, options?: InvokeOptions): Promise<T> {
+  try {
+    return await nativeInvoke<T>(command, args, options)
+  } catch (failure) {
+    reportError(command, failure)
+    throw failure
+  }
+}
 
 /**
  * The IPC contract. These types mirror the core's snapshots exactly; the
@@ -861,8 +871,9 @@ export interface TextFile {
   truncated: boolean
 }
 
-export function listFiles(projectId: string, taskId: string | null, path: string, showDotfiles: boolean): Promise<DirectoryListing> {
-  return invoke('list_files', { projectId, taskId, path, showDotfiles })
+export function listFiles(projectId: string, taskId: string | null, path: string, showDotfiles: boolean, speculative = false): Promise<DirectoryListing> {
+  const args = { projectId, taskId, path, showDotfiles }
+  return speculative ? nativeInvoke('list_files', args) : invoke('list_files', args)
 }
 
 export function readWorkspaceFile(projectId: string, taskId: string | null, path: string, line: number | null): Promise<TextFile> {

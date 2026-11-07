@@ -11,6 +11,7 @@ mod codex_harness;
 mod config_files;
 #[cfg(any(test, debug_assertions))]
 mod dev_harness;
+mod diagnostics;
 mod file_actions;
 mod file_watch;
 mod keybindings;
@@ -137,6 +138,9 @@ pub fn run() -> Result<(), tauri::Error> {
                 Some(path) => PathBuf::from(path),
                 None => app.path().app_data_dir()?,
             };
+            app.manage(diagnostics::DiagnosticLog::new(
+                data_directory.join("logs/errors.jsonl"),
+            ));
             let config_directory = app.path().app_config_dir()?;
             let preference_directory = if override_directory.is_some() {
                 &data_directory
@@ -216,6 +220,8 @@ pub fn run() -> Result<(), tauri::Error> {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            diagnostics::record_diagnostic,
+            diagnostics::diagnostic_history,
             keybindings::command_registry,
             keybindings::set_keybinding,
             bridge::commands::agent_availability,

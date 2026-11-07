@@ -2206,6 +2206,38 @@ textarea {
   pointer-events: none;
 }
 
+.error-toast {
+  position: fixed;
+  z-index: 1000;
+  inset-block-start: 52px;
+  inset-inline-end: 16px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  max-width: min(440px, calc(100vw - 32px));
+  padding: 10px 12px;
+  border: 1px solid var(--error-border);
+  border-radius: 8px;
+  background: var(--surface-raised);
+  box-shadow: 0 6px 20px var(--menu-shadow);
+  color: var(--text);
+}
+
+.error-history {
+  max-height: min(70vh, 600px);
+  overflow: auto;
+}
+
+.error-history details {
+  padding: 8px;
+  border-bottom: 1px solid var(--border);
+}
+
+.error-history pre {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 .files-search__excerpt {
   display: block;
   color: var(--text-muted);

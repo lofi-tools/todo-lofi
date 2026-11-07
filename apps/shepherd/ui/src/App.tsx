@@ -23,6 +23,8 @@ import { SEND_ACCENTS, SettingsPane } from './SettingsPane'
 import { FreebuffPane, TerminalPane, type TerminalCommands } from './TerminalPane'
 import { TaskSearch } from './TaskSearch'
 import { ReviewArchiveDialog, TaskRows } from './TaskRows'
+import { ErrorNotifications } from './ErrorNotifications'
+import { reportError } from './diagnostics'
 
 type CoreEvent = bridge.Event
 type TerminalBell = Extract<CoreEvent, { type: 'terminalBell' }>['data']
@@ -363,7 +365,9 @@ export function App() {
   const [scanning, setScanning] = createSignal(false)
   const [scanError, setScanError] = createSignal<string | null>(null)
   const [importNote, setImportNote] = createSignal<string | null>(null)
-  const [error, setError] = createSignal<string | null>(null)
+  function setError(message: string | null) {
+    if (message) reportError('workspace', message)
+  }
   const [projectAttachmentLimit] = createResource(
     () => {
       const project = selectedProject()
@@ -1525,18 +1529,9 @@ export function App() {
           )}
         </Show>
 
-        <Show when={error()}>
-          {(message) => (
-            <div class="banner banner--error" role="alert">
-              <span>{message()}</span>
-              <button type="button" class="banner__quiet" onClick={() => setError(null)}>
-                Dismiss
-              </button>
-            </div>
-          )}
-        </Show>
       </div>
       <footer class="status-bar" aria-label="Status">
+        <ErrorNotifications />
         <span>{agentActivity(workspace())}</span>
         <Dot />
         <span>{runningCount()} {runningCount() === 1 ? 'task' : 'tasks'} running</span>

@@ -604,6 +604,7 @@ test.beforeEach(async ({ context }) => {
             return 'fixture diff'
           case 'list_files': {
             fileListings.push(args.path)
+            if (options.has('file-list-error')) throw { message: 'Unknown error', cause: { message: 'Permission denied opening workspace' }, code: 'files' }
             if (options.has('slow-folder') && args.path === 'src') {
               await new Promise<void>((resolve) => window.addEventListener('release-folder-listing', () => resolve(), { once: true }))
             }
@@ -929,6 +930,14 @@ test.beforeEach(async ({ context }) => {
             return null
           case 'quit':
             return { interruptedTasks: 0, liveTerminals: 0 }
+          case 'record_diagnostic': {
+            const records = JSON.parse(localStorage.getItem('fixture.diagnostics') ?? '[]')
+            records.push(args.record)
+            localStorage.setItem('fixture.diagnostics', JSON.stringify(records))
+            return null
+          }
+          case 'diagnostic_history':
+            return JSON.parse(localStorage.getItem('fixture.diagnostics') ?? '[]')
           default:
             return null
         }
@@ -1628,6 +1637,24 @@ test('shows ignored entries with dim monochrome icons', async ({ page }) => {
   const folder = files.getByRole('button', { name: 'build' })
   await folder.click()
   await expect(files.getByRole('button', { name: 'output.txt' })).toHaveCSS('color', 'rgb(77, 70, 110)')
+})
+
+test('shows file errors as temporary toasts and keeps diagnostic history', async ({ page }) => {
+  await page.goto('/?file-list-error')
+  await page.getByRole('tab', { name: 'Files' }).click()
+  const toast = page.getByRole('alert').filter({ hasText: 'Permission denied opening workspace' })
+  await expect(toast).toBeVisible()
+  await toast.getByRole('button', { name: 'Dismiss error' }).click()
+  await expect(toast).toHaveCount(0)
+  await page.getByRole('button', { name: 'Error history' }).click()
+  const history = page.getByRole('dialog', { name: 'Error history' })
+  await history.getByText('Permission denied opening workspace', { exact: true }).click()
+  await expect(history).toContainText('list_files')
+  await expect(history).toContainText('Unknown error')
+  await expect(history).toContainText('Code: files')
+  await page.goto('/')
+  await page.getByRole('button', { name: 'Error history' }).click()
+  await expect(page.getByRole('dialog', { name: 'Error history' })).toContainText('Permission denied opening workspace')
 })
 
 test('filters by name, cancels content searches, and opens matches at their line', async ({ page }) => {

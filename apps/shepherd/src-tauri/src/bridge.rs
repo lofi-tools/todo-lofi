@@ -50,6 +50,8 @@ use crate::terminal_screen::{Screen, SearchDirection, TerminalAppearance, Termin
 pub struct BridgeError {
     code: &'static str,
     message: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    causes: Vec<String>,
     #[serde(rename = "quitConfirmation", skip_serializing_if = "Option::is_none")]
     quit_confirmation: Option<QuitConfirmation>,
 }
@@ -72,14 +74,26 @@ impl BridgeError {
         Self {
             code,
             message: message.into(),
+            causes: Vec::new(),
             quit_confirmation: None,
         }
     }
 }
 
+fn error_causes(error: &(dyn std::error::Error + 'static)) -> Vec<String> {
+    let mut causes = Vec::new();
+    let mut source = error.source();
+    while let Some(error) = source {
+        causes.push(error.to_string());
+        source = error.source();
+    }
+    causes
+}
+
 impl From<CoreError> for BridgeError {
     fn from(error: CoreError) -> Self {
         let mut bridge_error = Self::new("core", error.to_string());
+        bridge_error.causes = error_causes(&error);
         if let CoreError::QuitConfirmationRequired {
             live_tasks,
             live_terminals,
@@ -96,7 +110,9 @@ impl From<CoreError> for BridgeError {
 
 impl From<files::FileError> for BridgeError {
     fn from(error: files::FileError) -> Self {
-        Self::new("files", error.to_string())
+        let mut bridge_error = Self::new("files", error.to_string());
+        bridge_error.causes = error_causes(&error);
+        bridge_error
     }
 }
 
@@ -2051,7 +2067,15 @@ pub mod commands {
     ) -> Result<DirectoryListing, BridgeError> {
         let root = state.files_directory(project_id, task_id).await?;
         Ok(tokio::task::spawn_blocking(move || {
-            files::list_directory(&root, Path::new(&path), show_dotfiles)
+            files::list_directory(&root, Path::new(&path), show_dotfiles).map_err(|error| {
+                let mut error = BridgeError::from(error);
+                error.message = format!(
+                    "Could not list {}: {}",
+                    root.join(&path).display(),
+                    error.message
+                );
+                error
+            })
         })
         .await
         .map_err(|error| {

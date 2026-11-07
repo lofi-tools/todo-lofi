@@ -117,6 +117,9 @@ current layout and give future changes a point of comparison.
   For a task worktree, show its current branch and changed file count as Git
   reports them. Show **Detached HEAD** when detached. The native title names
   the active project and adds a working-count suffix while any task is live.
+- Show runtime errors in a temporary floating toast above the workspace. Provide
+  **Error history** in the status bar to inspect earlier messages and their
+  operation, timestamp, identifier, and diagnostic details.
 
 ## Projects sidebar and settings
 

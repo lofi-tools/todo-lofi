@@ -2,6 +2,7 @@ import { For, Show, createEffect, createMemo, createResource, createSignal, onCl
 
 import { actOnWorkspaceFile, cancelFileSearch, listFiles, readWorkspaceFile, reserveFileSearch, searchWorkspaceFiles, watchWorkspaceFiles, type DirectoryListing, type FileAction, type FileChange, type FileSearchQuery, type FileSearchResult, type WorkspaceFileEntry } from './bridge'
 import iconTheme from './charmed-icons.json'
+import { reportError } from './diagnostics'
 
 interface FileLocation {
   projectId: string
@@ -66,12 +67,12 @@ function FileBrowser(props: FileLocation & { showDotfiles: boolean; initialPath?
   let disposed = false
   onCleanup(() => { disposed = true })
 
-  function loadDirectory(path: string, showDotfiles: boolean, revision: number): Promise<DirectoryListing> {
+  function loadDirectory(path: string, showDotfiles: boolean, revision: number, speculative = false): Promise<DirectoryListing> {
     const version = `${showDotfiles}:${revision}`
     if (cacheVersion !== version) { directories.clear(); cacheVersion = version }
     const cached = directories.get(path)
     if (cached) return cached.promise
-    const entry: CachedDirectory = { promise: listFiles(props.projectId, props.taskId, path, showDotfiles) }
+    const entry: CachedDirectory = { promise: listFiles(props.projectId, props.taskId, path, showDotfiles, speculative) }
     directories.set(path, entry)
     entry.promise.then((value) => { entry.value = value }, () => {
       if (directories.get(path) === entry) directories.delete(path)
@@ -90,7 +91,7 @@ function FileBrowser(props: FileLocation & { showDotfiles: boolean; initialPath?
       while (!disposed && showDotfiles === props.showDotfiles && revision === treeRevision() && next < queue.length && next < 128) {
         const item = queue[next++]
         try {
-          const child = await loadDirectory(item.path, showDotfiles, revision)
+          const child = await loadDirectory(item.path, showDotfiles, revision, true)
           if (item.depth < 2) queue.push(...child.entries.filter((entry) => entry.directory).map((entry) => ({ path: entry.path, depth: item.depth + 1 })))
         } catch (error) {
           console.debug('Could not preload folder', item.path, error)
@@ -110,7 +111,7 @@ function FileBrowser(props: FileLocation & { showDotfiles: boolean; initialPath?
     try {
       await loadDirectory(path, props.showDotfiles, treeRevision())
     } catch (error) {
-      console.debug('Could not open folder', path, error)
+      reportError('list_files', error)
     }
     if (!disposed && request === navigation) setOpenPath(path)
   }
@@ -279,7 +280,6 @@ function FolderContents(props: FolderProps & { path: string }) {
   return (
     <>
       <Show when={listing.loading && !listing.latest && !props.cachedDirectory(props.path, props.showDotfiles, props.revision)}><p class="empty empty--tight" role="status">Loading files…</p></Show>
-      <Show when={listing.error}>{(error) => <p class="error" role="alert">{failureMessage(error())}</p>}</Show>
       <Show when={!listing.error && (listing.latest ?? props.cachedDirectory(props.path, props.showDotfiles, props.revision))}>
         {(current) => <>
           <Show when={current().entries.length} fallback={<p class="empty empty--tight">No files in this folder.</p>}>
@@ -386,7 +386,6 @@ function FileViewer(props: FileLocation & FileSelection) {
       </div>
       <Show when={actionError()}>{(message) => <p class="error" role="alert">{message()}</p>}</Show>
       <Show when={file.loading}><p class="empty empty--tight" role="status">Opening file…</p></Show>
-      <Show when={file.error}>{(error) => <p class="error" role="alert">{failureMessage(error())}</p>}</Show>
       <Show when={!file.error && file()}>
         {(current) => <>
           <Show when={current().lines.length} fallback={<p class="empty empty--tight">Empty file.</p>}>

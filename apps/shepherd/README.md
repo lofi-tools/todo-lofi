@@ -45,6 +45,12 @@ Set `SHEPHERD_DEV_DATA_DIR` to an absolute path when exercising the debug app
 with a separate project list and database. Set `SHEPHERD_DEV_PROJECT_ROOT`
 to point the debug project picker at a fixture directory.
 
+Runtime error toasts link to **Error history** in the status bar. The structured
+log is `logs/errors.jsonl` in the active data directory (normally
+`.cache/test-db/logs/errors.jsonl` for `shep`). Use `tail -F` on that file to
+follow new diagnostics; the `shepherd-debug` repository skill describes the
+investigation workflow.
+
 The native terminal smoke uses a disposable Git project, database and scripted
 agent in a temporary directory under `.cache/test-db/`. It requires `python3`.
 The full suite also requires `vim`, `less` and `fzf`.

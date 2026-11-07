@@ -172,10 +172,6 @@ export function ProjectPicker(props: ProjectPickerProps) {
           }}
         />
 
-        <Show when={props.error}>
-          {(message) => <p class="empty">{message()}</p>}
-        </Show>
-
         <Show when={!props.error}>
           <Show
             when={visible().length > 0}
