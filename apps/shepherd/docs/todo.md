@@ -1165,8 +1165,10 @@ placeholder tabs and no unearned state badges.
   Codex app-server and OpenCode's native server now run in their own process
   groups and stop those groups on normal shutdown; local fixtures check that
   descendants cannot outlive shutdown. OpenCode also stops its group on a
-  disconnected turn. Startup-failure cleanup still needs verification.
-  Agent process identities and stopping surviving processes remain.
+  disconnected turn. OpenCode stops the process group if server initialization
+  fails or is cancelled, and on subscription failure; local fixtures cover
+  initialization failure and cancellation. Subscription cancellation, agent
+  process identities and stopping surviving processes remain.
 - [ ] 30-day archived-worktree collection, dirty skip, branch-tip recreation.
   Startup preserves dirty worktrees and lists collection failures with their
   reasons; clean collection retains the tip and prunes Git worktree metadata.

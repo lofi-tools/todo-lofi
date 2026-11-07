@@ -343,7 +343,14 @@ impl AgentHarness for OpenCodeHarness {
         require_absolute_executable(Path::new(&spec.program))?;
         let native = async {
             let server = OpenCodeServer::start(&spec).await?;
-            server.subscribe().await?;
+            if let Err(error) = server.subscribe().await {
+                if let Err(cleanup) = server.shutdown().await {
+                    return Err(HarnessError::Protocol(format!(
+                        "OpenCode subscription failed: {error}; cleanup failed: {cleanup}"
+                    )));
+                }
+                return Err(error);
+            }
             Ok::<_, HarnessError>(server)
         };
         let server = match native.await {
@@ -1021,6 +1028,23 @@ fn server_command(spec: &SpawnSpec, directory: &str, password: &str) -> Command 
     command
 }
 
+#[cfg(unix)]
+struct StartupProcessGroup(Option<libc::pid_t>);
+
+#[cfg(unix)]
+impl Drop for StartupProcessGroup {
+    fn drop(&mut self) {
+        if let Some(group) = self.0.take()
+            && unsafe { libc::killpg(group, libc::SIGKILL) } != 0
+        {
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() != Some(libc::ESRCH) {
+                tracing::warn!(%error, "could not stop OpenCode startup process group");
+            }
+        }
+    }
+}
+
 async fn stop_server(child: &mut tokio::process::Child) -> std::io::Result<()> {
     #[cfg(unix)]
     let group_error = child
@@ -1070,6 +1094,9 @@ impl OpenCodeServer {
                 program: spec.program.clone(),
                 source,
             })?;
+        #[cfg(unix)]
+        let mut startup_group =
+            StartupProcessGroup(child.id().and_then(|id| libc::pid_t::try_from(id).ok()));
         let stdout = child.stdout.take().ok_or_else(|| {
             HarnessError::Protocol("OpenCode did not provide a startup pipe".into())
         })?;
@@ -1144,6 +1171,10 @@ impl OpenCodeServer {
         let health = response_json(request("/api/info")).await?;
         let api: Api = response_json(request("/openapi.json")).await?;
         let probe = api.probe(health)?;
+        #[cfg(unix)]
+        {
+            startup_group.0 = None;
+        }
         Ok(Self {
             child: Arc::new(AsyncMutex::new(child)),
             client,
@@ -1437,6 +1468,58 @@ fn protocol_error(context: &str, error: impl std::fmt::Display) -> HarnessError 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cancelled_native_start_stops_descendants() -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = tempfile::tempdir()?;
+        let script = directory.path().join("opencode");
+        std::fs::write(
+            &script,
+            "#!/bin/sh\n(sleep 1; printf escaped > escaped) &\nprintf ready > ready\nsleep 30\n",
+        )?;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700))?;
+        let spec = SpawnSpec {
+            program: script.to_string_lossy().into_owned(),
+            cwd: directory.path().to_owned(),
+            ..SpawnSpec::default()
+        };
+        let start = tokio::spawn(async move { OpenCodeServer::start(&spec).await });
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while !directory.path().join("ready").exists() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await?;
+        start.abort();
+        assert!(start.await.is_err_and(|error| error.is_cancelled()));
+        tokio::time::sleep(Duration::from_millis(1300)).await;
+        assert!(!directory.path().join("escaped").exists());
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn failed_native_start_stops_descendants() -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = tempfile::tempdir()?;
+        let script = directory.path().join("opencode");
+        std::fs::write(
+            &script,
+            "#!/bin/sh\n(sleep 1; printf escaped > escaped) &\nprintf 'server listening on invalid\\n'\nsleep 30\n",
+        )?;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700))?;
+        let spec = SpawnSpec {
+            program: script.to_string_lossy().into_owned(),
+            cwd: directory.path().to_owned(),
+            ..SpawnSpec::default()
+        };
+        assert!(OpenCodeServer::start(&spec).await.is_err());
+        tokio::time::sleep(Duration::from_millis(1300)).await;
+        assert!(!directory.path().join("escaped").exists());
+        Ok(())
+    }
 
     #[cfg(unix)]
     #[tokio::test]
