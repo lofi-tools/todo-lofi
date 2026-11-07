@@ -25,7 +25,7 @@ use tokio::io::{
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::sync::{Mutex as AsyncMutex, mpsc, oneshot};
 use tokio::task::JoinHandle;
-use tokio::time::timeout;
+use tokio::time::{Instant, timeout, timeout_at};
 
 use crate::{
     AgentDiagnostics, AgentHarness, ApprovalId, ApprovalRequest, Capabilities, Decision, DeltaKind,
@@ -1641,7 +1641,7 @@ fn spawn_exec_waiter(
                 }
             },
         };
-        let cancelled = outcome.is_none() && protocol_error.is_none();
+        let mut cancelled = outcome.is_none() && protocol_error.is_none();
         let status = match outcome {
             Some(status) => status,
             None => {
@@ -1662,30 +1662,20 @@ fn spawn_exec_waiter(
         };
 
         if !reader_finished {
-            loop {
-                let previous = progress.load(Ordering::Relaxed);
-                match timeout(Duration::from_secs(1), &mut reader).await {
-                    Ok(Ok(Ok(()))) => break,
-                    Ok(Ok(Err(error))) => {
-                        protocol_error = Some(error);
-                        break;
-                    }
-                    Ok(Err(error)) => {
-                        protocol_error = Some(format!("Codex exec reader failed: {error}"));
-                        break;
-                    }
-                    Err(_) if !cancelled && progress.load(Ordering::Relaxed) != previous => {
-                        continue;
-                    }
-                    Err(_) => {
-                        reader.abort();
-                        if !cancelled {
-                            protocol_error = Some(
-                                "Codex exec output did not close after the process exited".into(),
-                            );
-                        }
-                        break;
-                    }
+            match drain_exec_reader(
+                &mut reader,
+                &progress,
+                &mut kill,
+                cancelled,
+                Duration::from_secs(1),
+                Duration::from_secs(10),
+            )
+            .await
+            {
+                Ok(interrupted) => cancelled |= interrupted,
+                Err(error) if !cancelled => protocol_error = Some(error),
+                Err(error) => {
+                    tracing::debug!(%error, "Codex exec output stopped during cancellation")
                 }
             }
         }
@@ -1736,6 +1726,41 @@ fn spawn_exec_waiter(
             tracing::debug!("the core stopped listening to codex events");
         }
     })
+}
+
+async fn drain_exec_reader(
+    reader: &mut JoinHandle<Result<(), String>>,
+    progress: &AtomicU64,
+    kill: &mut oneshot::Receiver<()>,
+    cancelled: bool,
+    idle_timeout: Duration,
+    total_timeout: Duration,
+) -> Result<bool, String> {
+    let deadline = Instant::now() + total_timeout;
+    loop {
+        let previous = progress.load(Ordering::Relaxed);
+        let next_check = (Instant::now() + idle_timeout).min(deadline);
+        let result = tokio::select! {
+            result = timeout_at(next_check, &mut *reader) => result,
+            _ = &mut *kill, if !cancelled => {
+                reader.abort();
+                return Ok(true);
+            }
+        };
+        match result {
+            Ok(Ok(result)) => return result.map(|()| false),
+            Ok(Err(error)) => return Err(format!("Codex exec reader failed: {error}")),
+            Err(_) if Instant::now() >= deadline => {
+                reader.abort();
+                return Err("Codex exec output exceeded the post-exit drain limit".into());
+            }
+            Err(_) if !cancelled && progress.load(Ordering::Relaxed) != previous => continue,
+            Err(_) => {
+                reader.abort();
+                return Err("Codex exec output did not close after the process exited".into());
+            }
+        }
+    }
 }
 
 fn spawn_exec_reader(
@@ -3787,6 +3812,58 @@ exit 0
             }
         )));
         harness.shutdown().await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn exec_post_exit_drain_has_a_limit_even_with_continuous_progress()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let progress = Arc::new(AtomicU64::new(0));
+        let (_kill_sender, mut kill) = oneshot::channel();
+        let mut reader: JoinHandle<Result<(), String>> = tokio::spawn({
+            let progress = progress.clone();
+            async move {
+                loop {
+                    progress.fetch_add(1, Ordering::Relaxed);
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            }
+        });
+        let result = drain_exec_reader(
+            &mut reader,
+            &progress,
+            &mut kill,
+            false,
+            Duration::from_millis(80),
+            Duration::from_millis(250),
+        )
+        .await;
+        assert!(matches!(result, Err(error) if error.contains("post-exit drain limit")));
+        assert!(reader.await.is_err_and(|error| error.is_cancelled()));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cancellation_interrupts_the_post_exit_drain() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let progress = AtomicU64::new(0);
+        let (sender, mut kill) = oneshot::channel();
+        let mut reader = tokio::spawn(std::future::pending::<Result<(), String>>());
+        sender
+            .send(())
+            .map_err(|()| "cancellation receiver closed")?;
+        assert!(
+            drain_exec_reader(
+                &mut reader,
+                &progress,
+                &mut kill,
+                false,
+                Duration::from_secs(1),
+                Duration::from_secs(10)
+            )
+            .await?
+        );
+        assert!(reader.await.is_err_and(|error| error.is_cancelled()));
         Ok(())
     }
 

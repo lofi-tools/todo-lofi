@@ -1189,8 +1189,9 @@ placeholder tabs and no unearned state badges.
   and other buffer limits still need review. Codex app-server, exec and
   handshake protocol lines have the same limit; oversized exec output fails
   the turn and stops its process. Exec keeps draining output while it makes
-  progress after process exit, and fails the turn if the output pipe stalls
-  instead of reporting incomplete output as successful. Codex version and help
+  progress after process exit, with a 10-second limit and prompt cancellation.
+  It fails the turn if the output pipe stalls or exceeds that limit instead of
+  reporting incomplete output as successful. Codex version and help
   probes limit both stdout and stderr and time out if the command does not
   finish. ACP keeps
   only 64 unread stderr notifications while retaining its latest diagnostic
