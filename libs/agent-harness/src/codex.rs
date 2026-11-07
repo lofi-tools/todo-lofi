@@ -202,17 +202,13 @@ async fn capture_probe_output(
         HarnessError::Protocol(format!("Codex {description} stderr was not captured"))
     })?;
     let capture = async {
-        let (stdout, stderr, status) = tokio::try_join!(
+        let (stdout, stderr) = tokio::try_join!(
             read_probe_stream(stdout, description, "stdout"),
             read_probe_stream(stderr, description, "stderr"),
-            async {
-                child.0.wait().await.map_err(|error| {
-                    HarnessError::Protocol(format!(
-                        "Could not wait for Codex {description}: {error}"
-                    ))
-                })
-            },
         )?;
+        let status = child.0.wait().await.map_err(|error| {
+            HarnessError::Protocol(format!("Could not wait for Codex {description}: {error}"))
+        })?;
         Ok(std::process::Output {
             status,
             stdout,
@@ -3417,6 +3413,31 @@ done
             tokio::time::sleep(Duration::from_millis(1300)).await;
             assert!(!directory.path().join("escaped").exists());
         }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn probe_timeout_stops_pipe_holding_descendant_after_leader_exits()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = TempDir::new()?;
+        let stub = write_stub(
+            &directory,
+            "codex-probe-exit.sh",
+            "#!/bin/sh\n(sleep 1; printf escaped > escaped) &\nexit 0\n",
+        );
+        assert!(
+            capture_probe_output(
+                &stub,
+                directory.path(),
+                &[],
+                "fixture",
+                Duration::from_millis(300)
+            )
+            .await
+            .is_err()
+        );
+        tokio::time::sleep(Duration::from_millis(1300)).await;
+        assert!(!directory.path().join("escaped").exists());
         Ok(())
     }
 

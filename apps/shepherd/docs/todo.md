@@ -1223,7 +1223,8 @@ placeholder tabs and no unearned state badges.
   reporting incomplete output as successful. Codex version and help
   probes limit both stdout and stderr and time out if the command does not
   finish. Probe processes use isolated groups, with local fixtures for cleanup
-  after a handshake or timeout while the leader remains alive. ACP keeps
+  after a handshake or timeout. A timeout also stops a pipe-holding descendant
+  when the leader has exited, before reaping the leader. ACP keeps
   only 64 unread stderr notifications while retaining its latest diagnostic
   tail. ACP terminal output honors smaller requested limits and caps larger
   requests at 1 MiB per terminal. ACP terminal output has a shared 64-event
