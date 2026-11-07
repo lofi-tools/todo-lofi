@@ -99,18 +99,13 @@ impl SearchQuery {
             (SearchField::Project, project),
         ] {
             if let Some((start, word)) = words_with_offsets(text).find(|(_, word)| {
-                let word = lowercase(word);
                 terms.iter().enumerate().any(|(index, term)| {
-                    if self.prefix && index + 1 == terms.len() {
-                        word.starts_with(term)
-                    } else {
-                        word == *term
-                    }
+                    matches_term(word, term, self.prefix && index + 1 == terms.len())
                 })
             }) {
                 return SearchSnippet {
                     before: leading_context(&text[..start]),
-                    matched: word.to_owned(),
+                    matched: trailing_context(word),
                     after: trailing_context(&text[start + word.len()..]),
                     field,
                 };
@@ -140,6 +135,17 @@ fn words_with_offsets(text: &str) -> impl Iterator<Item = (usize, &str)> {
 
 fn lowercase(word: &str) -> String {
     word.chars().flat_map(char::to_lowercase).collect()
+}
+
+fn matches_term(word: &str, term: &str, prefix: bool) -> bool {
+    let mut folded = word.chars().flat_map(char::to_lowercase);
+    if !term
+        .chars()
+        .all(|character| folded.next() == Some(character))
+    {
+        return false;
+    }
+    prefix || folded.next().is_none()
 }
 
 fn prefix_end(word: &str) -> Option<String> {
@@ -200,5 +206,29 @@ pub(crate) fn entry_text(kind: &EntryKind) -> String {
             .collect::<Vec<_>>()
             .join(" "),
         EntryKind::Usage { .. } => String::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn search_snippet_bounds_long_matches_and_preserves_unicode() -> Result<(), &'static str> {
+        let query = SearchQuery::parse("écl").ok_or("missing query")?;
+        let entry = format!("before ÉCL{} after", "界".repeat(10_000));
+        let snippet = query.snippet(&entry, "task", "project");
+        assert_eq!(snippet.before, "before ");
+        assert_eq!(snippet.matched, format!("ÉCL{}…", "界".repeat(62)));
+        assert_eq!(snippet.after, " after");
+        Ok(())
+    }
+
+    #[test]
+    fn case_folded_matching_distinguishes_prefixes_and_full_words() {
+        assert!(matches_term("İSTANBUL", "i\u{307}st", true));
+        assert!(!matches_term("İSTANBUL", "i\u{307}st", false));
+        assert!(matches_term("İSTANBUL", "i\u{307}stanbul", false));
+        assert!(!matches_term("İSTANBUL", "istanbul", true));
     }
 }

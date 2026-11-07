@@ -1284,6 +1284,9 @@ placeholder tabs and no unearned state badges.
   OpenCode shutdown retains its server when stopping it fails; an injected
   group-signal failure verifies the process remains available for a retry.
 - [ ] Bounded transcript, stderr, search and frame buffers.
+  Search snippets cap the displayed matching word at 65 characters and compare
+  case-folded text without allocating a copy of an arbitrarily long word;
+  fixtures cover long Unicode matches and exact versus prefix matching.
   Codex, OpenCode and ACP stderr readers cap each line while draining the
   process, including newline-free output. OpenCode omits overlong lines to
   avoid exposing fragments of its authentication secret. ACP protocol lines
