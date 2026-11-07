@@ -1377,7 +1377,8 @@ placeholder tabs and no unearned state badges.
   ignored), and the desktop-backend suite passed 95 tests (one local throughput
   benchmark ignored) on macOS. The headless Chromium suite passed 110 tests
   after correcting the search-keycap expectations and recovered frame error
-  handling. No live agent or UI window was used.
+  handling; UI typechecking and the production frontend build also passed.
+  No live agent or UI window was used.
 - [ ] Packaging and CI: macOS 13+, Ubuntu 24.04+, pinned Zig, Tauri build,
   platform smoke.
   The local macOS debug app bundle declares macOS 13.0 in both Info.plist and
