@@ -1,6 +1,7 @@
 import { For, Show, createEffect, createSignal, onCleanup } from 'solid-js'
 
 import { openProjectPreview, type AttachmentLimit } from './bridge'
+import { reportError } from './diagnostics'
 
 interface PreviewPaneProps {
   projectId: string
@@ -68,7 +69,6 @@ function readSelection(data: unknown, origin: string): ElementSelection | undefi
 function ProjectPreview(props: PreviewPaneProps & { url: string }) {
   const [revision, setRevision] = createSignal(1)
   const [opening, setOpening] = createSignal(false)
-  const [error, setError] = createSignal('')
   const [annotationError, setAnnotationError] = createSignal('')
   const [selecting, setSelecting] = createSignal<'waiting' | 'ready'>()
   const [selection, setSelection] = createSignal<PreviewSelection>()
@@ -149,7 +149,7 @@ function ProjectPreview(props: PreviewPaneProps & { url: string }) {
       await props.onAddToPrompt(queued)
       setAnnotations((current) => current.filter((annotation) => !queued.includes(annotation)))
     } catch (failure) {
-      setAnnotationError(messageFor(failure))
+      reportError('add_preview_annotations', failure)
     } finally {
       setAdding(false)
     }
@@ -157,11 +157,10 @@ function ProjectPreview(props: PreviewPaneProps & { url: string }) {
 
   async function open() {
     setOpening(true)
-    setError('')
     try {
       await openProjectPreview(props.projectId)
     } catch (failure) {
-      setError(messageFor(failure))
+      reportError('open_project_preview', failure)
     } finally {
       setOpening(false)
     }
@@ -187,7 +186,6 @@ function ProjectPreview(props: PreviewPaneProps & { url: string }) {
         </Show>
         <button type="button" disabled={!!selection() || screenshotMode()} onClick={() => useScreenshot()}>Screenshot note</button>
       </div>
-      <Show when={error()}>{(message) => <p class="entry__notice--error" role="alert">{message()}</p>}</Show>
       <Show when={annotationError()}>{(message) => <p class="entry__notice--error" role="alert">{message()}</p>}</Show>
       <Show when={selection()}>
         {(selected) => <form class="preview-pane__note" onSubmit={queueNote}>
@@ -291,15 +289,11 @@ function ScreenshotPicker(props: { url: string; limit?: AttachmentLimit; onSelec
         {(current) => <button type="button" class="preview-pane__screenshot" aria-label="Mark a point on the screenshot" onClick={pickPoint}>
           <img ref={picture} src={current().source} alt="Screenshot to annotate" onError={() => {
             setImage(undefined)
-            setError('Could not read the screenshot image.')
+            reportError('read_preview_screenshot', 'Could not read the screenshot image.')
           }} />
         </button>}
       </Show>
       <div class="terminal-pane__bar"><button type="button" onClick={props.onCancel}>Cancel screenshot</button></div>
     </div>
   )
-}
-
-function messageFor(failure: unknown): string {
-  return failure && typeof failure === 'object' && 'message' in failure ? String(failure.message) : String(failure)
 }
