@@ -1165,6 +1165,10 @@ placeholder tabs and no unearned state badges.
   initialize it from task update time. Agent terminal activity still needs review.
 - [ ] Database backup, migration checks, malformed migration handling and
   transactional writes.
+  Existing file databases receive a retained Turso snapshot in a private
+  `<database>.pre-migration-<id>/snapshot.db` directory before pending
+  migrations; a failed backup or unknown migration blocks the migration.
+  Migration parsing and broader transaction checks remain.
 - [ ] Bounded transcript, stderr, search and frame buffers.
 - [ ] Multiple agents and projects: three agents across two projects, no state
   bleed, no polling.

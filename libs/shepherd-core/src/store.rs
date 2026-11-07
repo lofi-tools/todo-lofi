@@ -33,6 +33,12 @@ pub enum StoreError {
         expected: String,
         actual: String,
     },
+    #[error(
+        "unknown database migration {name}; this database may require a newer Shepherd version"
+    )]
+    UnknownMigration { name: String },
+    #[error("could not back up the database to {path}: {reason}")]
+    Backup { path: String, reason: String },
     #[error("invalid database row: {0}")]
     InvalidRow(String),
     #[error("task {task_id} is no longer awaiting review in the database")]
@@ -176,7 +182,10 @@ pub struct TursoStore {
 
 impl TursoStore {
     pub async fn open(db_uri: &str) -> Result<Self, StoreError> {
-        Self::open_driver(Turso::new(db_uri)?).await
+        let url =
+            url::Url::parse(db_uri).map_err(|error| StoreError::Backend(error.to_string()))?;
+        let path = (url.path() != ":memory:").then(|| PathBuf::from(url.path()));
+        Self::open_driver(Turso::new(db_uri)?, path.as_deref()).await
     }
 
     /// Open (or create) the database at a filesystem path.
@@ -186,16 +195,103 @@ impl TursoStore {
     /// as the macOS `Application Support` one resolves to a literal
     /// `Application%20Support` file that does not exist.
     pub async fn open_at(path: &Path) -> Result<Self, StoreError> {
-        Self::open_driver(Turso::file(path)).await
+        Self::open_driver(Turso::file(path), Some(path)).await
     }
 
-    async fn open_driver(driver: Turso) -> Result<Self, StoreError> {
+    async fn open_driver(driver: Turso, path: Option<&Path>) -> Result<Self, StoreError> {
+        let existed = path.is_some_and(Path::exists);
         let mut db = toasty::Db::builder()
             .build(driver.experimental_index_method(true))
             .await?;
+        if let Some(path) = path.filter(|_| existed)
+            && migrations_pending(&mut db).await?
+        {
+            backup_database(&mut db, path).await?;
+        }
         apply_migrations(&mut db).await?;
         Ok(Self { db: Mutex::new(db) })
     }
+}
+
+async fn migrations_pending(db: &mut toasty::db::Db) -> Result<bool, StoreError> {
+    let exists = toasty::sql::query(
+        "SELECT name FROM sqlite_schema WHERE type = 'table' AND name = '_migrations_history'",
+    )
+    .column_types([Type::String])
+    .exec(&mut *db)
+    .await?;
+    if exists.is_empty() {
+        return Ok(true);
+    }
+    let rows = toasty::sql::query("SELECT name, checksum FROM _migrations_history")
+        .column_types([Type::String, Type::String])
+        .exec(&mut *db)
+        .await?;
+    let mut applied = std::collections::BTreeSet::new();
+    for row in rows {
+        let Value::Record(record) = row else {
+            return Err(StoreError::InvalidRow(
+                "expected a migration history record".into(),
+            ));
+        };
+        let name = required_string(record.first())?;
+        let actual = required_string(record.get(1))?;
+        let migration = MIGRATIONS
+            .iter()
+            .find(|migration| migration.name == name)
+            .ok_or_else(|| StoreError::UnknownMigration { name: name.clone() })?;
+        let expected = checksum(migration.sql);
+        if actual != expected {
+            return Err(StoreError::MigrationChecksum {
+                name,
+                expected,
+                actual,
+            });
+        }
+        applied.insert(migration.name);
+    }
+    Ok(MIGRATIONS
+        .iter()
+        .any(|migration| !applied.contains(migration.name)))
+}
+
+async fn backup_database(db: &mut toasty::db::Db, path: &Path) -> Result<(), StoreError> {
+    let mut name = path.as_os_str().to_owned();
+    name.push(format!(".pre-migration-{}", uuid::Uuid::new_v4()));
+    let final_directory = PathBuf::from(&name);
+    name.push(".partial");
+    let directory = PathBuf::from(name);
+    let mut builder = std::fs::DirBuilder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder
+        .create(&directory)
+        .map_err(|error| StoreError::Backup {
+            path: directory.display().to_string(),
+            reason: error.to_string(),
+        })?;
+    let backup = directory.join("snapshot.db");
+    let display = backup.display().to_string();
+    let destination = backup.to_str().ok_or_else(|| StoreError::Backup {
+        path: display.clone(),
+        reason: "the backup path is not UTF-8".into(),
+    })?;
+    let statement = format!("VACUUM INTO \"{}\"", destination.replace('"', "\"\""));
+    toasty::sql::statement(&statement)
+        .exec(&mut *db)
+        .await
+        .map_err(|error| StoreError::Backup {
+            path: display,
+            reason: error.to_string(),
+        })?;
+    std::fs::rename(&directory, &final_directory).map_err(|error| StoreError::Backup {
+        path: final_directory.display().to_string(),
+        reason: error.to_string(),
+    })?;
+    Ok(())
 }
 
 #[async_trait]
@@ -1915,6 +2011,139 @@ mod tests {
 
         assert_eq!(store.load_projects().await?.len(), 1);
         assert!(spaced.join("shepherd.db").is_file());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn backs_up_old_database_before_migrating_and_preserves_rows()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("shepherd's \"data\".db");
+        let mut db = toasty::Db::builder()
+            .build(Turso::file(&path).experimental_index_method(true))
+            .await?;
+        toasty::sql::statement("CREATE TABLE _migrations_history (name TEXT NOT NULL PRIMARY KEY, checksum TEXT NOT NULL)")
+            .exec(&mut db).await?;
+        for migration in MIGRATIONS.iter().take(MIGRATIONS.len() - 1) {
+            for statement in split_sql(migration.sql) {
+                toasty::sql::statement(statement).exec(&mut db).await?;
+            }
+            toasty::sql::statement(
+                "INSERT INTO _migrations_history (name, checksum) VALUES (?1, ?2)",
+            )
+            .bind(migration.name)
+            .bind(checksum(migration.sql))
+            .exec(&mut db)
+            .await?;
+        }
+        toasty::sql::statement("INSERT INTO projects (id, path, name, created_at) VALUES ('project', '/legacy', 'Legacy', 1)")
+            .exec(&mut db).await?;
+        toasty::sql::statement("INSERT INTO tasks (id, project_id, title, state, tier, proposed_worktree_path, proposed_branch, created_at, updated_at, agent) VALUES ('task', 'project', 'Legacy task', 'draft', 'native', '/legacy/worktree', 'shepherd/legacy', 1, 42, 'codex')")
+            .exec(&mut db).await?;
+        toasty::sql::statement("INSERT INTO sessions (id, task_id, adapter, state, started_at) VALUES ('session', 'task', 'codex', 'ended', 1)")
+            .exec(&mut db).await?;
+        toasty::sql::statement("INSERT INTO entries (session_id, id, sequence, kind, payload, created_at, task_id, entry_text, task_title, project_name) VALUES ('session', 'entry', 0, 'userMessage', '{}', 1, 'task', 'uniquelysearchable', 'Legacy task', 'Legacy')")
+            .exec(&mut db).await?;
+        drop(db);
+
+        let migrated = TursoStore::open_at(&path).await?;
+        assert_eq!(
+            migrated
+                .load_tasks()
+                .await?
+                .first()
+                .map(|task| task.worktree_last_used_at),
+            Some(42)
+        );
+        let backups = std::fs::read_dir(directory.path())?
+            .map(|entry| entry.map(|entry| entry.path()))
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .filter(|path| path.to_string_lossy().contains(".pre-migration-"))
+            .collect::<Vec<_>>();
+        let [backup] = backups.as_slice() else {
+            return Err("expected one pre-migration backup".into());
+        };
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(backup)?.permissions().mode() & 0o777,
+                0o700
+            );
+        }
+        let mut old = toasty::Db::builder()
+            .build(Turso::file(backup.join("snapshot.db")).experimental_index_method(true))
+            .await?;
+        let rows = toasty::sql::query("SELECT title, updated_at FROM tasks")
+            .column_types([Type::String, Type::I64])
+            .exec(&mut old)
+            .await?;
+        assert_eq!(rows.len(), 1);
+        let matches = toasty::sql::query("SELECT id FROM entries WHERE fts_match(entry_text, task_title, project_name, 'uniquelysearchable')")
+            .column_types([Type::String]).exec(&mut old).await?;
+        assert_eq!(matches.len(), 1);
+        assert!(
+            toasty::sql::query("SELECT worktree_last_used_at FROM tasks")
+                .column_types([Type::I64])
+                .exec(&mut old)
+                .await
+                .is_err()
+        );
+        drop(old);
+        drop(migrated);
+        TursoStore::open_at(&path).await?;
+        let count = std::fs::read_dir(directory.path())?
+            .map(|entry| entry.map(|entry| entry.path()))
+            .collect::<Result<Vec<_>, _>>()?
+            .iter()
+            .filter(|path| path.to_string_lossy().contains(".pre-migration-"))
+            .count();
+        assert_eq!(count, 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn refuses_unknown_migrations_before_changing_the_database()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("shepherd.db");
+        let store = TursoStore::open_at(&path).await?;
+        toasty::sql::statement(
+            "INSERT INTO _migrations_history (name, checksum) VALUES ('9999_future.sql', 'future')",
+        )
+        .exec(&mut *store.db.lock().await)
+        .await?;
+        drop(store);
+        assert!(
+            matches!(TursoStore::open_at(&path).await, Err(StoreError::UnknownMigration { name }) if name == "9999_future.sql")
+        );
+        assert_eq!(
+            std::fs::read_dir(directory.path())?
+                .map(|entry| entry.map(|entry| entry.path()))
+                .collect::<Result<Vec<_>, _>>()?
+                .iter()
+                .filter(|path| path.to_string_lossy().contains(".pre-migration-"))
+                .count(),
+            0
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn refuses_modified_migration_history_before_migrating()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("shepherd.db");
+        let store = TursoStore::open_at(&path).await?;
+        toasty::sql::statement("UPDATE _migrations_history SET checksum = 'wrong' WHERE name = ?1")
+            .bind(MIGRATIONS[0].name)
+            .exec(&mut *store.db.lock().await)
+            .await?;
+        drop(store);
+        assert!(
+            matches!(TursoStore::open_at(&path).await, Err(StoreError::MigrationChecksum { name, .. }) if name == MIGRATIONS[0].name)
+        );
         Ok(())
     }
 
