@@ -1274,8 +1274,9 @@ placeholder tabs and no unearned state badges.
   retry, and reports a waiter failure on subsequent attempts. Cancellation and
   shutdown also report process-group or child-stop errors while retaining the
   child for retry. Local fixtures inject stop failures, cover both paths and
-  verify that shutdown stops a real descendant process. Reporting an error
-  while waiting for the child exit still needs review.
+  verify that shutdown stops a real descendant process. A child-wait error is
+  reported without declaring the turn finished, and shutdown retains the child
+  for retry; a fixture covers errors before and after cancellation.
   OpenCode shutdown retains its server when stopping it fails; an injected
   group-signal failure verifies the process remains available for a retry.
 - [ ] Bounded transcript, stderr, search and frame buffers.
