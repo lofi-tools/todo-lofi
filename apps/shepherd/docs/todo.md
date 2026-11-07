@@ -1175,7 +1175,8 @@ placeholder tabs and no unearned state badges.
   transactional writes.
   Existing file databases receive a retained Turso snapshot in a private
   `<database>.pre-migration-<id>/snapshot.db` directory before pending
-  migrations; a failed backup or unknown migration blocks the migration.
+  migrations; a failed backup, unknown migration or gap in migration history
+  blocks the migration before schema changes.
   Turso's parser validates migration statements before changes, and a failed
   statement rolls back its migration and history entry. Broader transaction
   checks remain. Transcript batches reject missing or mismatched task/session

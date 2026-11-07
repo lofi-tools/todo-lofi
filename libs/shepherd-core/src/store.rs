@@ -37,6 +37,8 @@ pub enum StoreError {
         "unknown database migration {name}; this database may require a newer Shepherd version"
     )]
     UnknownMigration { name: String },
+    #[error("database migration history is incomplete: {missing} is missing before {applied}")]
+    MigrationHistoryGap { missing: String, applied: String },
     #[error("invalid migration {name}: {reason}")]
     InvalidMigration { name: String, reason: String },
     #[error("migration {name} failed at statement {statement}: {reason}")]
@@ -266,9 +268,20 @@ async fn migrations_pending(db: &mut toasty::db::Db) -> Result<bool, StoreError>
         }
         applied.insert(migration.name);
     }
-    Ok(MIGRATIONS
-        .iter()
-        .any(|migration| !applied.contains(migration.name)))
+    let mut first_missing: Option<&str> = None;
+    for migration in MIGRATIONS {
+        if applied.contains(migration.name) {
+            if let Some(missing) = first_missing {
+                return Err(StoreError::MigrationHistoryGap {
+                    missing: missing.to_string(),
+                    applied: migration.name.to_string(),
+                });
+            }
+        } else if first_missing.is_none() {
+            first_missing = Some(migration.name);
+        }
+    }
+    Ok(first_missing.is_some())
 }
 
 async fn backup_database(db: &mut toasty::db::Db, path: &Path) -> Result<(), StoreError> {
@@ -2618,6 +2631,40 @@ mod tests {
                 .count(),
             0
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn refuses_a_gap_in_migration_history_before_changing_the_database()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("shepherd.db");
+        let first = MIGRATIONS.first().ok_or("missing first migration")?;
+        let second = MIGRATIONS.get(1).ok_or("missing second migration")?;
+        let store = TursoStore::open_at(&path).await?;
+        toasty::sql::statement("DELETE FROM _migrations_history WHERE name = ?1")
+            .bind(first.name)
+            .exec(&mut *store.db.lock().await)
+            .await?;
+        drop(store);
+        assert!(matches!(TursoStore::open_at(&path).await,
+            Err(StoreError::MigrationHistoryGap { missing, applied }) if missing == first.name && applied == second.name));
+        let entries = std::fs::read_dir(directory.path())?.collect::<Result<Vec<_>, _>>()?;
+        assert!(!entries.iter().any(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .contains(".pre-migration-")
+        }));
+        let mut db = toasty::Db::builder()
+            .build(Turso::file(&path).experimental_index_method(true))
+            .await?;
+        let rows = toasty::sql::query("SELECT name FROM _migrations_history WHERE name = ?1")
+            .column_types([Type::String])
+            .bind(second.name)
+            .exec(&mut db)
+            .await?;
+        assert_eq!(rows.len(), 1);
         Ok(())
     }
 
