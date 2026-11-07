@@ -674,8 +674,13 @@ pub async fn desktop_projects() -> HarnessResult<Vec<CodexProject>> {
 
 async fn list_projects(spec: SpawnSpec) -> HarnessResult<Vec<CodexProject>> {
     let mut harness = CodexHarness::new();
+    let mut discovery_group = None;
     let result = async {
         harness.connect(spec, true).await?;
+        discovery_group = harness
+            .child
+            .as_ref()
+            .map(|child| AppServerStartupGroup(Some(Arc::downgrade(child))));
         let mut projects = Vec::new();
         let mut cursor = None;
         let mut seen_cursors = BTreeSet::new();
@@ -706,6 +711,9 @@ async fn list_projects(spec: SpawnSpec) -> HarnessResult<Vec<CodexProject>> {
     }
     .await;
     let shutdown = harness.shutdown().await;
+    if let Some(group) = &mut discovery_group {
+        group.disarm();
+    }
     let projects = result?;
     shutdown?;
     Ok(projects)
@@ -745,9 +753,11 @@ struct CodexEffort {
 pub async fn project_models(spec: SpawnSpec) -> HarnessResult<CodexProjectModels> {
     let hide_diagnostics = !spec.environment.is_empty();
     let mut harness = CodexHarness::new();
+    let mut discovery_group = None;
     let result = async {
         let directory = spec.cwd.display().to_string();
         let capabilities = harness.start(spec).await?;
+        discovery_group = harness.child.as_ref().map(|child| AppServerStartupGroup(Some(Arc::downgrade(child))));
         let config = harness
             .request("config/read", json!({ "cwd": directory }))
             .await;
@@ -783,6 +793,9 @@ pub async fn project_models(spec: SpawnSpec) -> HarnessResult<CodexProjectModels
     }
     .await;
     let shutdown = harness.shutdown().await;
+    if let Some(group) = &mut discovery_group {
+        group.disarm();
+    }
     let settings =
         result.map_err(|error| crate::protect_discovery_error(error, hide_diagnostics))?;
     shutdown.map_err(|error| crate::protect_discovery_error(error, hide_diagnostics))?;
@@ -3573,6 +3586,48 @@ esac
         };
         assert!(!error.to_string().contains("fixture-private-value"));
         assert!(error.to_string().contains("hidden"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cancelled_discovery_stops_app_server_descendants()
+    -> Result<(), Box<dyn std::error::Error>> {
+        for projects in [false, true] {
+            let directory = TempDir::new()?;
+            let stub = write_stub(
+                &directory,
+                "codex-discovery.sh",
+                r##"#!/bin/sh
+while IFS= read -r line; do
+  case "$line" in
+    *'"method":"initialize"'*) printf '{"id":1,"result":{}}\n' ;;
+    *'"method":"config/read"'*|*'"method":"project/list"'*)
+      (sleep 2; printf escaped > escaped) &
+      printf ready > ready
+      sleep 30 ;;
+  esac
+done
+"##,
+            );
+            let launch = spec(&stub, directory.path());
+            let discovery = tokio::spawn(async move {
+                if projects {
+                    list_projects(launch).await.map(|_| ())
+                } else {
+                    project_models(launch).await.map(|_| ())
+                }
+            });
+            timeout(Duration::from_secs(5), async {
+                while !directory.path().join("ready").exists() {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await?;
+            discovery.abort();
+            assert!(discovery.await.is_err_and(|error| error.is_cancelled()));
+            tokio::time::sleep(Duration::from_millis(2300)).await;
+            assert!(!directory.path().join("escaped").exists());
+        }
         Ok(())
     }
 

@@ -1167,7 +1167,9 @@ placeholder tabs and no unearned state badges.
   descendants cannot outlive shutdown. Codex also stops the group on malformed
   output or a closed output stream while the server is still running; local
   fixtures exercise both. Failed or cancelled Codex initialization also stops
-  its group, covered by a local fixture. OpenCode also stops its group on a
+  its group, covered by a local fixture. Cancelling Codex project or model
+  discovery while awaiting a response also stops the group; a fixture covers
+  both paths. OpenCode also stops its group on a
   disconnected turn. OpenCode stops the process group if server initialization
   fails or is cancelled, and on subscription failure or cancellation; local
   fixtures cover initialization, subscription, and project-mode discovery
