@@ -2501,10 +2501,14 @@ test('ends a partial bracketed paste before sending the next key', async ({ page
     element.dispatchEvent(new ClipboardEvent('paste', { bubbles: true, cancelable: true, clipboardData: clipboard }))
   })
   await expect(page.getByText('The terminal stopped accepting the paste.')).toBeVisible()
+  await expect(page.locator('.error-toast')).toContainText('The terminal stopped accepting the paste.')
+  await expect(page.locator('.terminal-view').getByRole('alert')).toHaveCount(0)
   await input.press('b')
   const writes = () => page.evaluate(() => (window as unknown as { __writes: (string | number[])[] }).__writes)
   await expect.poll(async () => (await writes()).slice(2)).toEqual(['\x1b[201~', 'b'])
   expect((await writes())[0].slice(0, 6)).toEqual([27, 91, 50, 48, 48, 126])
+  await page.getByRole('button', { name: 'Error history' }).click()
+  await expect(page.getByRole('dialog', { name: 'Error history' })).toContainText('The terminal stopped accepting the paste.')
 })
 
 test('opens Freebuff as a standalone terminal in the conversation pane', async ({ page }) => {

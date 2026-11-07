@@ -8,6 +8,7 @@ import { For, Show, batch, createEffect, createMemo, createSignal, createUniqueI
 
 import * as bridge from './bridge'
 import { KITTY_REPORT_EVENTS, encodeKittyKey, encodeLegacyKey, encodeTerminalText } from './terminal_keys'
+import { reportError } from './diagnostics'
 
 interface TerminalSize {
   columns: number
@@ -18,7 +19,7 @@ const DEFAULT_TERMINAL_SIZE: TerminalSize = { columns: 80, rows: 24 }
 
 export function FreebuffPane(props: { projectId: string; shown: boolean }) {
   const [terminalId, setTerminalId] = createSignal<string>()
-  const [error, setError] = createSignal<string>()
+  const [failed, setFailed] = createSignal(false)
   let disposed = false
 
   function close(id: string) {
@@ -30,7 +31,7 @@ export function FreebuffPane(props: { projectId: string; shown: boolean }) {
       if (disposed) close(id)
       else setTerminalId(id)
     }).catch((failure) => {
-      if (!disposed) setError(describe(failure))
+      if (!disposed) { setFailed(true); reportError('start_freebuff_terminal', failure) }
     })
   })
 
@@ -43,8 +44,8 @@ export function FreebuffPane(props: { projectId: string; shown: boolean }) {
   return (
     <section class="chat chat--terminal" aria-label="Freebuff terminal" hidden={!props.shown}>
       <Show when={terminalId()} keyed fallback={
-        <Show when={error()} fallback={<p class="empty">Opening Freebuff terminal…</p>}>
-          {(message) => <p class="error" role="alert">{message()}</p>}
+        <Show when={failed()} fallback={<p class="empty">Opening Freebuff terminal…</p>}>
+          <p class="empty">Freebuff terminal unavailable.</p>
         </Show>
       }>
         {(id) => <TerminalCanvas terminalId={id} shown={props.shown} focusRequest={props.shown ? { id } : undefined} />}
@@ -86,7 +87,9 @@ export function TerminalPane(props: TerminalPaneProps) {
   const [selectedId, setSelectedId] = createSignal<string | null>(null)
   const [focusRequest, setFocusRequest] = createSignal<{ id: string }>()
   const [pending, setPending] = createSignal(false)
-  const [error, setError] = createSignal<string | null>(null)
+  function setError(message: string | null) {
+    if (message) reportError('terminal', message)
+  }
   const [hiddenAgentTerminals, setHiddenAgentTerminals] = createSignal(new Set<string>())
   const agentTerminalIds = createMemo(() => (props.agentTerminals ?? []).map((terminal) => terminal.id))
   const agentTerminal = (id: string) => props.agentTerminals?.find((terminal) => terminal.id === id)
@@ -312,7 +315,6 @@ export function TerminalPane(props: TerminalPaneProps) {
           </Show>
         </Show>
       </div>
-      <Show when={error()}>{(message) => <p class="error" role="alert">{message()}</p>}</Show>
       <details open>
         <summary>Terminal instances</summary>
         <ul class="terminal-list" aria-label="Terminals">
@@ -662,7 +664,9 @@ function terminalPaintColors() {
 function TerminalCanvas(props: { terminalId: string; shown: boolean; focusRequest: { id: string } | undefined; onFocus?: (id: string | null) => void; onMeasure?: (size: TerminalSize) => void }) {
   const mac = navigator.platform.startsWith('Mac')
   const linux = navigator.platform.startsWith('Linux')
-  const [error, setError] = createSignal<string | null>(null)
+  function setError(message: string | null) {
+    if (message) reportError('terminal', message)
+  }
   let input: HTMLTextAreaElement | undefined
   const [finding, setFinding] = createSignal(false)
   const [copyText, setCopyText] = createSignal<string | null>(null)
@@ -1420,7 +1424,6 @@ function TerminalCanvas(props: { terminalId: string; shown: boolean; focusReques
           <Show when={noMatch()}><span role="status">No matches</span></Show>
         </form>
       </Show>
-      <Show when={error()}>{(message) => <p class="error terminal-view__error" role="alert">{message()}</p>}</Show>
     </div>
   )
 }
