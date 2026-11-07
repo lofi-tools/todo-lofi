@@ -1212,7 +1212,8 @@ placeholder tabs and no unearned state badges.
   task together, with a rollback and retry fixture for a failed task write.
   If an opened agent session cannot be recorded, the core stops it before
   retrying; a database-trigger fixture verifies cleanup and a subsequent start.
-  If cleanup fails, the session is retained and cleanup is retried before reuse.
+  A second fixture makes cleanup fail twice and verifies that the session is
+  retained until cleanup succeeds, before another agent can start.
 - [ ] Bounded transcript, stderr, search and frame buffers.
   Codex, OpenCode and ACP stderr readers cap each line while draining the
   process, including newline-free output. OpenCode omits overlong lines to

@@ -4240,6 +4240,119 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn failed_unrecorded_session_cleanup_is_retried_before_new_agent()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use agent_harness::fake_harness::FakeHarness;
+        use agent_harness::{AgentHarness, Capabilities, HarnessError, HarnessResult, SpawnSpec};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct Factory {
+            starts: Arc<AtomicUsize>,
+            stops: Arc<AtomicUsize>,
+        }
+        impl HarnessFactory for Factory {
+            fn create(&self) -> Result<Box<dyn AgentHarness>, CoreError> {
+                self.starts.fetch_add(1, Ordering::SeqCst);
+                Ok(Box::new(FailingShutdown {
+                    inner: FakeHarness::one_turn(FakeTurn::new(vec![FakeStep::Message(
+                        "done".into(),
+                    )])),
+                    stops: self.stops.clone(),
+                }))
+            }
+        }
+        struct FailingShutdown {
+            inner: FakeHarness,
+            stops: Arc<AtomicUsize>,
+        }
+        #[async_trait::async_trait]
+        impl AgentHarness for FailingShutdown {
+            fn events(&mut self) -> &mut mpsc::UnboundedReceiver<HarnessEvent> {
+                self.inner.events()
+            }
+            async fn start(&mut self, spec: SpawnSpec) -> HarnessResult<Capabilities> {
+                self.inner.start(spec).await
+            }
+            async fn open_session(
+                &mut self,
+                resume: Option<SessionId>,
+            ) -> HarnessResult<SessionId> {
+                self.inner.open_session(resume).await
+            }
+            async fn prompt(&mut self, input: PromptInput) -> HarnessResult<()> {
+                self.inner.prompt(input).await
+            }
+            async fn cancel(&mut self) -> HarnessResult<()> {
+                self.inner.cancel().await
+            }
+            async fn respond(&mut self, id: ApprovalId, decision: Decision) -> HarnessResult<()> {
+                self.inner.respond(id, decision).await
+            }
+            async fn shutdown(&mut self) -> HarnessResult<()> {
+                if self.stops.fetch_add(1, Ordering::SeqCst) < 2 {
+                    return Err(HarnessError::Protocol("fixture shutdown failed".into()));
+                }
+                self.inner.shutdown().await
+            }
+        }
+        let repository = TestRepository::new()?;
+        let database = TestDatabase::new()?;
+        let uri = database.uri();
+        let starts = Arc::new(AtomicUsize::new(0));
+        let stops = Arc::new(AtomicUsize::new(0));
+        let mut core = Core::with_services(
+            Box::new(TursoStore::open(&uri).await?),
+            Box::new(Factory {
+                starts: starts.clone(),
+                stops: stops.clone(),
+            }),
+        );
+        let project_id = add_project(&mut core, repository.path().to_path_buf()).await?;
+        let draft = workspace_of(
+            core.execute(Command::CreateDraft {
+                project_id,
+                agent: Agent::Codex,
+                title: "Retry cleanup".into(),
+            })
+            .await?,
+        );
+        let task_id = TaskId::new(draft.task.id);
+        let mut database_probe = toasty::Db::builder()
+            .build(toasty_driver_turso::Turso::new(&uri)?.experimental_index_method(true))
+            .await?;
+        toasty::sql::statement("CREATE TRIGGER block_session_start BEFORE INSERT ON sessions BEGIN SELECT RAISE(ABORT, 'session save blocked'); END").exec(&mut database_probe).await?;
+        let prompt = || Command::SendPrompt {
+            task_id: task_id.clone(),
+            input: PromptInput::text("go"),
+        };
+        let error = core
+            .execute(prompt())
+            .await
+            .err()
+            .ok_or("expected save and cleanup failure")?;
+        assert!(matches!(error, CoreError::SessionRecordCleanup { .. }));
+        assert!(
+            core.sessions
+                .get(&task_id)
+                .is_some_and(|session| session.has_failed() && !session.is_closed())
+        );
+        toasty::sql::statement("DROP TRIGGER block_session_start")
+            .exec(&mut database_probe)
+            .await?;
+        assert!(core.execute(prompt()).await.is_err());
+        assert_eq!(starts.load(Ordering::SeqCst), 1);
+        let workspace = workspace_of(core.execute(prompt()).await?);
+        assert_eq!(starts.load(Ordering::SeqCst), 2);
+        assert_eq!(stops.load(Ordering::SeqCst), 3);
+        assert!(
+            summaries(&workspace)
+                .iter()
+                .any(|summary| summary.contains("done"))
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn failed_shutdown_persistence_keeps_the_session_for_retry()
     -> Result<(), Box<dyn std::error::Error>> {
         let repository = TestRepository::new()?;
