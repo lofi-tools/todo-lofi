@@ -29,9 +29,24 @@ const COMMAND_OUTPUT_OMITTED: &str = "[… earlier command output omitted …]\n
 
 fn limit_command_output(output: &mut String) {
     if output.len() > MAX_COMMAND_OUTPUT_BYTES {
-        let start = output.len() - MAX_COMMAND_OUTPUT_BYTES + COMMAND_OUTPUT_OMITTED.len();
-        output.replace_range(..output.ceil_char_boundary(start), COMMAND_OUTPUT_OMITTED);
+        let start = command_output_tail_start(output);
+        output.replace_range(..start, COMMAND_OUTPUT_OMITTED);
     }
+}
+
+fn bounded_command_output(output: &str) -> String {
+    if output.len() <= MAX_COMMAND_OUTPUT_BYTES {
+        return output.to_owned();
+    }
+    format!(
+        "{COMMAND_OUTPUT_OMITTED}{}",
+        &output[command_output_tail_start(output)..]
+    )
+}
+
+fn command_output_tail_start(output: &str) -> usize {
+    let start = output.len() - MAX_COMMAND_OUTPUT_BYTES + COMMAND_OUTPUT_OMITTED.len();
+    output.ceil_char_boundary(start)
 }
 
 /// Errors an adapter may report to the core.

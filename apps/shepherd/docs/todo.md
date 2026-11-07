@@ -1325,6 +1325,8 @@ placeholder tabs and no unearned state badges.
   Codex exec and app-server, and OpenCode tool events, bound output to the
   transcript's existing 64 KiB tail before placing it on the event queue,
   avoiding larger queued copies without changing the retained output.
+  Codex exec also selects the retained command-output tail before allocating
+  the event's string, avoiding a full extra copy of a large protocol field.
 - [ ] Multiple agents and projects: three agents across two projects, no state
   bleed, no polling.
   A three-session fixture holds Codex, OpenCode and Claude tasks at approvals

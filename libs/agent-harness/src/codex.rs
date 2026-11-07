@@ -2104,10 +2104,7 @@ fn exec_command_event(event: &Value, kind: &str) -> Option<HarnessEvent> {
         } else {
             ToolStatus::Completed
         };
-        let mut output = exec_command_output(event);
-        if let Some(output) = &mut output {
-            crate::limit_command_output(output);
-        }
+        let output = exec_command_output_text(event).map(crate::bounded_command_output);
         (status, output)
     } else {
         (ToolStatus::Running, None)
@@ -2141,6 +2138,10 @@ fn exec_command_title(event: &Value) -> String {
 }
 
 fn exec_command_output(event: &Value) -> Option<String> {
+    exec_command_output_text(event).map(str::to_string)
+}
+
+fn exec_command_output_text(event: &Value) -> Option<&str> {
     event
         .get("aggregated_output")
         .and_then(Value::as_str)
@@ -2157,7 +2158,6 @@ fn exec_command_output(event: &Value) -> Option<String> {
                 .and_then(Value::as_str)
                 .filter(|text| !text.is_empty())
         })
-        .map(str::to_string)
 }
 
 fn exec_patch_event(event: &Value, kind: &str) -> Option<HarnessEvent> {
@@ -3465,6 +3465,16 @@ done
             ]
         );
         assert_eq!(usage, Some((1200, 128_000)));
+    }
+
+    #[test]
+    fn bounded_exec_command_output_matches_transcript_truncation() {
+        for length in [0, 1, 21_845, 21_846, 50_000] {
+            let original = format!("{}tail", "界".repeat(length));
+            let mut expected = original.clone();
+            crate::limit_command_output(&mut expected);
+            assert_eq!(crate::bounded_command_output(&original), expected);
+        }
     }
 
     #[test]
