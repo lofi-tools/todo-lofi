@@ -249,7 +249,10 @@ impl AgentStore {
             && !parent.as_os_str().is_empty()
         {
             std::fs::create_dir_all(parent).with_context(|| {
-                format!("creating the telemetry directory {} failed", parent.display())
+                format!(
+                    "creating the telemetry directory {} failed",
+                    parent.display()
+                )
             })?;
         }
         let uri = format!("turso:{}", path.display());
@@ -318,7 +321,12 @@ impl AgentStore {
     }
 
     /// Run a write. Errors degrade instead of propagating.
-    async fn write(&self, what: &str, statement: &str, binds: Vec<toasty::stmt::Value>) -> anyhow::Result<()> {
+    async fn write(
+        &self,
+        what: &str,
+        statement: &str,
+        binds: Vec<toasty::stmt::Value>,
+    ) -> anyhow::Result<()> {
         if self.degraded.load(Ordering::Relaxed) {
             return Ok(());
         }
@@ -532,9 +540,7 @@ impl AgentStore {
                 nullable_text(&decision.combo.clone()),
                 toasty::stmt::Value::String(decision.chosen.provider.clone()),
                 toasty::stmt::Value::String(decision.chosen.model.clone()),
-                toasty::stmt::Value::String(
-                    serde_json::Value::Array(scores).to_string(),
-                ),
+                toasty::stmt::Value::String(serde_json::Value::Array(scores).to_string()),
             ],
         )
         .await
@@ -551,10 +557,7 @@ impl AgentStore {
         let cutoff = now_millis() - (retention_days as i64) * 24 * 60 * 60 * 1000;
         let mut deleted = 0usize;
         for (what, statement) in [
-            (
-                "pruning attempts",
-                "DELETE FROM attempts WHERE at < ?1",
-            ),
+            ("pruning attempts", "DELETE FROM attempts WHERE at < ?1"),
             (
                 "pruning routing decisions",
                 "DELETE FROM routing_decisions WHERE at < ?1",
@@ -1037,7 +1040,9 @@ impl TelemetryStore for AgentStore {
 
 /// Run a `sessions` subcommand against the configured database. Prints to
 /// stdout; an unusable database is an error (there is nothing to show).
-pub async fn run_sessions_command(action: &crate::cli_commands::SessionAction) -> anyhow::Result<()> {
+pub async fn run_sessions_command(
+    action: &crate::cli_commands::SessionAction,
+) -> anyhow::Result<()> {
     let config = crate::config::load();
     if !config.telemetry.enabled {
         anyhow::bail!(
@@ -1066,10 +1071,7 @@ pub async fn run_sessions_command(action: &crate::cli_commands::SessionAction) -
                     format_time(session.started_at),
                     session.turn_count,
                     "-",
-                    format!(
-                        "{}/{}",
-                        session.input_tokens, session.output_tokens
-                    ),
+                    format!("{}/{}", session.input_tokens, session.output_tokens),
                     session.outcome.as_deref().unwrap_or("(open)"),
                     format!(
                         "{}/{}",
@@ -1101,12 +1103,18 @@ pub async fn run_sessions_command(action: &crate::cli_commands::SessionAction) -
             println!(
                 "  outcome   {} ({})",
                 session.outcome.as_deref().unwrap_or("(open)"),
-                format!("{} turns, {} in / {} out tokens", session.turn_count, session.input_tokens, session.output_tokens)
+                format!(
+                    "{} turns, {} in / {} out tokens",
+                    session.turn_count, session.input_tokens, session.output_tokens
+                )
             );
 
             let turns = store.session_turns(&session.id).await?;
             if !turns.is_empty() {
-                println!("\n  {:<4} {:<34} {:<9} {:>6} {:>8} {:>13}", "SEQ", "MODEL", "OUTCOME", "TOOLS", "MS", "TOKENS I/O");
+                println!(
+                    "\n  {:<4} {:<34} {:<9} {:>6} {:>8} {:>13}",
+                    "SEQ", "MODEL", "OUTCOME", "TOOLS", "MS", "TOKENS I/O"
+                );
                 for turn in turns {
                     println!(
                         "  {:<4} {:<34} {:<9} {:>6} {:>8} {:>13}",
@@ -1126,10 +1134,8 @@ pub async fn run_sessions_command(action: &crate::cli_commands::SessionAction) -
             }
 
             let failures = store.session_failures(&session.id).await?;
-            let imperfect: Vec<&FailureRow> = failures
-                .iter()
-                .filter(|row| row.failures > 0)
-                .collect();
+            let imperfect: Vec<&FailureRow> =
+                failures.iter().filter(|row| row.failures > 0).collect();
             if !imperfect.is_empty() {
                 println!("\n  attempts:");
                 for row in imperfect {
@@ -1155,7 +1161,10 @@ pub async fn run_sessions_command(action: &crate::cli_commands::SessionAction) -
 
 /// `YYYY-MM-DD HH:MM` in UTC, computed from the epoch without a date library.
 fn format_time(time: SystemTime) -> String {
-    let seconds = time.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+    let seconds = time
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
     let (days, day_seconds) = ((seconds / 86_400) as i64, seconds % 86_400);
     let (year, month, day) = civil_from_days(days);
     let hour = day_seconds / 3600;
@@ -1174,11 +1183,7 @@ fn civil_from_days(days: i64) -> (i64, u32, u32) {
     let mp = (5 * doy + 2) / 153;
     let day = (doy - (153 * mp + 2) / 5 + 1) as u32;
     let month = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
-    (
-        if month <= 2 { year + 1 } else { year },
-        month,
-        day,
-    )
+    (if month <= 2 { year + 1 } else { year }, month, day)
 }
 
 /// Seed an in-process registry from the store's still-active cooldowns.
@@ -1316,7 +1321,10 @@ mod tests {
             .finish_turn(&second.id, "error", Some("rate_limited"), None, 0, 0)
             .await
             .unwrap();
-        store.note_usage(&first.id, "session-1", 10, 4).await.unwrap();
+        store
+            .note_usage(&first.id, "session-1", 10, 4)
+            .await
+            .unwrap();
         store.finish_session("session-1", "ok", None).await.unwrap();
 
         let sessions = store.list_sessions(10).await.unwrap();
@@ -1324,7 +1332,10 @@ mod tests {
         assert_eq!(sessions[0].turn_count, 2);
         assert_eq!(sessions[0].short_id(), "session-");
         assert!(sessions[0].ended_at.is_some());
-        assert_eq!(sessions[0].effective_model.as_deref(), Some("groq/compound"));
+        assert_eq!(
+            sessions[0].effective_model.as_deref(),
+            Some("groq/compound")
+        );
 
         // A unique prefix resolves; an ambiguous one is rejected.
         let found = store.find_session("session-").await.unwrap().unwrap();
@@ -1348,11 +1359,7 @@ mod tests {
         let store = Arc::new(store().await);
         store.start_session(&session()).await.unwrap();
         let cooldowns = Arc::new(CooldownRegistry::new());
-        let router = Router::new(
-            RoutingConfig::default(),
-            store.clone(),
-            cooldowns.clone(),
-        );
+        let router = Router::new(RoutingConfig::default(), store.clone(), cooldowns.clone());
         let healthy = ModelKey::new("orcarouter", "orcarouter/free");
         let flaky = ModelKey::new("groq", "groq/compound");
         for _ in 0..8 {
@@ -1395,9 +1402,7 @@ mod tests {
         let until = to_millis(SystemTime::now() + Duration::from_secs(600));
         std::fs::write(
             &path,
-            format!(
-                "{{\"groq\\u0000groq/compound\":{until},\"expired\\u0000m\":1}}"
-            ),
+            format!("{{\"groq\\u0000groq/compound\":{until},\"expired\\u0000m\":1}}"),
         )
         .unwrap();
 
@@ -1436,7 +1441,10 @@ mod tests {
         store.start_session(&old_session).await.unwrap();
         store.prune(30).await.unwrap();
         let attempts = store
-            .attempts_since(&key, SystemTime::now() - Duration::from_secs(365 * 24 * 60 * 60))
+            .attempts_since(
+                &key,
+                SystemTime::now() - Duration::from_secs(365 * 24 * 60 * 60),
+            )
             .await
             .unwrap();
         assert!(attempts.is_empty(), "old attempts are pruned");

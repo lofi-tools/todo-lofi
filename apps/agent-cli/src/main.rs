@@ -120,10 +120,7 @@ async fn try_fallback(runtime: &AgentRuntime, run: &mut SingleShotRun) -> bool {
     if run.produced_output || !runtime.fallback_enabled() {
         return false;
     }
-    let Some(next) = runtime
-        .choose_next_entry(&run.provider, &run.model)
-        .await
-    else {
+    let Some(next) = runtime.choose_next_entry(&run.provider, &run.model).await else {
         return false;
     };
     runtime.record_failure(&run.provider, &run.model);
@@ -198,7 +195,9 @@ async fn run_single_shot(runtime: Arc<AgentRuntime>, prompt: &str) -> anyhow::Re
             }
             cersei::events::AgentEvent::Error(msg) => {
                 if !try_fallback(&runtime, &mut run).await {
-                    runtime.end_turn("error", Some("provider_error"), 0, 0).await;
+                    runtime
+                        .end_turn("error", Some("provider_error"), 0, 0)
+                        .await;
                     eprintln!("\x1b[31mError: {msg}\x1b[0m");
                     anyhow::bail!("{msg}");
                 }

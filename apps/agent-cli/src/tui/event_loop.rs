@@ -68,10 +68,7 @@ async fn try_fallback(
     if run.produced_output || !runtime.fallback_enabled() {
         return false;
     }
-    let Some(next) = runtime
-        .choose_next_entry(&run.provider, &run.model)
-        .await
-    else {
+    let Some(next) = runtime.choose_next_entry(&run.provider, &run.model).await else {
         return false;
     };
     runtime.record_failure(&run.provider, &run.model);
@@ -2344,9 +2341,7 @@ fn handle_agent_event(state: &mut AppState, runtime: &Arc<AgentRuntime>, event: 
                 followups: Vec::new(),
             });
             let runtime = runtime.clone();
-            spawn_telemetry(async move {
-                runtime.end_turn("error", Some("error"), 0, 0).await
-            });
+            spawn_telemetry(async move { runtime.end_turn("error", Some("error"), 0, 0).await });
         }
         AgentEvent::Complete(_) => {
             state.commit_turn();

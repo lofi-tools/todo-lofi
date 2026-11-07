@@ -1331,7 +1331,12 @@ impl AgentRuntime {
     /// A runtime with no telemetry: in-process cooldowns, no database, the
     /// ordered walk. Used by tests and by anything that runs without a store.
     pub fn new(config: &AppConfig) -> anyhow::Result<Self> {
-        Self::build(config, Arc::new(NullStore), None, Arc::new(CooldownRegistry::new()))
+        Self::build(
+            config,
+            Arc::new(NullStore),
+            None,
+            Arc::new(CooldownRegistry::new()),
+        )
     }
 
     /// A runtime backed by the telemetry store: durable cooldowns, a session
@@ -1580,10 +1585,7 @@ impl AgentRuntime {
         let (Some(store), Some(session)) = (store, session) else {
             return;
         };
-        if let Err(error) = store
-            .finish_session(&session.id, outcome, error_kind)
-            .await
-        {
+        if let Err(error) = store.finish_session(&session.id, outcome, error_kind).await {
             eprintln!("warning: could not close the session: {error}");
         }
     }
@@ -1622,13 +1624,10 @@ impl AgentRuntime {
         let current = ModelKey::new(current_provider, current_model);
         if decision.chosen != current
             && let Some(entry) = combo(&config, &combo_name).and_then(|combo| {
-                combo
-                    .entries
-                    .into_iter()
-                    .find(|entry| {
-                        entry.provider == decision.chosen.provider
-                            && entry.model == decision.chosen.model
-                    })
+                combo.entries.into_iter().find(|entry| {
+                    entry.provider == decision.chosen.provider
+                        && entry.model == decision.chosen.model
+                })
             })
         {
             return Some(FallbackEntry {
@@ -2322,8 +2321,11 @@ mod tests {
         let config = isolated_config();
         let store: StoreHandle = Arc::new(ai_providers::InMemoryStore::new());
         let cooldowns = Arc::new(CooldownRegistry::new());
-        let fb = FallbackManager::new(&config, combo_entries())
-            .with_store(&config, store.clone(), cooldowns.clone());
+        let fb = FallbackManager::new(&config, combo_entries()).with_store(
+            &config,
+            store.clone(),
+            cooldowns.clone(),
+        );
         fb.record_failure("groq", "groq/compound");
         // The write is detached (the walk is synchronous), so let it run.
         for _ in 0..8 {
@@ -2339,8 +2341,11 @@ mod tests {
         let seeded = Arc::new(CooldownRegistry::new());
         crate::telemetry::seed_registry(&store, &seeded).await;
         assert!(seeded.is_cooling(&ModelKey::new("groq", "groq/compound")));
-        let fb2 = FallbackManager::new(&config, combo_entries())
-            .with_store(&config, store.clone(), seeded);
+        let fb2 = FallbackManager::new(&config, combo_entries()).with_store(
+            &config,
+            store.clone(),
+            seeded,
+        );
         let next = fb2
             .next_entry("nvidia", "nvidia/llama-3.3-nemotron-super-49b-v1")
             .unwrap();
@@ -2357,8 +2362,11 @@ mod tests {
         let cooldowns = Arc::new(CooldownRegistry::new());
         let key = ModelKey::new("groq", "groq/compound");
         cooldowns.set(&key, SystemTime::now() - Duration::from_secs(1), "failed");
-        let fb = FallbackManager::new(&config, combo_entries())
-            .with_store(&config, Arc::new(ai_providers::InMemoryStore::new()), cooldowns);
+        let fb = FallbackManager::new(&config, combo_entries()).with_store(
+            &config,
+            Arc::new(ai_providers::InMemoryStore::new()),
+            cooldowns,
+        );
         let next = fb
             .next_entry("nvidia", "nvidia/llama-3.3-nemotron-super-49b-v1")
             .unwrap();
@@ -2455,15 +2463,17 @@ mod tests {
         assert_eq!(candidates.len(), 2);
         let decision = fb.choose(Some("coding"), candidates).await.unwrap();
         assert_eq!(
-            decision.chosen.provider,
-            "poolside",
+            decision.chosen.provider, "poolside",
             "the failing entry must lose"
         );
         assert!(!decision.is_configured_order());
         assert_eq!(fb.last_decision().unwrap().chosen, decision.chosen);
         let table = explain_decision(&decision);
         assert!(table.contains("candidate"), "{table}");
-        assert!(table.contains("* poolside/poolside/laguna-xs-2.1"), "{table}");
+        assert!(
+            table.contains("* poolside/poolside/laguna-xs-2.1"),
+            "{table}"
+        );
     }
 
     #[test]
@@ -3357,10 +3367,7 @@ mod tests {
             .insert("groq/compound".into(), "plain".into());
         let family_catalog = catalog(&with_family, Arc::new(ai_providers::NullStore));
         assert_eq!(
-            family_catalog
-                .provider("groq")
-                .unwrap()
-                .models[0]
+            family_catalog.provider("groq").unwrap().models[0]
                 .family
                 .as_deref(),
             Some("plain")

@@ -36,7 +36,11 @@ impl MigrationEntry {
         let mut hasher = Sha256::new();
         hasher.update(name.as_bytes());
         let result = hasher.finalize();
-        u64::from_be_bytes(result[..8].try_into().expect("sha256 digest is long enough"))
+        u64::from_be_bytes(
+            result[..8]
+                .try_into()
+                .expect("sha256 digest is long enough"),
+        )
     }
 
     fn compute_checksum(content: &str) -> String {
@@ -97,9 +101,7 @@ pub async fn apply_pending_migrations(db: &mut toasty::db::Db) -> anyhow::Result
             toasty::sql::statement(statement)
                 .exec(&mut *db)
                 .await
-                .map_err(|error| {
-                    anyhow::anyhow!("migration '{}' failed: {error}", entry.name)
-                })?;
+                .map_err(|error| anyhow::anyhow!("migration '{}' failed: {error}", entry.name))?;
         }
         toasty::sql::statement(
             r#"INSERT INTO "_migrations_history" (id, name, checksum) VALUES (?1, ?2, ?3)"#,
@@ -123,8 +125,10 @@ async fn list_applied(db: &mut toasty::db::Db) -> anyhow::Result<HashMap<String,
     let mut applied = HashMap::new();
     for row in rows {
         if let toasty::stmt::Value::Record(record) = row
-            && let (Some(toasty::stmt::Value::String(name)), Some(toasty::stmt::Value::String(checksum))) =
-                (record.first(), record.get(1))
+            && let (
+                Some(toasty::stmt::Value::String(name)),
+                Some(toasty::stmt::Value::String(checksum)),
+            ) = (record.first(), record.get(1))
         {
             applied.insert(name.clone(), checksum.clone());
         }
@@ -271,8 +275,8 @@ mod tests {
 
     #[tokio::test]
     async fn migrations_apply_once_and_are_verified_on_reopen() {
-        let driver = toasty_driver_turso::Turso::new("turso::memory:")
-            .expect("in-memory turso driver");
+        let driver =
+            toasty_driver_turso::Turso::new("turso::memory:").expect("in-memory turso driver");
         let mut db = toasty::Db::builder()
             .build(driver)
             .await
@@ -295,8 +299,17 @@ mod tests {
                 _ => None,
             })
             .collect();
-        for table in ["sessions", "turns", "attempts", "cooldowns", "routing_decisions"] {
-            assert!(names.contains(&table.to_string()), "missing {table} in {names:?}");
+        for table in [
+            "sessions",
+            "turns",
+            "attempts",
+            "cooldowns",
+            "routing_decisions",
+        ] {
+            assert!(
+                names.contains(&table.to_string()),
+                "missing {table} in {names:?}"
+            );
         }
     }
 }
