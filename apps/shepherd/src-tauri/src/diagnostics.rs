@@ -57,9 +57,25 @@ impl DiagnosticLog {
             Err(error) => return Err(error),
         };
         let mut records = std::collections::VecDeque::new();
-        for line in BufReader::new(file).lines() {
-            let line = line?;
-            let record = serde_json::from_str(&line).map_err(io::Error::other)?;
+        let mut reader = BufReader::new(file);
+        let mut line = Vec::new();
+        let mut line_number = 0;
+        loop {
+            line.clear();
+            if reader.read_until(b'\n', &mut line)? == 0 {
+                break;
+            }
+            line_number += 1;
+            let record = match serde_json::from_slice(&line) {
+                Ok(record) => record,
+                Err(error) => Diagnostic {
+                    id: format!("invalid-log-line-{line_number}"),
+                    time: "Unknown time".into(),
+                    operation: "diagnostic_history".into(),
+                    message: "A diagnostic history record could not be read.".into(),
+                    details: format!("Invalid diagnostic record on line {line_number}: {error}"),
+                },
+            };
             if records.len() == 200 {
                 records.pop_front();
             }
@@ -105,6 +121,41 @@ mod tests {
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].id, "fixture");
         assert_eq!(records[0].details, "Permission denied\nCaused by: denied");
+        Ok(())
+    }
+
+    #[test]
+    fn history_keeps_readable_records_around_a_damaged_line()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("errors.jsonl");
+        let log = DiagnosticLog::new(path.clone());
+        let record = |id: &str| Diagnostic {
+            id: id.into(),
+            time: "2026-01-01T00:00:00Z".into(),
+            operation: "fixture".into(),
+            message: "fixture error".into(),
+            details: String::new(),
+        };
+        log.append(&record("before"))?;
+        OpenOptions::new()
+            .append(true)
+            .open(&path)?
+            .write_all(b"{\xff\n")?;
+        log.append(&record("after"))?;
+        let history = log.recent()?;
+        assert_eq!(history.len(), 3);
+        assert_eq!(
+            history.first().map(|record| record.id.as_str()),
+            Some("before")
+        );
+        let damaged = history.get(1).ok_or("missing damaged record notice")?;
+        assert_eq!(damaged.operation, "diagnostic_history");
+        assert!(damaged.details.contains("line 2"));
+        assert_eq!(
+            history.get(2).map(|record| record.id.as_str()),
+            Some("after")
+        );
         Ok(())
     }
 }
