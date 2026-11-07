@@ -1105,6 +1105,8 @@ and the task header never overstates the tier.
   neighboring cache files and symlink redirects.
   Turso fixtures verify attachment metadata after reopen, rollback on an
   invalid path, and removal with the task record.
+  Saved-task deletion is not yet exposed by the app, so removal of its cached
+  files cannot yet be verified end to end.
 - [x] Corrupt settings file falls back with a banner and backup.
   Rust verifies the exact backup bytes and read-only fallback. Chromium
   verifies the warning and that defaults are usable.

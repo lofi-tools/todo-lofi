@@ -255,6 +255,10 @@ mod tests {
         let outside = tempfile::tempdir()?;
         let cache = root.path().join("attachments");
         let task = cache.join("task");
+        symlink(outside.path(), &cache)?;
+        assert!(persist_prompt_file(&task, "redirect.txt", b"data").is_err());
+        assert!(remove_task(&task).is_err());
+        fs::remove_file(&cache)?;
         fs::create_dir(&cache)?;
         symlink(outside.path(), &task)?;
         assert!(persist_prompt_file(&task, "redirect.txt", b"data").is_err());
@@ -270,6 +274,14 @@ mod tests {
         assert!(prompt_file(&task, &id).is_err());
         assert!(persist_prompt_file(&task, "fixture.txt", b"data").is_err());
         assert_eq!(fs::read(outside_file)?, b"outside");
+        fs::remove_file(&file)?;
+        let file_directory = file
+            .parent()
+            .ok_or_else(|| invalid("Missing file directory."))?;
+        fs::remove_dir(file_directory)?;
+        symlink(outside.path(), file_directory)?;
+        assert!(prompt_file(&task, &id).is_err());
+        assert!(persist_prompt_file(&task, "fixture.txt", b"data").is_err());
         Ok(())
     }
 }
