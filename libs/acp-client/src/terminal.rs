@@ -216,9 +216,7 @@ impl TerminalRegistry {
                 }
             };
             let exit = match status {
-                Ok(status) => {
-                    TerminalExitStatus::new().exit_code(status.code().map(|code| code as u32))
-                }
+                Ok(status) => terminal_exit_status(status),
                 Err(error) => {
                     tracing::warn!("terminal {key} could not be waited on: {error}");
                     TerminalExitStatus::new()
@@ -561,6 +559,32 @@ fn next_terminal_number() -> u64 {
     COUNTER.fetch_add(1, Ordering::Relaxed)
 }
 
+fn terminal_exit_status(status: std::process::ExitStatus) -> TerminalExitStatus {
+    let exit = TerminalExitStatus::new().exit_code(status.code().map(|code| code as u32));
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt as _;
+        exit.signal(status.signal().map(|signal| match signal {
+            libc::SIGHUP => "SIGHUP".to_owned(),
+            libc::SIGINT => "SIGINT".to_owned(),
+            libc::SIGQUIT => "SIGQUIT".to_owned(),
+            libc::SIGABRT => "SIGABRT".to_owned(),
+            libc::SIGKILL => "SIGKILL".to_owned(),
+            libc::SIGSEGV => "SIGSEGV".to_owned(),
+            libc::SIGPIPE => "SIGPIPE".to_owned(),
+            libc::SIGALRM => "SIGALRM".to_owned(),
+            libc::SIGTERM => "SIGTERM".to_owned(),
+            libc::SIGUSR1 => "SIGUSR1".to_owned(),
+            libc::SIGUSR2 => "SIGUSR2".to_owned(),
+            other => format!("signal {other}"),
+        }))
+    }
+    #[cfg(not(unix))]
+    {
+        exit
+    }
+}
+
 fn stop_direct_process(child: &mut async_process::Child) -> Result<(), String> {
     #[cfg(unix)]
     {
@@ -778,7 +802,7 @@ mod tests {
     {
         let directory = tempfile::tempdir()?;
         let root = directory.path().canonicalize()?;
-        let (events, _receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (events, mut receiver) = tokio::sync::mpsc::unbounded_channel();
         let registry = TerminalRegistry::new(SessionRoots::new([root.clone()]), &events, None);
         let request = CreateTerminalRequest::new("session", "exec sleep 30").cwd(root);
         let terminal = registry
@@ -790,12 +814,19 @@ mod tests {
             .kill(&terminal)
             .await
             .map_err(std::io::Error::other)?;
-        tokio::time::timeout(
+        let result = tokio::time::timeout(
             std::time::Duration::from_secs(2),
             registry.wait_for_exit(&terminal),
         )
         .await?
         .map_err(std::io::Error::other)?;
+        assert_eq!(result.exit_status.exit_code, None);
+        assert_eq!(result.exit_status.signal.as_deref(), Some("SIGKILL"));
+        let event =
+            tokio::time::timeout(std::time::Duration::from_secs(2), receiver.recv()).await?;
+        assert!(
+            matches!(event, Some(AcpEvent::TerminalExited { exit_code: None, signal: Some(signal), .. }) if signal == "SIGKILL")
+        );
         Ok(())
     }
 
@@ -930,7 +961,12 @@ mod tests {
         })
         .await?;
         assert_eq!(output, "hello");
-        assert!(registry.output(&terminal).exit_status.is_some());
+        let status = registry
+            .output(&terminal)
+            .exit_status
+            .ok_or("missing exit status")?;
+        assert_eq!(status.exit_code, Some(0));
+        assert_eq!(status.signal, None);
         Ok(())
     }
 
