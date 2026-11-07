@@ -108,6 +108,7 @@ pub enum AcpEvent {
         terminal_id: String,
         chunk: String,
         truncated: bool,
+        permit: tokio::sync::OwnedSemaphorePermit,
     },
     /// A terminal started by the agent exited.
     TerminalExited {

@@ -22,6 +22,8 @@ use crate::{AcpEvent, fs::SessionRoots};
 /// Default retained output per terminal when the agent does not ask for a limit.
 const DEFAULT_OUTPUT_LIMIT: usize = 256 * 1024;
 const MAX_OUTPUT_LIMIT: usize = 1024 * 1024;
+const MAX_PENDING_OUTPUT_EVENTS: usize = 64;
+const MAX_OUTPUT_EVENT_BYTES: usize = 8192;
 
 pub struct TerminalLaunch {
     pub id: String,
@@ -61,6 +63,7 @@ struct TerminalEntry {
     exit: Option<TerminalExitStatus>,
     waiters: Vec<oneshot::Sender<TerminalExitStatus>>,
     byte_limit: usize,
+    cancelled: tokio::sync::watch::Sender<bool>,
 }
 
 /// Shared state for every terminal started in a session.
@@ -71,6 +74,7 @@ pub struct TerminalRegistry {
     events: tokio::sync::mpsc::WeakUnboundedSender<AcpEvent>,
     backend: Option<Arc<dyn TerminalBackend>>,
     closed: Arc<tokio::sync::Mutex<bool>>,
+    output_permits: Arc<tokio::sync::Semaphore>,
 }
 
 impl TerminalRegistry {
@@ -85,6 +89,7 @@ impl TerminalRegistry {
             events: events.downgrade(),
             backend,
             closed: Arc::new(tokio::sync::Mutex::new(false)),
+            output_permits: Arc::new(tokio::sync::Semaphore::new(MAX_PENDING_OUTPUT_EVENTS)),
         }
     }
 
@@ -93,6 +98,10 @@ impl TerminalRegistry {
         &self,
         request: CreateTerminalRequest,
     ) -> Result<CreateTerminalResponse, String> {
+        let closed = self.closed.lock().await;
+        if *closed {
+            return Err("the terminal connection is closed".into());
+        }
         let cwd = match &request.cwd {
             Some(cwd) => self
                 .roots
@@ -114,10 +123,6 @@ impl TerminalRegistry {
             })
             .unwrap_or(DEFAULT_OUTPUT_LIMIT);
         if let Some(backend) = &self.backend {
-            let closed = self.closed.lock().await;
-            if *closed {
-                return Err("the terminal connection is closed".into());
-            }
             let title = request.command.clone();
             let launch = TerminalLaunch {
                 id: key.clone(),
@@ -179,14 +184,14 @@ impl TerminalRegistry {
 
         let registry = self.clone();
         let event_key = key.clone();
-        tokio::spawn(async move {
+        let stdout_task = tokio::spawn(async move {
             if let Some(stdout) = stdout {
                 registry.pump(stdout, event_key.clone()).await;
             }
         });
         let registry = self.clone();
         let event_key = key.clone();
-        tokio::spawn(async move {
+        let stderr_task = tokio::spawn(async move {
             if let Some(stderr) = stderr {
                 registry.pump(stderr, event_key.clone()).await;
             }
@@ -203,13 +208,20 @@ impl TerminalRegistry {
                     TerminalExitStatus::new()
                 }
             };
-            registry.finish(&key, exit);
+            registry.record_exit(&key, &exit);
+            for task in [stdout_task, stderr_task] {
+                if let Err(error) = task.await {
+                    tracing::warn!(terminal_id = key, %error, "terminal output pump failed");
+                }
+            }
+            registry.publish_exit(&key, &exit);
         });
 
         Ok(CreateTerminalResponse::new(terminal_id))
     }
 
     fn register(&self, key: &str, byte_limit: usize) {
+        let (cancelled, _) = tokio::sync::watch::channel(false);
         self.entries().insert(
             key.to_owned(),
             TerminalEntry {
@@ -218,6 +230,7 @@ impl TerminalRegistry {
                 exit: None,
                 waiters: Vec::new(),
                 byte_limit,
+                cancelled,
             },
         );
     }
@@ -300,11 +313,15 @@ impl TerminalRegistry {
     }
 
     pub(crate) async fn shutdown(&self) {
+        let mut closed = self.closed.lock().await;
+        *closed = true;
+        self.output_permits.close();
+        for entry in self.entries().values() {
+            entry.cancelled.send_replace(true);
+        }
         let Some(backend) = &self.backend else {
             return;
         };
-        let mut closed = self.closed.lock().await;
-        *closed = true;
         let terminal_ids: Vec<_> = self.entries().keys().cloned().collect();
         for id in terminal_ids {
             match backend.stop(&id).await {
@@ -341,7 +358,12 @@ impl TerminalRegistry {
                     });
                     let tail = pending.split_off(pending.len() - incomplete);
                     if !pending.is_empty() {
-                        self.push(&key, String::from_utf8_lossy(&pending).into_owned());
+                        if !self
+                            .push(&key, String::from_utf8_lossy(&pending).into_owned())
+                            .await
+                        {
+                            return;
+                        }
                     }
                     pending = tail;
                 }
@@ -352,7 +374,12 @@ impl TerminalRegistry {
             }
         }
         if !pending.is_empty() {
-            self.push(&key, String::from_utf8_lossy(&pending).into_owned());
+            if !self
+                .push(&key, String::from_utf8_lossy(&pending).into_owned())
+                .await
+            {
+                return;
+            }
         }
         self.finish(&key, status);
     }
@@ -364,7 +391,9 @@ impl TerminalRegistry {
                 Ok(0) => break,
                 Ok(read) => {
                     let chunk = String::from_utf8_lossy(&buffer[..read]).into_owned();
-                    self.push(&key, chunk);
+                    if !self.push(&key, chunk).await {
+                        return;
+                    }
                 }
                 Err(error) => {
                     tracing::debug!("terminal {key} output ended: {error}");
@@ -374,13 +403,49 @@ impl TerminalRegistry {
         }
     }
 
-    fn push(&self, key: &str, chunk: String) {
+    async fn push(&self, key: &str, chunk: String) -> bool {
+        let mut remaining = chunk.as_str();
+        while !remaining.is_empty() {
+            let end = remaining.floor_char_boundary(remaining.len().min(MAX_OUTPUT_EVENT_BYTES));
+            let Some((part, rest)) = remaining.get(..end).zip(remaining.get(end..)) else {
+                tracing::error!("invalid terminal output boundary");
+                return false;
+            };
+            if !self.push_chunk(key, part).await {
+                return false;
+            }
+            remaining = rest;
+        }
+        true
+    }
+
+    async fn push_chunk(&self, key: &str, chunk: &str) -> bool {
+        let mut cancelled = {
+            let entries = self.entries();
+            let Some(entry) = entries.get(key) else {
+                return false;
+            };
+            entry.cancelled.subscribe()
+        };
+        if *cancelled.borrow() {
+            return false;
+        }
+        let events = self.events.upgrade();
+        let permit = if let Some(events) = &events {
+            tokio::select! {
+                permit = self.output_permits.clone().acquire_owned() => match permit { Ok(permit) => Some(permit), Err(_) => return false },
+                _ = cancelled.changed() => return false,
+                _ = events.closed() => None,
+            }
+        } else {
+            None
+        };
         let truncated = {
             let mut guard = self.entries();
             let Some(entry) = guard.get_mut(key) else {
-                return;
+                return false;
             };
-            entry.output.push_str(&chunk);
+            entry.output.push_str(chunk);
             if entry.output.len() > entry.byte_limit {
                 let overflow = entry.output.len() - entry.byte_limit;
                 let cut = entry
@@ -394,29 +459,47 @@ impl TerminalRegistry {
             }
             entry.truncated
         };
-        self.publish(AcpEvent::TerminalOutput {
-            terminal_id: key.to_string(),
-            chunk,
-            truncated,
-        });
+        if let (Some(events), Some(permit)) = (events, permit)
+            && events
+                .send(AcpEvent::TerminalOutput {
+                    terminal_id: key.to_string(),
+                    chunk: chunk.to_owned(),
+                    truncated,
+                    permit,
+                })
+                .is_err()
+        {
+            tracing::debug!("ACP terminal listener closed");
+        }
+        true
     }
 
     fn finish(&self, key: &str, exit: TerminalExitStatus) {
+        self.record_exit(key, &exit);
+        self.publish_exit(key, &exit);
+    }
+
+    fn record_exit(&self, key: &str, exit: &TerminalExitStatus) {
         let waiters = {
             let mut guard = self.entries();
             let Some(entry) = guard.get_mut(key) else {
                 return;
             };
             entry.exit = Some(exit.clone());
+            std::mem::take(&mut entry.waiters)
+        };
+        for waiter in waiters {
+            drop(waiter.send(exit.clone()));
+        }
+    }
+
+    fn publish_exit(&self, key: &str, exit: &TerminalExitStatus) {
+        if self.entries().contains_key(key) {
             self.publish(AcpEvent::TerminalExited {
                 terminal_id: key.to_string(),
                 exit_code: exit.exit_code,
                 signal: exit.signal.clone(),
             });
-            std::mem::take(&mut entry.waiters)
-        };
-        for waiter in waiters {
-            drop(waiter.send(exit.clone()));
         }
     }
 
@@ -485,7 +568,8 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let directory = tempfile::tempdir()?;
         let root = directory.path().canonicalize()?;
-        let (events, _receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (events, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let drain = tokio::spawn(async move { while receiver.recv().await.is_some() {} });
         let registry = TerminalRegistry::new(
             SessionRoots::new([root.clone()]),
             &events,
@@ -499,9 +583,13 @@ mod tests {
             .await
             .map_err(std::io::Error::other)?
             .terminal_id;
-        registry.push(
-            terminal.0.as_ref(),
-            format!("{}界", "x".repeat(MAX_OUTPUT_LIMIT)),
+        assert!(
+            registry
+                .push(
+                    terminal.0.as_ref(),
+                    format!("{}界", "x".repeat(MAX_OUTPUT_LIMIT)),
+                )
+                .await
         );
         let output = registry.output(&terminal);
         assert!(output.truncated);
@@ -516,10 +604,175 @@ mod tests {
             .await
             .map_err(std::io::Error::other)?
             .terminal_id;
-        registry.push(terminal.0.as_ref(), "界界".into());
+        assert!(registry.push(terminal.0.as_ref(), "界界".into()).await);
         let output = registry.output(&terminal);
         assert!(output.truncated);
         assert_eq!(output.output, "界");
+        drain.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn terminal_output_backpressures_and_release_unblocks_the_pump()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let (events, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let registry = TerminalRegistry::new(
+            SessionRoots::new([directory.path().to_path_buf()]),
+            &events,
+            None,
+        );
+        registry.register("fixture", MAX_OUTPUT_LIMIT);
+        for index in 0..MAX_PENDING_OUTPUT_EVENTS {
+            assert!(registry.push("fixture", format!("{index},")).await);
+        }
+        assert_eq!(receiver.len(), MAX_PENDING_OUTPUT_EVENTS);
+        let pending_registry = registry.clone();
+        let mut pending =
+            tokio::spawn(async move { pending_registry.push("fixture", "after,".into()).await });
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(30), &mut pending)
+                .await
+                .is_err()
+        );
+        let Some(AcpEvent::TerminalOutput { chunk, .. }) = receiver.recv().await else {
+            return Err("missing output event".into());
+        };
+        assert_eq!(chunk, "0,");
+        assert!(tokio::time::timeout(std::time::Duration::from_secs(2), pending).await??);
+        assert_eq!(receiver.len(), MAX_PENDING_OUTPUT_EVENTS);
+        let pending_registry = registry.clone();
+        let mut pending =
+            tokio::spawn(async move { pending_registry.push("fixture", "blocked".into()).await });
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(30), &mut pending)
+                .await
+                .is_err()
+        );
+        registry
+            .release(&TerminalId::new("fixture"))
+            .await
+            .map_err(std::io::Error::other)?;
+        assert!(!tokio::time::timeout(std::time::Duration::from_secs(2), pending).await??);
+        for index in 1..MAX_PENDING_OUTPUT_EVENTS {
+            let Some(AcpEvent::TerminalOutput { chunk, .. }) = receiver.recv().await else {
+                return Err("missing queued terminal output".into());
+            };
+            assert_eq!(chunk, format!("{index},"));
+        }
+        let Some(AcpEvent::TerminalOutput { chunk, .. }) = receiver.recv().await else {
+            return Err("missing resumed terminal output".into());
+        };
+        assert_eq!(chunk, "after,");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn terminal_shutdown_unblocks_backpressured_output()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let (events, _receiver) = tokio::sync::mpsc::unbounded_channel();
+        let registry = TerminalRegistry::new(
+            SessionRoots::new([directory.path().to_path_buf()]),
+            &events,
+            Some(Arc::new(IdleBackend)),
+        );
+        registry.register("fixture", MAX_OUTPUT_LIMIT);
+        for _ in 0..MAX_PENDING_OUTPUT_EVENTS {
+            assert!(registry.push("fixture", "output".into()).await);
+        }
+        let pending_registry = registry.clone();
+        let mut pending =
+            tokio::spawn(async move { pending_registry.push("fixture", "blocked".into()).await });
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(30), &mut pending)
+                .await
+                .is_err()
+        );
+        registry.shutdown().await;
+        assert!(!tokio::time::timeout(std::time::Duration::from_secs(2), pending).await??);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn terminal_output_is_retained_when_the_event_receiver_is_gone()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let (events, receiver) = tokio::sync::mpsc::unbounded_channel();
+        let registry = TerminalRegistry::new(
+            SessionRoots::new([directory.path().to_path_buf()]),
+            &events,
+            None,
+        );
+        registry.register("fixture", 4);
+        drop(receiver);
+        assert!(registry.push("fixture", "abcdef".into()).await);
+        let output = registry.output(&TerminalId::new("fixture"));
+        assert_eq!(output.output, "cdef");
+        assert!(output.truncated);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn dropping_receiver_unblocks_terminal_output() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let directory = tempfile::tempdir()?;
+        let (events, receiver) = tokio::sync::mpsc::unbounded_channel();
+        let registry = TerminalRegistry::new(
+            SessionRoots::new([directory.path().to_path_buf()]),
+            &events,
+            None,
+        );
+        registry.register("fixture", MAX_OUTPUT_LIMIT);
+        for _ in 0..MAX_PENDING_OUTPUT_EVENTS {
+            assert!(registry.push("fixture", "a".into()).await);
+        }
+        let pending_registry = registry.clone();
+        let mut pending =
+            tokio::spawn(async move { pending_registry.push("fixture", "after".into()).await });
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(30), &mut pending)
+                .await
+                .is_err()
+        );
+        drop(receiver);
+        assert!(tokio::time::timeout(std::time::Duration::from_secs(2), pending).await??);
+        assert!(
+            registry
+                .output(&TerminalId::new("fixture"))
+                .output
+                .ends_with("after")
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn direct_terminal_emits_output_before_exit() -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let root = directory.path().canonicalize()?;
+        let (events, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let registry = TerminalRegistry::new(SessionRoots::new([root.clone()]), &events, None);
+        let request = CreateTerminalRequest::new("session", "printf")
+            .args(vec!["hello".into()])
+            .cwd(root);
+        let terminal = registry
+            .create(request)
+            .await
+            .map_err(std::io::Error::other)?
+            .terminal_id;
+        let mut output = String::new();
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            while let Some(event) = receiver.recv().await {
+                match event {
+                    AcpEvent::TerminalOutput { chunk, .. } => output.push_str(&chunk),
+                    AcpEvent::TerminalExited { .. } => break,
+                    _ => {}
+                }
+            }
+        })
+        .await?;
+        assert_eq!(output, "hello");
+        assert!(registry.output(&terminal).exit_status.is_some());
         Ok(())
     }
 }

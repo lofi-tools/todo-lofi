@@ -1603,6 +1603,7 @@ impl AgentPane {
                     terminal_id,
                     chunk,
                     truncated,
+                    ..
                 } => {
                     let index = entry.transcript.index_of_terminal(&terminal_id);
                     let row = entry.terminals.entry(terminal_id).or_default();
