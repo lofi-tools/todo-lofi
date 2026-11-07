@@ -46,7 +46,7 @@ use crate::git::{GitError, GitService, TurnBaseline};
 use crate::harness::{HarnessFactory, HarnessSession, ProjectApprovals, UnavailableHarnessFactory};
 use crate::session::SessionRecord;
 use crate::snapshots::{SessionRecovery, TaskApproval};
-use crate::store::{MemoryStore, Store, StoreError};
+use crate::store::{MemoryStore, Store, StoreError, WorktreeDeletion};
 use crate::terminal::{
     InspectorTab, ProcessRecord, TerminalId, TerminalLayout, TerminalList, TerminalRecord,
     TerminalSnapshot,
@@ -144,6 +144,8 @@ pub enum CoreError {
     },
     #[error("store error: {0}")]
     Store(#[from] StoreError),
+    #[error("could not recover worktree deletion for task {task_id}: {reason}")]
+    WorktreeDeletionRecovery { task_id: String, reason: String },
     #[error("could not save the agent session: {store}; could not stop the agent: {cleanup}")]
     SessionRecordCleanup { store: String, cleanup: String },
     #[error("Git error: {0}")]
@@ -373,8 +375,118 @@ impl Core {
                 tracing::warn!(%project, "ignored invalid terminal layout");
             }
         }
+        core.recover_worktree_deletions().await?;
         core.collect_archived_worktrees().await;
         Ok(core)
+    }
+
+    async fn recover_worktree_deletions(&mut self) -> Result<(), CoreError> {
+        for deletion in self.store.load_worktree_deletions().await? {
+            self.recover_worktree_deletion(&deletion)
+                .await
+                .map_err(|error| CoreError::WorktreeDeletionRecovery {
+                    task_id: deletion.task_id.to_string(),
+                    reason: error.to_string(),
+                })?;
+        }
+        Ok(())
+    }
+
+    async fn recover_worktree_deletion(
+        &self,
+        deletion: &WorktreeDeletion,
+    ) -> Result<(), CoreError> {
+        let invalid = || CoreError::WorktreeDeletionRecovery {
+            task_id: deletion.task_id.to_string(),
+            reason: "the recorded paths or worktree identity are inconsistent".into(),
+        };
+        let identity = uuid::Uuid::parse_str(&deletion.identity).map_err(|_| invalid())?;
+        if identity.to_string() != deletion.identity {
+            return Err(invalid());
+        }
+        let repository = GitService::discover(&deletion.repository_root)?;
+        let worktrees = repository.git_dir.join("shepherd/worktrees");
+        if repository.root != deletion.repository_root
+            || deletion.original_path.parent() != Some(worktrees.as_path())
+            || deletion.staged_path != worktrees.join(format!(".shepherd-deletion-{identity}"))
+            || deletion.original_path == deletion.staged_path
+            || deletion.worktree_git_dir.parent()
+                != Some(repository.git_dir.join("worktrees").as_path())
+        {
+            return Err(invalid());
+        }
+        if let Some(task) = self.tasks.get(&deletion.task_id) {
+            if task.worktree_path.as_ref() != Some(&deletion.original_path)
+                || GitService::discover(&self.project_path(&task.project_id)?)?.root
+                    != repository.root
+            {
+                return Err(invalid());
+            }
+        } else if !self.projects.values().any(|project| {
+            GitService::discover(&project.path)
+                .is_ok_and(|candidate| candidate.root == repository.root)
+        }) {
+            return Err(invalid());
+        }
+        let exists = |path: &Path| -> Result<bool, CoreError> {
+            match path.symlink_metadata() {
+                Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => Ok(true),
+                Ok(_) => Err(invalid()),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+                Err(source) => Err(CoreError::Io {
+                    path: path.display().to_string(),
+                    source,
+                }),
+            }
+        };
+        let original = exists(&deletion.original_path)?;
+        let staged = exists(&deletion.staged_path)?;
+        match (self.tasks.contains_key(&deletion.task_id), original, staged) {
+            (true, original, staged) if original != staged => {
+                let current = if original {
+                    &deletion.original_path
+                } else {
+                    &deletion.staged_path
+                };
+                GitService.verify_worktree_deletion(
+                    &repository,
+                    current,
+                    &deletion.worktree_git_dir,
+                    &deletion.identity,
+                )?;
+                if staged {
+                    GitService.move_worktree(&repository, current, &deletion.original_path)?;
+                }
+                self.store
+                    .remove_worktree_deletion(&deletion.task_id)
+                    .await?;
+                GitService.clear_worktree_deletion_marker(
+                    &repository,
+                    &deletion.original_path,
+                    &deletion.worktree_git_dir,
+                    &deletion.identity,
+                )?;
+            }
+            (false, false, true) => {
+                GitService.verify_worktree_deletion(
+                    &repository,
+                    &deletion.staged_path,
+                    &deletion.worktree_git_dir,
+                    &deletion.identity,
+                )?;
+                GitService.remove_clean_worktree(&repository, &deletion.staged_path)?;
+                self.store
+                    .remove_worktree_deletion(&deletion.task_id)
+                    .await?;
+            }
+            (false, false, false) if !exists(&deletion.worktree_git_dir)? => {
+                self.store
+                    .remove_worktree_deletion(&deletion.task_id)
+                    .await?;
+            }
+            _ => return Err(invalid()),
+        }
+        Ok(())
     }
 
     async fn collect_archived_worktrees(&mut self) {
@@ -4236,6 +4348,106 @@ mod tests {
                 .iter()
                 .any(|summary| summary.contains("done"))
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn startup_recovers_staged_worktree_deletions_conservatively()
+    -> Result<(), Box<dyn std::error::Error>> {
+        for scenario in [
+            "before-move",
+            "restore",
+            "finish",
+            "finished",
+            "wrong-identity",
+            "both-paths",
+            "dirty",
+        ] {
+            let fixture = TestRepository::new()?;
+            let repository = GitService::discover(fixture.path())?;
+            let database = TestDatabase::new()?;
+            let store = TursoStore::open(&database.uri()).await?;
+            let project = projects::Project::new(repository.root.clone());
+            let mut task = Task::draft(project.id.clone(), "Recovery", &repository.git_dir);
+            let original = task.proposed_worktree_path.clone();
+            GitService.create_worktree(
+                &repository,
+                &original,
+                &task.proposed_branch,
+                &repository.default_branch,
+            )?;
+            task.worktree_path = Some(original.clone());
+            task.branch = Some(task.proposed_branch.clone());
+            std::fs::write(repository.git_dir.join("info/exclude"), "ignored.txt\n")?;
+            std::fs::write(original.join("ignored.txt"), "preserve me")?;
+            store.save_project(&project).await?;
+            store.save_task(&task).await?;
+            let identity = uuid::Uuid::new_v4().to_string();
+            let git_dir = GitService.mark_worktree_deletion(&repository, &original, &identity)?;
+            let staged = repository
+                .git_dir
+                .join("shepherd/worktrees")
+                .join(format!(".shepherd-deletion-{identity}"));
+            let deletion = WorktreeDeletion {
+                task_id: task.id.clone(),
+                repository_root: repository.root.clone(),
+                original_path: original.clone(),
+                staged_path: staged.clone(),
+                worktree_git_dir: git_dir.clone(),
+                identity: identity.clone(),
+            };
+            store.save_worktree_deletion(&deletion).await?;
+            if scenario != "before-move" {
+                GitService.move_worktree(&repository, &original, &staged)?;
+            }
+            if matches!(scenario, "finish" | "finished" | "dirty") {
+                store.delete_task(&task.id, None).await?;
+            }
+            if scenario == "finished" {
+                GitService.remove_clean_worktree(&repository, &staged)?;
+            }
+            if scenario == "both-paths" {
+                std::fs::create_dir(&original)?;
+            }
+            if scenario == "dirty" {
+                std::fs::write(staged.join("new-file"), "do not remove")?;
+            }
+            if scenario == "wrong-identity" {
+                GitService.clear_worktree_deletion_marker(
+                    &repository,
+                    &staged,
+                    &git_dir,
+                    &identity,
+                )?;
+            }
+            drop(store);
+            let result = Core::load(
+                Box::new(TursoStore::open(&database.uri()).await?),
+                Box::new(UnavailableHarnessFactory),
+            )
+            .await;
+            if matches!(scenario, "wrong-identity" | "both-paths" | "dirty") {
+                assert!(result.is_err());
+                assert_eq!(
+                    std::fs::read_to_string(staged.join("ignored.txt"))?,
+                    "preserve me"
+                );
+                continue;
+            }
+            let core = result?;
+            assert!(core.store.load_worktree_deletions().await?.is_empty());
+            if matches!(scenario, "finish" | "finished") {
+                assert!(!original.exists() && !staged.exists());
+                assert!(!core.tasks.contains_key(&task.id));
+            } else {
+                assert_eq!(
+                    std::fs::read_to_string(original.join("ignored.txt"))?,
+                    "preserve me"
+                );
+                assert!(!staged.exists());
+                assert!(core.tasks.contains_key(&task.id));
+            }
+        }
         Ok(())
     }
 

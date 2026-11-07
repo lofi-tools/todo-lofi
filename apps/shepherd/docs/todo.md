@@ -1227,7 +1227,11 @@ placeholder tabs and no unearned state badges.
   The journal can also record a random marker in the worktree's Git admin
   directory; a fixture verifies that the marker survives a move and rejects
   a different worktree identity.
-  Staging and startup recovery are not yet connected to deletion.
+  Startup recovery restores a staged checkout when the task remains and
+  finishes removal after task deletion, checking the marker and paths first.
+  Fixtures cover both outcomes, an already-finished removal, changed files,
+  conflicting paths and a missing marker. Task deletion does not yet stage or
+  write the journal.
   If an opened agent session cannot be recorded, the core stops it before
   retrying; a database-trigger fixture verifies cleanup and a subsequent start.
   A second fixture makes cleanup fail twice and verifies that the session is
