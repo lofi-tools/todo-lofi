@@ -237,9 +237,8 @@ fn load_tracker_config(config: &HashMap<String, serde_yaml::Value>) -> Result<Tr
         })?
         .to_string();
 
-    let active_states = string_list(tracker_map.get("active_states")).unwrap_or_else(|| {
-        vec!["Todo".to_string(), "In Progress".to_string()]
-    });
+    let active_states = string_list(tracker_map.get("active_states"))
+        .unwrap_or_else(|| vec!["Todo".to_string(), "In Progress".to_string()]);
 
     let terminal_states = string_list(tracker_map.get("terminal_states")).unwrap_or_else(|| {
         vec![
@@ -291,11 +290,7 @@ fn environment_variable_name(raw: &str) -> Option<&str> {
         .strip_prefix('{')
         .and_then(|inner| inner.strip_suffix('}'))
         .unwrap_or(remainder);
-    if name.is_empty() {
-        None
-    } else {
-        Some(name)
-    }
+    if name.is_empty() { None } else { Some(name) }
 }
 
 fn load_polling_config(config: &HashMap<String, serde_yaml::Value>) -> Result<PollingConfig> {
@@ -612,14 +607,14 @@ impl ServiceConfig {
             return Err(MissingTrackerProjectSlug);
         }
 
-        if !self
-            .tracker
-            .endpoint
-            .starts_with("http://")
+        if !self.tracker.endpoint.starts_with("http://")
             && !self.tracker.endpoint.starts_with("https://")
         {
             return Err(ConfigValidation {
-                message: format!("Tracker endpoint must be an HTTP(S) URL: {}", self.tracker.endpoint),
+                message: format!(
+                    "Tracker endpoint must be an HTTP(S) URL: {}",
+                    self.tracker.endpoint
+                ),
             });
         }
 
@@ -763,7 +758,10 @@ server:
         assert!(config.workspace.root.is_absolute());
         assert!(config.workspace.root.ends_with("workspaces"));
 
-        assert_eq!(config.hooks.after_create, Some("echo 'created'".to_string()));
+        assert_eq!(
+            config.hooks.after_create,
+            Some("echo 'created'".to_string())
+        );
         assert_eq!(config.hooks.before_run, Some("echo 'running'".to_string()));
         assert_eq!(config.hooks.timeout_ms, 30000);
 
@@ -808,7 +806,10 @@ prompt
         );
         assert_eq!(config.polling.interval_ms, DEFAULT_POLL_INTERVAL_MS);
         assert_eq!(config.hooks.timeout_ms, DEFAULT_HOOK_TIMEOUT_MS);
-        assert_eq!(config.agent.max_concurrent_agents, DEFAULT_MAX_CONCURRENT_AGENTS);
+        assert_eq!(
+            config.agent.max_concurrent_agents,
+            DEFAULT_MAX_CONCURRENT_AGENTS
+        );
         assert_eq!(config.agent.max_turns, DEFAULT_MAX_TURNS);
         assert_eq!(
             config.agent.max_retry_backoff_ms,
@@ -1015,7 +1016,10 @@ prompt
 
         let workflow = crate::workflow::load_workflow(&workflow_path).expect("workflow loads");
         let config = load_config(&workflow, workflow_dir.path()).expect("config is valid");
-        assert_eq!(config.workspace.root, PathBuf::from("/tmp/symphony-test-root"));
+        assert_eq!(
+            config.workspace.root,
+            PathBuf::from("/tmp/symphony-test-root")
+        );
     }
 
     #[test]

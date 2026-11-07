@@ -95,9 +95,13 @@ pub enum AgentEvent {
         message: String,
     },
     /// Absolute thread token totals. Delta-style payloads are ignored.
-    TokenUsage { usage: TokenUsage },
+    TokenUsage {
+        usage: TokenUsage,
+    },
     /// Latest rate-limit payload.
-    RateLimits { payload: Value },
+    RateLimits {
+        payload: Value,
+    },
 }
 
 impl AgentEvent {
@@ -151,11 +155,25 @@ enum PumpOutcome {
 }
 
 enum Incoming {
-    Response { id: Value, payload: Value },
-    Notification { method: String, params: Value },
-    Request { id: Value, method: String, params: Value },
-    Malformed { line: String },
-    Closed { message: String },
+    Response {
+        id: Value,
+        payload: Value,
+    },
+    Notification {
+        method: String,
+        params: Value,
+    },
+    Request {
+        id: Value,
+        method: String,
+        params: Value,
+    },
+    Malformed {
+        line: String,
+    },
+    Closed {
+        message: String,
+    },
 }
 
 /// One step of the agent pump loop.
@@ -295,7 +313,10 @@ impl AgentClient {
     async fn initialize(&mut self) -> Result<()> {
         let mut capabilities = serde_json::Map::new();
         // Dynamic tools are gated behind the experimental capability.
-        capabilities.insert("experimentalApi".into(), Value::Bool(!self.tools.is_empty()));
+        capabilities.insert(
+            "experimentalApi".into(),
+            Value::Bool(!self.tools.is_empty()),
+        );
 
         let params = json!({
             "clientInfo": {
@@ -509,9 +530,10 @@ impl AgentClient {
     }
 
     async fn send(&mut self, message: Value) -> Result<()> {
-        let mut line = serde_json::to_string(&message).map_err(|error| AgentCommunicationError {
-            source: Box::new(error),
-        })?;
+        let mut line =
+            serde_json::to_string(&message).map_err(|error| AgentCommunicationError {
+                source: Box::new(error),
+            })?;
         line.push('\n');
         self.stdin
             .write_all(line.as_bytes())
@@ -528,7 +550,8 @@ impl AgentClient {
     }
 
     async fn notify(&mut self, method: &str, params: Value) -> Result<()> {
-        self.send(json!({ "method": method, "params": params })).await
+        self.send(json!({ "method": method, "params": params }))
+            .await
     }
 
     /// Send a request and wait for its response, honouring `read_timeout_ms`.
@@ -545,7 +568,12 @@ impl AgentClient {
         let mut on_event = |_event: AgentEvent| {};
 
         match self
-            .pump(PumpTarget::Response(json!(id)), deadline, &mut cancel, &mut on_event)
+            .pump(
+                PumpTarget::Response(json!(id)),
+                deadline,
+                &mut cancel,
+                &mut on_event,
+            )
             .await
         {
             Ok(PumpOutcome::Response(response)) => Ok(response),
@@ -615,23 +643,20 @@ impl AgentClient {
                 Step::Message(Some(Incoming::Malformed { line })) => {
                     on_event(AgentEvent::Malformed { message: line });
                 }
-                Step::Message(Some(Incoming::Response { id, payload })) => {
-                    match &target {
-                        PumpTarget::Response(expected) if &id == expected => {
-                            return response_outcome(payload).map(PumpOutcome::Response);
-                        }
-                        _ => {
-                            debug!(
-                                target: "symphony",
-                                "outcome=ignored message=unexpected_response id={id}"
-                            );
-                        }
+                Step::Message(Some(Incoming::Response { id, payload })) => match &target {
+                    PumpTarget::Response(expected) if &id == expected => {
+                        return response_outcome(payload).map(PumpOutcome::Response);
                     }
-                }
+                    _ => {
+                        debug!(
+                            target: "symphony",
+                            "outcome=ignored message=unexpected_response id={id}"
+                        );
+                    }
+                },
                 Step::Message(Some(Incoming::Notification { method, params })) => {
-                    if let Some(terminal) = self
-                        .handle_notification(&method, params, on_event)
-                        .await?
+                    if let Some(terminal) =
+                        self.handle_notification(&method, params, on_event).await?
                         && matches!(target, PumpTarget::Turn(_))
                     {
                         return Ok(PumpOutcome::TurnEnded(terminal));
@@ -744,9 +769,7 @@ impl AgentClient {
                     .or_else(|| self.current_turn_id.as_deref())
                     .unwrap_or_default()
                     .to_string();
-                on_event(AgentEvent::TurnCancelled {
-                    turn_id,
-                });
+                on_event(AgentEvent::TurnCancelled { turn_id });
                 Ok(Some(TurnTerminal::Cancelled))
             }
             "thread/tokenUsage/updated" => {
@@ -1004,7 +1027,12 @@ fn truncate(text: &str, limit: usize) -> String {
 
 /// Map the configured thread sandbox mode onto the protocol's `SandboxMode`.
 fn map_sandbox_mode(configured: &str) -> &'static str {
-    match configured.trim().to_ascii_lowercase().replace('_', "-").as_str() {
+    match configured
+        .trim()
+        .to_ascii_lowercase()
+        .replace('_', "-")
+        .as_str()
+    {
         "read-only" | "readonly" => "readOnly",
         "danger-full-access" | "dangerfullaccess" | "full-access" => "dangerFullAccess",
         _ => "workspaceWrite",
@@ -1100,7 +1128,10 @@ fn extract_token_usage(params: &Value) -> Option<TokenUsage> {
     collect(params, &ABSOLUTE_KEYS)
 }
 
-fn spawn_stdout_reader(stdout: tokio::process::ChildStdout, tx: mpsc::Sender<Incoming>) -> JoinHandle<()> {
+fn spawn_stdout_reader(
+    stdout: tokio::process::ChildStdout,
+    tx: mpsc::Sender<Incoming>,
+) -> JoinHandle<()> {
     tokio::spawn(async move {
         let mut lines = BufReader::new(stdout).lines();
         loop {
@@ -1141,7 +1172,10 @@ fn spawn_stdout_reader(stdout: tokio::process::ChildStdout, tx: mpsc::Sender<Inc
                             params: message.get("params").cloned().unwrap_or(Value::Null),
                         },
                         (None, None) => Incoming::Malformed {
-                            line: format!("message without id or method: {}", truncate(trimmed, 200)),
+                            line: format!(
+                                "message without id or method: {}",
+                                truncate(trimmed, 200)
+                            ),
                         },
                     };
 
@@ -1480,7 +1514,10 @@ mod tests {
         assert_eq!(policy["writableRoots"][0], "/tmp/ws");
         assert_eq!(policy["networkAccess"], false);
 
-        assert_eq!(turn_sandbox_policy("read-only", "/tmp/ws")["type"], "readOnly");
+        assert_eq!(
+            turn_sandbox_policy("read-only", "/tmp/ws")["type"],
+            "readOnly"
+        );
         assert_eq!(
             turn_sandbox_policy("danger-full-access", "/tmp/ws")["type"],
             "dangerFullAccess"

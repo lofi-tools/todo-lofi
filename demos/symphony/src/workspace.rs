@@ -136,9 +136,7 @@ impl WorkspaceManager {
         };
 
         // `after_create` only runs for a newly created workspace and is fatal on failure.
-        if created_now
-            && let Some(script) = &hooks.after_create
-        {
+        if created_now && let Some(script) = &hooks.after_create {
             self.run_hook("after_create", script, &workspace.path, hooks.timeout_ms)
                 .await?;
         }
@@ -171,11 +169,7 @@ impl WorkspaceManager {
     }
 
     /// Remove the workspace for an issue, running `before_remove` first.
-    pub async fn remove_for_issue(
-        &self,
-        identifier: &str,
-        hooks: &HooksConfig,
-    ) -> Result<()> {
+    pub async fn remove_for_issue(&self, identifier: &str, hooks: &HooksConfig) -> Result<()> {
         let path = self.workspace_path(identifier);
 
         if !is_inside(&self.root, &path) {

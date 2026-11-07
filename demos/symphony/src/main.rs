@@ -101,8 +101,7 @@ async fn run(args: Args) -> symphony::error::Result<()> {
     )];
 
     let server_port = effective.config.server.port;
-    let mut orchestrator =
-        Orchestrator::new(tracker, workspace_manager, effective, tools)?;
+    let mut orchestrator = Orchestrator::new(tracker, workspace_manager, effective, tools)?;
     let observability = orchestrator.observability();
 
     if let Some(port) = server_port {

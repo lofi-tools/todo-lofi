@@ -159,15 +159,22 @@ impl LinearTracker {
             });
         }
 
-        let data = payload.get("data").cloned().ok_or_else(|| LinearUnknownPayload {
-            payload: truncate(&payload.to_string(), 500),
-        })?;
+        let data = payload
+            .get("data")
+            .cloned()
+            .ok_or_else(|| LinearUnknownPayload {
+                payload: truncate(&payload.to_string(), 500),
+            })?;
 
         Ok(data)
     }
 
     /// Page through an `issues` connection built from the supplied query.
-    async fn fetch_issues_paginated(&self, query: &str, state_names: Vec<String>) -> Result<Vec<Issue>> {
+    async fn fetch_issues_paginated(
+        &self,
+        query: &str,
+        state_names: Vec<String>,
+    ) -> Result<Vec<Issue>> {
         let mut issues = Vec::new();
         let mut cursor: Option<String> = None;
 
@@ -330,7 +337,10 @@ pub fn normalize_issue(node: &Value) -> Result<Issue> {
         .map(str::to_string);
 
     // Non-integer priorities normalize to null.
-    let priority = node.get("priority").and_then(Value::as_i64).map(|value| value as i32);
+    let priority = node
+        .get("priority")
+        .and_then(Value::as_i64)
+        .map(|value| value as i32);
 
     let branch_name = node
         .get("branchName")
@@ -493,7 +503,10 @@ impl ClientTool for LinearGraphqlTool {
         };
 
         if query.trim().is_empty() {
-            return Ok(tool_failure("invalid_arguments", "`query` must not be empty"));
+            return Ok(tool_failure(
+                "invalid_arguments",
+                "`query` must not be empty",
+            ));
         }
 
         if count_graphql_operations(&query) != 1 {
@@ -792,10 +805,9 @@ mod tests {
     #[tokio::test]
     async fn empty_state_list_skips_the_api_call() {
         // An unroutable endpoint proves no request is attempted.
-        let tracker = LinearTracker::from_config(&tracker_config(
-            "http://127.0.0.1:1/graphql".to_string(),
-        ))
-        .expect("tracker builds");
+        let tracker =
+            LinearTracker::from_config(&tracker_config("http://127.0.0.1:1/graphql".to_string()))
+                .expect("tracker builds");
 
         let issues = tracker
             .fetch_issues_by_states(Vec::new())
@@ -855,7 +867,10 @@ mod tests {
 
         let tracker = LinearTracker::from_config(&tracker_config(format!("http://{address}")))
             .expect("tracker builds");
-        let issues = tracker.fetch_candidate_issues().await.expect("fetch succeeds");
+        let issues = tracker
+            .fetch_candidate_issues()
+            .await
+            .expect("fetch succeeds");
 
         assert_eq!(issues.len(), 2);
         let requests = server.await.expect("server task");
@@ -875,7 +890,8 @@ mod tests {
         )
         .await;
 
-        let tracker = LinearTracker::from_config(&tracker_config(endpoint)).expect("tracker builds");
+        let tracker =
+            LinearTracker::from_config(&tracker_config(endpoint)).expect("tracker builds");
         let error = tracker
             .fetch_candidate_issues()
             .await
@@ -892,7 +908,8 @@ mod tests {
         let body = json!({ "errors": [ { "message": "bad query" } ] }).to_string();
         let (endpoint, server) = spawn_stub(http_ok(&body)).await;
 
-        let tracker = LinearTracker::from_config(&tracker_config(endpoint)).expect("tracker builds");
+        let tracker =
+            LinearTracker::from_config(&tracker_config(endpoint)).expect("tracker builds");
         let error = tracker
             .fetch_candidate_issues()
             .await
@@ -908,7 +925,8 @@ mod tests {
     async fn maps_unknown_payloads() {
         let (endpoint, server) = spawn_stub(http_ok("not json")).await;
 
-        let tracker = LinearTracker::from_config(&tracker_config(endpoint)).expect("tracker builds");
+        let tracker =
+            LinearTracker::from_config(&tracker_config(endpoint)).expect("tracker builds");
         assert!(matches!(
             tracker.fetch_candidate_issues().await,
             Err(LinearUnknownPayload { .. })
@@ -927,7 +945,8 @@ mod tests {
         .to_string();
         let (endpoint, server) = spawn_stub(http_ok(&body)).await;
 
-        let tracker = LinearTracker::from_config(&tracker_config(endpoint)).expect("tracker builds");
+        let tracker =
+            LinearTracker::from_config(&tracker_config(endpoint)).expect("tracker builds");
         assert!(matches!(
             tracker.fetch_candidate_issues().await,
             Err(LinearMissingEndCursor)
@@ -943,7 +962,8 @@ mod tests {
         .to_string();
         let (endpoint, server) = spawn_stub(http_ok(&body)).await;
 
-        let tracker = LinearTracker::from_config(&tracker_config(endpoint)).expect("tracker builds");
+        let tracker =
+            LinearTracker::from_config(&tracker_config(endpoint)).expect("tracker builds");
         let issues = tracker
             .fetch_issue_states_by_ids(vec!["issue-1".to_string()])
             .await
@@ -960,12 +980,18 @@ mod tests {
     fn counts_graphql_operations() {
         assert_eq!(count_graphql_operations("query A { a }"), 1);
         assert_eq!(count_graphql_operations("{ a }"), 1);
-        assert_eq!(count_graphql_operations("query A { a }\nmutation B { b }"), 2);
+        assert_eq!(
+            count_graphql_operations("query A { a }\nmutation B { b }"),
+            2
+        );
         assert_eq!(
             count_graphql_operations("# comment with query braces {}\nquery A { viewer { id } }"),
             1
         );
-        assert_eq!(count_graphql_operations("query { a(text: \"mutation X {}\") }"), 1);
+        assert_eq!(
+            count_graphql_operations("query { a(text: \"mutation X {}\") }"),
+            1
+        );
     }
 
     #[tokio::test]

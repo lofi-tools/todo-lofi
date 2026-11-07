@@ -162,7 +162,11 @@ async fn read_request(stream: &mut TcpStream) -> Result<Option<Request>> {
         .unwrap_or("/")
         .trim_end_matches('/')
         .to_string();
-    let path = if path.is_empty() { "/".to_string() } else { path };
+    let path = if path.is_empty() {
+        "/".to_string()
+    } else {
+        path
+    };
 
     Ok(Some(Request { method, path }))
 }
@@ -196,9 +200,7 @@ async fn write_response(stream: &mut TcpStream, response: &Response) -> Result<(
 fn route(request: &Request, observability: ObservabilityState) -> Response {
     match (request.method.as_str(), request.path.as_str()) {
         ("GET", "/") => Response::html(render_dashboard(&snapshot(&observability))),
-        ("GET", "/api/v1/state") => {
-            Response::json(200, "OK", snapshot(&observability).to_json())
-        }
+        ("GET", "/api/v1/state") => Response::json(200, "OK", snapshot(&observability).to_json()),
         ("POST", "/api/v1/refresh") => {
             observability.refresh.notify_one();
             info!(target: "symphony", "outcome=queued action=refresh");
@@ -458,7 +460,9 @@ mod tests {
                         active_states: vec!["Todo".to_string()],
                         terminal_states: vec!["Done".to_string()],
                     },
-                    polling: crate::config::PollingConfig { interval_ms: 30_000 },
+                    polling: crate::config::PollingConfig {
+                        interval_ms: 30_000,
+                    },
                     workspace: crate::config::WorkspaceConfig {
                         root: PathBuf::from("/tmp/ws"),
                     },
@@ -542,8 +546,7 @@ mod tests {
 
         let response = route(&request("GET", "/api/v1/state"), observability);
         assert_eq!(response.status, 200);
-        let body: serde_json::Value =
-            serde_json::from_slice(&response.body).expect("json body");
+        let body: serde_json::Value = serde_json::from_slice(&response.body).expect("json body");
         assert_eq!(body["counts"]["running"], 1);
         assert_eq!(body["running"][0]["issue_identifier"], "MT-649");
         assert_eq!(body["running"][0]["turn_count"], 7);
@@ -561,20 +564,15 @@ mod tests {
 
         let response = route(&request("GET", "/api/v1/MT-649"), observability.clone());
         assert_eq!(response.status, 200);
-        let body: serde_json::Value =
-            serde_json::from_slice(&response.body).expect("json body");
+        let body: serde_json::Value = serde_json::from_slice(&response.body).expect("json body");
         assert_eq!(body["status"], "running");
         assert_eq!(body["issue_id"], "abc123");
-        assert_eq!(
-            body["workspace"]["path"],
-            "/tmp/symphony_workspaces/MT-649"
-        );
+        assert_eq!(body["workspace"]["path"], "/tmp/symphony_workspaces/MT-649");
         assert_eq!(body["running"]["tokens"]["total_tokens"], 2_000);
 
         let response = route(&request("GET", "/api/v1/MT-999"), observability);
         assert_eq!(response.status, 404);
-        let body: serde_json::Value =
-            serde_json::from_slice(&response.body).expect("json body");
+        let body: serde_json::Value = serde_json::from_slice(&response.body).expect("json body");
         assert_eq!(body["error"]["code"], "issue_not_found");
     }
 
@@ -585,8 +583,7 @@ mod tests {
 
         let response = route(&request("POST", "/api/v1/refresh"), observability);
         assert_eq!(response.status, 202);
-        let body: serde_json::Value =
-            serde_json::from_slice(&response.body).expect("json body");
+        let body: serde_json::Value = serde_json::from_slice(&response.body).expect("json body");
         assert_eq!(body["queued"], true);
         assert_eq!(body["operations"][0], "poll");
 
@@ -609,10 +606,7 @@ mod tests {
             route(&request("DELETE", "/api/v1/refresh"), observability.clone()).status,
             405
         );
-        assert_eq!(
-            route(&request("GET", "/nope"), observability).status,
-            404
-        );
+        assert_eq!(route(&request("GET", "/nope"), observability).status, 404);
     }
 
     #[test]

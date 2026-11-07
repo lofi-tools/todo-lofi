@@ -1,4 +1,4 @@
-use crate::agent::{AgentClient, AgentEvent, ClientTool, TurnTerminal, CONTINUATION_GUIDANCE};
+use crate::agent::{AgentClient, AgentEvent, CONTINUATION_GUIDANCE, ClientTool, TurnTerminal};
 use crate::clock::{monotonic_ms, now_plus_monotonic};
 use crate::config::{EffectiveWorkflow, ServiceConfig};
 use crate::domain::*;
@@ -556,7 +556,8 @@ impl<T: IssueTracker + 'static> Orchestrator<T> {
                     entry.session.last_codex_message = Some(prompt);
                 }
                 AgentEvent::ApprovalAutoApproved { request_type, .. } => {
-                    entry.session.last_codex_message = Some(format!("auto-approved {request_type}"));
+                    entry.session.last_codex_message =
+                        Some(format!("auto-approved {request_type}"));
                 }
                 AgentEvent::UnsupportedToolCall { tool_name, .. } => {
                     entry.session.last_codex_message =
@@ -695,7 +696,8 @@ impl<T: IssueTracker + 'static> Orchestrator<T> {
                 target: "symphony",
                 "issue_id={issue_id} issue_identifier={identifier} outcome=reconciled action=non_active"
             );
-            self.terminate(&issue_id, TerminationReason::NonActive).await;
+            self.terminate(&issue_id, TerminationReason::NonActive)
+                .await;
         }
     }
 
@@ -828,7 +830,10 @@ impl<T: IssueTracker + 'static> Orchestrator<T> {
             }
         };
 
-        let Some(issue) = candidates.into_iter().find(|issue| issue.id == entry.issue_id) else {
+        let Some(issue) = candidates
+            .into_iter()
+            .find(|issue| issue.id == entry.issue_id)
+        else {
             self.release_claim(&entry.issue_id, &entry.identifier, "not_a_candidate");
             return;
         };
@@ -1366,7 +1371,9 @@ async fn run_attempt<T: IssueTracker>(
             .await
         {
             Ok(issues) => {
-                if let Some(refreshed) = issues.into_iter().find(|issue| issue.id == current_issue.id)
+                if let Some(refreshed) = issues
+                    .into_iter()
+                    .find(|issue| issue.id == current_issue.id)
                 {
                     current_issue = refreshed;
                 }
@@ -1434,7 +1441,9 @@ mod tests {
                 active_states: vec!["Todo".to_string(), "In Progress".to_string()],
                 terminal_states: vec!["Done".to_string(), "Cancelled".to_string()],
             },
-            polling: PollingConfig { interval_ms: 30_000 },
+            polling: PollingConfig {
+                interval_ms: 30_000,
+            },
             workspace: WorkspaceConfig {
                 root: PathBuf::from("/tmp/symphony-test"),
             },
@@ -1612,10 +1621,9 @@ mod tests {
         ];
 
         let mut state = state_with_max(10);
-        state.running.insert(
-            "running".to_string(),
-            running_entry("running", "R-1", None),
-        );
+        state
+            .running
+            .insert("running".to_string(), running_entry("running", "R-1", None));
         state.claimed.insert("claimed".to_string());
 
         let selected = select_dispatchable(&candidates, &config, &state);
@@ -1702,13 +1710,7 @@ mod tests {
         assert!(matches!(action, ExitAction::Retry { attempt: 3, .. }));
         let retry = state.retry_attempts.get("issue-1").expect("retry queued");
         assert_eq!(retry.attempt, 3);
-        assert!(
-            retry
-                .error
-                .as_deref()
-                .unwrap_or_default()
-                .contains("boom")
-        );
+        assert!(retry.error.as_deref().unwrap_or_default().contains("boom"));
 
         // attempt 3 -> 10000 * 2^2 = 40s
         let delay = retry.due_at_ms.saturating_sub(monotonic_ms());
@@ -1739,8 +1741,13 @@ mod tests {
         let mut state = OrchestratorState::default();
         state.claimed.insert("issue-1".to_string());
 
-        let action =
-            worker_exit_transition(&mut state, "issue-1", &entry, &WorkerOutcome::Canceled, 300_000);
+        let action = worker_exit_transition(
+            &mut state,
+            "issue-1",
+            &entry,
+            &WorkerOutcome::Canceled,
+            300_000,
+        );
 
         assert_eq!(action, ExitAction::Released);
         assert!(!state.claimed.contains("issue-1"));
@@ -1777,7 +1784,10 @@ mod tests {
 
         // The caller skips detection entirely when the timeout is zero; prove the
         // helper only reports what it is asked to.
-        assert_eq!(stalled_issue_ids(&state, Duration::from_secs(1), now).len(), 1);
+        assert_eq!(
+            stalled_issue_ids(&state, Duration::from_secs(1), now).len(),
+            1
+        );
     }
 
     #[test]
@@ -1906,13 +1916,9 @@ mod tests {
             prompt_template: prompt::parse("prompt").expect("template"),
         };
 
-        let orchestrator = Orchestrator::new(
-            tracker,
-            WorkspaceManager::new(root),
-            effective,
-            Vec::new(),
-        )
-        .expect("orchestrator builds");
+        let orchestrator =
+            Orchestrator::new(tracker, WorkspaceManager::new(root), effective, Vec::new())
+                .expect("orchestrator builds");
 
         let runtime = tokio::runtime::Runtime::new().expect("runtime");
         runtime.block_on(orchestrator.startup_cleanup());

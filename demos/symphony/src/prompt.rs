@@ -346,9 +346,7 @@ fn parse_for(remainder: &str, tokens: &[Token], cursor: &mut usize) -> Result<No
 
 fn expect_keyword(tokens: &[Token], cursor: &mut usize, expected: &str) -> Result<()> {
     match tokens.get(*cursor) {
-        Some(Token::Tag(Tag::Statement(statement)))
-            if split_keyword(statement).0 == expected =>
-        {
+        Some(Token::Tag(Tag::Statement(statement))) if split_keyword(statement).0 == expected => {
             *cursor += 1;
             Ok(())
         }
@@ -438,10 +436,7 @@ fn render_nodes(nodes: &[Node], scope: &mut Scope<'_>, output: &mut String) -> R
                 let value = evaluate_filtered(expression, scope)?;
                 output.push_str(&to_display_string(&value));
             }
-            Node::If {
-                branches,
-                fallback,
-            } => {
+            Node::If { branches, fallback } => {
                 let mut rendered = false;
                 for (condition, body) in branches {
                     if evaluate_condition(condition, scope)? {
@@ -450,9 +445,7 @@ fn render_nodes(nodes: &[Node], scope: &mut Scope<'_>, output: &mut String) -> R
                         break;
                     }
                 }
-                if !rendered
-                    && let Some(fallback) = fallback
-                {
+                if !rendered && let Some(fallback) = fallback {
                     render_nodes(fallback, scope, output)?;
                 }
             }
@@ -546,15 +539,11 @@ fn resolve_path(path: &str, scope: &Scope<'_>) -> Result<Value> {
             Value::Array(items) => match segment.parse::<usize>() {
                 Ok(index) if index < items.len() => items[index].clone(),
                 _ => {
-                    return Err(template_render_error(format!(
-                        "unknown variable `{path}`"
-                    )));
+                    return Err(template_render_error(format!("unknown variable `{path}`")));
                 }
             },
             _ => {
-                return Err(template_render_error(format!(
-                    "unknown variable `{path}`"
-                )));
+                return Err(template_render_error(format!("unknown variable `{path}`")));
             }
         };
     }
@@ -581,17 +570,15 @@ fn to_display_string(value: &Value) -> String {
     }
 }
 
-fn compare_values(
-    left: &Value,
-    operator: ComparisonOperator,
-    right: &Value,
-) -> Result<bool> {
+fn compare_values(left: &Value, operator: ComparisonOperator, right: &Value) -> Result<bool> {
     match operator {
         ComparisonOperator::Equal => Ok(values_equal(left, right)),
         ComparisonOperator::NotEqual => Ok(!values_equal(left, right)),
         ComparisonOperator::Contains => match (left, right) {
             (Value::String(haystack), Value::String(needle)) => Ok(haystack.contains(needle)),
-            (Value::Array(items), needle) => Ok(items.iter().any(|item| values_equal(item, needle))),
+            (Value::Array(items), needle) => {
+                Ok(items.iter().any(|item| values_equal(item, needle)))
+            }
             _ => Err(template_render_error(
                 "`contains` expects a string or array on the left".to_string(),
             )),
@@ -662,9 +649,11 @@ fn apply_filter(call: &FilterCall, input: Value, scope: &Scope<'_>) -> Result<Va
             let text = to_display_string(&input);
             let mut chars = text.chars();
             match chars.next() {
-                Some(first) => {
-                    Value::String(format!("{}{}", first.to_uppercase(), chars.as_str().to_lowercase()))
-                }
+                Some(first) => Value::String(format!(
+                    "{}{}",
+                    first.to_uppercase(),
+                    chars.as_str().to_lowercase()
+                )),
                 None => Value::String(String::new()),
             }
         }
@@ -738,7 +727,13 @@ fn apply_filter(call: &FilterCall, input: Value, scope: &Scope<'_>) -> Result<Va
                     items.remove(0)
                 }
             }
-            other => Value::String(to_display_string(&other).chars().next().map(String::from).unwrap_or_default()),
+            other => Value::String(
+                to_display_string(&other)
+                    .chars()
+                    .next()
+                    .map(String::from)
+                    .unwrap_or_default(),
+            ),
         },
         "last" => match input {
             Value::Array(items) => items.into_iter().last().unwrap_or(Value::Null),
@@ -802,12 +797,9 @@ fn apply_filter(call: &FilterCall, input: Value, scope: &Scope<'_>) -> Result<Va
             let left = as_number(&input).ok_or_else(|| {
                 template_render_error(format!("filter `{name}` requires a number on the left"))
             })?;
-            let right = args
-                .first()
-                .and_then(as_number)
-                .ok_or_else(|| {
-                    template_render_error(format!("filter `{name}` requires a numeric argument"))
-                })?;
+            let right = args.first().and_then(as_number).ok_or_else(|| {
+                template_render_error(format!("filter `{name}` requires a numeric argument"))
+            })?;
             let result = match name {
                 "plus" => left + right,
                 "minus" => left - right,
@@ -1004,7 +996,9 @@ fn parse_filtered_tokens(tokens: &[ExprToken], cursor: &mut usize) -> Result<Fil
     while matches!(tokens.get(*cursor), Some(ExprToken::Pipe)) {
         *cursor += 1;
         let Some(ExprToken::Ident(name)) = tokens.get(*cursor) else {
-            return Err(template_parse_error("expected a filter name after `|`".to_string()));
+            return Err(template_parse_error(
+                "expected a filter name after `|`".to_string(),
+            ));
         };
         let name = name.clone();
         *cursor += 1;
@@ -1176,7 +1170,9 @@ fn lex_expression(source: &str) -> Result<Vec<ExprToken>> {
                     index += 1;
                 }
                 if !terminated {
-                    return Err(template_parse_error("unterminated string literal".to_string()));
+                    return Err(template_parse_error(
+                        "unterminated string literal".to_string(),
+                    ));
                 }
                 tokens.push(ExprToken::Str(text));
             }
@@ -1263,7 +1259,8 @@ mod tests {
     #[test]
     fn renders_issue_fields_and_attempt() {
         let context = build_context(&issue(), Some(3));
-        let rendered = render_source("{{ issue.identifier }}: {{ issue.title }}", &context).unwrap();
+        let rendered =
+            render_source("{{ issue.identifier }}: {{ issue.title }}", &context).unwrap();
         assert_eq!(rendered, "MT-649: Fix the thing");
 
         let rendered = render_source("attempt={{ attempt }}", &context).unwrap();

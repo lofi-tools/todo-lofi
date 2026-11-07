@@ -1,6 +1,6 @@
 use crate::domain::WorkflowDefinition;
-use crate::error::SymphonyError::*;
 use crate::error::Result;
+use crate::error::SymphonyError::*;
 use crate::prompt::Template;
 use std::collections::HashMap;
 use std::fs;
