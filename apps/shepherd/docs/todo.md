@@ -1298,7 +1298,9 @@ placeholder tabs and no unearned state badges.
   OpenCode message and reasoning deltas use a 64-permit queue with 8 KiB
   UTF-8-safe chunks; the producer waits for consumption and a blocked producer
   can be cancelled. Other OpenCode events and other adapters still need
-  coordinated backpressure.
+  coordinated backpressure. A Codex fixture verifies that a command reply
+  remains reachable after 100 unconsumed stream events; a bounded design must
+  preserve that behavior.
   Event folding handles at
   most 256 events per session per pass, including during commands, and
   reschedules remaining events so one busy agent cannot monopolize other

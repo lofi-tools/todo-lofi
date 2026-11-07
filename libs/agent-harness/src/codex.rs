@@ -4783,6 +4783,48 @@ sleep 30
     }
 
     #[tokio::test]
+    async fn command_reply_is_delivered_after_unconsumed_stream_events()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = TempDir::new()?;
+        let stub = write_stub(
+            &directory,
+            "codex-events-before-reply.sh",
+            r#"#!/bin/sh
+while IFS= read -r line; do
+  id=$(printf '%s\n' "$line" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')
+  case "$line" in
+    *'"method":"initialize"'*) printf '{"id":%s,"result":{}}\n' "$id" ;;
+    *'"method":"thread/start"'*) printf '{"id":%s,"result":{"thread":{"id":"fixture"}}}\n' "$id" ;;
+    *'"method":"turn/start"'*)
+      i=0
+      while [ "$i" -lt 100 ]; do
+        printf '%s\n' '{"method":"item/agentMessage/delta","params":{"itemId":"message","delta":"chunk"}}'
+        i=$((i+1))
+      done
+      printf '{"id":%s,"result":{"turn":{"id":"turn","status":"inProgress"}}}\n' "$id"
+      ;;
+  esac
+done
+"#,
+        );
+        let (mut harness, _) = start_session(&stub, directory.path()).await;
+        timeout(
+            Duration::from_secs(5),
+            harness.prompt(PromptInput::text("go")),
+        )
+        .await??;
+        let mut chunks = 0;
+        while let Ok(event) = harness.receiver.try_recv() {
+            if matches!(event, HarnessEvent::Delta { .. }) {
+                chunks += 1;
+            }
+        }
+        assert_eq!(chunks, 100);
+        harness.shutdown().await?;
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn detection_prefers_the_configured_path_and_reports_its_kind() {
         let directory = TempDir::new().expect("temp dir");
         let stub = write_stub(&directory, "codex.sh", PROTOCOL_STUB);
