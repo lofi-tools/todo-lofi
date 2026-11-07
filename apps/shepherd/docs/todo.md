@@ -1178,7 +1178,8 @@ placeholder tabs and no unearned state badges.
   Normal task-state saves and interrupted shutdowns commit eligible transcript
   entries in the same transaction. A failed shutdown save retains its session
   and can be retried while draining. Multi-task archive rolls back on a
-  mid-batch database error and can be retried.
+  mid-batch database error and can be retried. Task deletion explicitly rolls
+  back a mid-deletion failure, preserving transcripts and attachments for retry.
 - [ ] Bounded transcript, stderr, search and frame buffers.
   Codex, OpenCode and ACP stderr readers cap each line while draining the
   process, including newline-free output. OpenCode omits overlong lines to

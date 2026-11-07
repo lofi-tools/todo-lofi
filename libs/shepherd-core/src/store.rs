@@ -872,10 +872,18 @@ impl Store for TursoStore {
             "DELETE FROM layouts WHERE task_id = ?1",
             "DELETE FROM tasks WHERE id = ?1",
         ] {
-            toasty::sql::statement(statement)
+            if let Err(error) = toasty::sql::statement(statement)
                 .bind(task_id.as_str())
                 .exec(&mut transaction)
-                .await?;
+                .await
+            {
+                if let Err(rollback_error) = transaction.rollback().await {
+                    return Err(StoreError::Backend(format!(
+                        "task deletion failed: {error}; rollback failed: {rollback_error}"
+                    )));
+                }
+                return Err(error.into());
+            }
         }
         transaction.commit().await?;
         Ok(())
@@ -1995,6 +2003,52 @@ mod tests {
         assert_eq!(reopened.load_workspace_layouts().await?.len(), 1);
         assert_eq!(reopened.load_sessions().await?.len(), 1);
         assert_eq!(reopened.load_terminals().await?.len(), 2);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn failed_task_deletion_rolls_back_and_can_be_retried()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database = TestDatabase::new()?;
+        let store = TursoStore::open(&database.uri()).await?;
+        let project = Project::new(database.path().to_path_buf());
+        let task = Task::draft(project.id.clone(), "Keep on failure", database.path());
+        let session = SessionRecord::started(task.id.clone(), "codex", None);
+        let mut transcript = agent_harness::Transcript::default();
+        transcript.push_user_message_with_attachments(
+            "Keep this",
+            vec![AttachmentMetadata {
+                id: "attachment".into(),
+                relative_path: PathBuf::from("attachment/file.txt"),
+                mime: "text/plain".into(),
+                bytes: 12,
+            }],
+        );
+        store.save_project(&project).await?;
+        store.save_task(&task).await?;
+        store.save_session(&session).await?;
+        store
+            .save_transcript_entries(&session, &[transcript.entry(0).ok_or("missing entry")?])
+            .await?;
+        {
+            let mut db = store.db.lock().await;
+            toasty::sql::statement("ALTER TABLE terminals RENAME TO terminals_unavailable")
+                .exec(&mut *db)
+                .await?;
+        }
+        assert!(store.delete_task(&task.id).await.is_err());
+        {
+            let mut db = store.db.lock().await;
+            toasty::sql::statement("ALTER TABLE terminals_unavailable RENAME TO terminals")
+                .exec(&mut *db)
+                .await?;
+        }
+        assert_eq!(store.load_tasks().await?.len(), 1);
+        assert_eq!(store.load_sessions().await?.len(), 1);
+        assert_eq!(store.load_transcript(&task.id).await?, transcript.entries());
+        store.delete_task(&task.id).await?;
+        assert!(store.load_tasks().await?.is_empty());
+        assert!(store.load_transcript(&task.id).await?.is_empty());
         Ok(())
     }
 
