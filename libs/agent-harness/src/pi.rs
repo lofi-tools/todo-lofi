@@ -185,7 +185,7 @@ impl PiRpc {
             Ok(Ok(data)) => serde_json::from_value::<PiSessionState>(data)
                 .map_err(|error| protocol(format!("invalid Pi get_state reply: {error}")))?,
             Ok(Err(HarnessError::ChannelClosed)) => {
-                return Err(rpc.startup_exit());
+                return Err(rpc.startup_exit().await);
             }
             Ok(Err(error)) => return Err(error),
             Err(_) => return Err(protocol("Pi get_state probe timed out")),
@@ -280,7 +280,16 @@ impl PiRpc {
             .map_err(|_| HarnessError::ChannelClosed)
     }
 
-    fn startup_exit(&mut self) -> HarnessError {
+    async fn startup_exit(&mut self) -> HarnessError {
+        match timeout(SHUTDOWN_TIMEOUT * 3, &mut self.supervisor).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                return protocol(format!("could not wait for Pi startup exit: {error}"));
+            }
+            Err(_) => {
+                return protocol("Pi did not exit after closing its RPC output during startup");
+            }
+        }
         while let Ok(event) = self.events.get_mut().try_recv() {
             if let PiRpcEvent::Exited {
                 code,
@@ -468,6 +477,30 @@ mod tests {
             PromptDisposition::Handled
         );
         assert!(PromptDisposition::from_reply(Value::Null).is_err());
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn startup_disconnect_reports_process_diagnostics()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let spec = SpawnSpec {
+            program: "/bin/sh".into(),
+            args: vec![
+                "-c".into(),
+                "printf 'fixture startup failure\\n' >&2; exit 23".into(),
+            ],
+            cwd: directory.path().to_owned(),
+            ..SpawnSpec::default()
+        };
+        let result = PiRpc::start(&spec).await;
+        let error = match result {
+            Ok(_) => return Err("Pi unexpectedly started".into()),
+            Err(error) => error.to_string(),
+        };
+        assert!(error.contains("fixture startup failure"), "{error}");
+        assert!(error.contains("23"), "{error}");
         Ok(())
     }
 
