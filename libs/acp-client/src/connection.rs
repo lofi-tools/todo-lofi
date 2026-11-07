@@ -333,8 +333,14 @@ pub struct AcpConnection {
     terminals: TerminalRegistry,
     /// Dropping this ends the connection and terminates the process group.
     shutdown: Option<oneshot::Sender<()>>,
-    supervision: Option<tokio::sync::oneshot::Receiver<Result<(), String>>>,
+    supervision: Option<ProcessSupervision>,
     supervision_failure: Option<String>,
+}
+
+struct ProcessSupervision {
+    results: tokio::sync::mpsc::UnboundedReceiver<Result<(), String>>,
+    retry: tokio::sync::mpsc::UnboundedSender<()>,
+    retry_needed: bool,
 }
 
 impl AcpConnection {
@@ -378,22 +384,30 @@ impl AcpConnection {
             return Err(AcpError::Protocol(error.clone()));
         }
         if let Some(supervision) = &mut self.supervision {
-            let result = tokio::time::timeout(deadline, supervision)
+            if supervision.retry_needed {
+                supervision.retry.send(()).map_err(|_| {
+                    AcpError::Protocol("ACP process supervisor is unavailable".into())
+                })?;
+                supervision.retry_needed = false;
+            }
+            let result = tokio::time::timeout(deadline, supervision.results.recv())
                 .await
                 .map_err(|_| {
                     AcpError::Protocol(
                         "ACP process did not stop before the shutdown deadline".into(),
                     )
                 })?;
-            self.supervision = None;
-            let failure = match result {
-                Ok(Ok(())) => None,
-                Ok(Err(error)) => Some(error),
-                Err(_) => Some("ACP process supervision ended without a result".into()),
-            };
-            if let Some(error) = failure {
-                self.supervision_failure = Some(error.clone());
-                return Err(AcpError::Protocol(error));
+            match result {
+                Some(Ok(())) => self.supervision = None,
+                Some(Err(error)) => {
+                    supervision.retry_needed = true;
+                    return Err(AcpError::Protocol(error));
+                }
+                None => {
+                    let error = "ACP process supervision ended without a result".to_owned();
+                    self.supervision_failure = Some(error.clone());
+                    return Err(AcpError::Protocol(error));
+                }
             }
         }
         Ok(())
@@ -458,18 +472,23 @@ async fn connect_spawn_inner(
     options: ConnectOptions,
     terminals: Option<Arc<dyn TerminalBackend>>,
 ) -> Result<AcpConnection, AcpError> {
-    let (completion, supervision) = tokio::sync::oneshot::channel();
+    let (completion, results) = tokio::sync::mpsc::unbounded_channel();
+    let (retry, retry_requests) = tokio::sync::mpsc::unbounded_channel();
     let mut connection = connect_over_with_terminals(
         move |events, stderr| {
             ProjectAgent::new(spawn)
                 .with_stderr_reporting(events, stderr)
-                .with_supervision(completion)
+                .with_supervision(completion, retry_requests)
         },
         options,
         terminals,
     )
     .await?;
-    connection.supervision = Some(supervision);
+    connection.supervision = Some(ProcessSupervision {
+        results,
+        retry,
+        retry_needed: false,
+    });
     Ok(connection)
 }
 
@@ -870,7 +889,10 @@ pub struct ProjectAgent {
     spec: SpawnSpec,
     events: Option<tokio::sync::mpsc::UnboundedSender<AcpEvent>>,
     stderr: Option<Arc<Mutex<VecDeque<String>>>>,
-    supervision: Option<tokio::sync::oneshot::Sender<Result<(), String>>>,
+    supervision: Option<(
+        tokio::sync::mpsc::UnboundedSender<Result<(), String>>,
+        tokio::sync::mpsc::UnboundedReceiver<()>,
+    )>,
 }
 
 impl ProjectAgent {
@@ -885,9 +907,10 @@ impl ProjectAgent {
 
     fn with_supervision(
         mut self,
-        completion: tokio::sync::oneshot::Sender<Result<(), String>>,
+        completion: tokio::sync::mpsc::UnboundedSender<Result<(), String>>,
+        retry: tokio::sync::mpsc::UnboundedReceiver<()>,
     ) -> Self {
-        self.supervision = Some(completion);
+        self.supervision = Some((completion, retry));
         self
     }
 
@@ -1041,13 +1064,16 @@ impl ConnectTo<Client> for ProjectAgent {
         // the subprocess must outlive that future.
         let (wire_finished, finished) = oneshot::channel();
         let supervisor = tokio::spawn(async move {
-            let result =
-                supervise_agent(child, finished, stderr_task, self.events, self.stderr).await;
-            if let Some(completion) = self.supervision
-                && completion.send(result).is_err()
-            {
-                tracing::debug!("ACP process supervision receiver closed");
-            }
+            supervise_agent(
+                child,
+                finished,
+                stderr_task,
+                self.events,
+                self.stderr,
+                self.supervision,
+                kill_agent_process,
+            )
+            .await;
         });
         let result = ConnectTo::<Client>::connect_to(Lines::new(outgoing, incoming), client).await;
         if wire_finished.send(()).is_err() {
@@ -1066,8 +1092,13 @@ async fn supervise_agent(
     mut stderr_task: Option<tokio::task::JoinHandle<()>>,
     events: Option<tokio::sync::mpsc::UnboundedSender<AcpEvent>>,
     stderr: Option<Arc<Mutex<VecDeque<String>>>>,
-) -> Result<(), String> {
-    let status = tokio::select! {
+    mut supervision: Option<(
+        tokio::sync::mpsc::UnboundedSender<Result<(), String>>,
+        tokio::sync::mpsc::UnboundedReceiver<()>,
+    )>,
+    mut stop: impl FnMut(&mut async_process::Child) -> std::io::Result<()> + Send,
+) {
+    let mut status = tokio::select! {
         status = child.status() => {
             // Give the wire time to deliver any protocol records already in the pipe.
             if tokio::time::timeout(Duration::from_millis(250), &mut wire_finished).await.is_err() {
@@ -1080,31 +1111,47 @@ async fn supervise_agent(
             // agent leaves on its own and terminate it if it outlives the wire.
             match tokio::time::timeout(Duration::from_millis(250), child.status()).await {
                 Ok(status) => status,
-                Err(_) => match kill_agent_process(&mut child) {
+                Err(_) => match stop(&mut child) {
                     Ok(()) => child.status().await,
                     Err(error) => Err(error),
                 },
             }
         }
     };
-    let mut failure = None;
-    let code = match status {
-        Ok(status) => status.code(),
-        Err(error) => {
-            failure = Some(format!("Could not stop or reap the ACP agent: {error}"));
-            tracing::warn!(%error, "could not stop or reap the ACP agent");
-            if let Some(events) = &events
-                && events
-                    .send(AcpEvent::ProtocolFailed {
-                        message: format!("Could not stop or reap the ACP agent: {error}"),
-                    })
-                    .is_err()
-            {
-                tracing::debug!("ACP protocol failure receiver closed");
-            }
-            None
+    while let Err(error) = status {
+        tracing::warn!(%error, "could not stop or reap the ACP agent");
+        let message = format!("Could not stop or reap the ACP agent: {error}");
+        if let Some(events) = &events
+            && events
+                .send(AcpEvent::ProtocolFailed {
+                    message: message.clone(),
+                })
+                .is_err()
+        {
+            tracing::debug!("ACP protocol failure receiver closed");
         }
-    };
+        let retry = match &mut supervision {
+            Some((results, retry)) => {
+                if results.send(Err(message)).is_err() {
+                    false
+                } else {
+                    retry.recv().await.is_some()
+                }
+            }
+            None => false,
+        };
+        if !retry {
+            if let Err(error) = child.kill() {
+                tracing::warn!(%error, "could not stop the abandoned ACP child");
+            }
+            return;
+        }
+        status = match stop(&mut child) {
+            Ok(()) => child.status().await,
+            Err(error) => Err(error),
+        };
+    }
+    let code = status.ok().and_then(|status| status.code());
     if let Some(stderr_task) = &mut stderr_task
         && tokio::time::timeout(Duration::from_millis(100), &mut *stderr_task)
             .await
@@ -1122,9 +1169,10 @@ async fn supervise_agent(
             tracing::debug!(%error, "ACP exit receiver closed");
         }
     }
-    match failure {
-        Some(error) => Err(error),
-        None => Ok(()),
+    if let Some((results, _)) = supervision
+        && results.send(Ok(())).is_err()
+    {
+        tracing::debug!("ACP process supervision receiver closed");
     }
 }
 
@@ -1153,14 +1201,9 @@ fn kill_agent_process_with(
     match signal_group(group) {
         Ok(()) => Ok(()),
         Err(error) if error.raw_os_error() == Some(libc::ESRCH) => child.kill(),
-        Err(error) => match child.kill() {
-            Ok(()) => Err(std::io::Error::other(format!(
-                "could not stop ACP process group: {error}"
-            ))),
-            Err(child_error) => Err(std::io::Error::other(format!(
-                "could not stop ACP process group: {error}; could not stop ACP child: {child_error}"
-            ))),
-        },
+        Err(error) => Err(std::io::Error::other(format!(
+            "could not stop ACP process group: {error}"
+        ))),
     }
 }
 
@@ -1174,7 +1217,7 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn close_wait_retains_supervision_failure() -> Result<(), Box<dyn std::error::Error>> {
+    async fn close_wait_retries_supervision_failure() -> Result<(), Box<dyn std::error::Error>> {
         let directory = tempfile::tempdir()?;
         let options = ConnectOptions {
             roots: SessionRoots::new([directory.path().to_path_buf()]),
@@ -1182,18 +1225,29 @@ mod tests {
         };
         let (mut connection, _) =
             crate::fake_agent::connect_fake_agent(Default::default(), options).await?;
-        let (sender, receiver) = tokio::sync::oneshot::channel();
-        connection.supervision = Some(receiver);
+        let (sender, results) = tokio::sync::mpsc::unbounded_channel();
+        let (retry, mut retries) = tokio::sync::mpsc::unbounded_channel();
+        connection.supervision = Some(ProcessSupervision {
+            results,
+            retry,
+            retry_needed: false,
+        });
         sender
             .send(Err("fixture shutdown failure".into()))
             .map_err(|_| "receiver closed")?;
-        for _ in 0..2 {
-            let error = connection
-                .close_and_wait()
-                .await
-                .expect_err("failure must persist");
-            assert!(error.to_string().contains("fixture shutdown failure"));
-        }
+        let error = connection
+            .close_and_wait()
+            .await
+            .expect_err("failure must be reported");
+        assert!(error.to_string().contains("fixture shutdown failure"));
+        let task = tokio::spawn(async move {
+            if retries.recv().await.is_some() {
+                sender.send(Ok(())).map_err(|_| "receiver closed")?;
+            }
+            Ok::<(), &'static str>(())
+        });
+        connection.close_and_wait().await?;
+        task.await??;
         Ok(())
     }
 
@@ -1206,8 +1260,13 @@ mod tests {
         };
         let (mut connection, _) =
             crate::fake_agent::connect_fake_agent(Default::default(), options).await?;
-        let (sender, receiver) = tokio::sync::oneshot::channel();
-        connection.supervision = Some(receiver);
+        let (sender, results) = tokio::sync::mpsc::unbounded_channel();
+        let (retry, _retries) = tokio::sync::mpsc::unbounded_channel();
+        connection.supervision = Some(ProcessSupervision {
+            results,
+            retry,
+            retry_needed: false,
+        });
         let error = connection
             .close_and_wait_with_timeout(Duration::from_millis(20))
             .await
@@ -1220,7 +1279,67 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn failed_acp_group_signal_reports_error_and_stops_child()
+    async fn supervisor_retries_stop_without_losing_child() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let child = async_process::Command::new("/bin/sleep")
+            .arg("30")
+            .kill_on_drop(true)
+            .spawn()?;
+        let pid = libc::pid_t::try_from(child.id())?;
+        let (wire_done, wire_finished) = oneshot::channel();
+        let (events, mut event_receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (results, mut result_receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (retry, retries) = tokio::sync::mpsc::unbounded_channel();
+        let mut attempts = 0;
+        let supervisor = tokio::spawn(supervise_agent(
+            child,
+            wire_finished,
+            None,
+            Some(events),
+            None,
+            Some((results, retries)),
+            move |child| {
+                attempts += 1;
+                if attempts == 1 {
+                    Err(std::io::Error::other("fixture stop failure"))
+                } else {
+                    child.kill()
+                }
+            },
+        ));
+        wire_done.send(()).map_err(|_| "wire closed")?;
+        let failure = tokio::time::timeout(Duration::from_secs(3), result_receiver.recv())
+            .await?
+            .ok_or("missing result")?;
+        assert!(
+            failure
+                .expect_err("first stop must fail")
+                .contains("fixture stop failure")
+        );
+        assert_eq!(unsafe { libc::kill(pid, 0) }, 0);
+        assert!(matches!(
+            event_receiver.try_recv(),
+            Ok(AcpEvent::ProtocolFailed { .. })
+        ));
+        assert!(matches!(
+            event_receiver.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ));
+        retry.send(()).map_err(|_| "retry closed")?;
+        tokio::time::timeout(Duration::from_secs(3), result_receiver.recv())
+            .await?
+            .ok_or("missing result")??;
+        supervisor.await?;
+        assert!(matches!(
+            event_receiver.try_recv(),
+            Ok(AcpEvent::Exited { .. })
+        ));
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn failed_acp_group_signal_keeps_child_for_retry()
     -> Result<(), Box<dyn std::error::Error>> {
         let mut child = async_process::Command::new("/bin/sleep")
             .arg("30")
@@ -1231,6 +1350,8 @@ mod tests {
         })
         .expect_err("group failure must be reported");
         assert!(error.to_string().contains("fixture group failure"));
+        assert!(child.try_status()?.is_none());
+        child.kill()?;
         let status = tokio::time::timeout(Duration::from_secs(3), child.status()).await??;
         assert!(!status.success());
         Ok(())
