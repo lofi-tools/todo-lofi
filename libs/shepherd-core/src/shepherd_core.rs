@@ -588,6 +588,10 @@ impl Core {
                     });
                 }
                 Ok(_) => {
+                    if path != &task.proposed_worktree_path {
+                        return Err(GitError::InvalidWorktree { path: path.clone() }.into());
+                    }
+                    self.task_git_worktree(task_id)?;
                     let mut updated = task.clone();
                     updated.collection_pending = false;
                     self.store.save_task(&updated).await?;
@@ -671,7 +675,12 @@ impl Core {
                         source,
                     });
                 }
-                Ok(_) => {}
+                Ok(_) => {
+                    if path != &task.proposed_worktree_path {
+                        return Err(GitError::InvalidWorktree { path: path.clone() }.into());
+                    }
+                    self.task_git_worktree(task_id)?;
+                }
             }
         }
         if task.state == TaskState::Done && task.worktree_path.is_some() {
@@ -6155,6 +6164,14 @@ mod tests {
         );
         assert!(core.task(&task.id)?.collection_pending);
         assert_eq!(core.task(&task.id)?.state, TaskState::Done);
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(repository.path(), &task.proposed_worktree_path)?;
+            assert!(core.touch_archived_worktree(&task.id).await.is_err());
+            assert!(core.collect_archived_worktree(&task.id).await.is_err());
+            assert!(core.task(&task.id)?.collection_pending);
+            std::fs::remove_file(&task.proposed_worktree_path)?;
+        }
         task.branch_tip_sha = Some(tip);
         core.store.save_task(&task).await?;
         core.tasks.insert(task.id.clone(), task.clone());

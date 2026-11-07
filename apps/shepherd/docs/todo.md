@@ -1201,7 +1201,9 @@ placeholder tabs and no unearned state badges.
   and a pending collection first completes recovery; failed verification
   preserves the intent for retry. Startup also reconciles pending collections
   for recently used tasks, keeping any checkout that still exists. Reopening
-  an archived task also verifies pending collection recovery first.
+  an archived task also verifies pending collection recovery first. Existing
+  paths are validated as task worktrees before their pending markers are cleared;
+  a symlink replacement fixture covers collection recovery and task access.
 - [ ] Database backup, migration checks, malformed migration handling and
   transactional writes.
   Existing file databases receive a retained Turso snapshot in a private
