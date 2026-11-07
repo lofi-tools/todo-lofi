@@ -32,7 +32,7 @@ use shepherd_core::terminal::{
 };
 use shepherd_core::{
     Agent, Command, CommandResult, Core, CoreError, Event, ProjectApprovalsSnapshot, ProjectId,
-    ProjectList, QuitSummary, TaskId, TaskList, TaskWorkspace, WorkspaceLayout,
+    ProjectList, QuitSummary, TaskId, TaskList, TaskState, TaskWorkspace, WorkspaceLayout,
 };
 use tokio::sync::{Mutex, broadcast, mpsc, oneshot, watch};
 use tokio::time::Instant;
@@ -352,7 +352,9 @@ impl TerminalHost {
                         }
                         if let Some(recorded) = &recorded {
                             let mut core = recorded.core.lock().await;
-                            if let Err(error) = core.end_terminal(&id, exit_code).await {
+                            if let Err(error) = core.end_terminal(&id, exit_code).await
+                                && !matches!(error, CoreError::TerminalNotFound { .. })
+                            {
                                 tracing::warn!(%error, "could not mark the terminal ended");
                             }
                             for event in core.drain_events() {
@@ -772,12 +774,35 @@ impl ShellState {
 
     pub async fn discard_draft(&self, task_id: String) -> Result<(), BridgeError> {
         let attachments = self.task_attachment_directory(&task_id);
-        match self
-            .execute(Command::DiscardDraft {
-                task_id: TaskId::new(task_id),
+        let _guard = self.terminal_lifecycle.lock().await;
+        let task_id = TaskId::new(task_id);
+        let mut core = self.core.lock().await;
+        let workspace = core.task_workspace(&task_id)?;
+        if workspace.task.state != TaskState::Draft {
+            return Err(CoreError::NotADraft {
+                id: task_id.to_string(),
+            }
+            .into());
+        }
+        let project_id = ProjectId::new(workspace.task.project_id);
+        let running = core
+            .terminals_for(&project_id)
+            .into_iter()
+            .filter(|terminal| {
+                terminal.task_id.as_deref() == Some(task_id.as_str()) && terminal.ended_at.is_none()
             })
-            .await?
-        {
+            .map(|terminal| TerminalId::new(terminal.id))
+            .collect::<Vec<_>>();
+        for terminal in running {
+            self.terminals
+                .stop_terminal_process(terminal.clone())
+                .await?;
+            core.end_terminal(&terminal, None).await?;
+        }
+        let result = core.execute(Command::DiscardDraft { task_id }).await;
+        Self::broadcast_core_events(&mut core, &self.events);
+        drop(core);
+        match result? {
             CommandResult::Ack => {
                 if let Some(path) = attachments {
                     match tokio::task::spawn_blocking(move || attachments::remove_task(&path)).await
@@ -2956,6 +2981,55 @@ mod tests {
                 .await??
                 .is_err()
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn discarding_draft_stops_only_its_terminal() -> Result<(), Box<dyn std::error::Error>> {
+        let repository = TestRepository::new()?;
+        let state = state_with(Core::with_services(
+            Box::new(MemoryStore::new()),
+            Box::new(ScriptedHarnessFactory),
+        ));
+        let projects = state
+            .add_project(repository.path().display().to_string())
+            .await?;
+        let project = projects.projects.first().ok_or("missing project")?;
+        let draft = state
+            .create_draft(project.id.clone(), "Draft".into(), Agent::Codex)
+            .await?;
+        let task = draft.task.id;
+        let shared = TerminalRecord::project_shared(
+            TerminalId::new("shared-draft-test"),
+            ProjectId::new(project.id.clone()),
+            "Shared",
+            repository.path().to_path_buf(),
+            "/bin/sh",
+            1,
+        );
+        let scoped = TerminalRecord::project_shared(
+            TerminalId::new("scoped-draft-test"),
+            ProjectId::new(project.id.clone()),
+            "Draft",
+            repository.path().to_path_buf(),
+            "/bin/sh",
+            2,
+        )
+        .for_task(TaskId::new(task.clone()));
+        state.launch_terminal(shared.clone(), 80, 24).await?;
+        state.launch_terminal(scoped.clone(), 80, 24).await?;
+        state.discard_draft(task).await?;
+        let remaining = state.terminal_list(project.id.clone()).await;
+        assert_eq!(remaining.terminals.len(), 1);
+        assert_eq!(remaining.terminals[0].id, shared.id.as_str());
+        tokio::time::timeout(Duration::from_secs(4), async {
+            while state.screen_slot(scoped.id.as_str()).await.is_ok() {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await?;
+        assert!(state.screen_slot(shared.id.as_str()).await.is_ok());
+        state.quit(true).await?;
         Ok(())
     }
 

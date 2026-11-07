@@ -178,6 +178,29 @@ pub enum TerminalSplit {
 }
 
 impl TerminalSplit {
+    pub(crate) fn without(self, removed: &std::collections::BTreeSet<String>) -> Option<Self> {
+        match self {
+            Self::Pane { terminal_id } => {
+                (!removed.contains(&terminal_id)).then_some(Self::Pane { terminal_id })
+            }
+            Self::Split {
+                axis,
+                ratio,
+                first,
+                second,
+            } => match (first.without(removed), second.without(removed)) {
+                (Some(first), Some(second)) => Some(Self::Split {
+                    axis,
+                    ratio,
+                    first: Box::new(first),
+                    second: Box::new(second),
+                }),
+                (Some(remaining), None) | (None, Some(remaining)) => Some(remaining),
+                (None, None) => None,
+            },
+        }
+    }
+
     pub fn contains(&self, id: &str) -> bool {
         match self {
             Self::Pane { terminal_id } => terminal_id == id,

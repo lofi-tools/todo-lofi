@@ -90,6 +90,8 @@ pub enum CoreError {
     },
     #[error("task {id} is not a draft")]
     NotADraft { id: String },
+    #[error("Close the task's running terminals before discarding it.")]
+    DraftTerminalsRunning,
     #[error("task {id} is {state}; it cannot accept a prompt")]
     TaskNotReady { id: String, state: &'static str },
     #[error("task {id} is {state}; it has nothing to resume")]
@@ -1111,11 +1113,43 @@ impl Core {
             });
         }
         let project_id = task.project_id.clone();
+        let terminals: Vec<_> = self
+            .terminals
+            .values()
+            .filter(|terminal| terminal.task_id.as_ref() == Some(task_id))
+            .collect();
+        if terminals.iter().any(|terminal| terminal.ended_at.is_none()) {
+            return Err(CoreError::DraftTerminalsRunning);
+        }
+        let terminal_ids: std::collections::BTreeSet<String> = terminals
+            .iter()
+            .map(|terminal| terminal.id.as_str().to_owned())
+            .collect();
+        if !terminal_ids.is_empty() {
+            let mut layout = self.terminal_layout(&project_id)?;
+            let previous = layout.root.clone();
+            layout.root = layout.root.and_then(|root| root.without(&terminal_ids));
+            if layout.root != previous {
+                layout.revision = layout
+                    .revision
+                    .checked_add(1)
+                    .ok_or(CoreError::TerminalLayoutChanged)?;
+                self.persist_terminal_layout(&project_id, &layout).await?;
+            }
+        }
         self.store.delete_task(task_id).await?;
         self.tasks.remove(task_id);
         self.workspace_layouts.remove(task_id);
         self.sessions.remove(task_id);
         self.detached_transcripts.remove(task_id);
+        self.session_records.remove(task_id);
+        self.turn_baselines.remove(task_id);
+        self.review_notes.remove(task_id);
+        self.terminals
+            .retain(|id, _| !terminal_ids.contains(id.as_str()));
+        if !terminal_ids.is_empty() {
+            self.publish_terminal_list(&project_id);
+        }
 
         let mut updated_project = None;
         if let Some(project) = self.projects.get_mut(&project_id)
@@ -3101,6 +3135,78 @@ mod tests {
         assert_eq!(git_in(&repository, &["branch", "--list", "shepherd/*"]), "");
         assert_eq!(worktree_count(&repository), 1);
         assert_eq!(git_in(&repository, &["status", "--porcelain"]), "");
+    }
+
+    #[tokio::test]
+    async fn discarding_draft_removes_ended_terminals_from_layout()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use crate::terminal::{SplitAxis, TerminalSplit};
+
+        let repository = TestRepository::new()?;
+        let mut core = Core::new();
+        let project = add_project(&mut core, repository.path().to_path_buf()).await?;
+        let CommandResult::TaskWorkspace(draft) = core
+            .execute(Command::CreateDraft {
+                project_id: project.clone(),
+                title: "Draft".into(),
+                agent: Agent::Codex,
+            })
+            .await?
+        else {
+            return Err("expected draft workspace".into());
+        };
+        let task = TaskId::new(draft.task.id);
+        let shared = TerminalRecord::project_shared(
+            TerminalId::new("shared"),
+            project.clone(),
+            "Shared",
+            repository.path().to_path_buf(),
+            "shell",
+            1,
+        );
+        let scoped = TerminalRecord::project_shared(
+            TerminalId::new("task"),
+            project.clone(),
+            "Task",
+            repository.path().to_path_buf(),
+            "shell",
+            2,
+        )
+        .for_task(task.clone());
+        core.record_terminal(&shared).await?;
+        core.record_terminal(&scoped).await?;
+        let layout = TerminalLayout {
+            root: Some(TerminalSplit::Split {
+                axis: SplitAxis::Horizontal,
+                ratio: 500,
+                first: Box::new(TerminalSplit::Pane {
+                    terminal_id: "shared".into(),
+                }),
+                second: Box::new(TerminalSplit::Pane {
+                    terminal_id: "task".into(),
+                }),
+            }),
+            ..TerminalLayout::default()
+        };
+        core.save_terminal_layout(&project, layout).await?;
+        assert!(matches!(
+            core.execute(Command::DiscardDraft {
+                task_id: task.clone()
+            })
+            .await,
+            Err(CoreError::DraftTerminalsRunning)
+        ));
+        core.end_terminal(&scoped.id, None).await?;
+        core.execute(Command::DiscardDraft { task_id: task })
+            .await?;
+        assert_eq!(
+            core.terminal_layout(&project)?.root,
+            Some(TerminalSplit::Pane {
+                terminal_id: "shared".into()
+            })
+        );
+        assert_eq!(core.terminals_for(&project).len(), 1);
+        Ok(())
     }
 
     #[test]
