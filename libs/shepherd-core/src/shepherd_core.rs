@@ -1907,7 +1907,7 @@ impl Core {
             Some(worktree_path) => worktree_path,
             None => self.project_path(&task.project_id)?,
         };
-        let (mut harness, mut spec) = match self
+        let (harness, mut spec) = match self
             .harness_factory
             .launch_for_task(task_id, task.agent, cwd)
         {
@@ -1923,16 +1923,23 @@ impl Core {
                 return Err(error);
             }
         };
+        let project_path = self.project_path(&task.project_id)?;
+        let environment = self
+            .harness_factory
+            .environment_for_project(task.agent, &project_path);
+        let mut session = HarnessSession::new(harness);
+        session.restore_transcript(carried);
+        match environment {
+            Ok(environment) => spec.environment.extend(environment),
+            Err(error) => return Err(self.fail_session_start(task_id, session, error)),
+        }
         let policy = ProjectApprovals::new(
             self.store.clone(),
             task.project_id.clone(),
             task.agent,
             &spec,
         )?;
-        harness.set_project_approval_policy(Arc::new(policy));
-        let mut session = HarnessSession::new(harness);
-        session.restore_transcript(carried);
-        let project_path = self.project_path(&task.project_id)?;
+        session.set_project_approval_policy(Arc::new(policy));
         if let Err(error) =
             agent_harness::settings::resolve_environment(&mut spec.environment, &project_path).await
         {

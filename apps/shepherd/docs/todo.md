@@ -1241,8 +1241,9 @@ placeholder tabs and no unearned state badges.
   attachment grants open every path component without following symlinks and
   retain the opened file for the duration of the prompt. Agent launch environment
   commands resolve at spawn with a five-second timeout and bounded output; errors
-  exclude their output. Settings still need to supply configured environment maps,
-  and end-to-end secret handling remains to be verified.
+  exclude their output. Settings supply per-agent maps with project overrides
+  for task launches; model and mode discovery still need to use those maps, and
+  end-to-end secret handling remains to be verified.
 - [ ] Packaging and CI: macOS 13+, Ubuntu 24.04+, pinned Zig, Tauri build,
   platform smoke.
 - [ ] v2/GPUI explicitly not started until v1 is feature complete.

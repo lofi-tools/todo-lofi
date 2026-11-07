@@ -4,6 +4,7 @@
 //! owns the session lifecycle: start, open, prompt, pause on approval, cancel and
 //! shutdown. It does not know which CLI is underneath.
 
+use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -82,6 +83,14 @@ impl ProjectApprovalPolicy for ProjectApprovals {
 pub trait HarnessFactory: Send + Sync {
     fn create(&self) -> Result<Box<dyn AgentHarness>, CoreError>;
 
+    fn environment_for_project(
+        &self,
+        _agent: Agent,
+        _project: &std::path::Path,
+    ) -> Result<BTreeMap<String, String>, CoreError> {
+        Ok(BTreeMap::new())
+    }
+
     fn launch_for_task(
         &self,
         _task_id: &crate::TaskId,
@@ -159,6 +168,10 @@ impl HarnessSession {
             closed: false,
             pending_event: None,
         }
+    }
+
+    pub(crate) fn set_project_approval_policy(&mut self, policy: Arc<dyn ProjectApprovalPolicy>) {
+        self.harness.set_project_approval_policy(policy);
     }
 
     pub async fn start(&mut self, spec: SpawnSpec) -> Result<Capabilities, CoreError> {

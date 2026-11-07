@@ -194,6 +194,7 @@ pub fn run() -> Result<(), tauri::Error> {
                             codex,
                             opencode,
                             claude,
+                            settings: agents.as_ref().cloned().map_err(ToString::to_string),
                             terminals: std::sync::Arc::new(terminals.clone()),
                         }),
                         codex_program,

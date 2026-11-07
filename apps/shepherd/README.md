@@ -170,6 +170,26 @@ falls back to ACP with the same executable when the native probe fails.
 Shepherd passes the optional file as `OPENCODE_CONFIG` for both protocols and
 for project mode discovery. With the setting omitted, OpenCode uses its usual
 configuration lookup.
+
+Agent task launches also accept `agents.codex.environment`,
+`agents.opencode.environment`, and `agents.claude.environment` objects in
+`settings.json`. Each maps variable names to strings. A project entry under
+`projects` can override the entire map for that agent. Values starting with
+`!` run as shell commands from the project root when a session starts; their
+output is passed to the agent without being saved. Commands time out after
+five seconds. For example:
+
+```json
+{
+  "version": 1,
+  "app": {
+    "agents.codex.environment": { "EXAMPLE_TOKEN": "!cat .local-token" }
+  }
+}
+```
+
+Restart Shepherd after changing these settings. Model and mode discovery do
+not yet use these environment maps.
 The task keeps its agent after the first prompt. The diagnostics show which
 protocol ran and why Shepherd selected the fallback.
 The conversation header shows the tier after a session opens. Diagnostics list

@@ -108,7 +108,7 @@ async fn resolve_environment_with_timeout(
     Ok(())
 }
 
-#[derive(Default, Deserialize)]
+#[derive(Clone, Default, Deserialize)]
 pub struct AgentSettings {
     #[serde(default)]
     app: Map<String, Value>,

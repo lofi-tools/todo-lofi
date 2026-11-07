@@ -4,13 +4,14 @@
 //! core asks this factory both for the adapter and for the command it should
 //! launch inside each task's directory.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use agent_harness::acp::{AcpHarness, TerminalBackend};
 use agent_harness::codex::{CodexHarness, CodexInstall, CodexTier, ExecHarness};
 use agent_harness::opencode::OpenCodeHarness;
-use agent_harness::settings::ConfiguredCommand;
+use agent_harness::settings::{AgentSettings, ConfiguredCommand};
 use agent_harness::{AgentHarness, FailureKind, HarnessError, SpawnSpec};
 use shepherd_core::harness::HarnessFactory;
 use shepherd_core::{Agent, CoreError};
@@ -21,12 +22,43 @@ pub struct DesktopHarnessFactory {
     pub codex: Box<dyn HarnessFactory>,
     pub opencode: Result<Option<SpawnSpec>, HarnessError>,
     pub claude: Result<Option<ConfiguredCommand>, HarnessError>,
+    pub settings: Result<AgentSettings, String>,
     pub terminals: Arc<crate::bridge::TerminalHost>,
 }
 
 impl HarnessFactory for DesktopHarnessFactory {
     fn create(&self) -> Result<Box<dyn AgentHarness>, CoreError> {
         self.codex.create()
+    }
+
+    fn environment_for_project(
+        &self,
+        agent: Agent,
+        project: &Path,
+    ) -> Result<BTreeMap<String, String>, CoreError> {
+        let settings = self
+            .settings
+            .as_ref()
+            .map_err(|error| HarnessError::Protocol(error.clone()))?;
+        let key = format!("agents.{}.environment", agent.as_str());
+        let values: BTreeMap<String, String> =
+            settings.project_value(project, &key)?.unwrap_or_default();
+        if values
+            .keys()
+            .any(|key| key.is_empty() || key.contains(['=', '\0']))
+        {
+            return Err(HarnessError::Protocol(format!(
+                "{key} contains an invalid environment variable name"
+            ))
+            .into());
+        }
+        if values.values().any(|value| value.contains('\0')) {
+            return Err(HarnessError::Protocol(format!(
+                "{key} contains an invalid environment value"
+            ))
+            .into());
+        }
+        Ok(values)
     }
 
     fn spawn_spec(&self, cwd: PathBuf) -> SpawnSpec {
@@ -250,6 +282,44 @@ mod tests {
     }
 
     #[test]
+    fn agent_environment_uses_project_overrides() -> Result<(), Box<dyn std::error::Error>> {
+        let settings = serde_json::from_value(serde_json::json!({
+            "app": {"agents.codex.environment": {"TOKEN": "!cat token"}},
+            "projects": {"/project": {"agents.codex.environment": {"TOKEN": "!cat project-token"}}}
+        }))?;
+        let factory = DesktopHarnessFactory {
+            codex: Box::new(MissingCodexFactory::new(
+                "fixture".into(),
+                FailureKind::MissingBinary,
+            )),
+            opencode: Ok(None),
+            claude: Ok(None),
+            settings: Ok(settings),
+            terminals: Arc::new(crate::bridge::TerminalHost::default()),
+        };
+        assert_eq!(
+            factory
+                .environment_for_project(Agent::Codex, Path::new("/project"))?
+                .get("TOKEN")
+                .map(String::as_str),
+            Some("!cat project-token")
+        );
+        assert_eq!(
+            factory
+                .environment_for_project(Agent::Codex, Path::new("/other"))?
+                .get("TOKEN")
+                .map(String::as_str),
+            Some("!cat token")
+        );
+        assert!(
+            factory
+                .environment_for_project(Agent::Claude, Path::new("/project"))?
+                .is_empty()
+        );
+        Ok(())
+    }
+
+    #[test]
     fn launches_the_configured_opencode_independently_of_codex()
     -> Result<(), Box<dyn std::error::Error>> {
         let executable = PathBuf::from("/etc/profiles/per-user/me/bin/opencode");
@@ -265,6 +335,7 @@ mod tests {
             )),
             opencode: agent_harness::opencode::configured_launch(&settings),
             claude: Ok(None),
+            settings: Ok(settings),
             terminals: Arc::new(crate::bridge::TerminalHost::default()),
         };
         let cwd = PathBuf::from("/tmp/worktree");
@@ -292,6 +363,7 @@ mod tests {
                 executable: executable.clone(),
                 args: vec!["--flag".into(), "value with spaces".into()],
             })),
+            settings: Ok(AgentSettings::default()),
             terminals: Arc::new(crate::bridge::TerminalHost::default()),
         };
         let cwd = PathBuf::from("/tmp/worktree");
