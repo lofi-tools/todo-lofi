@@ -910,6 +910,8 @@ If Pi’s RPC probe is blocked, proceed with ACP while resolving it.
   fixture verifies a complete fallback turn. Claude Code uses the same adapter
   through its configured executable and arguments. ACP approvals can remember
   an exact request for the live session and record when they reuse a grant.
+  Per-tool confirmation overrides a global allow; a fake-agent fixture checks
+  that the approval request reaches the client in that case.
   Project-scoped grants persist per configured agent. Settings → Projects
   lists saved grants and live session grants by task and can reset either.
   ACP terminals use Shepherd's PTY engine and appear in the selected task's

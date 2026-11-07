@@ -803,6 +803,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn tool_confirmation_surfaces_permission_under_global_allow()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut fields = acp::schema::v1::ToolCallUpdateFields::new();
+        fields.title = Some("Run tests".to_string());
+        fields.kind = Some(acp::schema::v1::ToolKind::Execute);
+        let mut policy = allow_all();
+        policy.set_tool_default("execute", PermissionRule::Confirm);
+        let (mut connection, _, directory) = connect_to_fake(
+            FakeScript {
+                permission: Some(ToolCallUpdate::new("confirm-override", fields)),
+                permission_options: vec![PermissionOption::new(
+                    "allow-once",
+                    "Allow once",
+                    PermissionOptionKind::AllowOnce,
+                )],
+                ..Default::default()
+            },
+            policy,
+        )
+        .await;
+        let session_id = new_session(&connection, &directory).await;
+        let requester = connection.requester.clone();
+        let turn = tokio::spawn(async move { requester.prompt(&session_id, "go".into()).await });
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while let Some(event) = connection.events.recv().await {
+                if let AcpEvent::PermissionRequested {
+                    options, decision, ..
+                } = event
+                {
+                    let option = options.first().ok_or("missing permission option")?;
+                    decision
+                        .answer(PermissionDecision::Selected(option.option_id.clone()))
+                        .map_err(|_| "permission recipient closed")?;
+                    return Ok::<(), Box<dyn std::error::Error>>(());
+                }
+            }
+            Err("permission event stream closed".into())
+        })
+        .await??;
+        turn.await??;
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn allow_policy_answers_without_asking_the_ui() {
         let mut fields = acp::schema::v1::ToolCallUpdateFields::new();
         fields.title = Some("Write file".to_string());

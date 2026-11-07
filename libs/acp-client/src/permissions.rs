@@ -95,9 +95,7 @@ impl ToolPermissions {
             if matches_any(&rule.always_allow, haystack) {
                 return Verdict::Allow;
             }
-            if rule.default != PermissionRule::Confirm {
-                return resolve(rule.default);
-            }
+            return resolve(rule.default);
         }
         resolve(self.default)
     }
@@ -306,6 +304,17 @@ mod tests {
             .push(PatternRule {
                 pattern: "([invalid".to_string(),
             });
+        assert_eq!(policy.decide("read", "anything"), Verdict::Allow);
+    }
+
+    #[test]
+    fn tool_confirmation_overrides_global_allow() {
+        let mut policy = ToolPermissions {
+            default: PermissionRule::Allow,
+            ..Default::default()
+        };
+        policy.set_tool_default("execute", PermissionRule::Confirm);
+        assert_eq!(policy.decide("execute", "cargo test"), Verdict::Confirm);
         assert_eq!(policy.decide("read", "anything"), Verdict::Allow);
     }
 
