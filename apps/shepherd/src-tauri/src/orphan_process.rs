@@ -3,6 +3,7 @@ use shepherd_core::terminal::ProcessRecord;
 use std::collections::BTreeMap;
 use std::fs::{File, OpenOptions};
 use std::io;
+#[cfg(any(test, not(unix)))]
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -10,6 +11,7 @@ use std::sync::Mutex;
 pub(crate) struct ProcessLease(File);
 
 impl ProcessLease {
+    #[cfg(any(test, not(unix)))]
     pub(crate) fn create(directory: &Path, id: &str) -> io::Result<Self> {
         Self::open(directory, id, true)
     }
@@ -19,6 +21,7 @@ impl ProcessLease {
         Self::open(directory, id, false)
     }
 
+    #[cfg(any(test, not(unix)))]
     fn open(directory: &Path, id: &str, create: bool) -> io::Result<Self> {
         let id = uuid::Uuid::parse_str(id).map_err(io::Error::other)?;
         let mut options = OpenOptions::new();
@@ -32,10 +35,33 @@ impl ProcessLease {
         file.try_lock()?;
         Ok(Self(file))
     }
+
+    #[cfg(unix)]
+    fn create_at(directory: &File, id: &str) -> io::Result<Self> {
+        use std::os::fd::{AsRawFd as _, FromRawFd as _};
+        let id = uuid::Uuid::parse_str(id).map_err(io::Error::other)?;
+        let name = std::ffi::CString::new(format!("{id}.lock")).map_err(io::Error::other)?;
+        let descriptor = unsafe {
+            libc::openat(
+                directory.as_raw_fd(),
+                name.as_ptr(),
+                libc::O_RDWR | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                0o600,
+            )
+        };
+        if descriptor < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let file = unsafe { File::from_raw_fd(descriptor) };
+        file.try_lock()?;
+        Ok(Self(file))
+    }
 }
 
 pub(crate) struct ProcessLeases {
     directory: PathBuf,
+    #[cfg(unix)]
+    directory_handle: File,
     active: Mutex<BTreeMap<String, ProcessLease>>,
 }
 
@@ -58,14 +84,34 @@ impl ProcessLeases {
         }
         #[cfg(unix)]
         {
-            use std::os::unix::fs::MetadataExt as _;
+            use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
             if metadata.uid() != unsafe { libc::geteuid() } || metadata.mode() & 0o022 != 0 {
                 return Err(io::Error::new(
                     io::ErrorKind::PermissionDenied,
                     "agent process lease directory must be owned by the current user and not writable by others",
                 ));
             }
+            let directory_handle = OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+                .open(&directory)?;
+            let opened = directory_handle.metadata()?;
+            if opened.dev() != metadata.dev()
+                || opened.ino() != metadata.ino()
+                || opened.uid() != unsafe { libc::geteuid() }
+                || opened.mode() & 0o022 != 0
+            {
+                return Err(io::Error::other(
+                    "agent process lease directory changed while opening",
+                ));
+            }
+            return Ok(Self {
+                directory,
+                directory_handle,
+                active: Mutex::new(BTreeMap::new()),
+            });
         }
+        #[cfg(not(unix))]
         Ok(Self {
             directory,
             active: Mutex::new(BTreeMap::new()),
@@ -73,6 +119,14 @@ impl ProcessLeases {
     }
 
     pub(crate) fn claim(&self, id: &str) -> io::Result<()> {
+        #[cfg(unix)]
+        let lease = {
+            self.verify_directory()?;
+            let lease = ProcessLease::create_at(&self.directory_handle, id)?;
+            self.verify_directory()?;
+            lease
+        };
+        #[cfg(not(unix))]
         let lease = ProcessLease::create(&self.directory, id)?;
         let mut active = self
             .active
@@ -82,6 +136,24 @@ impl ProcessLeases {
             return Err(io::Error::other("agent process lease already exists"));
         }
         active.insert(id.to_owned(), lease);
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    fn verify_directory(&self) -> io::Result<()> {
+        use std::os::unix::fs::MetadataExt as _;
+        let path = std::fs::symlink_metadata(&self.directory)?;
+        let opened = self.directory_handle.metadata()?;
+        if !path.is_dir()
+            || path.dev() != opened.dev()
+            || path.ino() != opened.ino()
+            || opened.uid() != unsafe { libc::geteuid() }
+            || opened.mode() & 0o022 != 0
+        {
+            return Err(io::Error::other(
+                "agent process lease directory was replaced or is unsafe",
+            ));
+        }
         Ok(())
     }
 
@@ -243,6 +315,34 @@ fn observe(_record: &ProcessRecord, boot_id: Option<String>) -> Observation {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn lease_claim_rejects_replaced_or_repermissioned_directory()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::fs::PermissionsExt as _;
+        let root = tempfile::tempdir()?;
+        let directory = root.path().join("leases");
+        let leases = ProcessLeases::new(directory.clone())?;
+        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o777))?;
+        assert!(leases.claim(&uuid::Uuid::new_v4().to_string()).is_err());
+        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700))?;
+        std::fs::rename(&directory, root.path().join("old-leases"))?;
+        std::fs::create_dir(&directory)?;
+        let id = uuid::Uuid::new_v4().to_string();
+        assert!(leases.claim(&id).is_err());
+        assert!(!directory.join(format!("{id}.lock")).exists());
+        let anchored = ProcessLease::create_at(&leases.directory_handle, &id)?;
+        assert!(
+            root.path()
+                .join("old-leases")
+                .join(format!("{id}.lock"))
+                .exists()
+        );
+        assert!(!directory.join(format!("{id}.lock")).exists());
+        drop(anchored);
+        Ok(())
+    }
 
     #[cfg(unix)]
     #[test]
