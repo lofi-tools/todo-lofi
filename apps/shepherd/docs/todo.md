@@ -1437,6 +1437,10 @@ placeholder tabs and no unearned state badges.
   after correcting the search-keycap expectations and recovered frame error
   handling; UI typechecking and the production frontend build also passed.
   No live agent or UI window was used.
+  After the process-recovery and lease changes, the default offline macOS
+  desktop-backend suite passed 104 tests (one benchmark ignored), and the
+  core suite passed 122 tests (three ignored). No live agent or UI window was
+  used in that rerun.
 - [ ] Packaging and CI: macOS 13+, Ubuntu 24.04+, pinned Zig, Tauri build,
   platform smoke.
   The local macOS debug app bundle declares macOS 13.0 in both Info.plist and
