@@ -4312,10 +4312,13 @@ mod tests {
         assert!(store.load_processes().await?.is_empty());
         let mut harness = agent_harness::codex::ExecHarness::new();
         harness.set_process_tracker(tracker);
+        use std::os::unix::fs::PermissionsExt as _;
+        let launcher = directory.path().join("exec-fixture");
+        std::fs::write(&launcher, "#!/bin/sh\nexec sleep 30\n")?;
+        std::fs::set_permissions(&launcher, std::fs::Permissions::from_mode(0o700))?;
         harness
             .start(agent_harness::SpawnSpec {
-                program: "/bin/sh".into(),
-                args: vec!["-c".into(), "sleep 30".into()],
+                program: launcher.to_string_lossy().into_owned(),
                 cwd: directory.path().to_path_buf(),
                 ..Default::default()
             })
@@ -4331,6 +4334,11 @@ mod tests {
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].kind, "agent");
         assert_eq!(records[0].owner_id, "task-fixture");
+        let record = records.first().ok_or("missing exec process record")?;
+        assert_eq!(
+            unsafe { libc::kill(libc::pid_t::try_from(record.pid)?, 0) },
+            0
+        );
         harness.shutdown().await?;
         assert!(store.load_processes().await?.is_empty());
         Ok(())
@@ -4407,14 +4415,51 @@ mod tests {
                 store: slot,
                 task_id: "crash-task".into(),
             });
-            let mut harness = agent_harness::codex::CodexHarness::new();
+            let kind = std::env::var("SHEPHERD_AGENT_ORPHAN_KIND")?;
+            let (mut harness, script, prompt): (Box<dyn AgentHarness>, &str, bool) = match kind
+                .as_str()
+            {
+                "app-server" => (
+                    Box::new(agent_harness::codex::CodexHarness::new()),
+                    "while IFS= read -r line; do case \"$line\" in *initialize*) printf '{\"id\":1,\"result\":{}}\\n';; esac; done; exec sleep 30",
+                    false,
+                ),
+                "exec" => (
+                    Box::new(agent_harness::codex::ExecHarness::new()),
+                    "exec sleep 30",
+                    true,
+                ),
+                "acp" => (
+                    Box::new(agent_harness::acp::AcpHarness::default()),
+                    r#"while IFS= read -r request; do case "$request" in *'"method":"initialize"'*) id=$(printf '%s\n' "$request" | sed -nE 's/.*"id":("[^"]+"|[0-9]+).*/\1/p'); printf '{"jsonrpc":"2.0","id":%s,"result":{"protocolVersion":1}}\n' "$id";; esac; done; exec sleep 30"#,
+                    false,
+                ),
+                _ => return Err("unknown agent fixture".into()),
+            };
             harness.set_process_tracker(tracker);
-            harness.start(agent_harness::SpawnSpec {
-                program: "/bin/sh".into(),
-                args: vec!["-c".into(), "while IFS= read -r line; do case \"$line\" in *initialize*) printf '{\"id\":1,\"result\":{}}\\n';; esac; done; exec sleep 30".into()],
-                cwd: data.clone(),
-                ..Default::default()
-            }).await?;
+            let (program, args) = if prompt {
+                use std::os::unix::fs::PermissionsExt as _;
+                let launcher = data.join("exec-fixture");
+                std::fs::write(&launcher, "#!/bin/sh\nexec sleep 30\n")?;
+                std::fs::set_permissions(&launcher, std::fs::Permissions::from_mode(0o700))?;
+                (launcher.to_string_lossy().into_owned(), Vec::new())
+            } else {
+                ("/bin/sh".into(), vec!["-c".into(), script.into()])
+            };
+            harness
+                .start(agent_harness::SpawnSpec {
+                    program,
+                    args,
+                    cwd: data.clone(),
+                    ..Default::default()
+                })
+                .await?;
+            if prompt {
+                harness.open_session(None).await?;
+                harness
+                    .prompt(agent_harness::PromptInput::text("fixture"))
+                    .await?;
+            }
             let record = store
                 .load_processes()
                 .await?
@@ -4446,58 +4491,62 @@ mod tests {
         if crate::pty_terminal::boot_id().is_none() {
             return Ok(());
         }
-        let data = TestDirectory::new()?;
-        let ready = data.join("agent-ready");
-        let mut child = tokio::process::Command::new(std::env::current_exe()?)
-            .args([
-                "--exact",
-                "bridge::tests::abrupt_shell_death_leaves_a_verifiable_agent_record",
-                "--nocapture",
-            ])
-            .env("SHEPHERD_AGENT_ORPHAN_DATA", data.path())
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .kill_on_drop(true)
-            .spawn()?;
-        let contents = tokio::time::timeout(Duration::from_secs(20), async {
-            loop {
-                match std::fs::read_to_string(&ready) {
-                    Ok(contents) => break Ok::<_, Box<dyn std::error::Error>>(contents),
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                    Err(error) => break Err(error.into()),
+        for kind in ["app-server", "exec", "acp"] {
+            let data = TestDirectory::new()?;
+            let ready = data.join("agent-ready");
+            let mut child = tokio::process::Command::new(std::env::current_exe()?)
+                .args([
+                    "--exact",
+                    "bridge::tests::abrupt_shell_death_leaves_a_verifiable_agent_record",
+                    "--nocapture",
+                ])
+                .env("SHEPHERD_AGENT_ORPHAN_DATA", data.path())
+                .env("SHEPHERD_AGENT_ORPHAN_KIND", kind)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .kill_on_drop(true)
+                .spawn()?;
+            let contents = tokio::time::timeout(Duration::from_secs(20), async {
+                loop {
+                    match std::fs::read_to_string(&ready) {
+                        Ok(contents) => break Ok::<_, Box<dyn std::error::Error>>(contents),
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                        Err(error) => break Err(error.into()),
+                    }
+                    if let Some(status) = child.try_wait()? {
+                        break Err(format!("fixture exited before ready: {status}").into());
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
                 }
-                if let Some(status) = child.try_wait()? {
-                    break Err(format!("fixture exited before ready: {status}").into());
-                }
-                tokio::time::sleep(Duration::from_millis(10)).await;
+            })
+            .await??;
+            let mut fields = contents.split_whitespace();
+            let pid: libc::pid_t = fields.next().ok_or("missing pid")?.parse()?;
+            let started_at = fields.next().ok_or("missing start time")?.parse()?;
+            if pid <= 1 || u32::try_from(pid).ok() == Some(std::process::id()) {
+                return Err("invalid fixture PID".into());
             }
-        })
-        .await??;
-        let mut fields = contents.split_whitespace();
-        let pid: libc::pid_t = fields.next().ok_or("missing pid")?.parse()?;
-        let started_at = fields.next().ok_or("missing start time")?.parse()?;
-        if pid <= 1 || u32::try_from(pid).ok() == Some(std::process::id()) {
-            return Err("invalid fixture PID".into());
+            let _guard = ProcessGuard { pid, started_at };
+            child.kill().await?;
+            use std::os::unix::process::ExitStatusExt as _;
+            assert_eq!(child.wait().await?.signal(), Some(libc::SIGKILL));
+            let store = TursoStore::open_at(&data.join("shepherd.db")).await?;
+            let records = store.load_processes().await?;
+            assert_eq!(records.len(), 1);
+            let record = records.first().ok_or("missing agent record")?;
+            assert_eq!(record.kind, "agent");
+            assert_eq!(record.owner_id, "crash-task");
+            assert_eq!(record.pid, u32::try_from(pid)?);
+            let inspection = serde_json::to_value(crate::orphan_process::inspect(records))?;
+            assert_eq!(
+                inspection
+                    .get(0)
+                    .and_then(|item| item.get("status"))
+                    .and_then(serde_json::Value::as_str),
+                Some("matching"),
+                "fixture: {kind}"
+            );
         }
-        let _guard = ProcessGuard { pid, started_at };
-        child.kill().await?;
-        use std::os::unix::process::ExitStatusExt as _;
-        assert_eq!(child.wait().await?.signal(), Some(libc::SIGKILL));
-        let store = TursoStore::open_at(&data.join("shepherd.db")).await?;
-        let records = store.load_processes().await?;
-        assert_eq!(records.len(), 1);
-        let record = records.first().ok_or("missing agent record")?;
-        assert_eq!(record.kind, "agent");
-        assert_eq!(record.owner_id, "crash-task");
-        assert_eq!(record.pid, u32::try_from(pid)?);
-        let inspection = serde_json::to_value(crate::orphan_process::inspect(records))?;
-        assert_eq!(
-            inspection
-                .get(0)
-                .and_then(|item| item.get("status"))
-                .and_then(serde_json::Value::as_str),
-            Some("matching")
-        );
         Ok(())
     }
 
