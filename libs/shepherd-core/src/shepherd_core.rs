@@ -3391,6 +3391,123 @@ mod tests {
         workspace.transcript.iter().map(Entry::summary).collect()
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn launch_environment_reaches_process_without_persisting_secret()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use agent_harness::fake_harness::FakeHarness;
+        use agent_harness::{AgentHarness, Capabilities, HarnessResult, SpawnSpec};
+
+        struct Factory;
+        impl HarnessFactory for Factory {
+            fn create(&self) -> Result<Box<dyn AgentHarness>, CoreError> {
+                Ok(Box::new(InspectingHarness(FakeHarness::one_turn(
+                    FakeTurn::new(vec![FakeStep::Message("done".into())]),
+                ))))
+            }
+            fn environment_for_project(
+                &self,
+                _: Agent,
+                _: &Path,
+            ) -> Result<BTreeMap<String, String>, CoreError> {
+                Ok(BTreeMap::from([(
+                    "SHEPHERD_TEST_TOKEN".into(),
+                    "!cat token".into(),
+                )]))
+            }
+        }
+        struct InspectingHarness(FakeHarness);
+        #[async_trait::async_trait]
+        impl AgentHarness for InspectingHarness {
+            fn events(&mut self) -> &mut mpsc::UnboundedReceiver<HarnessEvent> {
+                self.0.events()
+            }
+            fn diagnostics(&self) -> agent_harness::AgentDiagnostics {
+                self.0.diagnostics()
+            }
+            async fn start(&mut self, spec: SpawnSpec) -> HarnessResult<Capabilities> {
+                let output = tokio::process::Command::new("/bin/sh")
+                    .args(["-c", "printf %s \"$SHEPHERD_TEST_TOKEN\""])
+                    .envs(&spec.environment)
+                    .output()
+                    .await
+                    .map_err(|error| agent_harness::HarnessError::Protocol(error.to_string()))?;
+                if !output.status.success() || output.stdout != b"fixture-private-value" {
+                    return Err(agent_harness::HarnessError::Protocol(
+                        "environment not delivered".into(),
+                    ));
+                }
+                self.0.start(spec).await
+            }
+            async fn open_session(
+                &mut self,
+                resume: Option<SessionId>,
+            ) -> HarnessResult<SessionId> {
+                self.0.open_session(resume).await
+            }
+            async fn prompt(&mut self, input: PromptInput) -> HarnessResult<()> {
+                self.0.prompt(input).await
+            }
+            async fn cancel(&mut self) -> HarnessResult<()> {
+                self.0.cancel().await
+            }
+            async fn respond(&mut self, id: ApprovalId, decision: Decision) -> HarnessResult<()> {
+                self.0.respond(id, decision).await
+            }
+            async fn shutdown(&mut self) -> HarnessResult<()> {
+                self.0.shutdown().await
+            }
+        }
+        let repository = TestRepository::new()?;
+        std::fs::write(repository.path().join("token"), "fixture-private-value\n")?;
+        let database = TestDatabase::new()?;
+        let mut core = Core::with_services(
+            Box::new(TursoStore::open(&database.uri()).await?),
+            Box::new(Factory),
+        );
+        let project = add_project(&mut core, repository.path().to_path_buf()).await?;
+        let draft = workspace_of(
+            core.execute(Command::CreateDraft {
+                project_id: project,
+                title: "environment".into(),
+                agent: Agent::Codex,
+            })
+            .await?,
+        );
+        let task_id = TaskId::new(draft.task.id);
+        let workspace = workspace_of(
+            core.execute(Command::SendPrompt {
+                task_id: task_id.clone(),
+                input: PromptInput::text("hello"),
+            })
+            .await?,
+        );
+        assert!(!serde_json::to_string(&workspace)?.contains("fixture-private-value"));
+        drop(core);
+        let mut reopened = Core::load(
+            Box::new(TursoStore::open(&database.uri()).await?),
+            Box::new(UnavailableHarnessFactory),
+        )
+        .await?;
+        assert!(
+            !serde_json::to_string(&reopened.open_task_workspace(&task_id).await?)?
+                .contains("fixture-private-value")
+        );
+        drop(reopened);
+        for entry in std::fs::read_dir(database.path())? {
+            let entry = entry?;
+            if entry.file_type()?.is_file() {
+                let data = std::fs::read(entry.path())?;
+                assert!(
+                    !data
+                        .windows(b"fixture-private-value".len())
+                        .any(|window| window == b"fixture-private-value")
+                );
+            }
+        }
+        Ok(())
+    }
+
     #[tokio::test]
     async fn three_agent_sessions_keep_projects_approvals_and_worktrees_isolated()
     -> Result<(), Box<dyn std::error::Error>> {

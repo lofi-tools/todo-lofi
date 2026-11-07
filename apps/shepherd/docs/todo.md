@@ -1242,8 +1242,10 @@ placeholder tabs and no unearned state badges.
   retain the opened file for the duration of the prompt. Agent launch environment
   commands resolve at spawn with a five-second timeout and bounded output; errors
   exclude their output. Settings supply per-agent maps with project overrides
-  for task launches and model and mode discovery. End-to-end secret handling
-  remains to be verified.
+  for task launches and model and mode discovery. A scripted task fixture
+  verifies that a local process receives the resolved value while the workspace
+  snapshot and reopened database files do not contain it. Log handling and
+  live-adapter behavior remain to be verified.
 - [ ] Packaging and CI: macOS 13+, Ubuntu 24.04+, pinned Zig, Tauri build,
   platform smoke.
 - [ ] v2/GPUI explicitly not started until v1 is feature complete.
