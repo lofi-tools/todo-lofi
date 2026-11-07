@@ -1027,32 +1027,41 @@ impl OpenCodeServer {
             HarnessError::Protocol("OpenCode did not provide a startup pipe".into())
         })?;
         let stderr = Arc::new(Mutex::new(VecDeque::new()));
-        if let Some(output) = child.stderr.take() {
+        if let Some(mut output) = child.stderr.take() {
             let stderr = stderr.clone();
             let password = password.clone();
             tokio::spawn(async move {
-                let mut lines = BufReader::new(output).lines();
-                loop {
-                    match lines.next_line().await {
-                        Ok(Some(line)) => {
-                            let mut tail = match stderr.lock() {
-                                Ok(tail) => tail,
-                                Err(error) => {
-                                    tracing::error!(%error, "could not retain OpenCode stderr");
-                                    break;
-                                }
-                            };
-                            if tail.len() == 20 {
-                                tail.pop_front();
-                            }
-                            tail.push_back(line.replace(&password, "[redacted]"));
+                let mut lines = acp_client::bounded_lines::BoundedLines::default();
+                let mut bytes = [0u8; 4096];
+                let record = |line: acp_client::bounded_lines::BoundedLine| {
+                    let mut tail = match stderr.lock() {
+                        Ok(tail) => tail,
+                        Err(error) => {
+                            tracing::error!(%error, "could not retain OpenCode stderr");
+                            error.into_inner()
                         }
-                        Ok(None) => break,
+                    };
+                    if tail.len() == 20 {
+                        tail.pop_front();
+                    }
+                    tail.push_back(sanitize_stderr_line(line, &password));
+                };
+                loop {
+                    match output.read(&mut bytes).await {
+                        Ok(0) => break,
+                        Ok(count) => {
+                            for line in lines.push(&bytes[..count]) {
+                                record(line);
+                            }
+                        }
                         Err(error) => {
                             tracing::debug!(%error, "could not read OpenCode stderr");
                             break;
                         }
                     }
+                }
+                if let Some(line) = lines.finish() {
+                    record(line);
                 }
             });
         }
@@ -1286,6 +1295,14 @@ impl OpenCodeServer {
     }
 }
 
+fn sanitize_stderr_line(line: acp_client::bounded_lines::BoundedLine, password: &str) -> String {
+    if line.truncated {
+        "[long stderr line omitted]".to_owned()
+    } else {
+        line.text.replace(password, "[redacted]")
+    }
+}
+
 fn stderr_tail(stderr: &Mutex<VecDeque<String>>) -> String {
     match stderr.lock() {
         Ok(tail) => tail.iter().cloned().collect::<Vec<_>>().join("\n"),
@@ -1376,6 +1393,25 @@ fn protocol_error(context: &str, error: impl std::fmt::Display) -> HarnessError 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stderr_redaction_omits_truncated_lines_and_hides_credentials()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut lines = acp_client::bounded_lines::BoundedLines::default();
+        let normal = lines.push(b"token=secret\n");
+        assert_eq!(
+            sanitize_stderr_line(normal.into_iter().next().ok_or("missing line")?, "secret"),
+            "token=[redacted]"
+        );
+        let mut long = vec![b'x'; 5000];
+        long.extend_from_slice(b"secret\n");
+        let truncated = lines.push(&long).into_iter().next().ok_or("missing line")?;
+        assert_eq!(
+            sanitize_stderr_line(truncated, "secret"),
+            "[long stderr line omitted]"
+        );
+        Ok(())
+    }
     use tokio::io::{AsyncRead, AsyncWriteExt};
     use tokio::net::TcpListener;
 

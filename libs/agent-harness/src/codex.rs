@@ -17,8 +17,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{Value, json};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::sync::{Mutex as AsyncMutex, mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio::time::timeout;
@@ -1985,29 +1985,47 @@ fn spawn_reader(
 }
 
 fn spawn_stderr_reader(
-    stderr: ChildStderr,
+    mut stderr: impl AsyncRead + Unpin + Send + 'static,
     tail: Arc<Mutex<VecDeque<String>>>,
     drained: Option<oneshot::Sender<()>>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
-        let mut lines = BufReader::new(stderr).lines();
-        while let Ok(Some(line)) = lines.next_line().await {
-            tracing::debug!(stream = "codex-stderr", "{line}");
+        let mut lines = acp_client::bounded_lines::BoundedLines::default();
+        let mut bytes = [0u8; 4096];
+        let record = |line: acp_client::bounded_lines::BoundedLine| {
+            tracing::debug!(stream = "codex-stderr", "{}", line.text);
             match tail.lock() {
                 Ok(mut tail) => {
                     if tail.len() == STDERR_TAIL_LINES {
                         tail.pop_front();
                     }
-                    tail.push_back(line);
+                    tail.push_back(line.text);
                 }
                 Err(poisoned) => {
                     let mut tail = poisoned.into_inner();
                     if tail.len() == STDERR_TAIL_LINES {
                         tail.pop_front();
                     }
-                    tail.push_back(line);
+                    tail.push_back(line.text);
                 }
             }
+        };
+        loop {
+            match stderr.read(&mut bytes).await {
+                Ok(0) => break,
+                Ok(count) => {
+                    for line in lines.push(&bytes[..count]) {
+                        record(line);
+                    }
+                }
+                Err(error) => {
+                    tracing::debug!(%error, "could not read Codex stderr");
+                    break;
+                }
+            }
+        }
+        if let Some(line) = lines.finish() {
+            record(line);
         }
         if let Some(drained) = drained
             && drained.send(()).is_err()
@@ -2466,6 +2484,24 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+
+    #[tokio::test]
+    async fn stderr_reader_bounds_long_lines_and_drains_following_output()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (mut writer, reader) = tokio::io::duplex(8192);
+        let tail = Arc::new(Mutex::new(VecDeque::new()));
+        let task = spawn_stderr_reader(reader, tail.clone(), None);
+        writer.write_all(&vec![b'x'; 256 * 1024]).await?;
+        writer.write_all(b" end\nnext\npartial").await?;
+        drop(writer);
+        task.await?;
+        let tail = tail.lock().map_err(|_| "stderr lock poisoned")?;
+        assert_eq!(tail.len(), 3);
+        assert!(tail[0].len() < 5000 && tail[0].ends_with(" end"));
+        assert_eq!(tail[1], "next");
+        assert_eq!(tail[2], "partial");
+        Ok(())
+    }
     use crate::{Entry, EntryKind, Transcript};
 
     /// Answers the handshake, starts a thread, streams a delta and a tool item,

@@ -1177,6 +1177,10 @@ placeholder tabs and no unearned state badges.
   and can be retried while draining. Multi-task archive rolls back on a
   mid-batch database error and can be retried.
 - [ ] Bounded transcript, stderr, search and frame buffers.
+  Codex, OpenCode and ACP stderr readers cap each line while draining the
+  process, including newline-free output. OpenCode omits overlong lines to
+  avoid exposing fragments of its authentication secret. Event queues and
+  other buffer limits still need review.
 - [ ] Multiple agents and projects: three agents across two projects, no state
   bleed, no polling.
 - [ ] Performance: cold start under 1.2 s, streaming while a large diff renders,

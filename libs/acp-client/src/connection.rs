@@ -33,7 +33,7 @@ use agent_client_protocol::schema::v1::{
 };
 use futures::channel::oneshot;
 use futures::io::BufReader;
-use futures::{AsyncBufReadExt as _, AsyncWriteExt as _};
+use futures::{AsyncBufReadExt as _, AsyncReadExt as _, AsyncWriteExt as _};
 
 use crate::agent::{AgentServer, SpawnSpec};
 use crate::fs::{PromptReads, SessionRoots, read_text_file, write_text_file};
@@ -846,23 +846,44 @@ impl ConnectTo<Client> for ProjectAgent {
             .ok_or_else(|| acp::Error::internal_error().data("agent stdout unavailable"))?;
         let stderr = child.stderr.take();
 
-        let stderr_task = if let (Some(stderr), Some(events), Some(buffer)) =
+        let stderr_task = if let (Some(mut stderr), Some(events), Some(buffer)) =
             (stderr, self.events.clone(), self.stderr.clone())
         {
             // stderr has no protocol framing, so it is drained on its own task:
             // a full pipe from a chatty agent would otherwise stall the child.
             Some(tokio::spawn(async move {
-                let mut lines = BufReader::new(stderr).lines();
-                while let Some(Ok(line)) = futures::StreamExt::next(&mut lines).await {
-                    if let Ok(mut buffer) = buffer.lock() {
-                        buffer.push_back(line.clone());
-                        while buffer.len() > STDERR_LINES {
-                            buffer.pop_front();
+                let mut lines = crate::bounded_lines::BoundedLines::default();
+                let mut bytes = [0u8; 4096];
+                let record = |line: crate::bounded_lines::BoundedLine| {
+                    match buffer.lock() {
+                        Ok(mut buffer) => {
+                            buffer.push_back(line.text.clone());
+                            while buffer.len() > STDERR_LINES {
+                                buffer.pop_front();
+                            }
+                        }
+                        Err(error) => tracing::error!(%error, "could not retain ACP stderr"),
+                    }
+                    if events.send(AcpEvent::Stderr(line.text)).is_err() {
+                        tracing::debug!("ACP stderr receiver closed");
+                    }
+                };
+                loop {
+                    match stderr.read(&mut bytes).await {
+                        Ok(0) => break,
+                        Ok(count) => {
+                            for line in lines.push(&bytes[..count]) {
+                                record(line);
+                            }
+                        }
+                        Err(error) => {
+                            tracing::debug!(%error, "could not read ACP stderr");
+                            break;
                         }
                     }
-                    if events.send(AcpEvent::Stderr(line)).is_err() {
-                        break;
-                    }
+                }
+                if let Some(line) = lines.finish() {
+                    record(line);
                 }
             }))
         } else {

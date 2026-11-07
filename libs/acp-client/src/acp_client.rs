@@ -11,6 +11,7 @@
 //! [`connection`], and UI-facing state is plain data in [`thread`].
 
 pub mod agent;
+pub mod bounded_lines;
 pub mod connection;
 pub mod fs;
 pub mod permissions;
