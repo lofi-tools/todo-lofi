@@ -9,6 +9,40 @@ use crate::{HarnessError, HarnessResult};
 
 const MAX_ENVIRONMENT_OUTPUT: u64 = 1024 * 1024;
 
+#[cfg(unix)]
+struct EnvironmentProcessGroup(Option<i32>);
+
+#[cfg(unix)]
+impl EnvironmentProcessGroup {
+    fn stop(&mut self) -> std::io::Result<()> {
+        let Some(group) = self.0.take() else {
+            return Ok(());
+        };
+        if unsafe { libc::killpg(group, libc::SIGKILL) } == 0 {
+            return Ok(());
+        }
+        let error = std::io::Error::last_os_error();
+        if error.raw_os_error() == Some(libc::ESRCH) {
+            Ok(())
+        } else {
+            Err(error)
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.0 = None;
+    }
+}
+
+#[cfg(unix)]
+impl Drop for EnvironmentProcessGroup {
+    fn drop(&mut self) {
+        if let Err(error) = self.stop() {
+            tracing::warn!(%error, "could not stop a cancelled environment command process group");
+        }
+    }
+}
+
 pub async fn resolve_environment(
     environment: &mut BTreeMap<String, String>,
     cwd: &Path,
@@ -42,7 +76,7 @@ async fn resolve_environment_with_timeout(
             ))
         })?;
         #[cfg(unix)]
-        let group = child.id().and_then(|id| i32::try_from(id).ok());
+        let mut group = EnvironmentProcessGroup(child.id().and_then(|id| i32::try_from(id).ok()));
         let stdout = child.stdout.take().ok_or_else(|| {
             HarnessError::Protocol(format!("Could not capture environment command for {key}"))
         })?;
@@ -96,24 +130,20 @@ async fn resolve_environment_with_timeout(
         };
         let outcome = tokio::time::timeout(deadline, capture).await;
         #[cfg(unix)]
-        if !matches!(outcome, Ok(Ok(_)))
-            && let Some(group) = group
-        {
+        if !matches!(outcome, Ok(Ok(_))) {
             // Commands can leave descendants holding stdout after the shell exits.
-            let result = unsafe { libc::killpg(group, libc::SIGKILL) };
-            if result != 0 {
-                let error = std::io::Error::last_os_error();
-                if error.raw_os_error() != Some(libc::ESRCH) {
-                    let reason = match &outcome {
-                        Err(_) => format!("Environment command for {key} timed out"),
-                        Ok(Err(reason)) => reason.to_string(),
-                        Ok(Ok(_)) => format!("Environment command for {key} finished"),
-                    };
-                    return Err(HarnessError::Protocol(format!(
-                        "{reason}; could not stop environment command for {key}: {error}"
-                    )));
-                }
+            if let Err(error) = group.stop() {
+                let reason = match &outcome {
+                    Err(_) => format!("Environment command for {key} timed out"),
+                    Ok(Err(reason)) => reason.to_string(),
+                    Ok(Ok(_)) => format!("Environment command for {key} finished"),
+                };
+                return Err(HarnessError::Protocol(format!(
+                    "{reason}; could not stop environment command for {key}: {error}"
+                )));
             }
+        } else {
+            group.disarm();
         }
         *value = outcome.map_err(|_| {
             HarnessError::Protocol(format!("Environment command for {key} timed out"))
@@ -210,6 +240,32 @@ impl AgentSettings {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cancelling_environment_resolution_stops_descendants()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let cwd = directory.path().to_owned();
+        let task = tokio::spawn(async move {
+            let mut values = BTreeMap::from([(
+                "TOKEN".into(),
+                "!(sleep 1; printf leaked > escaped) & printf ready > ready; wait".into(),
+            )]);
+            resolve_environment(&mut values, &cwd).await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            while !directory.path().join("ready").exists() {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await?;
+        task.abort();
+        assert!(task.await.is_err_and(|error| error.is_cancelled()));
+        tokio::time::sleep(std::time::Duration::from_millis(1300)).await;
+        assert!(!directory.path().join("escaped").exists());
+        Ok(())
+    }
 
     #[cfg(unix)]
     #[tokio::test]

@@ -1242,7 +1242,9 @@ placeholder tabs and no unearned state badges.
   retain the opened file for the duration of the prompt. Agent launch environment
   commands resolve at spawn with a five-second timeout and bounded output; errors
   exclude their output. Oversized output and failed commands with inherited
-  stdout fail promptly; any process-group cleanup failure is reported. Settings
+  stdout fail promptly; any process-group cleanup failure is reported.
+  Cancellation also stops the command's process group on Unix; a local fixture
+  checks that a descendant cannot write after the resolver is dropped. Settings
   supply per-agent maps with project overrides
   for task launches and model and mode discovery. A scripted task fixture
   verifies that a local process receives the resolved value while the workspace
