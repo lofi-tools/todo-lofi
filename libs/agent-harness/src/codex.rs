@@ -357,7 +357,7 @@ struct ProbeProcess(Child);
 
 impl Drop for ProbeProcess {
     fn drop(&mut self) {
-        if let Err(error) = stop_app_server_group(&self.0) {
+        if let Err(error) = stop_codex_process_group(&self.0) {
             tracing::warn!(%error, "could not stop the Codex probe process group");
         }
         if self.0.id().is_some()
@@ -1345,7 +1345,7 @@ impl AgentHarness for CodexHarness {
     }
 
     async fn shutdown(&mut self) -> HarnessResult<()> {
-        self.shutdown_with_signal(stop_app_server_group).await
+        self.shutdown_with_signal(stop_codex_process_group).await
     }
 }
 
@@ -1717,14 +1717,8 @@ fn spawn_exec_waiter(
         let status = match outcome {
             Some(status) => status,
             None => {
-                #[cfg(unix)]
-                if let Some(group) = child.id().and_then(|id| libc::pid_t::try_from(id).ok())
-                    && unsafe { libc::killpg(group, libc::SIGKILL) } != 0
-                {
-                    let error = std::io::Error::last_os_error();
-                    if error.raw_os_error() != Some(libc::ESRCH) {
-                        tracing::warn!(%error, "could not stop the Codex exec process group");
-                    }
+                if let Err(error) = stop_codex_process_group(&child) {
+                    tracing::warn!(%error, "could not stop the Codex exec process group");
                 }
                 if let Err(error) = child.kill().await {
                     tracing::debug!(%error, "could not kill the codex exec process");
@@ -2206,7 +2200,7 @@ fn spawn_reader(
         let outcome = {
             let mut child = child.lock().await;
             if let Some(message) = protocol_failure {
-                if let Err(error) = stop_app_server_group(&child) {
+                if let Err(error) = stop_codex_process_group(&child) {
                     tracing::warn!(%error, "could not stop the Codex app-server process group");
                 }
                 if let Err(error) = child.kill().await {
@@ -2218,7 +2212,7 @@ fn spawn_reader(
                     Ok(Ok(status)) => Ok(status.code()),
                     Ok(Err(error)) => Err(format!("Could not read the Codex exit status: {error}")),
                     Err(_) => {
-                        if let Err(error) = stop_app_server_group(&child) {
+                        if let Err(error) = stop_codex_process_group(&child) {
                             tracing::warn!(%error, "could not stop the Codex app-server process group");
                         }
                         if let Err(error) = child.kill().await {
@@ -2271,7 +2265,7 @@ impl Drop for AppServerStartupGroup {
         if let Some(child) = self.0.take().and_then(|child| child.upgrade()) {
             match child.try_lock() {
                 Ok(mut child) => {
-                    if let Err(error) = stop_app_server_group(&child) {
+                    if let Err(error) = stop_codex_process_group(&child) {
                         tracing::warn!(%error, "could not stop the Codex startup process group");
                     }
                     if let Err(error) = child.start_kill() {
@@ -2284,7 +2278,7 @@ impl Drop for AppServerStartupGroup {
     }
 }
 
-fn stop_app_server_group(child: &Child) -> std::io::Result<()> {
+fn stop_codex_process_group(child: &Child) -> std::io::Result<()> {
     #[cfg(unix)]
     if let Some(group) = child.id().and_then(|id| libc::pid_t::try_from(id).ok())
         && unsafe { libc::killpg(group, libc::SIGKILL) } != 0
