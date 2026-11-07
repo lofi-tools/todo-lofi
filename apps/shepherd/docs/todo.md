@@ -873,6 +873,8 @@ If Pi’s RPC probe is blocked, proceed with ACP while resolving it.
 - [ ] Pi byte-oriented LF reader, ID correlation, `agent_settled`, extension UI
   bridge and approval bridge.
   The stdio transport and ID-based command and dialog replies are implemented.
+  Pending RPC requests fail when output closes, without waiting for a lingering
+  process to exit; a local subprocess fixture verifies the disconnect path.
   The installed Nix-profile Pi 0.75.4 passed the isolated dialog smoke, but its
   prompt reply omitted `disposition` and its shipped RPC/session code lacks
   `agent_settled`. Continue with ACP while the Pi lifecycle probe is blocked.
