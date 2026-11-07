@@ -2948,23 +2948,32 @@ mod tests {
         };
         use shepherd_core::store::MemoryStore;
 
-        struct Factory(std::sync::Mutex<Option<mpsc::UnboundedReceiver<HarnessEvent>>>);
+        struct Factory {
+            receiver: std::sync::Mutex<Option<mpsc::UnboundedReceiver<HarnessEvent>>>,
+            sender: mpsc::UnboundedSender<HarnessEvent>,
+        }
         impl HarnessFactory for Factory {
             fn create(&self) -> Result<Box<dyn AgentHarness>, CoreError> {
                 let events = self
-                    .0
+                    .receiver
                     .lock()
                     .map_err(|_| CoreError::HarnessUnavailable)?
                     .take()
                     .ok_or(CoreError::HarnessUnavailable)?;
-                Ok(Box::new(DelayedHarness(events)))
+                Ok(Box::new(DelayedHarness {
+                    events,
+                    sender: self.sender.clone(),
+                }))
             }
         }
-        struct DelayedHarness(mpsc::UnboundedReceiver<HarnessEvent>);
+        struct DelayedHarness {
+            events: mpsc::UnboundedReceiver<HarnessEvent>,
+            sender: mpsc::UnboundedSender<HarnessEvent>,
+        }
         #[async_trait]
         impl AgentHarness for DelayedHarness {
             fn events(&mut self) -> &mut mpsc::UnboundedReceiver<HarnessEvent> {
-                &mut self.0
+                &mut self.events
             }
             async fn start(&mut self, _: SpawnSpec) -> HarnessResult<Capabilities> {
                 Ok(Capabilities::default())
@@ -2973,6 +2982,15 @@ mod tests {
                 Ok(SessionId::new("fixture"))
             }
             async fn prompt(&mut self, _: PromptInput) -> HarnessResult<()> {
+                for _ in 0..300 {
+                    self.sender
+                        .send(HarnessEvent::Delta {
+                            item_id: ItemId::new("answer"),
+                            kind: DeltaKind::Message,
+                            text: "p".into(),
+                        })
+                        .map_err(|_| agent_harness::HarnessError::ChannelClosed)?;
+                }
                 Ok(())
             }
             async fn cancel(&mut self) -> HarnessResult<()> {
@@ -2990,7 +3008,10 @@ mod tests {
         let (sender, receiver) = mpsc::unbounded_channel();
         let state = ShellState::new(Core::with_services(
             Box::new(MemoryStore::new()),
-            Box::new(Factory(std::sync::Mutex::new(Some(receiver)))),
+            Box::new(Factory {
+                receiver: std::sync::Mutex::new(Some(receiver)),
+                sender: sender.clone(),
+            }),
         ));
         state.start_event_pump();
         let projects = state
@@ -3035,9 +3056,11 @@ mod tests {
                 if let Event::TaskWorkspaceChanged(workspace) = events.recv().await?
                     && workspace.task.id == task_id.as_str()
                     && workspace.transcript.iter().any(|entry| {
-                        entry
-                            .summary()
-                            .contains(&format!("{}delayed answer", "x".repeat(600)))
+                        entry.summary().contains(&format!(
+                            "{}{}delayed answer",
+                            "p".repeat(300),
+                            "x".repeat(600)
+                        ))
                     })
                     && workspace.task.state == TaskState::Ready
                 {

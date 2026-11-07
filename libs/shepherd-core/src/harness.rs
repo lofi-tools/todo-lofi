@@ -20,7 +20,7 @@ use crate::session::SessionRecord;
 use crate::store::{ProjectApproval, Store, checksum};
 use crate::{Agent, AgentTier, CoreError, ProjectId, Task};
 
-pub(crate) const MAX_EVENTS_PER_BACKGROUND_PUMP: usize = 256;
+pub(crate) const MAX_EVENTS_PER_PUMP: usize = 256;
 
 pub(crate) struct ProjectApprovals {
     store: Arc<dyn Store>,
@@ -201,8 +201,7 @@ impl HarnessSession {
         Ok(self.pump())
     }
 
-    /// Record the user's prompt, ask the adapter, then fold every event the
-    /// adapter has already produced into the transcript.
+    /// Record the user's prompt, ask the adapter, then fold an available event batch.
     pub async fn prompt(&mut self, mut input: PromptInput) -> Result<Vec<HarnessEvent>, CoreError> {
         if let Some(mode) = input.mode.take() {
             self.harness.set_mode(&mode).await?;
@@ -262,17 +261,12 @@ impl HarnessSession {
         self.closed = true;
         self.pending_approval = None;
         self.agent_terminals.clear();
-        Ok(self.pump())
+        Ok(self.pump_with_limit(usize::MAX))
     }
 
-    /// Drain events that have arrived since the last pump. Returning them as
-    /// well as applying them lets the core forward adapter activity to the shell.
+    /// Fold a bounded batch of available events, preserving the rest for the next wakeup.
     pub fn pump(&mut self) -> Vec<HarnessEvent> {
-        self.pump_with_limit(usize::MAX)
-    }
-
-    pub(crate) fn pump_background_batch(&mut self) -> Vec<HarnessEvent> {
-        self.pump_with_limit(MAX_EVENTS_PER_BACKGROUND_PUMP)
+        self.pump_with_limit(MAX_EVENTS_PER_PUMP)
     }
 
     fn pump_with_limit(&mut self, limit: usize) -> Vec<HarnessEvent> {
@@ -611,6 +605,63 @@ mod tests {
             Some("agent: hello".to_string())
         );
         assert!(session.capabilities().tool_calls);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn command_batches_preserve_bursts_and_shutdown_drains_the_remainder()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = TestDirectory::new()?;
+        let count = MAX_EVENTS_PER_PUMP * 2 + 1;
+        for shutdown in [false, true] {
+            let turn = FakeTurn::new(
+                (0..count)
+                    .map(|index| FakeStep::Message(format!("message {index}")))
+                    .collect(),
+            );
+            let mut session = HarnessSession::new(Box::new(FakeHarness::one_turn(turn)));
+            session
+                .start(SpawnSpec {
+                    program: "fake".into(),
+                    cwd: directory.path().to_path_buf(),
+                    ..SpawnSpec::default()
+                })
+                .await?;
+            session.open_session(None).await?;
+            let first = session.prompt(PromptInput::text("go")).await?;
+            assert_eq!(first.len(), MAX_EVENTS_PER_PUMP);
+            let mut events = first;
+            if shutdown {
+                events.extend(session.shutdown().await?);
+            } else {
+                loop {
+                    let batch = session.pump();
+                    if batch.is_empty() {
+                        break;
+                    }
+                    assert!(batch.len() <= MAX_EVENTS_PER_PUMP);
+                    events.extend(batch);
+                }
+            }
+            let messages = events
+                .iter()
+                .filter_map(|event| match event {
+                    HarnessEvent::Delta { text, .. } => Some(text.clone()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                messages,
+                (0..count)
+                    .map(|index| format!("message {index}"))
+                    .collect::<Vec<_>>()
+            );
+            assert!(
+                events
+                    .iter()
+                    .any(|event| matches!(event, HarnessEvent::TurnFinished { .. }))
+            );
+        }
         Ok(())
     }
 

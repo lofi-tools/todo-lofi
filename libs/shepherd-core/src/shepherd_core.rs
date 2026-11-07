@@ -739,7 +739,7 @@ impl Core {
         let mut changed = false;
         for task_id in task_ids {
             let events = match self.sessions.get_mut(&task_id) {
-                Some(session) if !session.is_closed() => session.pump_background_batch(),
+                Some(session) if !session.is_closed() => session.pump(),
                 Some(_) => Vec::new(),
                 None => continue,
             };
@@ -2898,7 +2898,7 @@ mod streaming {
                 })),
             );
         }
-        let count = crate::harness::MAX_EVENTS_PER_BACKGROUND_PUMP * 2 + 1;
+        let count = crate::harness::MAX_EVENTS_PER_PUMP * 2 + 1;
         for index in 0..count {
             busy_sender.send(HarnessEvent::Delta {
                 item_id: ItemId::new("busy"),
@@ -2918,13 +2918,13 @@ mod streaming {
             .sessions
             .get_mut(&busy)
             .ok_or("missing busy session")?
-            .pump_background_batch();
-        assert_eq!(first.len(), crate::harness::MAX_EVENTS_PER_BACKGROUND_PUMP);
+            .pump();
+        assert_eq!(first.len(), crate::harness::MAX_EVENTS_PER_PUMP);
         assert_eq!(
             core.sessions
                 .get_mut(&other)
                 .ok_or("missing other session")?
-                .pump_background_batch()
+                .pump()
                 .len(),
             1
         );
@@ -2939,7 +2939,7 @@ mod streaming {
                 core.sessions
                     .get_mut(&busy)
                     .ok_or("missing busy session")?
-                    .pump_background_batch(),
+                    .pump(),
             );
         }
         let chunks: Vec<_> = received
