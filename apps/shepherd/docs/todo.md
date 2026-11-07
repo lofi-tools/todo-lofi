@@ -1181,7 +1181,10 @@ placeholder tabs and no unearned state badges.
   process, including newline-free output. OpenCode omits overlong lines to
   avoid exposing fragments of its authentication secret. ACP protocol lines
   are rejected above 8 MiB while reading, with a protocol error. Event queues
-  and other buffer limits still need review.
+  and other buffer limits still need review. Codex app-server, exec and
+  handshake protocol lines have the same limit; oversized exec output fails
+  the turn and stops its process. Version and help probe output still needs
+  bounded capture.
 - [ ] Multiple agents and projects: three agents across two projects, no state
   bleed, no polling.
 - [ ] Performance: cold start under 1.2 s, streaming while a large diff renders,

@@ -17,7 +17,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{Value, json};
-use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::sync::{Mutex as AsyncMutex, mpsc, oneshot};
 use tokio::task::JoinHandle;
@@ -48,6 +48,38 @@ const METHOD_NOT_FOUND: i64 = -32601;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const PROBE_TIMEOUT: Duration = Duration::from_secs(20);
 const STDERR_TAIL_LINES: usize = 20;
+const MAX_PROTOCOL_LINE_BYTES: usize = 8 * 1024 * 1024;
+
+async fn read_protocol_line<R: AsyncBufRead + Unpin>(
+    reader: &mut R,
+) -> std::io::Result<Option<String>> {
+    let mut bytes = Vec::new();
+    let count = reader
+        .take((MAX_PROTOCOL_LINE_BYTES + 2) as u64)
+        .read_until(b'\n', &mut bytes)
+        .await?;
+    if count == 0 {
+        return Ok(None);
+    }
+    if bytes.last() == Some(&b'\n') {
+        bytes.pop();
+        if bytes.last() == Some(&b'\r') {
+            bytes.pop();
+        }
+    }
+    if bytes.len() > MAX_PROTOCOL_LINE_BYTES {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("Codex protocol message exceeds {MAX_PROTOCOL_LINE_BYTES} bytes"),
+        ));
+    }
+    String::from_utf8(bytes).map(Some).map_err(|error| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("Codex protocol message is not UTF-8: {error}"),
+        )
+    })
+}
 
 /// Which Codex integration this build can drive.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -186,10 +218,10 @@ async fn run_handshake(program: &str, cwd: &Path) -> HarnessResult<Handshake> {
         )));
     }
 
-    let mut lines = BufReader::new(stdout).lines();
+    let mut lines = BufReader::new(stdout);
     let outcome = tokio::time::timeout(PROBE_TIMEOUT, async {
         for _ in 0..50 {
-            let line = match lines.next_line().await {
+            let line = match read_protocol_line(&mut lines).await {
                 Ok(Some(line)) => line,
                 Ok(None) => return Ok(None),
                 Err(error) => return Err(error),
@@ -1510,19 +1542,32 @@ impl AgentHarness for ExecHarness {
 
 fn spawn_exec_waiter(
     mut child: Child,
-    kill: oneshot::Receiver<()>,
+    mut kill: oneshot::Receiver<()>,
     sender: mpsc::UnboundedSender<HarnessEvent>,
     stderr: Arc<Mutex<VecDeque<String>>>,
     stderr_drained: oneshot::Receiver<()>,
     finished: Arc<AtomicBool>,
-    mut reader: JoinHandle<()>,
+    mut reader: JoinHandle<Result<(), String>>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
+        let mut reader_finished = false;
+        let mut protocol_error = None;
         let outcome = tokio::select! {
             status = child.wait() => Some(status),
-            _ = kill => None,
+            _ = &mut kill => None,
+            result = &mut reader => {
+                reader_finished = true;
+                match result {
+                    Ok(Ok(())) => tokio::select! {
+                        status = child.wait() => Some(status),
+                        _ = &mut kill => None,
+                    },
+                    Ok(Err(error)) => { protocol_error = Some(error); None },
+                    Err(error) => { protocol_error = Some(format!("Codex exec reader failed: {error}")); None },
+                }
+            },
         };
-        let cancelled = outcome.is_none();
+        let cancelled = outcome.is_none() && protocol_error.is_none();
         let status = match outcome {
             Some(status) => status,
             None => {
@@ -1542,10 +1587,15 @@ fn spawn_exec_waiter(
             }
         };
 
-        match timeout(Duration::from_secs(1), &mut reader).await {
-            Ok(Ok(())) => {}
-            Ok(Err(error)) => tracing::debug!(%error, "the Codex exec reader stopped"),
-            Err(_) => reader.abort(),
+        if !reader_finished {
+            match timeout(Duration::from_secs(1), &mut reader).await {
+                Ok(Ok(Ok(()))) => {}
+                Ok(Ok(Err(error))) => protocol_error = Some(error),
+                Ok(Err(error)) => {
+                    protocol_error = Some(format!("Codex exec reader failed: {error}"))
+                }
+                Err(_) => reader.abort(),
+            }
         }
         let code = match &status {
             Ok(status) => status.code(),
@@ -1556,7 +1606,7 @@ fn spawn_exec_waiter(
         };
         let reason = if cancelled {
             TurnFinishReason::Cancelled
-        } else if matches!(&status, Ok(status) if status.success()) {
+        } else if protocol_error.is_none() && matches!(&status, Ok(status) if status.success()) {
             TurnFinishReason::Completed
         } else {
             TurnFinishReason::Failed
@@ -1573,8 +1623,10 @@ fn spawn_exec_waiter(
                 || "exit status unavailable".into(),
                 |code| format!("exit code {code}"),
             );
+            let explanation =
+                protocol_error.unwrap_or_else(|| format!("Codex exec failed ({status})"));
             let text = format!(
-                "Codex exec failed ({status}){suffix}",
+                "{explanation}{suffix}",
                 suffix = if stderr.is_empty() {
                     String::new()
                 } else {
@@ -1597,17 +1649,14 @@ fn spawn_exec_waiter(
 fn spawn_exec_reader(
     stdout: ChildStdout,
     sender: mpsc::UnboundedSender<HarnessEvent>,
-) -> JoinHandle<()> {
+) -> JoinHandle<Result<(), String>> {
     tokio::spawn(async move {
-        let mut lines = BufReader::new(stdout).lines();
+        let mut lines = BufReader::new(stdout);
         loop {
-            let line = match lines.next_line().await {
+            let line = match read_protocol_line(&mut lines).await {
                 Ok(Some(line)) => line,
                 Ok(None) => break,
-                Err(error) => {
-                    tracing::debug!(%error, "reading codex exec stdout failed");
-                    break;
-                }
+                Err(error) => return Err(format!("Could not read Codex exec stdout: {error}")),
             };
             let trimmed = line.trim();
             if trimmed.is_empty() {
@@ -1623,10 +1672,11 @@ fn spawn_exec_reader(
             for event in exec_events(&message) {
                 if sender.send(event).is_err() {
                     tracing::debug!("the core stopped listening to codex events");
-                    return;
+                    return Ok(());
                 }
             }
         }
+        Ok(())
     })
 }
 
@@ -1906,9 +1956,9 @@ fn spawn_reader(
     #[cfg(any(test, feature = "live-test-support"))] capture: Option<WireCapture>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
-        let mut lines = BufReader::new(stdout).lines();
+        let mut lines = BufReader::new(stdout);
         let protocol_failure = loop {
-            let line = match lines.next_line().await {
+            let line = match read_protocol_line(&mut lines).await {
                 Ok(Some(line)) => line,
                 Ok(None) => break None,
                 Err(error) => break Some(format!("Could not read Codex stdout: {error}")),
@@ -2762,6 +2812,10 @@ done
         for (name, action) in [
             ("codex-exit", "echo 'fixture crashed' >&2; exit 23"),
             ("codex-invalid", "echo 'not valid JSON'"),
+            (
+                "codex-oversized",
+                "python3 -c 'import sys; sys.stdout.write(\"x\" * (8 * 1024 * 1024 + 2)); sys.stdout.flush()'; sleep 30",
+            ),
         ] {
             let script = PROTOCOL_STUB.replace(
                 r#"printf '{"method":"turn/completed","params":{"turn":{"id":"turn_1","status":"completed"}}}\n'"#,
@@ -2794,6 +2848,13 @@ done
                         text,
                     }),
                 ) => assert!(text.contains("malformed JSON")),
+                (
+                    "codex-oversized",
+                    Some(HarnessEvent::ConnectionFailed {
+                        kind: FailureKind::Protocol,
+                        text,
+                    }),
+                ) => assert!(text.contains("exceeds 8388608 bytes"), "{text}"),
                 _ => panic!("{name}: {events:?}"),
             }
             harness.shutdown().await?;
@@ -3415,6 +3476,66 @@ sleep 30
             .await
             .expect("the session handle opens");
         (harness, capabilities)
+    }
+
+    #[tokio::test]
+    async fn exec_rejects_oversized_output_and_stops_the_process()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = TempDir::new()?;
+        let stub = write_stub(
+            &directory,
+            "oversized-exec",
+            r##"#!/usr/bin/env bash
+python3 -c 'import sys; sys.stdout.write("x" * (8 * 1024 * 1024 + 2)); sys.stdout.flush()'
+sleep 30
+"##,
+        );
+        let (mut harness, _) = start_exec(&stub, directory.path()).await;
+        harness.prompt(PromptInput::text("go")).await?;
+        let events = collect_until(&mut harness, |events| {
+            events
+                .iter()
+                .any(|event| matches!(event, HarnessEvent::TurnFinished { .. }))
+        })
+        .await;
+        assert!(events.iter().any(|event| matches!(event, HarnessEvent::TurnError { kind: FailureKind::Protocol, text } if text.contains("exceeds 8388608 bytes"))), "{events:?}");
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                HarnessEvent::TurnFinished {
+                    reason: TurnFinishReason::Failed
+                }
+            )),
+            "{events:?}"
+        );
+        harness.shutdown().await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn handshake_rejects_an_oversized_message() -> Result<(), Box<dyn std::error::Error>> {
+        let directory = TempDir::new()?;
+        let stub = write_stub(
+            &directory,
+            "oversized-handshake",
+            r##"#!/usr/bin/env bash
+python3 -c 'import sys; sys.stdout.write("x" * (8 * 1024 * 1024 + 2)); sys.stdout.flush()'
+sleep 30
+"##,
+        );
+        let result = timeout(
+            Duration::from_secs(5),
+            run_handshake(&stub, directory.path()),
+        )
+        .await?;
+        let Err(error) = result else {
+            return Err("oversized handshake succeeded".into());
+        };
+        assert!(
+            error.to_string().contains("exceeds 8388608 bytes"),
+            "{error}"
+        );
+        Ok(())
     }
 
     #[tokio::test]
