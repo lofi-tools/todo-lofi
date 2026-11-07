@@ -1,5 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs::{self, File};
+#[cfg(any(test, not(unix)))]
+use std::fs;
+use std::fs::File;
 use std::io::{self, Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::sync::OnceLock;

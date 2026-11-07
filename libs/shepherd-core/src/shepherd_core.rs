@@ -1907,7 +1907,7 @@ impl Core {
             Some(worktree_path) => worktree_path,
             None => self.project_path(&task.project_id)?,
         };
-        let (mut harness, spec) = match self
+        let (mut harness, mut spec) = match self
             .harness_factory
             .launch_for_task(task_id, task.agent, cwd)
         {
@@ -1932,6 +1932,12 @@ impl Core {
         harness.set_project_approval_policy(Arc::new(policy));
         let mut session = HarnessSession::new(harness);
         session.restore_transcript(carried);
+        let project_path = self.project_path(&task.project_id)?;
+        if let Err(error) =
+            agent_harness::settings::resolve_environment(&mut spec.environment, &project_path).await
+        {
+            return Err(self.fail_session_start(task_id, session, error.into()));
+        }
         let capabilities = match session.start(spec).await {
             Ok(capabilities) => capabilities,
             Err(error) => return Err(self.fail_session_start(task_id, session, error)),

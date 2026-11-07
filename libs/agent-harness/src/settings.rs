@@ -7,6 +7,107 @@ use serde_json::{Map, Value};
 
 use crate::{HarnessError, HarnessResult};
 
+const MAX_ENVIRONMENT_OUTPUT: u64 = 1024 * 1024;
+
+pub async fn resolve_environment(
+    environment: &mut BTreeMap<String, String>,
+    cwd: &Path,
+) -> HarnessResult<()> {
+    resolve_environment_with_timeout(environment, cwd, std::time::Duration::from_secs(5)).await
+}
+
+async fn resolve_environment_with_timeout(
+    environment: &mut BTreeMap<String, String>,
+    cwd: &Path,
+    deadline: std::time::Duration,
+) -> HarnessResult<()> {
+    use tokio::io::AsyncReadExt;
+    for (key, value) in environment.iter_mut() {
+        let Some(command) = value.strip_prefix('!') else {
+            continue;
+        };
+        let mut process = tokio::process::Command::new("/bin/sh");
+        process
+            .args(["-c", command])
+            .current_dir(cwd)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true);
+        #[cfg(unix)]
+        process.process_group(0);
+        let mut child = process.spawn().map_err(|error| {
+            HarnessError::Protocol(format!(
+                "Could not start environment command for {key}: {error}"
+            ))
+        })?;
+        #[cfg(unix)]
+        let group = child.id().and_then(|id| i32::try_from(id).ok());
+        let stdout = child.stdout.take().ok_or_else(|| {
+            HarnessError::Protocol(format!("Could not capture environment command for {key}"))
+        })?;
+        let capture = async {
+            let mut output = Vec::new();
+            let mut stdout = stdout.take(MAX_ENVIRONMENT_OUTPUT + 1);
+            let (read, status) = tokio::join!(stdout.read_to_end(&mut output), child.wait());
+            read.map_err(|error| {
+                HarnessError::Protocol(format!(
+                    "Could not read environment command for {key}: {error}"
+                ))
+            })?;
+            let status = status.map_err(|error| {
+                HarnessError::Protocol(format!(
+                    "Could not wait for environment command for {key}: {error}"
+                ))
+            })?;
+            if !status.success() {
+                return Err(HarnessError::Protocol(format!(
+                    "Environment command for {key} failed ({status})"
+                )));
+            }
+            if output.len() as u64 > MAX_ENVIRONMENT_OUTPUT {
+                return Err(HarnessError::Protocol(format!(
+                    "Environment command for {key} produced too much output"
+                )));
+            }
+            let mut output = String::from_utf8(output).map_err(|_| {
+                HarnessError::Protocol(format!(
+                    "Environment command for {key} did not produce UTF-8"
+                ))
+            })?;
+            if output.ends_with('\n') {
+                output.pop();
+            }
+            if output.contains('\0') {
+                return Err(HarnessError::Protocol(format!(
+                    "Environment command for {key} produced a NUL byte"
+                )));
+            }
+            Ok(output)
+        };
+        let outcome = tokio::time::timeout(deadline, capture).await;
+        #[cfg(unix)]
+        if outcome.is_err()
+            && let Some(group) = group
+        {
+            // Commands can leave descendants holding stdout after the shell exits.
+            let result = unsafe { libc::killpg(group, libc::SIGKILL) };
+            if result != 0 {
+                let error = std::io::Error::last_os_error();
+                if error.raw_os_error() != Some(libc::ESRCH) {
+                    return Err(HarnessError::Protocol(format!(
+                        "Could not stop environment command for {key}: {error}"
+                    )));
+                }
+            }
+        }
+        *value = outcome.map_err(|_| {
+            HarnessError::Protocol(format!("Environment command for {key} timed out"))
+        })??;
+    }
+    Ok(())
+}
+
 #[derive(Default, Deserialize)]
 pub struct AgentSettings {
     #[serde(default)]
@@ -95,6 +196,43 @@ impl AgentSettings {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn environment_commands_resolve_at_launch_without_exposing_output()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        std::fs::write(directory.path().join("token"), "secret\n\n")?;
+        let mut values = BTreeMap::from([
+            ("TOKEN".into(), "!cat token".into()),
+            ("LITERAL".into(), "value".into()),
+        ]);
+        resolve_environment(&mut values, directory.path()).await?;
+        assert_eq!(values.get("TOKEN").map(String::as_str), Some("secret\n"));
+        assert_eq!(values.get("LITERAL").map(String::as_str), Some("value"));
+        let mut failure = BTreeMap::from([(
+            "TOKEN".into(),
+            "!printf secret; printf secret >&2; exit 1".into(),
+        )]);
+        let error = resolve_environment(&mut failure, directory.path())
+            .await
+            .expect_err("must fail");
+        assert!(!error.to_string().contains("secret"));
+        assert_eq!(
+            failure.get("TOKEN").map(String::as_str),
+            Some("!printf secret; printf secret >&2; exit 1")
+        );
+        let mut slow = BTreeMap::from([("TOKEN".into(), "!sleep 30".into())]);
+        let error = resolve_environment_with_timeout(
+            &mut slow,
+            directory.path(),
+            std::time::Duration::from_millis(100),
+        )
+        .await
+        .expect_err("must time out");
+        assert!(error.to_string().contains("timed out"));
+        Ok(())
+    }
 
     #[test]
     fn project_settings_override_app_values_per_key() -> Result<(), Box<dyn std::error::Error>> {
