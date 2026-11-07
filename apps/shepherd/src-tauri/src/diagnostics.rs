@@ -43,9 +43,12 @@ impl DiagnosticLog {
         #[cfg(unix)]
         {
             use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+            options
+                .mode(0o600)
+                .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
         }
         let mut file = options.open(&self.path)?;
+        ensure_regular_file(&file)?;
         file.lock()?;
         if file.metadata()?.len() > 0 {
             file.seek(SeekFrom::End(-1))?;
@@ -71,13 +74,14 @@ impl DiagnosticLog {
         #[cfg(unix)]
         {
             use std::os::unix::fs::OpenOptionsExt;
-            options.custom_flags(libc::O_NOFOLLOW);
+            options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
         }
         let file = match options.open(&self.path) {
             Ok(file) => file,
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
             Err(error) => return Err(error),
         };
+        ensure_regular_file(&file)?;
         file.lock_shared()?;
         let mut records = std::collections::VecDeque::new();
         let mut reader = BufReader::new(file);
@@ -105,6 +109,17 @@ impl DiagnosticLog {
             records.push_back(record);
         }
         Ok(records.into_iter().collect())
+    }
+}
+
+fn ensure_regular_file(file: &fs::File) -> io::Result<()> {
+    if file.metadata()?.is_file() {
+        Ok(())
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "diagnostic log is not a regular file",
+        ))
     }
 }
 
@@ -184,6 +199,37 @@ mod tests {
         assert!(log.append(&record).is_err());
         assert!(log.recent().is_err());
         assert_eq!(fs::read_to_string(target)?, "unchanged");
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn refuses_a_fifo_without_waiting_for_a_writer() -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::ffi::OsStrExt;
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("errors.jsonl");
+        let path_bytes = std::ffi::CString::new(path.as_os_str().as_bytes())?;
+        if unsafe { libc::mkfifo(path_bytes.as_ptr(), 0o600) } != 0 {
+            return Err(io::Error::last_os_error().into());
+        }
+        let log = DiagnosticLog::new(path);
+        let record = Diagnostic {
+            id: "fixture".into(),
+            time: "fixture".into(),
+            operation: "fixture".into(),
+            message: "fixture error".into(),
+            details: String::new(),
+        };
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let _worker = std::thread::spawn(move || {
+            let results = (log.recent().map(|_| ()), log.append(&record));
+            if let Err(error) = sender.send(results) {
+                eprintln!("FIFO fixture receiver closed: {error}");
+            }
+        });
+        let (read, write) = receiver.recv_timeout(std::time::Duration::from_secs(5))?;
+        assert!(matches!(read, Err(error) if error.kind() == io::ErrorKind::InvalidInput));
+        assert!(matches!(write, Err(error) if error.kind() == io::ErrorKind::InvalidInput));
         Ok(())
     }
 
