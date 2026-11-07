@@ -1210,6 +1210,9 @@ placeholder tabs and no unearned state badges.
   rolls back a mid-deletion failure, preserving those records, transcripts and
   attachments for retry. Draft creation commits the project selection and new
   task together, with a rollback and retry fixture for a failed task write.
+  If an opened agent session cannot be recorded, the core stops it before
+  retrying; a database-trigger fixture verifies cleanup and a subsequent start.
+  If cleanup fails, the session is retained and cleanup is retried before reuse.
 - [ ] Bounded transcript, stderr, search and frame buffers.
   Codex, OpenCode and ACP stderr readers cap each line while draining the
   process, including newline-free output. OpenCode omits overlong lines to

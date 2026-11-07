@@ -144,6 +144,8 @@ pub enum CoreError {
     },
     #[error("store error: {0}")]
     Store(#[from] StoreError),
+    #[error("could not save the agent session: {store}; could not stop the agent: {cleanup}")]
+    SessionRecordCleanup { store: String, cleanup: String },
     #[error("Git error: {0}")]
     Git(#[from] GitError),
     #[error("agent harness error: {0}")]
@@ -1966,6 +1968,12 @@ impl Core {
         resume: Option<SessionId>,
     ) -> Result<SessionOpened, CoreError> {
         self.restore_task_transcript(task_id).await?;
+        if let Some(session) = self.sessions.get_mut(task_id)
+            && session.has_failed()
+            && !session.is_closed()
+        {
+            session.shutdown().await?;
+        }
         let carried = match self.sessions.get(task_id) {
             Some(session) if !session.has_failed() && !session.is_closed() => {
                 return Ok(SessionOpened::Fresh);
@@ -2090,7 +2098,24 @@ impl Core {
             Some(session_id.as_str().to_string()),
         );
         record.capabilities = Some(session.capabilities().clone());
-        self.store.save_session(&record).await?;
+        if let Err(error) = self.store.save_session(&record).await {
+            let result = match session.shutdown().await {
+                Ok(_) => CoreError::Store(error),
+                Err(cleanup) => {
+                    session.push_failure(
+                        FailureKind::Protocol,
+                        "Could not stop the agent after a session save failure.",
+                        None,
+                    );
+                    CoreError::SessionRecordCleanup {
+                        store: error.to_string(),
+                        cleanup: cleanup.to_string(),
+                    }
+                }
+            };
+            self.sessions.insert(task_id.clone(), session);
+            return Err(result);
+        }
         if let Some(task) = self.tasks.get_mut(task_id) {
             task.tier = session.tier();
         }
@@ -4155,6 +4180,63 @@ mod tests {
                 state: ShutdownState::Closed
             })
         ));
+    }
+
+    #[tokio::test]
+    async fn failed_session_record_save_stops_agent_and_allows_retry()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let repository = TestRepository::new()?;
+        let database = TestDatabase::new()?;
+        let uri = database.uri();
+        let turns = || vec![FakeTurn::new(vec![FakeStep::Message("done".into())])];
+        let mut core = Core::with_services(
+            Box::new(TursoStore::open(&uri).await?),
+            Box::new(FakeHarnessFactory::new(vec![turns(), turns()])),
+        );
+        let project_id = add_project(&mut core, repository.path().to_path_buf()).await?;
+        let draft = workspace_of(
+            core.execute(Command::CreateDraft {
+                project_id,
+                agent: Agent::Codex,
+                title: "Retry session".into(),
+            })
+            .await?,
+        );
+        let task_id = TaskId::new(draft.task.id);
+        let mut database_probe = toasty::Db::builder()
+            .build(toasty_driver_turso::Turso::new(&uri)?.experimental_index_method(true))
+            .await?;
+        toasty::sql::statement("CREATE TRIGGER block_session_start BEFORE INSERT ON sessions BEGIN SELECT RAISE(ABORT, 'session save blocked'); END")
+            .exec(&mut database_probe).await?;
+        let failure = core
+            .execute(Command::SendPrompt {
+                task_id: task_id.clone(),
+                input: PromptInput::text("go"),
+            })
+            .await;
+        assert!(failure.is_err());
+        assert!(
+            core.sessions
+                .get(&task_id)
+                .is_some_and(HarnessSession::is_closed)
+        );
+        assert!(core.store.load_sessions().await?.is_empty());
+        toasty::sql::statement("DROP TRIGGER block_session_start")
+            .exec(&mut database_probe)
+            .await?;
+        let workspace = workspace_of(
+            core.execute(Command::SendPrompt {
+                task_id,
+                input: PromptInput::text("go"),
+            })
+            .await?,
+        );
+        assert!(
+            summaries(&workspace)
+                .iter()
+                .any(|summary| summary.contains("done"))
+        );
+        Ok(())
     }
 
     #[tokio::test]
