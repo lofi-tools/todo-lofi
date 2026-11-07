@@ -90,7 +90,7 @@ impl WorkspaceWatch {
             (common_dir.join("refs"), RecursiveMode::Recursive),
             (common_dir.join("info"), RecursiveMode::NonRecursive),
         ] {
-            if !path.starts_with(&root) && path.is_dir() {
+            if !path.starts_with(&root) && watch_directory_exists(&path)? {
                 watcher.watch(&path, mode)?;
             }
         }
@@ -149,6 +149,14 @@ fn has_git_marker(root: &Path) -> io::Result<bool> {
     }
 }
 
+fn watch_directory_exists(path: &Path) -> io::Result<bool> {
+    match path.metadata() {
+        Ok(metadata) => Ok(metadata.is_dir()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
 impl WatchPaths {
     fn relevant(&self, event: &Event) -> bool {
         event.need_rescan()
@@ -190,6 +198,22 @@ mod tests {
     use shepherd_core::test_support::TestRepository;
 
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn distinguishes_missing_and_inaccessible_watch_directories() -> io::Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = tempfile::tempdir()?;
+        let nested = directory.path().join("nested");
+        std::fs::create_dir(&nested)?;
+        assert!(watch_directory_exists(&nested)?);
+        assert!(!watch_directory_exists(&nested.join("missing"))?);
+        std::fs::set_permissions(&nested, std::fs::Permissions::from_mode(0o000))?;
+        let result = watch_directory_exists(&nested.join("inaccessible"));
+        std::fs::set_permissions(&nested, std::fs::Permissions::from_mode(0o700))?;
+        assert!(matches!(result, Err(error) if error.kind() == io::ErrorKind::PermissionDenied));
+        Ok(())
+    }
 
     #[tokio::test]
     async fn refreshes_a_linked_worktree_after_file_and_git_metadata_changes()
