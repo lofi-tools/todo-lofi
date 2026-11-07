@@ -199,6 +199,7 @@ impl FakeHarness {
                         item_id: ItemId::new(format!("message-{}-{offset}", self.next_turn)),
                         kind: DeltaKind::Message,
                         text: text.clone(),
+                        stream_permit: None,
                     })?;
                 }
                 FakeStep::Thought(text) => {
@@ -206,6 +207,7 @@ impl FakeHarness {
                         item_id: ItemId::new(format!("thought-{}-{offset}", self.next_turn)),
                         kind: DeltaKind::Thought,
                         text: text.clone(),
+                        stream_permit: None,
                     })?;
                 }
                 FakeStep::ToolCall {

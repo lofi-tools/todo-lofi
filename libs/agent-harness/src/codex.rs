@@ -1930,6 +1930,7 @@ fn exec_delta(
         item_id: ItemId::new(format!("{prefix}-{event_id}")),
         kind,
         text: text.to_string(),
+        stream_permit: None,
     })
 }
 
@@ -2487,6 +2488,7 @@ async fn handle_notification(
                     item_id: ItemId::new(item_id(params)),
                     kind: DeltaKind::Message,
                     text: delta.to_string(),
+                    stream_permit: None,
                 });
             }
         }
@@ -2496,6 +2498,7 @@ async fn handle_notification(
                     item_id: ItemId::new(item_id(params)),
                     kind: DeltaKind::Thought,
                     text: delta.to_string(),
+                    stream_permit: None,
                 });
             }
         }
@@ -4560,6 +4563,7 @@ sleep 30
             item_id: ItemId::new("item_1"),
             kind: DeltaKind::Message,
             text: " again".to_string(),
+            stream_permit: None,
         });
         assert!(
             !change.appended,

@@ -583,6 +583,8 @@ pub enum HarnessEvent {
         item_id: ItemId,
         kind: DeltaKind,
         text: String,
+        /// Retains the stream buffer permit while this event is in use.
+        stream_permit: Option<Arc<tokio::sync::OwnedSemaphorePermit>>,
     },
     ToolCall {
         tool_call_id: ToolCallId,
@@ -915,6 +917,7 @@ impl Transcript {
                 item_id,
                 kind,
                 text,
+                ..
             } => self.push_delta(item_id.as_str(), *kind, text),
             HarnessEvent::ToolCall {
                 tool_call_id,
@@ -1333,11 +1336,13 @@ mod tests {
             item_id: ItemId::new("message-1"),
             kind: DeltaKind::Message,
             text: "Hello ".to_string(),
+            stream_permit: None,
         });
         let second = transcript.apply(&HarnessEvent::Delta {
             item_id: ItemId::new("message-1"),
             kind: DeltaKind::Message,
             text: "world".to_string(),
+            stream_permit: None,
         });
 
         assert!(!second.appended);
@@ -1415,6 +1420,7 @@ mod tests {
             item_id: ItemId::new("message-1"),
             kind: DeltaKind::Message,
             text: "hello".to_string(),
+            stream_permit: None,
         });
         transcript.apply(&tool_event("Edit file", ToolStatus::Completed));
 
@@ -1437,6 +1443,7 @@ mod tests {
             item_id: ItemId::new("message-1"),
             kind: DeltaKind::Message,
             text: " again".to_string(),
+            stream_permit: None,
         });
         assert!(!change.appended, "a restored message keeps its row");
         assert_eq!(restored.len(), 3);

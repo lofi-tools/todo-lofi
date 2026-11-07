@@ -3234,6 +3234,7 @@ mod streaming {
             item_id: ItemId::new("middle"),
             kind: DeltaKind::Message,
             text: "first".into(),
+            stream_permit: None,
         })?;
         tokio::time::timeout(Duration::from_secs(1), notify.notified()).await?;
         let events = core
@@ -3246,6 +3247,7 @@ mod streaming {
             item_id: ItemId::new("first"),
             kind: DeltaKind::Message,
             text: "buffered".into(),
+            stream_permit: None,
         })?;
         core.arm_agent_events(&notify);
         tokio::time::timeout(Duration::from_secs(1), notify.notified()).await?;
@@ -3262,6 +3264,7 @@ mod streaming {
             item_id: ItemId::new("last"),
             kind: DeltaKind::Message,
             text: "last".into(),
+            stream_permit: None,
         })?;
         tokio::time::timeout(Duration::from_secs(1), notify.notified()).await?;
         assert_eq!(
@@ -3300,12 +3303,14 @@ mod streaming {
                 item_id: ItemId::new("busy"),
                 kind: DeltaKind::Message,
                 text: format!("{index},"),
+                stream_permit: None,
             })?;
         }
         other_sender.send(HarnessEvent::Delta {
             item_id: ItemId::new("other"),
             kind: DeltaKind::Message,
             text: "other".into(),
+            stream_permit: None,
         })?;
         let notify = Arc::new(tokio::sync::Notify::new());
         core.arm_agent_events(&notify);
@@ -3572,6 +3577,7 @@ mod streaming {
             item_id: ItemId::new("item-1"),
             kind: DeltaKind::Message,
             text: "streamed".to_string(),
+            stream_permit: None,
         })?;
         assert!(core.pump().await?);
         let store = TursoStore::open(&database.uri()).await?;

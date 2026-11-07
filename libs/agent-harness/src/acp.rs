@@ -1157,6 +1157,7 @@ impl Updates {
             item_id,
             kind,
             text: content.text.clone(),
+            stream_permit: None,
         })
     }
 

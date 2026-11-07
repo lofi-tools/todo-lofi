@@ -1274,6 +1274,10 @@ placeholder tabs and no unearned state badges.
   limits are tested with fragmented lines and accumulated multiline data.
   It checks streamed text against the final message with a digest and length
   instead of keeping a second copy of every text fragment.
+  OpenCode message and reasoning deltas use a 64-permit queue with 8 KiB
+  UTF-8-safe chunks; the producer waits for consumption and a blocked producer
+  can be cancelled. Other OpenCode events and other adapters still need
+  coordinated backpressure.
   Event folding handles at
   most 256 events per session per pass, including during commands, and
   reschedules remaining events so one busy agent cannot monopolize other
@@ -1331,7 +1335,7 @@ placeholder tabs and no unearned state badges.
   Codex stderr is retained in the bounded diagnostic tail without logging its
   contents; a debug-log fixture checks that agent output is not exposed.
   Other adapter-internal logs and live-adapter behavior remain to be audited.
-  The default headless agent-harness suite passed 109 tests (two live tests
+  The default headless agent-harness suite passed 111 tests (two live tests
   ignored) and the core suite passed 116 tests (three tests ignored) on
   macOS after the confinement, environment and shutdown-recovery changes.
   The default desktop-backend suite also passed 85 tests on macOS after the

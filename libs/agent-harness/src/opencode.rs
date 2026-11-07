@@ -15,7 +15,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 use tokio::process::{Child, Command};
-use tokio::sync::{Mutex as AsyncMutex, mpsc};
+use tokio::sync::{Mutex as AsyncMutex, Semaphore, mpsc};
 use tokio::task::JoinHandle;
 use tokio::time::{Instant, timeout, timeout_at};
 
@@ -31,6 +31,8 @@ use crate::{
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(20);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
+const STREAM_CHUNK_BYTES: usize = 8 * 1024;
+const STREAM_BUFFER_CHUNKS: usize = 64;
 const USERNAME: &str = "opencode";
 const SERVER_ARGS: [&str; 5] = ["serve", "--hostname", "127.0.0.1", "--port", "0"];
 
@@ -217,6 +219,7 @@ pub struct OpenCodeHarness {
     turn: Option<ActiveTurn>,
     sender: mpsc::UnboundedSender<HarnessEvent>,
     receiver: mpsc::UnboundedReceiver<HarnessEvent>,
+    stream_capacity: Arc<Semaphore>,
     diagnostics: AgentDiagnostics,
     fallback: Option<AcpHarness>,
     project_approvals: Option<Arc<dyn crate::ProjectApprovalPolicy>>,
@@ -233,6 +236,7 @@ impl Default for OpenCodeHarness {
             turn: None,
             sender,
             receiver,
+            stream_capacity: Arc::new(Semaphore::new(STREAM_BUFFER_CHUNKS)),
             diagnostics: AgentDiagnostics::default(),
             fallback: None,
             project_approvals: None,
@@ -489,13 +493,16 @@ impl AgentHarness for OpenCodeHarness {
         let reader = tokio::spawn({
             let id = id.clone();
             let sender = self.sender.clone();
+            let stream_capacity = self.stream_capacity.clone();
             let finished = finished.clone();
             let remove = server.request(Method::DELETE, &format!("{path}/inbox/{id}"));
             let interrupt = server.request(Method::POST, &format!("{path}/interrupt"));
             let child = server.child.clone();
             let stderr = server.stderr.clone();
             async move {
-                let terminal = match read_turn(events, session, &id, &sender).await {
+                let terminal = match read_turn(events, session, &id, &sender, &stream_capacity)
+                    .await
+                {
                     Ok(event) => event,
                     Err(error) => {
                         let exit = if matches!(error, HarnessError::TransportClosed(_)) {
@@ -632,6 +639,7 @@ async fn read_turn(
     session: SessionId,
     prompt_id: &str,
     sender: &mpsc::UnboundedSender<HarnessEvent>,
+    stream_capacity: &Arc<Semaphore>,
 ) -> HarnessResult<HarnessEvent> {
     let mut transcript = OpenCodeTranscript::new(session.clone());
     let mut admitted = false;
@@ -704,8 +712,47 @@ async fn read_turn(
             }
             _ => {}
         }
-        publish(sender, event)?;
+        publish_stream_event(sender, stream_capacity, event).await?;
     }
+}
+
+async fn publish_stream_event(
+    sender: &mpsc::UnboundedSender<HarnessEvent>,
+    capacity: &Arc<Semaphore>,
+    event: HarnessEvent,
+) -> HarnessResult<()> {
+    let HarnessEvent::Delta {
+        item_id,
+        kind,
+        text,
+        ..
+    } = event
+    else {
+        return publish(sender, event);
+    };
+    let mut remaining = text.as_str();
+    while !remaining.is_empty() {
+        let end = remaining.floor_char_boundary(remaining.len().min(STREAM_CHUNK_BYTES));
+        let (chunk, rest) = remaining
+            .split_at_checked(end)
+            .ok_or_else(|| HarnessError::Protocol("invalid OpenCode stream boundary".into()))?;
+        let permit = capacity
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| HarnessError::ChannelClosed)?;
+        publish(
+            sender,
+            HarnessEvent::Delta {
+                item_id: item_id.clone(),
+                kind,
+                text: chunk.to_owned(),
+                stream_permit: Some(Arc::new(permit)),
+            },
+        )?;
+        remaining = rest;
+    }
+    Ok(())
 }
 
 /// A loopback server owned by one Shepherd task.
@@ -843,6 +890,7 @@ impl OpenCodeTranscript {
             item_id: ItemId::new(id),
             kind,
             text,
+            stream_permit: None,
         }))
     }
 
@@ -1708,6 +1756,92 @@ mod tests {
         "/api/session/{sessionID}/permission/{requestID}/reply": {"post": {}}
     }}"#;
 
+    #[tokio::test]
+    async fn streamed_text_applies_backpressure_and_preserves_utf8()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        let capacity = Arc::new(Semaphore::new(2));
+        let text = format!("{}tail", "界".repeat(6000));
+        let expected = text.clone();
+        let task = tokio::spawn({
+            let capacity = capacity.clone();
+            async move {
+                publish_stream_event(
+                    &sender,
+                    &capacity,
+                    HarnessEvent::Delta {
+                        item_id: ItemId::new("message"),
+                        kind: DeltaKind::Message,
+                        text,
+                        stream_permit: None,
+                    },
+                )
+                .await
+            }
+        });
+        let first = receiver.recv().await.ok_or("missing first chunk")?;
+        let second = receiver.recv().await.ok_or("missing second chunk")?;
+        assert_eq!(capacity.available_permits(), 0);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(30), receiver.recv())
+                .await
+                .is_err()
+        );
+        let mut output = match &first {
+            HarnessEvent::Delta { text, .. } => text.clone(),
+            _ => return Err("unexpected event".into()),
+        };
+        drop(first);
+        let third = receiver.recv().await.ok_or("missing third chunk")?;
+        for event in [&second, &third] {
+            let HarnessEvent::Delta { text, .. } = event else {
+                return Err("unexpected event".into());
+            };
+            assert!(text.len() <= STREAM_CHUNK_BYTES);
+            output.push_str(text);
+        }
+        task.await??;
+        assert_eq!(output, expected);
+        drop(second);
+        drop(third);
+        assert_eq!(capacity.available_permits(), 2);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cancelling_blocked_stream_releases_capacity() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        let capacity = Arc::new(Semaphore::new(1));
+        let task = tokio::spawn({
+            let capacity = capacity.clone();
+            async move {
+                publish_stream_event(
+                    &sender,
+                    &capacity,
+                    HarnessEvent::Delta {
+                        item_id: ItemId::new("message"),
+                        kind: DeltaKind::Message,
+                        text: "x".repeat(STREAM_CHUNK_BYTES + 1),
+                        stream_permit: None,
+                    },
+                )
+                .await
+            }
+        });
+        let event = receiver.recv().await.ok_or("missing chunk")?;
+        assert!(
+            tokio::time::timeout(Duration::from_millis(30), receiver.recv())
+                .await
+                .is_err()
+        );
+        task.abort();
+        assert!(task.await.is_err_and(|error| error.is_cancelled()));
+        drop(event);
+        assert_eq!(capacity.available_permits(), 1);
+        Ok(())
+    }
+
     #[test]
     fn mode_discovery_reports_both_failures_without_exposing_environment() {
         let failures = || {
@@ -2273,7 +2407,13 @@ exec sleep 60
         let (sender, _receiver) = mpsc::unbounded_channel();
         let terminal = timeout(
             REQUEST_TIMEOUT,
-            read_turn(events, session, &prompt_id, &sender),
+            read_turn(
+                events,
+                session,
+                &prompt_id,
+                &sender,
+                &Arc::new(Semaphore::new(STREAM_BUFFER_CHUNKS)),
+            ),
         )
         .await??;
         assert!(matches!(

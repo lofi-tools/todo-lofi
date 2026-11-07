@@ -3264,6 +3264,7 @@ mod tests {
                             item_id: ItemId::new("answer"),
                             kind: DeltaKind::Message,
                             text: "p".into(),
+                            stream_permit: None,
                         })
                         .map_err(|_| agent_harness::HarnessError::ChannelClosed)?;
                 }
@@ -3317,12 +3318,14 @@ mod tests {
                 item_id: ItemId::new("answer"),
                 kind: DeltaKind::Message,
                 text: "x".into(),
+                stream_permit: None,
             })?;
         }
         sender.send(HarnessEvent::Delta {
             item_id: ItemId::new("answer"),
             kind: DeltaKind::Message,
             text: "delayed answer".into(),
+            stream_permit: None,
         })?;
         sender.send(HarnessEvent::TurnFinished {
             reason: TurnFinishReason::Completed,
