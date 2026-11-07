@@ -720,6 +720,73 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(unix)]
+    async fn exec_backpressure_preserves_every_message_through_the_core()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::fs::PermissionsExt as _;
+        let directory = TestDirectory::new()?;
+        let executable = directory.path().join("exec-fixture");
+        std::fs::write(
+            &executable,
+            r##"#!/bin/sh
+number=0
+while [ "$number" -lt 150 ]; do
+  printf '{"id":"%s","msg":{"type":"agent_message","message":"message %s"}}\n' "$number" "$number"
+  number=$((number + 1))
+done
+"##,
+        )?;
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700))?;
+        let mut session = HarnessSession::new(Box::new(agent_harness::codex::ExecHarness::new()));
+        session
+            .start(SpawnSpec {
+                program: executable.to_string_lossy().into_owned(),
+                cwd: directory.path().to_path_buf(),
+                ..Default::default()
+            })
+            .await?;
+        session.open_session(None).await?;
+        drop(session.prompt(PromptInput::text("go")).await?);
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while session.harness.events().len() < 64 {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await?;
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let events = session.pump();
+                let finished = events.iter().any(|event| {
+                    matches!(
+                        event,
+                        HarnessEvent::TurnFinished {
+                            reason: agent_harness::TurnFinishReason::Completed
+                        }
+                    )
+                });
+                drop(events);
+                if finished {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await?;
+        assert_eq!(session.transcript().len(), 151);
+        for index in 0..150 {
+            assert_eq!(
+                session
+                    .transcript()
+                    .entry(index + 1)
+                    .map(|entry| entry.summary()),
+                Some(format!("agent: message {index}"))
+            );
+        }
+        drop(session.shutdown().await?);
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn command_batches_preserve_bursts_and_shutdown_drains_the_remainder()
     -> Result<(), Box<dyn std::error::Error>> {
         let directory = TestDirectory::new()?;
