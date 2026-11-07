@@ -1201,6 +1201,10 @@ placeholder tabs and no unearned state badges.
   still need backpressure.
 - [ ] Multiple agents and projects: three agents across two projects, no state
   bleed, no polling.
+  A three-session fixture holds Codex, OpenCode and Claude tasks at approvals
+  across two projects, resolves identical approval IDs independently, and
+  verifies worktree and persisted transcript isolation. Live adapters and the
+  no-polling requirement still need verification.
 - [ ] Performance: cold start under 1.2 s, streaming while a large diff renders,
   terminal burst budget.
 - [ ] Path confinement, environment `!command` timeout, no secret values in
@@ -1215,6 +1219,8 @@ placeholder tabs and no unearned state badges.
 - [ ] Missing worktree repair; archived worktree collection; dirty skip.
 - [ ] Large transcript and large diff with no dropped state.
 - [ ] Three-agent/two-project concurrency test.
+  The local scripted fixture covers overlapping approval waits and independent
+  worktree writes; a live multi-agent run remains unverified.
 - [ ] Release checklist on both target platforms.
 
 ### Gate

@@ -3146,6 +3146,130 @@ mod tests {
         workspace.transcript.iter().map(Entry::summary).collect()
     }
 
+    #[tokio::test]
+    async fn three_agent_sessions_keep_projects_approvals_and_worktrees_isolated()
+    -> Result<(), Box<dyn std::error::Error>> {
+        struct ThreeAgentFactory;
+        impl HarnessFactory for ThreeAgentFactory {
+            fn create(&self) -> Result<Box<dyn agent_harness::AgentHarness>, CoreError> {
+                Err(CoreError::HarnessUnavailable)
+            }
+
+            fn launch(
+                &self,
+                agent: Agent,
+                cwd: PathBuf,
+            ) -> Result<
+                (
+                    Box<dyn agent_harness::AgentHarness>,
+                    agent_harness::SpawnSpec,
+                ),
+                CoreError,
+            > {
+                let name = agent.as_str();
+                let turn = FakeTurn::new(vec![
+                    FakeStep::Message(format!("{name} started")),
+                    FakeStep::approval("same-approval-id", &format!("Approve {name}")),
+                    FakeStep::WriteFile {
+                        path: "agent-result.txt".into(),
+                        contents: name.into(),
+                    },
+                    FakeStep::Message(format!("{name} finished")),
+                ]);
+                Ok((
+                    Box::new(agent_harness::fake_harness::FakeHarness::one_turn(turn)),
+                    self.spawn_spec(cwd),
+                ))
+            }
+        }
+
+        let first_repository = TestRepository::new()?;
+        let second_repository = TestRepository::new()?;
+        let database = TestDatabase::new()?;
+        let uri = database.uri();
+        let mut core = Core::with_services(
+            Box::new(TursoStore::open(&uri).await?),
+            Box::new(ThreeAgentFactory),
+        );
+        let first_project = add_project(&mut core, first_repository.path().to_path_buf()).await?;
+        let second_project = add_project(&mut core, second_repository.path().to_path_buf()).await?;
+        let mut tasks = Vec::new();
+        for (project, agent) in [
+            (&first_project, Agent::Codex),
+            (&first_project, Agent::OpenCode),
+            (&second_project, Agent::Claude),
+        ] {
+            let draft = workspace_of(
+                core.execute(Command::CreateDraft {
+                    project_id: project.clone(),
+                    title: format!("{} task", agent.as_str()),
+                    agent,
+                })
+                .await?,
+            );
+            let id = TaskId::new(draft.task.id);
+            let waiting = workspace_of(
+                core.execute(Command::SendPrompt {
+                    task_id: id.clone(),
+                    input: PromptInput::text(format!("prompt for {}", agent.as_str())),
+                })
+                .await?,
+            );
+            assert_eq!(waiting.task.state, TaskState::Waiting);
+            assert_eq!(waiting.task.project_id, project.as_str());
+            tasks.push((
+                id,
+                agent,
+                PathBuf::from(waiting.task.worktree_path.ok_or("missing worktree")?),
+            ));
+        }
+        assert!(tasks.iter().all(|(id, _, _)| {
+            core.task_workspace(id)
+                .is_ok_and(|workspace| workspace.task.state == TaskState::Waiting)
+        }));
+        for (index, (id, agent, path)) in tasks.iter().enumerate().rev() {
+            let completed = workspace_of(
+                core.execute(Command::ResolveApproval {
+                    task_id: id.clone(),
+                    approval_id: ApprovalId::new("same-approval-id"),
+                    decision: Decision::Allow,
+                })
+                .await?,
+            );
+            assert_eq!(completed.task.state, TaskState::Review);
+            assert_eq!(
+                std::fs::read_to_string(path.join("agent-result.txt"))?,
+                agent.as_str()
+            );
+            let text = summaries(&completed).join("\n");
+            assert!(text.contains(&format!("{} finished", agent.as_str())));
+            for (other_id, other_agent, other_path) in &tasks[..index] {
+                assert_eq!(
+                    core.task_workspace(other_id)?.task.state,
+                    TaskState::Waiting
+                );
+                assert!(!other_path.join("agent-result.txt").exists());
+                assert!(!text.contains(&format!("{} started", other_agent.as_str())));
+            }
+        }
+        drop(core);
+        let mut reopened = Core::load(
+            Box::new(TursoStore::open(&uri).await?),
+            Box::new(UnavailableHarnessFactory),
+        )
+        .await?;
+        for (id, agent, _) in tasks {
+            let text = summaries(&reopened.open_task_workspace(&id).await?).join("\n");
+            assert!(text.contains(&format!("{} finished", agent.as_str())));
+            for other in [Agent::Codex, Agent::OpenCode, Agent::Claude] {
+                if other != agent {
+                    assert!(!text.contains(&format!("{} started", other.as_str())));
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn git_in(repository: &TestRepository, args: &[&str]) -> String {
         let output = std::process::Command::new("git")
             .arg("-C")
