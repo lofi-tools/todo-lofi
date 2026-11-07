@@ -133,6 +133,37 @@ impl ProcessIdentity {
     }
 }
 
+#[cfg(unix)]
+pub(crate) fn capture_process_record(
+    pid: libc::pid_t,
+    kind: &str,
+    owner_id: &str,
+) -> Option<ProcessRecord> {
+    if pid <= 1 {
+        return None;
+    }
+    let identity = ProcessIdentity::new(pid)?;
+    let group = unsafe { libc::getpgid(pid) };
+    let session = unsafe { libc::getsid(pid) };
+    if group <= 1 || session <= 1 {
+        return None;
+    }
+    let boot_id = boot_id()?;
+    if !identity.is_in_session(session) || unsafe { libc::getpgid(pid) } != group {
+        return None;
+    }
+    Some(ProcessRecord {
+        id: uuid::Uuid::new_v4().to_string(),
+        kind: kind.to_owned(),
+        owner_id: owner_id.to_owned(),
+        pid: u32::try_from(pid).ok()?,
+        started_at: identity.started_at,
+        process_group: u32::try_from(group).ok()?,
+        session_id: u32::try_from(session).ok()?,
+        boot_id,
+    })
+}
+
 #[cfg(target_os = "macos")]
 pub(crate) fn process_start_time(pid: libc::pid_t) -> Option<u64> {
     let mut info = std::mem::MaybeUninit::<libc::proc_bsdinfo>::uninit();
@@ -739,24 +770,8 @@ impl TerminalService for PtyTerminals {
             .process_id()
             .and_then(|pid| libc::pid_t::try_from(pid).ok());
         #[cfg(unix)]
-        let process = session_id.and_then(|pid| {
-            let identity = ProcessIdentity::new(pid)?;
-            let group = unsafe { libc::getpgid(pid) };
-            let session = unsafe { libc::getsid(pid) };
-            if pid <= 1 || group <= 1 || session <= 1 {
-                return None;
-            }
-            Some(ProcessRecord {
-                id: uuid::Uuid::new_v4().to_string(),
-                kind: "terminal".into(),
-                owner_id: terminal_id.as_str().to_owned(),
-                pid: u32::try_from(pid).ok()?,
-                started_at: identity.started_at,
-                process_group: u32::try_from(group).ok()?,
-                session_id: u32::try_from(session).ok()?,
-                boot_id: boot_id()?,
-            })
-        });
+        let process = session_id
+            .and_then(|pid| capture_process_record(pid, "terminal", terminal_id.as_str()));
         #[cfg(not(unix))]
         let process = None;
         self.sessions()?.live.insert(
@@ -868,6 +883,29 @@ mod tests {
     use std::time::Instant;
 
     use super::*;
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn captured_process_record_includes_verified_identity() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let pid = libc::pid_t::try_from(std::process::id())?;
+        let record = capture_process_record(pid, "agent", "task").ok_or("identity unavailable")?;
+        assert_eq!(record.pid, u32::try_from(pid)?);
+        assert_eq!(record.kind, "agent");
+        assert_eq!(record.owner_id, "task");
+        assert_eq!(Some(record.started_at), process_start_time(pid));
+        assert_eq!(
+            record.process_group,
+            u32::try_from(unsafe { libc::getpgid(pid) })?
+        );
+        assert_eq!(
+            record.session_id,
+            u32::try_from(unsafe { libc::getsid(pid) })?
+        );
+        assert_eq!(Some(record.boot_id), boot_id());
+        assert!(capture_process_record(1, "agent", "task").is_none());
+        Ok(())
+    }
 
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     #[test]

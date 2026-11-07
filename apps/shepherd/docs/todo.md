@@ -1169,7 +1169,9 @@ placeholder tabs and no unearned state badges.
   Project and task terminal launches now persist PID, start time, process group,
   session, and boot identity per launch. On exit, remaining background jobs
   are recorded before the leader record is removed; PTY fixtures verify
-  persistence and cleanup. Startup snapshots earlier records for read-only
+  persistence and cleanup. Shared process-record capture rechecks the start
+  time, session and group before returning an identity; a local process fixture
+  verifies its fields. Startup snapshots earlier records for read-only
   inspection against boot, start time, process group, and session identities;
   a match does not establish that another Shepherd instance has released it.
   ACP terminal launches also record and clear their process identities. A
