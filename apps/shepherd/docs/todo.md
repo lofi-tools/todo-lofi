@@ -1145,6 +1145,9 @@ placeholder tabs and no unearned state badges.
 
 - [ ] Crash and kill tests: interrupted state, orphan detection, recorded PID
   plus start time, reused-PID refusal.
+  A headless subprocess fixture is killed with SIGKILL while a scripted agent
+  waits for approval; reopening its database restores the prompt and marks the
+  task interrupted without inventing the unfinished answer.
   PTY process-group shutdown checks each member's recorded start time before
   signalling; a fixture rejects a matching PID with a different start time.
   Project and task terminal launches now persist PID, start time, process group,
@@ -1226,6 +1229,8 @@ placeholder tabs and no unearned state badges.
 ### Proof
 
 - [ ] Chaos: kill -9 mid-turn, restart, resume or fail honestly.
+  A local scripted approval-wait fixture covers SIGKILL and interrupted recovery;
+  live-agent crash and resume behavior still needs verification.
 - [ ] Missing worktree repair; archived worktree collection; dirty skip.
 - [ ] Large transcript and large diff with no dropped state.
 - [ ] Three-agent/two-project concurrency test.

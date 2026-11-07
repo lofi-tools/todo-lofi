@@ -4019,6 +4019,102 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn abrupt_process_death_recovers_the_waiting_task()
+    -> Result<(), Box<dyn std::error::Error>> {
+        if let Some(uri) = std::env::var_os("SHEPHERD_CRASH_FIXTURE_DATABASE") {
+            let uri = uri.into_string().map_err(|_| "database URI is not UTF-8")?;
+            let repository = PathBuf::from(
+                std::env::var_os("SHEPHERD_CRASH_FIXTURE_REPOSITORY")
+                    .ok_or("missing repository")?,
+            );
+            let ready = PathBuf::from(
+                std::env::var_os("SHEPHERD_CRASH_FIXTURE_READY").ok_or("missing ready path")?,
+            );
+            let mut core = Core::with_services(
+                Box::new(TursoStore::open(&uri).await?),
+                Box::new(FakeHarnessFactory::new(vec![vec![FakeTurn::new(vec![
+                    FakeStep::Message("unfinished answer".into()),
+                    FakeStep::approval("crash-approval", "Run tests"),
+                ])]])),
+            );
+            let project = add_project(&mut core, repository).await?;
+            let draft = workspace_of(
+                core.execute(Command::CreateDraft {
+                    agent: Agent::Codex,
+                    project_id: project,
+                    title: "Crash fixture".into(),
+                })
+                .await?,
+            );
+            let task_id = TaskId::new(draft.task.id);
+            let waiting = workspace_of(
+                core.execute(Command::SendPrompt {
+                    task_id: task_id.clone(),
+                    input: PromptInput::text("persist this prompt"),
+                })
+                .await?,
+            );
+            assert_eq!(waiting.task.state, TaskState::Waiting);
+            let temporary = ready.with_extension("tmp");
+            std::fs::write(&temporary, task_id.as_str())?;
+            std::fs::rename(temporary, ready)?;
+            std::future::pending::<()>().await;
+            return Ok(());
+        }
+
+        use std::os::unix::process::ExitStatusExt as _;
+        let repository = TestRepository::new()?;
+        let database = TestDatabase::new()?;
+        let uri = database.uri();
+        let ready = database.path().join("crash-fixture-ready");
+        let mut child = tokio::process::Command::new(std::env::current_exe()?)
+            .args([
+                "--exact",
+                "tests::abrupt_process_death_recovers_the_waiting_task",
+                "--nocapture",
+            ])
+            .env("SHEPHERD_CRASH_FIXTURE_DATABASE", &uri)
+            .env("SHEPHERD_CRASH_FIXTURE_REPOSITORY", repository.path())
+            .env("SHEPHERD_CRASH_FIXTURE_READY", &ready)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .kill_on_drop(true)
+            .spawn()?;
+        let task_id = tokio::time::timeout(std::time::Duration::from_secs(20), async {
+            loop {
+                match std::fs::read_to_string(&ready) {
+                    Ok(id) => break Ok::<_, Box<dyn std::error::Error>>(TaskId::new(id)),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => break Err(error.into()),
+                }
+                if let Some(status) = child.try_wait()? {
+                    break Err(
+                        format!("crash fixture exited before becoming ready: {status}").into(),
+                    );
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await??;
+        child.kill().await?;
+        let status = child.wait().await?;
+        assert_eq!(status.signal(), Some(9));
+        let mut recovered = Core::load(
+            Box::new(TursoStore::open(&uri).await?),
+            Box::new(UnavailableHarnessFactory),
+        )
+        .await?;
+        let workspace = recovered.open_task_workspace(&task_id).await?;
+        assert_eq!(workspace.task.state, TaskState::Interrupted);
+        let text = summaries(&workspace).join("\n");
+        assert!(text.contains("persist this prompt"));
+        assert!(!text.contains("unfinished answer"));
+        assert!(recovered.sessions.get(&task_id).is_none());
+        Ok(())
+    }
+
     #[tokio::test]
     async fn a_fake_task_runs_through_approval_quit_and_resume()
     -> Result<(), Box<dyn std::error::Error>> {
