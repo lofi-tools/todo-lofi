@@ -269,12 +269,27 @@ impl TurnId {
 }
 
 /// What an adapter needs to launch its child process.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Default)]
 pub struct SpawnSpec {
     pub program: String,
     pub args: Vec<String>,
     pub cwd: PathBuf,
     pub environment: BTreeMap<String, String>,
+}
+
+impl std::fmt::Debug for SpawnSpec {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SpawnSpec")
+            .field("program", &self.program)
+            .field("args", &self.args)
+            .field("cwd", &self.cwd)
+            .field(
+                "environment_keys",
+                &self.environment.keys().collect::<Vec<_>>(),
+            )
+            .finish()
+    }
 }
 
 /// The exact launch and protocol an adapter used, for Task → Diagnostics. The
@@ -1274,6 +1289,19 @@ pub trait AgentHarness: Send {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn spawn_spec_debug_does_not_expose_environment_values() {
+        let spec = SpawnSpec {
+            program: "agent".into(),
+            environment: BTreeMap::from([("TOKEN".into(), "fixture-private-value".into())]),
+            ..SpawnSpec::default()
+        };
+        let formatted = format!("{spec:?}");
+        assert!(formatted.contains("agent"));
+        assert!(formatted.contains("TOKEN"));
+        assert!(!formatted.contains("fixture-private-value"));
+    }
 
     fn tool_event(title: &str, status: ToolStatus) -> HarnessEvent {
         HarnessEvent::ToolCall {

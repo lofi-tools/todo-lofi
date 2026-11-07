@@ -1246,8 +1246,10 @@ placeholder tabs and no unearned state badges.
   supply per-agent maps with project overrides
   for task launches and model and mode discovery. A scripted task fixture
   verifies that a local process receives the resolved value while the workspace
-  snapshot and reopened database files do not contain it. Log handling and
-  live-adapter behavior remain to be verified.
+  snapshot and reopened database files do not contain it. Launch-spec debug
+  output omits environment values. Agent stderr can still echo those values
+  into diagnostics or failure events; redact it before treating log handling
+  as verified. Live-adapter behavior remains to be verified.
 - [ ] Packaging and CI: macOS 13+, Ubuntu 24.04+, pinned Zig, Tauri build,
   platform smoke.
 - [ ] v2/GPUI explicitly not started until v1 is feature complete.
