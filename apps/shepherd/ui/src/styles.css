@@ -535,15 +535,15 @@ textarea {
 .task-search__keys {
   inset-inline-end: 6px;
   display: flex;
-  gap: 2px;
+  gap: 1px;
   max-inline-size: calc(100% - 30px);
   overflow: hidden;
   color: color-mix(in srgb, var(--text-muted) 84%, var(--surface));
-  font-size: 9px;
+  font-size: 8px;
 }
 
 .task-search__keys kbd {
-  padding: 0 1px;
+  padding: 0 .5px;
   border: 1px solid var(--border);
   border-radius: 3px;
   background: color-mix(in srgb, var(--text-muted) 8%, transparent);
@@ -2206,7 +2206,8 @@ textarea {
 .files-pane__toolbar input[type='search'] {
   flex: 1 1 12ch;
   min-width: 8ch;
-  padding: 4px 8px;
+  height: 26px;
+  padding: 2px 8px;
   border: 1px solid var(--border);
   border-radius: 6px;
   background: var(--surface-raised);
@@ -2227,6 +2228,7 @@ textarea {
 
 .files-root-picker select {
   appearance: none;
+  height: 26px;
   padding: 4px 25px 4px 8px;
   border: 1px solid var(--border);
   border-radius: 6px;
