@@ -18,6 +18,11 @@ interface PendingSearch {
   id?: string
 }
 
+interface CachedDirectory {
+  promise: Promise<DirectoryListing>
+  value?: DirectoryListing
+}
+
 export function FilesPane(props: { projectId: string; worktreeTaskId: string | null; initialFile?: { taskId: string; path: string } }) {
   const [scope, setScope] = createSignal(props.worktreeTaskId ? 'worktree' : 'project')
   const [showDotfiles, setShowDotfiles] = createSignal(false)
@@ -55,6 +60,60 @@ function FileBrowser(props: FileLocation & { showDotfiles: boolean; initialPath?
   const [changes, setChanges] = createSignal<FileChange[]>([])
   const [watchError, setWatchError] = createSignal<string>()
   const [treeRevision, setTreeRevision] = createSignal(0)
+  const directories = new Map<string, CachedDirectory>()
+  let cacheVersion = ''
+  let navigation = 0
+  let disposed = false
+  onCleanup(() => { disposed = true })
+
+  function loadDirectory(path: string, showDotfiles: boolean, revision: number): Promise<DirectoryListing> {
+    const version = `${showDotfiles}:${revision}`
+    if (cacheVersion !== version) { directories.clear(); cacheVersion = version }
+    const cached = directories.get(path)
+    if (cached) return cached.promise
+    const entry: CachedDirectory = { promise: listFiles(props.projectId, props.taskId, path, showDotfiles) }
+    directories.set(path, entry)
+    entry.promise.then((value) => { entry.value = value }, () => {
+      if (directories.get(path) === entry) directories.delete(path)
+    })
+    return entry.promise
+  }
+
+  function cachedDirectory(path: string, showDotfiles: boolean, revision: number): DirectoryListing | undefined {
+    return cacheVersion === `${showDotfiles}:${revision}` ? directories.get(path)?.value : undefined
+  }
+
+  function preloadDirectories(listing: DirectoryListing, showDotfiles: boolean, revision: number) {
+    const queue = listing.entries.filter((entry) => entry.directory).map((entry) => ({ path: entry.path, depth: 1 }))
+    let next = 0
+    async function worker() {
+      while (!disposed && showDotfiles === props.showDotfiles && revision === treeRevision() && next < queue.length && next < 128) {
+        const item = queue[next++]
+        try {
+          const child = await loadDirectory(item.path, showDotfiles, revision)
+          if (item.depth < 2) queue.push(...child.entries.filter((entry) => entry.directory).map((entry) => ({ path: entry.path, depth: item.depth + 1 })))
+        } catch (error) {
+          console.debug('Could not preload folder', item.path, error)
+        }
+      }
+    }
+    for (let index = 0; index < Math.min(4, queue.length); index++) void worker()
+  }
+
+  async function toggleFolder(path: string) {
+    const request = ++navigation
+    const current = openPath()
+    if (current === path || current.startsWith(`${path}/`)) {
+      setOpenPath(parentPath(path))
+      return
+    }
+    try {
+      await loadDirectory(path, props.showDotfiles, treeRevision())
+    } catch (error) {
+      console.debug('Could not open folder', path, error)
+    }
+    if (!disposed && request === navigation) setOpenPath(path)
+  }
   const changesByPath = createMemo(() => new Map(changes().map((change) => [change.path, change])))
   const changeFor = (path: string) => changesByPath().get(path)
   const directoryChangeFor = (path: string) => changes().find((change) => change.path.startsWith(`${path}/`))
@@ -143,9 +202,9 @@ function FileBrowser(props: FileLocation & { showDotfiles: boolean; initialPath?
       <div class="files-pane__tree" aria-label="File tree" hidden={!!query().trim()}>
         <FolderContents projectId={props.projectId} taskId={props.taskId} path="" showDotfiles={props.showDotfiles}
           revision={treeRevision()} changeFor={changeFor} directoryChangeFor={directoryChangeFor} selected={selected()?.path ?? null}
-          openPath={openPath()} onToggleFolder={(path) => setOpenPath((current) =>
-            current === path || current.startsWith(`${path}/`) ? parentPath(path) : path)}
-          onSelect={(path) => { setOpenPath(parentPath(path)); setSelected({ path, line: null }) }} />
+          loadDirectory={loadDirectory} cachedDirectory={cachedDirectory} preloadDirectories={preloadDirectories}
+          openPath={openPath()} onToggleFolder={(path) => void toggleFolder(path)}
+          onSelect={(path) => { navigation++; setOpenPath(parentPath(path)); setSelected({ path, line: null }) }} />
         <Show when={deleted().length}>
           <details class="files-tree__deleted" open>
             <summary>Deleted files</summary>
@@ -199,13 +258,17 @@ interface FolderProps extends FileLocation {
   revision: number
   changeFor: (path: string) => FileChange | undefined
   directoryChangeFor: (path: string) => FileChange | undefined
+  loadDirectory: (path: string, showDotfiles: boolean, revision: number) => Promise<DirectoryListing>
+  cachedDirectory: (path: string, showDotfiles: boolean, revision: number) => DirectoryListing | undefined
+  preloadDirectories: (listing: DirectoryListing, showDotfiles: boolean, revision: number) => void
 }
 
 function FolderContents(props: FolderProps & { path: string }) {
   const [listing] = createResource(
     () => [props.projectId, props.taskId, props.path, props.showDotfiles, props.revision] as const,
-    async ([projectId, taskId, path, showDotfiles], { value }): Promise<DirectoryListing> => {
-      const next = await listFiles(projectId, taskId, path, showDotfiles)
+    async ([, , path, showDotfiles, revision], { value }): Promise<DirectoryListing> => {
+      const next = await props.loadDirectory(path, showDotfiles, revision)
+      props.preloadDirectories(next, showDotfiles, revision)
       const previous = new Map(value?.entries.map((entry) => [entry.path, entry]))
       return { ...next, entries: next.entries.map((entry) => {
         const prior = previous.get(entry.path)
@@ -215,9 +278,9 @@ function FolderContents(props: FolderProps & { path: string }) {
   )
   return (
     <>
-      <Show when={listing.loading && !listing.latest}><p class="empty empty--tight" role="status">Loading files…</p></Show>
+      <Show when={listing.loading && !listing.latest && !props.cachedDirectory(props.path, props.showDotfiles, props.revision)}><p class="empty empty--tight" role="status">Loading files…</p></Show>
       <Show when={listing.error}>{(error) => <p class="error" role="alert">{failureMessage(error())}</p>}</Show>
-      <Show when={!listing.error && listing()}>
+      <Show when={!listing.error && (listing.latest ?? props.cachedDirectory(props.path, props.showDotfiles, props.revision))}>
         {(current) => <>
           <Show when={current().entries.length} fallback={<p class="empty empty--tight">No files in this folder.</p>}>
             <ul class="files-tree">

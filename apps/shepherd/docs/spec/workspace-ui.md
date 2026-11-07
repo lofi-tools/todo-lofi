@@ -91,7 +91,9 @@ current layout and give future changes a point of comparison.
   with scrolling for longer lists. Show Git change badges beside visible paths and list deleted paths below the
   tree. Show Git-ignored files and folders in the active Zed theme's dim ignored
   colour, including monochrome icons; continue hiding `.shepherdignore` entries.
-  Refresh Git status and open folders after a debounced workspace change.
+  Preload nearby folder levels with bounded concurrency so opening a folder does
+  not briefly show an empty list. Refresh Git status and cached folders after a
+  debounced workspace change.
   Put **Open in external editor** and **Reveal in file manager** above the file
   preview. **Open in Files** from a Git or Review diff selects and focuses the
   Files tab and opens the matching worktree file.

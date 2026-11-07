@@ -604,6 +604,9 @@ test.beforeEach(async ({ context }) => {
             return 'fixture diff'
           case 'list_files': {
             fileListings.push(args.path)
+            if (options.has('slow-folder') && args.path === 'src') {
+              await new Promise<void>((resolve) => window.addEventListener('release-folder-listing', () => resolve(), { once: true }))
+            }
             if (options.has('ignored-files')) return { entries: args.path === '' ? [
               { name: 'build', path: 'build', directory: true, ignored: true },
               { name: 'ignored.rs', path: 'ignored.rs', directory: false, ignored: true },
@@ -1530,7 +1533,7 @@ test('adds a screenshot note with image coordinates when the page blocks framing
   await expect(page.getByRole('list', { name: 'Queued annotations' })).toHaveCount(0)
 })
 
-test('browses a worktree and project root with lazy folders and read-only previews', async ({ page }) => {
+test('browses a worktree and project root with preloaded folders and read-only previews', async ({ page }) => {
   await page.goto('/')
   await expect(page.getByRole('region', { name: 'Task chat' }).getByText('ready to go')).toBeVisible()
   expect(await page.evaluate(() => window.__fileListings)).toEqual([])
@@ -1540,7 +1543,7 @@ test('browses a worktree and project root with lazy folders and read-only previe
   const root = files.getByLabel('File root')
   await expect(root).toHaveValue('worktree')
   await expect(files.getByRole('button', { name: 'worktree.txt' })).toBeVisible()
-  expect(await page.evaluate(() => window.__fileListings)).toEqual([''])
+  await expect.poll(() => page.evaluate(() => window.__fileListings)).toEqual(['', 'src'])
   const folder = files.getByRole('button', { name: 'src' })
   await expect(folder).toHaveAttribute('aria-expanded', 'false')
   await folder.click()
@@ -1560,6 +1563,20 @@ test('browses a worktree and project root with lazy folders and read-only previe
   await expect(files.getByRole('button', { name: '.env.example' })).toBeVisible()
   await files.getByRole('button', { name: 'README.md' }).click()
   await expect(viewer.getByText('<file>', { exact: true })).toBeVisible()
+})
+
+test('waits for a slow folder before expanding it', async ({ page }) => {
+  await page.goto('/?slow-folder')
+  await page.getByRole('tab', { name: 'Files' }).click()
+  const files = page.getByRole('region', { name: 'Workspace files' })
+  const folder = files.getByRole('button', { name: 'src', exact: true })
+  await expect.poll(() => page.evaluate(() => window.__fileListings)).toContain('src')
+  await folder.click()
+  await expect(folder).toHaveAttribute('aria-expanded', 'false')
+  await expect(files.getByText('No files in this folder.')).toHaveCount(0)
+  await page.evaluate(() => window.dispatchEvent(new Event('release-folder-listing')))
+  await expect(folder).toHaveAttribute('aria-expanded', 'true')
+  await expect(files.getByRole('button', { name: 'main.rs' })).toBeVisible()
 })
 
 test('keeps only one expanded folder path in the file tree', async ({ page }) => {
