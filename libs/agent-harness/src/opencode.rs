@@ -262,33 +262,40 @@ struct ActiveTurn {
     reader: JoinHandle<()>,
 }
 
-struct AdmissionGuard {
+struct StopOnDrop {
     child: Option<Arc<AsyncMutex<Child>>>,
     sender: mpsc::UnboundedSender<HarnessEvent>,
     signal_group: fn(&Child) -> std::io::Result<()>,
     runtime: tokio::runtime::Handle,
+    operation: &'static str,
+    active_turn: Option<(tokio::task::AbortHandle, Arc<AtomicBool>)>,
 }
 
-impl AdmissionGuard {
+impl StopOnDrop {
     fn disarm(&mut self) {
         self.child = None;
     }
 }
 
-impl Drop for AdmissionGuard {
+impl Drop for StopOnDrop {
     fn drop(&mut self) {
         let Some(child) = self.child.take() else {
             return;
         };
         let sender = self.sender.clone();
         let signal_group = self.signal_group;
+        let operation = self.operation;
+        if let Some((reader, finished)) = self.active_turn.take() {
+            reader.abort();
+            finished.store(true, Ordering::Release);
+        }
         let immediate_signal = child.try_lock().ok().map(|child| signal_group(&child));
         if let Some(Err(error)) = &immediate_signal {
-            tracing::warn!(%error, "could not signal OpenCode after cancelled admission");
+            tracing::warn!(%error, operation, "could not signal OpenCode after interrupted operation");
         }
         self.runtime.spawn(async move {
             let mut text =
-                "OpenCode prompt admission was cancelled; the server was stopped.".to_string();
+                format!("OpenCode {operation} did not complete; the server was stopped.");
             let result = match immediate_signal {
                 Some(Ok(())) => child.lock().await.kill().await,
                 Some(Err(error)) => Err(error),
@@ -296,7 +303,7 @@ impl Drop for AdmissionGuard {
             };
             if let Err(error) = result {
                 text = format!(
-                    "OpenCode prompt admission was cancelled; could not stop the server: {error}"
+                    "OpenCode {operation} did not complete; could not stop the server: {error}"
                 );
             }
             if publish(
@@ -308,7 +315,10 @@ impl Drop for AdmissionGuard {
             )
             .is_err()
             {
-                tracing::debug!("could not report cancelled OpenCode admission cleanup");
+                tracing::debug!(
+                    operation,
+                    "could not report interrupted OpenCode operation cleanup"
+                );
             }
         });
     }
@@ -553,11 +563,13 @@ impl AgentHarness for OpenCodeHarness {
             HarnessError::Protocol(format!("OpenCode requires an async runtime: {error}"))
         })?;
         self.cleanup_required = true;
-        let mut admission = AdmissionGuard {
+        let mut admission = StopOnDrop {
             child: Some(server.child.clone()),
             sender: self.sender.clone(),
             signal_group: signal_server_group,
             runtime,
+            operation: "prompt admission",
+            active_turn: None,
         };
         if let Err(error) = server.enqueue_prompt(&session, &id, &input, true).await {
             if let Err(cleanup) = server.cancel_prompt(&session, &id).await {
@@ -669,12 +681,31 @@ impl AgentHarness for OpenCodeHarness {
         if let Some(fallback) = &mut self.fallback {
             return fallback.cancel().await;
         }
+        if self.cleanup_required {
+            return Err(HarnessError::Protocol(
+                "OpenCode needs cleanup before cancellation".into(),
+            ));
+        }
         let server = self.server.as_ref().ok_or(HarnessError::NotStarted)?;
         let session = self.session.as_ref().ok_or(HarnessError::SessionMissing)?;
         if let Some(turn) = &self.turn
             && !turn.finished.load(Ordering::Acquire)
         {
+            let runtime = tokio::runtime::Handle::try_current().map_err(|error| {
+                HarnessError::Protocol(format!("OpenCode requires an async runtime: {error}"))
+            })?;
+            self.cleanup_required = true;
+            let mut cleanup = StopOnDrop {
+                child: Some(server.child.clone()),
+                sender: self.sender.clone(),
+                signal_group: signal_server_group,
+                runtime,
+                operation: "turn cancellation request",
+                active_turn: Some((turn.reader.abort_handle(), turn.finished.clone())),
+            };
             server.cancel_prompt(session, &turn.id).await?;
+            cleanup.disarm();
+            self.cleanup_required = false;
         }
         Ok(())
     }
@@ -2019,11 +2050,13 @@ mod tests {
         command.arg("30").process_group(0).kill_on_drop(true);
         let child = Arc::new(AsyncMutex::new(command.spawn()?));
         let (sender, mut events) = mpsc::unbounded_channel();
-        let guard = AdmissionGuard {
+        let guard = StopOnDrop {
             child: Some(child.clone()),
             sender,
             signal_group: |_| Err(std::io::Error::other("fixture stop failure")),
             runtime: tokio::runtime::Handle::try_current()?,
+            operation: "prompt admission",
+            active_turn: None,
         };
         drop(guard);
         assert!(matches!(
@@ -2046,11 +2079,13 @@ mod tests {
         command.arg("30").process_group(0).kill_on_drop(true);
         let child = Arc::new(AsyncMutex::new(command.spawn()?));
         let (sender, mut events) = mpsc::unbounded_channel();
-        let guard = AdmissionGuard {
+        let guard = StopOnDrop {
             child: Some(child.clone()),
             sender,
             signal_group: signal_server_group,
             runtime: tokio::runtime::Handle::try_current()?,
+            operation: "prompt admission",
+            active_turn: None,
         };
         let locked_child = child.lock().await;
         std::thread::spawn(move || drop(guard))
@@ -2079,11 +2114,13 @@ mod tests {
         })?;
         let child = Arc::new(AsyncMutex::new(child));
         let (sender, _events) = mpsc::unbounded_channel();
-        let guard = AdmissionGuard {
+        let guard = StopOnDrop {
             child: Some(child.clone()),
             sender,
             signal_group: signal_server_group,
             runtime: runtime.handle().clone(),
+            operation: "prompt admission",
+            active_turn: None,
         };
         drop(runtime);
         drop(guard);
@@ -2469,7 +2506,7 @@ exec sleep 60
             )]),
             ..SpawnSpec::default()
         };
-        let fixture = serve_native_fixture(listener, &directory, false, None);
+        let fixture = serve_native_fixture(listener, &directory, false, None, None);
         let client = async {
             let mut harness = OpenCodeHarness::default();
             let tracker = Arc::new(Tracker {
@@ -2552,7 +2589,7 @@ exec sleep 60
             )]),
             ..SpawnSpec::default()
         };
-        let fixture = serve_native_fixture(listener, &directory, true, None);
+        let fixture = serve_native_fixture(listener, &directory, true, None, None);
         let client = async {
             let mut harness = OpenCodeHarness::default();
             harness.set_process_tracker(Arc::new(Tracker(AtomicBool::new(true))));
@@ -2620,7 +2657,8 @@ exec sleep 60
         };
         let (started, waiting) = tokio::sync::oneshot::channel();
         let (release, released) = tokio::sync::oneshot::channel();
-        let fixture = serve_native_fixture(listener, &directory, false, Some((started, released)));
+        let fixture =
+            serve_native_fixture(listener, &directory, false, Some((started, released)), None);
         let client = async {
             let mut harness = OpenCodeHarness::default();
             harness.start(spec).await?;
@@ -2648,10 +2686,160 @@ exec sleep 60
             })
             .await??;
             assert!(
-                matches!(event, HarnessEvent::ConnectionFailed { text, .. } if text.contains("admission was cancelled"))
+                matches!(event, HarnessEvent::ConnectionFailed { text, .. } if text.contains("prompt admission did not complete"))
             );
             let server = harness.server.as_ref().ok_or("server handle was lost")?;
             assert!(server.child.lock().await.try_wait()?.is_some());
+            harness.shutdown().await?;
+            Ok::<_, Box<dyn std::error::Error>>(())
+        };
+        timeout(REQUEST_TIMEOUT, async { tokio::try_join!(fixture, client) }).await??;
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn interrupted_turn_cancellation_stops_server_and_reports_failure()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = tempfile::tempdir()?;
+        let directory = root.path().canonicalize()?;
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let program = fixture_launcher(
+            &directory,
+            r#"#!/bin/sh
+[ "$*" = "serve --hostname 127.0.0.1 --port 0" ] || exit 2
+printf 'opencode server listening on %s\n' "$SHEPHERD_TEST_OPENCODE_URL"
+exec sleep 60
+"#,
+        )?;
+        let spec = SpawnSpec {
+            program,
+            cwd: directory.clone(),
+            environment: BTreeMap::from([(
+                "SHEPHERD_TEST_OPENCODE_URL".into(),
+                format!("http://{}", listener.local_addr()?),
+            )]),
+            ..SpawnSpec::default()
+        };
+        let (started, waiting) = tokio::sync::oneshot::channel();
+        let (release, released) = tokio::sync::oneshot::channel();
+        let fixture =
+            serve_native_fixture(listener, &directory, false, None, Some((started, released)));
+        let client = async {
+            let mut harness = OpenCodeHarness::default();
+            harness.start(spec).await?;
+            harness.open_session(None).await?;
+            harness
+                .prompt(PromptInput::text("Reply with local fixture text only"))
+                .await?;
+            let mut cancel = Box::pin(harness.cancel());
+            tokio::select! {
+                result = &mut cancel => return Err(format!("cancel completed unexpectedly: {result:?}").into()),
+                result = waiting => result?,
+            }
+            drop(cancel);
+            release.send(false).map_err(|_| "fixture ended early")?;
+            assert!(
+                matches!(harness.cancel().await, Err(HarnessError::Protocol(message)) if message.contains("needs cleanup"))
+            );
+            let event = timeout(Duration::from_secs(5), async {
+                loop {
+                    match harness.receiver.recv().await {
+                        Some(event @ HarnessEvent::ConnectionFailed { .. }) => break Ok(event),
+                        Some(_) => continue,
+                        None => break Err("event stream closed"),
+                    }
+                }
+            })
+            .await??;
+            assert!(
+                matches!(event, HarnessEvent::ConnectionFailed { text, .. } if text.contains("turn cancellation request did not complete"))
+            );
+            assert!(
+                harness
+                    .turn
+                    .as_ref()
+                    .is_some_and(|turn| turn.finished.load(Ordering::Acquire))
+            );
+            assert!(
+                harness
+                    .server
+                    .as_ref()
+                    .ok_or("missing server")?
+                    .child
+                    .lock()
+                    .await
+                    .try_wait()?
+                    .is_some()
+            );
+            harness.shutdown().await?;
+            Ok::<_, Box<dyn std::error::Error>>(())
+        };
+        timeout(REQUEST_TIMEOUT, async { tokio::try_join!(fixture, client) }).await??;
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn successful_turn_cancellation_keeps_server_running()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = tempfile::tempdir()?;
+        let directory = root.path().canonicalize()?;
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let program = fixture_launcher(
+            &directory,
+            r#"#!/bin/sh
+[ "$*" = "serve --hostname 127.0.0.1 --port 0" ] || exit 2
+printf 'opencode server listening on %s\n' "$SHEPHERD_TEST_OPENCODE_URL"
+exec sleep 60
+"#,
+        )?;
+        let spec = SpawnSpec {
+            program,
+            cwd: directory.clone(),
+            environment: BTreeMap::from([(
+                "SHEPHERD_TEST_OPENCODE_URL".into(),
+                format!("http://{}", listener.local_addr()?),
+            )]),
+            ..SpawnSpec::default()
+        };
+        let (started, waiting) = tokio::sync::oneshot::channel();
+        let (release, released) = tokio::sync::oneshot::channel();
+        let fixture =
+            serve_native_fixture(listener, &directory, false, None, Some((started, released)));
+        let client = async {
+            let mut harness = OpenCodeHarness::default();
+            harness.start(spec).await?;
+            harness.open_session(None).await?;
+            harness
+                .prompt(PromptInput::text("Reply with local fixture text only"))
+                .await?;
+            let cancel = harness.cancel();
+            let release_fixture = async {
+                waiting.await?;
+                release.send(true).map_err(|_| "fixture ended early")?;
+                Ok::<_, Box<dyn std::error::Error>>(())
+            };
+            tokio::try_join!(
+                async {
+                    cancel
+                        .await
+                        .map_err(|error| -> Box<dyn std::error::Error> { Box::new(error) })
+                },
+                release_fixture
+            )?;
+            assert!(!harness.cleanup_required);
+            assert!(
+                harness
+                    .server
+                    .as_ref()
+                    .ok_or("missing server")?
+                    .child
+                    .lock()
+                    .await
+                    .try_wait()?
+                    .is_none()
+            );
             harness.shutdown().await?;
             Ok::<_, Box<dyn std::error::Error>>(())
         };
@@ -2667,6 +2855,10 @@ exec sleep 60
         mut hang_prompt: Option<(
             tokio::sync::oneshot::Sender<()>,
             tokio::sync::oneshot::Receiver<()>,
+        )>,
+        mut hang_cancel: Option<(
+            tokio::sync::oneshot::Sender<()>,
+            tokio::sync::oneshot::Receiver<bool>,
         )>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let mut stream = None;
@@ -2736,6 +2928,9 @@ exec sleep 60
                                 json!({"sessionID": "ses_fixture"}),
                             ),
                         ] {
+                            if kind == "session.execution.succeeded" && hang_cancel.is_some() {
+                                continue;
+                            }
                             let event = json!({"type": kind, "data": data});
                             stream
                                 .write_all(format!("data: {event}\n\n").as_bytes())
@@ -2767,6 +2962,28 @@ exec sleep 60
             assert_eq!(request, "POST /api/session/ses_fixture/interrupt HTTP/1.1");
             writer.write_all(b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await?;
             writer.shutdown().await?;
+        }
+        if let Some((started, release)) = hang_cancel.take() {
+            let (socket, _) = listener.accept().await?;
+            let (reader, mut writer) = socket.into_split();
+            let (request, _) = read_fixture_request(reader).await?;
+            assert!(request.starts_with("DELETE /api/session/ses_fixture/inbox/msg_"));
+            started.send(()).map_err(|_| "cancel waiter dropped")?;
+            if release.await? {
+                writer
+                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                    .await?;
+                writer.shutdown().await?;
+                let (socket, _) = listener.accept().await?;
+                let (reader, mut writer) = socket.into_split();
+                let (request, _) = read_fixture_request(reader).await?;
+                assert_eq!(request, "POST /api/session/ses_fixture/interrupt HTTP/1.1");
+                let response = r#"{"interrupted":true}"#;
+                writer.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response}", response.len()).as_bytes()).await?;
+                writer.shutdown().await?;
+                let stream = stream.as_mut().ok_or("expected an event stream")?;
+                stream.write_all(b"data: {\"type\":\"session.execution.interrupted\",\"data\":{\"sessionID\":\"ses_fixture\"}}\n\n").await?;
+            }
         }
         Ok(())
     }

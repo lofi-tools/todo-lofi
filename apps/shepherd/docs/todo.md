@@ -1386,7 +1386,10 @@ placeholder tabs and no unearned state badges.
   the task failed, retains the prompt across database reopen and runs cleanup.
   Cancelling an OpenCode prompt attempts both queue removal and session
   interruption even if the first request fails; the local HTTP fixture verifies
-  both errors are reported when both requests fail.
+  both errors are reported when both requests fail. If an active turn’s
+  cancellation fails or its future is dropped, Shepherd stops the server and
+  blocks further work until cleanup; local fixtures cover an interrupted request
+  and successful cancellation without stopping the server.
   Core sessions distinguish a disconnected adapter from completed cleanup.
   Retry, task deletion, batch archive and quit all attempt shutdown before
   discarding a disconnected session; an injected-failure fixture verifies that
