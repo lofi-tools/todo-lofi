@@ -344,6 +344,7 @@ struct ProjectEntry {
     tool_permissions: ToolPermissions,
     /// Answers waiting for a user decision, keyed by transcript entry id.
     permission_replies: HashMap<u64, PermissionReply>,
+    permission_requests: HashMap<u64, u64>,
     /// Tool rule key per pending permission request, keyed the same way.
     permission_tools: HashMap<u64, String>,
     /// Live terminal output per terminal id.
@@ -381,6 +382,7 @@ impl ProjectEntry {
             queue: VecDeque::new(),
             tool_permissions,
             permission_replies: HashMap::new(),
+            permission_requests: HashMap::new(),
             permission_tools: HashMap::new(),
             terminals: HashMap::new(),
             expanded: HashSet::new(),
@@ -390,6 +392,21 @@ impl ProjectEntry {
             _launch_task: None,
             _misc_task: None,
         }
+    }
+
+    fn cancel_permission(&mut self, request_id: u64) -> Option<usize> {
+        let entry_id = self.permission_requests.remove(&request_id)?;
+        self.permission_replies.remove(&entry_id);
+        self.permission_tools.remove(&entry_id);
+        self.transcript.resolve_permission(
+            entry_id,
+            PermissionRecord {
+                option_id: String::new(),
+                name: String::new(),
+                kind: "Cancelled".into(),
+                automatic: false,
+            },
+        )
     }
 
     fn live(&self) -> Option<&LiveSession> {
@@ -968,6 +985,7 @@ impl AgentPane {
             entry.expanded.clear();
         }
         entry.permission_replies.clear();
+        entry.permission_requests.clear();
         entry.permission_tools.clear();
         entry.terminals.clear();
         entry.queue.clear();
@@ -1443,26 +1461,39 @@ impl AgentPane {
         entry_id: u64,
         choice: PermissionChoice,
         cx: &mut Context<Self>,
-    ) {
+    ) -> bool {
         let Some(tag_name) = self.active.clone() else {
-            return;
+            return false;
         };
         let Some(entry) = self.projects.get_mut(&tag_name) else {
-            return;
+            return false;
         };
         let Some(reply) = entry.permission_replies.remove(&entry_id) else {
-            return;
+            return false;
         };
+        entry.permission_tools.remove(&entry_id);
+        entry
+            .permission_requests
+            .retain(|_, pending| *pending != entry_id);
         let decision =
             PermissionDecision::Selected(PermissionOptionId::new(choice.option_id.clone()));
-        if let Err(decision) = reply.answer(decision) {
-            tracing::debug!("permission request was already resolved: {decision:?}");
-        }
-        let record = PermissionRecord::from_choice(&choice, false);
+        let answered = reply.answer(decision).is_ok();
+        let record = if answered {
+            PermissionRecord::from_choice(&choice, false)
+        } else {
+            tracing::debug!("permission request was already resolved");
+            PermissionRecord {
+                option_id: String::new(),
+                name: String::new(),
+                kind: "Cancelled".into(),
+                automatic: false,
+            }
+        };
         if let Some(index) = entry.transcript.resolve_permission(entry_id, record) {
             self.remeasure(index, cx);
         }
         cx.notify();
+        answered
     }
 
     /// Remember an allow/deny rule for the tool behind a pending permission
@@ -1476,11 +1507,9 @@ impl AgentPane {
             let Some(entry) = self.projects.get(&tag_name) else {
                 return;
             };
-            let tool = entry
-                .permission_tools
-                .get(&entry_id)
-                .cloned()
-                .unwrap_or_else(|| "other".to_string());
+            let Some(tool) = entry.permission_tools.get(&entry_id).cloned() else {
+                return;
+            };
             let options = entry
                 .transcript
                 .index_of(entry_id)
@@ -1499,8 +1528,11 @@ impl AgentPane {
                 .cloned();
             (tool, choice)
         };
-        if let Some(choice) = choice {
-            self.answer_permission(entry_id, choice, cx);
+        let Some(choice) = choice else {
+            return;
+        };
+        if !self.answer_permission(entry_id, choice, cx) {
+            return;
         }
         let rule = if allow {
             PermissionRule::Allow
@@ -1553,6 +1585,7 @@ impl AgentPane {
                     }
                 }
                 AcpEvent::PermissionRequested {
+                    request_id,
                     tool_call,
                     options,
                     decision,
@@ -1562,9 +1595,15 @@ impl AgentPane {
                     let choices = PermissionChoice::from_options(&options);
                     let entry_id = entry.transcript.push_permission(title, choices);
                     entry.permission_replies.insert(entry_id, decision);
+                    entry.permission_requests.insert(request_id, entry_id);
                     entry
                         .permission_tools
                         .insert(entry_id, acp_client::tool_key(&tool_call));
+                }
+                AcpEvent::PermissionCancelled { request_id } => {
+                    if let Some(index) = entry.cancel_permission(request_id) {
+                        changed.push(index);
+                    }
                 }
                 AcpEvent::PermissionAutoDecided { tool_call, choice } => {
                     let entry_id = entry
@@ -1597,6 +1636,14 @@ impl AgentPane {
                     let row = entry.terminals.entry(terminal_id).or_default();
                     row.exit_code = Some(exit_code);
                     changed.extend(index);
+                }
+                AcpEvent::TerminalFailed {
+                    terminal_id,
+                    message,
+                } => {
+                    entry
+                        .transcript
+                        .push_error(format!("Terminal {terminal_id} failed: {message}"));
                 }
                 AcpEvent::TerminalStarted { .. } | AcpEvent::TerminalReleased { .. } => {}
                 AcpEvent::Stderr(line) => {
@@ -3811,7 +3858,9 @@ fn render_permission(
     decision: Option<&PermissionRecord>,
 ) -> AnyElement {
     if let Some(decision) = decision {
-        let mut label = if decision.is_allow() {
+        let mut label = if decision.kind == "Cancelled" {
+            "Cancelled".to_string()
+        } else if decision.is_allow() {
             format!("Allowed · {}", decision.name)
         } else {
             format!("Rejected · {}", decision.name)
@@ -3827,11 +3876,13 @@ fn render_permission(
             .bg(rgb(PANEL_BG))
             .rounded_md()
             .text_xs()
-            .text_color(rgb(if decision.is_allow() {
-                TEXT_MUTED
-            } else {
-                DANGER
-            }))
+            .text_color(rgb(
+                if decision.is_allow() || decision.kind == "Cancelled" {
+                    TEXT_MUTED
+                } else {
+                    DANGER
+                },
+            ))
             .child(format!("{label} · {title}"))
             .into_any_element();
     }
@@ -4252,6 +4303,25 @@ mod tests {
             Arc::new(OpenCodeAgent),
             None,
         )
+    }
+
+    #[test]
+    fn cancelled_permission_clears_only_the_matching_request() {
+        let mut entry = project_entry(PROJECT);
+        let first = entry.transcript.push_permission("first", Vec::new());
+        let second = entry.transcript.push_permission("second", Vec::new());
+        entry.permission_requests.insert(10, first);
+        entry.permission_requests.insert(11, second);
+        entry.permission_tools.insert(first, "read".into());
+        entry.permission_tools.insert(second, "write".into());
+        assert!(entry.cancel_permission(10).is_some());
+        assert!(!entry.permission_requests.contains_key(&10));
+        assert!(!entry.permission_tools.contains_key(&first));
+        assert!(entry.permission_tools.contains_key(&second));
+        assert!(entry.transcript.has_pending_permission());
+        assert!(entry.cancel_permission(10).is_none());
+        assert!(entry.cancel_permission(11).is_some());
+        assert!(!entry.transcript.has_pending_permission());
     }
 
     /// One `session/update` event, as the connection forwards it.
