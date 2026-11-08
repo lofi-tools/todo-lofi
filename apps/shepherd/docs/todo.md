@@ -1520,9 +1520,10 @@ placeholder tabs and no unearned state badges.
   untracked regular files without following substituted file or parent symlinks;
   a fixture exercises both substitutions. Untracked symlink targets are read
   relative to the opened parent, with a parent-replacement fixture. Project
-  discovery opens `.git` marker files relative to the opened parent without
-  following the final symlink or blocking on a substituted pipe; a fixture
-  replaces the parent. Directory enumeration and traversal remain pathname-based.
+  discovery enumerates opened directories and descends without following
+  symlinks on Unix. Marker files are opened relative to their parent without
+  blocking on a substituted pipe; fixtures replace parents and children during
+  scanning. Results still contain pathnames that may change before selection.
   External editor and file-manager
   actions pass a validated pathname to another application; a later path swap
   can change its target, so those actions do not guarantee race-free confinement.

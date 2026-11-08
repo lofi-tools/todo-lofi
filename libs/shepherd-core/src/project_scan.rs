@@ -66,26 +66,52 @@ pub struct ProjectScan {
 /// Scan `root`, returning only the directories that lead to repositories.
 pub fn scan(root: &Path) -> ProjectScan {
     let mut repositories = 0;
-    let mut tree = Vec::new();
-    if let Some((_, subdirectories)) = read_directory(root) {
-        for subdirectory in subdirectories {
-            if matches!(
-                subdirectory.file_name().and_then(|name| name.to_str()),
-                Some(".claude" | ".codex" | "ComfyUI-Installs")
-            ) {
-                continue;
-            }
-            if let Some(node) = walk(&subdirectory, 1, &mut repositories) {
-                tree.push(collapse(node));
-            }
-        }
-    }
+    let mut tree = root_children(root, &mut repositories);
     tree.sort_by(|left, right| left.name.cmp(&right.name));
     ProjectScan {
         root: root.display().to_string(),
         repositories,
         tree,
     }
+}
+
+#[cfg(unix)]
+fn root_children(root: &Path, repositories: &mut usize) -> Vec<ProjectNode> {
+    use rustix::fs::{Mode, OFlags, open};
+    let flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::DIRECTORY;
+    let Ok(directory) = open(root, flags, Mode::empty()) else {
+        return Vec::new();
+    };
+    let Some((_, children)) = read_directory_at(&directory) else {
+        return Vec::new();
+    };
+    children
+        .into_iter()
+        .filter(|name| {
+            !matches!(
+                name.to_str(),
+                Some(".claude" | ".codex" | "ComfyUI-Installs")
+            )
+        })
+        .filter_map(|name| walk_at(&directory, &name, &root.join(&name), 1, repositories))
+        .map(collapse)
+        .collect()
+}
+
+#[cfg(not(unix))]
+fn root_children(root: &Path, repositories: &mut usize) -> Vec<ProjectNode> {
+    read_directory(root)
+        .into_iter()
+        .flat_map(|(_, children)| children)
+        .filter(|path| {
+            !matches!(
+                path.file_name().and_then(|name| name.to_str()),
+                Some(".claude" | ".codex" | "ComfyUI-Installs")
+            )
+        })
+        .filter_map(|path| walk(&path, 1, repositories))
+        .map(collapse)
+        .collect()
 }
 
 struct RawNode {
@@ -95,6 +121,87 @@ struct RawNode {
     children: BTreeMap<String, RawNode>,
 }
 
+#[cfg(unix)]
+fn walk_at(
+    parent: &impl std::os::fd::AsFd,
+    name: &std::ffi::OsStr,
+    path: &Path,
+    depth: usize,
+    repositories: &mut usize,
+) -> Option<RawNode> {
+    use rustix::fs::{Mode, OFlags, openat};
+    if depth > MAX_SCAN_DEPTH {
+        return None;
+    }
+    let flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::DIRECTORY;
+    let directory = openat(parent, name, flags, Mode::empty()).ok()?;
+    let (has_git, subdirectories) = read_directory_at(&directory)?;
+    let name = leaf_name(path);
+    if has_git {
+        *repositories += 1;
+        return Some(RawNode {
+            name,
+            path: path.to_path_buf(),
+            repository: true,
+            children: BTreeMap::new(),
+        });
+    }
+    let mut children = BTreeMap::new();
+    for child in subdirectories {
+        if let Some(node) = walk_at(
+            &directory,
+            &child,
+            &path.join(&child),
+            depth + 1,
+            repositories,
+        ) {
+            children.insert(node.name.clone(), node);
+        }
+    }
+    if children.is_empty() {
+        return None;
+    }
+    Some(RawNode {
+        name,
+        path: path.to_path_buf(),
+        repository: false,
+        children,
+    })
+}
+
+#[cfg(unix)]
+fn read_directory_at(
+    directory: &impl std::os::fd::AsFd,
+) -> Option<(bool, Vec<std::ffi::OsString>)> {
+    use rustix::fs::{AtFlags, Dir, FileType, statat};
+    use std::os::unix::ffi::OsStringExt;
+
+    let entries = Dir::read_from(directory).ok()?;
+    let mut has_git = false;
+    let mut children = Vec::new();
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        if name.to_bytes() == b"." || name.to_bytes() == b".." {
+            continue;
+        }
+        let Ok(metadata) = statat(directory, name, AtFlags::SYMLINK_NOFOLLOW) else {
+            continue;
+        };
+        let file_type = FileType::from_raw_mode(metadata.st_mode);
+        let name = std::ffi::OsString::from_vec(name.to_bytes().to_vec());
+        if name == ".git" {
+            has_git = file_type == FileType::Directory
+                || (file_type == FileType::RegularFile && is_gitdir_file_at(directory, &name));
+        } else if file_type == FileType::Directory
+            && !SKIPPED_DIRS.contains(&name.to_string_lossy().as_ref())
+        {
+            children.push(name);
+        }
+    }
+    Some((has_git, children))
+}
+
+#[cfg(not(unix))]
 fn walk(dir: &Path, depth: usize, repositories: &mut usize) -> Option<RawNode> {
     if depth > MAX_SCAN_DEPTH {
         return None;
@@ -133,17 +240,8 @@ fn walk(dir: &Path, depth: usize, repositories: &mut usize) -> Option<RawNode> {
     })
 }
 
+#[cfg(not(unix))]
 fn read_directory(dir: &Path) -> Option<(bool, Vec<PathBuf>)> {
-    #[cfg(unix)]
-    let directory = {
-        use rustix::fs::{Mode, OFlags, open};
-        open(
-            dir,
-            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::DIRECTORY,
-            Mode::empty(),
-        )
-        .ok()?
-    };
     let entries = std::fs::read_dir(dir).ok()?;
     let mut has_git = false;
     let mut subdirectories = Vec::new();
@@ -153,9 +251,6 @@ fn read_directory(dir: &Path) -> Option<(bool, Vec<PathBuf>)> {
         };
         let name = entry.file_name();
         if name == ".git" {
-            #[cfg(unix)]
-            let marker_file = file_type.is_file() && is_gitdir_file_at(&directory, &name);
-            #[cfg(not(unix))]
             let marker_file = file_type.is_file() && is_gitdir_file(&entry.path());
             has_git = file_type.is_dir() || marker_file;
             continue;
@@ -320,6 +415,52 @@ mod tests {
         std::fs::rename(&original, root.join("moved"))?;
         symlink(&outside, &original)?;
         assert!(is_gitdir_file_at(&directory, ".git".as_ref()));
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scan_descent_uses_open_parent_and_rejects_replaced_children()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::fs::symlink;
+
+        let root = TestDirectory::new()?;
+        let parent = root.join("projects");
+        let outside = root.join("outside");
+        std::fs::create_dir_all(parent.join("repo/.git"))?;
+        std::fs::create_dir_all(outside.join("repo/.git"))?;
+        std::fs::create_dir_all(outside.join("external/.git"))?;
+        let directory = std::fs::File::open(&parent)?;
+        std::fs::rename(&parent, root.join("moved"))?;
+        symlink(&outside, &parent)?;
+        let (_, names) = read_directory_at(&directory).ok_or("directory enumeration failed")?;
+        assert_eq!(names, vec![std::ffi::OsString::from("repo")]);
+        let mut count = 0;
+        assert!(
+            walk_at(
+                &directory,
+                "repo".as_ref(),
+                &parent.join("repo"),
+                1,
+                &mut count
+            )
+            .is_some()
+        );
+        assert_eq!(count, 1);
+
+        std::fs::rename(root.join("moved/repo"), root.join("saved"))?;
+        symlink(outside.join("repo"), root.join("moved/repo"))?;
+        assert!(
+            walk_at(
+                &directory,
+                "repo".as_ref(),
+                &parent.join("repo"),
+                1,
+                &mut count
+            )
+            .is_none()
+        );
+        assert_eq!(count, 1);
         Ok(())
     }
 
