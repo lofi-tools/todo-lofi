@@ -227,17 +227,33 @@ pub enum PermissionDecision {
 ///
 /// Wrapping the sender keeps the async channel type out of the UI crate's
 /// dependencies.
-pub struct PermissionReply(oneshot::Sender<PermissionDecision>);
+pub struct PermissionReply {
+    sender: oneshot::Sender<PermissionDecision>,
+    _permit: Option<tokio::sync::OwnedSemaphorePermit>,
+}
 
 impl PermissionReply {
     pub fn new(sender: oneshot::Sender<PermissionDecision>) -> Self {
-        Self(sender)
+        Self {
+            sender,
+            _permit: None,
+        }
+    }
+
+    pub(crate) fn limited(
+        sender: oneshot::Sender<PermissionDecision>,
+        permit: tokio::sync::OwnedSemaphorePermit,
+    ) -> Self {
+        Self {
+            sender,
+            _permit: Some(permit),
+        }
     }
 
     /// Answer the agent. Returns the decision back when nobody is listening
     /// any more (the connection or the turn ended first).
     pub fn answer(self, decision: PermissionDecision) -> Result<(), PermissionDecision> {
-        self.0.send(decision)
+        self.sender.send(decision)
     }
 }
 

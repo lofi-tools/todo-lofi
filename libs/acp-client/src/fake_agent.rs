@@ -42,6 +42,7 @@ pub struct FakeScript {
     pub permission: Option<ToolCallUpdate>,
     pub cancel_permission: bool,
     pub permission_after_cancel: bool,
+    pub permission_burst: usize,
     /// Options offered with the permission request.
     pub permission_options: Vec<PermissionOption>,
     /// `session/load` fails, as an agent without resume support would.
@@ -74,6 +75,8 @@ pub struct FakeObservations {
     pub cancels: Vec<String>,
     pub permission_responses: Vec<String>,
     pub permission_cancellation: Option<Result<(), String>>,
+    pub permission_burst_overflow: Option<Result<(), String>>,
+    pub permission_burst_cancellations: Vec<Result<(), String>>,
     pub terminal_output: Vec<String>,
     pub terminal_exit: Vec<Option<u32>>,
     pub terminal_wait_cancellations: Vec<Result<(), String>>,
@@ -314,43 +317,75 @@ async fn run_turn(
         ))?;
     }
     if let Some(tool_call) = &script.permission {
-        let request = connection.send_request(RequestPermissionRequest::new(
-            session_id.clone(),
-            tool_call.clone(),
-            script.permission_options.clone(),
-        ));
-        if script.cancel_permission {
-            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-            request.cancel()?;
-            let result = request
-                .block_task()
-                .await
-                .map(|_| ())
-                .map_err(|error| error.to_string());
-            if let Ok(mut state) = observations.lock() {
-                state.permission_cancellation = Some(result);
+        if script.permission_burst > 0 {
+            let mut requests = Vec::new();
+            for _ in 0..script.permission_burst {
+                requests.push(connection.send_request(RequestPermissionRequest::new(
+                    session_id.clone(),
+                    tool_call.clone(),
+                    script.permission_options.clone(),
+                )));
             }
-            if script.permission_after_cancel {
-                let response = connection
-                    .send_request(RequestPermissionRequest::new(
-                        session_id.clone(),
-                        tool_call.clone(),
-                        script.permission_options.clone(),
-                    ))
+            if let Some(overflow) = requests.pop() {
+                let result = overflow
                     .block_task()
-                    .await?;
+                    .await
+                    .map(|_| ())
+                    .map_err(|error| error.to_string());
+                if let Ok(mut state) = observations.lock() {
+                    state.permission_burst_overflow = Some(result);
+                }
+            }
+            for request in requests {
+                request.cancel()?;
+                let result = request
+                    .block_task()
+                    .await
+                    .map(|_| ())
+                    .map_err(|error| error.to_string());
+                if let Ok(mut state) = observations.lock() {
+                    state.permission_burst_cancellations.push(result);
+                }
+            }
+        } else {
+            let request = connection.send_request(RequestPermissionRequest::new(
+                session_id.clone(),
+                tool_call.clone(),
+                script.permission_options.clone(),
+            ));
+            if script.cancel_permission {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                request.cancel()?;
+                let result = request
+                    .block_task()
+                    .await
+                    .map(|_| ())
+                    .map_err(|error| error.to_string());
+                if let Ok(mut state) = observations.lock() {
+                    state.permission_cancellation = Some(result);
+                }
+                if script.permission_after_cancel {
+                    let response = connection
+                        .send_request(RequestPermissionRequest::new(
+                            session_id.clone(),
+                            tool_call.clone(),
+                            script.permission_options.clone(),
+                        ))
+                        .block_task()
+                        .await?;
+                    if let Ok(mut state) = observations.lock() {
+                        state
+                            .permission_responses
+                            .push(format!("{:?}", response.outcome));
+                    }
+                }
+            } else {
+                let response = request.block_task().await?;
                 if let Ok(mut state) = observations.lock() {
                     state
                         .permission_responses
                         .push(format!("{:?}", response.outcome));
                 }
-            }
-        } else {
-            let response = request.block_task().await?;
-            if let Ok(mut state) = observations.lock() {
-                state
-                    .permission_responses
-                    .push(format!("{:?}", response.outcome));
             }
         }
     }
@@ -802,6 +837,47 @@ mod tests {
             }
             other => panic!("expected a tool call row, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn permission_burst_is_bounded_and_capacity_recovers()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (mut connection, observations, directory) = connect_to_fake(
+            FakeScript {
+                permission: Some(ToolCallUpdate::new(
+                    "burst",
+                    acp::schema::v1::ToolCallUpdateFields::new(),
+                )),
+                permission_burst: 65,
+                ..Default::default()
+            },
+            confirm_all(),
+        )
+        .await;
+        let session = new_session(&connection, &directory).await;
+        for turn in 1..=2 {
+            tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                connection.requester.prompt(&session, "go".into()),
+            )
+            .await??;
+            let mut requests = 0;
+            while let Ok(event) = connection.events.try_recv() {
+                if matches!(event, AcpEvent::PermissionRequested { .. }) {
+                    requests += 1;
+                }
+            }
+            assert_eq!(requests, 64);
+            let observed = observations.lock().map_err(|error| error.to_string())?;
+            assert!(
+                matches!(&observed.permission_burst_overflow, Some(Err(error)) if error.contains("too many pending"))
+            );
+            assert_eq!(observed.permission_burst_cancellations.len(), turn * 64);
+            assert!(observed.permission_burst_cancellations.iter().all(
+                |result| matches!(result, Err(error) if error.to_lowercase().contains("cancel"))
+            ));
+        }
+        Ok(())
     }
 
     #[tokio::test]

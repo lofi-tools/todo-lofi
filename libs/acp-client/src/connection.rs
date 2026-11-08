@@ -47,6 +47,7 @@ use crate::{AcpError, AcpEvent, SessionSpec, StderrMessage, schema};
 /// How many stderr lines are kept for the error state.
 const STDERR_LINES: usize = 250;
 const PENDING_STDERR_EVENTS: usize = 64;
+const MAX_PENDING_PERMISSIONS: usize = 64;
 const MAX_PROTOCOL_LINE_BYTES: usize = 8 * 1024 * 1024;
 
 fn record_agent_stderr(
@@ -560,6 +561,7 @@ where
     let roots_for_handlers = roots.clone();
     let events_for_notifications = events_tx.clone();
     let permissions = events_tx.clone();
+    let permission_permits = Arc::new(tokio::sync::Semaphore::new(MAX_PENDING_PERMISSIONS));
     let permission_ids = std::sync::atomic::AtomicU64::new(0);
     let reads = events_tx.clone();
     let writes = events_tx.clone();
@@ -630,6 +632,13 @@ where
                     }
                     return Ok(());
                 }
+                let permit = match permission_permits.clone().try_acquire_owned() {
+                    Ok(permit) => permit,
+                    Err(_) => {
+                        responder.respond_with_internal_error("too many pending permission requests")?;
+                        return Ok(());
+                    }
+                };
                 let permissions = permissions.clone();
                 let cancellation = responder.cancellation();
                 let request_id = permission_ids.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -640,7 +649,7 @@ where
                         session_id: request.session_id.clone(),
                         tool_call: request.tool_call.clone(),
                         options: request.options.clone(),
-                        decision: PermissionReply::new(decision_tx),
+                        decision: PermissionReply::limited(decision_tx, permit),
                     });
                     if sent.is_err() {
                         log_reply(
