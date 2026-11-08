@@ -867,8 +867,17 @@ async fn read_turn(
 async fn publish_stream_event(
     sender: &mpsc::UnboundedSender<HarnessEvent>,
     capacity: &Arc<Semaphore>,
-    event: HarnessEvent,
+    mut event: HarnessEvent,
 ) -> HarnessResult<()> {
+    if let HarnessEvent::ToolCall { stream_permit, .. } = &mut event {
+        let permit = capacity
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| HarnessError::ChannelClosed)?;
+        *stream_permit = Some(Arc::new(permit));
+        return publish(sender, event);
+    }
     let HarnessEvent::Delta {
         item_id,
         kind,
@@ -2266,6 +2275,99 @@ mod tests {
         assert_eq!(output, expected);
         drop(second);
         drop(third);
+        assert_eq!(capacity.available_permits(), 2);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn tool_updates_share_capacity_with_text_and_release_on_cancellation()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        let capacity = Arc::new(Semaphore::new(2));
+        let task = tokio::spawn({
+            let capacity = capacity.clone();
+            async move {
+                publish_stream_event(
+                    &sender,
+                    &capacity,
+                    HarnessEvent::Delta {
+                        item_id: ItemId::new("message"),
+                        kind: DeltaKind::Message,
+                        text: "hello".into(),
+                        stream_permit: None,
+                    },
+                )
+                .await?;
+                for id in ["first", "second"] {
+                    publish_stream_event(
+                        &sender,
+                        &capacity,
+                        HarnessEvent::ToolCall {
+                            tool_call_id: ToolCallId::new(id),
+                            title: id.into(),
+                            kind: "command".into(),
+                            status: ToolStatus::Running,
+                            output: None,
+                            diffs: Vec::new(),
+                            terminal_id: None,
+                            stream_permit: None,
+                        },
+                    )
+                    .await?;
+                }
+                Ok::<_, HarnessError>(())
+            }
+        });
+        let text = receiver.recv().await.ok_or("missing text")?;
+        let first = receiver.recv().await.ok_or("missing first tool")?;
+        assert_eq!(capacity.available_permits(), 0);
+        assert!(
+            timeout(Duration::from_millis(30), receiver.recv())
+                .await
+                .is_err()
+        );
+        let retained = first.clone();
+        drop(first);
+        assert!(
+            timeout(Duration::from_millis(30), receiver.recv())
+                .await
+                .is_err()
+        );
+        drop(text);
+        let second = receiver.recv().await.ok_or("missing second tool")?;
+        assert!(
+            matches!(second, HarnessEvent::ToolCall { ref tool_call_id, .. } if tool_call_id.as_str() == "second")
+        );
+        task.await??;
+        drop(retained);
+        drop(second);
+        assert_eq!(capacity.available_permits(), 2);
+        let held = capacity.clone().acquire_many_owned(2).await?;
+        let blocked = tokio::spawn({
+            let capacity = capacity.clone();
+            async move {
+                let (sender, _receiver) = mpsc::unbounded_channel();
+                publish_stream_event(
+                    &sender,
+                    &capacity,
+                    HarnessEvent::ToolCall {
+                        tool_call_id: ToolCallId::new("blocked"),
+                        title: "blocked".into(),
+                        kind: "command".into(),
+                        status: ToolStatus::Running,
+                        output: None,
+                        diffs: Vec::new(),
+                        terminal_id: None,
+                        stream_permit: None,
+                    },
+                )
+                .await
+            }
+        });
+        tokio::task::yield_now().await;
+        blocked.abort();
+        assert!(blocked.await.is_err_and(|error| error.is_cancelled()));
+        drop(held);
         assert_eq!(capacity.available_permits(), 2);
         Ok(())
     }
