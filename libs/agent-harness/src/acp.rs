@@ -659,14 +659,17 @@ async fn drive_session(
                             updates.publish(&sender, event)?;
                         }
                     }
-                    Some(AcpEvent::PermissionRequested { session_id, tool_call, options, decision })
+                    Some(AcpEvent::PermissionRequested { request_id, session_id, tool_call, options, decision })
                         if session_id == session && prompt.is_some() && !cancelling => {
-                        let approval = PendingApproval::new(tool_call, options, decision, project_approvals.is_some());
+                        let approval = PendingApproval::new(request_id, tool_call, options, decision, project_approvals.is_some());
                         let idle = approvals.is_empty();
                         approvals.push_back(approval);
                         if idle {
                             show_next_approval(&sender, &mut approvals, &session_grants, project_approvals).await?;
                         }
+                    }
+                    Some(AcpEvent::PermissionCancelled { request_id }) => {
+                        cancel_approval(&sender, &mut approvals, &session_grants, project_approvals, request_id).await?;
                     }
                     Some(AcpEvent::TerminalOutput { terminal_id, chunk, permit, .. }) if prompt.is_some() => {
                         updates.terminal_output(&sender, terminal_id, chunk, Arc::new(permit))?;
@@ -815,6 +818,7 @@ fn finish_turn(
 }
 
 struct PendingApproval {
+    request_id: u64,
     request: ApprovalRequest,
     allow: Option<schema::PermissionOptionId>,
     deny: Option<schema::PermissionOptionId>,
@@ -876,6 +880,7 @@ impl SessionGrants {
 
 impl PendingApproval {
     fn new(
+        request_id: u64,
         call: schema::ToolCallUpdate,
         options: Vec<schema::PermissionOption>,
         reply: PermissionReply,
@@ -952,6 +957,7 @@ impl PendingApproval {
             choices: Some(choices),
         };
         Self {
+            request_id,
             request,
             allow,
             deny: once(PermissionOptionKind::RejectOnce),
@@ -970,6 +976,34 @@ fn has_approval_input(input: &serde_json::Value) -> bool {
         serde_json::Value::Bool(_) | serde_json::Value::Number(_) => true,
         serde_json::Value::Null => false,
     }
+}
+
+async fn cancel_approval(
+    sender: &mpsc::UnboundedSender<HarnessEvent>,
+    approvals: &mut VecDeque<PendingApproval>,
+    session_grants: &SessionGrants,
+    project_approvals: Option<&dyn ProjectApprovalPolicy>,
+    request_id: u64,
+) -> HarnessResult<()> {
+    let Some(index) = approvals
+        .iter()
+        .position(|approval| approval.request_id == request_id)
+    else {
+        return Ok(());
+    };
+    let Some(approval) = approvals.remove(index) else {
+        return Ok(());
+    };
+    if index == 0 {
+        publish(
+            sender,
+            HarnessEvent::ApprovalWithdrawn {
+                approval_id: approval.request.approval_id,
+            },
+        )?;
+        show_next_approval(sender, approvals, session_grants, project_approvals).await?;
+    }
+    Ok(())
 }
 
 async fn show_next_approval(
@@ -2405,6 +2439,43 @@ done
     }
 
     #[tokio::test]
+    async fn cancelled_approval_withdraws_visible_and_skips_queued_requests()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let pending = |request_id| {
+            let (reply, _response) = futures_channel::oneshot::channel();
+            PendingApproval::new(
+                request_id,
+                ToolCallUpdate::new("tool", ToolCallUpdateFields::new()),
+                Vec::new(),
+                PermissionReply::new(reply),
+                false,
+            )
+        };
+        let first = pending(1);
+        let second = pending(2);
+        let third = pending(3);
+        let first_id = first.request.approval_id.clone();
+        let third_id = third.request.approval_id.clone();
+        let mut queue = VecDeque::from([first, second, third]);
+        let (grant_changes, _) = watch::channel(Vec::new());
+        let grants = SessionGrants::new(grant_changes);
+        let (sender, mut events) = mpsc::unbounded_channel();
+
+        cancel_approval(&sender, &mut queue, &grants, None, 2).await?;
+        assert!(events.try_recv().is_err());
+        cancel_approval(&sender, &mut queue, &grants, None, 1).await?;
+        assert!(
+            matches!(events.try_recv()?, HarnessEvent::ApprovalWithdrawn { approval_id } if approval_id == first_id)
+        );
+        assert!(
+            matches!(events.try_recv()?, HarnessEvent::ApprovalRequested { request } if request.approval_id == third_id)
+        );
+        cancel_approval(&sender, &mut queue, &grants, None, 99).await?;
+        assert!(events.try_recv().is_err());
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn queued_session_grant_never_covers_a_changed_command()
     -> Result<(), Box<dyn std::error::Error>> {
         let pending = |command: &str| {
@@ -2422,7 +2493,7 @@ done
                 PermissionOptionKind::AllowOnce,
             )];
             (
-                PendingApproval::new(request, options, PermissionReply::new(reply), false),
+                PendingApproval::new(0, request, options, PermissionReply::new(reply), false),
                 response,
             )
         };
@@ -2470,6 +2541,44 @@ done
         assert!(
             matches!(events.try_recv()?, HarnessEvent::ApprovalRequested { request } if request.approval_id == changed_id)
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn agent_cancelled_approval_is_withdrawn_before_next_request()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (mut harness, _, _) = fake(FakeScript {
+            permission: Some(tool_request()),
+            cancel_permission: true,
+            permission_after_cancel: true,
+            ..FakeScript::default()
+        })
+        .await?;
+        harness.open_session(None).await?;
+        harness
+            .prompt(PromptInput::text("request approval"))
+            .await?;
+        let first = loop {
+            if let HarnessEvent::ApprovalRequested { request } = next(&mut harness).await? {
+                break request.approval_id;
+            }
+        };
+        assert!(
+            matches!(next(&mut harness).await?, HarnessEvent::ApprovalWithdrawn { approval_id } if approval_id == first)
+        );
+        let second = loop {
+            if let HarnessEvent::ApprovalRequested { request } = next(&mut harness).await? {
+                break request.approval_id;
+            }
+        };
+        assert_ne!(first, second);
+        harness.respond(second, Decision::Deny).await?;
+        loop {
+            if matches!(next(&mut harness).await?, HarnessEvent::TurnFinished { .. }) {
+                break;
+            }
+        }
+        harness.shutdown().await?;
         Ok(())
     }
 

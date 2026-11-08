@@ -915,8 +915,9 @@ If Pi’s RPC probe is blocked, proceed with ACP while resolving it.
   Invalid deny or confirmation patterns cannot silently turn into an automatic
   allow; policy fixtures cover both and preserve explicit deny decisions.
   Agent-cancelled permission requests release their pending response task; a
-  fake-agent fixture checks cancellation and rejects a late UI answer. Clearing
-  a permission already displayed in the UI still needs handling.
+  fake-agent fixture checks cancellation and rejects a late UI answer. The
+  harness withdraws the matching displayed approval and skips cancelled queued
+  approvals; fixtures cover both and a subsequent request in the same turn.
   Project-scoped grants persist per configured agent. Settings → Projects
   lists saved grants and live session grants by task and can reset either.
   ACP terminals use Shepherd's PTY engine and appear in the selected task's

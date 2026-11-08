@@ -560,6 +560,7 @@ where
     let roots_for_handlers = roots.clone();
     let events_for_notifications = events_tx.clone();
     let permissions = events_tx.clone();
+    let permission_ids = std::sync::atomic::AtomicU64::new(0);
     let reads = events_tx.clone();
     let writes = events_tx.clone();
     let terminal_create = events_tx.clone();
@@ -631,9 +632,11 @@ where
                 }
                 let permissions = permissions.clone();
                 let cancellation = responder.cancellation();
+                let request_id = permission_ids.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 tokio::spawn(async move {
                     let (decision_tx, decision_rx) = oneshot::channel();
                     let sent = permissions.send(AcpEvent::PermissionRequested {
+                        request_id,
                         session_id: request.session_id.clone(),
                         tool_call: request.tool_call.clone(),
                         options: request.options.clone(),
@@ -650,7 +653,12 @@ where
                         decision = decision_rx => responder.respond(permission_response(
                             decision.unwrap_or(PermissionDecision::Cancelled),
                         )),
-                        _ = cancellation.cancelled() => responder.respond_with_error(acp::Error::request_cancelled()),
+                        _ = cancellation.cancelled() => {
+                            if permissions.send(AcpEvent::PermissionCancelled { request_id }).is_err() {
+                                tracing::debug!("ACP permission cancellation receiver closed");
+                            }
+                            responder.respond_with_error(acp::Error::request_cancelled())
+                        },
                     };
                     log_reply(reply, "permission");
                 });

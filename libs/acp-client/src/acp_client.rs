@@ -84,10 +84,14 @@ pub enum AcpEvent {
     SessionUpdate(Box<acp::schema::v1::SessionNotification>),
     /// The agent wants the user to approve a tool call.
     PermissionRequested {
+        request_id: u64,
         session_id: schema::SessionId,
         tool_call: ToolCallUpdate,
         options: Vec<PermissionOption>,
         decision: PermissionReply,
+    },
+    PermissionCancelled {
+        request_id: u64,
     },
     /// The client answered a permission request from the project's policy,
     /// without asking.
@@ -180,6 +184,10 @@ impl std::fmt::Debug for AcpEvent {
                 .debug_struct("PermissionRequested")
                 .field("tool_call", tool_call)
                 .field("options", options)
+                .finish(),
+            Self::PermissionCancelled { request_id } => f
+                .debug_struct("PermissionCancelled")
+                .field("request_id", request_id)
                 .finish(),
             Self::TerminalOutput {
                 terminal_id, chunk, ..

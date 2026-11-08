@@ -41,6 +41,7 @@ pub struct FakeScript {
     /// Ask the client to approve this tool call.
     pub permission: Option<ToolCallUpdate>,
     pub cancel_permission: bool,
+    pub permission_after_cancel: bool,
     /// Options offered with the permission request.
     pub permission_options: Vec<PermissionOption>,
     /// `session/load` fails, as an agent without resume support would.
@@ -328,6 +329,21 @@ async fn run_turn(
                 .map_err(|error| error.to_string());
             if let Ok(mut state) = observations.lock() {
                 state.permission_cancellation = Some(result);
+            }
+            if script.permission_after_cancel {
+                let response = connection
+                    .send_request(RequestPermissionRequest::new(
+                        session_id.clone(),
+                        tool_call.clone(),
+                        script.permission_options.clone(),
+                    ))
+                    .block_task()
+                    .await?;
+                if let Ok(mut state) = observations.lock() {
+                    state
+                        .permission_responses
+                        .push(format!("{:?}", response.outcome));
+                }
             }
         } else {
             let response = request.block_task().await?;
@@ -816,14 +832,27 @@ mod tests {
             .clone()
             .ok_or("missing cancellation")?;
         assert!(matches!(cancellation, Err(error) if error.to_lowercase().contains("cancel")));
-        let mut found = false;
+        let mut found = None;
+        let mut cancelled = None;
         while let Ok(event) = connection.events.try_recv() {
-            if let AcpEvent::PermissionRequested { decision, .. } = event {
-                assert!(decision.answer(PermissionDecision::Cancelled).is_err());
-                found = true;
+            match event {
+                AcpEvent::PermissionRequested {
+                    request_id,
+                    decision,
+                    ..
+                } => {
+                    assert!(decision.answer(PermissionDecision::Cancelled).is_err());
+                    found = Some(request_id);
+                }
+                AcpEvent::PermissionCancelled { request_id } => cancelled = Some(request_id),
+                _ => {}
             }
         }
-        assert!(found, "permission request should have reached the client");
+        assert!(
+            found.is_some(),
+            "permission request should have reached the client"
+        );
+        assert_eq!(found, cancelled);
         Ok(())
     }
 
