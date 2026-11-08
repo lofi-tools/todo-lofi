@@ -1632,6 +1632,9 @@ placeholder tabs and no unearned state badges.
   Unsolicited starts and completions while idle no longer enqueue turn events;
   a burst fixture also checks unrelated starts cannot replace the active turn
   and duplicate starts cannot erase its reported error.
+  A completion without a turn ID during a pending or active turn is a protocol
+  error instead of a false completion; a fixture checks state and approvals are
+  not changed before the error is handled.
   App-server turn starts are emitted by the protocol reader before completion,
   including when a fast turn finishes before its start reply is processed;
   an offline fixture checks reply and notification ordering. While that reply

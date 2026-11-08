@@ -3191,28 +3191,27 @@ async fn handle_notification(
                 tracing::debug!("ignoring an unsolicited Codex turn completion");
                 return Ok(());
             }
+            let completed = read_turn_id(params).ok_or_else(|| {
+                HarnessError::Protocol("Codex turn completion is missing its turn ID.".into())
+            })?;
             let active = pending
                 .turn_id
                 .as_deref()
                 .or_else(|| pending.start_request.and(pending.announced_turn.as_deref()));
-            if let (Some(active), Some(completed)) = (active, read_turn_id(params))
-                && active != completed
-            {
+            if active.is_some_and(|active| active != completed) {
                 tracing::warn!("ignoring completion for a different Codex turn");
                 return Ok(());
             }
             if pending.start_request.is_some()
                 && pending.turn_id.is_none()
                 && pending.announced_turn.is_some()
-                && pending.announced_turn == read_turn_id(params)
+                && pending.announced_turn.as_deref() == Some(completed.as_str())
             {
                 tracing::debug!("ignoring a duplicate Codex turn completion");
                 return Ok(());
             }
-            if pending.start_request.is_some()
-                && let Some(turn_id) = read_turn_id(params)
-            {
-                announce_app_turn(&mut pending, turn_id, sender)?;
+            if pending.start_request.is_some() {
+                announce_app_turn(&mut pending, completed, sender)?;
             }
             pending.turn_id = None;
             pending.approval_writes.clear();
@@ -3679,6 +3678,39 @@ mod tests {
         assert!(matches!(pending.lock().await.turn_error.as_ref(),
             Some(HarnessEvent::TurnError { text, .. }) if text == "original failure"));
         assert!(events.try_recv().is_err());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn unidentified_turn_completion_fails_without_mutating_active_state() -> HarnessResult<()>
+    {
+        for active in [false, true] {
+            let pending = Arc::new(AsyncMutex::new(Pending::default()));
+            {
+                let mut state = pending.lock().await;
+                state.start_request = Some(1);
+                if active {
+                    state.turn_id = Some("current".into());
+                    state.announced_turn = Some("current".into());
+                }
+                state.approvals.insert("approval".into(), 7);
+            }
+            let (sender, mut events) = mpsc::unbounded_channel();
+            let result = handle_notification(
+                "turn/completed",
+                &json!({"turn": {"status": "completed"}}),
+                &sender,
+                &pending,
+            )
+            .await;
+            assert!(
+                matches!(result, Err(HarnessError::Protocol(message)) if message.contains("missing its turn ID"))
+            );
+            let state = pending.lock().await;
+            assert_eq!(state.turn_id.as_deref(), active.then_some("current"));
+            assert_eq!(state.approvals.get("approval"), Some(&7));
+            assert!(events.try_recv().is_err());
+        }
         Ok(())
     }
 
