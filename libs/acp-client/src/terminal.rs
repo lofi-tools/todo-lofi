@@ -25,6 +25,7 @@ const MAX_OUTPUT_LIMIT: usize = 1024 * 1024;
 const MAX_PENDING_OUTPUT_EVENTS: usize = 64;
 const MAX_OUTPUT_EVENT_BYTES: usize = 8192;
 const MAX_EXIT_WAITERS_PER_TERMINAL: usize = 64;
+const MAX_PENDING_STOP_REQUESTS: usize = 64;
 
 pub struct TerminalLaunch {
     pub id: String,
@@ -69,7 +70,7 @@ struct TerminalEntry {
     waiters: Vec<TerminalWaiter>,
     byte_limit: usize,
     cancelled: tokio::sync::watch::Sender<bool>,
-    stop: Option<tokio::sync::mpsc::UnboundedSender<oneshot::Sender<Result<(), String>>>>,
+    stop: Option<tokio::sync::mpsc::Sender<oneshot::Sender<Result<(), String>>>>,
 }
 
 struct TerminalWaiter {
@@ -218,8 +219,9 @@ impl TerminalRegistry {
         let stderr = child.stderr.take();
 
         self.register(&key, byte_limit);
-        let (stop, mut stop_requests) =
-            tokio::sync::mpsc::unbounded_channel::<oneshot::Sender<Result<(), String>>>();
+        let (stop, mut stop_requests) = tokio::sync::mpsc::channel::<
+            oneshot::Sender<Result<(), String>>,
+        >(MAX_PENDING_STOP_REQUESTS);
         if let Some(entry) = self.entries().get_mut(&key) {
             entry.stop = Some(stop);
         }
@@ -436,8 +438,12 @@ impl TerminalRegistry {
             return Ok(());
         };
         let (response, result) = oneshot::channel();
-        if stop.send(response).is_err() {
-            return Ok(());
+        match stop.try_send(response) {
+            Ok(()) => {}
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => return Ok(()),
+            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                return Err("too many pending terminal stop requests".into());
+            }
         }
         match result.await {
             Ok(result) => result,
@@ -727,6 +733,50 @@ mod tests {
         async fn stop(&self, _id: &str) -> Result<(), String> {
             Ok(())
         }
+    }
+
+    #[tokio::test]
+    async fn direct_stop_queue_rejects_excess_and_accepts_retry()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let (events, _receiver) = tokio::sync::mpsc::unbounded_channel();
+        let registry = TerminalRegistry::new(
+            SessionRoots::new([directory.path().to_path_buf()]),
+            &events,
+            None,
+        );
+        registry.register("fixture", MAX_OUTPUT_LIMIT);
+        let (stop, mut requests) = tokio::sync::mpsc::channel(MAX_PENDING_STOP_REQUESTS);
+        for _ in 0..MAX_PENDING_STOP_REQUESTS {
+            let (response, _result) = oneshot::channel();
+            stop.try_send(response)?;
+        }
+        registry
+            .entries()
+            .get_mut("fixture")
+            .ok_or("missing terminal")?
+            .stop = Some(stop);
+        assert!(
+            registry
+                .stop_direct("fixture")
+                .await
+                .is_err_and(|error| error.contains("too many pending"))
+        );
+        requests.recv().await.ok_or("missing queued stop")?;
+        let retry = registry.stop_direct("fixture");
+        tokio::pin!(retry);
+        assert!(futures::poll!(retry.as_mut()).is_pending());
+        for _ in 1..MAX_PENDING_STOP_REQUESTS {
+            requests.recv().await.ok_or("missing queued stop")?;
+        }
+        requests
+            .recv()
+            .await
+            .ok_or("missing retry")?
+            .send(Ok(()))
+            .map_err(|_| "retry receiver dropped")?;
+        retry.await.map_err(std::io::Error::other)?;
+        Ok(())
     }
 
     #[tokio::test]
