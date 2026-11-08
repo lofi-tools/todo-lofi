@@ -1452,6 +1452,9 @@ placeholder tabs and no unearned state badges.
   discarding a disconnected session; an injected-failure fixture verifies that
   each operation retains it until a later shutdown succeeds.
 - [ ] Bounded transcript, stderr, search and frame buffers.
+  Diagnostic history retains at most 256 KiB per record while draining longer
+  lines, reports oversized records, and continues to later entries; a local
+  log fixture covers recovery after an oversized line.
   Search snippets cap the displayed matching word at 65 characters and compare
   case-folded text without allocating a copy of an arbitrarily long word;
   fixtures cover long Unicode matches and exact versus prefix matching.

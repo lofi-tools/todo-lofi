@@ -5,6 +5,8 @@ use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
 
+const MAX_DIAGNOSTIC_RECORD_BYTES: usize = 256 * 1024;
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Diagnostic {
@@ -89,19 +91,33 @@ impl DiagnosticLog {
         let mut line_number = 0;
         loop {
             line.clear();
-            if reader.read_until(b'\n', &mut line)? == 0 {
+            let Some(truncated) = read_diagnostic_line(&mut reader, &mut line)? else {
                 break;
-            }
+            };
             line_number += 1;
-            let record = match serde_json::from_slice(&line) {
-                Ok(record) => record,
-                Err(error) => Diagnostic {
+            let record = if truncated {
+                Diagnostic {
                     id: format!("invalid-log-line-{line_number}"),
                     time: "Unknown time".into(),
                     operation: "diagnostic_history".into(),
                     message: "A diagnostic history record could not be read.".into(),
-                    details: format!("Invalid diagnostic record on line {line_number}: {error}"),
-                },
+                    details: format!(
+                        "Diagnostic record on line {line_number} exceeds the {MAX_DIAGNOSTIC_RECORD_BYTES}-byte limit."
+                    ),
+                }
+            } else {
+                match serde_json::from_slice(&line) {
+                    Ok(record) => record,
+                    Err(error) => Diagnostic {
+                        id: format!("invalid-log-line-{line_number}"),
+                        time: "Unknown time".into(),
+                        operation: "diagnostic_history".into(),
+                        message: "A diagnostic history record could not be read.".into(),
+                        details: format!(
+                            "Invalid diagnostic record on line {line_number}: {error}"
+                        ),
+                    },
+                }
             };
             if records.len() == 200 {
                 records.pop_front();
@@ -109,6 +125,27 @@ impl DiagnosticLog {
             records.push_back(record);
         }
         Ok(records.into_iter().collect())
+    }
+}
+
+fn read_diagnostic_line(reader: &mut impl BufRead, line: &mut Vec<u8>) -> io::Result<Option<bool>> {
+    let mut found_data = false;
+    let mut truncated = false;
+    loop {
+        let available = reader.fill_buf()?;
+        if available.is_empty() {
+            return Ok(found_data.then_some(truncated));
+        }
+        found_data = true;
+        let end = available.iter().position(|byte| *byte == b'\n');
+        let length = end.map_or(available.len(), |index| index + 1);
+        let retained = length.min(MAX_DIAGNOSTIC_RECORD_BYTES.saturating_sub(line.len()));
+        line.extend_from_slice(&available[..retained]);
+        truncated |= retained < length;
+        reader.consume(length);
+        if end.is_some() {
+            return Ok(Some(truncated));
+        }
     }
 }
 
@@ -265,6 +302,30 @@ mod tests {
             history.get(2).map(|record| record.id.as_str()),
             Some("after")
         );
+        Ok(())
+    }
+
+    #[test]
+    fn history_skips_oversized_records_and_preserves_following_entries()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("errors.jsonl");
+        let log = DiagnosticLog::new(path.clone());
+        let mut file = OpenOptions::new().create(true).append(true).open(&path)?;
+        file.write_all(&vec![b'x'; MAX_DIAGNOSTIC_RECORD_BYTES * 3])?;
+        file.write_all(b"\n")?;
+        drop(file);
+        log.append(&Diagnostic {
+            id: "after".into(),
+            time: "fixture".into(),
+            operation: "fixture".into(),
+            message: "fixture error".into(),
+            details: String::new(),
+        })?;
+        let history = log.recent()?;
+        assert_eq!(history.len(), 2);
+        assert!(history[0].details.contains("exceeds"));
+        assert_eq!(history[1].id, "after");
         Ok(())
     }
 
