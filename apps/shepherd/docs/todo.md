@@ -1372,6 +1372,11 @@ placeholder tabs and no unearned state badges.
   group-signal failure verifies the process remains available for a retry.
   A disconnected turn also reports a failed stop alongside the connection
   error and retains the child; a local fixture checks cleanup on retry.
+  If OpenCode prompt admission fails and cancellation also fails, Shepherd
+  stops the server, reports the combined error and blocks further prompts until
+  cleanup; failure to clear its process record remains retryable. A local HTTP
+  fixture covers this path. Cancellation
+  of the admission future itself still needs a cleanup guard.
   Core sessions distinguish a disconnected adapter from completed cleanup.
   Retry, task deletion, batch archive and quit all attempt shutdown before
   discarding a disconnected session; an injected-failure fixture verifies that

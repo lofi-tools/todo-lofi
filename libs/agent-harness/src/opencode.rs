@@ -225,6 +225,7 @@ pub struct OpenCodeHarness {
     project_approvals: Option<Arc<dyn crate::ProjectApprovalPolicy>>,
     terminals: Option<Arc<dyn TerminalBackend>>,
     process_tracker: Option<Arc<dyn crate::AgentProcessTracker>>,
+    cleanup_required: bool,
 }
 
 impl Default for OpenCodeHarness {
@@ -243,6 +244,7 @@ impl Default for OpenCodeHarness {
             project_approvals: None,
             terminals: None,
             process_tracker: None,
+            cleanup_required: false,
         }
     }
 }
@@ -476,6 +478,11 @@ impl AgentHarness for OpenCodeHarness {
         if let Some(fallback) = &mut self.fallback {
             return fallback.prompt(input).await;
         }
+        if self.cleanup_required {
+            return Err(HarnessError::Protocol(
+                "OpenCode needs cleanup before another prompt".into(),
+            ));
+        }
         if self
             .turn
             .as_ref()
@@ -491,8 +498,22 @@ impl AgentHarness for OpenCodeHarness {
         let events = server.subscribe().await?;
         let id = format!("msg_{}", uuid::Uuid::new_v4().simple());
         if let Err(error) = server.enqueue_prompt(&session, &id, &input, true).await {
-            if server.cancel_prompt(&session, &id).await.is_err() {
-                tracing::warn!("could not clean up an unconfirmed OpenCode prompt");
+            if let Err(cleanup) = server.cancel_prompt(&session, &id).await {
+                self.cleanup_required = true;
+                let kind = FailureKind::classify(&error).unwrap_or(FailureKind::Protocol);
+                let mut message =
+                    format!("{error}; could not cancel the unconfirmed OpenCode prompt: {cleanup}");
+                if let Err(stop) = server.shutdown().await {
+                    message.push_str(&format!("; could not stop the OpenCode server: {stop}"));
+                }
+                publish(
+                    &self.sender,
+                    HarnessEvent::ConnectionFailed {
+                        kind,
+                        text: message.clone(),
+                    },
+                )?;
+                return Err(HarnessError::Reported { kind, message });
             }
             return Err(error);
         }
@@ -637,6 +658,7 @@ impl AgentHarness for OpenCodeHarness {
         }
         self.session = None;
         self.modes = None;
+        self.cleanup_required = false;
         Ok(())
     }
 }
@@ -2276,7 +2298,7 @@ exec sleep 60
             )]),
             ..SpawnSpec::default()
         };
-        let fixture = serve_native_fixture(listener, &directory);
+        let fixture = serve_native_fixture(listener, &directory, false);
         let client = async {
             let mut harness = OpenCodeHarness::default();
             let tracker = Arc::new(Tracker {
@@ -2322,9 +2344,80 @@ exec sleep 60
     }
 
     #[cfg(unix)]
+    #[tokio::test]
+    async fn unconfirmed_prompt_with_failed_cancel_stops_the_server()
+    -> Result<(), Box<dyn std::error::Error>> {
+        struct Tracker(AtomicBool);
+        #[async_trait]
+        impl crate::AgentProcessTracker for Tracker {
+            async fn started(&self, _: u32) -> Result<String, String> {
+                Ok("fixture-record".into())
+            }
+            async fn stopped(&self, _: &str) -> Result<(), String> {
+                if self.0.swap(false, Ordering::SeqCst) {
+                    Err("fixture record cleanup failure".into())
+                } else {
+                    Ok(())
+                }
+            }
+        }
+        let root = tempfile::tempdir()?;
+        let directory = root.path().canonicalize()?;
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let program = fixture_launcher(
+            &directory,
+            r#"#!/bin/sh
+[ "$*" = "serve --hostname 127.0.0.1 --port 0" ] || exit 2
+printf 'opencode server listening on %s\n' "$SHEPHERD_TEST_OPENCODE_URL"
+exec sleep 60
+"#,
+        )?;
+        let spec = SpawnSpec {
+            program,
+            cwd: directory.clone(),
+            environment: BTreeMap::from([(
+                "SHEPHERD_TEST_OPENCODE_URL".into(),
+                format!("http://{}", listener.local_addr()?),
+            )]),
+            ..SpawnSpec::default()
+        };
+        let fixture = serve_native_fixture(listener, &directory, true);
+        let client = async {
+            let mut harness = OpenCodeHarness::default();
+            harness.set_process_tracker(Arc::new(Tracker(AtomicBool::new(true))));
+            harness.start(spec).await?;
+            harness.open_session(None).await?;
+            let error = harness
+                .prompt(PromptInput::text("Reply with local fixture text only"))
+                .await
+                .err()
+                .ok_or("prompt unexpectedly succeeded")?;
+            assert!(
+                error
+                    .to_string()
+                    .contains("could not cancel the unconfirmed OpenCode prompt")
+            );
+            assert!(error.to_string().contains("fixture record cleanup failure"));
+            assert!(matches!(
+                harness.prompt(PromptInput::text("must not start")).await,
+                Err(HarnessError::Protocol(message)) if message.contains("needs cleanup")
+            ));
+            let events: Vec<_> = std::iter::from_fn(|| harness.receiver.try_recv().ok()).collect();
+            assert!(events.iter().any(|event| matches!(event, HarnessEvent::ConnectionFailed { text, .. } if text.contains("could not cancel the unconfirmed OpenCode prompt"))));
+            let server = harness.server.as_ref().ok_or("server handle was lost")?;
+            assert!(server.child.lock().await.try_wait()?.is_some());
+            harness.shutdown().await?;
+            Ok::<_, Box<dyn std::error::Error>>(())
+        };
+        timeout(REQUEST_TIMEOUT, async { tokio::try_join!(fixture, client) }).await??;
+        Ok(())
+    }
+
+    #[cfg(unix)]
     async fn serve_native_fixture(
         listener: TcpListener,
         directory: &Path,
+        fail_prompt: bool,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let mut stream = None;
         for expected in [
@@ -2339,6 +2432,7 @@ exec sleep 60
             let (reader, mut writer) = socket.into_split();
             let (request, body) = read_fixture_request(reader).await?;
             assert_eq!(request, format!("{expected} HTTP/1.1"));
+            let mut status = "200 OK";
             let response = match expected {
                 "GET /api/info" => json!({"version": "fixture"}).to_string(),
                 "GET /openapi.json" => NATIVE_API.to_owned(),
@@ -2361,43 +2455,56 @@ exec sleep 60
                     let prompt_id = body["id"].as_str().ok_or("expected prompt ID")?;
                     assert_eq!(body["text"], "Reply with local fixture text only");
                     assert_eq!(body["resume"], true);
-                    let stream = stream.as_mut().ok_or("expected an event stream")?;
-                    let delta = |session, delta| json!({"sessionID": session, "assistantMessageID": "msg_fixture", "ordinal": 0, "delta": delta});
-                    for (kind, data) in [
-                        (
-                            "session.inbox.enqueued",
-                            json!({"sessionID": "ses_fixture", "inboxID": "msg_previous"}),
-                        ),
-                        ("session.text.delta", delta("ses_fixture", "prior turn")),
-                        (
-                            "session.inbox.enqueued",
-                            json!({"sessionID": "ses_fixture", "inboxID": prompt_id}),
-                        ),
-                        ("session.text.delta", delta("ses_other", "other session")),
-                        (
-                            "session.text.delta",
-                            delta("ses_fixture", "native fixture reply"),
-                        ),
-                        (
-                            "session.execution.succeeded",
-                            json!({"sessionID": "ses_fixture"}),
-                        ),
-                    ] {
-                        let event = json!({"type": kind, "data": data});
-                        stream
-                            .write_all(format!("data: {event}\n\n").as_bytes())
-                            .await?;
+                    if fail_prompt {
+                        status = "500 Internal Server Error";
+                        "{}".to_string()
+                    } else {
+                        let stream = stream.as_mut().ok_or("expected an event stream")?;
+                        let delta = |session, delta| json!({"sessionID": session, "assistantMessageID": "msg_fixture", "ordinal": 0, "delta": delta});
+                        for (kind, data) in [
+                            (
+                                "session.inbox.enqueued",
+                                json!({"sessionID": "ses_fixture", "inboxID": "msg_previous"}),
+                            ),
+                            ("session.text.delta", delta("ses_fixture", "prior turn")),
+                            (
+                                "session.inbox.enqueued",
+                                json!({"sessionID": "ses_fixture", "inboxID": prompt_id}),
+                            ),
+                            ("session.text.delta", delta("ses_other", "other session")),
+                            (
+                                "session.text.delta",
+                                delta("ses_fixture", "native fixture reply"),
+                            ),
+                            (
+                                "session.execution.succeeded",
+                                json!({"sessionID": "ses_fixture"}),
+                            ),
+                        ] {
+                            let event = json!({"type": kind, "data": data});
+                            stream
+                                .write_all(format!("data: {event}\n\n").as_bytes())
+                                .await?;
+                        }
+                        json!({"data": {"id": prompt_id, "sessionID": "ses_fixture"}}).to_string()
                     }
-                    json!({"data": {"id": prompt_id, "sessionID": "ses_fixture"}}).to_string()
                 }
                 _ => return Err("unexpected fixture request".into()),
             };
             let header = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                 response.len()
             );
             writer.write_all(header.as_bytes()).await?;
             writer.write_all(response.as_bytes()).await?;
+            writer.shutdown().await?;
+        }
+        if fail_prompt {
+            let (socket, _) = listener.accept().await?;
+            let (reader, mut writer) = socket.into_split();
+            let (request, _) = read_fixture_request(reader).await?;
+            assert!(request.starts_with("DELETE /api/session/ses_fixture/inbox/msg_"));
+            writer.write_all(b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await?;
             writer.shutdown().await?;
         }
         Ok(())
