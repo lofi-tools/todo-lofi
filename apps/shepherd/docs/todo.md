@@ -925,9 +925,11 @@ If Pi’s RPC probe is blocked, proceed with ACP while resolving it.
   sends `abort`; shutdown closes stdin and reaps the process group. A `confirm`
   extension dialog becomes an approval card answered by its ID through
   `extension_ui_response`; other dialog methods are logged rather than mapped to
-  a decision. Session resume by ID, the bundled tool-approval extension and the
-  `unreviewed tools` label remain open, as does recording a live model turn for
-  `agent_settled` and tool approval records.
+  a decision. Reopening sends `switch_session` with the stored session file and
+  refreshes the state, so the adapter session ID is that file; a session started
+  with `--no-session` reports no resume support. The bundled tool-approval
+  extension and the `unreviewed tools` label remain open, as does recording a
+  live model turn for `agent_settled` and tool approval records.
 - [ ] ACP adapter using `libs/acp-client`; no duplicate protocol client.
   Use this adapter for OpenCode when its native protocol is unavailable.
   The shared client accepts an exact configured command, validates ACP v1,

@@ -561,12 +561,14 @@ impl AgentHarness for PiHarness {
             pump_events(events, sender, bridge, cancelled, dialog_ping).await;
         }));
         self.rpc = Some(rpc);
+        let resume = state.session_file.is_some();
         self.state = Some(state);
         Ok(Capabilities {
             streaming: true,
             thoughts: true,
             tool_calls: true,
             approvals: true,
+            resume,
             cancel: true,
             images: true,
             ..Capabilities::default()
@@ -577,11 +579,21 @@ impl AgentHarness for PiHarness {
         if self.session.is_some() {
             return Err(protocol("Pi session is already open"));
         }
-        if resume.is_some() {
-            return Err(protocol("Pi RPC cannot resume a session by ID"));
-        }
-        let state = self.state.as_ref().ok_or(HarnessError::NotStarted)?;
-        let session = SessionId::new(state.session_id.clone());
+        let session = match resume {
+            Some(path) => {
+                let state = {
+                    let rpc = self.rpc.as_ref().ok_or(HarnessError::NotStarted)?;
+                    switch_session(rpc, path.as_str()).await?
+                };
+                let session = session_id_for(&state);
+                self.state = Some(state);
+                session
+            }
+            None => {
+                let state = self.state.as_ref().ok_or(HarnessError::NotStarted)?;
+                session_id_for(state)
+            }
+        };
         self.session = Some(session.clone());
         self.publish(HarnessEvent::SessionState {
             state: SessionState::Ready,
@@ -737,6 +749,34 @@ async fn pump_events(
             return;
         }
     }
+}
+
+/// A Pi session can only be reopened through its session file, so that path is
+/// the adapter session ID; a session started with `--no-session` has none.
+fn session_id_for(state: &PiSessionState) -> SessionId {
+    match &state.session_file {
+        Some(file) => SessionId::new(file.to_string_lossy()),
+        None => SessionId::new(state.session_id.clone()),
+    }
+}
+
+async fn switch_session(rpc: &PiRpc, path: &str) -> HarnessResult<PiSessionState> {
+    let reply = rpc
+        .request(
+            "switch_session",
+            Map::from_iter([("sessionPath".into(), json!(path))]),
+        )
+        .await?;
+    if reply.get("cancelled").and_then(Value::as_bool) == Some(true) {
+        return Err(protocol("Pi declined to switch sessions"));
+    }
+    let data = rpc.request("get_state", Map::new()).await?;
+    let state = serde_json::from_value::<PiSessionState>(data)
+        .map_err(|error| protocol(format!("invalid Pi get_state reply: {error}")))?;
+    if state.session_file.is_none() {
+        return Err(protocol("Pi switched to a session without a session file"));
+    }
+    Ok(state)
 }
 
 fn translate_record(
@@ -1710,6 +1750,54 @@ sed -n '3p' session.jsonl | sed "s/\"id\":\"2\"/\"id\":\"$prompt_id\"/"
             })
         ));
         rpc.shutdown().await?;
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn harness_resumes_a_session_file() -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let resumed = directory.path().join("resumed.jsonl");
+        let script = directory.path().join("pi-harness-resume.sh");
+        std::fs::write(
+            &script,
+            r#"
+[ "$1" = --mode ] && [ "$2" = rpc ] || exit 2
+IFS= read -r state || exit 3
+state_id=$(printf '%s\n' "$state" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
+printf '{"type":"response","id":"%s","command":"get_state","success":true,"data":{"sessionId":"pi-fresh","isStreaming":false,"isCompacting":false,"pendingMessageCount":0}}\n' "$state_id"
+IFS= read -r switch || exit 4
+switch_id=$(printf '%s\n' "$switch" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
+switch_path=$(printf '%s\n' "$switch" | sed -n 's/.*"sessionPath":"\([^"]*\)".*/\1/p')
+[ "$switch_path" = "$RESUMED" ] || exit 5
+printf '{"type":"response","id":"%s","command":"switch_session","success":true,"data":{"cancelled":false}}\n' "$switch_id"
+IFS= read -r reload || exit 6
+reload_id=$(printf '%s\n' "$reload" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
+printf '{"type":"response","id":"%s","command":"get_state","success":true,"data":{"sessionId":"pi-resumed","sessionFile":"%s","isStreaming":false,"isCompacting":false,"pendingMessageCount":0}}\n' "$reload_id" "$RESUMED"
+exec sleep 30
+"#,
+        )?;
+        let mut spec = pi_script_spec(&script, directory.path());
+        spec.environment
+            .insert("RESUMED".into(), resumed.to_string_lossy().into_owned());
+        let mut harness = PiHarness::new();
+        let capabilities = harness.start(spec).await?;
+        assert!(
+            !capabilities.resume,
+            "a session without a file cannot be reopened"
+        );
+        let path = resumed.to_string_lossy().into_owned();
+        let session = harness
+            .open_session(Some(SessionId::new(path.clone())))
+            .await?;
+        assert_eq!(session.as_str(), path);
+        assert!(matches!(
+            harness_event(&mut harness).await?,
+            HarnessEvent::SessionState {
+                state: SessionState::Ready
+            }
+        ));
+        harness.shutdown().await?;
         Ok(())
     }
 
