@@ -1937,28 +1937,26 @@ impl Store for MemoryStore {
         task_id: &TaskId,
         layout: Option<(&ProjectId, &TerminalLayout)>,
     ) -> Result<(), StoreError> {
+        let mut tasks = self.tasks.write().await;
+        let mut sessions = self.sessions.write().await;
+        let mut projects = self.projects.write().await;
+        let mut transcripts = self.transcripts.write().await;
+        let mut workspace_layouts = self.workspace_layouts.write().await;
+        let mut terminal_layouts = self.terminal_layouts.write().await;
+        let mut terminals = self.terminals.write().await;
         if let Some((project_id, layout)) = layout {
-            self.terminal_layouts
-                .write()
-                .await
-                .insert(project_id.clone(), layout.clone());
+            terminal_layouts.insert(project_id.clone(), layout.clone());
         }
-        for project in self.projects.write().await.values_mut() {
+        for project in projects.values_mut() {
             if project.last_task_id.as_ref() == Some(task_id) {
                 project.last_task_id = None;
             }
         }
-        self.tasks.write().await.remove(task_id.as_str());
-        self.workspace_layouts.write().await.remove(task_id);
-        self.transcripts.write().await.remove(task_id);
-        self.sessions
-            .write()
-            .await
-            .retain(|session| &session.task_id != task_id);
-        self.terminals
-            .write()
-            .await
-            .retain(|_, terminal| terminal.task_id.as_ref() != Some(task_id));
+        tasks.remove(task_id.as_str());
+        workspace_layouts.remove(task_id);
+        transcripts.remove(task_id);
+        sessions.retain(|session| &session.task_id != task_id);
+        terminals.retain(|_, terminal| terminal.task_id.as_ref() != Some(task_id));
         Ok(())
     }
 
@@ -2209,6 +2207,56 @@ mod tests {
             .save_transcript_entries(&session, &entries.iter().collect::<Vec<_>>())
             .await?;
         assert_eq!(store.load_transcript(&task.id).await?, entries);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn memory_delete_and_transcript_save_are_serialized()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = TestDirectory::new()?;
+        let store = Arc::new(MemoryStore::new());
+        let mut project = Project::new(directory.path().to_path_buf());
+        let task = Task::draft(project.id.clone(), "Original", directory.path());
+        project.last_task_id = Some(task.id.clone());
+        store.save_project(&project).await?;
+        store.save_task(&task).await?;
+        let session = SessionRecord::started(task.id.clone(), "codex", None);
+        store.save_session(&session).await?;
+        let transcripts = store.transcripts.write().await;
+        let deletion = tokio::spawn({
+            let store = store.clone();
+            let id = task.id.clone();
+            async move { store.delete_task(&id, None).await }
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while store.tasks.try_read().is_ok() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await?;
+        let save = tokio::spawn({
+            let store = store.clone();
+            let task = task.clone();
+            async move { store.save_task_with_transcript(&task, &session, &[]).await }
+        });
+        drop(transcripts);
+        tokio::time::timeout(std::time::Duration::from_secs(2), deletion).await???;
+        assert!(matches!(
+            tokio::time::timeout(std::time::Duration::from_secs(2), save).await??,
+            Err(StoreError::TranscriptOwnerMissing { .. })
+        ));
+        assert!(store.load_tasks().await?.is_empty());
+        assert!(store.load_sessions().await?.is_empty());
+        assert!(store.load_transcript(&task.id).await?.is_empty());
+        assert!(
+            store
+                .load_projects()
+                .await?
+                .first()
+                .ok_or("missing project")?
+                .last_task_id
+                .is_none()
+        );
         Ok(())
     }
 
