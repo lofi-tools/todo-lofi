@@ -1623,7 +1623,9 @@ placeholder tabs and no unearned state badges.
   Invalid ACP permission patterns are logged without their contents or the
   regex parser's echoed input; a debug-log fixture covers this path.
   Pi RPC logs omit correlation IDs from abandoned replies; a log-capture
-  fixture checks that a private value in an echoed ID is not written.
+  fixture checks that a private value in an echoed ID is not written. Codex
+  app-server also omits numeric response IDs from abandoned-reply logs; a
+  log-capture fixture covers unsolicited and late replies.
   Other adapter-internal logs and live-adapter behavior remain to be audited.
   On 2026-11-07 the default offline headless agent-harness suite passed 124
   tests (two live tests ignored), the core suite passed 120 tests (three

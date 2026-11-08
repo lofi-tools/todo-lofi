@@ -2850,7 +2850,7 @@ async fn route_incoming(
             };
             let waiter = pending.lock().await.responses.remove(&request_id);
             let Some(waiter) = waiter else {
-                tracing::debug!(request_id, "codex answered a request nobody is waiting for");
+                tracing::debug!("codex answered a request nobody is waiting for");
                 return Ok(());
             };
             let outcome = match message.get("error") {
@@ -2858,7 +2858,7 @@ async fn route_incoming(
                 None => Ok(message.get("result").cloned().unwrap_or(Value::Null)),
             };
             if waiter.send(outcome).is_err() {
-                tracing::debug!(request_id, "the answer arrived after its caller gave up");
+                tracing::debug!("the answer arrived after its caller gave up");
             }
         }
         (None, Some(method)) => {
@@ -3698,6 +3698,59 @@ mod tests {
         assert!(tail[0].len() < 5000 && tail[0].ends_with(" end"));
         assert_eq!(tail[1], "next");
         assert_eq!(tail[2], "partial");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn abandoned_reply_logs_omit_response_ids() -> Result<(), Box<dyn std::error::Error>> {
+        #[derive(Clone)]
+        struct Writer(Arc<Mutex<Vec<u8>>>);
+        impl std::io::Write for Writer {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0
+                    .lock()
+                    .map_err(|error| std::io::Error::other(error.to_string()))?
+                    .extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let logs = Arc::new(Mutex::new(Vec::new()));
+        let writer = Writer(logs.clone());
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .without_time()
+            .with_max_level(tracing::Level::DEBUG)
+            .with_writer(move || writer.clone())
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+        let (events, _event_receiver) = mpsc::unbounded_channel();
+        let (outgoing, _outgoing_receiver) = mpsc::channel(1);
+        let pending = Arc::new(AsyncMutex::new(Pending::default()));
+        route_incoming(
+            json!({"id": 72931486152_i64, "result": {}}),
+            &events,
+            &pending,
+            &outgoing,
+        )
+        .await?;
+        let (reply, receiver) = oneshot::channel();
+        drop(receiver);
+        pending.lock().await.responses.insert(72931486153, reply);
+        route_incoming(
+            json!({"id": 72931486153_i64, "result": {}}),
+            &events,
+            &pending,
+            &outgoing,
+        )
+        .await?;
+        let output = String::from_utf8(logs.lock().map_err(|error| error.to_string())?.clone())?;
+        assert!(output.contains("codex answered a request nobody is waiting for"));
+        assert!(output.contains("the answer arrived after its caller gave up"));
+        assert!(!output.contains("72931486152"));
+        assert!(!output.contains("72931486153"));
         Ok(())
     }
 
