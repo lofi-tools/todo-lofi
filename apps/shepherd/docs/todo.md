@@ -1593,6 +1593,10 @@ placeholder tabs and no unearned state badges.
   Its recorded `.cache` replay also verifies that the failure remains visible
   after reopening. This kills the agent, not the Shepherd process, and does not
   verify live-agent resume after a Shepherd crash.
+  A separate ChatGPT-plan fixture dropped and reloaded the core during a live
+  Codex turn, resumed the recorded session, and completed another turn using
+  GPT-6.1 Terra at low effort on this Mac. Its recorded responses replayed from
+  `.cache`; this controlled drop is not a SIGKILL of the Shepherd process.
 - [x] Missing worktree repair; archived worktree collection; dirty skip.
   A task fixture deletes its checkout between turns and verifies restoration of
   the same branch and transcript across restart. The review lifecycle fixture
