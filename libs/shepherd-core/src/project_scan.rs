@@ -158,10 +158,27 @@ fn read_directory(dir: &Path) -> Option<(bool, Vec<PathBuf>)> {
 }
 
 fn is_gitdir_file(path: &Path) -> bool {
+    #[cfg(unix)]
+    let file = {
+        use rustix::fs::{Mode, OFlags, open};
+        open(
+            path,
+            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map(std::fs::File::from)
+        .map_err(std::io::Error::from)
+    };
+    #[cfg(not(unix))]
+    let file = std::fs::File::open(path);
     let mut prefix = [0; 8];
-    std::fs::File::open(path)
-        .and_then(|mut file| file.read_exact(&mut prefix))
-        .is_ok()
+    file.and_then(|mut file| {
+        if !file.metadata()?.is_file() {
+            return Err(std::io::Error::other("Git marker is not a regular file"));
+        }
+        file.read_exact(&mut prefix)
+    })
+    .is_ok()
         && &prefix == b"gitdir: "
 }
 
@@ -243,6 +260,25 @@ mod tests {
             root.join("projects/child").display().to_string()
         );
         assert!(child.repository);
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn gitdir_marker_reader_rejects_symlinks_and_named_pipes()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::fs::symlink;
+
+        let root = TestDirectory::new()?;
+        std::fs::write(root.join("marker"), "gitdir: /fixture\n")?;
+        symlink(root.join("marker"), root.join("link"))?;
+        assert!(!is_gitdir_file(&root.join("link")));
+        let status = std::process::Command::new("mkfifo")
+            .arg(root.join("pipe"))
+            .status()?;
+        assert!(status.success());
+        assert!(!is_gitdir_file(&root.join("pipe")));
+        assert!(is_gitdir_file(&root.join("marker")));
         Ok(())
     }
 
