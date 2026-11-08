@@ -1306,13 +1306,15 @@ placeholder tabs and no unearned state badges.
   for retry. When a stop or wait fails, the supervisor retains its child and
   retries on a later quit. Local subprocess fixtures cover shutdown and an
   injected stop failure followed by retry. Descendant recovery remains open.
-- [ ] 30-day archived-worktree collection, dirty skip, branch-tip recreation.
+- [x] 30-day archived-worktree collection, dirty skip, branch-tip recreation.
   Startup preserves dirty worktrees and lists collection failures with their
   reasons; clean collection retains the tip and prunes Git worktree metadata.
   Collection also skips worktrees containing Git-ignored files and reports the
   reason; fixtures check the files and collection journal remain intact. The
-  scan and Git removal are separate operations, so concurrent file creation
-  after the scan is not protected.
+  scan and Git removal are separate operations, but a modified or untracked
+  file created after the scan still blocks removal because Git rechecks the
+  checkout; a fixture covers that. An ignored file created in that window can
+  still be removed along with the checkout.
   Opening a task, using its terminal, and accessing its files or Git views
   refresh a separate last-use timestamp, coalescing repeated input and reads
   to at most one write per minute per activity source. Older databases

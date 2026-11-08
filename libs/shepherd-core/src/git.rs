@@ -1916,6 +1916,25 @@ mod tests {
     }
 
     #[test]
+    fn collection_removal_refuses_files_created_after_its_scan()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fixture = TestRepository::new()?;
+        let path = task_worktree(&fixture)?;
+        assert!(!GitService.has_changes(&path)?);
+        let late = path.join("late-arrival.txt");
+        std::fs::write(&late, "created between the scan and removal")?;
+        assert!(matches!(
+            GitService.remove_clean_worktree(fixture.repository(), &path),
+            Err(GitError::DirtyWorktree { .. })
+        ));
+        assert_eq!(
+            std::fs::read_to_string(&late)?,
+            "created between the scan and removal"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn moving_a_worktree_preserves_ignored_files_and_registration()
     -> Result<(), Box<dyn std::error::Error>> {
         let fixture = TestRepository::new()?;
