@@ -1643,6 +1643,8 @@ placeholder tabs and no unearned state badges.
   Newer events take precedence over matching snapshots, and unrelated events do
   not restart the refresh. Backend and headless browser fixtures cover lag
   detection, restoring the selected task, and an update during a paused read.
+  The full headless Chromium suite passed 115 tests at `0659181`, including
+  both event-recovery regressions; it uses mocked IPC, not a native window.
   Transient notifications missed during lag cannot be reconstructed.
   Codex exec and app-server, and OpenCode tool events, bound output to the
   transcript's existing 64 KiB tail before placing it on the event queue,
