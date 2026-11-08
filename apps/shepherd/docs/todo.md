@@ -1528,7 +1528,9 @@ placeholder tabs and no unearned state badges.
   Early output is limited to 64 terminal buffers per turn, each capped at the
   existing command-output limit; overflow reports a connection failure. A
   fixture covers saturation, retained output and recovery after cleanup.
-  One turn can still accumulate other released-terminal state until it finishes.
+  A turn retains at most 256 released-terminal records for late tool updates;
+  excess releases report a connection failure. A fixture checks the limit and
+  that retained event capacity is released at turn cleanup.
   OpenCode decodes event-stream chunks one event at a time instead of
   queuing every decoded event from a network read. Its 8 MiB line and event
   limits are tested with fragmented lines and accumulated multiline data.

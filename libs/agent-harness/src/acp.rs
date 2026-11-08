@@ -37,6 +37,7 @@ const ERROR_QUEUE_CAPACITY: usize = 64;
 const MAX_TURN_ERROR_BYTES: usize = 64 * 1024;
 const ERROR_OMITTED: &str = "\n[… error details omitted …]";
 const MAX_EARLY_TERMINAL_BUFFERS: usize = 64;
+const MAX_RELEASED_TERMINALS: usize = 256;
 
 pub struct AcpHarness {
     connection: Option<AcpConnection>,
@@ -723,8 +724,8 @@ async fn drive_session(
                     }
                     Some(AcpEvent::TerminalReleased { terminal_id, permit }) if terminals.remove(&terminal_id) => {
                         if prompt.is_some() {
+                            retain_released_terminal(&mut released, terminal_id.clone(), permit.clone())?;
                             publish(&sender, HarnessEvent::AgentTerminalExited { id: terminal_id.clone(), exit_code: None, stream_permit: permit.clone() })?;
-                            released.push((terminal_id, permit));
                         } else {
                             updates.forget_terminal(&terminal_id);
                             publish(&sender, HarnessEvent::AgentTerminalRemoved { id: terminal_id, stream_permit: permit })?;
@@ -820,6 +821,20 @@ async fn drive_session(
             }
         }
     }
+}
+
+fn retain_released_terminal(
+    released: &mut Vec<(String, Option<Arc<tokio::sync::OwnedSemaphorePermit>>)>,
+    id: String,
+    permit: Option<Arc<tokio::sync::OwnedSemaphorePermit>>,
+) -> HarnessResult<()> {
+    if released.len() >= MAX_RELEASED_TERMINALS {
+        return Err(protocol(
+            "ACP exceeded the released terminal limit for one turn",
+        ));
+    }
+    released.push((id, permit));
+    Ok(())
 }
 
 async fn finish_turn(
@@ -1645,6 +1660,32 @@ mod tests {
             .ok_or("missing early output")?;
         assert!(buffered.len() <= crate::MAX_COMMAND_OUTPUT_BYTES);
         assert!(buffered.ends_with("xxx"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn released_terminal_state_is_bounded_and_retains_capacity_until_cleanup()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let capacity = Arc::new(Semaphore::new(1));
+        let permit = Arc::new(capacity.clone().acquire_owned().await?);
+        let mut released = Vec::new();
+        for number in 0..MAX_RELEASED_TERMINALS {
+            retain_released_terminal(
+                &mut released,
+                format!("terminal-{number}"),
+                Some(permit.clone()),
+            )?;
+        }
+        let error = retain_released_terminal(&mut released, "excess".into(), Some(permit.clone()))
+            .expect_err("too many released terminals");
+        assert!(error.to_string().contains("released terminal limit"));
+        assert_eq!(released.len(), MAX_RELEASED_TERMINALS);
+        drop(permit);
+        assert_eq!(capacity.available_permits(), 0);
+        released.clear();
+        assert_eq!(capacity.available_permits(), 1);
+        retain_released_terminal(&mut released, "next-turn".into(), None)?;
+        assert_eq!(released.len(), 1);
         Ok(())
     }
 
