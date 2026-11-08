@@ -84,15 +84,24 @@ impl ToolPermissions {
     /// Evaluate the policy for a tool call. Priority mirrors Zed:
     /// `always_deny` beats everything, then `always_confirm`, then
     /// `always_allow`; the tool default beats the global default.
+    /// Invalid deny or confirmation patterns cannot produce an automatic allow.
     pub fn decide(&self, tool: &str, haystack: &str) -> Verdict {
         if let Some(rule) = self.tools.get(tool) {
-            if matches_any(&rule.always_deny, haystack) {
+            let (deny, invalid_deny) = matches_any(&rule.always_deny, haystack);
+            if deny {
                 return Verdict::Deny;
             }
-            if matches_any(&rule.always_confirm, haystack) {
+            let (confirm, invalid_confirm) = matches_any(&rule.always_confirm, haystack);
+            if confirm {
                 return Verdict::Confirm;
             }
-            if matches_any(&rule.always_allow, haystack) {
+            if invalid_deny || invalid_confirm {
+                return match rule.default {
+                    PermissionRule::Deny => Verdict::Deny,
+                    PermissionRule::Allow | PermissionRule::Confirm => Verdict::Confirm,
+                };
+            }
+            if matches_any(&rule.always_allow, haystack).0 {
                 return Verdict::Allow;
             }
             return resolve(rule.default);
@@ -115,18 +124,19 @@ fn resolve(rule: PermissionRule) -> Verdict {
     }
 }
 
-fn matches_any(rules: &[PatternRule], haystack: &str) -> bool {
-    rules.iter().any(|rule| {
+fn matches_any(rules: &[PatternRule], haystack: &str) -> (bool, bool) {
+    let mut matched = false;
+    let mut invalid = false;
+    for rule in rules {
         match regex::Regex::new(&rule.pattern) {
-            Ok(expression) => expression.is_match(haystack),
+            Ok(expression) => matched |= expression.is_match(haystack),
             Err(_) => {
-                // A hand-edited pattern must never break answering; it just
-                // stops matching until fixed.
-                tracing::debug!("ignoring invalid permission pattern");
-                false
+                tracing::debug!("invalid permission pattern");
+                invalid = true;
             }
         }
-    })
+    }
+    (matched, invalid)
 }
 
 /// The rule key for a tool call: the ACP tool kind in snake_case (`read`,
@@ -319,6 +329,42 @@ mod tests {
     }
 
     #[test]
+    fn invalid_restrictive_patterns_do_not_allow_a_request()
+    -> Result<(), Box<dyn std::error::Error>> {
+        for deny_pattern in [true, false] {
+            let mut policy = allow_deny(".*", "never-match");
+            let rule = policy
+                .tools
+                .get_mut("execute")
+                .ok_or("missing execute rule")?;
+            rule.default = PermissionRule::Allow;
+            let invalid = PatternRule {
+                pattern: "(invalid".to_owned(),
+            };
+            if deny_pattern {
+                rule.always_deny.push(invalid);
+            } else {
+                rule.always_confirm.push(invalid);
+            }
+            assert_eq!(policy.decide("execute", "cargo test"), Verdict::Confirm);
+            policy
+                .tools
+                .get_mut("execute")
+                .ok_or("missing execute rule")?
+                .default = PermissionRule::Deny;
+            assert_eq!(policy.decide("execute", "cargo test"), Verdict::Deny);
+            if let Some(rule) = policy.tools.get_mut("execute") {
+                rule.default = PermissionRule::Allow;
+                rule.always_deny.push(PatternRule {
+                    pattern: "cargo".to_owned(),
+                });
+            }
+            assert_eq!(policy.decide("execute", "cargo test"), Verdict::Deny);
+        }
+        Ok(())
+    }
+
+    #[test]
     fn invalid_pattern_does_not_expose_its_contents_in_logs()
     -> Result<(), Box<dyn std::error::Error>> {
         use std::io::Write;
@@ -349,15 +395,18 @@ mod tests {
             .with_writer(move || writer.clone())
             .finish();
         tracing::subscriber::with_default(subscriber, || {
-            assert!(!matches_any(
-                &[PatternRule {
-                    pattern: "(fixture-private-value".to_owned(),
-                }],
-                "anything"
-            ));
+            assert_eq!(
+                matches_any(
+                    &[PatternRule {
+                        pattern: "(fixture-private-value".to_owned(),
+                    }],
+                    "anything"
+                ),
+                (false, true)
+            );
         });
         let output = String::from_utf8(logs.lock().map_err(|error| error.to_string())?.clone())?;
-        assert!(output.contains("ignoring invalid permission pattern"));
+        assert!(output.contains("invalid permission pattern"));
         assert!(!output.contains("fixture-private-value"));
         Ok(())
     }
