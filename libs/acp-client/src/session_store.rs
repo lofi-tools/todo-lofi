@@ -203,8 +203,11 @@ impl SessionStore {
                 })
             }
             Err(error) => Err(anyhow::anyhow!(
-                "failed to parse {}: {error}",
-                self.path.display()
+                "failed to parse {}: {:?} at line {}, column {}",
+                self.path.display(),
+                error.classify(),
+                error.line(),
+                error.column()
             )),
         }
     }
@@ -270,6 +273,25 @@ mod tests {
         std::fs::remove_file(&path)?;
         store.set_tool_permissions("/project", ToolPermissions::default())?;
         assert!(store.get("/project").is_some());
+        Ok(())
+    }
+
+    #[test]
+    fn parse_errors_do_not_echo_invalid_policy_values() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("acp-sessions.json");
+        std::fs::write(
+            &path,
+            r#"{"sessions":[{"project_path":"/project","session_id":"session","tool_permissions":{"default":"fixture-private-value"}}]}"#,
+        )?;
+        let store = SessionStore::new(&path);
+        let error = store
+            .remove("/project")
+            .expect_err("invalid policy must fail")
+            .to_string();
+        assert!(!error.contains("fixture-private-value"));
+        assert!(error.contains("Data"));
+        assert!(error.contains("line 1"));
         Ok(())
     }
 

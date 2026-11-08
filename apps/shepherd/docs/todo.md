@@ -1676,6 +1676,8 @@ placeholder tabs and no unearned state badges.
   verifies that failed updates preserve corrupt bytes and can be retried after
   repair. Cooperating writers hold a retained sidecar file lock across the
   read-modify-write cycle; a concurrent fixture checks that updates survive.
+  Invalid policy values are omitted from parse errors while retaining their
+  location and error category; a fixture checks redaction.
   On 2026-11-07 the default offline headless agent-harness suite passed 124
   tests (two live tests ignored), the core suite passed 120 tests (three
   ignored), and the desktop-backend suite passed 95 tests (one local throughput
