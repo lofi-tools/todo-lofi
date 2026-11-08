@@ -681,7 +681,7 @@ where
             async move |request: WriteTextFileRequest, responder, _cx| {
                 let roots = roots_for_write.clone();
                 let events = writes.clone();
-                tokio::spawn(async move {
+                tokio::task::spawn_blocking(move || {
                     let reply = match roots.write_text_file(&request.path, &request.content) {
                         Ok(()) => responder.respond(WriteTextFileResponse::new()),
                         Err(error) => respond_with_error(responder, error, &events, "write"),

@@ -1431,8 +1431,9 @@ placeholder tabs and no unearned state badges.
   can change its target, so those actions do not guarantee race-free confinement.
   The remaining filesystem operations still need a confinement audit. ACP file reads
   and atomic writes also use descriptor-relative operations on Unix, with
-  fixtures for directory substitution and preserved file permissions. ACP
-  attachment grants open every path component without following symlinks and
+  fixtures for directory substitution and preserved file permissions. ACP reads
+  and writes run on blocking workers. ACP attachment grants open every path
+  component without following symlinks and
   retain the opened file for the duration of the prompt. Agent launch environment
   commands resolve at spawn with a five-second timeout and bounded output; errors
   exclude their output. Resolution updates the environment only after every
