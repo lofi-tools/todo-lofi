@@ -668,11 +668,15 @@ async fn drive_session(
                 }
             } => {
                 match event {
-                    Some(AcpEvent::SessionUpdate(notification)) if notification.session_id == session => {
+                    Some(AcpEvent::SessionUpdate(notification, permit)) if notification.session_id == session => {
                         if update_modes(&changes.modes, &notification.update) {
                             publish(&sender, HarnessEvent::ModeChanged)?;
                         }
-                        if let Some(event) = updates.apply(&notification.update) {
+                        if let Some(mut event) = updates.apply(&notification.update) {
+                            match &mut event {
+                                HarnessEvent::Delta { stream_permit, .. } | HarnessEvent::ToolCall { stream_permit, .. } => *stream_permit = permit,
+                                _ => {}
+                            }
                             updates.publish(&sender, event)?;
                         }
                     }
@@ -1377,7 +1381,7 @@ impl ReplayHistory {
         startup_events: &mut VecDeque<AcpEvent>,
     ) -> HarnessResult<()> {
         match event {
-            AcpEvent::SessionUpdate(notification) if &notification.session_id == session => {
+            AcpEvent::SessionUpdate(notification, _) if &notification.session_id == session => {
                 if let SessionUpdate::UserMessageChunk(chunk) = &notification.update
                     && let ContentBlock::Text(content) = &chunk.content
                 {
@@ -1553,6 +1557,41 @@ mod tests {
         script: FakeScript,
     ) -> Result<(AcpHarness, Capabilities, Shared), Box<dyn std::error::Error>> {
         fake_at(script, std::env::temp_dir()).await
+    }
+
+    #[tokio::test]
+    async fn unread_stream_updates_exhaust_capacity_and_fail_the_turn()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (mut harness, _, _) = fake(FakeScript {
+            chunks: vec!["fixture".into(); 4097],
+            ..FakeScript::default()
+        })
+        .await?;
+        harness.open_session(None).await?;
+        harness.prompt(PromptInput::text("go")).await?;
+        timeout(Duration::from_secs(10), async {
+            while harness.events.len() < 4099 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await?;
+        let mut deltas = 0;
+        let mut failed = false;
+        while let Ok(event) = harness.events.try_recv() {
+            match event {
+                HarnessEvent::Delta { .. } => deltas += 1,
+                HarnessEvent::ConnectionFailed { text, .. } if text.contains("queue exceeded") => {
+                    failed = true
+                }
+                HarnessEvent::TurnFinished { .. } => {
+                    return Err("overflow reported a successful turn".into());
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(deltas, 4096);
+        assert!(failed);
+        Ok(())
     }
 
     async fn fake_at(

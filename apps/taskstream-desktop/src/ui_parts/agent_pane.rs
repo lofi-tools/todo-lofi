@@ -1593,7 +1593,7 @@ impl AgentPane {
         let mut exited = false;
         for event in events {
             match event {
-                AcpEvent::SessionUpdate(notification) => {
+                AcpEvent::SessionUpdate(notification, _) => {
                     let delta = entry.transcript.apply(&notification);
                     if let Some(index) = delta.changed {
                         changed.push(index);
@@ -2449,13 +2449,15 @@ async fn load_session_with_history(
     let mut config = None;
     let mut fold = |event| -> anyhow::Result<()> {
         match event {
-            AcpEvent::SessionUpdate(notification) if notification.session_id == session_id => {
+            AcpEvent::SessionUpdate(notification, permit)
+                if notification.session_id == session_id =>
+            {
                 match &notification.update {
                     SessionUpdate::CurrentModeUpdate(_) => {
-                        mode = Some(AcpEvent::SessionUpdate(notification))
+                        mode = Some(AcpEvent::SessionUpdate(notification, permit))
                     }
                     SessionUpdate::ConfigOptionUpdate(_) => {
-                        config = Some(AcpEvent::SessionUpdate(notification))
+                        config = Some(AcpEvent::SessionUpdate(notification, permit))
                     }
                     _ => {
                         transcript.apply(&notification);
@@ -4450,10 +4452,13 @@ mod tests {
 
     /// One `session/update` event, as the connection forwards it.
     fn session_update(update: SessionUpdate) -> AcpEvent {
-        AcpEvent::SessionUpdate(Box::new(SessionNotification::new(
-            SessionId::new("test-session"),
-            update,
-        )))
+        AcpEvent::SessionUpdate(
+            Box::new(SessionNotification::new(
+                SessionId::new("test-session"),
+                update,
+            )),
+            None,
+        )
     }
 
     fn text_chunk<F>(wrap: F, text: &str) -> AcpEvent

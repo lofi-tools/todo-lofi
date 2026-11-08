@@ -1562,15 +1562,16 @@ placeholder tabs and no unearned state badges.
   OpenCode bounds the intermediate output while joining tool text parts; a
   multipart Unicode fixture verifies the retained tail. ACP's SDK dispatches
   notifications and replies on one ordered loop, so waiting for queue capacity
-  inside its notification callback can delay control responses; its remaining
-  queue limit needs a design that preserves response progress. A local
-  256-update overflow prototype showed that returning an error from the SDK
-  notification callback alone can still leave a prompt reporting success; the
-  failure must also reach the pending request and stop the connection. Both
-  Shepherd now folds history while session/load is in flight, with a 600-update
-  replay fixture. Taskstream likewise folds history while loading, with its own
-  600-update fixture. The queue-limit prototype was removed pending a reliable
-  way to fail the pending request and stop the connection on overflow.
+  in its callback would delay control responses. Session updates now reserve
+  capacity without waiting, charged by serialized size in 16 KiB units against
+  a 64 MiB budget. Overflow reports a protocol failure, fails the pending
+  prompt and stops the connection; a fake-agent fixture verifies the failure
+  and preserves already queued updates. A second fixture verifies that a prompt
+  response is delivered even when the update capacity is full. Text and tool
+  events retain their permits through Shepherd's harness queue; a fixture fills
+  that queue and checks the failure. Other mapped event types still need
+  downstream capacity tracking. Shepherd and Taskstream fold history while
+  session/load is in flight, each with a 600-update replay fixture.
   Transcript folding similarly selects the tail of an oversized command-output
   chunk before allocating it, with a UTF-8 regression for the retained output.
 - [ ] Multiple agents and projects: three agents across two projects, no state

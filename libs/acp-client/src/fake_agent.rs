@@ -824,7 +824,7 @@ mod tests {
     /// Drain the events the client has already received into a transcript.
     fn drain(connection: &mut crate::AcpConnection, transcript: &mut Transcript) {
         while let Ok(event) = connection.events.try_recv() {
-            if let AcpEvent::SessionUpdate(notification) = event {
+            if let AcpEvent::SessionUpdate(notification, _) = event {
                 transcript.apply(&notification);
             }
         }
@@ -846,6 +846,65 @@ mod tests {
             connect_to_fake(FakeScript::default(), confirm_all()).await;
         assert_eq!(connection.info.name, "fake-agent");
         assert_eq!(observations.lock().unwrap().initialize_count, 1);
+    }
+
+    #[tokio::test]
+    async fn overflowing_unread_updates_fails_the_prompt_and_preserves_queued_updates()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let limit = 4096;
+        let (mut connection, _, directory) = connect_to_fake(
+            FakeScript {
+                chunks: vec!["fixture".into(); limit + 1],
+                ..FakeScript::default()
+            },
+            confirm_all(),
+        )
+        .await;
+        let session = new_session(&connection, &directory).await;
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            connection.requester.prompt(&session, "go".into()),
+        )
+        .await?;
+        assert!(
+            matches!(result, Err(crate::AcpError::Protocol(message)) if message.contains("queue exceeded"))
+        );
+        let mut updates = 0;
+        let mut failed = false;
+        while let Ok(event) = connection.events.try_recv() {
+            match event {
+                AcpEvent::SessionUpdate(_, _) => updates += 1,
+                AcpEvent::ProtocolFailed { message } if message.contains("queue exceeded") => {
+                    failed = true
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(updates, limit);
+        assert!(failed);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn prompt_reply_is_delivered_with_a_full_update_queue()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (connection, _, directory) = connect_to_fake(
+            FakeScript {
+                chunks: vec!["fixture".into(); 4096],
+                ..FakeScript::default()
+            },
+            confirm_all(),
+        )
+        .await;
+        let session = new_session(&connection, &directory).await;
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            connection.requester.prompt(&session, "go".into()),
+        )
+        .await??;
+        assert_eq!(result, StopReason::EndTurn);
+        assert_eq!(connection.events.len(), 4096);
+        Ok(())
     }
 
     #[tokio::test]

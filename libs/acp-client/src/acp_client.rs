@@ -81,7 +81,10 @@ impl From<acp::Error> for AcpError {
 /// preserved: notifications, interactive requests, and process-level events.
 pub enum AcpEvent {
     /// A `session/update` notification, to be reduced by [`Transcript::apply`].
-    SessionUpdate(Box<acp::schema::v1::SessionNotification>),
+    SessionUpdate(
+        Box<acp::schema::v1::SessionNotification>,
+        Option<std::sync::Arc<tokio::sync::OwnedSemaphorePermit>>,
+    ),
     /// The agent wants the user to approve a tool call.
     PermissionRequested {
         request_id: u64,
@@ -178,7 +181,7 @@ impl std::fmt::Debug for StderrMessage {
 impl std::fmt::Debug for AcpEvent {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::SessionUpdate(notification) => f
+            Self::SessionUpdate(notification, _) => f
                 .debug_tuple("SessionUpdate")
                 .field(&notification.update)
                 .finish(),

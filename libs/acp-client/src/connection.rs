@@ -47,6 +47,34 @@ use crate::{AcpError, AcpEvent, SessionSpec, StderrMessage, schema};
 /// How many stderr lines are kept for the error state.
 const STDERR_LINES: usize = 250;
 const PENDING_STDERR_EVENTS: usize = 64;
+const UPDATE_CAPACITY_UNITS: usize = 4096;
+const UPDATE_UNIT_BYTES: usize = 16 * 1024;
+const UPDATE_OVERFLOW: &str = "ACP session update queue exceeded its limit";
+
+#[derive(Default)]
+struct ByteCounter(usize);
+
+impl std::io::Write for ByteCounter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0 = self.0.saturating_add(bytes.len());
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+async fn wait_for_update_overflow(mut overflow: tokio::sync::watch::Receiver<bool>) {
+    loop {
+        if *overflow.borrow_and_update() {
+            return;
+        }
+        if overflow.changed().await.is_err() {
+            std::future::pending::<()>().await;
+        }
+    }
+}
 const MAX_PENDING_PERMISSIONS: usize = 64;
 const MAX_PENDING_FILE_REQUESTS: usize = 32;
 const MAX_PROTOCOL_LINE_BYTES: usize = 8 * 1024 * 1024;
@@ -137,10 +165,14 @@ pub struct Requester {
     connection: ConnectionTo<Agent>,
     auth_methods: Arc<[AuthMethod]>,
     prompt_reads: PromptReads,
+    overflow: tokio::sync::watch::Receiver<bool>,
 }
 
 impl Requester {
     fn request_error(&self, error: acp::Error) -> AcpError {
+        if *self.overflow.borrow() {
+            return AcpError::Protocol(UPDATE_OVERFLOW.into());
+        }
         match AcpError::from(error) {
             AcpError::AuthRequired(message) if !self.auth_methods.is_empty() => {
                 let methods = self
@@ -170,6 +202,9 @@ impl Requester {
         ),
         AcpError,
     > {
+        if *self.overflow.borrow() {
+            return Err(AcpError::Protocol(UPDATE_OVERFLOW.into()));
+        }
         let request = NewSessionRequest::new(cwd)
             .additional_directories(additional)
             .mcp_servers(mcp_servers);
@@ -179,6 +214,9 @@ impl Requester {
             .block_task()
             .await
             .map_err(|error| self.request_error(error))?;
+        if *self.overflow.borrow() {
+            return Err(AcpError::Protocol(UPDATE_OVERFLOW.into()));
+        }
         Ok((
             response.session_id,
             response.modes,
@@ -194,6 +232,9 @@ impl Requester {
         additional: Vec<PathBuf>,
         mcp_servers: Vec<McpServer>,
     ) -> Result<(Option<SessionModeState>, Vec<SessionConfigOption>), AcpError> {
+        if *self.overflow.borrow() {
+            return Err(AcpError::Protocol(UPDATE_OVERFLOW.into()));
+        }
         let request = LoadSessionRequest::new(session_id, cwd)
             .additional_directories(additional)
             .mcp_servers(mcp_servers);
@@ -203,6 +244,9 @@ impl Requester {
             .block_task()
             .await
             .map_err(|error| self.request_error(error))?;
+        if *self.overflow.borrow() {
+            return Err(AcpError::Protocol(UPDATE_OVERFLOW.into()));
+        }
         Ok((response.modes, response.config_options.unwrap_or_default()))
     }
 
@@ -228,6 +272,9 @@ impl Requester {
         content: Vec<schema::ContentBlock>,
         readable_files: Vec<PathBuf>,
     ) -> Result<impl Future<Output = Result<StopReason, AcpError>> + Send + use<>, AcpError> {
+        if *self.overflow.borrow() {
+            return Err(AcpError::Protocol(UPDATE_OVERFLOW.into()));
+        }
         let grant = if readable_files.is_empty() {
             None
         } else {
@@ -249,10 +296,14 @@ impl Requester {
         let requester = self.clone();
         Ok(async move {
             let _grant = grant;
-            let response = pending
-                .block_task()
-                .await
-                .map_err(|error| requester.request_error(error))?;
+            let response = tokio::select! {
+                biased;
+                () = wait_for_update_overflow(requester.overflow.clone()) => return Err(AcpError::Protocol(UPDATE_OVERFLOW.into())),
+                response = pending.block_task() => response.map_err(|error| requester.request_error(error))?,
+            };
+            if *requester.overflow.borrow() {
+                return Err(AcpError::Protocol(UPDATE_OVERFLOW.into()));
+            }
             Ok(response.stop_reason)
         })
     }
@@ -574,6 +625,8 @@ where
     let transport = build_transport(events_tx.clone(), stderr_buffer.clone());
     let (ready_tx, ready_rx) = oneshot::channel();
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
+    let (overflow_tx, overflow_rx) = tokio::sync::watch::channel(false);
+    let connection_overflow = overflow_rx.clone();
     let tool_permissions = Arc::new(RwLock::new(options.tool_permissions));
     let policy_for_handlers = tool_permissions.clone();
 
@@ -582,6 +635,7 @@ where
     let prompt_reads_for_handler = prompt_reads.clone();
     let roots_for_handlers = roots.clone();
     let events_for_notifications = events_tx.clone();
+    let update_capacity = Arc::new(tokio::sync::Semaphore::new(UPDATE_CAPACITY_UNITS));
     let permissions = events_tx.clone();
     let permission_permits = Arc::new(tokio::sync::Semaphore::new(MAX_PENDING_PERMISSIONS));
     let permission_ids = std::sync::atomic::AtomicU64::new(0);
@@ -615,8 +669,22 @@ where
         // them through the transcript model.
         .on_receive_notification(
             async move |notification: SessionNotification, _cx| {
+                if *overflow_tx.borrow() {
+                    return Ok(());
+                }
+                let mut bytes = ByteCounter::default();
+                let serialized = serde_json::to_writer(&mut bytes, &notification);
+                let units = bytes.0.div_ceil(UPDATE_UNIT_BYTES).max(1);
+                let permit = u32::try_from(units).ok().and_then(|units| update_capacity.clone().try_acquire_many_owned(units).ok());
+                let Some(permit) = permit.filter(|_| serialized.is_ok()) else {
+                    if events_for_notifications.send(AcpEvent::ProtocolFailed { message: UPDATE_OVERFLOW.into() }).is_err() {
+                        tracing::debug!("ACP protocol failure receiver closed");
+                    }
+                    overflow_tx.send_replace(true);
+                    return Ok(());
+                };
                 if events_for_notifications
-                    .send(AcpEvent::SessionUpdate(Box::new(notification)))
+                    .send(AcpEvent::SessionUpdate(Box::new(notification), Some(Arc::new(permit))))
                     .is_err()
                 {
                     tracing::debug!("ACP session update receiver closed");
@@ -966,6 +1034,7 @@ where
                     Err(error) => return Err(error),
                 },
                 _ = &mut shutdown_rx => return Ok(()),
+                () = wait_for_update_overflow(connection_overflow.clone()) => return Err(acp::Error::internal_error().data(UPDATE_OVERFLOW)),
             };
             if initialize.protocol_version != ProtocolVersion::V1 {
                 if ready_tx
@@ -999,8 +1068,11 @@ where
                 return Ok(());
             }
             // Stay connected until the handle is dropped.
-            if shutdown_rx.await.is_err() {
-                tracing::debug!("agent connection closed without a shutdown signal");
+            tokio::select! {
+                result = shutdown_rx => if result.is_err() {
+                    tracing::debug!("agent connection closed without a shutdown signal");
+                },
+                () = wait_for_update_overflow(connection_overflow) => return Err(acp::Error::internal_error().data(UPDATE_OVERFLOW)),
             }
             Ok(())
         });
@@ -1025,6 +1097,7 @@ where
                     connection,
                     auth_methods: info.auth_methods.clone().into(),
                     prompt_reads,
+                    overflow: overflow_rx,
                 },
                 info,
             )
