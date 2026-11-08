@@ -1653,8 +1653,8 @@ placeholder tabs and no unearned state badges.
   tests and one desktop benchmark were ignored. No live agent or window was used.
   Workspace Clippy passes with warnings denied. `taskstream-desktop` handles
   ACP permission cancellation and terminal failures. Storage's offline library
-  tests passed with one network-dependent Todoist test excluded and one
-  previously ignored test.
+  tests passed with one previously ignored test; its Todoist push guard fixture
+  uses an injected response instead of contacting the live service.
 - [ ] Packaging and CI: macOS 13+, Ubuntu 24.04+, pinned Zig, Tauri build,
   platform smoke.
   The local macOS debug app bundle declares macOS 13.0 in both Info.plist and

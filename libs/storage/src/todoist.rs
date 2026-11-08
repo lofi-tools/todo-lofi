@@ -638,6 +638,24 @@ impl TodoStore {
         task_id: u64,
         patch: &TaskPatch,
     ) -> QueryResult<()> {
+        self.push_todoist_patch_with(integration_id, external_id, task_id, patch, |commands| {
+            send_commands(token, commands)
+        })
+        .await
+    }
+
+    async fn push_todoist_patch_with<F, Fut>(
+        &mut self,
+        integration_id: u64,
+        external_id: &str,
+        task_id: u64,
+        patch: &TaskPatch,
+        send: F,
+    ) -> QueryResult<()>
+    where
+        F: FnOnce(Vec<serde_json::Value>) -> Fut,
+        Fut: std::future::Future<Output = anyhow::Result<serde_json::Value>>,
+    {
         let task = self.get_task(task_id).await?;
         if task.workflow_run_id.is_some() || self.is_builtin_owned(task_id).await? {
             return Ok(());
@@ -690,7 +708,7 @@ impl TodoStore {
                 serde_json::json!({ "id": external_id }),
             ));
         }
-        send_commands(token, commands)
+        send(commands)
             .await
             .map_err(|e| crate::QueryErr::UnexpectedValue {
                 message: format!("Todoist push failed for task {task_id}: {e}"),
@@ -976,8 +994,6 @@ mod tests {
         use crate::TodoStore;
         let mut storage = TodoStore::for_test().await?;
         let demo = storage.demo_app().await?;
-        // Bogus token: builtin-owned content must return before any network
-        // happens.
         let shipped = storage
             .create_task(crate::Task::create().title("shipped"))
             .await?;
@@ -989,38 +1005,45 @@ mod tests {
                 true,
             )
             .await?;
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+        let patch = TaskPatch {
+            content: Some("changed".into()),
+            ..Default::default()
+        };
         storage
-            .push_todoist_patch(
-                "bogus",
-                1,
-                "ext-1",
-                shipped.id,
-                &TaskPatch {
-                    content: Some("changed".to_string()),
-                    ..Default::default()
-                },
-            )
+            .push_todoist_patch_with(1, "ext-1", shipped.id, &patch, |_commands| {
+                calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                async { Err(anyhow::anyhow!("fixture request failure")) }
+            })
             .await?;
-        // A real task with the same bogus token fails at the network —
-        // proving the guard above is what skipped the builtin-owned row.
-        let live = storage
-            .create_task(crate::Task::create().title("live"))
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        let regular = storage
+            .create_task(crate::Task::create().title("regular"))
             .await?;
-        assert!(
-            storage
-                .push_todoist_patch(
-                    "bogus",
-                    1,
-                    "ext-2",
-                    live.id,
-                    &TaskPatch {
-                        content: Some("changed".to_string()),
-                        ..Default::default()
-                    }
-                )
-                .await
-                .is_err()
-        );
+        let result = storage
+            .push_todoist_patch_with(1, "ext-2", regular.id, &patch, |commands| {
+                calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                assert_eq!(commands.len(), 1);
+                let command = commands.first().cloned().unwrap_or_default();
+                assert_eq!(
+                    command.get("type").and_then(|value| value.as_str()),
+                    Some("item_update")
+                );
+                assert_eq!(
+                    command.pointer("/args/id").and_then(|value| value.as_str()),
+                    Some("ext-2")
+                );
+                assert_eq!(
+                    command
+                        .pointer("/args/content")
+                        .and_then(|value| value.as_str()),
+                    Some("changed")
+                );
+                async { Err(anyhow::anyhow!("fixture request failure")) }
+            })
+            .await;
+        assert!(result.is_err_and(|error| error.to_string().contains("fixture request failure")));
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
         Ok(())
     }
 
