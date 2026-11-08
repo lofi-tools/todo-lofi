@@ -36,6 +36,7 @@ const SESSION_TIMEOUT: Duration = Duration::from_secs(15);
 const ERROR_QUEUE_CAPACITY: usize = 64;
 const MAX_TURN_ERROR_BYTES: usize = 64 * 1024;
 const ERROR_OMITTED: &str = "\n[… error details omitted …]";
+const MAX_EARLY_TERMINAL_BUFFERS: usize = 64;
 
 pub struct AcpHarness {
     connection: Option<AcpConnection>,
@@ -609,7 +610,8 @@ impl Runtime {
         let (grant_changes, grants) = watch::channel(Vec::new());
         let (mode_changes, modes) = watch::channel(mode);
         let worker = tokio::spawn(async move {
-            if drive_session(
+            let failure_sender = sender.clone();
+            if let Err(error) = drive_session(
                 requester,
                 session,
                 events,
@@ -622,9 +624,16 @@ impl Runtime {
                 },
             )
             .await
-            .is_err()
+                && publish(
+                    &failure_sender,
+                    HarnessEvent::ConnectionFailed {
+                        kind: FailureKind::classify(&error).unwrap_or(FailureKind::Protocol),
+                        text: error.to_string(),
+                    },
+                )
+                .is_err()
             {
-                tracing::debug!("ACP harness event loop ended with an error");
+                tracing::debug!("the core stopped listening to ACP errors");
             }
             if close_terminals.await.is_err() {
                 tracing::warn!("ACP terminal cleanup did not complete");
@@ -1334,6 +1343,13 @@ impl Updates {
                 },
             )?;
         } else {
+            if !self.early_output.contains_key(&terminal_id)
+                && self.early_output.len() >= MAX_EARLY_TERMINAL_BUFFERS
+            {
+                return Err(protocol(
+                    "ACP exceeded the early terminal output buffer limit",
+                ));
+            }
             let output = self.early_output.entry(terminal_id).or_default();
             output.push_str(&chunk);
             limit_command_output(output);
@@ -1629,6 +1645,55 @@ mod tests {
             .ok_or("missing early output")?;
         assert!(buffered.len() <= crate::MAX_COMMAND_OUTPUT_BYTES);
         assert!(buffered.ends_with("xxx"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn early_terminal_buffers_reject_new_ids_at_the_limit_and_recover()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let permits = Arc::new(Semaphore::new(1));
+        let (sender, _receiver) = mpsc::unbounded_channel();
+        let mut updates = Updates::default();
+        for number in 0..MAX_EARLY_TERMINAL_BUFFERS {
+            updates.terminal_output(
+                &sender,
+                format!("terminal-{number}"),
+                "a".into(),
+                Arc::new(permits.clone().acquire_owned().await?),
+            )?;
+        }
+        updates.terminal_output(
+            &sender,
+            "terminal-0".into(),
+            "b".into(),
+            Arc::new(permits.clone().acquire_owned().await?),
+        )?;
+        let error = updates
+            .terminal_output(
+                &sender,
+                "extra".into(),
+                "c".into(),
+                Arc::new(permits.clone().acquire_owned().await?),
+            )
+            .expect_err("new terminal exceeds the limit");
+        assert!(
+            error
+                .to_string()
+                .contains("early terminal output buffer limit")
+        );
+        assert_eq!(
+            updates.early_output.get("terminal-0").map(String::as_str),
+            Some("ab")
+        );
+        assert_eq!(permits.available_permits(), 1);
+        updates.forget_terminal("terminal-0");
+        updates.terminal_output(
+            &sender,
+            "extra".into(),
+            "c".into(),
+            Arc::new(permits.clone().acquire_owned().await?),
+        )?;
+        assert_eq!(updates.early_output.len(), MAX_EARLY_TERMINAL_BUFFERS);
         Ok(())
     }
 

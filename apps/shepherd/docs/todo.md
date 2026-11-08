@@ -1525,7 +1525,10 @@ placeholder tabs and no unearned state badges.
   descendant keeps an output pipe open, and shutdown rejects new terminals.
   ACP releases buffered early output and terminal-to-tool mappings after a
   released terminal's turn ends, preserving late tool updates during that turn.
-  One turn can still accumulate released-terminal state until it finishes.
+  Early output is limited to 64 terminal buffers per turn, each capped at the
+  existing command-output limit; overflow reports a connection failure. A
+  fixture covers saturation, retained output and recovery after cleanup.
+  One turn can still accumulate other released-terminal state until it finishes.
   OpenCode decodes event-stream chunks one event at a time instead of
   queuing every decoded event from a network read. Its 8 MiB line and event
   limits are tested with fragmented lines and accumulated multiline data.
