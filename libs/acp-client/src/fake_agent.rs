@@ -914,6 +914,65 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn automatic_permissions_stop_before_an_unrecordable_decision()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (mut connection, observations, directory) = connect_to_fake(
+            FakeScript {
+                permission: Some(ToolCallUpdate::new(
+                    "fixture",
+                    acp::schema::v1::ToolCallUpdateFields::new(),
+                )),
+                permission_options: vec![PermissionOption::new(
+                    "allow",
+                    "Allow",
+                    PermissionOptionKind::AllowOnce,
+                )],
+                permission_burst: 4097,
+                ..FakeScript::default()
+            },
+            allow_all(),
+        )
+        .await;
+        let session = new_session(&connection, &directory).await;
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            connection.requester.prompt(&session, "go".into()),
+        )
+        .await?;
+        assert!(
+            matches!(result, Err(crate::AcpError::Protocol(message)) if message.contains("queue exceeded"))
+        );
+        let mut decisions = 0;
+        let mut failed = false;
+        while let Ok(event) = connection.events.try_recv() {
+            match event {
+                AcpEvent::PermissionAutoDecided { .. } => decisions += 1,
+                AcpEvent::ProtocolFailed { message } if message.contains("queue exceeded") => {
+                    failed = true
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(decisions, 4096);
+        assert!(failed);
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if let Some(result) = observations
+                    .lock()
+                    .ok()
+                    .and_then(|state| state.permission_burst_overflow.clone())
+                {
+                    assert!(result.is_err(), "the overflowed permission was approved");
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await?;
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn new_session_carries_cwd_and_additional_roots() {
         let (connection, observations, dir) =
             connect_to_fake(FakeScript::default(), confirm_all()).await;

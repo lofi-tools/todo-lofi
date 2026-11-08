@@ -65,6 +65,20 @@ impl std::io::Write for ByteCounter {
     }
 }
 
+fn reserve_update<T: serde::Serialize>(
+    capacity: &Arc<tokio::sync::Semaphore>,
+    value: &T,
+) -> Option<Arc<tokio::sync::OwnedSemaphorePermit>> {
+    let mut bytes = ByteCounter::default();
+    serde_json::to_writer(&mut bytes, value).ok()?;
+    let units = u32::try_from(bytes.0.div_ceil(UPDATE_UNIT_BYTES).max(1)).ok()?;
+    capacity
+        .clone()
+        .try_acquire_many_owned(units)
+        .ok()
+        .map(Arc::new)
+}
+
 async fn wait_for_update_overflow(mut overflow: tokio::sync::watch::Receiver<bool>) {
     loop {
         if *overflow.borrow_and_update() {
@@ -636,6 +650,8 @@ where
     let roots_for_handlers = roots.clone();
     let events_for_notifications = events_tx.clone();
     let update_capacity = Arc::new(tokio::sync::Semaphore::new(UPDATE_CAPACITY_UNITS));
+    let approval_capacity = update_capacity.clone();
+    let approval_overflow = overflow_tx.clone();
     let permissions = events_tx.clone();
     let permission_permits = Arc::new(tokio::sync::Semaphore::new(MAX_PENDING_PERMISSIONS));
     let permission_ids = std::sync::atomic::AtomicU64::new(0);
@@ -672,11 +688,7 @@ where
                 if *overflow_tx.borrow() {
                     return Ok(());
                 }
-                let mut bytes = ByteCounter::default();
-                let serialized = serde_json::to_writer(&mut bytes, &notification);
-                let units = bytes.0.div_ceil(UPDATE_UNIT_BYTES).max(1);
-                let permit = u32::try_from(units).ok().and_then(|units| update_capacity.clone().try_acquire_many_owned(units).ok());
-                let Some(permit) = permit.filter(|_| serialized.is_ok()) else {
+                let Some(permit) = reserve_update(&update_capacity, &notification) else {
                     if events_for_notifications.send(AcpEvent::ProtocolFailed { message: UPDATE_OVERFLOW.into() }).is_err() {
                         tracing::debug!("ACP protocol failure receiver closed");
                     }
@@ -684,7 +696,7 @@ where
                     return Ok(());
                 };
                 if events_for_notifications
-                    .send(AcpEvent::SessionUpdate(Box::new(notification), Some(Arc::new(permit))))
+                    .send(AcpEvent::SessionUpdate(Box::new(notification), Some(permit)))
                     .is_err()
                 {
                     tracing::debug!("ACP session update receiver closed");
@@ -697,6 +709,10 @@ where
         // denies, otherwise wait for the user without blocking the event loop.
         .on_receive_request(
             async move |request: RequestPermissionRequest, responder, _cx| {
+                if *approval_overflow.borrow() {
+                    responder.respond_with_internal_error(UPDATE_OVERFLOW)?;
+                    return Ok(());
+                }
                 let tool = tool_key(&request.tool_call);
                 let text = haystack(&request.tool_call);
                 let verdict = policy_for_handlers
@@ -709,6 +725,14 @@ where
                     Verdict::Confirm => None,
                 };
                 if let Some(option) = automatic {
+                    let Some(permit) = reserve_update(&approval_capacity, &request) else {
+                        if auto_approvals.send(AcpEvent::ProtocolFailed { message: UPDATE_OVERFLOW.into() }).is_err() {
+                            tracing::debug!("ACP protocol failure receiver closed");
+                        }
+                        approval_overflow.send_replace(true);
+                        responder.respond_with_internal_error(UPDATE_OVERFLOW)?;
+                        return Ok(());
+                    };
                     responder.respond(permission_response(PermissionDecision::Selected(
                         option.option_id.clone(),
                     )))?;
@@ -717,6 +741,7 @@ where
                         .send(AcpEvent::PermissionAutoDecided {
                             tool_call: request.tool_call.clone(),
                             choice: crate::thread::PermissionChoice::from_option(option),
+                            permit,
                         })
                         .is_err()
                     {

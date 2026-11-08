@@ -1620,7 +1620,9 @@ impl AgentPane {
                         changed.push(index);
                     }
                 }
-                AcpEvent::PermissionAutoDecided { tool_call, choice } => {
+                AcpEvent::PermissionAutoDecided {
+                    tool_call, choice, ..
+                } => {
                     let entry_id = entry
                         .transcript
                         .push_permission(permission_title(&tool_call), vec![choice.clone()]);

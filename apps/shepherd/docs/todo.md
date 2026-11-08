@@ -1573,6 +1573,9 @@ placeholder tabs and no unearned state badges.
   retain permits through the harness; a fixture checks each kind. Shepherd and
   Taskstream fold history while session/load is in flight, each with a
   600-update replay fixture.
+  Automatic ACP permission decisions share the same capacity and reserve an
+  audit event before responding; saturation fails the connection without
+  authorizing an unrecordable decision. A fake-agent burst covers the limit.
   Transcript folding similarly selects the tail of an oversized command-output
   chunk before allocating it, with a UTF-8 regression for the retained output.
 - [ ] Multiple agents and projects: three agents across two projects, no state

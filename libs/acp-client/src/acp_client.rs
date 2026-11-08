@@ -101,6 +101,7 @@ pub enum AcpEvent {
     PermissionAutoDecided {
         tool_call: ToolCallUpdate,
         choice: thread::PermissionChoice,
+        permit: std::sync::Arc<tokio::sync::OwnedSemaphorePermit>,
     },
     TerminalStarted {
         session_id: schema::SessionId,
@@ -229,7 +230,9 @@ impl std::fmt::Debug for AcpEvent {
                 .field("terminal_id", terminal_id)
                 .field("exit_code", exit_code)
                 .finish(),
-            Self::PermissionAutoDecided { tool_call, choice } => f
+            Self::PermissionAutoDecided {
+                tool_call, choice, ..
+            } => f
                 .debug_struct("PermissionAutoDecided")
                 .field("tool_call", tool_call)
                 .field("choice", choice)
