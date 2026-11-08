@@ -1374,7 +1374,9 @@ placeholder tabs and no unearned state badges.
   pump. Cancelled terminal exit-wait futures remove their registry entries;
   fixtures also cover a reused terminal ID. Each terminal admits at most 64
   active exit waits and reports an error for excess requests; cancellation
-  frees a slot and existing waiters still receive the exit status.
+  frees a slot and existing waiters still receive the exit status. The ACP
+  handler honors request cancellation; a fake agent cancels 65 waits and then
+  successfully waits for the same terminal to exit.
   Output permits remain held through the harness queue until the core
   consumes the events. A direct terminal's exit wait completes even if a
   descendant keeps an output pipe open, and shutdown rejects new terminals.

@@ -727,10 +727,14 @@ where
         .on_receive_request(
             async move |request: WaitForTerminalExitRequest, responder, _cx| {
                 let registry = registry_for_wait.clone();
+                let cancellation = responder.cancellation();
                 tokio::spawn(async move {
-                    let reply = match registry.wait_for_exit(&request.terminal_id).await {
-                        Ok(response) => responder.respond(response),
-                        Err(error) => responder.respond_with_internal_error(error),
+                    let reply = tokio::select! {
+                        result = registry.wait_for_exit(&request.terminal_id) => match result {
+                            Ok(response) => responder.respond(response),
+                            Err(error) => responder.respond_with_internal_error(error),
+                        },
+                        _ = cancellation.cancelled() => responder.respond_with_error(acp::Error::request_cancelled()),
                     };
                     log_reply(reply, "terminal exit wait");
                 });

@@ -9,13 +9,14 @@ use std::sync::{Arc, Mutex};
 use agent_client_protocol as acp;
 use agent_client_protocol::schema::v1::{
     AgentCapabilities, CancelNotification, ContentBlock, ContentChunk, CreateTerminalRequest,
-    Implementation, InitializeRequest, InitializeResponse, LoadSessionRequest, LoadSessionResponse,
-    McpCapabilities, McpServer, NewSessionRequest, NewSessionResponse, PermissionOption,
-    PromptCapabilities, PromptRequest, PromptResponse, ReadTextFileRequest, ReleaseTerminalRequest,
-    RequestPermissionRequest, SessionConfigOption, SessionModeState, SessionNotification,
-    SessionUpdate, SetSessionConfigOptionRequest, SetSessionConfigOptionResponse,
-    SetSessionModeRequest, SetSessionModeResponse, StopReason, TerminalOutputRequest, TextContent,
-    ToolCall, ToolCallUpdate, WaitForTerminalExitRequest, WriteTextFileRequest,
+    Implementation, InitializeRequest, InitializeResponse, KillTerminalRequest, LoadSessionRequest,
+    LoadSessionResponse, McpCapabilities, McpServer, NewSessionRequest, NewSessionResponse,
+    PermissionOption, PromptCapabilities, PromptRequest, PromptResponse, ReadTextFileRequest,
+    ReleaseTerminalRequest, RequestPermissionRequest, SessionConfigOption, SessionModeState,
+    SessionNotification, SessionUpdate, SetSessionConfigOptionRequest,
+    SetSessionConfigOptionResponse, SetSessionModeRequest, SetSessionModeResponse, StopReason,
+    TerminalOutputRequest, TextContent, ToolCall, ToolCallUpdate, WaitForTerminalExitRequest,
+    WriteTextFileRequest,
 };
 
 #[cfg(test)]
@@ -47,6 +48,7 @@ pub struct FakeScript {
     pub load_updates: Vec<SessionUpdate>,
     /// Ask the client to run a command.
     pub terminal: Option<(String, Vec<String>)>,
+    pub cancelled_terminal_waits: usize,
     pub release_terminal: bool,
     /// Ask the client to read these paths in order.
     pub read_paths: Vec<PathBuf>,
@@ -71,6 +73,7 @@ pub struct FakeObservations {
     pub permission_responses: Vec<String>,
     pub terminal_output: Vec<String>,
     pub terminal_exit: Vec<Option<u32>>,
+    pub terminal_wait_cancellations: Vec<Result<(), String>>,
     pub file_reads: Vec<Result<String, String>>,
     pub file_writes: Vec<Result<(), String>>,
 }
@@ -355,6 +358,31 @@ async fn run_turn(
             )
             .block_task()
             .await?;
+        for _ in 0..script.cancelled_terminal_waits {
+            let wait = connection.send_request(WaitForTerminalExitRequest::new(
+                session_id.clone(),
+                created.terminal_id.clone(),
+            ));
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            wait.cancel()?;
+            let result = wait
+                .block_task()
+                .await
+                .map(|_| ())
+                .map_err(|error| error.to_string());
+            if let Ok(mut state) = observations.lock() {
+                state.terminal_wait_cancellations.push(result);
+            }
+        }
+        if script.cancelled_terminal_waits > 0 {
+            connection
+                .send_request(KillTerminalRequest::new(
+                    session_id.clone(),
+                    created.terminal_id.clone(),
+                ))
+                .block_task()
+                .await?;
+        }
         // Wait first, then snapshot: `terminal/output` is a point-in-time read,
         // so an early call legitimately returns nothing yet.
         let exit = connection
@@ -987,6 +1015,34 @@ mod tests {
             std::fs::read_to_string(dir.path().join(&target)).unwrap(),
             "hello"
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cancelled_terminal_wait_requests_do_not_exhaust_waiter_slots()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (connection, observations, directory) = connect_to_fake(
+            FakeScript {
+                terminal: Some(("/bin/sleep".to_string(), vec!["30".to_string()])),
+                cancelled_terminal_waits: 65,
+                ..Default::default()
+            },
+            confirm_all(),
+        )
+        .await;
+        let session = new_session(&connection, &directory).await;
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            connection.requester.prompt(&session, "run".into()),
+        )
+        .await??;
+        let state = observations.lock().map_err(|error| error.to_string())?;
+        assert_eq!(state.terminal_wait_cancellations.len(), 65);
+        assert!(state.terminal_wait_cancellations.iter().all(|result| {
+            matches!(result, Err(error) if error.to_lowercase().contains("cancel"))
+        }));
+        assert_eq!(state.terminal_exit.len(), 1);
+        Ok(())
     }
 
     #[tokio::test]
