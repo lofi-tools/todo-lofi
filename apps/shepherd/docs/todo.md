@@ -1478,8 +1478,8 @@ placeholder tabs and no unearned state badges.
 - [ ] Multiple agents and projects: three agents across two projects, no state
   bleed, no polling.
   A three-session fixture holds Codex, OpenCode and Claude tasks at approvals
-  across two projects, resolves identical approval IDs independently, and
-  verifies worktree and persisted transcript isolation. Agent events wake the
+  across two projects, denies one and allows the others with identical approval
+  IDs, and verifies worktree and persisted decision/transcript isolation. Agent events wake the
   shell directly instead of using a periodic poll; fixtures cover multiple
   receivers and delivery between commands. The event pump exits on shutdown
   or shell disposal without retaining the core. Live adapters remain unverified.
@@ -1624,8 +1624,9 @@ placeholder tabs and no unearned state badges.
   complete transcript and diff. On this Mac that database fixture took about
   two minutes; it does not measure interactive responsiveness.
 - [ ] Three-agent/two-project concurrency test.
-  The local scripted fixture covers overlapping approval waits and independent
-  worktree writes; a live multi-agent run remains unverified.
+  The local scripted fixture covers overlapping approval waits, mixed decisions
+  on identical approval IDs, and independent worktree writes; a live multi-agent
+  run remains unverified.
 - [ ] Release checklist on both target platforms.
 
 ### Gate

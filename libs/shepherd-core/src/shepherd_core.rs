@@ -4014,21 +4014,39 @@ mod tests {
                 .is_ok_and(|workspace| workspace.task.state == TaskState::Waiting)
         }));
         for (index, (id, agent, path)) in tasks.iter().enumerate().rev() {
+            let denied = *agent == Agent::Claude;
             let completed = workspace_of(
                 core.execute(Command::ResolveApproval {
                     task_id: id.clone(),
                     approval_id: ApprovalId::new("same-approval-id"),
-                    decision: Decision::Allow,
+                    decision: if denied {
+                        Decision::Deny
+                    } else {
+                        Decision::Allow
+                    },
                 })
                 .await?,
             );
-            assert_eq!(completed.task.state, TaskState::Review);
-            assert_eq!(
-                std::fs::read_to_string(path.join("agent-result.txt"))?,
-                agent.as_str()
-            );
+            if denied {
+                assert_ne!(completed.task.state, TaskState::Waiting);
+                assert!(!path.join("agent-result.txt").exists());
+            } else {
+                assert_eq!(completed.task.state, TaskState::Review);
+                assert_eq!(
+                    std::fs::read_to_string(path.join("agent-result.txt"))?,
+                    agent.as_str()
+                );
+            }
             let text = summaries(&completed).join("\n");
-            assert!(text.contains(&format!("{} finished", agent.as_str())));
+            assert_eq!(
+                text.contains(&format!("{} finished", agent.as_str())),
+                !denied
+            );
+            assert!(completed.transcript.iter().any(|entry| matches!(
+                &entry.kind,
+                agent_harness::EntryKind::Permission { approval_id, decision: Some(decision), .. }
+                    if approval_id == "same-approval-id" && *decision == if denied { Decision::Deny } else { Decision::Allow }
+            )));
             for (other_id, other_agent, other_path) in &tasks[..index] {
                 assert_eq!(
                     core.task_workspace(other_id)?.task.state,
@@ -4045,8 +4063,17 @@ mod tests {
         )
         .await?;
         for (id, agent, _) in tasks {
-            let text = summaries(&reopened.open_task_workspace(&id).await?).join("\n");
-            assert!(text.contains(&format!("{} finished", agent.as_str())));
+            let restored = reopened.open_task_workspace(&id).await?;
+            assert!(restored.transcript.iter().any(|entry| matches!(
+                &entry.kind,
+                agent_harness::EntryKind::Permission { approval_id, decision: Some(decision), .. }
+                    if approval_id == "same-approval-id" && *decision == if agent == Agent::Claude { Decision::Deny } else { Decision::Allow }
+            )));
+            let text = summaries(&restored).join("\n");
+            assert_eq!(
+                text.contains(&format!("{} finished", agent.as_str())),
+                agent != Agent::Claude
+            );
             for other in [Agent::Codex, Agent::OpenCode, Agent::Claude] {
                 if other != agent {
                     assert!(!text.contains(&format!("{} started", other.as_str())));
@@ -6269,14 +6296,27 @@ mod tests {
         assert_eq!(workspace.task.state, TaskState::Review);
         let transcript = summaries(&workspace);
         for index in 0..1_000 {
-            assert!(transcript.iter().any(|entry| entry == &format!("agent: message {index:04}")));
+            assert!(
+                transcript
+                    .iter()
+                    .any(|entry| entry == &format!("agent: message {index:04}"))
+            );
         }
         let diff = core.review_file_diff(&task_id, "large.txt")?;
         let expected_lines: Vec<String> = (0..12_000)
             .map(|index| format!("+large diff line {index:05}"))
             .collect();
-        let actual_lines: Vec<&str> = diff.lines().filter(|line| line.starts_with("+large diff line ")).collect();
-        assert_eq!(actual_lines, expected_lines.iter().map(String::as_str).collect::<Vec<_>>());
+        let actual_lines: Vec<&str> = diff
+            .lines()
+            .filter(|line| line.starts_with("+large diff line "))
+            .collect();
+        assert_eq!(
+            actual_lines,
+            expected_lines
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>()
+        );
         drop(core);
 
         let mut reopened = Core::load(
