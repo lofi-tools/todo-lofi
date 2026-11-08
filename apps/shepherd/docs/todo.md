@@ -1500,7 +1500,7 @@ placeholder tabs and no unearned state badges.
   Retry, task deletion, batch archive and quit all attempt shutdown before
   discarding a disconnected session; an injected-failure fixture verifies that
   each operation retains it until a later shutdown succeeds.
-- [ ] Bounded transcript, stderr, search and frame buffers.
+- [x] Bounded transcript, stderr, search and frame buffers.
   Diagnostic history retains at most 256 KiB per record while draining longer
   lines, reports oversized records, and continues to later entries; a local
   log fixture covers recovery after an oversized line. New oversized diagnostics
@@ -1517,10 +1517,20 @@ placeholder tabs and no unearned state badges.
   Codex, OpenCode and ACP stderr readers cap each line while draining the
   process, including newline-free output. OpenCode omits overlong lines to
   avoid exposing fragments of its authentication secret. ACP protocol lines
-  are rejected above 8 MiB while reading, with a protocol error. Event queues
-  and other buffer limits still need review. Pi admits at most 64 pending RPC
-  requests, rejects excess requests and reclaims cancelled requests on the next
-  attempt; a local subprocess fixture checks saturation and recovery. Pi also
+  are rejected above 8 MiB while reading, with a protocol error.
+  Event queues are bounded by what producers may have in flight, not by the
+  channel: streamed text, tool, plan and usage events keep their semaphore
+  permit in the queued event, so a stalled consumer fills the budget instead
+  of memory — 4096 units of 16 KiB for Codex app-server records, 64 chunks for
+  Codex exec and OpenCode, 64 error permits for ACP, and 32 queued events with
+  an explicit overflow for Pi. Turn-scoped control events (finish, error, mode,
+  session, exit) are bounded by the protocol, and the shutdown, kill and
+  stop-error channels carry at most one message per operation. The core emits
+  at most 256 pending UI events before a `ResyncRequired`; a fixture keeps a
+  drained stream event's permit held until the event is dropped. Pi admits at
+  most 64 pending RPC requests, rejects excess requests and reclaims
+  cancelled requests on the next attempt; a local subprocess fixture checks
+  saturation and recovery. Pi also
   bounds unread RPC events to 32; overflow fails the transport explicitly,
   reserving space for its exit report. A subprocess fixture checks the queued
   events, error and process cleanup. Codex app-server, exec and
@@ -1683,7 +1693,7 @@ placeholder tabs and no unearned state badges.
   ordinary replies still pass. Queued turn errors also retain capacity based on
   their own text, including errors saved before a small completion message;
   a fixture checks capacity release and control replies. Other critical queues
-  still need review.
+  are bounded as described above.
   App-server completion notifications for a different identified turn leave
   the active turn and its pending approvals untouched; a fixture covers stale
   and matching completions. Turn errors are retained only when their ID matches

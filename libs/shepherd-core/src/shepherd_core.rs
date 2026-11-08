@@ -3385,6 +3385,46 @@ mod streaming {
     }
 
     #[tokio::test]
+    async fn queued_stream_events_hold_their_capacity_until_folded()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let capacity = Arc::new(tokio::sync::Semaphore::new(1));
+        let permit = capacity.clone().acquire_owned().await?;
+        let (sender, events) = mpsc::unbounded_channel();
+        let id = TaskId::new("capacity");
+        let mut core = Core::new();
+        core.sessions.insert(
+            id.clone(),
+            HarnessSession::new(Box::new(LateHarness {
+                events,
+                approvals: Vec::new(),
+                prompts: None,
+                mode: None,
+            })),
+        );
+        sender.send(HarnessEvent::Delta {
+            item_id: ItemId::new("held"),
+            kind: DeltaKind::Message,
+            text: "held".into(),
+            stream_permit: Some(Arc::new(permit)),
+        })?;
+        assert_eq!(capacity.available_permits(), 0);
+        let mut drained = core.sessions.get_mut(&id).ok_or("missing session")?.pump();
+        assert_eq!(drained.len(), 1);
+        assert_eq!(
+            capacity.available_permits(),
+            0,
+            "a drained event must keep its capacity until it is folded"
+        );
+        drained.clear();
+        assert_eq!(
+            capacity.available_permits(),
+            1,
+            "folding an event must release its capacity"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn background_batches_are_fair_and_preserve_all_agent_events()
     -> Result<(), Box<dyn std::error::Error>> {
         let mut core = Core::new();
