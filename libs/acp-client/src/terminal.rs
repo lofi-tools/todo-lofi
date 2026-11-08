@@ -289,25 +289,19 @@ impl TerminalRegistry {
         });
         let registry = self.clone();
         tokio::spawn(async move {
-            let status = loop {
-                tokio::select! {
-                    status = child.status() => break status,
-                    Some(response) = stop_requests.recv() => {
-                        let result = stop_direct_process(&mut child);
-                        if response.send(result).is_err() {
-                            tracing::debug!(terminal_id = key, "terminal termination requester disconnected");
-                        }
-                    }
-                }
-            };
+            let status = supervise_direct_child(
+                &mut child,
+                &registry,
+                &key,
+                &mut stop_requests,
+                wait_direct_child,
+                stop_direct_process,
+            )
+            .await;
             let exit = match status {
                 Ok(status) => terminal_exit_status(status),
                 Err(error) => {
                     tracing::warn!("terminal {key} could not be waited on: {error}");
-                    registry.record_wait_failure(
-                        &key,
-                        format!("could not wait for terminal process: {error}"),
-                    );
                     drop(stop_requests);
                     for task in [stdout_task, stderr_task] {
                         task.abort();
@@ -790,6 +784,67 @@ fn terminal_exit_status(status: std::process::ExitStatus) -> TerminalExitStatus 
     }
 }
 
+type DirectWait = for<'a> fn(
+    &'a mut async_process::Child,
+) -> std::pin::Pin<
+    Box<dyn std::future::Future<Output = std::io::Result<std::process::ExitStatus>> + Send + 'a>,
+>;
+
+fn wait_direct_child(
+    child: &mut async_process::Child,
+) -> std::pin::Pin<
+    Box<dyn std::future::Future<Output = std::io::Result<std::process::ExitStatus>> + Send + '_>,
+> {
+    Box::pin(child.status())
+}
+
+async fn supervise_direct_child(
+    child: &mut async_process::Child,
+    registry: &TerminalRegistry,
+    key: &str,
+    requests: &mut tokio::sync::mpsc::Receiver<oneshot::Sender<Result<(), String>>>,
+    wait: DirectWait,
+    stop: fn(&mut async_process::Child) -> Result<(), String>,
+) -> Result<std::process::ExitStatus, String> {
+    let mut wait_failed = false;
+    loop {
+        if wait_failed {
+            let Some(response) = requests.recv().await else {
+                return Err(
+                    "terminal supervisor lost its stop channel after a wait failure".into(),
+                );
+            };
+            let result = stop(child);
+            let stopped = result.is_ok();
+            if response.send(result).is_err() {
+                tracing::debug!(
+                    terminal_id = key,
+                    "terminal termination requester disconnected"
+                );
+            }
+            if stopped {
+                wait_failed = false;
+            }
+            continue;
+        }
+        tokio::select! {
+            status = wait(child) => match status {
+                Ok(status) => return Ok(status),
+                Err(error) => {
+                    registry.record_wait_failure(key, format!("could not wait for terminal process: {error}"));
+                    wait_failed = true;
+                }
+            },
+            Some(response) = requests.recv() => {
+                let result = stop(child);
+                if response.send(result).is_err() {
+                    tracing::debug!(terminal_id = key, "terminal termination requester disconnected");
+                }
+            }
+        }
+    }
+}
+
 fn stop_direct_process(child: &mut async_process::Child) -> Result<(), String> {
     #[cfg(unix)]
     {
@@ -855,6 +910,94 @@ mod tests {
         async fn stop(&self, _id: &str) -> Result<(), String> {
             Ok(())
         }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn direct_child_wait_failure_retains_child_for_stop_retry()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::process::CommandExt as _;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static WAIT_CALLS: AtomicUsize = AtomicUsize::new(0);
+        static STOP_CALLS: AtomicUsize = AtomicUsize::new(0);
+        fn wait_once(
+            child: &mut async_process::Child,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<Output = std::io::Result<std::process::ExitStatus>>
+                    + Send
+                    + '_,
+            >,
+        > {
+            if WAIT_CALLS.fetch_add(1, Ordering::SeqCst) == 0 {
+                Box::pin(async { Err(std::io::Error::other("fixture wait failure")) })
+            } else {
+                wait_direct_child(child)
+            }
+        }
+        fn stop_once(child: &mut async_process::Child) -> Result<(), String> {
+            if STOP_CALLS.fetch_add(1, Ordering::SeqCst) == 0 {
+                Err("fixture stop failure".into())
+            } else {
+                stop_direct_process(child)
+            }
+        }
+        WAIT_CALLS.store(0, Ordering::SeqCst);
+        STOP_CALLS.store(0, Ordering::SeqCst);
+        let directory = tempfile::tempdir()?;
+        let (events, _receiver) = tokio::sync::mpsc::unbounded_channel();
+        let registry = TerminalRegistry::new(
+            SessionRoots::new([directory.path().to_path_buf()]),
+            &events,
+            None,
+        );
+        registry.register("fixture", MAX_OUTPUT_LIMIT);
+        let (stop, mut requests) = tokio::sync::mpsc::channel(MAX_PENDING_STOP_REQUESTS);
+        registry
+            .entries()
+            .get_mut("fixture")
+            .ok_or("missing terminal")?
+            .stop = Some(stop);
+        let mut command = std::process::Command::new("/bin/sh");
+        command.args(["-c", "sleep 2"]).process_group(0);
+        let mut child = async_process::Command::from(command).spawn()?;
+        let supervisor = tokio::spawn({
+            let registry = registry.clone();
+            async move {
+                supervise_direct_child(
+                    &mut child,
+                    &registry,
+                    "fixture",
+                    &mut requests,
+                    wait_once,
+                    stop_once,
+                )
+                .await
+            }
+        });
+        let terminal = TerminalId::new("fixture");
+        let error = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            registry.wait_for_exit(&terminal),
+        )
+        .await?;
+        assert!(matches!(error, Err(error) if error.contains("fixture wait failure")));
+        assert!(
+            registry
+                .stop_direct("fixture")
+                .await
+                .is_err_and(|error| error.contains("fixture stop failure"))
+        );
+        registry
+            .stop_direct("fixture")
+            .await
+            .map_err(std::io::Error::other)?;
+        tokio::time::timeout(std::time::Duration::from_secs(2), supervisor)
+            .await??
+            .map_err(std::io::Error::other)?;
+        assert_eq!(WAIT_CALLS.load(Ordering::SeqCst), 2);
+        assert_eq!(STOP_CALLS.load(Ordering::SeqCst), 2);
+        Ok(())
     }
 
     #[tokio::test]
