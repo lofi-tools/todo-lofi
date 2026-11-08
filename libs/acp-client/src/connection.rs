@@ -771,9 +771,11 @@ where
                 };
                 let registry = registry_for_create.clone();
                 let events = terminal_create.clone();
+                let cancellation = responder.cancellation();
                 tokio::spawn(async move {
-                    let reply = match registry.create_reserved(request, permit).await {
-                        Ok(response) => responder.respond(response),
+                    let reply = match registry.create_reserved(request, permit, cancellation.cancelled()).await {
+                        Ok(Some(response)) => responder.respond(response),
+                        Ok(None) => responder.respond_with_error(acp::Error::request_cancelled()),
                         Err(error) => {
                             let message = format!("terminal failed to start: {error}");
                             if events.send(terminal_notice(message.clone())).is_err() {

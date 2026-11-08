@@ -143,7 +143,9 @@ impl TerminalRegistry {
         request: CreateTerminalRequest,
     ) -> Result<CreateTerminalResponse, String> {
         let permit = self.reserve_creation()?;
-        self.create_reserved(request, permit).await
+        self.create_reserved(request, permit, std::future::pending())
+            .await?
+            .ok_or_else(|| "terminal creation was cancelled".into())
     }
 
     pub(crate) fn reserve_creation(&self) -> Result<tokio::sync::OwnedSemaphorePermit, String> {
@@ -164,8 +166,13 @@ impl TerminalRegistry {
         &self,
         request: CreateTerminalRequest,
         _permit: tokio::sync::OwnedSemaphorePermit,
-    ) -> Result<CreateTerminalResponse, String> {
-        let closed = self.closed.lock().await;
+        cancellation: impl std::future::Future<Output = ()>,
+    ) -> Result<Option<CreateTerminalResponse>, String> {
+        let closed = tokio::select! {
+            biased;
+            () = cancellation => return Ok(None),
+            closed = self.closed.lock() => closed,
+        };
         if *closed {
             return Err("the terminal connection is closed".into());
         }
@@ -211,7 +218,7 @@ impl TerminalRegistry {
             });
             let registry = self.clone();
             tokio::spawn(async move { registry.pump_backend(key, receiver).await });
-            return Ok(CreateTerminalResponse::new(terminal_id));
+            return Ok(Some(CreateTerminalResponse::new(terminal_id)));
         }
         let shell = default_shell();
         let mut std_command = std::process::Command::new(&shell);
@@ -299,7 +306,7 @@ impl TerminalRegistry {
             registry.publish_exit(&key, &exit);
         });
 
-        Ok(CreateTerminalResponse::new(terminal_id))
+        Ok(Some(CreateTerminalResponse::new(terminal_id)))
     }
 
     fn register(&self, key: &str, byte_limit: usize) {
@@ -762,6 +769,47 @@ mod tests {
         async fn stop(&self, _id: &str) -> Result<(), String> {
             Ok(())
         }
+    }
+
+    #[tokio::test]
+    async fn cancelled_creation_waiting_for_lock_does_not_start_terminal()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let (events, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let registry = TerminalRegistry::new(
+            SessionRoots::new([directory.path().to_path_buf()]),
+            &events,
+            Some(Arc::new(IdleBackend)),
+        );
+        let guard = registry.closed.lock().await;
+        let (cancel, cancelled) = tokio::sync::oneshot::channel::<()>();
+        let permit = registry.reserve_creation().map_err(std::io::Error::other)?;
+        let start = registry.create_reserved(
+            CreateTerminalRequest::new("session", "fixture"),
+            permit,
+            async {
+                if cancelled.await.is_err() {
+                    tracing::debug!("test cancellation sender dropped");
+                }
+            },
+        );
+        tokio::pin!(start);
+        assert!(futures::poll!(start.as_mut()).is_pending());
+        cancel.send(()).map_err(|_| "creation already finished")?;
+        assert!(start.await.map_err(std::io::Error::other)?.is_none());
+        drop(guard);
+        assert!(registry.entries().is_empty());
+        assert!(receiver.try_recv().is_err());
+        assert_eq!(
+            registry.creation_permits.available_permits(),
+            MAX_PENDING_CREATIONS
+        );
+        registry
+            .create(CreateTerminalRequest::new("session", "fixture"))
+            .await
+            .map_err(std::io::Error::other)?;
+        registry.shutdown().await.map_err(std::io::Error::other)?;
+        Ok(())
     }
 
     #[tokio::test]
