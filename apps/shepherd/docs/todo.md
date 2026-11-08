@@ -1331,7 +1331,9 @@ placeholder tabs and no unearned state badges.
   blocks the migration before schema changes. File-database openers resolving
   to the same canonical path hold a retained migration lock across existence
   checks, backup and migrations; concurrent-open fixtures verify waiting and a
-  single preserved snapshot. Unix checks reject dangling database symlinks and
+  single preserved snapshot. A separate-process fixture verifies that another
+  opener waits and proceeds after the lock holder is killed. Unix checks reject
+  dangling database symlinks and
   symlinked lock files. Hard-linked database aliases do not share this lock.
   A Unix fixture denies backup
   directory creation, verifies the old history remains intact, then retries

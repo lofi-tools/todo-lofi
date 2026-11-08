@@ -2565,6 +2565,66 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    #[ignore = "subprocess fixture for the migration lock crash test"]
+    fn migration_lock_subprocess_fixture() -> Result<(), Box<dyn std::error::Error>> {
+        let Some(path) = std::env::var_os("SHEPHERD_TEST_MIGRATION_DATABASE") else {
+            return Ok(());
+        };
+        let path = PathBuf::from(path);
+        let ready = PathBuf::from(
+            std::env::var_os("SHEPHERD_TEST_MIGRATION_READY").ok_or("missing ready path")?,
+        );
+        let _lock = lock_database_migrations(&path)?;
+        std::fs::write(ready, "ready")?;
+        std::thread::sleep(std::time::Duration::from_secs(30));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn database_migration_lock_is_released_when_another_process_dies()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = TestDirectory::new()?;
+        let path = directory.join("cross-process.db");
+        let ready = directory.join("ready");
+        let mut child = tokio::process::Command::new(std::env::current_exe()?)
+            .args([
+                "--ignored",
+                "--exact",
+                "store::tests::migration_lock_subprocess_fixture",
+            ])
+            .env("SHEPHERD_TEST_MIGRATION_DATABASE", &path)
+            .env("SHEPHERD_TEST_MIGRATION_READY", &ready)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true)
+            .spawn()?;
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                if ready.exists() {
+                    return Ok::<(), Box<dyn std::error::Error>>(());
+                }
+                if let Some(status) = child.try_wait()? {
+                    return Err(format!("migration lock fixture exited early: {status}").into());
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await??;
+        let open_path = path.clone();
+        let mut open = tokio::spawn(async move { TursoStore::open_at(&open_path).await });
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(150), &mut open)
+                .await
+                .is_err()
+        );
+        assert!(!path.exists());
+        child.kill().await?;
+        let store = tokio::time::timeout(std::time::Duration::from_secs(10), open).await???;
+        assert!(store.load_projects().await?.is_empty());
+        Ok(())
+    }
+
     #[tokio::test]
     async fn database_open_waits_for_the_shared_migration_lock()
     -> Result<(), Box<dyn std::error::Error>> {
