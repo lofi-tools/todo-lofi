@@ -3105,15 +3105,14 @@ async fn handle_notification(
             if let Some(turn_id) = read_turn_id(params) {
                 let mut pending = pending.lock().await;
                 if pending.start_request.is_some() {
+                    let first_start = pending.announced_turn.is_none();
                     announce_app_turn(&mut pending, turn_id, sender)?;
-                } else if pending.announced_turn.as_deref() == Some(turn_id.as_str())
-                    && pending.turn_id.is_none()
-                {
-                    return Ok(());
+                    if first_start {
+                        pending.turn_error = None;
+                    }
                 } else {
-                    pending.turn_id = Some(turn_id);
+                    tracing::debug!("ignoring an unsolicited or duplicate Codex turn start");
                 }
-                pending.turn_error = None;
             }
         }
         "error" if params["willRetry"] == false => {
@@ -3188,6 +3187,10 @@ async fn handle_notification(
                 _ => turn_finish_reason(params),
             };
             let mut pending = pending.lock().await;
+            if pending.start_request.is_none() && pending.turn_id.is_none() {
+                tracing::debug!("ignoring an unsolicited Codex turn completion");
+                return Ok(());
+            }
             let active = pending
                 .turn_id
                 .as_deref()
@@ -3627,6 +3630,55 @@ mod tests {
             assert!(events.try_recv().is_err());
             assert!(pending.lock().await.turn_id.is_none());
         }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn unsolicited_turn_notifications_do_not_create_events_or_change_active_turn()
+    -> HarnessResult<()> {
+        let pending = Arc::new(AsyncMutex::new(Pending::default()));
+        let (sender, mut events) = mpsc::unbounded_channel();
+        let start = json!({"turn": {"id": "unsolicited"}});
+        let completed = json!({"turn": {"id": "unsolicited", "status": "completed"}});
+        for _ in 0..512 {
+            handle_notification("turn/started", &start, &sender, &pending).await?;
+            handle_notification("turn/completed", &completed, &sender, &pending).await?;
+        }
+        assert!(events.try_recv().is_err());
+        assert!(pending.lock().await.turn_id.is_none());
+        {
+            let mut state = pending.lock().await;
+            state.turn_id = Some("current".into());
+            state.turn_error = Some(HarnessEvent::TurnError {
+                kind: FailureKind::Protocol,
+                text: "original failure".into(),
+                stream_permit: None,
+            });
+        }
+        handle_notification("turn/started", &start, &sender, &pending).await?;
+        handle_notification("turn/completed", &completed, &sender, &pending).await?;
+        let state = pending.lock().await;
+        assert_eq!(state.turn_id.as_deref(), Some("current"));
+        assert!(
+            matches!(state.turn_error.as_ref(), Some(HarnessEvent::TurnError { text, .. }) if text == "original failure")
+        );
+        assert!(events.try_recv().is_err());
+        drop(state);
+        {
+            let mut state = pending.lock().await;
+            state.start_request = Some(1);
+            state.announced_turn = Some("current".into());
+        }
+        handle_notification(
+            "turn/started",
+            &json!({"turn": {"id": "current"}}),
+            &sender,
+            &pending,
+        )
+        .await?;
+        assert!(matches!(pending.lock().await.turn_error.as_ref(),
+            Some(HarnessEvent::TurnError { text, .. }) if text == "original failure"));
+        assert!(events.try_recv().is_err());
         Ok(())
     }
 
@@ -4524,7 +4576,10 @@ done
     /// stdout reader uses, with no child process involved.
     async fn replay_app_server(name: &str) -> HarnessResult<Transcript> {
         let (sender, mut receiver) = mpsc::unbounded_channel();
-        let pending = Arc::new(AsyncMutex::new(Pending::default()));
+        let pending = Arc::new(AsyncMutex::new(Pending {
+            turn_id: Some("turn_1".into()),
+            ..Pending::default()
+        }));
         let (outgoing, _outgoing_receiver) = mpsc::channel(MAX_OUTBOUND_MESSAGES);
         for message in fixture_lines(name) {
             let params = message.get("params").cloned().unwrap_or(Value::Null);
