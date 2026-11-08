@@ -524,8 +524,7 @@ impl GitService {
         };
         let unstaged = git_bytes(path, &args)?;
         args.insert(2, "--binary");
-        let full_diff = git_bytes(path, &args)?;
-        let revision = Sha256::digest(full_diff)
+        let revision = git_digest(path, &args)?
             .iter()
             .map(|byte| format!("{byte:02x}"))
             .collect();
@@ -688,7 +687,7 @@ impl GitService {
             path,
             &["rev-parse", "--symbolic-full-name", "HEAD"],
         )?);
-        hash.update(git_bytes(path, &["ls-files", "--stage", "-z"])?);
+        hash = git_extend_digest(path, &["ls-files", "--stage", "-z"], hash)?;
         Ok(hash
             .finalize()
             .iter()
@@ -1172,6 +1171,12 @@ pub(crate) fn run_git(cwd: &Path, args: &[&str]) -> Result<String, GitError> {
 }
 
 fn git_digest(cwd: &Path, args: &[&str]) -> Result<[u8; 32], GitError> {
+    Ok(git_extend_digest(cwd, args, Sha256::new())?
+        .finalize()
+        .into())
+}
+
+fn git_extend_digest(cwd: &Path, args: &[&str], hash: Sha256) -> Result<Sha256, GitError> {
     let mut child = Command::new("git")
         .arg("-C")
         .arg(cwd)
@@ -1191,7 +1196,7 @@ fn git_digest(cwd: &Path, args: &[&str]) -> Result<[u8; 32], GitError> {
         .name("git-diff-digest".into())
         .spawn(move || {
             let mut stdout = stdout;
-            let mut hash = Sha256::new();
+            let mut hash = hash;
             let mut buffer = [0; 8192];
             loop {
                 let length = stdout.read(&mut buffer)?;
@@ -1200,7 +1205,7 @@ fn git_digest(cwd: &Path, args: &[&str]) -> Result<[u8; 32], GitError> {
                 }
                 hash.update(&buffer[..length]);
             }
-            Ok::<[u8; 32], std::io::Error>(hash.finalize().into())
+            Ok::<Sha256, std::io::Error>(hash)
         }) {
         Ok(thread) => thread,
         Err(error) => return Err(stop_git_after_reader_failure(&mut child, error)),
@@ -1318,6 +1323,58 @@ mod tests {
             git_digest(fixture.path(), &["diff", "--definitely-invalid-option"]),
             Err(GitError::CommandFailed { .. })
         ));
+        Ok(())
+    }
+
+    #[test]
+    fn streamed_revision_tokens_match_git_output_and_reject_stale_discard()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fixture = TestRepository::new()?;
+        fixture.write_file("README.md", "staged content\n")?;
+        GitService.stage(fixture.path(), Some("README.md"))?;
+        fixture.write_file("README.md", "unstaged content\n")?;
+        let mut staged_hash = Sha256::new();
+        staged_hash.update(git_bytes(fixture.path(), &["rev-parse", "HEAD"])?);
+        staged_hash.update(git_bytes(
+            fixture.path(),
+            &["rev-parse", "--symbolic-full-name", "HEAD"],
+        )?);
+        staged_hash.update(git_bytes(fixture.path(), &["ls-files", "--stage", "-z"])?);
+        let expected_staged = staged_hash
+            .finalize()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        assert_eq!(GitService.staged_revision(fixture.path())?, expected_staged);
+        let diff = GitService.file_diff(fixture.path(), "README.md")?;
+        let bytes = git_bytes(
+            fixture.path(),
+            &[
+                "--literal-pathspecs",
+                "diff",
+                "--binary",
+                "--no-color",
+                "--no-ext-diff",
+                "--no-textconv",
+                "--",
+                "README.md",
+            ],
+        )?;
+        let expected_diff = Sha256::digest(bytes)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        assert_eq!(diff.revision, expected_diff);
+        assert!(diff.can_discard);
+        fixture.write_file("README.md", "newer content\n")?;
+        assert!(matches!(
+            GitService.discard_unstaged(fixture.path(), "README.md", &diff.revision),
+            Err(GitError::DiscardChanged)
+        ));
+        assert_eq!(
+            std::fs::read_to_string(fixture.path().join("README.md"))?,
+            "newer content\n"
+        );
         Ok(())
     }
 
