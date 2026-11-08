@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 
 const MAX_DIAGNOSTIC_RECORD_BYTES: usize = 256 * 1024;
 const MAX_DIAGNOSTIC_HISTORY_RECORDS: usize = 200;
+const MAX_DIAGNOSTIC_HISTORY_SCAN_BYTES: u64 = 64 * 1024 * 1024;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -86,12 +87,27 @@ impl DiagnosticLog {
         };
         ensure_regular_file(&file)?;
         file.lock_shared()?;
-        let start = recent_history_start(&mut file)?;
+        let (start, omitted, partial) = recent_history_start(&mut file)?;
         file.seek(SeekFrom::Start(start))?;
-        let mut records = Vec::new();
+        let mut records = std::collections::VecDeque::new();
         let mut reader = BufReader::new(file);
         let mut line = Vec::new();
         let mut line_number = 0;
+        if omitted {
+            records.push_back(Diagnostic {
+                id: format!("omitted-log-before-{start}"),
+                time: "Unknown time".into(),
+                operation: "diagnostic_history".into(),
+                message: "Earlier diagnostic history was omitted.".into(),
+                details: format!("History scanning is limited to the latest {MAX_DIAGNOSTIC_HISTORY_SCAN_BYTES} bytes."),
+            });
+        }
+        if partial {
+            // The first line starts before the scan floor, so its fragment is unreadable.
+            if read_diagnostic_line(&mut reader, &mut line)?.is_none() {
+                return Ok(records.into_iter().collect());
+            }
+        }
         loop {
             line.clear();
             let line_offset = reader.stream_position()?;
@@ -126,23 +142,24 @@ impl DiagnosticLog {
                     },
                 }
             };
-            records.push(record);
+            if records.len() == MAX_DIAGNOSTIC_HISTORY_RECORDS {
+                records.pop_front();
+            }
+            records.push_back(record);
         }
-        Ok(records)
+        Ok(records.into_iter().collect())
     }
 }
 
-fn recent_history_start(file: &mut fs::File) -> io::Result<u64> {
+fn recent_history_start(file: &mut fs::File) -> io::Result<(u64, bool, bool)> {
     let end = file.metadata()?.len();
-    if end == 0 {
-        return Ok(0);
-    }
+    let floor = end.saturating_sub(MAX_DIAGNOSTIC_HISTORY_SCAN_BYTES);
     let mut position = end;
     let mut delimiters = 0;
     let mut buffer = [0; 8192];
-    while position > 0 {
-        let length =
-            usize::try_from(position.min(buffer.len() as u64)).map_err(io::Error::other)?;
+    while position > floor {
+        let length = usize::try_from((position - floor).min(buffer.len() as u64))
+            .map_err(io::Error::other)?;
         position -= length as u64;
         file.seek(SeekFrom::Start(position))?;
         file.read_exact(&mut buffer[..length])?;
@@ -151,12 +168,18 @@ fn recent_history_start(file: &mut fs::File) -> io::Result<u64> {
             if buffer[index] == b'\n' && offset + 1 < end {
                 delimiters += 1;
                 if delimiters == MAX_DIAGNOSTIC_HISTORY_RECORDS {
-                    return Ok(offset + 1);
+                    return Ok((offset + 1, false, false));
                 }
             }
         }
     }
-    Ok(0)
+    if floor == 0 {
+        return Ok((0, false, false));
+    }
+    file.seek(SeekFrom::Start(floor - 1))?;
+    let mut previous = [0];
+    file.read_exact(&mut previous)?;
+    Ok((floor, true, previous[0] != b'\n'))
 }
 
 struct LimitedDiagnosticBuffer {
@@ -448,6 +471,35 @@ mod tests {
         assert!(history[0].details.starts_with("start"));
         assert!(history[0].details.contains("[diagnostic field truncated]"));
         assert!(history[0].details.ends_with("end"));
+        Ok(())
+    }
+
+    #[test]
+    fn history_bounds_backward_scan_and_keeps_later_complete_records()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("errors.jsonl");
+        let mut file = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&path)?;
+        file.set_len(MAX_DIAGNOSTIC_HISTORY_SCAN_BYTES + 1024)?;
+        file.seek(SeekFrom::End(0))?;
+        file.write_all(b"\n")?;
+        drop(file);
+        let log = DiagnosticLog::new(path);
+        log.append(&Diagnostic {
+            id: "after".into(),
+            time: "fixture".into(),
+            operation: "fixture".into(),
+            message: "fixture error".into(),
+            details: String::new(),
+        })?;
+        let history = log.recent()?;
+        assert_eq!(history.len(), 2);
+        assert_eq!(history[0].operation, "diagnostic_history");
+        assert!(history[0].message.contains("omitted"));
+        assert_eq!(history[1].id, "after");
         Ok(())
     }
 

@@ -1478,7 +1478,9 @@ placeholder tabs and no unearned state badges.
   a fixture checks escaped content and retains both ends of the details.
   History seeks backward to the latest 200 records before parsing; a fixture
   checks ordering and identifies damaged records by absolute byte offset when
-  earlier entries are skipped.
+  earlier entries are skipped. The backward scan also stops after 64 MiB and
+  reports the omission, keeping later complete records while skipping the
+  fragment before the first complete line; a sparse-file fixture covers it.
   Search snippets cap the displayed matching word at 65 characters and compare
   case-folded text without allocating a copy of an arbitrarily long word;
   fixtures cover long Unicode matches and exact versus prefix matching.
