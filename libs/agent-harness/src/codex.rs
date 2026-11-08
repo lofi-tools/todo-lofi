@@ -1369,14 +1369,16 @@ impl AgentHarness for CodexHarness {
                 return Err(HarnessError::ApprovalOptionUnavailable);
             }
         };
-        let request_id = self
-            .pending
-            .lock()
-            .await
-            .approvals
-            .remove(approval_id.as_str())
-            .ok_or(HarnessError::NoPendingApproval)?;
-        self.send(json!({ "id": request_id, "result": { "decision": answer } }))?;
+        {
+            let mut pending = self.pending.lock().await;
+            let request_id = pending
+                .approvals
+                .get(approval_id.as_str())
+                .copied()
+                .ok_or(HarnessError::NoPendingApproval)?;
+            self.send(json!({ "id": request_id, "result": { "decision": answer } }))?;
+            pending.approvals.remove(approval_id.as_str());
+        }
         self.sender
             .send(HarnessEvent::ApprovalResolved {
                 approval_id,
@@ -4531,6 +4533,50 @@ done
                 if output == "running tests\nwarning: unused import\nok\n"
         ));
         harness.shutdown().await.expect("the session stops");
+    }
+
+    #[tokio::test]
+    async fn failed_approval_delivery_preserves_the_request_for_retry()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut harness = CodexHarness::new();
+        harness
+            .pending
+            .lock()
+            .await
+            .approvals
+            .insert("item".into(), 42);
+        let (disconnected, receiver) = mpsc::unbounded_channel();
+        drop(receiver);
+        harness.outgoing = Some(disconnected);
+        assert!(matches!(
+            harness
+                .respond(ApprovalId::new("item"), Decision::Allow)
+                .await,
+            Err(HarnessError::ChannelClosed)
+        ));
+        assert_eq!(
+            harness.pending.lock().await.approvals.get("item"),
+            Some(&42)
+        );
+        assert!(harness.receiver.try_recv().is_err());
+
+        let (connected, mut requests) = mpsc::unbounded_channel();
+        harness.outgoing = Some(connected);
+        harness
+            .respond(ApprovalId::new("item"), Decision::Allow)
+            .await?;
+        let request = requests.try_recv()?;
+        assert_eq!(request["id"], 42);
+        assert_eq!(request["result"]["decision"], "accept");
+        assert!(!harness.pending.lock().await.approvals.contains_key("item"));
+        assert!(matches!(
+            harness.receiver.try_recv(),
+            Ok(HarnessEvent::ApprovalResolved {
+                decision: Decision::Allow,
+                ..
+            })
+        ));
+        Ok(())
     }
 
     #[tokio::test]
