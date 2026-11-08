@@ -230,6 +230,7 @@ pub enum PermissionDecision {
 pub struct PermissionReply {
     sender: oneshot::Sender<PermissionDecision>,
     _permit: Option<tokio::sync::OwnedSemaphorePermit>,
+    confirmation: Option<oneshot::Receiver<bool>>,
 }
 
 impl PermissionReply {
@@ -237,16 +238,19 @@ impl PermissionReply {
         Self {
             sender,
             _permit: None,
+            confirmation: None,
         }
     }
 
     pub(crate) fn limited(
         sender: oneshot::Sender<PermissionDecision>,
         permit: tokio::sync::OwnedSemaphorePermit,
+        confirmation: oneshot::Receiver<bool>,
     ) -> Self {
         Self {
             sender,
             _permit: Some(permit),
+            confirmation: Some(confirmation),
         }
     }
 
@@ -254,6 +258,23 @@ impl PermissionReply {
     /// any more (the connection or the turn ended first).
     pub fn answer(self, decision: PermissionDecision) -> Result<(), PermissionDecision> {
         self.sender.send(decision)
+    }
+
+    pub async fn answer_confirmed(
+        self,
+        decision: PermissionDecision,
+    ) -> Result<(), PermissionDecision> {
+        self.sender.send(decision.clone())?;
+        match self.confirmation {
+            Some(confirmation) => {
+                if confirmation.await.unwrap_or(false) {
+                    Ok(())
+                } else {
+                    Err(decision)
+                }
+            }
+            None => Ok(()),
+        }
     }
 }
 
@@ -266,6 +287,31 @@ impl std::fmt::Debug for PermissionReply {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn confirmed_permission_requires_successful_delivery()
+    -> Result<(), Box<dyn std::error::Error>> {
+        for accepted in [false, true] {
+            let (sender, decision) = oneshot::channel();
+            let (confirmation, confirmed) = oneshot::channel();
+            let permit = std::sync::Arc::new(tokio::sync::Semaphore::new(1))
+                .acquire_owned()
+                .await?;
+            let reply = PermissionReply::limited(sender, permit, confirmed);
+            let answer = reply.answer_confirmed(PermissionDecision::Cancelled);
+            let receiver = async {
+                decision.await.map_err(|_| "missing decision")?;
+                confirmation
+                    .send(accepted)
+                    .map_err(|_| "missing confirmation receiver")?;
+                Ok::<(), &'static str>(())
+            };
+            let (result, received) = tokio::join!(answer, receiver);
+            received?;
+            assert_eq!(result.is_ok(), accepted);
+        }
+        Ok(())
+    }
 
     fn allow_deny(allow: &str, deny: &str) -> ToolPermissions {
         ToolPermissions {

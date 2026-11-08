@@ -1050,7 +1050,8 @@ async fn show_next_approval(
             .ok_or(HarnessError::NoPendingApproval)?;
         if approval
             .reply
-            .answer(PermissionDecision::Selected(option))
+            .answer_confirmed(PermissionDecision::Selected(option))
+            .await
             .is_ok()
         {
             publish(
@@ -1101,7 +1102,7 @@ async fn respond(
         .pop_front()
         .ok_or(HarnessError::NoPendingApproval)?;
     let reply = option.map_or(PermissionDecision::Cancelled, PermissionDecision::Selected);
-    if approval.reply.answer(reply).is_err() {
+    if approval.reply.answer_confirmed(reply).await.is_err() {
         publish(sender, HarnessEvent::ApprovalWithdrawn { approval_id: id })?;
     } else {
         let decision = if decision == Decision::AllowProject

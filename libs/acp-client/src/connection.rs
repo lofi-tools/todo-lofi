@@ -659,7 +659,8 @@ where
                 let permit = match permission_permits.clone().try_acquire_owned() {
                     Ok(permit) => permit,
                     Err(_) => {
-                        responder.respond_with_internal_error("too many pending permission requests")?;
+                        responder
+                            .respond_with_internal_error("too many pending permission requests")?;
                         return Ok(());
                     }
                 };
@@ -668,12 +669,13 @@ where
                 let request_id = permission_ids.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 tokio::spawn(async move {
                     let (decision_tx, decision_rx) = oneshot::channel();
+                    let (confirmed_tx, confirmed_rx) = oneshot::channel();
                     let sent = permissions.send(AcpEvent::PermissionRequested {
                         request_id,
                         session_id: request.session_id.clone(),
                         tool_call: request.tool_call.clone(),
                         options: request.options.clone(),
-                        decision: PermissionReply::limited(decision_tx, permit),
+                        decision: PermissionReply::limited(decision_tx, permit, confirmed_rx),
                     });
                     if sent.is_err() {
                         log_reply(
@@ -682,17 +684,25 @@ where
                         );
                         return;
                     }
-                    let reply = tokio::select! {
-                        decision = decision_rx => responder.respond(permission_response(
-                            decision.unwrap_or(PermissionDecision::Cancelled),
-                        )),
-                        _ = cancellation.cancelled() => {
-                            if permissions.send(AcpEvent::PermissionCancelled { request_id }).is_err() {
-                                tracing::debug!("ACP permission cancellation receiver closed");
+                    let reply =
+                        match wait_for_permission(decision_rx, cancellation.cancelled()).await {
+                            Some(decision) => {
+                                let reply = responder.respond(permission_response(decision));
+                                if confirmed_tx.send(reply.is_ok()).is_err() {
+                                    tracing::debug!("ACP permission confirmation receiver closed");
+                                }
+                                reply
                             }
-                            responder.respond_with_error(acp::Error::request_cancelled())
-                        },
-                    };
+                            None => {
+                                if permissions
+                                    .send(AcpEvent::PermissionCancelled { request_id })
+                                    .is_err()
+                                {
+                                    tracing::debug!("ACP permission cancellation receiver closed");
+                                }
+                                responder.respond_with_error(acp::Error::request_cancelled())
+                            }
+                        };
                     log_reply(reply, "permission");
                 });
                 Ok(())
@@ -715,7 +725,10 @@ where
                 tokio::task::spawn_blocking(move || {
                     if cancellation.is_cancelled() {
                         drop(permit);
-                        log_reply(responder.respond_with_error(acp::Error::request_cancelled()), "file read");
+                        log_reply(
+                            responder.respond_with_error(acp::Error::request_cancelled()),
+                            "file read",
+                        );
                         return;
                     }
                     let content = prompt_reads
@@ -757,7 +770,10 @@ where
                 tokio::task::spawn_blocking(move || {
                     if cancellation.is_cancelled() {
                         drop(permit);
-                        log_reply(responder.respond_with_error(acp::Error::request_cancelled()), "file write");
+                        log_reply(
+                            responder.respond_with_error(acp::Error::request_cancelled()),
+                            "file write",
+                        );
                         return;
                     }
                     let result = roots.write_text_file(&request.path, &request.content);
@@ -785,14 +801,22 @@ where
                 let events = terminal_create.clone();
                 let cancellation = responder.cancellation();
                 tokio::spawn(async move {
-                    let reply = match registry.create_reserved(request, permit, cancellation.cancelled()).await {
+                    let reply = match registry
+                        .create_reserved(request, permit, cancellation.cancelled())
+                        .await
+                    {
                         Ok(Some(response)) if cancellation.is_cancelled() => {
                             match registry.release(&response.terminal_id).await {
-                                Ok(_) => responder.respond_with_error(acp::Error::request_cancelled()),
+                                Ok(_) => {
+                                    responder.respond_with_error(acp::Error::request_cancelled())
+                                }
                                 Err(error) => {
-                                    let message = format!("cancelled terminal could not be stopped: {error}");
+                                    let message =
+                                        format!("cancelled terminal could not be stopped: {error}");
                                     if events.send(terminal_notice(message.clone())).is_err() {
-                                        tracing::debug!("ACP terminal cleanup error receiver closed");
+                                        tracing::debug!(
+                                            "ACP terminal cleanup error receiver closed"
+                                        );
                                     }
                                     responder.respond_with_internal_error(message)
                                 }
@@ -801,14 +825,17 @@ where
                         Ok(Some(response)) => {
                             let terminal_id = response.terminal_id.clone();
                             let reply = responder.respond(response);
-                            if reply.is_err() && let Err(error) = registry.release(&terminal_id).await {
-                                let message = format!("unclaimed terminal could not be stopped: {error}");
+                            if reply.is_err()
+                                && let Err(error) = registry.release(&terminal_id).await
+                            {
+                                let message =
+                                    format!("unclaimed terminal could not be stopped: {error}");
                                 if events.send(terminal_notice(message)).is_err() {
                                     tracing::debug!("ACP terminal cleanup error receiver closed");
                                 }
                             }
                             reply
-                        },
+                        }
                         Ok(None) => responder.respond_with_error(acp::Error::request_cancelled()),
                         Err(error) => {
                             let message = format!("terminal failed to start: {error}");
@@ -878,7 +905,9 @@ where
                 let registry = registry_for_kill.clone();
                 let cancellation = responder.cancellation();
                 tokio::spawn(async move {
-                    let result = registry.kill_cancellable(&request.terminal_id, cancellation.cancelled()).await;
+                    let result = registry
+                        .kill_cancellable(&request.terminal_id, cancellation.cancelled())
+                        .await;
                     drop(permit);
                     let reply = match result {
                         Ok(Some(response)) => responder.respond(response),
@@ -903,7 +932,9 @@ where
                 let registry = registry_for_release.clone();
                 let cancellation = responder.cancellation();
                 tokio::spawn(async move {
-                    let result = registry.release_cancellable(&request.terminal_id, cancellation.cancelled()).await;
+                    let result = registry
+                        .release_cancellable(&request.terminal_id, cancellation.cancelled())
+                        .await;
                     drop(permit);
                     let reply = match result {
                         Ok(Some(response)) => responder.respond(response),
@@ -1035,6 +1066,17 @@ where
         supervision: None,
         supervision_failure: None,
     })
+}
+
+async fn wait_for_permission(
+    decision: oneshot::Receiver<PermissionDecision>,
+    cancellation: impl Future<Output = ()>,
+) -> Option<PermissionDecision> {
+    tokio::select! {
+        biased;
+        () = cancellation => None,
+        decision = decision => Some(decision.unwrap_or(PermissionDecision::Cancelled)),
+    }
 }
 
 fn permission_response(decision: PermissionDecision) -> RequestPermissionResponse {
@@ -1515,6 +1557,33 @@ pub fn stderr_summary(lines: &[String]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn permission_cancellation_wins_when_answer_is_also_ready()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (sender, receiver) = oneshot::channel();
+        sender
+            .send(PermissionDecision::Selected(
+                schema::PermissionOptionId::new("allow"),
+            ))
+            .map_err(|_| "receiver closed")?;
+        assert!(
+            wait_for_permission(receiver, std::future::ready(()))
+                .await
+                .is_none()
+        );
+        let (sender, receiver) = oneshot::channel();
+        sender
+            .send(PermissionDecision::Selected(
+                schema::PermissionOptionId::new("allow"),
+            ))
+            .map_err(|_| "receiver closed")?;
+        assert!(matches!(
+            wait_for_permission(receiver, std::future::pending()).await,
+            Some(PermissionDecision::Selected(_))
+        ));
+        Ok(())
+    }
 
     #[tokio::test]
     async fn close_and_wait_reports_and_retries_terminal_stop_failure()
