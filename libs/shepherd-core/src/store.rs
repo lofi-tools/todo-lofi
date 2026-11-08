@@ -55,6 +55,8 @@ pub enum StoreError {
     ReviewStateChanged { task_id: TaskId },
     #[error("session {session_id} does not belong to task {task_id} in the store")]
     TranscriptOwnerMissing { task_id: TaskId, session_id: String },
+    #[error("session {session_id} cannot be saved for task {task_id}")]
+    SessionOwnerMissing { task_id: TaskId, session_id: String },
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -1284,15 +1286,15 @@ impl Store for TursoStore {
             .map(serde_json::to_string)
             .transpose()
             .map_err(|error| StoreError::Backend(error.to_string()))?;
-        toasty::sql::statement(
+        let updated = toasty::sql::statement(
             "INSERT INTO sessions (\
                 id, task_id, adapter, state, adapter_session_id, started_at, \
                 ended_at, exit_code, stderr, capabilities_json\
-             ) VALUES (\
+             ) SELECT \
                 ?1, ?2, ?3, ?4, NULLIF(?5, ''), ?6, \
                 NULLIF(?7, -1), NULLIF(?8, -1), NULLIF(?9, ''), NULLIF(?10, '')\
-             ) ON CONFLICT (id) DO UPDATE SET \
-                task_id = excluded.task_id, \
+             FROM tasks WHERE id = ?2 \
+             ON CONFLICT (id) DO UPDATE SET \
                 adapter = excluded.adapter, \
                 state = excluded.state, \
                 adapter_session_id = excluded.adapter_session_id, \
@@ -1300,7 +1302,8 @@ impl Store for TursoStore {
                 ended_at = excluded.ended_at, \
                 exit_code = excluded.exit_code, \
                 stderr = excluded.stderr, \
-                capabilities_json = excluded.capabilities_json",
+                capabilities_json = excluded.capabilities_json \
+             WHERE sessions.task_id = excluded.task_id",
         )
         .bind(session.id.as_str())
         .bind(session.task_id.as_str())
@@ -1314,6 +1317,12 @@ impl Store for TursoStore {
         .bind(capabilities.as_deref().unwrap_or_default())
         .exec(&mut *db)
         .await?;
+        if updated != 1 {
+            return Err(StoreError::SessionOwnerMissing {
+                task_id: session.task_id.clone(),
+                session_id: session.id.clone(),
+            });
+        }
         Ok(())
     }
 }
@@ -2025,7 +2034,18 @@ impl Store for MemoryStore {
     }
 
     async fn save_session(&self, session: &SessionRecord) -> Result<(), StoreError> {
+        let tasks = self.tasks.read().await;
         let mut sessions = self.sessions.write().await;
+        if !tasks.contains_key(session.task_id.as_str())
+            || sessions
+                .iter()
+                .any(|seen| seen.id == session.id && seen.task_id != session.task_id)
+        {
+            return Err(StoreError::SessionOwnerMissing {
+                task_id: session.task_id.clone(),
+                session_id: session.id.clone(),
+            });
+        }
         sessions.retain(|seen| seen.id != session.id);
         sessions.push(session.clone());
         Ok(())
@@ -2207,6 +2227,50 @@ mod tests {
             .save_transcript_entries(&session, &entries.iter().collect::<Vec<_>>())
             .await?;
         assert_eq!(store.load_transcript(&task.id).await?, entries);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn session_save_requires_existing_task_and_preserves_owner()
+    -> Result<(), Box<dyn std::error::Error>> {
+        async fn verify(store: &dyn Store, root: &Path) -> Result<(), Box<dyn std::error::Error>> {
+            let project = Project::new(root.to_path_buf());
+            let first = Task::draft(project.id.clone(), "First", root);
+            let second = Task::draft(project.id.clone(), "Second", root);
+            let mut session = SessionRecord::started(first.id.clone(), "codex", None);
+            assert!(matches!(
+                store.save_session(&session).await,
+                Err(StoreError::SessionOwnerMissing { .. })
+            ));
+            store.save_project(&project).await?;
+            store.save_task(&first).await?;
+            store.save_task(&second).await?;
+            store.save_session(&session).await?;
+            let mut reassigned = session.clone();
+            reassigned.task_id = second.id.clone();
+            assert!(matches!(
+                store.save_session(&reassigned).await,
+                Err(StoreError::SessionOwnerMissing { .. })
+            ));
+            assert_eq!(store.load_sessions().await?, vec![session.clone()]);
+            session.end(Some(0), None);
+            store.save_session(&session).await?;
+            assert_eq!(store.load_sessions().await?, vec![session.clone()]);
+            store.delete_task(&first.id, None).await?;
+            assert!(matches!(
+                store.save_session(&session).await,
+                Err(StoreError::SessionOwnerMissing { .. })
+            ));
+            assert!(store.load_sessions().await?.is_empty());
+            Ok(())
+        }
+        let directory = TestDirectory::new()?;
+        verify(&MemoryStore::new(), directory.path()).await?;
+        verify(
+            &TursoStore::open_at(&directory.join("session-owner.db")).await?,
+            directory.path(),
+        )
+        .await?;
         Ok(())
     }
 

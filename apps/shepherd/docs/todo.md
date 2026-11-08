@@ -1334,6 +1334,9 @@ placeholder tabs and no unearned state badges.
   It also holds the task, session, project and associated-state locks through
   task deletion; a concurrency fixture verifies a competing transcript save
   cannot recreate a deleted task.
+  Session saves require an existing task and cannot move an existing session
+  ID to another task. Both stores reject a late save after deletion; the Turso
+  check is part of the write statement.
   Task deletion stages the checkout before the database transaction so a
   failed deletion can restore ignored files as well as tracked files.
   A deletion journal now survives task deletion and database reopen in both
