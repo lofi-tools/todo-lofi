@@ -1589,7 +1589,9 @@ placeholder tabs and no unearned state badges.
   budget and retain their permits through the harness. Saturation rejects a
   new start before spawning, while a release still stops and removes its
   terminal before reporting overflow. Fixtures cover both, repeated failures,
-  and permit propagation through terminal lifecycle events.
+  and permit propagation through terminal lifecycle events. Terminal failures
+  received during history reload are retained in order for the live session;
+  a fixture also checks their capacity is retained until consumption.
   Transcript folding similarly selects the tail of an oversized command-output
   chunk before allocating it, with a UTF-8 regression for the retained output.
 - [ ] Multiple agents and projects: three agents across two projects, no state

@@ -1416,6 +1416,7 @@ impl ReplayHistory {
             AcpEvent::ProtocolFailed { message } => return Err(protocol(message)),
             event @ (AcpEvent::TerminalStarted { .. }
             | AcpEvent::TerminalExited { .. }
+            | AcpEvent::TerminalFailed { .. }
             | AcpEvent::TerminalReleased { .. }) => startup_events.push_back(event),
             _ => {}
         }
@@ -1444,6 +1445,45 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn replay_preserves_terminal_failure_order_and_capacity()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let capacity = Arc::new(tokio::sync::Semaphore::new(1));
+        let permit = Arc::new(capacity.clone().try_acquire_owned()?);
+        let session = schema::SessionId::new("session");
+        let mut history = ReplayHistory::default();
+        let mut startup = VecDeque::new();
+        history.apply(
+            &session,
+            AcpEvent::TerminalStarted {
+                session_id: session.clone(),
+                terminal_id: "terminal".into(),
+                title: "shell".into(),
+                permit: None,
+            },
+            &mut startup,
+        )?;
+        history.apply(
+            &session,
+            AcpEvent::TerminalFailed {
+                terminal_id: "terminal".into(),
+                message: "fixture failure".into(),
+                permit: Some(permit),
+            },
+            &mut startup,
+        )?;
+        assert!(matches!(
+            startup.pop_front(),
+            Some(AcpEvent::TerminalStarted { .. })
+        ));
+        assert_eq!(capacity.available_permits(), 0);
+        assert!(
+            matches!(startup.pop_front(), Some(AcpEvent::TerminalFailed { message, .. }) if message == "fixture failure")
+        );
+        assert_eq!(capacity.available_permits(), 1);
+        Ok(())
+    }
 
     #[test]
     fn command_tool_events_keep_a_bounded_unicode_tail() -> Result<(), Box<dyn std::error::Error>> {
