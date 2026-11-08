@@ -2114,6 +2114,15 @@ placeholder tabs and no unearned state badges.
   it needs installed agents and their credentials; the scripted fixture is the
   offline acceptance evidence.
 - [ ] Release checklist on both target platforms.
+  `apps/shepherd/docs/release-checklist.md` now holds the ordered macOS 13+
+  and Ubuntu 24.04+ gate: preflight commands, release bundle paths and metadata
+  checks, clean-machine launch and agent walkthroughs, and an evidence log.
+  `cargo test -p shepherd --test packaging` checks the checklist's required
+  sections and that its commands and artifact paths still match the build
+  configuration and CI. Only local debug-bundle metadata on macOS 15.7.4 has
+  been checked; the checklist itself has not been run on a clean macOS 13+ or
+  Ubuntu 24.04+ machine with installed agents, so the clean-machine gate below
+  remains unmet and this item stays unchecked.
 
 ### Gate
 

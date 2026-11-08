@@ -83,3 +83,49 @@ fn packaging_versions_and_build_path_agree() -> Result<(), Box<dyn std::error::E
     );
     Ok(())
 }
+
+#[test]
+fn release_checklist_tracks_the_build_and_ci() -> Result<(), Box<dyn std::error::Error>> {
+    let root = repo_root();
+    let checklist = read(&root.join("apps/shepherd/docs/release-checklist.md"))?;
+    for section in [
+        "## Preflight",
+        "## macOS 13+",
+        "## Ubuntu 24.04+",
+        "## Human-gated steps",
+        "## Evidence",
+    ] {
+        assert!(
+            checklist.contains(section),
+            "the release checklist is missing {section}"
+        );
+    }
+    for command in [
+        "cargo fmt --check",
+        "cargo clippy --workspace -- -D warnings",
+        "cargo test -p shepherd --test packaging",
+        "cargo test -p shepherd --test shell_scope",
+        "pnpm --dir apps/shepherd build --bundles app",
+        "target/release/bundle/macos/Shepherd.app",
+        "LSMinimumSystemVersion",
+        "xcrun vtool -show-build",
+        "pnpm --dir apps/shepherd build --bundles deb",
+        "target/release/bundle/deb",
+        "dpkg-deb --info",
+        "readelf -dW",
+        "./scripts/smoke-shepherd-terminal.sh --macos-window",
+        "Pending — human-gated",
+    ] {
+        assert!(
+            checklist.contains(command),
+            "the release checklist is missing {command}"
+        );
+    }
+
+    let readme = read(&root.join("apps/shepherd/README.md"))?;
+    assert!(
+        readme.contains("docs/release-checklist.md"),
+        "the README must link the release checklist"
+    );
+    Ok(())
+}

@@ -28,7 +28,10 @@ clean target directory when checking a release so older cached objects cannot
 change it. `cargo test -p shepherd --test packaging` checks that the Tauri
 config, build script, CI workflows and Nix Zig pin still agree.
 The manually dispatched **Shepherd package smoke** workflow builds debug macOS
-and Ubuntu bundles on clean runners without launching the app.
+and Ubuntu bundles on clean runners without launching the app. Follow
+[docs/release-checklist.md](docs/release-checklist.md) for the clean-machine
+macOS 13+ and Ubuntu 24.04+ release gate, including the artifact checks and
+human-gated agent walkthroughs.
 
 Choose the Send button color under **Settings → Appearance**. The choice is
 saved between launches for `shep` and lasts for the window session in
