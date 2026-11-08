@@ -725,6 +725,18 @@ impl TerminalService for PtyTerminals {
         if self.sessions()?.live.contains_key(terminal_id.as_str()) {
             return Err(TerminalError::Backend("terminal is already running".into()));
         }
+        let metadata = std::fs::metadata(&spec.cwd).map_err(|error| {
+            TerminalError::Backend(format!(
+                "cannot access terminal working directory {}: {error}",
+                spec.cwd.display()
+            ))
+        })?;
+        if !metadata.is_dir() {
+            return Err(TerminalError::Backend(format!(
+                "terminal working directory is not a directory: {}",
+                spec.cwd.display()
+            )));
+        }
         let system = native_pty_system();
         let pair = system
             .openpty(Self::size(spec.columns, spec.rows))
@@ -926,6 +938,42 @@ mod tests {
     use std::time::Instant;
 
     use super::*;
+
+    #[test]
+    fn refuses_unavailable_terminal_working_directories() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let directory = tempfile::tempdir()?;
+        let file = directory.path().join("file");
+        std::fs::write(&file, "not a directory")?;
+        let missing = directory.path().join("missing");
+        let mut engine = PtyTerminals::new();
+
+        for (cwd, expected) in [(&missing, "cannot access"), (&file, "not a directory")] {
+            let (sender, _receiver) = mpsc::channel(1);
+            let result = engine.spawn(
+                TerminalSpec {
+                    id: TerminalId::new("invalid-cwd"),
+                    columns: 80,
+                    rows: 24,
+                    cwd: cwd.to_path_buf(),
+                    command: "/bin/true".to_string(),
+                    args: Vec::new(),
+                    environment: BTreeMap::new(),
+                },
+                sender,
+            );
+            match result {
+                Err(TerminalError::Backend(message)) => {
+                    assert!(message.contains(expected), "{message}");
+                    assert!(message.contains(&cwd.display().to_string()), "{message}");
+                }
+                other => {
+                    return Err(format!("expected a working directory error, got {other:?}").into());
+                }
+            }
+        }
+        Ok(())
+    }
 
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     #[test]

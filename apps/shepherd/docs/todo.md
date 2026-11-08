@@ -1611,7 +1611,10 @@ placeholder tabs and no unearned state badges.
   during opening and afterward. Missing write directories are created relative
   to that root without following symlink substitutions; filesystem and fake-agent
   fixtures cover nested writes. Terminal
-  working directories still pass through a pathname. ACP reads and writes
+  working directories still pass through a pathname and can change between
+  validation and launch. Missing or non-directory working paths now fail
+  instead of silently falling back to the home directory; a fixture covers both.
+  ACP reads and writes
   run on blocking workers. ACP attachment grants open every path
   component without following symlinks and retain the opened file for the
   duration of the prompt. ACP line-limited reads stream only the requested range
