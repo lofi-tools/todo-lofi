@@ -1639,7 +1639,9 @@ placeholder tabs and no unearned state badges.
   pending requests and stops the agent process group, including a descendant.
   A successful turn-start reply missing its turn ID also stops the app-server
   because admission is uncertain; a subprocess fixture verifies descendant
-  cleanup. Timeout and cancellation during turn admission still need review.
+  cleanup. A timed-out turn-start request also stops the server and its process
+  group; an offline subprocess fixture verifies descendant cleanup. Cancellation
+  of the admission future still needs review.
   App-server turn starts are emitted by the protocol reader before completion,
   including when a fast turn finishes before its start reply is processed;
   an offline fixture checks reply and notification ordering. While that reply

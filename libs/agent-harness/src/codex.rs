@@ -932,6 +932,8 @@ pub struct CodexHarness {
     stderr_task: Option<JoinHandle<()>>,
     writer_task: Option<JoinHandle<()>>,
     next_request_id: i64,
+    #[cfg(test)]
+    request_timeout: Duration,
     supported: BTreeSet<String>,
     cwd: PathBuf,
     session_id: Option<SessionId>,
@@ -963,6 +965,8 @@ impl CodexHarness {
             stderr_task: None,
             writer_task: None,
             next_request_id: 1,
+            #[cfg(test)]
+            request_timeout: REQUEST_TIMEOUT,
             supported: SUPPORTED_METHODS
                 .iter()
                 .map(|method| method.to_string())
@@ -1067,16 +1071,29 @@ impl CodexHarness {
             return Err(error);
         }
 
-        match timeout(REQUEST_TIMEOUT, receiver).await {
+        #[cfg(test)]
+        let request_timeout = self.request_timeout;
+        #[cfg(not(test))]
+        let request_timeout = REQUEST_TIMEOUT;
+        match timeout(request_timeout, receiver).await {
             Err(_) => {
-                let mut pending = self.pending.lock().await;
-                pending.responses.remove(&id);
-                if pending.start_request == Some(id) {
-                    pending.start_request = None;
+                {
+                    let mut pending = self.pending.lock().await;
+                    pending.responses.remove(&id);
+                    if pending.start_request == Some(id) {
+                        pending.start_request = None;
+                    }
                 }
-                Err(HarnessError::Protocol(format!(
-                    "codex did not answer {method}"
-                )))
+                let message = format!("codex did not answer {method}");
+                if method == "turn/start" {
+                    return match self.shutdown().await {
+                        Ok(()) => Err(HarnessError::Protocol(message)),
+                        Err(error) => Err(HarnessError::Protocol(format!(
+                            "{message}; could not stop Codex after uncertain turn admission: {error}"
+                        ))),
+                    };
+                }
+                Err(HarnessError::Protocol(message))
             }
             Ok(Err(_)) => {
                 let stderr = stderr_tail(&self.stderr);
@@ -4408,6 +4425,33 @@ done
             .expect("the stub app-server starts");
         harness.open_session(None).await.expect("a thread opens");
         (harness, capabilities)
+    }
+
+    #[tokio::test]
+    async fn timed_out_turn_admission_stops_server_and_descendants()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = TempDir::new()?;
+        let original = r#"      printf '{"id":%s,"result":{"turn":{"id":"turn_1","status":"inProgress"}}}\n' "$id""#;
+        let replacement = r#"      (sleep 1; printf escaped > "$directory/escaped") >/dev/null 2>&1 &
+      sleep 30"#;
+        assert!(PROTOCOL_STUB.contains(original));
+        let script = PROTOCOL_STUB.replace(original, replacement);
+        let stub = write_stub(&directory, "codex-timeout-turn", &script);
+        let (mut harness, _) = start_session(&stub, directory.path()).await;
+        harness.request_timeout = Duration::from_millis(200);
+        let result = timeout(
+            Duration::from_secs(5),
+            harness.prompt(PromptInput::text("start")),
+        )
+        .await?;
+        assert!(
+            matches!(result, Err(HarnessError::Protocol(message)) if message.contains("did not answer turn/start"))
+        );
+        assert!(harness.child.is_none());
+        assert!(!harness.started);
+        tokio::time::sleep(Duration::from_millis(1300)).await;
+        assert!(!directory.path().join("escaped").exists());
+        Ok(())
     }
 
     #[tokio::test]
