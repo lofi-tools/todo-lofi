@@ -1341,8 +1341,10 @@ placeholder tabs and no unearned state badges.
   lock is checked against its pathname; a fixture verifies replacement while
   waiting is rejected before database open. The database pathname is also
   resolved again after acquiring the lock; a fixture rejects an alias redirected
-  during the wait. Replacement after that check remains
-  possible, and hard-linked database aliases do not share this lock.
+  during the wait. Existing hard-linked databases are rejected on Unix because
+  their aliases would not share a lock; a fixture checks both aliases and a
+  successful reopen after one is removed. Path or link changes after these
+  checks remain possible; hard-linked aliases remain unsupported on other platforms.
   A Unix fixture denies backup
   directory creation, verifies the old history remains intact, then retries
   successfully after access is restored. An inaccessible database path also

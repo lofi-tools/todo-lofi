@@ -322,6 +322,7 @@ async fn wait_for_database_migration_lock(
                         requested_path.display()
                     )));
                 }
+                reject_hard_linked_database(&target)?;
                 return Ok(file);
             }
             Err(std::fs::TryLockError::WouldBlock) => {
@@ -335,6 +336,28 @@ async fn wait_for_database_migration_lock(
             }
         }
     }
+}
+
+#[cfg(unix)]
+fn reject_hard_linked_database(path: &Path) -> Result<(), StoreError> {
+    use std::os::unix::fs::MetadataExt;
+    match std::fs::metadata(path) {
+        Ok(metadata) if metadata.nlink() > 1 => Err(StoreError::Backend(format!(
+            "database has multiple hard links and cannot be safely locked: {}",
+            path.display()
+        ))),
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(StoreError::Backend(format!(
+            "could not inspect database links {}: {error}",
+            path.display()
+        ))),
+    }
+}
+
+#[cfg(not(unix))]
+fn reject_hard_linked_database(_path: &Path) -> Result<(), StoreError> {
+    Ok(())
 }
 
 #[cfg(test)]
@@ -2738,6 +2761,34 @@ mod tests {
             Ok::<(), Box<dyn std::error::Error>>(())
         })?;
         drop(lock);
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn hard_linked_database_is_rejected_until_alias_is_removed()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = TestDirectory::new()?;
+        let path = directory.join("original.db");
+        let alias = directory.join("hardlink.db");
+        let project = Project::new(directory.join("project"));
+        let store = TursoStore::open_at(&path).await?;
+        store.save_project(&project).await?;
+        drop(store);
+        std::fs::hard_link(&path, &alias)?;
+        for candidate in [&path, &alias] {
+            assert!(matches!(TursoStore::open_at(candidate).await,
+                Err(StoreError::Backend(message)) if message.contains("multiple hard links")));
+        }
+        std::fs::remove_file(&alias)?;
+        let reopened = TursoStore::open_at(&path).await?;
+        assert!(
+            reopened
+                .load_projects()
+                .await?
+                .iter()
+                .any(|stored| stored.id == project.id)
+        );
         Ok(())
     }
 
