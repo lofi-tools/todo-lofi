@@ -3227,11 +3227,6 @@ async fn handle_notification(
     let mut events = Vec::new();
 
     match method {
-        "thread/started" => {
-            if let Some(thread_id) = read_thread_id(params) {
-                pending.lock().await.thread_id = Some(thread_id);
-            }
-        }
         "turn/started" => {
             if let Some(turn_id) = read_turn_id(params) {
                 let mut pending = pending.lock().await;
@@ -3614,6 +3609,31 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
 
     use tempfile::TempDir;
+
+    #[tokio::test]
+    async fn thread_notifications_do_not_replace_the_open_session() -> HarnessResult<()> {
+        let pending = Arc::new(AsyncMutex::new(Pending::default()));
+        let (sender, mut events) = mpsc::unbounded_channel();
+        handle_notification(
+            "thread/started",
+            &json!({"thread": {"id": "early"}}),
+            &sender,
+            &pending,
+        )
+        .await?;
+        assert!(pending.lock().await.thread_id.is_none());
+        pending.lock().await.thread_id = Some("current".into());
+        handle_notification(
+            "thread/started",
+            &json!({"thread": {"id": "other"}}),
+            &sender,
+            &pending,
+        )
+        .await?;
+        assert_eq!(pending.lock().await.thread_id.as_deref(), Some("current"));
+        assert!(events.try_recv().is_err());
+        Ok(())
+    }
 
     #[tokio::test]
     async fn stale_turn_completion_preserves_active_turn_and_approvals()
@@ -6097,6 +6117,31 @@ done
         );
         assert_eq!(request.paths, vec![PathBuf::from("src/main.rs")]);
         harness.shutdown().await.expect("the session stops");
+    }
+
+    #[tokio::test]
+    async fn stale_thread_notification_cannot_redirect_interrupt()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = TempDir::new()?;
+        let original = r#"      printf '{"id":%s,"result":{"turn":{"id":"turn_waiting","status":"inProgress"}}}\n' "$id""#;
+        let replacement = format!(
+            "      printf '%s\\n' '{{\"method\":\"thread/started\",\"params\":{{\"thread\":{{\"id\":\"other-thread\"}}}}}}'\n{original}"
+        );
+        assert!(INTERRUPT_STUB.contains(original));
+        let stub = write_stub(
+            &directory,
+            "codex-stale-thread",
+            &INTERRUPT_STUB.replace(original, &replacement),
+        );
+        let (mut harness, _) = start_session(&stub, directory.path()).await;
+        harness.prompt(PromptInput::text("start")).await?;
+        harness.cancel().await?;
+        let interrupt = std::fs::read_to_string(directory.path().join("interrupt.txt"))?;
+        let request: Value = serde_json::from_str(interrupt.trim())?;
+        assert_eq!(request["params"]["threadId"], "thr_waiting");
+        assert_eq!(request["params"]["turnId"], "turn_waiting");
+        harness.shutdown().await?;
+        Ok(())
     }
 
     #[tokio::test]
