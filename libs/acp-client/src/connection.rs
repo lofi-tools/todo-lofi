@@ -774,7 +774,29 @@ where
                 let cancellation = responder.cancellation();
                 tokio::spawn(async move {
                     let reply = match registry.create_reserved(request, permit, cancellation.cancelled()).await {
-                        Ok(Some(response)) => responder.respond(response),
+                        Ok(Some(response)) if cancellation.is_cancelled() => {
+                            match registry.release(&response.terminal_id).await {
+                                Ok(_) => responder.respond_with_error(acp::Error::request_cancelled()),
+                                Err(error) => {
+                                    let message = format!("cancelled terminal could not be stopped: {error}");
+                                    if events.send(terminal_notice(message.clone())).is_err() {
+                                        tracing::debug!("ACP terminal cleanup error receiver closed");
+                                    }
+                                    responder.respond_with_internal_error(message)
+                                }
+                            }
+                        }
+                        Ok(Some(response)) => {
+                            let terminal_id = response.terminal_id.clone();
+                            let reply = responder.respond(response);
+                            if reply.is_err() && let Err(error) = registry.release(&terminal_id).await {
+                                let message = format!("unclaimed terminal could not be stopped: {error}");
+                                if events.send(terminal_notice(message)).is_err() {
+                                    tracing::debug!("ACP terminal cleanup error receiver closed");
+                                }
+                            }
+                            reply
+                        },
                         Ok(None) => responder.respond_with_error(acp::Error::request_cancelled()),
                         Err(error) => {
                             let message = format!("terminal failed to start: {error}");

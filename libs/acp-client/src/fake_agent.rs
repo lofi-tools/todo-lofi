@@ -53,6 +53,7 @@ pub struct FakeScript {
     pub terminal: Option<(String, Vec<String>)>,
     pub cancelled_terminal_waits: usize,
     pub cancel_waiting_terminal_creation: bool,
+    pub cancel_started_terminal_creation: bool,
     pub release_terminal: bool,
     /// Ask the client to read these paths in order.
     pub read_paths: Vec<PathBuf>,
@@ -80,6 +81,7 @@ pub struct FakeObservations {
     pub permission_burst_cancellations: Vec<Result<(), String>>,
     pub terminal_output: Vec<String>,
     pub terminal_creation_cancellation: Option<Result<(), String>>,
+    pub terminal_creation_cancel_sent: bool,
     pub terminal_exit: Vec<Option<u32>>,
     pub terminal_wait_cancellations: Vec<Result<(), String>>,
     pub file_reads: Vec<Result<String, String>>,
@@ -418,7 +420,31 @@ async fn run_turn(
         }
     }
     if let Some((command, args)) = &script.terminal {
-        if script.cancel_waiting_terminal_creation {
+        if script.cancel_started_terminal_creation {
+            let request = connection.send_request(
+                CreateTerminalRequest::new(session_id.clone(), command.clone()).args(args.clone()),
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            request.cancel()?;
+            connection
+                .send_request(TerminalOutputRequest::new(
+                    session_id.clone(),
+                    acp::schema::v1::TerminalId::new("barrier"),
+                ))
+                .block_task()
+                .await?;
+            if let Ok(mut state) = observations.lock() {
+                state.terminal_creation_cancel_sent = true;
+            }
+            let result = request
+                .block_task()
+                .await
+                .map(|_| ())
+                .map_err(|error| error.to_string());
+            if let Ok(mut state) = observations.lock() {
+                state.terminal_creation_cancellation = Some(result);
+            }
+        } else if script.cancel_waiting_terminal_creation {
             let first = connection.send_request(
                 CreateTerminalRequest::new(session_id.clone(), command.clone()).args(args.clone()),
             );
@@ -1255,6 +1281,104 @@ mod tests {
             std::fs::read_to_string(dir.path().join(&target)).unwrap(),
             "hello"
         );
+    }
+
+    #[tokio::test]
+    async fn cancelled_started_terminal_is_stopped_and_failed_cleanup_can_retry()
+    -> Result<(), Box<dyn std::error::Error>> {
+        struct Backend {
+            started: tokio::sync::Semaphore,
+            resume: tokio::sync::Semaphore,
+            stops: std::sync::atomic::AtomicUsize,
+            fail_first_stop: bool,
+        }
+        #[async_trait::async_trait]
+        impl crate::terminal::TerminalBackend for Backend {
+            async fn spawn(
+                &self,
+                _launch: crate::terminal::TerminalLaunch,
+                _events: tokio::sync::mpsc::Sender<crate::terminal::TerminalProcessEvent>,
+            ) -> Result<(), String> {
+                self.started.add_permits(1);
+                self.resume
+                    .acquire()
+                    .await
+                    .map_err(|error| error.to_string())?
+                    .forget();
+                Ok(())
+            }
+            async fn stop(&self, _id: &str) -> Result<(), String> {
+                let attempt = self.stops.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if self.fail_first_stop && attempt == 0 {
+                    Err("fixture stop failure".into())
+                } else {
+                    Ok(())
+                }
+            }
+        }
+        for fail_first_stop in [false, true] {
+            let directory = tempfile::tempdir()?;
+            let backend = Arc::new(Backend {
+                started: tokio::sync::Semaphore::new(0),
+                resume: tokio::sync::Semaphore::new(0),
+                stops: std::sync::atomic::AtomicUsize::new(0),
+                fail_first_stop,
+            });
+            let (mut connection, observations) = connect_fake_agent_with_terminals(
+                FakeScript {
+                    terminal: Some(("fixture".into(), Vec::new())),
+                    cancel_started_terminal_creation: true,
+                    ..Default::default()
+                },
+                ConnectOptions {
+                    roots: SessionRoots::new([directory.path().to_path_buf()]),
+                    tool_permissions: confirm_all(),
+                },
+                backend.clone(),
+            )
+            .await?;
+            let session = new_session(&connection, &directory).await;
+            let turn = tokio::spawn({
+                let requester = connection.requester.clone();
+                async move { requester.prompt(&session, "go".into()).await }
+            });
+            tokio::time::timeout(std::time::Duration::from_secs(5), backend.started.acquire())
+                .await??
+                .forget();
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                loop {
+                    if observations
+                        .lock()
+                        .map_err(|error| error.to_string())?
+                        .terminal_creation_cancel_sent
+                    {
+                        return Ok::<(), String>(());
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                }
+            })
+            .await?
+            .map_err(std::io::Error::other)?;
+            backend.resume.add_permits(1);
+            tokio::time::timeout(std::time::Duration::from_secs(5), turn).await???;
+            let error = observations
+                .lock()
+                .map_err(|error| error.to_string())?
+                .terminal_creation_cancellation
+                .clone()
+                .ok_or("missing cancellation outcome")?;
+            if fail_first_stop {
+                assert!(matches!(error, Err(error) if error.contains("fixture stop failure")));
+            } else {
+                assert!(matches!(error, Err(error) if error.to_lowercase().contains("cancel")));
+            }
+            connection.close_and_wait().await?;
+            assert_eq!(
+                backend.stops.load(std::sync::atomic::Ordering::SeqCst),
+                if fail_first_stop { 2 } else { 1 }
+            );
+        }
+        Ok(())
     }
 
     #[tokio::test]
