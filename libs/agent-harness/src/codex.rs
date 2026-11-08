@@ -59,6 +59,22 @@ const MAX_PROTOCOL_LINE_BYTES: usize = 8 * 1024 * 1024;
 const MAX_PROBE_OUTPUT_BYTES: usize = 256 * 1024;
 const EXEC_STREAM_CHUNKS: usize = 64;
 const EXEC_STREAM_CHUNK_BYTES: usize = 8 * 1024;
+const APP_STREAM_UNIT_BYTES: usize = 16 * 1024;
+const APP_STREAM_CAPACITY_UNITS: usize = 4096;
+
+#[derive(Default)]
+struct ByteCounter(usize);
+
+impl std::io::Write for ByteCounter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0 = self.0.saturating_add(bytes.len());
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
 
 async fn read_protocol_line<R: AsyncBufRead + Unpin>(
     reader: &mut R,
@@ -827,7 +843,6 @@ pub async fn project_models(spec: SpawnSpec) -> HarnessResult<CodexProjectModels
     Ok(settings)
 }
 
-#[derive(Default)]
 struct Pending {
     responses: HashMap<i64, oneshot::Sender<HarnessResult<Value>>>,
     approvals: HashMap<String, i64>,
@@ -835,6 +850,21 @@ struct Pending {
     thread_id: Option<String>,
     turn_id: Option<String>,
     turn_error: Option<HarnessEvent>,
+    stream_capacity: Arc<tokio::sync::Semaphore>,
+}
+
+impl Default for Pending {
+    fn default() -> Self {
+        Self {
+            responses: HashMap::new(),
+            approvals: HashMap::new(),
+            approval_writes: BTreeSet::new(),
+            thread_id: None,
+            turn_id: None,
+            turn_error: None,
+            stream_capacity: Arc::new(tokio::sync::Semaphore::new(APP_STREAM_CAPACITY_UNITS)),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -2881,7 +2911,7 @@ async fn route_incoming(
         (None, Some(method)) => {
             let method = method.as_str().unwrap_or_default().to_string();
             let params = message.get("params").cloned().unwrap_or(Value::Null);
-            handle_notification(&method, &params, sender, pending).await;
+            handle_notification(&method, &params, sender, pending).await?;
         }
         (None, None) => tracing::warn!("codex sent a message with neither id nor method"),
     }
@@ -2995,7 +3025,7 @@ async fn handle_notification(
     params: &Value,
     sender: &mpsc::UnboundedSender<HarnessEvent>,
     pending: &Arc<AsyncMutex<Pending>>,
-) {
+) -> HarnessResult<()> {
     let mut events = Vec::new();
 
     match method {
@@ -3106,12 +3136,42 @@ async fn handle_notification(
         _ => {}
     }
 
-    for event in events {
+    let permit = if events.iter().any(|event| {
+        matches!(
+            event,
+            HarnessEvent::Delta { .. }
+                | HarnessEvent::ToolCall { .. }
+                | HarnessEvent::CommandOutput { .. }
+        )
+    }) {
+        let mut bytes = ByteCounter::default();
+        serde_json::to_writer(&mut bytes, params)
+            .map_err(|_| HarnessError::Protocol("could not measure Codex stream event".into()))?;
+        let units =
+            u32::try_from(bytes.0.div_ceil(APP_STREAM_UNIT_BYTES).max(1)).map_err(|_| {
+                HarnessError::Protocol("Codex stream event exceeds queue capacity".into())
+            })?;
+        let capacity = pending.lock().await.stream_capacity.clone();
+        let permit = capacity.try_acquire_many_owned(units).map_err(|_| {
+            HarnessError::Protocol("Codex stream event queue exceeded its limit".into())
+        })?;
+        Some(Arc::new(permit))
+    } else {
+        None
+    };
+    for mut event in events {
+        match &mut event {
+            HarnessEvent::Delta { stream_permit, .. }
+            | HarnessEvent::ToolCall { stream_permit, .. } => *stream_permit = permit.clone(),
+            HarnessEvent::CommandOutput { output_permit, .. } => *output_permit = permit.clone(),
+            _ => {}
+        }
         if sender.send(event).is_err() {
             tracing::debug!("the core stopped listening to codex events");
-            return;
+            return Ok(());
         }
     }
+    Ok(())
 }
 
 fn tool_call_from_item(item: &Value) -> Option<HarnessEvent> {
@@ -3660,7 +3720,7 @@ mod tests {
             &events,
             &pending,
         )
-        .await;
+        .await?;
         assert!(matches!(
             received.try_recv(),
             Ok(HarnessEvent::ApprovalWithdrawn { .. })
@@ -3687,7 +3747,7 @@ mod tests {
             &events,
             &pending,
         )
-        .await;
+        .await?;
         handle_server_request(
             json!(103),
             method.into(),
@@ -4218,7 +4278,7 @@ done
                         &sender,
                         &pending,
                     )
-                    .await;
+                    .await?;
                 }
                 // Answers to Shepherd's own requests need a live waiter; the
                 // mapping under test is the notification and request surface.
@@ -5060,7 +5120,7 @@ done
             &harness.sender,
             &harness.pending,
         )
-        .await;
+        .await?;
         assert!(matches!(
             harness.receiver.try_recv(),
             Ok(HarnessEvent::ApprovalWithdrawn { .. })
@@ -5194,7 +5254,7 @@ done
             &harness.sender,
             &harness.pending,
         )
-        .await;
+        .await?;
         assert!(harness.pending.lock().await.approval_writes.is_empty());
         harness.outgoing = None;
         writer_task.await?;
@@ -5596,6 +5656,111 @@ exit 0
             }
         )));
         harness.shutdown().await?;
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn app_server_stream_overflow_stops_child_and_releases_waiters()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let line = r#"{"method":"item/agentMessage/delta","params":{"itemId":"message","delta":"fixture"}}"#;
+        let mut command = Command::new("/bin/sh");
+        command
+            .args([
+                "-c",
+                &format!("printf '%s\\n' '{line}' '{line}'; exec sleep 30"),
+            ])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            .process_group(0);
+        let mut child = command.spawn()?;
+        let stdout = child.stdout.take().ok_or("missing stdout")?;
+        let child = Arc::new(AsyncMutex::new(child));
+        let (sender, mut events) = mpsc::unbounded_channel();
+        let pending = Arc::new(AsyncMutex::new(Pending::default()));
+        pending.lock().await.stream_capacity = Arc::new(tokio::sync::Semaphore::new(1));
+        let (response, response_waiter) = oneshot::channel();
+        pending.lock().await.responses.insert(1, response);
+        let (outgoing, _requests) = mpsc::channel(1);
+        let (_writer, writer_failed) = oneshot::channel();
+        let (drained, stderr_drained) = oneshot::channel();
+        drained.send(()).map_err(|_| "stderr receiver closed")?;
+        let reader = spawn_reader(
+            stdout,
+            sender,
+            pending,
+            outgoing,
+            Arc::new(Mutex::new(VecDeque::new())),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+            stderr_drained,
+            writer_failed,
+            Arc::downgrade(&child),
+            stop_codex_process_group,
+            None,
+        );
+        let first = timeout(Duration::from_secs(5), events.recv())
+            .await?
+            .ok_or("missing first event")?;
+        assert!(matches!(&first, HarnessEvent::Delta { .. }));
+        let failure = timeout(Duration::from_secs(5), events.recv())
+            .await?
+            .ok_or("missing failure")?;
+        assert!(
+            matches!(failure, HarnessEvent::ConnectionFailed { text, .. } if text.contains("queue exceeded"))
+        );
+        reader.await?;
+        assert!(
+            timeout(Duration::from_secs(1), response_waiter)
+                .await?
+                .is_err()
+        );
+        assert!(child.lock().await.try_wait()?.is_some());
+        drop(first);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn app_server_stream_saturation_preserves_control_replies()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (sender, mut events) = mpsc::unbounded_channel();
+        let (outgoing, _receiver) = mpsc::channel(MAX_OUTBOUND_MESSAGES);
+        let pending = Arc::new(AsyncMutex::new(Pending::default()));
+        let capacity = Arc::new(tokio::sync::Semaphore::new(1));
+        pending.lock().await.stream_capacity = capacity.clone();
+        route_incoming(json!({"method":"item/agentMessage/delta","params":{"itemId":"message","delta":"first"}}), &sender, &pending, &outgoing).await?;
+        let first = events.recv().await.ok_or("missing stream event")?;
+        let copy = first.clone();
+        drop(first);
+        let (reply, result) = oneshot::channel();
+        pending.lock().await.responses.insert(99, reply);
+        route_incoming(
+            json!({"id":99,"result":{"ok":true}}),
+            &sender,
+            &pending,
+            &outgoing,
+        )
+        .await?;
+        assert_eq!(result.await??["ok"], true);
+        let error = route_incoming(json!({"method":"item/agentMessage/delta","params":{"itemId":"message","delta":"second"}}), &sender, &pending, &outgoing).await;
+        assert!(
+            matches!(error, Err(HarnessError::Protocol(message)) if message.contains("queue exceeded"))
+        );
+        drop(copy);
+        assert_eq!(capacity.available_permits(), 1);
+        route_incoming(json!({"method":"item/commandExecution/outputDelta","params":{"itemId":"tool","delta":"output"}}), &sender, &pending, &outgoing).await?;
+        let output = events.recv().await.ok_or("missing command output")?;
+        assert!(matches!(
+            &output,
+            HarnessEvent::CommandOutput {
+                output_permit: Some(_),
+                ..
+            }
+        ));
+        assert_eq!(capacity.available_permits(), 0);
+        drop(output);
+        assert_eq!(capacity.available_permits(), 1);
         Ok(())
     }
 

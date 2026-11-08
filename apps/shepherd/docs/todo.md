@@ -1546,10 +1546,13 @@ placeholder tabs and no unearned state badges.
   so replies to queued requests can still be processed when the stream is full.
   A fixture checks both reply handling and recovery when a permit is released. A core
   fixture fills the queue and verifies that 150 scripted messages and 150 tool
-  calls reach the transcript in order. App-server events and other critical
-  queues still need coordinated backpressure. A
-  Codex fixture verifies that a command reply remains reachable after 100
-  unconsumed stream events; a bounded design must preserve that behavior.
+  calls reach the transcript in order. Codex app-server text, reasoning,
+  command-output and tool events use a nonblocking 64 MiB serialized-size
+  budget. Saturation fails the connection and stops the process instead of
+  blocking the stdout reader; a local subprocess fixture checks cleanup and
+  pending-request release. Fixtures verify that control replies remain reachable
+  while the budget is full and after 100 unconsumed stream events. App-server
+  approval and other critical queues still need coordinated backpressure.
   Event folding handles at
   most 256 events per session per pass, including during commands, and
   reschedules remaining events so one busy agent cannot monopolize other
