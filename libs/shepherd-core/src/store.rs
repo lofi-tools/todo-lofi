@@ -1448,9 +1448,24 @@ fn parse_migration(migration: &Migration) -> Result<Vec<&str>, StoreError> {
                 name: migration.name.to_owned(),
                 reason: error.to_string(),
             })?;
-        let Some(_) = command else {
+        let Some(command) = command else {
             break;
         };
+        if matches!(
+            command,
+            turso_parser::ast::Cmd::Stmt(
+                turso_parser::ast::Stmt::Begin { .. }
+                    | turso_parser::ast::Stmt::Commit { .. }
+                    | turso_parser::ast::Stmt::Rollback { .. }
+                    | turso_parser::ast::Stmt::Savepoint { .. }
+                    | turso_parser::ast::Stmt::Release { .. }
+            )
+        ) {
+            return Err(StoreError::InvalidMigration {
+                name: migration.name.to_owned(),
+                reason: "transaction control is managed by the migration runner".into(),
+            });
+        }
         let end = parser.offset();
         let statement = migration
             .sql
@@ -3107,6 +3122,44 @@ mod tests {
             return Err("missing migration row".into());
         };
         assert_eq!(required_string(record.first())?, "hello; it's working");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn migration_rejects_transaction_control_before_applying_any_migration()
+    -> Result<(), Box<dyn std::error::Error>> {
+        for statement in [
+            "CREATE TABLE escaped (value TEXT); BEGIN;",
+            "CREATE TABLE escaped (value TEXT); COMMIT;",
+            "CREATE TABLE escaped (value TEXT); END;",
+            "CREATE TABLE escaped (value TEXT); ROLLBACK;",
+            "CREATE TABLE escaped (value TEXT); SAVEPOINT nested;",
+            "CREATE TABLE escaped (value TEXT); RELEASE nested;",
+        ] {
+            let mut db = toasty::Db::builder().build(Turso::in_memory()).await?;
+            let migrations = [
+                Migration {
+                    name: "first.sql",
+                    sql: "CREATE TABLE first_table (value TEXT);",
+                },
+                Migration {
+                    name: "unsafe.sql",
+                    sql: statement,
+                },
+            ];
+            assert!(
+                matches!(
+                    apply_migration_set(&mut db, &migrations).await,
+                    Err(StoreError::InvalidMigration { name, reason })
+                        if name == "unsafe.sql" && reason.contains("transaction control")
+                ),
+                "accepted {statement}"
+            );
+            let tables = toasty::sql::query("SELECT name FROM sqlite_schema WHERE name IN ('first_table', 'escaped', '_migrations_history')")
+                .column_types([Type::String])
+                .exec(&mut db).await?;
+            assert!(tables.is_empty(), "schema changed for {statement}");
+        }
         Ok(())
     }
 
