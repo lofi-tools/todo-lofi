@@ -332,7 +332,7 @@ pub(crate) fn inspect(records: Vec<ProcessRecord>) -> Vec<ProcessInspection> {
             let observed = observe(&record, boot_id.clone());
             let status = classify(&record, &observed);
             #[cfg(unix)]
-            let status = if record.kind == "agent" && status == ProcessStatus::Gone {
+            let status = if status == ProcessStatus::Gone {
                 match crate::pty_terminal::process_group_has_other_members(&record) {
                     Ok(true) => ProcessStatus::GroupUnverified,
                     Ok(false) => status,

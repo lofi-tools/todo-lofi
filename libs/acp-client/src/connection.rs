@@ -1330,6 +1330,17 @@ impl ProjectAgent {
         command
     }
 
+    /// Spawn an agent process through the ACP transport without completing a
+    /// handshake, for tests that need a real child tree. The child is detached
+    /// so the caller can reap it explicitly after it exits.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn spawn_for_test(spec: SpawnSpec) -> std::io::Result<u32> {
+        let child = ProjectAgent::new(spec).spawn_child()?;
+        let pid = child.id();
+        std::mem::forget(child);
+        Ok(pid)
+    }
+
     fn spawn_child(&self) -> std::io::Result<async_process::Child> {
         // NB: `async_process::Command::from` resets its internal
         // stdin/stdout/stderr-configured flags, and `spawn()` overwrites any
@@ -2239,6 +2250,64 @@ for line in sys.stdin:
         )
         .await??;
         second.close();
+        Ok(())
+    }
+
+    /// The launch token only proves provenance if the ACP child really receives
+    /// it; a spec environment that never reaches the process would make the
+    /// token-verified stop silently refuse every ACP launch.
+    #[test]
+    fn spawn_child_exports_the_launch_environment() -> Result<(), Box<dyn std::error::Error>> {
+        let path = std::env::temp_dir().join(format!("acp-launch-env-{}", std::process::id()));
+        match std::fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+        let agent = ProjectAgent::new(SpawnSpec {
+            program: "/bin/sh".into(),
+            args: vec![
+                "-c".into(),
+                format!(
+                    "printf %s \"$SHEPHERD_PROCESS_TOKEN\" > '{}'; exec sleep 5",
+                    path.display()
+                ),
+            ],
+            cwd: std::env::temp_dir(),
+            env: std::collections::BTreeMap::from([(
+                "SHEPHERD_PROCESS_TOKEN".to_string(),
+                "acp-launch-token".to_string(),
+            )]),
+        });
+        let mut child = agent.spawn_child()?;
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let token = loop {
+            match std::fs::read_to_string(&path) {
+                Ok(token) => break token,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    if std::time::Instant::now() >= deadline {
+                        if let Err(kill_error) = child.kill() {
+                            eprintln!("could not stop the ACP fixture: {kill_error}");
+                        }
+                        return Err("the ACP fixture did not export its environment".into());
+                    }
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => {
+                    if let Err(kill_error) = child.kill() {
+                        eprintln!("could not stop the ACP fixture: {kill_error}");
+                    }
+                    return Err(error.into());
+                }
+            }
+        };
+        match std::fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+        child.kill()?;
+        assert_eq!(token, "acp-launch-token");
         Ok(())
     }
 

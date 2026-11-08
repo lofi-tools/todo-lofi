@@ -4682,6 +4682,95 @@ mod tests {
         state.close_terminal(terminal.as_str().to_owned()).await?;
         Ok(())
     }
+    /// Spawns through the ACP transport's own command builder, so the launch
+    /// token and process group are the ones a real ACP agent would receive.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn acp_launched_tree_is_stopped_after_its_leader_exits()
+    -> Result<(), Box<dyn std::error::Error>> {
+        if crate::pty_terminal::boot_id().is_none() {
+            eprintln!("Skipping process stop check: the OS boot identifier is unavailable");
+            return Ok(());
+        }
+        let directory = TestDirectory::new()?;
+        let members_file = directory.path().join("stoppable-members");
+        let token_file = directory.path().join("stoppable-token");
+        let token = "acp-launch-token";
+        let script = format!(
+            "printf %s \"$SHEPHERD_PROCESS_TOKEN\" > '{}'; sleep 30 & echo $! > '{}'; SHEPHERD_PROCESS_TOKEN=other-launch sleep 30 & echo $! >> '{}'; sleep 0.5; exit 0",
+            token_file.display(),
+            members_file.display(),
+            members_file.display()
+        );
+        let leader_pid =
+            acp_client::connection::ProjectAgent::spawn_for_test(acp_client::SpawnSpec {
+                program: "/bin/sh".into(),
+                args: vec!["-c".into(), script],
+                cwd: directory.path().to_path_buf(),
+                env: BTreeMap::from([(agent_harness::PROCESS_TOKEN_ENV.into(), token.into())]),
+            })?;
+        let record = crate::pty_terminal::capture_process_record(
+            libc::pid_t::try_from(leader_pid)?,
+            "agent",
+            "acp-task",
+            token,
+        )
+        .ok_or("could not capture the ACP process")?;
+        let members = {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                if let Ok(contents) = std::fs::read_to_string(&members_file) {
+                    let pids: Vec<libc::pid_t> = contents
+                        .lines()
+                        .filter_map(|line| line.trim().parse().ok())
+                        .collect();
+                    if pids.len() >= 2 {
+                        break pids;
+                    }
+                }
+                if Instant::now() >= deadline {
+                    return Err("the ACP fixture did not record its members".into());
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        };
+        assert_eq!(std::fs::read_to_string(&token_file)?, token);
+        let mut unrelated = std::process::Command::new("sleep")
+            .arg("30")
+            .env(agent_harness::PROCESS_TOKEN_ENV, token)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()?;
+        let unrelated_pid = libc::pid_t::try_from(unrelated.id())?;
+        let mut status = 0;
+        let reaped = unsafe { libc::waitpid(libc::pid_t::try_from(leader_pid)?, &mut status, 0) };
+        if reaped < 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        let leases_directory = directory.path().join("leases");
+        let leases = crate::orphan_process::ProcessLeases::new(leases_directory.clone())?;
+        drop(crate::orphan_process::ProcessLease::create(
+            &leases_directory,
+            &record.id,
+        )?);
+        let stopping = record.clone();
+        tokio::task::spawn_blocking(move || crate::orphan_process::stop(&leases, &stopping))
+            .await??;
+        let alive = |pid: libc::pid_t| (unsafe { libc::kill(pid, 0) }) == 0;
+        assert!(
+            !alive(members[0]),
+            "a descendant of the ACP launch should be stopped"
+        );
+        assert!(alive(members[1]), "a member of another launch must survive");
+        assert!(alive(unrelated_pid), "an unrelated process must survive");
+        unsafe {
+            libc::kill(members[1], libc::SIGKILL);
+            libc::kill(unrelated_pid, libc::SIGKILL);
+        }
+        unrelated.wait()?;
+        Ok(())
+    }
 
     #[tokio::test]
     async fn acp_terminal_identity_is_recorded_and_removed_on_exit()

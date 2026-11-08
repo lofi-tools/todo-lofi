@@ -1215,7 +1215,7 @@ placeholder tabs and no unearned state badges.
 
 ### Build
 
-- [ ] Crash and kill tests: interrupted state, orphan detection, recorded PID
+- [x] Crash and kill tests: interrupted state, orphan detection, recorded PID
   plus start time, reused-PID refusal.
   A headless subprocess fixture is killed with SIGKILL while a scripted agent
   waits for approval; reopening its database restores the prompt and marks the
@@ -1296,7 +1296,12 @@ placeholder tabs and no unearned state badges.
   and the original group stop while the leader still matches.
   Newly recorded agents hold a per-record OS lock while owned by this instance;
   cross-process and crash fixtures verify that another process cannot acquire
-  it until the owner exits. Existing records have no such ownership evidence.
+  it until the owner exits. A record written before the launch token or the
+  per-record lock existed carries neither: inspection still lists it, but a
+  stop refuses without signalling anything because neither the lease nor any
+  environment proves ownership, and the record stays listed for inspection. A
+  record whose lease is still locked by a running instance, or whose lease file
+  was replaced, is refused the same way.
   Lease files are retained so all instances continue to lock the same file.
   New lease directories are private; startup rejects a symlink, a directory
   owned by another user, or one writable by other users.  On Unix, lease files
@@ -1304,16 +1309,25 @@ placeholder tabs and no unearned state badges.
   before and after each claim. A recorded process can now be stopped from the
   startup notice: Shepherd adopts the retained lease, refusing one still
   locked by a running instance or whose file is no longer the entry it locked,
-  and signals only while the recorded identity still matches. The lease stays
+  and signals members while the recorded identity still matches, or by the
+  launch token once the leader has exited. The lease stays
   held through termination, which escalates from `SIGTERM` to `SIGKILL` after
-  500 ms only while the leader still matches; a fixture covers an owned lease,
+  500 ms only while the leader still matches or the member still carries the
+  launch token; a fixture covers an owned lease,
   a replaced lease file, a reused start time and a completed stop.
   ACP supervision reports a failed process-group signal even if killing the
   leader succeeds, with an injected-failure fixture. ACP quit now waits for
   process supervision and reports its failure; timeout retains the connection
   for retry. When a stop or wait fails, the supervisor retains its child and
-  retries on a later quit. Local subprocess fixtures cover shutdown and an
-  injected stop failure followed by retry. Descendant recovery remains open.
+  retries on a later quit.  Local subprocess fixtures cover shutdown and an
+  injected stop failure followed by retry. When an ACP leader exits while
+  descendants survive, its record is retained and the startup notice reports
+  the group, which the token-verified stop above terminates. ACP agent launches
+  pass the launch token through their spawn spec and ACP terminals receive it
+  from the PTY launch; a fixture exports the token from a spawned ACP child, and
+  an end-to-end fixture spawns a tree through the ACP transport, lets its
+  leader exit, and stops the launch while leaving a member of another launch
+  and an unrelated same-token process running.
 - [x] 30-day archived-worktree collection, dirty skip, branch-tip recreation.
   Startup preserves dirty worktrees and lists collection failures with their
   reasons; clean collection retains the tip and prunes Git worktree metadata.
