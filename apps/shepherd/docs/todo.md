@@ -1444,9 +1444,10 @@ placeholder tabs and no unearned state badges.
   additional requests receive an error. A fake-agent burst verifies the limit,
   cancellation and recovery after the queued requests are released. OpenCode
   limits outstanding approvals to 64 and rejects duplicate pending IDs; a
-  local event-stream fixture checks overflow and capacity after a reply.
-  Pending approvals are withdrawn when the event stream fails or its reader is
-  cancelled; fixtures cover multiple outstanding requests and a dropped reader.
+  local event-stream fixture checks overflow and capacity after a reply. It shows
+  one approval at a time and skips queued requests resolved by the agent.
+  The visible approval is withdrawn when the event stream fails or its reader is
+  cancelled; fixtures cover queued requests and a dropped reader.
   Codex app-server likewise limits pending approvals to 64 and rejects a second
   request for an already pending item without replacing the first. Repeated
   server request IDs are ignored while pending. A local protocol fixture covers

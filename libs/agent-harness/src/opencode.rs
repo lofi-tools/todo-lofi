@@ -794,6 +794,8 @@ async fn read_turn(
     let mut admitted = false;
     let mut approvals = PendingApprovals {
         ids: HashSet::new(),
+        active: None,
+        queued: VecDeque::new(),
         sender,
     };
     let admission_deadline = Instant::now() + REQUEST_TIMEOUT;
@@ -849,32 +851,80 @@ async fn read_turn(
         let Some(event) = transcript.apply(event)? else {
             continue;
         };
-        match &event {
-            HarnessEvent::ApprovalRequested { request } => {
-                register_approval(&mut approvals.ids, &request.approval_id)?;
+        match event {
+            HarnessEvent::ApprovalRequested { request } => approvals.enqueue(request)?,
+            HarnessEvent::ApprovalResolved {
+                approval_id,
+                decision,
+                source,
+            } => {
+                approvals.resolve(approval_id, decision, source)?;
             }
-            HarnessEvent::ApprovalResolved { approval_id, .. } => {
-                approvals.ids.remove(approval_id);
-            }
-            HarnessEvent::TurnFinished { .. } => return Ok(event),
-            _ => {}
+            event @ HarnessEvent::TurnFinished { .. } => return Ok(event),
+            event => publish_stream_event(sender, stream_capacity, event).await?,
         }
-        publish_stream_event(sender, stream_capacity, event).await?;
     }
 }
 
 struct PendingApprovals<'a> {
     ids: HashSet<ApprovalId>,
+    active: Option<ApprovalId>,
+    queued: VecDeque<ApprovalRequest>,
     sender: &'a mpsc::UnboundedSender<HarnessEvent>,
+}
+
+impl PendingApprovals<'_> {
+    fn enqueue(&mut self, request: ApprovalRequest) -> HarnessResult<()> {
+        register_approval(&mut self.ids, &request.approval_id)?;
+        self.queued.push_back(request);
+        self.show_next()
+    }
+
+    fn show_next(&mut self) -> HarnessResult<()> {
+        if self.active.is_none()
+            && let Some(request) = self.queued.pop_front()
+        {
+            let id = request.approval_id.clone();
+            publish(self.sender, HarnessEvent::ApprovalRequested { request })?;
+            self.active = Some(id);
+        }
+        Ok(())
+    }
+
+    fn resolve(
+        &mut self,
+        approval_id: ApprovalId,
+        decision: Decision,
+        source: crate::ApprovalSource,
+    ) -> HarnessResult<()> {
+        if !self.ids.remove(&approval_id) {
+            return Ok(());
+        }
+        if self.active.as_ref() == Some(&approval_id) {
+            self.active = None;
+            publish(
+                self.sender,
+                HarnessEvent::ApprovalResolved {
+                    approval_id,
+                    decision,
+                    source,
+                },
+            )?;
+            self.show_next()?;
+        } else {
+            self.queued
+                .retain(|request| request.approval_id != approval_id);
+        }
+        Ok(())
+    }
 }
 
 impl Drop for PendingApprovals<'_> {
     fn drop(&mut self) {
-        for approval_id in self.ids.drain() {
-            if publish(self.sender, HarnessEvent::ApprovalWithdrawn { approval_id }).is_err() {
-                tracing::debug!("could not withdraw pending OpenCode approval");
-                break;
-            }
+        if let Some(approval_id) = self.active.take()
+            && publish(self.sender, HarnessEvent::ApprovalWithdrawn { approval_id }).is_err()
+        {
+            tracing::debug!("could not withdraw pending OpenCode approval");
         }
     }
 }
@@ -2268,6 +2318,58 @@ mod tests {
         "/api/session/{sessionID}/permission/{requestID}/reply": {"post": {}}
     }}"#;
 
+    #[test]
+    fn approvals_are_presented_one_at_a_time_and_queued_replies_are_skipped()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        let mut pending = PendingApprovals {
+            ids: HashSet::new(),
+            active: None,
+            queued: VecDeque::new(),
+            sender: &sender,
+        };
+        for id in ["per_1", "per_2", "per_3"] {
+            pending.enqueue(
+                PermissionRequest {
+                    id: id.into(),
+                    action: "read".into(),
+                    resources: Vec::new(),
+                    metadata: Value::Null,
+                    source: None,
+                    message: None,
+                }
+                .into_approval(),
+            )?;
+        }
+        assert!(
+            matches!(receiver.try_recv(), Ok(HarnessEvent::ApprovalRequested { request }) if request.approval_id.as_str() == "per_1")
+        );
+        assert!(receiver.try_recv().is_err());
+        pending.resolve(
+            ApprovalId::new("per_3"),
+            Decision::Deny,
+            crate::ApprovalSource::Agent,
+        )?;
+        assert!(receiver.try_recv().is_err());
+        pending.resolve(
+            ApprovalId::new("per_1"),
+            Decision::Allow,
+            crate::ApprovalSource::Agent,
+        )?;
+        assert!(
+            matches!(receiver.try_recv(), Ok(HarnessEvent::ApprovalResolved { approval_id, .. }) if approval_id.as_str() == "per_1")
+        );
+        assert!(
+            matches!(receiver.try_recv(), Ok(HarnessEvent::ApprovalRequested { request }) if request.approval_id.as_str() == "per_2")
+        );
+        drop(pending);
+        assert!(
+            matches!(receiver.try_recv(), Ok(HarnessEvent::ApprovalWithdrawn { approval_id }) if approval_id.as_str() == "per_2")
+        );
+        assert!(receiver.try_recv().is_err());
+        Ok(())
+    }
+
     #[tokio::test]
     async fn cancelling_reader_withdraws_pending_approvals()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -2276,14 +2378,30 @@ mod tests {
         let task = tokio::spawn(async move {
             let mut pending = PendingApprovals {
                 ids: HashSet::new(),
+                active: None,
+                queued: VecDeque::new(),
                 sender: &sender,
             };
-            register_approval(&mut pending.ids, &ApprovalId::new("per_1"))?;
+            pending.enqueue(
+                PermissionRequest {
+                    id: "per_1".into(),
+                    action: "read".into(),
+                    resources: Vec::new(),
+                    metadata: Value::Null,
+                    source: None,
+                    message: None,
+                }
+                .into_approval(),
+            )?;
             ready.send(()).map_err(|_| HarnessError::ChannelClosed)?;
             std::future::pending::<()>().await;
             Ok::<_, HarnessError>(())
         });
         waiting.await?;
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(HarnessEvent::ApprovalRequested { .. })
+        ));
         task.abort();
         assert!(task.await.is_err_and(|error| error.is_cancelled()));
         assert!(
@@ -2363,11 +2481,10 @@ mod tests {
                 _ => return Err("unexpected event".into()),
             }
         }
-        assert_eq!(requested, MAX_PENDING_APPROVALS + 1);
+        assert_eq!(requested, 2);
         assert_eq!(resolved, 1);
-        assert_eq!(withdrawn.len(), MAX_PENDING_APPROVALS);
-        assert!(!withdrawn.contains(&ApprovalId::new("per_0")));
-        assert!(withdrawn.contains(&ApprovalId::new("per_extra")));
+        assert_eq!(withdrawn.len(), 1);
+        assert!(withdrawn.contains(&ApprovalId::new("per_1")));
         fixture.await?.map_err(|error| error.to_string())?;
         Ok(())
     }
