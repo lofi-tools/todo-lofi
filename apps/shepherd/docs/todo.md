@@ -529,7 +529,7 @@ task-scoped, persistent and fast enough.
 
 ### Build
 
-- [ ] Complete `TerminalEngine`: scrollback, alternate screen, wide characters,
+- [x] Complete `TerminalEngine`: scrollback, alternate screen, wide characters,
   reflow, Kitty keyboard protocol, selection, copy/paste, search, mouse and
   hyperlinks. Kitty modes negotiate independently for each screen, including
   when the screen switch is part of a synchronized update. Fixtures cover
@@ -538,8 +538,9 @@ task-scoped, persistent and fast enough.
   reports, including the distinct replies on each side of a synchronized
   screen switch, plus bracketed paste and SGR mouse reports. Interactive fish verifies
   distinct Ctrl+I and Tab bindings. Native IBus Pinyin verifies candidate
-  selection and placement on Ubuntu. A candidate-based input source still
-  needs a pass on macOS.
+  selection and placement on Ubuntu. The candidate-based macOS Pinyin smoke is
+  human-gated; its repeatable procedure is
+  [macos-ime-smoke.md](./macos-ime-smoke.md), and it has not been run here.
   The native PTY probe checks Kitty releases after lifting a shortcut modifier
   and after leaving the terminal. A browser regression checks that focus loss
   releases every reported key once.
@@ -570,9 +571,11 @@ task-scoped, persistent and fast enough.
   passed the native IBus probe. Normal-suite tests also cover the configured
   scrollback tail, main-screen cursor restoration after leaving the alternate
   screen, and a combining mark split from its base and following wide glyph
-  across process calls. System candidate selection and placement on macOS
-  remain the only unchecked criterion; that smoke needs a live desktop session
-  and Pinyin, so this item stays open.
+  across process calls. At this commit, `cargo test -p shepherd --lib
+  terminal_screen::tests` passed 28 tests, the full `cargo test -p shepherd
+  --lib` suite passed 127, and `cargo test -p shepherd --test shell_scope`
+  passed. The macOS Pinyin candidate smoke remains human-gated and is not
+  claimed as passed.
 - [x] Add the binary frame protocol, dirty-row rendering and a frame smoke test.
 - [x] Build the Terminals tab split tree, resize, focus and presets.
   Single and Quad save through the project layout, preserve slots for other
