@@ -3180,7 +3180,26 @@ async fn handle_server_request(
         tracing::debug!("codex repeated a pending server request ID");
         return Ok(());
     }
-    let rejection = if approvals.approvals.contains_key(&approval_id) {
+    let wrong_thread = params
+        .get("threadId")
+        .and_then(Value::as_str)
+        .is_some_and(|thread| {
+            approvals
+                .thread_id
+                .as_deref()
+                .is_some_and(|current| thread != current)
+        });
+    let wrong_turn =
+        params
+            .get("turnId")
+            .and_then(Value::as_str)
+            .is_some_and(|turn| match approvals.turn_id.as_deref() {
+                Some(current) => turn != current,
+                None => approvals.start_request.is_none() || approvals.announced_turn.is_some(),
+            });
+    let rejection = if wrong_thread || wrong_turn {
+        Some("approval does not belong to the active session or turn")
+    } else if approvals.approvals.contains_key(&approval_id) {
         Some("an approval for this item is already pending")
     } else if approvals.approvals.len() >= MAX_PENDING_APPROVALS {
         Some("too many pending approvals")
@@ -4146,6 +4165,79 @@ mod tests {
         harness.outgoing = None;
         drop(outgoing);
         writer_task.await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn approvals_for_other_sessions_or_turns_are_rejected_without_disturbing_active_work()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let pending = Arc::new(AsyncMutex::new(Pending::default()));
+        {
+            let mut state = pending.lock().await;
+            state.thread_id = Some("thread-current".into());
+            state.turn_id = Some("turn-current".into());
+        }
+        let (events, mut received) = mpsc::unbounded_channel();
+        let (outgoing, mut responses) = mpsc::channel(4);
+        for (id, thread, turn) in [
+            (1, "thread-other", "turn-current"),
+            (2, "thread-current", "turn-other"),
+        ] {
+            handle_server_request(
+                json!(id),
+                "item/commandExecution/requestApproval".into(),
+                json!({"itemId": format!("item-{id}"), "threadId": thread, "turnId": turn}),
+                &events,
+                &pending,
+                &outgoing,
+            )
+            .await?;
+            let response = responses.try_recv()?.value;
+            assert_eq!(response["id"], id);
+            assert!(
+                response["error"]["message"]
+                    .as_str()
+                    .is_some_and(|message| message.contains("active session or turn"))
+            );
+            assert!(received.try_recv().is_err());
+            assert!(pending.lock().await.approvals.is_empty());
+        }
+        {
+            let mut state = pending.lock().await;
+            state.turn_id = None;
+            state.announced_turn = Some("turn-current".into());
+            state.start_request = Some(1);
+        }
+        handle_server_request(
+            json!(4),
+            "item/commandExecution/requestApproval".into(),
+            json!({"itemId": "late", "threadId": "thread-current", "turnId": "turn-current"}),
+            &events,
+            &pending,
+            &outgoing,
+        )
+        .await?;
+        assert_eq!(responses.try_recv()?.value["id"], 4);
+        assert!(received.try_recv().is_err());
+        {
+            let mut state = pending.lock().await;
+            state.turn_id = Some("turn-current".into());
+            state.start_request = None;
+        }
+        handle_server_request(
+            json!(3),
+            "item/commandExecution/requestApproval".into(),
+            json!({"itemId": "valid", "threadId": "thread-current", "turnId": "turn-current"}),
+            &events,
+            &pending,
+            &outgoing,
+        )
+        .await?;
+        assert!(matches!(
+            received.try_recv(),
+            Ok(HarnessEvent::ApprovalRequested { .. })
+        ));
+        assert_eq!(pending.lock().await.approvals.get("valid"), Some(&3));
         Ok(())
     }
 

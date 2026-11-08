@@ -1523,7 +1523,12 @@ placeholder tabs and no unearned state badges.
   The visible approval is withdrawn when the event stream fails or its reader is
   cancelled; fixtures cover queued requests and a dropped reader.
   Codex app-server likewise limits pending approvals to 64 and rejects a second
-  request for an already pending item without replacing the first. Repeated
+  request for an already pending item without replacing the first. Identified
+  approvals for another session or turn, including a completed turn, are
+  rejected; a fixture checks that a matching approval remains available. Requests
+  omitting identity fields remain compatible, and an approval arriving before
+  the start response identifies its turn cannot yet be checked against it.
+  Repeated
   server request IDs are ignored while pending. A local protocol fixture covers
   saturation, withdrawal, retry and an unavailable event consumer.
   If enqueueing a Codex approval response fails, its pending request remains
