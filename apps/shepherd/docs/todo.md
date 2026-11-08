@@ -1385,6 +1385,7 @@ placeholder tabs and no unearned state badges.
   split across both internal chunks and backend events.
   Direct terminal output uses the same incremental decoder, preserving
   characters split across reads and flushing an incomplete final sequence.
+  A local subprocess fixture also checks split writes through terminal events.
   Cancelled terminal exit-wait futures remove their registry entries; fixtures
   also cover a reused terminal ID. Each terminal admits at most 64
   active exit waits and reports an error for excess requests; cancellation

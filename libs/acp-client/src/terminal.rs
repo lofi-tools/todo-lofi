@@ -1633,6 +1633,46 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
+    async fn direct_subprocess_preserves_utf8_split_between_writes()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let root = directory.path().canonicalize()?;
+        let (events, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let registry = TerminalRegistry::new(SessionRoots::new([root.clone()]), &events, None);
+        let terminal = registry
+            .create(
+                CreateTerminalRequest::new("session", "/bin/sh")
+                    .args(vec![
+                        "-c".into(),
+                        "printf '\\342'; sleep 0.05; printf '\\202\\254'".into(),
+                    ])
+                    .cwd(root),
+            )
+            .await
+            .map_err(std::io::Error::other)?
+            .terminal_id;
+        let mut output = String::new();
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            while let Some(event) = receiver.recv().await {
+                match event {
+                    AcpEvent::TerminalOutput { chunk, .. } => output.push_str(&chunk),
+                    AcpEvent::TerminalExited { .. } => break,
+                    _ => {}
+                }
+            }
+        })
+        .await?;
+        assert_eq!(output, "€");
+        assert_eq!(registry.output(&terminal).output, "€");
+        registry
+            .release(&terminal)
+            .await
+            .map_err(std::io::Error::other)?;
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn terminal_exit_wait_does_not_wait_for_inherited_output_pipes()
     -> Result<(), Box<dyn std::error::Error>> {
         let directory = tempfile::tempdir()?;
