@@ -2056,7 +2056,15 @@ placeholder tabs and no unearned state badges.
   here, so clean-runner portability remains unverified. A normal-suite test,
   `cargo test -p shepherd --test packaging`, checks that the config, build
   script, workflow expectations and Zig pin agree.
-- [ ] v2/GPUI explicitly not started until v1 is feature complete.
+- [x] v2/GPUI explicitly not started until v1 is feature complete.
+  v1 is still open: the `TerminalEngine`, the Pi extension UI and the
+  installed-agent smokes remain unchecked, so the gate stays in force. No
+  `apps/shepherd-gpui` directory, GPUI dependency or `gpui-tokio` bridge exists
+  in the Shepherd shell, core or adapters; Taskstream's separate GPUI crates are
+  outside this rule. A normal-suite test,
+  `cargo test -p shepherd --test shell_scope`, fails if v2 shell scaffolding or
+  a GPUI dependency appears in a Shepherd crate, and checks that the spec still
+  says v2 work starts only when v1 is feature complete.
 
 ### Proof
 
