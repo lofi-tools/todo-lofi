@@ -267,6 +267,18 @@ impl TursoStore {
     }
 
     async fn open_driver(driver: Turso, path: Option<&Path>) -> Result<Self, StoreError> {
+        let _migration_lock = if let Some(path) = path {
+            let path = path.to_path_buf();
+            Some(
+                tokio::task::spawn_blocking(move || lock_database_migrations(&path))
+                    .await
+                    .map_err(|error| {
+                        StoreError::Backend(format!("migration lock worker failed: {error}"))
+                    })??,
+            )
+        } else {
+            None
+        };
         let existed = match path {
             Some(path) => path.try_exists().map_err(|error| {
                 StoreError::Backend(format!(
@@ -287,6 +299,99 @@ impl TursoStore {
         apply_migrations(&mut db).await?;
         Ok(Self { db: Mutex::new(db) })
     }
+}
+
+fn lock_database_migrations(path: &Path) -> Result<std::fs::File, StoreError> {
+    let canonical = match std::fs::canonicalize(path) {
+        Ok(path) => path,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            match std::fs::symlink_metadata(path) {
+                Ok(metadata) if metadata.file_type().is_symlink() => {
+                    return Err(StoreError::Backend(format!(
+                        "database path is a dangling symbolic link: {}",
+                        path.display()
+                    )));
+                }
+                Ok(_) => {
+                    return Err(StoreError::Backend(format!(
+                        "database path changed while acquiring its migration lock: {}",
+                        path.display()
+                    )));
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(StoreError::Backend(format!(
+                        "could not inspect database path {}: {error}",
+                        path.display()
+                    )));
+                }
+            }
+            let parent = path
+                .parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+                .unwrap_or(Path::new("."));
+            let name = path
+                .file_name()
+                .ok_or_else(|| StoreError::Backend("database path has no filename".into()))?;
+            std::fs::canonicalize(parent)
+                .map_err(|error| {
+                    StoreError::Backend(format!(
+                        "could not inspect database directory {}: {error}",
+                        parent.display()
+                    ))
+                })?
+                .join(name)
+        }
+        Err(error) => {
+            return Err(StoreError::Backend(format!(
+                "could not inspect database path {}: {error}",
+                path.display()
+            )));
+        }
+    };
+    let mut lock_path = canonical.into_os_string();
+    lock_path.push(".migration.lock");
+    let lock_path = PathBuf::from(lock_path);
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true).write(true).create(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600).custom_flags(
+            (rustix::fs::OFlags::NOFOLLOW
+                | rustix::fs::OFlags::NONBLOCK
+                | rustix::fs::OFlags::CLOEXEC)
+                .bits() as i32,
+        );
+    }
+    let file = options.open(&lock_path).map_err(|error| {
+        StoreError::Backend(format!(
+            "could not open database migration lock {}: {error}",
+            lock_path.display()
+        ))
+    })?;
+    if !file
+        .metadata()
+        .map_err(|error| {
+            StoreError::Backend(format!(
+                "could not inspect database migration lock {}: {error}",
+                lock_path.display()
+            ))
+        })?
+        .is_file()
+    {
+        return Err(StoreError::Backend(format!(
+            "database migration lock is not a regular file: {}",
+            lock_path.display()
+        )));
+    }
+    file.lock().map_err(|error| {
+        StoreError::Backend(format!(
+            "could not acquire database migration lock {}: {error}",
+            lock_path.display()
+        ))
+    })?;
+    Ok(file)
 }
 
 async fn migrations_pending(db: &mut toasty::db::Db) -> Result<bool, StoreError> {
@@ -2402,6 +2507,85 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn concurrent_database_opens_share_one_pre_migration_snapshot()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = TestDirectory::new()?;
+        let path = directory.join("shared.db");
+        let mut legacy = toasty::Db::builder()
+            .build(Turso::file(&path).experimental_index_method(true))
+            .await?;
+        toasty::sql::statement("CREATE TABLE legacy_data (value TEXT NOT NULL)")
+            .exec(&mut legacy)
+            .await?;
+        toasty::sql::statement("INSERT INTO legacy_data VALUES ('preserved')")
+            .exec(&mut legacy)
+            .await?;
+        drop(legacy);
+        let (first, second) = tokio::join!(TursoStore::open_at(&path), TursoStore::open_at(&path));
+        assert!(first?.load_projects().await?.is_empty());
+        assert!(second?.load_projects().await?.is_empty());
+        let backups = std::fs::read_dir(directory.path())?
+            .map(|entry| entry.map(|entry| entry.path()))
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .filter(|path| path.to_string_lossy().contains(".pre-migration-"))
+            .collect::<Vec<_>>();
+        let [backup] = backups.as_slice() else {
+            return Err("expected one pre-migration backup".into());
+        };
+        let mut old = toasty::Db::builder()
+            .build(Turso::file(backup.join("snapshot.db")).experimental_index_method(true))
+            .await?;
+        let rows = toasty::sql::query("SELECT value FROM legacy_data")
+            .column_types([Type::String])
+            .exec(&mut old)
+            .await?;
+        assert!(
+            matches!(rows.first(), Some(Value::Record(fields)) if matches!(fields.first(), Some(Value::String(value)) if value.as_str() == "preserved"))
+        );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn migration_lock_refuses_dangling_database_and_lock_symlinks()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = TestDirectory::new()?;
+        let dangling = directory.join("dangling.db");
+        std::os::unix::fs::symlink(directory.join("missing.db"), &dangling)?;
+        assert!(TursoStore::open_at(&dangling).await.is_err());
+        let path = directory.join("database.db");
+        let lock = directory.join("database.db.migration.lock");
+        let target = directory.join("target");
+        std::fs::write(&target, "unchanged")?;
+        std::os::unix::fs::symlink(&target, &lock)?;
+        assert!(TursoStore::open_at(&path).await.is_err());
+        assert_eq!(std::fs::read_to_string(target)?, "unchanged");
+        assert!(!path.exists());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn database_open_waits_for_the_shared_migration_lock()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = TestDirectory::new()?;
+        let path = directory.join("locked.db");
+        let lock = lock_database_migrations(&path)?;
+        let open_path = path.clone();
+        let mut open = tokio::spawn(async move { TursoStore::open_at(&open_path).await });
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(150), &mut open)
+                .await
+                .is_err()
+        );
+        assert!(!path.exists());
+        drop(lock);
+        let store = tokio::time::timeout(std::time::Duration::from_secs(10), open).await???;
+        assert!(store.load_projects().await?.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn task_saves_require_a_project_and_preserve_task_ownership()
     -> Result<(), Box<dyn std::error::Error>> {
         async fn verify(store: &dyn Store, root: &Path) -> Result<(), Box<dyn std::error::Error>> {
@@ -3979,6 +4163,7 @@ mod tests {
         let (last, previous) = MIGRATIONS.split_last().ok_or("missing migrations")?;
         apply_migration_set(&mut db, previous).await?;
         drop(db);
+        drop(lock_database_migrations(&path)?);
         std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o500))?;
         let failed = TursoStore::open_at(&path).await;
         std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700))?;

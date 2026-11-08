@@ -1328,7 +1328,12 @@ placeholder tabs and no unearned state badges.
   Existing file databases receive a retained Turso snapshot in a private
   `<database>.pre-migration-<id>/snapshot.db` directory before pending
   migrations; a failed backup, unknown migration or gap in migration history
-  blocks the migration before schema changes. A Unix fixture denies backup
+  blocks the migration before schema changes. File-database openers resolving
+  to the same canonical path hold a retained migration lock across existence
+  checks, backup and migrations; concurrent-open fixtures verify waiting and a
+  single preserved snapshot. Unix checks reject dangling database symlinks and
+  symlinked lock files. Hard-linked database aliases do not share this lock.
+  A Unix fixture denies backup
   directory creation, verifies the old history remains intact, then retries
   successfully after access is restored. An inaccessible database path also
   fails before opening or migrating instead of being treated as a new database.
