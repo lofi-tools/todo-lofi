@@ -1431,8 +1431,10 @@ placeholder tabs and no unearned state badges.
   can change its target, so those actions do not guarantee race-free confinement.
   The remaining filesystem operations still need a confinement audit. ACP file reads
   and atomic writes also use descriptor-relative operations on Unix, with
-  fixtures for directory substitution and preserved file permissions. ACP reads
-  and writes run on blocking workers. ACP attachment grants open every path
+  fixtures for directory substitution and preserved file permissions. ACP workspace
+  access rejects unresolved session roots with their original error, even if the path
+  appears later; a fresh session can use a repaired root. ACP reads and writes
+  run on blocking workers. ACP attachment grants open every path
   component without following symlinks and retain the opened file for the
   duration of the prompt. ACP line-limited reads stream only the requested range
   and honor a limit even when the start line is omitted; a fixture checks that

@@ -15,15 +15,25 @@ const MAX_READ_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 #[derive(Clone, Debug, Default)]
 pub struct SessionRoots {
     roots: Vec<PathBuf>,
+    initialization_errors: Vec<(PathBuf, Arc<std::io::Error>)>,
 }
 
 impl SessionRoots {
     pub fn new(roots: impl IntoIterator<Item = PathBuf>) -> Self {
+        let mut resolved_roots = Vec::new();
+        let mut initialization_errors = Vec::new();
+        for root in roots {
+            match root.canonicalize() {
+                Ok(resolved) => resolved_roots.push(resolved),
+                Err(error) => {
+                    initialization_errors.push((root.clone(), Arc::new(error)));
+                    resolved_roots.push(root);
+                }
+            }
+        }
         Self {
-            roots: roots
-                .into_iter()
-                .map(|root| root.canonicalize().unwrap_or(root))
-                .collect(),
+            roots: resolved_roots,
+            initialization_errors,
         }
     }
 
@@ -37,6 +47,9 @@ impl SessionRoots {
     /// canonicalized so `..` cannot escape, and paths that end up outside every
     /// root are refused rather than served.
     pub fn resolve(&self, requested: &Path) -> anyhow::Result<PathBuf> {
+        if let Some((root, error)) = self.initialization_errors.first() {
+            anyhow::bail!("could not resolve session root {}: {error}", root.display());
+        }
         let absolute = if requested.is_absolute() {
             requested.to_path_buf()
         } else {
@@ -411,6 +424,26 @@ pub fn write_text_file(path: &Path, content: &str) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unresolved_session_root_requires_a_new_session_after_repair() -> anyhow::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let missing = directory.path().join("missing");
+        let roots = SessionRoots::new([missing.clone()]);
+        std::fs::create_dir(&missing)?;
+        std::fs::write(missing.join("file"), "content")?;
+        let error = roots
+            .read_text_file(Path::new("file"), None, None)
+            .err()
+            .ok_or_else(|| anyhow::anyhow!("unresolved root was accepted"))?;
+        assert!(error.to_string().contains("could not resolve session root"));
+        let repaired = SessionRoots::new([missing]);
+        assert_eq!(
+            repaired.read_text_file(Path::new("file"), None, None)?,
+            "content"
+        );
+        Ok(())
+    }
 
     #[test]
     fn ranged_reads_honor_limit_without_a_start_line_and_stop_early() -> anyhow::Result<()> {
