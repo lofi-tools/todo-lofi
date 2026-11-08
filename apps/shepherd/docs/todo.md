@@ -1417,6 +1417,8 @@ placeholder tabs and no unearned state badges.
   Codex exec and app-server, and OpenCode tool events, bound output to the
   transcript's existing 64 KiB tail before placing it on the event queue,
   avoiding larger queued copies without changing the retained output.
+  ACP command tool events also use that UTF-8-safe tail before entering the
+  harness queue; its intermediate ACP tool transcript still holds full content.
   Codex exec also selects the retained command-output tail before allocating
   the event's string, avoiding a full extra copy of a large protocol field.
   Transcript folding similarly selects the tail of an oversized command-output

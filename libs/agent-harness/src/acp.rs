@@ -28,7 +28,8 @@ use crate::{
     ApprovalRequest, ApprovalSource, Capabilities, Decision, DeltaKind, Entry, FailureKind,
     FileDiff, HarnessError, HarnessEvent, HarnessResult, ItemId, PlanRow, ProjectApprovalPolicy,
     PromptInput, SessionApproval, SessionId, SessionState, SpawnSpec, ToolCallId, ToolStatus,
-    Transcript, TurnFinishReason, TurnId, command_line, limit_command_output,
+    Transcript, TurnFinishReason, TurnId, bounded_command_output, command_line,
+    limit_command_output,
 };
 
 const SESSION_TIMEOUT: Duration = Duration::from_secs(15);
@@ -1311,7 +1312,16 @@ fn tool_event(entry: &acp_client::Entry) -> Option<HarnessEvent> {
             acp_client::ToolStatus::Completed => ToolStatus::Completed,
             acp_client::ToolStatus::Failed => ToolStatus::Failed,
         },
-        output: output.clone().filter(|output| !output.is_empty()),
+        output: output
+            .as_deref()
+            .filter(|output| !output.is_empty())
+            .map(|output| {
+                if kind == "Execute" {
+                    bounded_command_output(output)
+                } else {
+                    output.to_owned()
+                }
+            }),
         diffs: diffs
             .iter()
             .map(|diff| FileDiff {
@@ -1386,6 +1396,40 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn command_tool_events_keep_a_bounded_unicode_tail() -> Result<(), Box<dyn std::error::Error>> {
+        let output = format!("{}tail", "界".repeat(crate::MAX_COMMAND_OUTPUT_BYTES));
+        let mut entry = acp_client::Entry {
+            id: 1,
+            kind: acp_client::EntryKind::ToolCall {
+                tool_call_id: "tool".into(),
+                title: "command".into(),
+                kind: "Execute".into(),
+                status: acp_client::ToolStatus::Completed,
+                output: Some(output.clone()),
+                diffs: Vec::new(),
+                terminal_id: None,
+            },
+        };
+        let Some(HarnessEvent::ToolCall {
+            output: Some(bounded),
+            ..
+        }) = tool_event(&entry)
+        else {
+            return Err("missing command output".into());
+        };
+        assert!(bounded.len() <= crate::MAX_COMMAND_OUTPUT_BYTES);
+        assert!(bounded.starts_with(crate::COMMAND_OUTPUT_OMITTED));
+        assert!(bounded.ends_with("tail"));
+        if let acp_client::EntryKind::ToolCall { kind, .. } = &mut entry.kind {
+            *kind = "Read".into();
+        }
+        assert!(
+            matches!(tool_event(&entry), Some(HarnessEvent::ToolCall { output: Some(text), .. }) if text == output)
+        );
+        Ok(())
+    }
 
     #[tokio::test]
     async fn terminal_output_keeps_its_permit_until_the_harness_event_is_consumed()
