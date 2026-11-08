@@ -3180,17 +3180,28 @@ async fn handle_notification(
                 _ => turn_finish_reason(params),
             };
             let mut pending = pending.lock().await;
-            if pending.start_request.is_some()
-                && let Some(turn_id) = read_turn_id(params)
-            {
-                announce_app_turn(&mut pending, turn_id, sender)?;
-            }
-            if let (Some(active), Some(completed)) =
-                (pending.turn_id.as_deref(), read_turn_id(params))
+            let active = pending
+                .turn_id
+                .as_deref()
+                .or_else(|| pending.start_request.and(pending.announced_turn.as_deref()));
+            if let (Some(active), Some(completed)) = (active, read_turn_id(params))
                 && active != completed
             {
                 tracing::warn!("ignoring completion for a different Codex turn");
                 return Ok(());
+            }
+            if pending.start_request.is_some()
+                && pending.turn_id.is_none()
+                && pending.announced_turn.is_some()
+                && pending.announced_turn == read_turn_id(params)
+            {
+                tracing::debug!("ignoring a duplicate Codex turn completion");
+                return Ok(());
+            }
+            if pending.start_request.is_some()
+                && let Some(turn_id) = read_turn_id(params)
+            {
+                announce_app_turn(&mut pending, turn_id, sender)?;
             }
             pending.turn_id = None;
             pending.approval_writes.clear();
@@ -3457,6 +3468,8 @@ mod tests {
         {
             let mut state = pending.lock().await;
             state.turn_id = Some("current".into());
+            state.start_request = Some(1);
+            state.announced_turn = Some("current".into());
             state.approvals.insert("approval".into(), 7);
         }
         let (sender, mut receiver) = mpsc::unbounded_channel();
@@ -3486,6 +3499,22 @@ mod tests {
             Ok(HarnessEvent::TurnFinished { .. })
         ));
         assert!(pending.lock().await.turn_id.is_none());
+        handle_notification(
+            "turn/completed",
+            &json!({"turn": {"id": "previous", "status": "completed"}}),
+            &sender,
+            &pending,
+        )
+        .await?;
+        assert!(receiver.try_recv().is_err());
+        handle_notification(
+            "turn/completed",
+            &json!({"turn": {"id": "current", "status": "completed"}}),
+            &sender,
+            &pending,
+        )
+        .await?;
+        assert!(receiver.try_recv().is_err());
         Ok(())
     }
 
