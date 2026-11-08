@@ -1442,7 +1442,9 @@ placeholder tabs and no unearned state badges.
   terminals; a fake-agent fixture fills it, cancels the waits, and repeats.
   ACP allows at most 64 pending manual permission requests per connection;
   additional requests receive an error. A fake-agent burst verifies the limit,
-  cancellation and recovery after the queued requests are released.
+  cancellation and recovery after the queued requests are released. OpenCode
+  limits outstanding approvals to 64 and rejects duplicate pending IDs; a
+  local event-stream fixture checks overflow and capacity after a reply.
   Codex app-server likewise limits pending approvals to 64 and rejects a second
   request for an already pending item without replacing the first. Repeated
   server request IDs are ignored while pending. A local protocol fixture covers

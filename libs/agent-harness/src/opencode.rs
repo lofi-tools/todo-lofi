@@ -33,6 +33,7 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 const STREAM_CHUNK_BYTES: usize = 8 * 1024;
 const STREAM_BUFFER_CHUNKS: usize = 64;
+const MAX_PENDING_APPROVALS: usize = 64;
 const USERNAME: &str = "opencode";
 const SERVER_ARGS: [&str; 5] = ["serve", "--hostname", "127.0.0.1", "--port", "0"];
 
@@ -847,7 +848,7 @@ async fn read_turn(
         };
         match &event {
             HarnessEvent::ApprovalRequested { request } => {
-                approvals.insert(request.approval_id.clone());
+                register_approval(&mut approvals, &request.approval_id)?;
             }
             HarnessEvent::ApprovalResolved { approval_id, .. } => {
                 approvals.remove(approval_id);
@@ -862,6 +863,21 @@ async fn read_turn(
         }
         publish_stream_event(sender, stream_capacity, event).await?;
     }
+}
+
+fn register_approval(approvals: &mut HashSet<ApprovalId>, id: &ApprovalId) -> HarnessResult<()> {
+    if approvals.contains(id) {
+        return Err(HarnessError::Protocol(
+            "OpenCode repeated a pending approval request".into(),
+        ));
+    }
+    if approvals.len() >= MAX_PENDING_APPROVALS {
+        return Err(HarnessError::Protocol(
+            "OpenCode exceeded the pending approval limit".into(),
+        ));
+    }
+    approvals.insert(id.clone());
+    Ok(())
 }
 
 async fn publish_stream_event(
@@ -2237,6 +2253,79 @@ mod tests {
         "/api/session/{sessionID}/interrupt": {"post": {}},
         "/api/session/{sessionID}/permission/{requestID}/reply": {"post": {}}
     }}"#;
+
+    #[test]
+    fn repeated_pending_approval_is_rejected_without_replacement() -> HarnessResult<()> {
+        let mut pending = HashSet::new();
+        let id = ApprovalId::new("per_1");
+        register_approval(&mut pending, &id)?;
+        assert!(register_approval(&mut pending, &id).is_err());
+        assert_eq!(pending.len(), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn approval_burst_is_bounded_and_resolved_requests_free_capacity()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let address = listener.local_addr()?;
+        let fixture = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await?;
+            let (reader, mut writer) = socket.into_split();
+            read_fixture_request(reader).await?;
+            let mut body = format!(
+                "data: {}\n\n",
+                json!({"type":"session.inbox.enqueued", "data":{"sessionID":"ses_1", "inboxID":"msg_1"}})
+            );
+            for number in 0..MAX_PENDING_APPROVALS {
+                body.push_str(&format!("data: {}\n\n", json!({"type":"permission.asked", "data":{"sessionID":"ses_1", "id":format!("per_{number}"), "action":"read", "resources":[]}})));
+            }
+            body.push_str(&format!("data: {}\n\n", json!({"type":"permission.replied", "data":{"sessionID":"ses_1", "requestID":"per_0", "reply":"once"}})));
+            for id in ["per_extra", "per_overflow"] {
+                body.push_str(&format!("data: {}\n\n", json!({"type":"permission.asked", "data":{"sessionID":"ses_1", "id":id, "action":"read", "resources":[]}})));
+            }
+            writer.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await?;
+            writer.shutdown().await?;
+            Ok::<_, Box<dyn std::error::Error + Send + Sync>>(())
+        });
+        let response = Client::new()
+            .get(format!("http://{address}/events"))
+            .send()
+            .await?;
+        let events = OpenCodeEvents {
+            response,
+            decoder: EventDecoder::default(),
+            pending: bytes::Bytes::new(),
+        };
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        let error = read_turn(
+            events,
+            SessionId::new("ses_1"),
+            "msg_1",
+            &sender,
+            &Arc::new(Semaphore::new(2)),
+        )
+        .await
+        .err()
+        .ok_or("expected approval overflow")?;
+        assert!(error.to_string().contains("pending approval limit"));
+        let mut requested = 0;
+        let mut resolved = 0;
+        while let Ok(event) = receiver.try_recv() {
+            match event {
+                HarnessEvent::ApprovalRequested { request } => {
+                    assert_ne!(request.approval_id.as_str(), "per_overflow");
+                    requested += 1;
+                }
+                HarnessEvent::ApprovalResolved { .. } => resolved += 1,
+                _ => return Err("unexpected event".into()),
+            }
+        }
+        assert_eq!(requested, MAX_PENDING_APPROVALS + 1);
+        assert_eq!(resolved, 1);
+        fixture.await?.map_err(|error| error.to_string())?;
+        Ok(())
+    }
 
     #[tokio::test]
     async fn streamed_text_applies_backpressure_and_preserves_utf8()
