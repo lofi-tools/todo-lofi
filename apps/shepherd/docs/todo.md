@@ -1616,9 +1616,13 @@ placeholder tabs and no unearned state badges.
   the same branch and transcript across restart. The review lifecycle fixture
   collects an old clean worktree and restores its recorded tip; the startup
   fixture retains dirty and recently used worktrees.
-- [ ] Large transcript and large diff with no dropped state.
+- [x] Large transcript and large diff with no dropped state.
   The headless UI fixture checks all streamed chunks and both ends of a large
   mocked diff while 1,000 earlier transcript entries remain present.
+  A core fixture also checks all 1,000 scripted messages and every line of a
+  real 12,000-line worktree diff, then reopens the database and compares the
+  complete transcript and diff. On this Mac that database fixture took about
+  two minutes; it does not measure interactive responsiveness.
 - [ ] Three-agent/two-project concurrency test.
   The local scripted fixture covers overlapping approval waits and independent
   worktree writes; a live multi-agent run remains unverified.

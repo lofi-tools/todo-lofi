@@ -6233,6 +6233,65 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn large_transcript_and_git_diff_survive_restart()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let repository = TestRepository::new()?;
+        let database = TestDatabase::new()?;
+        let content: String = (0..12_000)
+            .map(|index| format!("large diff line {index:05}\n"))
+            .collect();
+        let mut steps = vec![FakeStep::WriteFile {
+            path: "large.txt".into(),
+            contents: content,
+        }];
+        steps.extend((0..1_000).map(|index| FakeStep::Message(format!("message {index:04}"))));
+        let mut core = Core::with_services(
+            Box::new(TursoStore::open(&database.uri()).await?),
+            Box::new(FakeHarnessFactory::new(vec![vec![FakeTurn::new(steps)]])),
+        );
+        let project_id = add_project(&mut core, repository.path().to_path_buf()).await?;
+        let draft = workspace_of(
+            core.execute(Command::CreateDraft {
+                project_id,
+                title: "Large review".into(),
+                agent: Agent::Codex,
+            })
+            .await?,
+        );
+        let task_id = TaskId::new(draft.task.id);
+        core.execute(Command::SendPrompt {
+            task_id: task_id.clone(),
+            input: PromptInput::text("Create a large review"),
+        })
+        .await?;
+        while core.pump().await? {}
+        let workspace = core.open_task_workspace(&task_id).await?;
+        assert_eq!(workspace.task.state, TaskState::Review);
+        let transcript = summaries(&workspace);
+        for index in 0..1_000 {
+            assert!(transcript.iter().any(|entry| entry == &format!("agent: message {index:04}")));
+        }
+        let diff = core.review_file_diff(&task_id, "large.txt")?;
+        let expected_lines: Vec<String> = (0..12_000)
+            .map(|index| format!("+large diff line {index:05}"))
+            .collect();
+        let actual_lines: Vec<&str> = diff.lines().filter(|line| line.starts_with("+large diff line ")).collect();
+        assert_eq!(actual_lines, expected_lines.iter().map(String::as_str).collect::<Vec<_>>());
+        drop(core);
+
+        let mut reopened = Core::load(
+            Box::new(TursoStore::open(&database.uri()).await?),
+            Box::new(UnavailableHarnessFactory),
+        )
+        .await?;
+        let restored = reopened.open_task_workspace(&task_id).await?;
+        assert_eq!(restored.task.state, TaskState::Review);
+        assert_eq!(summaries(&restored), transcript);
+        assert_eq!(reopened.review_file_diff(&task_id, "large.txt")?, diff);
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn missing_worktree_is_repaired_before_the_next_turn()
     -> Result<(), Box<dyn std::error::Error>> {
         let repository = TestRepository::new()?;
