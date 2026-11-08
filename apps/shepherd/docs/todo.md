@@ -1335,8 +1335,10 @@ placeholder tabs and no unearned state badges.
   opener waits and proceeds after the lock holder is killed. Lock contention
   uses cancellable async retries; a fixture verifies cancelling an opener does
   not occupy a blocking worker while the lock is held. Unix checks reject
-  dangling database symlinks and
-  symlinked lock files. Hard-linked database aliases do not share this lock.
+  dangling database symlinks and symlinked lock files. On Unix, the acquired
+  lock is checked against its pathname; a fixture verifies replacement while
+  waiting is rejected before database open. Replacement after that check remains
+  possible, and hard-linked database aliases do not share this lock.
   A Unix fixture denies backup
   directory creation, verifies the old history remains intact, then retries
   successfully after access is restored. An inaccessible database path also

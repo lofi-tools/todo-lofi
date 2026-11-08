@@ -297,12 +297,26 @@ impl TursoStore {
 async fn acquire_database_migration_lock(path: &Path) -> Result<std::fs::File, StoreError> {
     let path = path.to_path_buf();
     let display = path.display().to_string();
-    let file = tokio::task::spawn_blocking(move || open_database_migration_lock(&path))
-        .await
-        .map_err(|error| StoreError::Backend(format!("migration lock worker failed: {error}")))??;
+    let (file, lock_path) =
+        tokio::task::spawn_blocking(move || open_database_migration_lock(&path))
+            .await
+            .map_err(|error| {
+                StoreError::Backend(format!("migration lock worker failed: {error}"))
+            })??;
+    wait_for_database_migration_lock(file, lock_path, &display).await
+}
+
+async fn wait_for_database_migration_lock(
+    file: std::fs::File,
+    lock_path: PathBuf,
+    display: &str,
+) -> Result<std::fs::File, StoreError> {
     loop {
         match file.try_lock() {
-            Ok(()) => return Ok(file),
+            Ok(()) => {
+                verify_database_migration_lock(&file, &lock_path)?;
+                return Ok(file);
+            }
             Err(std::fs::TryLockError::WouldBlock) => {
                 tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             }
@@ -317,17 +331,47 @@ async fn acquire_database_migration_lock(path: &Path) -> Result<std::fs::File, S
 
 #[cfg(test)]
 fn lock_database_migrations(path: &Path) -> Result<std::fs::File, StoreError> {
-    let file = open_database_migration_lock(path)?;
+    let (file, lock_path) = open_database_migration_lock(path)?;
     file.lock().map_err(|error| {
         StoreError::Backend(format!(
             "could not acquire database migration lock for {}: {error}",
             path.display()
         ))
     })?;
+    verify_database_migration_lock(&file, &lock_path)?;
     Ok(file)
 }
 
-fn open_database_migration_lock(path: &Path) -> Result<std::fs::File, StoreError> {
+#[cfg(unix)]
+fn verify_database_migration_lock(file: &std::fs::File, path: &Path) -> Result<(), StoreError> {
+    use std::os::unix::fs::MetadataExt;
+    let opened = file.metadata().map_err(|error| {
+        StoreError::Backend(format!(
+            "could not inspect acquired migration lock {}: {error}",
+            path.display()
+        ))
+    })?;
+    let current = std::fs::symlink_metadata(path).map_err(|error| {
+        StoreError::Backend(format!(
+            "could not inspect migration lock path {}: {error}",
+            path.display()
+        ))
+    })?;
+    if !current.is_file() || current.dev() != opened.dev() || current.ino() != opened.ino() {
+        return Err(StoreError::Backend(format!(
+            "database migration lock changed while acquiring it: {}",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn verify_database_migration_lock(_file: &std::fs::File, _path: &Path) -> Result<(), StoreError> {
+    Ok(())
+}
+
+fn open_database_migration_lock(path: &Path) -> Result<(std::fs::File, PathBuf), StoreError> {
     let canonical = match std::fs::canonicalize(path) {
         Ok(path) => path,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -411,7 +455,7 @@ fn open_database_migration_lock(path: &Path) -> Result<std::fs::File, StoreError
             lock_path.display()
         )));
     }
-    Ok(file)
+    Ok((file, lock_path))
 }
 
 async fn migrations_pending(db: &mut toasty::db::Db) -> Result<bool, StoreError> {
@@ -2671,6 +2715,41 @@ mod tests {
             Ok::<(), Box<dyn std::error::Error>>(())
         })?;
         drop(lock);
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn replaced_migration_lock_is_rejected_before_database_open()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = TestDirectory::new()?;
+        let path = directory.join("replace.db");
+        let held = lock_database_migrations(&path)?;
+        let (waiting_file, lock_path) = open_database_migration_lock(&path)?;
+        let wait_path = lock_path.clone();
+        let mut waiting = tokio::spawn(async move {
+            wait_for_database_migration_lock(waiting_file, wait_path, "fixture").await
+        });
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(150), &mut waiting)
+                .await
+                .is_err()
+        );
+        std::fs::rename(&lock_path, directory.join("old.lock"))?;
+        std::fs::write(&lock_path, "replacement")?;
+        drop(held);
+        let result = tokio::time::timeout(std::time::Duration::from_secs(5), waiting).await??;
+        assert!(
+            matches!(result, Err(StoreError::Backend(message)) if message.contains("lock changed"))
+        );
+        assert!(!path.exists());
+        assert!(
+            TursoStore::open_at(&path)
+                .await?
+                .load_projects()
+                .await?
+                .is_empty()
+        );
         Ok(())
     }
 
