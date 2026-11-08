@@ -1387,6 +1387,9 @@ placeholder tabs and no unearned state badges.
   ACP file reads and writes share a 32-worker limit per connection; excess
   requests receive an error. An injected exhausted-capacity fixture verifies
   both operations can be retried successfully when capacity returns.
+  File requests cancelled while queued check cancellation before touching the
+  filesystem; an occupied-worker fake-agent fixture covers reads and writes.
+  Operations already underway complete rather than being interrupted.
   ACP terminal creation admits at most 32 pending starts per connection before
   spawning handler tasks; excess requests receive an error. A registry fixture
   checks that cancelling waiting starts frees capacity for another creation.

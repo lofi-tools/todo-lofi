@@ -59,6 +59,7 @@ pub struct FakeScript {
     pub read_paths: Vec<PathBuf>,
     /// Ask the client to write this content to this path.
     pub write: Option<(PathBuf, String)>,
+    pub cancel_file_requests: bool,
 }
 
 /// Everything the fake agent observed, for assertions.
@@ -86,6 +87,7 @@ pub struct FakeObservations {
     pub terminal_wait_cancellations: Vec<Result<(), String>>,
     pub file_reads: Vec<Result<String, String>>,
     pub file_writes: Vec<Result<(), String>>,
+    pub file_cancellations_sent: bool,
 }
 
 pub type Shared = Arc<Mutex<FakeObservations>>;
@@ -393,30 +395,69 @@ async fn run_turn(
             }
         }
     }
-    for path in &script.read_paths {
-        let result = connection
-            .send_request(ReadTextFileRequest::new(session_id.clone(), path.clone()))
-            .block_task()
-            .await
-            .map(|response| response.content)
-            .map_err(|error| error.to_string());
-        if let Ok(mut state) = observations.lock() {
-            state.file_reads.push(result);
-        }
-    }
-    if let Some((path, content)) = &script.write {
-        let result = connection
-            .send_request(WriteTextFileRequest::new(
+    if script.cancel_file_requests {
+        if let (Some(path), Some((target, content))) = (script.read_paths.first(), &script.write) {
+            let read =
+                connection.send_request(ReadTextFileRequest::new(session_id.clone(), path.clone()));
+            let write = connection.send_request(WriteTextFileRequest::new(
                 session_id.clone(),
-                path.clone(),
+                target.clone(),
                 content.clone(),
-            ))
-            .block_task()
-            .await
-            .map(|_| ())
-            .map_err(|error| error.to_string());
-        if let Ok(mut state) = observations.lock() {
-            state.file_writes.push(result);
+            ));
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            read.cancel()?;
+            write.cancel()?;
+            connection
+                .send_request(TerminalOutputRequest::new(
+                    session_id.clone(),
+                    acp::schema::v1::TerminalId::new("barrier"),
+                ))
+                .block_task()
+                .await?;
+            if let Ok(mut state) = observations.lock() {
+                state.file_cancellations_sent = true;
+            }
+            let read_result = read
+                .block_task()
+                .await
+                .map(|response| response.content)
+                .map_err(|error| error.to_string());
+            let write_result = write
+                .block_task()
+                .await
+                .map(|_| ())
+                .map_err(|error| error.to_string());
+            if let Ok(mut state) = observations.lock() {
+                state.file_reads.push(read_result);
+                state.file_writes.push(write_result);
+            }
+        }
+    } else {
+        for path in &script.read_paths {
+            let result = connection
+                .send_request(ReadTextFileRequest::new(session_id.clone(), path.clone()))
+                .block_task()
+                .await
+                .map(|response| response.content)
+                .map_err(|error| error.to_string());
+            if let Ok(mut state) = observations.lock() {
+                state.file_reads.push(result);
+            }
+        }
+        if let Some((path, content)) = &script.write {
+            let result = connection
+                .send_request(WriteTextFileRequest::new(
+                    session_id.clone(),
+                    path.clone(),
+                    content.clone(),
+                ))
+                .block_task()
+                .await
+                .map(|_| ())
+                .map_err(|error| error.to_string());
+            if let Ok(mut state) = observations.lock() {
+                state.file_writes.push(result);
+            }
         }
     }
     if let Some((command, args)) = &script.terminal {
@@ -894,6 +935,52 @@ mod tests {
             }
             other => panic!("expected a tool call row, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn cancelled_queued_file_requests_do_not_touch_filesystem()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .max_blocking_threads(1)
+            .build()?;
+        runtime.block_on(async {
+            let directory = tempfile::tempdir()?;
+            std::fs::write(directory.path().join("input"), "source")?;
+            let (release, blocked) = std::sync::mpsc::channel::<()>();
+            let (started, ready) = tokio::sync::oneshot::channel();
+            let blocker = tokio::task::spawn_blocking(move || -> Result<(), String> {
+                started.send(()).map_err(|_| "blocker start receiver dropped".to_string())?;
+                blocked.recv().map_err(|error| error.to_string())?;
+                Ok(())
+            });
+            ready.await?;
+            let (connection, observations) = connect_fake_agent(
+                FakeScript {
+                    read_paths: vec!["input".into()],
+                    write: Some(("output".into(), "saved".into())),
+                    cancel_file_requests: true,
+                    ..Default::default()
+                },
+                ConnectOptions { roots: SessionRoots::new([directory.path().to_path_buf()]), tool_permissions: confirm_all() },
+            ).await?;
+            let session = new_session(&connection, &directory).await;
+            let turn = tokio::spawn({ let requester = connection.requester.clone(); async move { requester.prompt(&session, "go".into()).await } });
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                loop {
+                    if observations.lock().map_err(|error| error.to_string())?.file_cancellations_sent { return Ok::<(), String>(()); }
+                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                }
+            }).await?.map_err(std::io::Error::other)?;
+            release.send(())?;
+            blocker.await?.map_err(std::io::Error::other)?;
+            tokio::time::timeout(std::time::Duration::from_secs(5), turn).await???;
+            let observed = observations.lock().map_err(|error| error.to_string())?;
+            assert!(matches!(observed.file_reads.first(), Some(Err(error)) if error.to_lowercase().contains("cancel")));
+            assert!(matches!(observed.file_writes.first(), Some(Err(error)) if error.to_lowercase().contains("cancel")));
+            assert!(!directory.path().join("output").exists());
+            Ok(())
+        })
     }
 
     #[tokio::test]

@@ -711,7 +711,13 @@ where
                 let roots = roots_for_read.clone();
                 let prompt_reads = prompt_reads_for_handler.clone();
                 let events = reads.clone();
+                let cancellation = responder.cancellation();
                 tokio::task::spawn_blocking(move || {
+                    if cancellation.is_cancelled() {
+                        drop(permit);
+                        log_reply(responder.respond_with_error(acp::Error::request_cancelled()), "file read");
+                        return;
+                    }
                     let content = prompt_reads
                         .read(
                             &request.session_id,
@@ -747,7 +753,13 @@ where
                 };
                 let roots = roots_for_write.clone();
                 let events = writes.clone();
+                let cancellation = responder.cancellation();
                 tokio::task::spawn_blocking(move || {
+                    if cancellation.is_cancelled() {
+                        drop(permit);
+                        log_reply(responder.respond_with_error(acp::Error::request_cancelled()), "file write");
+                        return;
+                    }
                     let result = roots.write_text_file(&request.path, &request.content);
                     drop(permit);
                     let reply = match result {
