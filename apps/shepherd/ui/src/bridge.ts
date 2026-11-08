@@ -57,6 +57,10 @@ export function inspectPreviousProcesses(): Promise<PreviousProcess[]> {
   return invoke('inspect_previous_processes')
 }
 
+export function stopPreviousProcess(id: string): Promise<PreviousProcess[]> {
+  return invoke('stop_previous_process', { id })
+}
+
 export type Decision = 'allow' | 'allowSession' | 'allowProject' | 'deny'
 
 export type ShortcutScope = 'window' | 'composer' | 'workspaceTerminal' | 'commitForm'

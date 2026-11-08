@@ -279,6 +279,32 @@ fn list_processes() -> std::io::Result<Vec<libc::pid_t>> {
 }
 
 #[cfg(unix)]
+pub(crate) fn session_members(record: &ProcessRecord) -> std::io::Result<Vec<libc::pid_t>> {
+    let current_boot =
+        boot_id().ok_or_else(|| std::io::Error::other("could not identify the current boot"))?;
+    if current_boot != record.boot_id {
+        return Ok(Vec::new());
+    }
+    let group = libc::pid_t::try_from(record.process_group).map_err(std::io::Error::other)?;
+    let session = libc::pid_t::try_from(record.session_id).map_err(std::io::Error::other)?;
+    let own_group = unsafe { libc::getpgrp() };
+    let own_pid = unsafe { libc::getpid() };
+    if group <= 1 || session <= 1 || group == own_group {
+        return Err(std::io::Error::other("invalid recorded process identity"));
+    }
+    let mut members = Vec::new();
+    for pid in list_processes()? {
+        if pid <= 1 || pid == own_pid || unsafe { libc::getsid(pid) } != session {
+            continue;
+        }
+        if unsafe { libc::getpgid(pid) } == group {
+            members.push(pid);
+        }
+    }
+    Ok(members)
+}
+
+#[cfg(unix)]
 pub(crate) fn process_group_has_other_members(record: &ProcessRecord) -> std::io::Result<bool> {
     let current_boot =
         boot_id().ok_or_else(|| std::io::Error::other("could not identify the current boot"))?;

@@ -134,6 +134,17 @@ export function App() {
       setCheckingProcesses(false)
     }
   }
+  const [stoppingProcess, setStoppingProcess] = createSignal<string>()
+  async function stopPreviousProcess(id: string) {
+    setStoppingProcess(id)
+    try {
+      setPreviousProcesses(await bridge.stopPreviousProcess(id))
+    } catch (failure) {
+      setError(describe(failure))
+    } finally {
+      setStoppingProcess()
+    }
+  }
   const [homeDirectory, setHomeDirectory] = createSignal<string>()
   const [projectsLoaded, setProjectsLoaded] = createSignal(false)
   const [codexAvailable, setCodexAvailable] = createSignal(false)
@@ -1704,10 +1715,15 @@ export function App() {
           <div class="banner" role="status">
             <details class="process-notice__details">
               <summary>Previously recorded processes need review ({processesNeedingReview().length})</summary>
-              <p>A matching process may belong to another running Shepherd instance. Shepherd has not stopped any processes.</p>
+              <p>A matching process may belong to another running Shepherd instance. Shepherd stops one only when no running instance owns its lease and its identity still matches.</p>
               <ul>
                 <For each={processesNeedingReview()}>{(process) =>
-                  <li>{process.kind === 'agent' ? 'Agent' : process.kind === 'acp_terminal' ? 'Agent terminal' : 'Terminal'} · PID {process.pid} · {process.status === 'matching' ? 'identity matches' : process.status === 'changed' ? 'process group or session is unsafe' : process.status === 'groupUnverified' ? 'leader exited; process group may still be active' : 'identity could not be verified'}</li>
+                  <li>
+                    {process.kind === 'agent' ? 'Agent' : process.kind === 'acp_terminal' ? 'Agent terminal' : 'Terminal'} · PID {process.pid} · {process.status === 'matching' ? 'identity matches' : process.status === 'changed' ? 'process group or session is unsafe' : process.status === 'groupUnverified' ? 'leader exited; process group may still be active' : 'identity could not be verified'}
+                    <Show when={process.status === 'matching'}>
+                      <button type="button" disabled={stoppingProcess() === process.id} onClick={() => void stopPreviousProcess(process.id)}>Stop</button>
+                    </Show>
+                  </li>
                 }</For>
               </ul>
             </details>

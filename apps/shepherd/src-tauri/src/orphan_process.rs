@@ -56,6 +56,79 @@ impl ProcessLease {
         file.try_lock()?;
         Ok(Self(file))
     }
+
+    /// Take over a lease left by an earlier instance. The lock proves that no
+    /// live instance still owns the process.
+    #[cfg(unix)]
+    fn adopt_at(directory: &File, id: &str) -> io::Result<Self> {
+        use std::os::fd::{AsRawFd as _, FromRawFd as _};
+        use std::os::unix::fs::MetadataExt as _;
+        let name = lease_name(id)?;
+        let descriptor = unsafe {
+            libc::openat(
+                directory.as_raw_fd(),
+                name.as_ptr(),
+                libc::O_RDWR | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK,
+            )
+        };
+        if descriptor < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let lease = Self(unsafe { File::from_raw_fd(descriptor) });
+        let metadata = lease.0.metadata()?;
+        if !metadata.is_file()
+            || metadata.uid() != unsafe { libc::geteuid() }
+            || metadata.mode() & 0o077 != 0
+            || metadata.nlink() != 1
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "agent process lease file is unsafe",
+            ));
+        }
+        lease.0.try_lock().map_err(|error| {
+            io::Error::new(
+                io::ErrorKind::WouldBlock,
+                format!("a running Shepherd instance owns the agent process lease: {error}"),
+            )
+        })?;
+        lease.verify_entry(directory, id)?;
+        Ok(lease)
+    }
+
+    /// Confirm that the locked file is still the entry at the lease name, so a
+    /// replacement cannot stand in for a live owner's lease.
+    #[cfg(unix)]
+    fn verify_entry(&self, directory: &File, id: &str) -> io::Result<()> {
+        use std::os::fd::AsRawFd as _;
+        use std::os::unix::fs::MetadataExt as _;
+        let name = lease_name(id)?;
+        let mut entry: libc::stat = unsafe { std::mem::zeroed() };
+        let checked = unsafe {
+            libc::fstatat(
+                directory.as_raw_fd(),
+                name.as_ptr(),
+                &mut entry,
+                libc::AT_SYMLINK_NOFOLLOW,
+            )
+        };
+        if checked != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let metadata = self.0.metadata()?;
+        if entry.st_dev as u64 != metadata.dev() || entry.st_ino != metadata.ino() {
+            return Err(io::Error::other(
+                "agent process lease file was replaced while opening",
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[cfg(unix)]
+fn lease_name(id: &str) -> io::Result<std::ffi::CString> {
+    let id = uuid::Uuid::parse_str(id).map_err(io::Error::other)?;
+    std::ffi::CString::new(format!("{id}.lock")).map_err(io::Error::other)
 }
 
 pub(crate) struct ProcessLeases {
@@ -137,6 +210,16 @@ impl ProcessLeases {
         }
         active.insert(id.to_owned(), lease);
         Ok(())
+    }
+
+    /// Take the retained lease for a recorded process. The returned lease is
+    /// held while that process is stopped so another instance cannot adopt it.
+    #[cfg(unix)]
+    pub(crate) fn adopt(&self, id: &str) -> io::Result<ProcessLease> {
+        self.verify_directory()?;
+        let lease = ProcessLease::adopt_at(&self.directory_handle, id)?;
+        self.verify_directory()?;
+        Ok(lease)
     }
 
     #[cfg(unix)]
@@ -272,6 +355,77 @@ pub(crate) fn inspect(records: Vec<ProcessRecord>) -> Vec<ProcessInspection> {
         .collect()
 }
 
+/// Stop a process recorded by an earlier instance.
+///
+/// The retained lease proves that no running instance still owns the process.
+/// The leader's identity must match before signalling, and escalation only
+/// targets members of the recorded session and group, so a reused PID is never
+/// signalled.
+#[cfg(unix)]
+pub(crate) fn stop(leases: &ProcessLeases, record: &ProcessRecord) -> io::Result<()> {
+    let _lease = leases.adopt(&record.id)?;
+    _lease.verify_entry(&leases.directory_handle, &record.id)?;
+    ensure_matching(record)?;
+    let mut members = crate::pty_terminal::session_members(record)?;
+    if members.is_empty() {
+        return Ok(());
+    }
+    signal_members(&members, libc::SIGTERM)?;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
+    loop {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        members = crate::pty_terminal::session_members(record)?;
+        if members.is_empty() {
+            return Ok(());
+        }
+        if std::time::Instant::now() >= deadline {
+            break;
+        }
+    }
+    signal_members(&members, libc::SIGKILL)?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+pub(crate) fn stop(_leases: &ProcessLeases, _record: &ProcessRecord) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "stopping recorded processes is unavailable on this platform",
+    ))
+}
+
+#[cfg(unix)]
+fn ensure_matching(record: &ProcessRecord) -> io::Result<()> {
+    let observed = observe(record, crate::pty_terminal::boot_id());
+    if classify(record, &observed) == ProcessStatus::Matching {
+        return Ok(());
+    }
+    Err(io::Error::new(
+        io::ErrorKind::InvalidData,
+        "the recorded process identity no longer matches a live process",
+    ))
+}
+
+// macOS refuses `killpg` for a group in another session, so signal each
+// recorded session member instead.
+#[cfg(unix)]
+fn signal_members(members: &[libc::pid_t], signal: libc::c_int) -> io::Result<()> {
+    let mut failure = None;
+    for pid in members {
+        if unsafe { libc::kill(*pid, signal) } == 0 {
+            continue;
+        }
+        let error = io::Error::last_os_error();
+        if error.raw_os_error() != Some(libc::ESRCH) && failure.is_none() {
+            failure = Some(error);
+        }
+    }
+    match failure {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
+}
+
 #[cfg(unix)]
 fn observe(record: &ProcessRecord, boot_id: Option<String>) -> Observation {
     let pid = libc::pid_t::try_from(record.pid)
@@ -397,6 +551,103 @@ mod tests {
         assert!(ProcessLease::recover(directory.path(), &id).is_err());
         drop(recovered);
         assert!(ProcessLease::recover(directory.path(), "../other").is_err());
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn lease_adoption_requires_an_unowned_lease_file() -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::fs::PermissionsExt as _;
+        let root = tempfile::tempdir()?;
+        let directory = root.path().join("leases");
+        let leases = ProcessLeases::new(directory.clone())?;
+        let id = uuid::Uuid::new_v4().to_string();
+        let path = directory.join(format!("{id}.lock"));
+        let lease = ProcessLease::create(&directory, &id)?;
+        let error = leases.adopt(&id).err().ok_or("adopted an owned lease")?;
+        assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
+        drop(lease);
+        let adopted = leases.adopt(&id)?;
+        assert!(leases.adopt(&id).is_err());
+        std::fs::rename(&path, root.path().join("moved.lock"))?;
+        std::fs::write(&path, "")?;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+        assert!(adopted.verify_entry(&leases.directory_handle, &id).is_err());
+        drop(adopted);
+        drop(leases.adopt(&id)?);
+        std::fs::remove_file(&path)?;
+        std::os::unix::fs::symlink(root.path().join("moved.lock"), &path)?;
+        assert!(leases.adopt(&id).is_err());
+        std::fs::remove_file(&path)?;
+        std::fs::write(&path, "")?;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o666))?;
+        let error = leases.adopt(&id).err().ok_or("adopted a shared lease")?;
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stop_signals_only_a_verified_unowned_process_group() -> Result<(), Box<dyn std::error::Error>>
+    {
+        use std::os::unix::process::{CommandExt as _, ExitStatusExt as _};
+        if crate::pty_terminal::boot_id().is_none() {
+            eprintln!("Skipping process stop check: the OS boot identifier is unavailable");
+            return Ok(());
+        }
+        let root = tempfile::tempdir()?;
+        let directory = root.path().join("leases");
+        let leases = ProcessLeases::new(directory.clone())?;
+        let spawn =
+            || -> Result<(std::process::Child, ProcessRecord), Box<dyn std::error::Error>> {
+                let mut command = std::process::Command::new("/bin/sh");
+                command
+                    .args(["-c", "exec sleep 30"])
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null());
+                unsafe {
+                    command.pre_exec(|| {
+                        if libc::setsid() < 0 {
+                            return Err(std::io::Error::last_os_error());
+                        }
+                        Ok(())
+                    });
+                }
+                let child = command.spawn()?;
+                let pid = libc::pid_t::try_from(child.id())?;
+                let record = crate::pty_terminal::capture_process_record(pid, "agent", "fixture")
+                    .ok_or("could not capture the fixture process")?;
+                Ok((child, record))
+            };
+
+        let (mut child, record) = spawn()?;
+        let lease = ProcessLease::create(&directory, &record.id)?;
+        let error = stop(&leases, &record)
+            .err()
+            .ok_or("stopped an owned process")?;
+        assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
+        assert_eq!(
+            unsafe { libc::kill(libc::pid_t::try_from(record.pid)?, 0) },
+            0
+        );
+        drop(lease);
+        stop(&leases, &record)?;
+        assert!(child.wait()?.signal().is_some());
+
+        let (mut child, mut reused) = spawn()?;
+        drop(ProcessLease::create(&directory, &reused.id)?);
+        reused.started_at += 1;
+        let error = stop(&leases, &reused)
+            .err()
+            .ok_or("stopped a reused identity")?;
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(
+            unsafe { libc::kill(libc::pid_t::try_from(reused.pid)?, 0) },
+            0
+        );
+        unsafe { libc::killpg(libc::pid_t::try_from(reused.process_group)?, libc::SIGKILL) };
+        child.wait()?;
         Ok(())
     }
 

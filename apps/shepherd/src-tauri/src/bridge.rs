@@ -326,6 +326,10 @@ impl TerminalHost {
             leases: self.process_leases.get().cloned(),
         })
     }
+
+    pub(crate) fn process_leases(&self) -> Option<Arc<crate::orphan_process::ProcessLeases>> {
+        self.process_leases.get().cloned()
+    }
 }
 
 impl Default for TerminalHost {
@@ -730,7 +734,7 @@ pub struct ShellState {
     terminal_lifecycle: Mutex<()>,
     pending_quit: Mutex<Option<QuitSummary>>,
     terminals: TerminalHost,
-    previous_processes: Vec<ProcessRecord>,
+    previous_processes: Mutex<Vec<ProcessRecord>>,
     scan: Arc<Mutex<ProjectScanCache>>,
     file_searches: Mutex<BTreeMap<String, FileSearch>>,
     task_searches: Mutex<BTreeMap<String, TaskSearchRequest>>,
@@ -893,7 +897,7 @@ impl ShellState {
             terminal_lifecycle: Mutex::new(()),
             pending_quit: Mutex::new(None),
             terminals,
-            previous_processes: Vec::new(),
+            previous_processes: Mutex::new(Vec::new()),
             scan: Arc::new(Mutex::new(ProjectScanCache::default())),
             file_searches: Mutex::new(BTreeMap::new()),
             task_searches: Mutex::new(BTreeMap::new()),
@@ -972,7 +976,7 @@ impl ShellState {
         })?;
         let previous_processes = core.recorded_processes().await.map_err(BridgeError::from)?;
         let mut state = Self::with_terminals(core, terminals);
-        state.previous_processes = previous_processes;
+        state.previous_processes = Mutex::new(previous_processes);
         state.attachment_root = Some(data_directory.join("attachments"));
 
         // Walking the home directory can take seconds, so the scan starts with
@@ -2485,8 +2489,59 @@ pub mod commands {
     pub async fn inspect_previous_processes(
         state: State<'_, ShellState>,
     ) -> Result<Vec<crate::orphan_process::ProcessInspection>, BridgeError> {
-        let records = state.previous_processes.clone();
+        let records = state.previous_processes.lock().await.clone();
         tokio::task::spawn_blocking(move || crate::orphan_process::inspect(records))
+            .await
+            .map_err(|error| BridgeError::new("process_inspection", error.to_string()))
+    }
+
+    #[tauri::command]
+    pub async fn stop_previous_process(
+        state: State<'_, ShellState>,
+        id: String,
+    ) -> Result<Vec<crate::orphan_process::ProcessInspection>, BridgeError> {
+        let record = state
+            .previous_processes
+            .lock()
+            .await
+            .iter()
+            .find(|record| record.id == id)
+            .cloned()
+            .ok_or_else(|| {
+                BridgeError::new(
+                    "process_inspection",
+                    "The recorded process is no longer known.",
+                )
+            })?;
+        let leases = state.terminals.process_leases().ok_or_else(|| {
+            BridgeError::new(
+                "process_inspection",
+                "Agent process leases are unavailable.",
+            )
+        })?;
+        let stopping = record.clone();
+        tokio::task::spawn_blocking(move || crate::orphan_process::stop(&leases, &stopping))
+            .await
+            .map_err(|error| BridgeError::new("process_inspection", error.to_string()))?
+            .map_err(|error| {
+                BridgeError::new(
+                    "process_inspection",
+                    format!("Could not stop the recorded process: {error}"),
+                )
+            })?;
+        state
+            .core
+            .lock()
+            .await
+            .remove_process(&record.id)
+            .await
+            .map_err(BridgeError::from)?;
+        let remaining = {
+            let mut records = state.previous_processes.lock().await;
+            records.retain(|seen| seen.id != record.id);
+            records.clone()
+        };
+        tokio::task::spawn_blocking(move || crate::orphan_process::inspect(remaining))
             .await
             .map_err(|error| BridgeError::new("process_inspection", error.to_string()))
     }
@@ -5598,7 +5653,7 @@ mod tests {
             TerminalHost::default(),
         )
         .await?;
-        let records = reopened.previous_processes.clone();
+        let records = reopened.previous_processes.lock().await.clone();
         assert_eq!(records.len(), 1);
         assert_eq!(
             records.first().map(|record| record.pid),
@@ -6509,7 +6564,7 @@ mod tests {
             boot_id: "boot".into(),
         };
         state.core.lock().await.record_process(&record).await?;
-        assert!(state.previous_processes.is_empty());
+        assert!(state.previous_processes.lock().await.is_empty());
         drop(state);
 
         let reopened = ShellState::load(
@@ -6518,7 +6573,7 @@ mod tests {
             TerminalHost::default(),
         )
         .await?;
-        assert_eq!(reopened.previous_processes, vec![record]);
+        assert_eq!(*reopened.previous_processes.lock().await, vec![record]);
         Ok(())
     }
 

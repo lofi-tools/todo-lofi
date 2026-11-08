@@ -1284,16 +1284,22 @@ placeholder tabs and no unearned state badges.
   group and session still have members. Inspection reports the group as
   unverified, since reuse prevents proving ownership; a local fixture covers
   retention and eventual cleanup. Group scans are snapshots and do not prove
-  that every descendant is found. Stopping surviving processes remains open.
+  that every descendant is found. Stopping a recorded group whose leader exited
+  remains open because its members' identities cannot be verified.
   Newly recorded agents hold a per-record OS lock while owned by this instance;
   cross-process and crash fixtures verify that another process cannot acquire
   it until the owner exits. Existing records have no such ownership evidence.
   Lease files are retained so all instances continue to lock the same file.
   New lease directories are private; startup rejects a symlink, a directory
-  owned by another user, or one writable by other users. On Unix, lease files
+  owned by another user, or one writable by other users.  On Unix, lease files
   are created relative to an opened directory and its identity is checked
-  before and after each claim. Replacement after the last check still needs
-  protection before leases can authorize stopping a process.
+  before and after each claim. A recorded process can now be stopped from the
+  startup notice: Shepherd adopts the retained lease, refusing one still
+  locked by a running instance or whose file is no longer the entry it locked,
+  and signals only while the recorded identity still matches. The lease stays
+  held through termination, which escalates from `SIGTERM` to `SIGKILL` after
+  500 ms only while the leader still matches; a fixture covers an owned lease,
+  a replaced lease file, a reused start time and a completed stop.
   ACP supervision reports a failed process-group signal even if killing the
   leader succeeds, with an injected-failure fixture. ACP quit now waits for
   process supervision and reports its failure; timeout retains the connection
