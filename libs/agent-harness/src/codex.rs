@@ -2238,7 +2238,10 @@ async fn publish_exec_event(
     progress: &AtomicU64,
     mut event: HarnessEvent,
 ) -> Result<(), ()> {
-    if let HarnessEvent::ToolCall { stream_permit, .. } = &mut event {
+    if let HarnessEvent::ToolCall { stream_permit, .. }
+    | HarnessEvent::Plan { stream_permit, .. }
+    | HarnessEvent::Usage { stream_permit, .. } = &mut event
+    {
         backpressured.store(true, Ordering::Release);
         let permit = capacity.clone().acquire_owned().await.map_err(|_| ())?;
         backpressured.store(false, Ordering::Release);
@@ -5593,6 +5596,56 @@ exit 0
             }
         )));
         harness.shutdown().await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn exec_plan_and_usage_share_stream_capacity() -> Result<(), Box<dyn std::error::Error>> {
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        let capacity = Arc::new(tokio::sync::Semaphore::new(1));
+        let blocked = Arc::new(AtomicBool::new(false));
+        let progress = Arc::new(AtomicU64::new(0));
+        let producer = tokio::spawn({
+            let capacity = capacity.clone();
+            let blocked = blocked.clone();
+            let progress = progress.clone();
+            async move {
+                for event in [
+                    HarnessEvent::Plan {
+                        rows: vec![PlanRow {
+                            text: "step".into(),
+                            status: "pending".into(),
+                        }],
+                        stream_permit: None,
+                    },
+                    HarnessEvent::Usage {
+                        used: 1,
+                        size: 100,
+                        cost: None,
+                        stream_permit: None,
+                    },
+                ] {
+                    publish_exec_event(&sender, &capacity, &blocked, &progress, event).await?;
+                }
+                Ok::<_, ()>(())
+            }
+        });
+        let plan = receiver.recv().await.ok_or("missing plan")?;
+        assert!(matches!(plan, HarnessEvent::Plan { .. }));
+        let retained = plan.clone();
+        drop(plan);
+        assert!(
+            timeout(Duration::from_millis(30), receiver.recv())
+                .await
+                .is_err()
+        );
+        drop(retained);
+        let usage = receiver.recv().await.ok_or("missing usage")?;
+        assert!(matches!(usage, HarnessEvent::Usage { .. }));
+        producer.await?.map_err(|()| "stream closed")?;
+        assert_eq!(capacity.available_permits(), 0);
+        drop(usage);
+        assert_eq!(capacity.available_permits(), 1);
         Ok(())
     }
 

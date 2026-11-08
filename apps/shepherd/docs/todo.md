@@ -1538,11 +1538,13 @@ placeholder tabs and no unearned state badges.
   consumer is backpressured. Local fixtures cover UTF-8, multiple turns,
   cancellation and a slow consumer. Codex exec tool events share that capacity;
   a fixture checks ordering, cloned-event permit retention and cancellation of
-  a blocked producer. OpenCode tool updates also share its text capacity; a
-  mixed-stream fixture checks ordering, cloned permits and cancellation. A core
+  a blocked producer. Codex exec plan and usage events also share that capacity;
+  a fixture verifies ordering and retained cloned permits. OpenCode tool
+  updates also share its text capacity; a mixed-stream fixture checks ordering,
+  cloned permits and cancellation. A core
   fixture fills the queue and verifies that 150 scripted messages and 150 tool
-  calls reach the transcript in order. Other OpenCode and Codex exec events and other adapters
-  still need coordinated backpressure. A
+  calls reach the transcript in order. Other OpenCode events and app-server
+  events still need coordinated backpressure. A
   Codex fixture verifies that a command reply remains reachable after 100
   unconsumed stream events; a bounded design must preserve that behavior.
   Event folding handles at
