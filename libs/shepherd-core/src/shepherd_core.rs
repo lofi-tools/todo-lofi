@@ -5306,7 +5306,9 @@ mod tests {
         assert_eq!(status.signal(), Some(9));
         let mut recovered = Core::load(
             Box::new(TursoStore::open(&uri).await?),
-            Box::new(UnavailableHarnessFactory),
+            Box::new(FakeHarnessFactory::new(vec![vec![FakeTurn::new(vec![
+                FakeStep::Message("answer after crash".into()),
+            ])]])),
         )
         .await?;
         let workspace = recovered.open_task_workspace(&task_id).await?;
@@ -5316,6 +5318,48 @@ mod tests {
         assert!(workspace.transcript.iter().any(|entry| matches!(&entry.kind, agent_harness::EntryKind::Notice { text, is_error: true } if text.contains("missing exit status"))));
         assert!(!text.contains("unfinished answer"));
         assert!(!recovered.sessions.contains_key(&task_id));
+        recovered
+            .execute(Command::ResumeTask {
+                task_id: task_id.clone(),
+            })
+            .await?;
+        let workspace = workspace_of(
+            recovered
+                .execute(Command::SendPrompt {
+                    task_id: task_id.clone(),
+                    input: PromptInput::text("continue after crash"),
+                })
+                .await?,
+        );
+        assert!(workspace.transcript.iter().any(|entry| matches!(&entry.kind, agent_harness::EntryKind::Notice { text, is_error: true } if text.contains("missing exit status"))));
+        assert!(
+            summaries(&workspace)
+                .iter()
+                .any(|entry| entry.contains("answer after crash"))
+        );
+        let sequences: Vec<_> = workspace
+            .transcript
+            .iter()
+            .map(|entry| entry.sequence)
+            .collect();
+        assert!(
+            sequences
+                .windows(2)
+                .all(|pair| matches!(pair, [first, second] if first < second))
+        );
+        drop(recovered);
+        let mut reopened = Core::load(
+            Box::new(TursoStore::open(&uri).await?),
+            Box::new(UnavailableHarnessFactory),
+        )
+        .await?;
+        let workspace = reopened.open_task_workspace(&task_id).await?;
+        assert!(workspace.transcript.iter().any(|entry| matches!(&entry.kind, agent_harness::EntryKind::Notice { text, is_error: true } if text.contains("missing exit status"))));
+        assert!(
+            summaries(&workspace)
+                .iter()
+                .any(|entry| entry.contains("answer after crash"))
+        );
         Ok(())
     }
 
