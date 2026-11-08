@@ -1563,7 +1563,14 @@ placeholder tabs and no unearned state badges.
   multipart Unicode fixture verifies the retained tail. ACP's SDK dispatches
   notifications and replies on one ordered loop, so waiting for queue capacity
   inside its notification callback can delay control responses; its remaining
-  queue limit needs a design that preserves response progress.
+  queue limit needs a design that preserves response progress. A local
+  256-update overflow prototype showed that returning an error from the SDK
+  notification callback alone can still leave a prompt reporting success; the
+  failure must also reach the pending request and stop the connection. Both
+  Shepherd and Taskstream currently wait for session/load before consuming
+  history, so a fixed notification limit also requires concurrent history
+  consumption to avoid rejecting legitimate long sessions. The prototype was
+  removed until both conditions can be handled.
   Transcript folding similarly selects the tail of an oversized command-output
   chunk before allocating it, with a UTF-8 regression for the retained output.
 - [ ] Multiple agents and projects: three agents across two projects, no state
