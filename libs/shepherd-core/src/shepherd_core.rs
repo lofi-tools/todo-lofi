@@ -2040,19 +2040,36 @@ impl Core {
         };
         let events = match events {
             Ok(events) => events,
-            Err(
-                error @ CoreError::Harness(
-                    agent_harness::HarnessError::NoPendingApproval
-                    | agent_harness::HarnessError::ApprovalOptionUnavailable,
-                ),
-            ) => {
-                return Err(error);
-            }
             Err(error) => {
-                self.record_failure(task_id, &error);
-                self.set_task_state(task_id, TaskState::Ready)?;
-                self.save_task(task_id).await?;
-                self.publish_task(task_id)?;
+                let pending = self
+                    .sessions
+                    .get_mut(task_id)
+                    .map(HarnessSession::pump_existing)
+                    .unwrap_or_default();
+                let disconnected = pending.iter().any(|event| {
+                    matches!(
+                        event,
+                        HarnessEvent::ConnectionFailed { .. } | HarnessEvent::Exited { .. }
+                    )
+                });
+                if !pending.is_empty() {
+                    self.apply_events(task_id, &pending)?;
+                }
+                let expected = matches!(
+                    error,
+                    CoreError::Harness(
+                        agent_harness::HarnessError::NoPendingApproval
+                            | agent_harness::HarnessError::ApprovalOptionUnavailable
+                    )
+                );
+                if !expected && !disconnected {
+                    self.record_failure(task_id, &error);
+                    self.set_task_state(task_id, TaskState::Ready)?;
+                }
+                if !expected || !pending.is_empty() {
+                    self.save_task(task_id).await?;
+                    self.publish_task(task_id)?;
+                }
                 return Err(error);
             }
         };
@@ -5763,6 +5780,147 @@ mod tests {
         );
         let store = TursoStore::open(&uri).await?;
         assert_eq!(store.load_transcript(&task_id).await?, workspace.transcript);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn approval_failure_folds_queued_disconnect_before_returning()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use agent_harness::{
+            AgentHarness, ApprovalRequest, Capabilities, DeltaKind, FailureKind, HarnessError,
+            HarnessResult, ItemId, SpawnSpec, ToolCallId, TurnId,
+        };
+        use tokio::sync::mpsc;
+        struct Factory;
+        impl HarnessFactory for Factory {
+            fn create(&self) -> Result<Box<dyn AgentHarness>, CoreError> {
+                let (sender, receiver) = mpsc::unbounded_channel();
+                Ok(Box::new(FailingApproval { sender, receiver }))
+            }
+            fn launch(
+                &self,
+                _: Agent,
+                cwd: PathBuf,
+            ) -> Result<(Box<dyn AgentHarness>, SpawnSpec), CoreError> {
+                Ok((self.create()?, self.spawn_spec(cwd)))
+            }
+        }
+        struct FailingApproval {
+            sender: mpsc::UnboundedSender<HarnessEvent>,
+            receiver: mpsc::UnboundedReceiver<HarnessEvent>,
+        }
+        #[async_trait::async_trait]
+        impl AgentHarness for FailingApproval {
+            fn events(&mut self) -> &mut mpsc::UnboundedReceiver<HarnessEvent> {
+                &mut self.receiver
+            }
+            async fn start(&mut self, _: SpawnSpec) -> HarnessResult<Capabilities> {
+                Ok(Capabilities::default())
+            }
+            async fn open_session(&mut self, _: Option<SessionId>) -> HarnessResult<SessionId> {
+                Ok(SessionId::new("fixture"))
+            }
+            async fn prompt(&mut self, _: PromptInput) -> HarnessResult<()> {
+                self.sender
+                    .send(HarnessEvent::TurnStarted {
+                        turn_id: TurnId::new("turn"),
+                    })
+                    .map_err(|_| HarnessError::ChannelClosed)?;
+                self.sender
+                    .send(HarnessEvent::ApprovalRequested {
+                        request: ApprovalRequest {
+                            approval_id: ApprovalId::new("approval"),
+                            tool_call_id: ToolCallId::new("tool"),
+                            title: "Run tests".into(),
+                            arguments: serde_json::Value::Null,
+                            paths: Vec::new(),
+                            patch: None,
+                            choices: None,
+                        },
+                    })
+                    .map_err(|_| HarnessError::ChannelClosed)?;
+                Ok(())
+            }
+            async fn respond(&mut self, _: ApprovalId, _: Decision) -> HarnessResult<()> {
+                for _ in 0..300 {
+                    self.sender
+                        .send(HarnessEvent::Delta {
+                            item_id: ItemId::new("stream"),
+                            kind: DeltaKind::Message,
+                            text: "x".into(),
+                            stream_permit: None,
+                        })
+                        .map_err(|_| HarnessError::ChannelClosed)?;
+                }
+                self.sender
+                    .send(HarnessEvent::ApprovalWithdrawn {
+                        approval_id: ApprovalId::new("approval"),
+                    })
+                    .map_err(|_| HarnessError::ChannelClosed)?;
+                self.sender
+                    .send(HarnessEvent::ConnectionFailed {
+                        kind: FailureKind::Protocol,
+                        text: "approval delivery failed".into(),
+                    })
+                    .map_err(|_| HarnessError::ChannelClosed)?;
+                Err(HarnessError::Reported {
+                    kind: FailureKind::Protocol,
+                    message: "approval delivery failed".into(),
+                })
+            }
+            async fn cancel(&mut self) -> HarnessResult<()> {
+                Ok(())
+            }
+            async fn shutdown(&mut self) -> HarnessResult<()> {
+                Ok(())
+            }
+        }
+        let repository = TestRepository::new()?;
+        let database = TestDatabase::new()?;
+        let uri = database.uri();
+        let mut core =
+            Core::with_services(Box::new(TursoStore::open(&uri).await?), Box::new(Factory));
+        let project_id = add_project(&mut core, repository.path().to_path_buf()).await?;
+        let draft = workspace_of(
+            core.execute(Command::CreateDraft {
+                project_id,
+                agent: Agent::OpenCode,
+                title: "Approval failure".into(),
+            })
+            .await?,
+        );
+        let task_id = TaskId::new(draft.task.id);
+        let workspace = workspace_of(
+            core.execute(Command::SendPrompt {
+                task_id: task_id.clone(),
+                input: PromptInput::text("go"),
+            })
+            .await?,
+        );
+        assert_eq!(workspace.task.state, TaskState::Waiting);
+        let error = core
+            .execute(Command::ResolveApproval {
+                task_id: task_id.clone(),
+                approval_id: ApprovalId::new("approval"),
+                decision: Decision::Allow,
+            })
+            .await;
+        assert!(error.is_err());
+        let workspace = core.task_workspace(&task_id)?;
+        assert_eq!(workspace.task.state, TaskState::Failed);
+        assert!(workspace.transcript.iter().any(|entry| matches!(&entry.kind, agent_harness::EntryKind::Permission { approval_id, withdrawn: true, .. } if approval_id == "approval")));
+        assert_eq!(workspace.transcript.iter().filter(|entry| matches!(&entry.kind, agent_harness::EntryKind::Failure { text, .. } if text == "approval delivery failed")).count(), 1);
+        assert!(
+            core.sessions
+                .get(&task_id)
+                .is_some_and(HarnessSession::is_closed)
+        );
+        drop(core);
+        let mut reopened =
+            Core::load(Box::new(TursoStore::open(&uri).await?), Box::new(Factory)).await?;
+        let restored = reopened.open_task_workspace(&task_id).await?;
+        assert_eq!(restored.task.state, TaskState::Failed);
+        assert!(restored.transcript.iter().any(|entry| matches!(&entry.kind, agent_harness::EntryKind::Permission { approval_id, withdrawn: true, .. } if approval_id == "approval")));
         Ok(())
     }
 

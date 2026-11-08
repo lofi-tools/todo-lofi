@@ -322,6 +322,12 @@ impl HarnessSession {
         self.pump_with_limit(MAX_EVENTS_PER_PUMP)
     }
 
+    pub(crate) fn pump_existing(&mut self) -> Vec<HarnessEvent> {
+        let pending = usize::from(self.pending_event.is_some());
+        let available = self.harness.events().len();
+        self.pump_with_limit(pending.saturating_add(available))
+    }
+
     fn pump_with_limit(&mut self, limit: usize) -> Vec<HarnessEvent> {
         let mut events = Vec::new();
         while events.len() < limit {
