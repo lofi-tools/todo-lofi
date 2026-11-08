@@ -1555,6 +1555,9 @@ placeholder tabs and no unearned state badges.
   approval requests now share that budget; a fixture verifies a resolved but
   unread approval retains its permit, excess requests are not registered, and
   ordinary replies still pass. Other critical queues still need review.
+  App-server completion notifications for a different identified turn leave
+  the active turn and its pending approvals untouched; a fixture covers stale
+  and matching completions.
   Event folding handles at
   most 256 events per session per pass, including during commands, and
   reschedules remaining events so one busy agent cannot monopolize other

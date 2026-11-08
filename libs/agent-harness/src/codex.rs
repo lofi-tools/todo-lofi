@@ -3126,6 +3126,13 @@ async fn handle_notification(
                 _ => turn_finish_reason(params),
             };
             let mut pending = pending.lock().await;
+            if let (Some(active), Some(completed)) =
+                (pending.turn_id.as_deref(), read_turn_id(params))
+                && active != completed
+            {
+                tracing::warn!("ignoring completion for a different Codex turn");
+                return Ok(());
+            }
             pending.turn_id = None;
             pending.approval_writes.clear();
             let reported_error = pending.turn_error.take();
@@ -3383,6 +3390,45 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
 
     use tempfile::TempDir;
+
+    #[tokio::test]
+    async fn stale_turn_completion_preserves_active_turn_and_approvals()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let pending = Arc::new(AsyncMutex::new(Pending::default()));
+        {
+            let mut state = pending.lock().await;
+            state.turn_id = Some("current".into());
+            state.approvals.insert("approval".into(), 7);
+        }
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        handle_notification(
+            "turn/completed",
+            &json!({"turn": {"id": "previous", "status": "completed"}}),
+            &sender,
+            &pending,
+        )
+        .await?;
+        assert_eq!(pending.lock().await.turn_id.as_deref(), Some("current"));
+        assert_eq!(pending.lock().await.approvals.get("approval"), Some(&7));
+        assert!(receiver.try_recv().is_err());
+        handle_notification(
+            "turn/completed",
+            &json!({"turn": {"id": "current", "status": "completed"}}),
+            &sender,
+            &pending,
+        )
+        .await?;
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(HarnessEvent::ApprovalWithdrawn { .. })
+        ));
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(HarnessEvent::TurnFinished { .. })
+        ));
+        assert!(pending.lock().await.turn_id.is_none());
+        Ok(())
+    }
 
     use super::*;
 
