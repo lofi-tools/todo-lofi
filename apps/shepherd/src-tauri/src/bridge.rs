@@ -6684,6 +6684,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cold_start_loads_the_shell_within_the_warm_budget()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = TestDirectory::new()?;
+        let started = std::time::Instant::now();
+        let cold = ShellState::load(
+            directory.path(),
+            Box::new(ScriptedHarnessFactory),
+            TerminalHost::default(),
+        )
+        .await?;
+        let cold_elapsed = started.elapsed();
+        drop(cold);
+        let started = std::time::Instant::now();
+        let warm = ShellState::load(
+            directory.path(),
+            Box::new(ScriptedHarnessFactory),
+            TerminalHost::default(),
+        )
+        .await?;
+        let warm_elapsed = started.elapsed();
+        eprintln!("headless cold start {cold_elapsed:.1?}, warm start {warm_elapsed:.1?}");
+        assert!(
+            cold_elapsed < std::time::Duration::from_secs(4),
+            "headless cold start took {cold_elapsed:.1?}, over the 4 s budget"
+        );
+        assert!(
+            warm_elapsed < std::time::Duration::from_millis(1200),
+            "headless warm start took {warm_elapsed:.1?}, over the 1.2 s budget"
+        );
+        drop(warm);
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn load_opens_the_durable_core_and_survives_a_reopen()
     -> Result<(), Box<dyn std::error::Error>> {
         let directory = TestDirectory::new()?;

@@ -851,7 +851,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "reports local parser and encoder throughput"]
     fn terminal_frame_burst() {
         use std::fmt::Write as _;
         use std::time::Instant;
@@ -878,11 +877,18 @@ mod tests {
             previous = Some(frame);
             frames += 1;
         }
+        let elapsed = start.elapsed();
         eprintln!(
-            "{BURST_BYTES} PTY bytes in {:.1?}; {frames} frames, {encoded_bytes} encoded bytes",
-            start.elapsed(),
+            "{BURST_BYTES} PTY bytes in {elapsed:.1?}; {frames} frames, {encoded_bytes} encoded bytes"
         );
-        assert!(encoded_bytes < BURST_BYTES);
+        assert!(
+            encoded_bytes < BURST_BYTES,
+            "frames must stay smaller than the input"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_millis(100),
+            "1 MiB burst took {elapsed:.1?}, over the 100 ms parse-and-encode budget"
+        );
 
         const SNAPSHOTS: usize = 1_000;
         let snapshot_start = Instant::now();

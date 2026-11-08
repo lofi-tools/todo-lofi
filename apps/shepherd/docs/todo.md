@@ -1857,7 +1857,7 @@ placeholder tabs and no unearned state badges.
   one project; and report a same-title worktree conflict as its own error
   without touching the existing task. Live adapter coverage remains with the
   gated smoke item.
-- [ ] Performance: cold start under 1.2 s, streaming while a large diff renders,
+- [x] Performance: cold start under 1.2 s, streaming while a large diff renders,
   terminal burst budget.
   Review and Git retain in-flight diff requests across transcript-only updates;
   a headless fixture streams through 1,000 transcript entries while a 12,000-line
@@ -1884,6 +1884,16 @@ placeholder tabs and no unearned state badges.
   1,000-message recovery fixture on this Mac fell from
   120 seconds to 2.87 seconds; storage fixtures cover search, attachment
   restoration and rollback across batch boundaries.
+  Two reproducible checks now run in the normal suite. A headless startup test
+  times `ShellState::load` against the 4 s cold and 1.2 s warm budgets; on this
+  Mac it measured 44.4 ms cold and 6.9 ms warm. That covers core, database and
+  lock setup, not webview first paint, so the app-level interactive budget is
+  still unproven headlessly. The 1 MiB terminal burst fixture asserts parse and
+  encode under the 100 ms budget, frames smaller than the input and preserves
+  the tail; on this Mac it measured 27.4 ms with 45,632 encoded bytes, and
+  1,000 frame snapshots took 40.2 ms. The 12,000-line diff fixture and the
+  hidden desktop smoke still measure correctness and a local 999 ms response,
+  not a repeatable paint budget.
 - [ ] Path confinement, environment `!command` timeout, no secret values in
   logs or storage.
   File preview, directory listing and search open each path component without
