@@ -1370,6 +1370,8 @@ placeholder tabs and no unearned state badges.
   if the failure recurs; the cause remains unconfirmed.
   OpenCode shutdown retains its server when stopping it fails; an injected
   group-signal failure verifies the process remains available for a retry.
+  A disconnected turn also reports a failed stop alongside the connection
+  error and retains the child; a local fixture checks cleanup on retry.
 - [ ] Bounded transcript, stderr, search and frame buffers.
   Search snippets cap the displayed matching word at 65 characters and compare
   case-folded text without allocating a copy of an arbitrarily long word;

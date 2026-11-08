@@ -554,14 +554,12 @@ impl AgentHarness for OpenCodeHarness {
                             {
                                 tracing::warn!("OpenCode turn cleanup timed out");
                             }
-                            if let Err(stop) = stop_server(&mut *child.lock().await).await {
-                                tracing::debug!(%stop, "could not stop OpenCode after the connection failed");
-                            }
-                            HarnessEvent::ConnectionFailed {
-                                kind: FailureKind::classify(&error)
-                                    .unwrap_or(FailureKind::Protocol),
-                                text: error.to_string(),
-                            }
+                            disconnected_turn_failure(
+                                &mut *child.lock().await,
+                                error,
+                                signal_server_group,
+                            )
+                            .await
                         }
                     }
                 };
@@ -1200,6 +1198,19 @@ async fn stop_server_with(
 ) -> std::io::Result<()> {
     signal_group(child)?;
     child.kill().await
+}
+
+async fn disconnected_turn_failure(
+    child: &mut Child,
+    error: HarnessError,
+    signal_group: impl FnOnce(&Child) -> std::io::Result<()>,
+) -> HarnessEvent {
+    let kind = FailureKind::classify(&error).unwrap_or(FailureKind::Protocol);
+    let text = match stop_server_with(child, signal_group).await {
+        Ok(()) => error.to_string(),
+        Err(cleanup) => format!("{error}; could not stop the OpenCode server: {cleanup}"),
+    };
+    HarnessEvent::ConnectionFailed { kind, text }
 }
 
 impl OpenCodeServer {
@@ -1872,6 +1883,28 @@ mod tests {
         })
         .await;
         assert!(failure.is_err());
+        assert!(child.id().is_some());
+        assert!(child.try_wait()?.is_none());
+        stop_server(&mut child).await?;
+        assert!(child.try_wait()?.is_some());
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn disconnected_turn_reports_cleanup_failure_and_keeps_server_for_retry()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut command = Command::new("/bin/sleep");
+        command.arg("30").process_group(0).kill_on_drop(true);
+        let mut child = command.spawn()?;
+        let event = disconnected_turn_failure(
+            &mut child,
+            HarnessError::TransportClosed("fixture disconnect".into()),
+            |_| Err(std::io::Error::other("fixture cleanup failure")),
+        )
+        .await;
+        assert!(matches!(event, HarnessEvent::ConnectionFailed { text, .. }
+            if text.contains("fixture disconnect") && text.contains("fixture cleanup failure")));
         assert!(child.id().is_some());
         assert!(child.try_wait()?.is_none());
         stop_server(&mut child).await?;
