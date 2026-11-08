@@ -762,10 +762,17 @@ where
         )
         .on_receive_request(
             async move |request: CreateTerminalRequest, responder, _cx| {
+                let permit = match registry_for_create.reserve_creation() {
+                    Ok(permit) => permit,
+                    Err(error) => {
+                        responder.respond_with_internal_error(error)?;
+                        return Ok(());
+                    }
+                };
                 let registry = registry_for_create.clone();
                 let events = terminal_create.clone();
                 tokio::spawn(async move {
-                    let reply = match registry.create(request).await {
+                    let reply = match registry.create_reserved(request, permit).await {
                         Ok(response) => responder.respond(response),
                         Err(error) => {
                             let message = format!("terminal failed to start: {error}");

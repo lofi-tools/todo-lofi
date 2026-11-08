@@ -1387,6 +1387,9 @@ placeholder tabs and no unearned state badges.
   ACP file reads and writes share a 32-worker limit per connection; excess
   requests receive an error. An injected exhausted-capacity fixture verifies
   both operations can be retried successfully when capacity returns.
+  ACP terminal creation admits at most 32 pending starts per connection before
+  spawning handler tasks; excess requests receive an error. A registry fixture
+  checks that cancelling waiting starts frees capacity for another creation.
   Connection shutdown also unblocks pending waits if a terminal stop fails.
   It returns the stop failure and retains the terminal for retry; registry,
   connection and harness fixtures cover a failure followed by a successful retry.

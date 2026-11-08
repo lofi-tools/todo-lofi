@@ -26,6 +26,7 @@ const MAX_PENDING_OUTPUT_EVENTS: usize = 64;
 const MAX_OUTPUT_EVENT_BYTES: usize = 8192;
 const MAX_EXIT_WAITERS_PER_TERMINAL: usize = 64;
 const MAX_PENDING_STOP_REQUESTS: usize = 64;
+const MAX_PENDING_CREATIONS: usize = 32;
 
 pub struct TerminalLaunch {
     pub id: String,
@@ -113,6 +114,7 @@ pub struct TerminalRegistry {
     backend: Option<Arc<dyn TerminalBackend>>,
     closed: Arc<tokio::sync::Mutex<bool>>,
     output_permits: Arc<tokio::sync::Semaphore>,
+    creation_permits: Arc<tokio::sync::Semaphore>,
 }
 
 impl TerminalRegistry {
@@ -128,6 +130,7 @@ impl TerminalRegistry {
             backend,
             closed: Arc::new(tokio::sync::Mutex::new(false)),
             output_permits: Arc::new(tokio::sync::Semaphore::new(MAX_PENDING_OUTPUT_EVENTS)),
+            creation_permits: Arc::new(tokio::sync::Semaphore::new(MAX_PENDING_CREATIONS)),
         }
     }
 
@@ -135,6 +138,22 @@ impl TerminalRegistry {
     pub async fn create(
         &self,
         request: CreateTerminalRequest,
+    ) -> Result<CreateTerminalResponse, String> {
+        let permit = self.reserve_creation()?;
+        self.create_reserved(request, permit).await
+    }
+
+    pub(crate) fn reserve_creation(&self) -> Result<tokio::sync::OwnedSemaphorePermit, String> {
+        self.creation_permits
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| "too many pending terminal creations".into())
+    }
+
+    pub(crate) async fn create_reserved(
+        &self,
+        request: CreateTerminalRequest,
+        _permit: tokio::sync::OwnedSemaphorePermit,
     ) -> Result<CreateTerminalResponse, String> {
         let closed = self.closed.lock().await;
         if *closed {
@@ -733,6 +752,39 @@ mod tests {
         async fn stop(&self, _id: &str) -> Result<(), String> {
             Ok(())
         }
+    }
+
+    #[tokio::test]
+    async fn terminal_creation_limit_recovers_after_cancelled_waiters()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let (events, _receiver) = tokio::sync::mpsc::unbounded_channel();
+        let registry = TerminalRegistry::new(
+            SessionRoots::new([directory.path().to_path_buf()]),
+            &events,
+            Some(Arc::new(IdleBackend)),
+        );
+        let guard = registry.closed.lock().await;
+        let mut starts = Vec::new();
+        for _ in 0..MAX_PENDING_CREATIONS {
+            let mut start =
+                Box::pin(registry.create(CreateTerminalRequest::new("session", "fixture")));
+            assert!(futures::poll!(start.as_mut()).is_pending());
+            starts.push(start);
+        }
+        assert!(
+            registry
+                .reserve_creation()
+                .is_err_and(|error| error.contains("too many pending"))
+        );
+        drop(starts);
+        drop(guard);
+        registry
+            .create(CreateTerminalRequest::new("session", "fixture"))
+            .await
+            .map_err(std::io::Error::other)?;
+        registry.shutdown().await.map_err(std::io::Error::other)?;
+        Ok(())
     }
 
     #[tokio::test]
