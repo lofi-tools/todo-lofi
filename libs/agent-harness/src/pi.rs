@@ -18,6 +18,7 @@ use tokio::time::timeout;
 use crate::{HarnessError, HarnessResult, SpawnSpec};
 
 const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
+const MAX_PENDING_REQUESTS: usize = 64;
 const STDERR_TAIL_BYTES: usize = 16 * 1024;
 const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(3);
@@ -324,6 +325,9 @@ impl PiRpc {
                 return Err(HarnessError::ChannelClosed);
             }
             replies.pending.retain(|_, reply| !reply.is_closed());
+            if replies.pending.len() >= MAX_PENDING_REQUESTS {
+                return Err(protocol("too many pending Pi RPC requests"));
+            }
             replies.pending.insert(id.clone(), sender);
         }
         if let Err(error) = self.send(Value::Object(fields)).await {
@@ -583,6 +587,81 @@ fn protocol(message: impl Into<String>) -> HarnessError {
 mod tests {
 
     use super::*;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn pending_requests_are_bounded_and_cancellation_frees_capacity()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let script = directory.path().join("pi-pending.sh");
+        std::fs::write(
+            &script,
+            r#"
+IFS= read -r state || exit 3
+state_id=$(printf '%s\n' "$state" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
+printf '{"type":"response","id":"%s","command":"get_state","success":true,"data":{"sessionId":"pi-fixture","sessionFile":null,"isStreaming":false,"isCompacting":false,"pendingMessageCount":0}}\n' "$state_id"
+while IFS= read -r request; do :; done
+"#,
+        )?;
+        let spec = SpawnSpec {
+            program: "/bin/sh".into(),
+            args: vec![script.to_string_lossy().into_owned()],
+            cwd: directory.path().to_owned(),
+            ..SpawnSpec::default()
+        };
+        let (rpc, _) = PiRpc::start(&spec).await?;
+        let rpc = Arc::new(rpc);
+        let mut requests = tokio::task::JoinSet::new();
+        for _ in 0..MAX_PENDING_REQUESTS {
+            let rpc = rpc.clone();
+            requests.spawn(async move { rpc.request("get_state", Map::new()).await });
+        }
+        timeout(Duration::from_secs(5), async {
+            while rpc.replies.lock().await.pending.len() != MAX_PENDING_REQUESTS {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await?;
+        let error = rpc
+            .request("get_state", Map::new())
+            .await
+            .err()
+            .ok_or("request unexpectedly accepted")?;
+        assert!(
+            error
+                .to_string()
+                .contains("too many pending Pi RPC requests")
+        );
+        requests.abort_all();
+        while requests.join_next().await.is_some() {}
+
+        let retry = {
+            let rpc = rpc.clone();
+            tokio::spawn(async move { rpc.request("get_state", Map::new()).await })
+        };
+        timeout(Duration::from_secs(5), async {
+            loop {
+                let replies = rpc.replies.lock().await;
+                if replies.pending.len() == 1
+                    && replies.pending.values().all(|reply| !reply.is_closed())
+                {
+                    break;
+                }
+                drop(replies);
+                tokio::task::yield_now().await;
+            }
+        })
+        .await?;
+        retry.abort();
+        if let Err(error) = retry.await
+            && !error.is_cancelled()
+        {
+            return Err(error.into());
+        }
+        let mut rpc = Arc::try_unwrap(rpc).map_err(|_| "Pi transport still borrowed")?;
+        rpc.shutdown().await?;
+        Ok(())
+    }
 
     #[tokio::test(flavor = "current_thread")]
     async fn abandoned_rpc_response_does_not_log_correlation_id()
