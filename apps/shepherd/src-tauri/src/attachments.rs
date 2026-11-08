@@ -306,11 +306,39 @@ pub(crate) fn resolve_prompt_file(
     let relative_path = file_path
         .strip_prefix(path.canonicalize()?)
         .map_err(|_| invalid("The attachment is outside the task cache."))?;
-    let file = fs::File::open(&file_path)?;
-    let bytes = file.metadata()?.len();
-    limit.check(bytes)?;
+    let mut file =
+        open_cached_file(&file_path)?.ok_or_else(|| invalid("The attachment is missing."))?;
+    let expected_bytes = file.metadata()?.len();
+    limit.check(expected_bytes)?;
+    let name = relative_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| invalid("The attachment name is invalid."))?;
+    let mut hash = Sha256::new();
+    hash.update(name.as_bytes());
+    hash.update([0]);
     let mut header = Vec::with_capacity(12);
-    file.take(12).read_to_end(&mut header)?;
+    let mut buffer = [0; 8192];
+    let mut bytes = 0_u64;
+    loop {
+        let length = file.read(&mut buffer)?;
+        if length == 0 {
+            break;
+        }
+        bytes = bytes
+            .checked_add(length as u64)
+            .ok_or_else(|| invalid("The attachment is too large."))?;
+        limit.check(bytes)?;
+        let header_bytes = length.min(12 - header.len());
+        header.extend_from_slice(&buffer[..header_bytes]);
+        hash.update(&buffer[..length]);
+    }
+    if bytes != expected_bytes || !hex_digest(&hash.finalize()).eq_ignore_ascii_case(id) {
+        return Err(io::Error::new(
+            ErrorKind::InvalidData,
+            "Cached attachment does not match its content.",
+        ));
+    }
     let image_mime_type = match header.as_slice() {
         [137, b'P', b'N', b'G', 13, 10, 26, 10, ..] => Some("image/png"),
         [255, 216, 255, ..] => Some("image/jpeg"),
@@ -375,27 +403,11 @@ fn persist(path: &Path, bytes: &[u8]) -> io::Result<()> {
 }
 
 fn verify_cached_file(path: &Path, expected: &[u8]) -> io::Result<bool> {
-    #[cfg(not(unix))]
-    match path.symlink_metadata() {
-        Ok(metadata) if metadata.is_file() => {}
-        Ok(_) => return Err(invalid("The cached attachment is not a regular file.")),
-        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(false),
-        Err(error) => return Err(error),
-    }
-    let mut options = fs::OpenOptions::new();
-    options.read(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
-    }
-    let mut file = match options.open(path) {
-        Ok(file) => file,
-        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(false),
-        Err(error) => return Err(error),
+    let Some(mut file) = open_cached_file(path)? else {
+        return Ok(false);
     };
     let metadata = file.metadata()?;
-    if !metadata.is_file() || metadata.len() != expected.len() as u64 {
+    if metadata.len() != expected.len() as u64 {
         return Err(io::Error::new(
             ErrorKind::InvalidData,
             "Cached attachment does not match its content.",
@@ -420,6 +432,33 @@ fn verify_cached_file(path: &Path, expected: &[u8]) -> io::Result<bool> {
     Ok(true)
 }
 
+fn open_cached_file(path: &Path) -> io::Result<Option<fs::File>> {
+    #[cfg(not(unix))]
+    match path.symlink_metadata() {
+        Ok(metadata) if metadata.is_file() => {}
+        Ok(_) => return Err(invalid("The cached attachment is not a regular file.")),
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    }
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    let file = match options.open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let metadata = file.metadata()?;
+    if !metadata.is_file() {
+        return Err(invalid("The cached attachment is not a regular file."));
+    }
+    Ok(Some(file))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -433,8 +472,16 @@ mod tests {
             .join(uuid::Uuid::new_v4().to_string());
         let id = persist_prompt_file(&task, "note.txt", b"first")?;
         let file = prompt_file(&task, &id)?;
+        let limit = AttachmentLimit::from_bytes(100);
+        assert!(resolve_prompt_file(&task, &id, &limit).is_ok());
         assert_eq!(persist_prompt_file(&task, "note.txt", b"first")?, id);
         fs::write(&file, b"other")?;
+        assert_eq!(
+            resolve_prompt_file(&task, &id, &limit)
+                .err()
+                .map(|error| error.kind()),
+            Some(ErrorKind::InvalidData)
+        );
         assert_eq!(
             persist_prompt_file(&task, "note.txt", b"first")
                 .err()
