@@ -1517,8 +1517,8 @@ placeholder tabs and no unearned state badges.
   a fixture checks ordering, cloned-event permit retention and cancellation of
   a blocked producer. OpenCode tool updates also share its text capacity; a
   mixed-stream fixture checks ordering, cloned permits and cancellation. A core
-  fixture fills the queue and verifies that 150 scripted messages reach the
-  transcript in order. Other OpenCode and Codex exec events and other adapters
+  fixture fills the queue and verifies that 150 scripted messages and 150 tool
+  calls reach the transcript in order. Other OpenCode and Codex exec events and other adapters
   still need coordinated backpressure. A
   Codex fixture verifies that a command reply remains reachable after 100
   unconsumed stream events; a bounded design must preserve that behavior.

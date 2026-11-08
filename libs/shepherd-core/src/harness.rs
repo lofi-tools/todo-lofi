@@ -744,7 +744,7 @@ mod tests {
 
     #[tokio::test]
     #[cfg(unix)]
-    async fn exec_backpressure_preserves_every_message_through_the_core()
+    async fn exec_backpressure_preserves_messages_and_tool_calls_through_the_core()
     -> Result<(), Box<dyn std::error::Error>> {
         use std::os::unix::fs::PermissionsExt as _;
         let directory = TestDirectory::new()?;
@@ -755,6 +755,7 @@ mod tests {
 number=0
 while [ "$number" -lt 150 ]; do
   printf '{"id":"%s","msg":{"type":"agent_message","message":"message %s"}}\n' "$number" "$number"
+  printf '{"id":"%s","msg":{"type":"exec_command_begin","call_id":"call-%s","command":"command %s"}}\n' "$number" "$number" "$number"
   number=$((number + 1))
 done
 "##,
@@ -795,15 +796,20 @@ done
             }
         })
         .await?;
-        assert_eq!(session.transcript().len(), 151);
+        assert_eq!(session.transcript().len(), 301);
         for index in 0..150 {
             assert_eq!(
                 session
                     .transcript()
-                    .entry(index + 1)
+                    .entry(index * 2 + 1)
                     .map(|entry| entry.summary()),
                 Some(format!("agent: message {index}"))
             );
+            assert!(matches!(
+                session.transcript().entry(index * 2 + 2).map(|entry| &entry.kind),
+                Some(agent_harness::EntryKind::ToolCall { tool_call_id, title, .. })
+                    if tool_call_id == &format!("call-{index}") && title == &format!("command {index}")
+            ));
         }
         drop(session.shutdown().await?);
         Ok(())
