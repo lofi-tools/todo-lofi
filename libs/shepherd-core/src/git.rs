@@ -1192,6 +1192,12 @@ fn git_extend_digest(cwd: &Path, args: &[&str], hash: Sha256) -> Result<Sha256, 
             std::io::Error::other("Git stdout was not captured"),
         ));
     };
+    let Some(stderr) = child.stderr.take() else {
+        return Err(stop_git_after_reader_failure(
+            &mut child,
+            std::io::Error::other("Git stderr was not captured"),
+        ));
+    };
     let digest = match std::thread::Builder::new()
         .name("git-diff-digest".into())
         .spawn(move || {
@@ -1199,7 +1205,10 @@ fn git_extend_digest(cwd: &Path, args: &[&str], hash: Sha256) -> Result<Sha256, 
             let mut hash = hash;
             let mut buffer = [0; 8192];
             loop {
-                let length = stdout.read(&mut buffer)?;
+                let length = match stdout.read(&mut buffer) {
+                    Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                    result => result?,
+                };
                 if length == 0 {
                     break;
                 }
@@ -1210,24 +1219,58 @@ fn git_extend_digest(cwd: &Path, args: &[&str], hash: Sha256) -> Result<Sha256, 
         Ok(thread) => thread,
         Err(error) => return Err(stop_git_after_reader_failure(&mut child, error)),
     };
-    let output = child
-        .wait_with_output()
-        .map_err(|source| GitError::Io { source });
+    let stderr = match read_git_stderr(stderr) {
+        Ok(stderr) => stderr,
+        Err(error) => {
+            let error = stop_git_after_reader_failure(&mut child, error);
+            return Err(error);
+        }
+    };
+    let status = child.wait().map_err(|source| GitError::Io { source });
     let digest = digest
         .join()
         .map_err(|_| GitError::Io {
             source: std::io::Error::other("Git output reader panicked"),
         })?
         .map_err(|source| GitError::Io { source });
-    let output = output?;
-    if !output.status.success() {
+    let status = status?;
+    if !status.success() {
         return Err(GitError::CommandFailed {
             command: format!("git -C {} {}", cwd.display(), args.join(" ")),
-            status: output.status,
-            stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+            status,
+            stderr,
         });
     }
     digest
+}
+
+const MAX_GIT_STDERR_BYTES: usize = 64 * 1024;
+
+fn read_git_stderr(mut stderr: impl Read) -> std::io::Result<String> {
+    let mut tail = Vec::with_capacity(MAX_GIT_STDERR_BYTES);
+    let mut buffer = [0; 8192];
+    let mut truncated = false;
+    loop {
+        let length = match stderr.read(&mut buffer) {
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            result => result?,
+        };
+        if length == 0 {
+            break;
+        }
+        let excess = (tail.len() + length).saturating_sub(MAX_GIT_STDERR_BYTES);
+        if excess > 0 {
+            tail.drain(..excess);
+            truncated = true;
+        }
+        tail.extend_from_slice(&buffer[..length]);
+    }
+    let tail = String::from_utf8_lossy(&tail);
+    if truncated {
+        Ok(format!("[earlier Git stderr omitted]\n{}", tail.trim()))
+    } else {
+        Ok(tail.trim().to_string())
+    }
 }
 
 fn stop_git_after_reader_failure(child: &mut Child, error: std::io::Error) -> GitError {
@@ -1288,6 +1331,47 @@ mod tests {
         );
         assert!(error.to_string().contains("fixture reader failure"));
         assert!(child.try_wait()?.is_some());
+        Ok(())
+    }
+
+    #[test]
+    fn streamed_git_stderr_keeps_the_tail_and_drains_the_input()
+    -> Result<(), Box<dyn std::error::Error>> {
+        assert_eq!(read_git_stderr(&b"  short error  \n"[..])?, "short error");
+        let mut output = vec![b'a'; MAX_GIT_STDERR_BYTES * 3];
+        output.extend_from_slice(b"tail marker");
+        let stderr = read_git_stderr(output.as_slice())?;
+        assert!(stderr.starts_with("[earlier Git stderr omitted]\n"));
+        assert!(stderr.ends_with("tail marker"));
+        assert_eq!(
+            stderr.len(),
+            MAX_GIT_STDERR_BYTES + "[earlier Git stderr omitted]\n".len()
+        );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn streamed_git_digest_drains_large_stderr_without_deadlocking()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fixture = TestRepository::new()?;
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let alias = "alias.shepherd-verbose=!i=0; while [ \"$i\" -lt 2048 ]; do printf '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef' >&2; i=$((i+1)); done; printf 'tail marker' >&2; printf stdout; exit 1";
+            let result = git_digest(fixture.path(), &["-c", alias, "shepherd-verbose"]);
+            if let Err(error) = sender.send(result) {
+                eprintln!("failed to deliver Git fixture result: {error}");
+            }
+        });
+        let result = receiver.recv_timeout(std::time::Duration::from_secs(10))?;
+        match result {
+            Err(GitError::CommandFailed { stderr, .. }) => {
+                assert!(stderr.starts_with("[earlier Git stderr omitted]\n"));
+                assert!(stderr.ends_with("tail marker"));
+                assert!(stderr.len() <= MAX_GIT_STDERR_BYTES + 30);
+            }
+            result => return Err(format!("unexpected Git result: {result:?}").into()),
+        }
         Ok(())
     }
 

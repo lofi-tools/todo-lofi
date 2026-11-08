@@ -1693,7 +1693,9 @@ placeholder tabs and no unearned state badges.
   cannot start, Git is stopped and reaped; a subprocess fixture covers cleanup.
   Commit and discard revision tokens also hash Git's index and binary diff
   streams without an extra full-output buffer. A fixture checks unchanged token
-  values and refusal to discard a file changed after review.
+  values and refusal to discard a file changed after review. These streamed Git
+  commands drain stderr while retaining at most 64 KiB and mark truncated errors;
+  fixtures cover the retained tail and a command producing large diagnostics.
   Git and Review reads run outside the core lock on blocking workers. A real
   worktree fixture verifies an agent approval can finish during a stalled read,
   then checks both ends of a 12,000-line diff.
