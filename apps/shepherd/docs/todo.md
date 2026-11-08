@@ -1340,6 +1340,9 @@ placeholder tabs and no unearned state badges.
   Session saves require an existing task and cannot move an existing session
   ID to another task. Both stores reject a late save after deletion; the Turso
   check is part of the write statement.
+  Task saves require an existing project and reject reassignment of an existing
+  task ID. Both stores check ordinary, draft and transcript save paths; a
+  rejected draft also leaves the other project's selection unchanged.
   Terminal saves similarly validate project and task ownership, reject owner
   changes and late writes, and preserve project-scoped terminals when a task is
   deleted; both stores have an ownership fixture.

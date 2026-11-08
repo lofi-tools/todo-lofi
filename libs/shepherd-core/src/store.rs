@@ -61,6 +61,11 @@ pub enum StoreError {
     TerminalOwnerMissing { terminal_id: String },
     #[error("workspace layout cannot be saved for missing task {task_id}")]
     WorkspaceOwnerMissing { task_id: TaskId },
+    #[error("task {task_id} cannot be saved for project {project_id}")]
+    TaskOwnerMissing {
+        task_id: TaskId,
+        project_id: ProjectId,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -528,16 +533,16 @@ async fn write_task(
     let branch = task.branch.as_deref().unwrap_or_default();
     let base_branch = task.base_branch.as_deref().unwrap_or_default();
     let error = task.error.as_deref().unwrap_or_default();
-    toasty::sql::statement(
+    let updated = toasty::sql::statement(
             "INSERT INTO tasks (\
                 id, project_id, title, state, tier, proposed_worktree_path, \
                 proposed_branch, worktree_path, branch, base_branch, error, \
                 created_at, updated_at, branch_tip_sha, agent, worktree_last_used_at, collection_pending\
-             ) VALUES (\
+             ) SELECT \
                 ?1, ?2, ?3, ?4, ?5, ?6, ?7, \
                 NULLIF(?8, ''), NULLIF(?9, ''), NULLIF(?10, ''), NULLIF(?11, ''), ?12, ?13, NULLIF(?14, ''), ?15, ?16, ?17\
-             ) ON CONFLICT (id) DO UPDATE SET \
-                project_id = excluded.project_id, \
+             FROM projects WHERE id = ?2 \
+             ON CONFLICT (id) DO UPDATE SET \
                 title = excluded.title, \
                 state = excluded.state, \
                 tier = excluded.tier, \
@@ -552,7 +557,8 @@ async fn write_task(
                 branch_tip_sha = excluded.branch_tip_sha, \
                 agent = excluded.agent, \
                 worktree_last_used_at = excluded.worktree_last_used_at, \
-                collection_pending = excluded.collection_pending",
+                collection_pending = excluded.collection_pending \
+             WHERE tasks.project_id = excluded.project_id",
         )
         .bind(task.id.as_str())
         .bind(task.project_id.as_str())
@@ -573,6 +579,12 @@ async fn write_task(
         .bind(i64::from(task.collection_pending))
         .exec(&mut *executor)
         .await?;
+    if updated != 1 {
+        return Err(StoreError::TaskOwnerMissing {
+            task_id: task.id.clone(),
+            project_id: task.project_id.clone(),
+        });
+    }
     Ok(())
 }
 
@@ -1714,6 +1726,22 @@ fn validate_attachments(entries: &[&Entry]) -> Result<(), StoreError> {
     Ok(())
 }
 
+fn validate_memory_task_owner(
+    tasks: &BTreeMap<String, Task>,
+    task: &Task,
+) -> Result<(), StoreError> {
+    if tasks
+        .get(task.id.as_str())
+        .is_some_and(|stored| stored.project_id != task.project_id)
+    {
+        return Err(StoreError::TaskOwnerMissing {
+            task_id: task.id.clone(),
+            project_id: task.project_id.clone(),
+        });
+    }
+    Ok(())
+}
+
 /// A non-durable store used to test the boundary before a database is opened.
 #[derive(Default)]
 pub struct MemoryStore {
@@ -1888,6 +1916,7 @@ impl Store for MemoryStore {
         validate_draft_owner(project, task)?;
         let mut tasks = self.tasks.write().await;
         let mut projects = self.projects.write().await;
+        validate_memory_task_owner(&tasks, task)?;
         projects.insert(project.id.as_str().to_string(), project.clone());
         tasks.insert(task.id.as_str().to_string(), task.clone());
         Ok(())
@@ -1900,6 +1929,14 @@ impl Store for MemoryStore {
 
     async fn save_task(&self, task: &Task) -> Result<(), StoreError> {
         let mut tasks = self.tasks.write().await;
+        let projects = self.projects.read().await;
+        if !projects.contains_key(task.project_id.as_str()) {
+            return Err(StoreError::TaskOwnerMissing {
+                task_id: task.id.clone(),
+                project_id: task.project_id.clone(),
+            });
+        }
+        validate_memory_task_owner(&tasks, task)?;
         tasks.insert(task.id.as_str().to_string(), task.clone());
         Ok(())
     }
@@ -1920,6 +1957,7 @@ impl Store for MemoryStore {
         let mut tasks = self.tasks.write().await;
         let sessions = self.sessions.read().await;
         let projects = self.projects.read().await;
+        validate_memory_task_owner(&tasks, task)?;
         if !tasks.contains_key(task.id.as_str())
             || !projects.contains_key(task.project_id.as_str())
             || !sessions
@@ -2276,6 +2314,74 @@ mod tests {
             .save_transcript_entries(&session, &entries.iter().collect::<Vec<_>>())
             .await?;
         assert_eq!(store.load_transcript(&task.id).await?, entries);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn task_saves_require_a_project_and_preserve_task_ownership()
+    -> Result<(), Box<dyn std::error::Error>> {
+        async fn verify(store: &dyn Store, root: &Path) -> Result<(), Box<dyn std::error::Error>> {
+            let first = Project::new(root.join("first"));
+            let mut second = Project::new(root.join("second"));
+            let mut task = Task::draft(first.id.clone(), "Task", root);
+            assert!(matches!(
+                store.save_task(&task).await,
+                Err(StoreError::TaskOwnerMissing { .. })
+            ));
+            store.save_project(&first).await?;
+            store.save_project(&second).await?;
+            store.save_task(&task).await?;
+            let session = SessionRecord::started(task.id.clone(), "codex", None);
+            store.save_session(&session).await?;
+            let mut moved = task.clone();
+            moved.project_id = second.id.clone();
+            moved.title = "Moved".into();
+            assert!(matches!(
+                store.save_task(&moved).await,
+                Err(StoreError::TaskOwnerMissing { .. })
+            ));
+            assert!(matches!(
+                store.save_task_with_transcript(&moved, &session, &[]).await,
+                Err(StoreError::TaskOwnerMissing { .. })
+            ));
+            second.last_task_id = Some(task.id.clone());
+            assert!(matches!(
+                store.save_draft(&second, &moved).await,
+                Err(StoreError::TaskOwnerMissing { .. })
+            ));
+            let projects = store.load_projects().await?;
+            assert!(
+                projects
+                    .iter()
+                    .find(|project| project.id == second.id)
+                    .ok_or("missing second project")?
+                    .last_task_id
+                    .is_none()
+            );
+            let tasks = store.load_tasks().await?;
+            let stored = tasks.first().ok_or("missing task")?;
+            assert_eq!(stored.project_id, first.id);
+            assert_eq!(stored.title, "Task");
+            task.title = "Updated".into();
+            store.save_task(&task).await?;
+            assert_eq!(
+                store
+                    .load_tasks()
+                    .await?
+                    .first()
+                    .ok_or("missing task")?
+                    .title,
+                "Updated"
+            );
+            Ok(())
+        }
+        let directory = TestDirectory::new()?;
+        verify(&MemoryStore::new(), directory.path()).await?;
+        verify(
+            &TursoStore::open_at(&directory.join("task-owner.db")).await?,
+            directory.path(),
+        )
+        .await?;
         Ok(())
     }
 
@@ -4047,11 +4153,7 @@ mod tests {
         assert_eq!(projects.len(), 1);
         assert_eq!(projects[0].id, project.id);
 
-        let task = Task::draft(
-            ProjectId::new("project-1"),
-            "Boundary",
-            Path::new("/tmp/project"),
-        );
+        let task = Task::draft(project.id.clone(), "Boundary", directory.path());
         store.save_task(&task).await?;
         let tasks = store.load_tasks().await?;
         assert_eq!(tasks.len(), 1);
