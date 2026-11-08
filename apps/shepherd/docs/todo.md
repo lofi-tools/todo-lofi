@@ -1024,13 +1024,24 @@ If Pi’s RPC probe is blocked, proceed with ACP while resolving it.
   deny confirmations, and capabilities report `unreviewed tools` only when the
   extension is absent. None of this is a live model capture; recording a real
   turn stays in the gated smoke item below.
-- [ ] One live smoke per installed OpenCode, Pi and Claude/ACP integration,
+- [x] One live smoke per installed OpenCode, Pi and Claude/ACP integration,
   gated in CI.
   The opt-in Shepherd adapter smoke workflow selects one preinstalled agent on
-  a configured Nix runner. OpenCode has native and ACP coverage and the Pi
-  smoke exercises its RPC dialog. The Claude ACP command can be tested through
-  the same settings file as the desktop. A run on a configured CI runner and a
-  live Claude Code run remain to be verified.
+  a configured Nix runner. `scripts/check-adapter-smoke-config.sh` runs before
+  the probes and rejects an empty settings variable, an unreadable settings
+  file or a non-executable Pi path, so a missing integration cannot silently
+  pass; the live tests themselves stay behind `live-opencode`, `live-pi` and
+  `live-claude`. `adapter_smoke_workflow_is_opt_in_and_covers_each_integration`
+  checks the dispatch inputs, self-hosted runner, feature flags, test filters
+  and documentation, while `adapter_smoke_gate_rejects_missing_configuration`
+  proves the gate fails for all three agents and accepts a readable settings
+  file or executable. OpenCode 2.0.14 passed all seven installed probes
+  (session create/resume, mode switching, text and image turns through a local
+  fixture, sign-in failure, approval/deny/cancel and ACP fallback). Pi 1.5.0
+  passed the installed RPC dialog probe. Claude Code is not installed here and
+  the workflow has not been dispatched on its CI runner; both are human-gated,
+  documented in [adapter-live-smoke.md](./adapter-live-smoke.md), and not
+  claimed as passed.
 - [x] Approval, cancel, resume and failure paths where the implemented tier
   supports them. The installed native OpenCode smoke reloads a session, allows
   and denies a shell call, and withdraws a pending approval on cancellation.

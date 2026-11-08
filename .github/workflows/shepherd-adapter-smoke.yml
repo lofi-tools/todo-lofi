@@ -25,6 +25,12 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Check adapter smoke configuration
+        env:
+          SHEPHERD_ADAPTER_TEST_SETTINGS: ${{ vars.SHEPHERD_ADAPTER_TEST_SETTINGS }}
+          SHEPHERD_PI_TEST_EXECUTABLE: ${{ vars.SHEPHERD_PI_TEST_EXECUTABLE }}
+        run: ./scripts/check-adapter-smoke-config.sh "${{ inputs.agent }}"
+
       - name: OpenCode native and ACP smoke
         if: inputs.agent == 'opencode'
         env:
