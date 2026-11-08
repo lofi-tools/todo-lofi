@@ -29,6 +29,7 @@ const MAX_PENDING_STOP_REQUESTS: usize = 64;
 const MAX_PENDING_CREATIONS: usize = 32;
 const MAX_PENDING_CONTROLS: usize = 64;
 const MAX_PENDING_EXIT_WAITS: usize = 256;
+const MAX_TERMINALS: usize = 64;
 
 pub struct TerminalLaunch {
     pub id: String,
@@ -186,6 +187,9 @@ impl TerminalRegistry {
         };
         if *closed {
             return Err("the terminal connection is closed".into());
+        }
+        if self.entries().len() >= MAX_TERMINALS {
+            return Err("too many unreleased terminals for connection".into());
         }
         let cwd = match &request.cwd {
             Some(cwd) => self
@@ -946,6 +950,43 @@ mod tests {
         async fn stop(&self, _id: &str) -> Result<(), String> {
             Ok(())
         }
+    }
+
+    #[tokio::test]
+    async fn terminal_limit_recovers_after_release() -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let (events, _receiver) = tokio::sync::mpsc::unbounded_channel();
+        let registry = TerminalRegistry::new(
+            SessionRoots::new([directory.path().to_path_buf()]),
+            &events,
+            Some(Arc::new(IdleBackend)),
+        );
+        let mut terminals = Vec::new();
+        for _ in 0..MAX_TERMINALS {
+            let response = registry
+                .create(CreateTerminalRequest::new("session", "fixture"))
+                .await
+                .map_err(std::io::Error::other)?;
+            terminals.push(response.terminal_id);
+        }
+        assert!(
+            registry
+                .create(CreateTerminalRequest::new("session", "fixture"))
+                .await
+                .is_err_and(|error| error.contains("too many unreleased terminals"))
+        );
+        let first = terminals.first().ok_or("no terminal created")?;
+        registry
+            .release(first)
+            .await
+            .map_err(std::io::Error::other)?;
+        registry
+            .create(CreateTerminalRequest::new("session", "fixture"))
+            .await
+            .map_err(std::io::Error::other)?;
+        assert_eq!(registry.entries().len(), MAX_TERMINALS);
+        registry.shutdown().await.map_err(std::io::Error::other)?;
+        Ok(())
     }
 
     #[tokio::test]
