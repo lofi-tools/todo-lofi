@@ -1725,6 +1725,9 @@ placeholder tabs and no unearned state badges.
   ACP permission cancellation and terminal failures. Storage's offline library
   tests passed with one previously ignored test; its Todoist push guard fixture
   uses an injected response instead of contacting the live service.
+  After the ACP lifecycle event changes, the offline headless desktop-backend
+  suite passed 107 tests with one local benchmark ignored; its terminal bridge
+  fixture was updated for the added event permit.
 - [ ] Packaging and CI: macOS 13+, Ubuntu 24.04+, pinned Zig, Tauri build,
   platform smoke.
   The local macOS debug app bundle declares macOS 13.0 in both Info.plist and

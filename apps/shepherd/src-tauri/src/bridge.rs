@@ -4484,6 +4484,7 @@ mod tests {
         while let Ok(event) = events.try_recv() {
             if let AcpEvent::TerminalReleased {
                 terminal_id: released_id,
+                ..
             } = event
             {
                 released |= released_id == terminal_id;
