@@ -839,7 +839,14 @@ fn finish_turn(
             )
         }
     };
-    publish(sender, HarnessEvent::TurnError { kind, text })?;
+    publish(
+        sender,
+        HarnessEvent::TurnError {
+            kind,
+            text,
+            stream_permit: None,
+        },
+    )?;
     Ok(TurnFinishReason::Failed)
 }
 
@@ -2218,6 +2225,7 @@ done
                     HarnessEvent::TurnError {
                         kind: FailureKind::AuthRequired,
                         text,
+                        ..
                     },
                 ) => {
                     assert!(

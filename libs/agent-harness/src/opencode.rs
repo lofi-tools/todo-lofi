@@ -911,6 +911,7 @@ async fn read_turn(
                     HarnessEvent::TurnError {
                         kind,
                         text: message.to_owned(),
+                        stream_permit: None,
                     },
                 )?;
             }

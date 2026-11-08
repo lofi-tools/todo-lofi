@@ -694,6 +694,7 @@ pub enum HarnessEvent {
     TurnError {
         kind: FailureKind,
         text: String,
+        stream_permit: Option<Arc<tokio::sync::OwnedSemaphorePermit>>,
     },
     ConnectionFailed {
         kind: FailureKind,
@@ -1016,7 +1017,7 @@ impl Transcript {
             }
             HarnessEvent::ApprovalPolicyError { text }
             | HarnessEvent::AgentTerminalError { text, .. } => self.push_notice(text, true),
-            HarnessEvent::TurnError { kind, text }
+            HarnessEvent::TurnError { kind, text, .. }
             | HarnessEvent::ConnectionFailed { kind, text } => {
                 if matches!(event, HarnessEvent::ConnectionFailed { .. }) {
                     self.stop_unfinished_commands();

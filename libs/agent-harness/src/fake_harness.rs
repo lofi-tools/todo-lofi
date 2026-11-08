@@ -207,6 +207,7 @@ impl FakeHarness {
                     self.send(HarnessEvent::TurnError {
                         kind: *kind,
                         text: text.clone(),
+                        stream_permit: None,
                     })?;
                 }
                 FakeStep::TerminalError { id, text } => {

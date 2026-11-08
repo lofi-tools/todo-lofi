@@ -1554,7 +1554,10 @@ placeholder tabs and no unearned state badges.
   while the budget is full and after 100 unconsumed stream events. App-server
   approval requests now share that budget; a fixture verifies a resolved but
   unread approval retains its permit, excess requests are not registered, and
-  ordinary replies still pass. Other critical queues still need review.
+  ordinary replies still pass. Queued turn errors also retain capacity based on
+  their own text, including errors saved before a small completion message;
+  a fixture checks capacity release and control replies. Other critical queues
+  still need review.
   App-server completion notifications for a different identified turn leave
   the active turn and its pending approvals untouched; a fixture covers stale
   and matching completions. Turn errors are retained only when their ID matches

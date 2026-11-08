@@ -76,9 +76,9 @@ impl std::io::Write for ByteCounter {
     }
 }
 
-fn reserve_app_stream(
+fn reserve_app_stream<T: serde::Serialize + ?Sized>(
     capacity: &Arc<tokio::sync::Semaphore>,
-    value: &Value,
+    value: &T,
 ) -> HarnessResult<Arc<tokio::sync::OwnedSemaphorePermit>> {
     let mut bytes = ByteCounter::default();
     serde_json::to_writer(&mut bytes, value)
@@ -2050,7 +2050,7 @@ fn spawn_exec_waiter(
                     Ok(status) => break status,
                     Err(error) => {
                         let text = format!("Could not wait for Codex exec to exit: {error}");
-                        if sender.send(HarnessEvent::TurnError { kind: FailureKind::Protocol, text: text.clone() }).is_err() {
+                        if sender.send(HarnessEvent::TurnError { kind: FailureKind::Protocol, text: text.clone(), stream_permit: None }).is_err() {
                             tracing::debug!("the core stopped listening to codex errors");
                         }
                         if wait_errors.send(text).is_err() {
@@ -2096,7 +2096,7 @@ fn spawn_exec_waiter(
                         protocol_error = Some(error);
                         if let Err(error) = stop(&mut child) {
                             let text = format!("Could not stop Codex exec after an output failure: {error}");
-                            if sender.send(HarnessEvent::TurnError { kind: FailureKind::Protocol, text }).is_err() {
+                            if sender.send(HarnessEvent::TurnError { kind: FailureKind::Protocol, text, stream_permit: None }).is_err() {
                                 tracing::debug!("the core stopped listening to codex errors");
                             }
                         } else {
@@ -2163,7 +2163,14 @@ fn spawn_exec_waiter(
             );
             let kind = FailureKind::classify(&HarnessError::Protocol(text.clone()))
                 .unwrap_or(FailureKind::Protocol);
-            if sender.send(HarnessEvent::TurnError { kind, text }).is_err() {
+            if sender
+                .send(HarnessEvent::TurnError {
+                    kind,
+                    text,
+                    stream_permit: None,
+                })
+                .is_err()
+            {
                 tracing::debug!("the core stopped listening to codex errors");
             }
         }
@@ -2172,6 +2179,7 @@ fn spawn_exec_waiter(
                 .send(HarnessEvent::TurnError {
                     kind: FailureKind::Protocol,
                     text: error.to_string(),
+                    stream_permit: None,
                 })
                 .is_err()
         {
@@ -3222,6 +3230,7 @@ async fn handle_notification(
                 events.push(HarnessEvent::TurnError {
                     kind: FailureKind::Protocol,
                     text: "Codex completed the turn without a recognized status.".into(),
+                    stream_permit: None,
                 });
                 TurnFinishReason::Failed
             });
@@ -3248,6 +3257,14 @@ async fn handle_notification(
             HarnessEvent::Delta { stream_permit, .. }
             | HarnessEvent::ToolCall { stream_permit, .. } => *stream_permit = permit.clone(),
             HarnessEvent::CommandOutput { output_permit, .. } => *output_permit = permit.clone(),
+            HarnessEvent::TurnError {
+                text,
+                stream_permit,
+                ..
+            } => {
+                let capacity = pending.lock().await.stream_capacity.clone();
+                *stream_permit = Some(reserve_app_stream(&capacity, text)?);
+            }
             _ => {}
         }
         if sender.send(event).is_err() {
@@ -3364,7 +3381,11 @@ fn codex_turn_error(error: &Value) -> Option<HarnessEvent> {
         Some(details) => format!("{message}\n{details}"),
         None => message.to_string(),
     };
-    Some(HarnessEvent::TurnError { kind, text })
+    Some(HarnessEvent::TurnError {
+        kind,
+        text,
+        stream_permit: None,
+    })
 }
 
 fn turn_finish_reason(params: &Value) -> Option<TurnFinishReason> {
@@ -3519,6 +3540,51 @@ mod tests {
     }
 
     use super::*;
+
+    #[tokio::test]
+    async fn app_server_saved_turn_error_retains_its_byte_capacity() -> HarnessResult<()> {
+        let pending = Arc::new(AsyncMutex::new(Pending::default()));
+        let capacity = Arc::new(tokio::sync::Semaphore::new(2));
+        {
+            let mut state = pending.lock().await;
+            state.stream_capacity = capacity.clone();
+            state.turn_id = Some("turn".into());
+        }
+        let (sender, mut events) = mpsc::unbounded_channel();
+        handle_notification(
+            "error",
+            &json!({"willRetry": false, "turnId": "turn", "error": {"message": "x".repeat(APP_STREAM_UNIT_BYTES + 1)}}),
+            &sender,
+            &pending,
+        ).await?;
+        handle_notification("turn/failed", &json!({"turnId": "turn"}), &sender, &pending).await?;
+        assert_eq!(capacity.available_permits(), 0);
+        let error = events.try_recv().map_err(|_| HarnessError::ChannelClosed)?;
+        assert!(matches!(
+            &error,
+            HarnessEvent::TurnError {
+                stream_permit: Some(_),
+                ..
+            }
+        ));
+        assert!(matches!(
+            events.try_recv(),
+            Ok(HarnessEvent::TurnFinished { .. })
+        ));
+        let (reply, response) = oneshot::channel();
+        pending.lock().await.responses.insert(9, reply);
+        let (outgoing, _requests) = mpsc::channel(1);
+        route_incoming(json!({"id":9, "result":{}}), &sender, &pending, &outgoing).await?;
+        assert!(
+            response
+                .await
+                .map_err(|_| HarnessError::ChannelClosed)?
+                .is_ok()
+        );
+        drop(error);
+        assert_eq!(capacity.available_permits(), 2);
+        Ok(())
+    }
 
     #[tokio::test]
     async fn app_server_orders_start_and_completion_around_start_reply() -> HarnessResult<()> {
@@ -4323,7 +4389,7 @@ done
         })
         .await;
         assert!(
-            matches!(events.as_slice(), [.., HarnessEvent::TurnError { kind: FailureKind::AuthRequired, text }, HarnessEvent::TurnFinished { reason: TurnFinishReason::Failed }] if text == "Session expired\nRefresh the account"),
+            matches!(events.as_slice(), [.., HarnessEvent::TurnError { kind: FailureKind::AuthRequired, text, .. }, HarnessEvent::TurnFinished { reason: TurnFinishReason::Failed }] if text == "Session expired\nRefresh the account"),
             "{events:?}"
         );
         harness.shutdown().await?;
@@ -5772,7 +5838,7 @@ sleep 30
                 .any(|event| matches!(event, HarnessEvent::TurnFinished { .. }))
         })
         .await;
-        assert!(events.iter().any(|event| matches!(event, HarnessEvent::TurnError { kind: FailureKind::Protocol, text } if text.contains("exceeds 8388608 bytes"))), "{events:?}");
+        assert!(events.iter().any(|event| matches!(event, HarnessEvent::TurnError { kind: FailureKind::Protocol, text, .. } if text.contains("exceeds 8388608 bytes"))), "{events:?}");
         assert!(
             events.iter().any(|event| matches!(
                 event,
@@ -6710,7 +6776,7 @@ sleep 30
         .await;
         assert!(
             matches!(events.as_slice(), [..,
-            HarnessEvent::TurnError { kind: FailureKind::AuthRequired, text },
+            HarnessEvent::TurnError { kind: FailureKind::AuthRequired, text, .. },
             HarnessEvent::TurnFinished { reason: TurnFinishReason::Failed },
         ] if text.contains("exit code 23") && text.contains("authentication required for this account")),
             "{events:?}"
