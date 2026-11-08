@@ -932,7 +932,7 @@ If Pi’s RPC probe is blocked, proceed with ACP while resolving it.
   header and diagnostics say that Pi's tool calls follow Pi's configuration and
   are never approved by Shepherd. The bundled extension remains open, as does
   recording a live model turn for `agent_settled` and tool approval records.
-- [ ] ACP adapter using `libs/acp-client`; no duplicate protocol client.
+- [x] ACP adapter using `libs/acp-client`; no duplicate protocol client.
   Use this adapter for OpenCode when its native protocol is unavailable.
   The shared client accepts an exact configured command, validates ACP v1,
   and reports child exit independently of wire shutdown. The installed
@@ -962,7 +962,7 @@ If Pi’s RPC probe is blocked, proceed with ACP while resolving it.
   lists saved grants and live session grants by task and can reset either.
   ACP terminals use Shepherd's PTY engine and appear in the selected task's
   inspector. Fixtures cover input, resize, exit status, release, and cleanup
-  on disconnect. A live Claude Code smoke remains open.
+  on disconnect. A live Claude Code smoke is tracked in the gated smoke item.
 - [x] Freebuff runs in a standalone PTY in place of the conversation pane.
 - [x] Tier downgrade UI, capability gates and diagnostics per adapter.
   The task shows its negotiated tier and fallback reason. Diagnostics list the
