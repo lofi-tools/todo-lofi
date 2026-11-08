@@ -57,6 +57,8 @@ pub enum StoreError {
     TranscriptOwnerMissing { task_id: TaskId, session_id: String },
     #[error("session {session_id} cannot be saved for task {task_id}")]
     SessionOwnerMissing { task_id: TaskId, session_id: String },
+    #[error("terminal {terminal_id} cannot be saved for its project and task")]
+    TerminalOwnerMissing { terminal_id: String },
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -1158,22 +1160,25 @@ impl Store for TursoStore {
         // `-1` cannot come from a process this app spawned.
         let ended_at = terminal.ended_at.map(|value| value as i64).unwrap_or(-1);
         let exit_code = terminal.exit_code.map(i64::from).unwrap_or(-1);
-        toasty::sql::statement(
+        let updated = toasty::sql::statement(
             "INSERT INTO terminals (\
                 id, project_id, task_id, scope, title, cwd, command, \
                 created_at, ended_at, exit_code\
-             ) VALUES (\
+             ) SELECT \
                 ?1, ?2, NULLIF(?3, ''), ?4, ?5, ?6, ?7, ?8, NULLIF(?9, -1), NULLIF(?10, -1)\
+             FROM projects WHERE id = ?2 AND (\
+                (?4 = 'project' AND ?3 = '') OR \
+                (?4 = 'task' AND EXISTS (SELECT 1 FROM tasks WHERE id = ?3 AND project_id = ?2))\
              ) ON CONFLICT (id) DO UPDATE SET \
-                project_id = excluded.project_id, \
-                task_id = excluded.task_id, \
-                scope = excluded.scope, \
                 title = excluded.title, \
                 cwd = excluded.cwd, \
                 command = excluded.command, \
                 created_at = excluded.created_at, \
                 ended_at = excluded.ended_at, \
-                exit_code = excluded.exit_code",
+                exit_code = excluded.exit_code \
+             WHERE terminals.project_id = excluded.project_id \
+                AND COALESCE(terminals.task_id, '') = COALESCE(excluded.task_id, '') \
+                AND terminals.scope = excluded.scope",
         )
         .bind(terminal.id.as_str())
         .bind(terminal.project_id.as_str())
@@ -1187,6 +1192,11 @@ impl Store for TursoStore {
         .bind(exit_code)
         .exec(&mut *db)
         .await?;
+        if updated != 1 {
+            return Err(StoreError::TerminalOwnerMissing {
+                terminal_id: terminal.id.as_str().to_string(),
+            });
+        }
         Ok(())
     }
 
@@ -1997,7 +2007,27 @@ impl Store for MemoryStore {
     }
 
     async fn save_terminal(&self, terminal: &TerminalRecord) -> Result<(), StoreError> {
+        let tasks = self.tasks.read().await;
+        let projects = self.projects.read().await;
         let mut terminals = self.terminals.write().await;
+        let valid_owner = projects.contains_key(terminal.project_id.as_str())
+            && match (terminal.scope, &terminal.task_id) {
+                (TerminalScope::Project, None) => true,
+                (TerminalScope::Task, Some(id)) => tasks
+                    .get(id.as_str())
+                    .is_some_and(|task| task.project_id == terminal.project_id),
+                _ => false,
+            };
+        let same_owner = terminals.get(terminal.id.as_str()).is_none_or(|existing| {
+            existing.project_id == terminal.project_id
+                && existing.task_id == terminal.task_id
+                && existing.scope == terminal.scope
+        });
+        if !valid_owner || !same_owner {
+            return Err(StoreError::TerminalOwnerMissing {
+                terminal_id: terminal.id.as_str().to_string(),
+            });
+        }
         terminals.insert(terminal.id.as_str().to_string(), terminal.clone());
         Ok(())
     }
@@ -2227,6 +2257,77 @@ mod tests {
             .save_transcript_entries(&session, &entries.iter().collect::<Vec<_>>())
             .await?;
         assert_eq!(store.load_transcript(&task.id).await?, entries);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn terminal_save_requires_matching_owner_and_rejects_late_writes()
+    -> Result<(), Box<dyn std::error::Error>> {
+        async fn verify(store: &dyn Store, root: &Path) -> Result<(), Box<dyn std::error::Error>> {
+            let project = Project::new(root.join("one"));
+            let other = Project::new(root.join("two"));
+            let task = Task::draft(project.id.clone(), "Task", root);
+            let shared = TerminalRecord::project_shared(
+                TerminalId::new("shared"),
+                project.id.clone(),
+                "Shared",
+                root.to_path_buf(),
+                "shell",
+                1,
+            );
+            let mut terminal = TerminalRecord::project_shared(
+                TerminalId::new("task"),
+                project.id.clone(),
+                "Task",
+                root.to_path_buf(),
+                "shell",
+                1,
+            )
+            .for_task(task.id.clone());
+            assert!(matches!(
+                store.save_terminal(&shared).await,
+                Err(StoreError::TerminalOwnerMissing { .. })
+            ));
+            store.save_project(&project).await?;
+            store.save_project(&other).await?;
+            store.save_task(&task).await?;
+            store.save_terminal(&shared).await?;
+            store.save_terminal(&terminal).await?;
+            let mut wrong_project = terminal.clone();
+            wrong_project.id = TerminalId::new("wrong-project");
+            wrong_project.project_id = other.id.clone();
+            assert!(matches!(
+                store.save_terminal(&wrong_project).await,
+                Err(StoreError::TerminalOwnerMissing { .. })
+            ));
+            let mut moved = shared.clone();
+            moved.project_id = other.id.clone();
+            assert!(matches!(
+                store.save_terminal(&moved).await,
+                Err(StoreError::TerminalOwnerMissing { .. })
+            ));
+            terminal.ended_at = Some(2);
+            store.save_terminal(&terminal).await?;
+            store.delete_task(&task.id, None).await?;
+            assert!(matches!(
+                store.save_terminal(&terminal).await,
+                Err(StoreError::TerminalOwnerMissing { .. })
+            ));
+            let remaining = store.load_terminals().await?;
+            assert_eq!(remaining.len(), 1);
+            assert_eq!(
+                remaining.first().ok_or("missing shared terminal")?.id,
+                shared.id
+            );
+            Ok(())
+        }
+        let directory = TestDirectory::new()?;
+        verify(&MemoryStore::new(), directory.path()).await?;
+        verify(
+            &TursoStore::open_at(&directory.join("terminal-owner.db")).await?,
+            directory.path(),
+        )
+        .await?;
         Ok(())
     }
 

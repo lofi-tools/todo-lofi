@@ -1337,6 +1337,9 @@ placeholder tabs and no unearned state badges.
   Session saves require an existing task and cannot move an existing session
   ID to another task. Both stores reject a late save after deletion; the Turso
   check is part of the write statement.
+  Terminal saves similarly validate project and task ownership, reject owner
+  changes and late writes, and preserve project-scoped terminals when a task is
+  deleted; both stores have an ownership fixture.
   Task deletion stages the checkout before the database transaction so a
   failed deletion can restore ignored files as well as tracked files.
   A deletion journal now survives task deletion and database reopen in both
