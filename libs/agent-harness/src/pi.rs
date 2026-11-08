@@ -526,7 +526,7 @@ async fn read_output(
             if let Some(sender) = replies.lock().await.pending.remove(&id)
                 && sender.send(reply).is_err()
             {
-                tracing::debug!(%id, "Pi RPC caller released its response");
+                tracing::debug!("Pi RPC caller released its response");
             }
         } else {
             events
@@ -583,6 +583,48 @@ fn protocol(message: impl Into<String>) -> HarnessError {
 mod tests {
 
     use super::*;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn abandoned_rpc_response_does_not_log_correlation_id()
+    -> Result<(), Box<dyn std::error::Error>> {
+        #[derive(Clone)]
+        struct Writer(Arc<std::sync::Mutex<Vec<u8>>>);
+        impl std::io::Write for Writer {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0
+                    .lock()
+                    .map_err(|error| std::io::Error::other(error.to_string()))?
+                    .extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let logs = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let writer = Writer(logs.clone());
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .without_time()
+            .with_max_level(tracing::Level::DEBUG)
+            .with_writer(move || writer.clone())
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+        let replies = Replies::default();
+        let (sender, receiver) = oneshot::channel();
+        drop(receiver);
+        replies
+            .lock()
+            .await
+            .pending
+            .insert("fixture-private-value".into(), sender);
+        let (events, _receiver) = mpsc::unbounded_channel();
+        read_output(BufReader::new(b"{\"type\":\"response\",\"id\":\"fixture-private-value\",\"command\":\"get_state\",\"success\":true}\n".as_slice()), &replies, &events).await?;
+        let output = String::from_utf8(logs.lock().map_err(|error| error.to_string())?.clone())?;
+        assert!(output.contains("Pi RPC caller released its response"));
+        assert!(!output.contains("fixture-private-value"));
+        Ok(())
+    }
 
     #[tokio::test]
     async fn preserves_unicode_separators_and_routes_reversed_responses() -> HarnessResult<()> {
