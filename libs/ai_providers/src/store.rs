@@ -94,6 +94,7 @@ impl AttemptSummary {
 
 /// The library's storage port. The agent implements this; nothing here may
 /// fail a run, so callers log and continue on `Err`.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait TelemetryStore: Send + Sync {
     async fn record_attempt(&self, attempt: &AttemptRecord) -> anyhow::Result<()>;

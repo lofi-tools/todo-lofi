@@ -266,10 +266,13 @@ impl Router {
                 .partial_cmp(&scores[chosen_index].penalty)
             {
                 Some(std::cmp::Ordering::Less) => chosen_index = index,
-                Some(std::cmp::Ordering::Equal) => {
-                    if cools_sooner(scores[index].in_cooldown, scores[chosen_index].in_cooldown) {
-                        chosen_index = index;
-                    }
+                Some(std::cmp::Ordering::Equal)
+                    if cools_sooner(
+                        scores[index].in_cooldown,
+                        scores[chosen_index].in_cooldown,
+                    ) =>
+                {
+                    chosen_index = index;
                 }
                 _ => {}
             }

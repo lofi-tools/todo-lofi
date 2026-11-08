@@ -143,6 +143,7 @@ impl BenchmarkScore {
 /// A trait for anything that can produce benchmark scores: an HTTP API, a
 /// dataset, a vendored file. Each source is fetched independently and cached by
 /// the caller, so one source going dark cannot take the rank with it.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait BenchmarkSource: Send + Sync {
     /// The source name recorded on every score it produces.

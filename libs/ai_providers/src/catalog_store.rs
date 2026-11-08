@@ -120,6 +120,7 @@ impl UpsertSummary {
 
 /// The library's catalog port. The agent implements this; a store failure
 /// degrades to "nothing remembered", never to a failed run.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait ModelCatalogStore: Send + Sync {
     /// Insert or update model records, keyed by `(provider, model)`. Records
