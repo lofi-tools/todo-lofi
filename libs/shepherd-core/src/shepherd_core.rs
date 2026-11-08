@@ -3933,6 +3933,135 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cancelled_admission_failure_is_persisted_and_cleanup_runs()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use agent_harness::fake_harness::FakeHarness;
+        use agent_harness::{AgentHarness, Capabilities, HarnessResult, SpawnSpec};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct Factory {
+            started: Arc<tokio::sync::Notify>,
+            shutdowns: Arc<AtomicUsize>,
+        }
+        impl HarnessFactory for Factory {
+            fn create(&self) -> Result<Box<dyn AgentHarness>, CoreError> {
+                let (sender, receiver) = mpsc::unbounded_channel();
+                Ok(Box::new(AdmissionHarness {
+                    inner: FakeHarness::one_turn(FakeTurn::default()),
+                    started: self.started.clone(),
+                    shutdowns: self.shutdowns.clone(),
+                    sender,
+                    receiver,
+                }))
+            }
+        }
+        struct AdmissionHarness {
+            inner: FakeHarness,
+            started: Arc<tokio::sync::Notify>,
+            shutdowns: Arc<AtomicUsize>,
+            sender: mpsc::UnboundedSender<HarnessEvent>,
+            receiver: mpsc::UnboundedReceiver<HarnessEvent>,
+        }
+        struct CancelledAdmission(mpsc::UnboundedSender<HarnessEvent>);
+        impl Drop for CancelledAdmission {
+            fn drop(&mut self) {
+                if self
+                    .0
+                    .send(HarnessEvent::ConnectionFailed {
+                        kind: FailureKind::Protocol,
+                        text: "fixture admission cancelled".into(),
+                    })
+                    .is_err()
+                {
+                    tracing::debug!("cancelled admission fixture receiver closed");
+                }
+            }
+        }
+        #[async_trait::async_trait]
+        impl AgentHarness for AdmissionHarness {
+            fn events(&mut self) -> &mut mpsc::UnboundedReceiver<HarnessEvent> {
+                &mut self.receiver
+            }
+            async fn start(&mut self, spec: SpawnSpec) -> HarnessResult<Capabilities> {
+                self.inner.start(spec).await
+            }
+            async fn open_session(
+                &mut self,
+                resume: Option<SessionId>,
+            ) -> HarnessResult<SessionId> {
+                self.inner.open_session(resume).await
+            }
+            async fn prompt(&mut self, _: PromptInput) -> HarnessResult<()> {
+                let _guard = CancelledAdmission(self.sender.clone());
+                self.started.notify_one();
+                std::future::pending().await
+            }
+            async fn cancel(&mut self) -> HarnessResult<()> {
+                self.inner.cancel().await
+            }
+            async fn respond(&mut self, id: ApprovalId, decision: Decision) -> HarnessResult<()> {
+                self.inner.respond(id, decision).await
+            }
+            async fn shutdown(&mut self) -> HarnessResult<()> {
+                self.shutdowns.fetch_add(1, Ordering::SeqCst);
+                self.inner.shutdown().await
+            }
+        }
+
+        let repository = TestRepository::new()?;
+        let database = TestDatabase::new()?;
+        let started = Arc::new(tokio::sync::Notify::new());
+        let shutdowns = Arc::new(AtomicUsize::new(0));
+        let mut core = Core::with_services(
+            Box::new(TursoStore::open(&database.uri()).await?),
+            Box::new(Factory {
+                started: started.clone(),
+                shutdowns: shutdowns.clone(),
+            }),
+        );
+        let project_id = add_project(&mut core, repository.path().to_path_buf()).await?;
+        let draft = workspace_of(
+            core.execute(Command::CreateDraft {
+                project_id,
+                title: "Cancelled admission".into(),
+                agent: Agent::Codex,
+            })
+            .await?,
+        );
+        let task_id = TaskId::new(draft.task.id);
+        let mut sending = Box::pin(core.execute(Command::SendPrompt {
+            task_id: task_id.clone(),
+            input: PromptInput::text("Keep this prompt"),
+        }));
+        tokio::select! {
+            result = &mut sending => return Err(format!("admission finished unexpectedly: {result:?}").into()),
+            _ = started.notified() => {}
+        }
+        drop(sending);
+        assert!(core.pump().await?);
+        let workspace = core.task_workspace(&task_id)?;
+        assert_eq!(workspace.task.state, TaskState::Failed);
+        let text = summaries(&workspace).join("\n");
+        assert!(text.contains("Keep this prompt"));
+        assert!(text.contains("fixture admission cancelled"));
+        core.execute(Command::Quit { force: true }).await?;
+        assert_eq!(shutdowns.load(Ordering::SeqCst), 1);
+        drop(core);
+
+        let mut reopened = Core::load(
+            Box::new(TursoStore::open(&database.uri()).await?),
+            Box::new(UnavailableHarnessFactory),
+        )
+        .await?;
+        let restored = reopened.open_task_workspace(&task_id).await?;
+        assert_eq!(restored.task.state, TaskState::Failed);
+        let text = summaries(&restored).join("\n");
+        assert!(text.contains("Keep this prompt"));
+        assert!(text.contains("fixture admission cancelled"));
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn three_agent_sessions_keep_projects_approvals_and_worktrees_isolated()
     -> Result<(), Box<dyn std::error::Error>> {
         struct ThreeAgentFactory;

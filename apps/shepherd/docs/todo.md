@@ -1381,7 +1381,9 @@ placeholder tabs and no unearned state badges.
   future dropped from a thread outside the runtime. When the child handle is
   immediately available, the guard signals its group synchronously even after
   runtime shutdown; a local subprocess fixture covers that case. A contended
-  child handle still depends on the runtime remaining available.
+  child handle still depends on the runtime remaining available. A separate
+  scripted core fixture verifies that an admission cancellation failure leaves
+  the task failed, retains the prompt across database reopen and runs cleanup.
   Core sessions distinguish a disconnected adapter from completed cleanup.
   Retry, task deletion, batch archive and quit all attempt shutdown before
   discarding a disconnected session; an injected-failure fixture verifies that
