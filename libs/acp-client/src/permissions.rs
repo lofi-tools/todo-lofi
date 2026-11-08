@@ -242,6 +242,18 @@ impl PermissionReply {
         }
     }
 
+    #[cfg(feature = "test-support")]
+    pub fn new_with_confirmation(
+        sender: oneshot::Sender<PermissionDecision>,
+        confirmation: oneshot::Receiver<bool>,
+    ) -> Self {
+        Self {
+            sender,
+            _permit: None,
+            confirmation: Some(confirmation),
+        }
+    }
+
     pub(crate) fn limited(
         sender: oneshot::Sender<PermissionDecision>,
         permit: tokio::sync::OwnedSemaphorePermit,

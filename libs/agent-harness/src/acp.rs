@@ -2484,6 +2484,63 @@ done
     }
 
     #[tokio::test]
+    async fn unconfirmed_approval_never_creates_a_reusable_grant()
+    -> Result<(), Box<dyn std::error::Error>> {
+        for choice in [Decision::AllowSession, Decision::AllowProject] {
+            let (reply, received) = futures_channel::oneshot::channel();
+            let (confirmation, confirmed) = futures_channel::oneshot::channel();
+            let approval = PendingApproval::new(
+                1,
+                ToolCallUpdate::new(
+                    "tool",
+                    ToolCallUpdateFields::new()
+                        .kind(ToolKind::Execute)
+                        .title("Run command")
+                        .raw_input(serde_json::json!({"command": "git status"})),
+                ),
+                vec![PermissionOption::new(
+                    "once",
+                    "Allow once",
+                    PermissionOptionKind::AllowOnce,
+                )],
+                PermissionReply::new_with_confirmation(reply, confirmed),
+                true,
+            );
+            let id = approval.request.approval_id.clone();
+            let mut approvals = VecDeque::from([approval]);
+            let (changes, _) = watch::channel(Vec::new());
+            let mut grants = SessionGrants::new(changes);
+            let policy = TestProjectPolicy::default();
+            let (sender, mut events) = mpsc::unbounded_channel();
+            let answer = respond(
+                &sender,
+                &mut approvals,
+                &mut grants,
+                Some(&policy),
+                id.clone(),
+                choice,
+            );
+            let fail_delivery = async {
+                received.await.map_err(|_| "missing answer")?;
+                confirmation
+                    .send(false)
+                    .map_err(|_| "missing confirmation receiver")?;
+                Ok::<(), &'static str>(())
+            };
+            let (result, delivery) = tokio::join!(answer, fail_delivery);
+            result?;
+            delivery?;
+            assert!(
+                matches!(events.try_recv()?, HarnessEvent::ApprovalWithdrawn { approval_id } if approval_id == id)
+            );
+            assert!(events.try_recv().is_err());
+            assert!(grants.entries.is_empty());
+            assert!(policy.key.read().await.is_none());
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn cancelled_approval_withdraws_visible_and_skips_queued_requests()
     -> Result<(), Box<dyn std::error::Error>> {
         let pending = |request_id| {

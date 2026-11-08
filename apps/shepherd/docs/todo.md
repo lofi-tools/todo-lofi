@@ -920,8 +920,9 @@ If Pi’s RPC probe is blocked, proceed with ACP while resolving it.
   approvals; fixtures cover both and a subsequent request in the same turn.
   When an answer and cancellation are both ready, cancellation wins. The
   harness waits for the SDK to accept the response before recording a reusable
-  grant; fixtures cover cancellation priority and failed confirmation. This is
-  transport acceptance, not an acknowledgement from the agent.
+  grant; fixtures cover cancellation priority and verify that failed confirmation
+  creates neither a session nor project grant. This is transport acceptance,
+  not an acknowledgement from the agent.
   Project-scoped grants persist per configured agent. Settings → Projects
   lists saved grants and live session grants by task and can reset either.
   ACP terminals use Shepherd's PTY engine and appear in the selected task's
