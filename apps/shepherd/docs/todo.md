@@ -1,12 +1,26 @@
 # Shepherd implementation plan
 
-Status: proposed, 2026-11-04.
+Status: in progress. The initial plan was written on 2026-11-04; the slice
+checklists and evidence below record subsequent work.
 
 Specs: [goal.md](./spec/goal.md), [master-spec.md](./spec/master-spec.md),
 [stack.md](./spec/stack.md), [workspace-ui.md](./spec/workspace-ui.md). This
 file gives the working order. The specs govern behaviour and technology.
 Check the workspace UI decisions when implementing a slice that touches the
 shell.
+
+## Current progress
+
+The desktop shell, durable core, Codex task flow, worktree review and terminal
+interface are implemented and have scripted coverage. The later slices have
+partial implementations and remaining unchecked work; their individual proof
+and gate sections describe what is and is not verified.
+
+The S4 normal-workday trial and macOS candidate-input check remain open. The
+user asked to skip those blocked checks for now and continue with later tasks;
+that does not count as passing the S4 gate. Live adapter checks and the clean
+machine release checklist also remain open. Use the dated evidence in each
+slice rather than treating an older test count or platform result as current.
 
 ## Next feature
 
@@ -30,15 +44,19 @@ Each slice ends with a gate:
 3. a written go/no-go decision.
 
 Do not start the next slice because the code compiles. Start it because the gate
-passed.
+passed, unless the user explicitly directs work to continue past an open gate.
+Record that exception and leave the gate open until its evidence is available.
 
 If only four slices can be built, build **S0–S3**. That is the smallest version
 of the product that can answer: “Can I run a real agent, review what it changed,
 and merge it without leaving Shepherd?”
 
-## Current starting point
+## Starting point on 2026-11-04
 
-| Area | Current state |
+This table is the historical baseline for the plan. It does not describe the
+current implementation or current test counts.
+
+| Area | State at the start of the plan |
 | --- | --- |
 | Workspace | Root Cargo workspace includes `apps/*`, `libs/*` and `demos/*`. |
 | `apps/shepherd` | Tauri 2 shell: `src-tauri/` (window, generated desktop icons, default capability, command bridge, single event channel, durable core in the app data dir) and `ui/` (SolidJS + TypeScript + Vite, typed client in `src/bridge.ts`). `pnpm dev:shepherd` starts Vite on port 1420 and opens the window. At startup the shell detects Codex (configured path, `PATH`, then the macOS app bundle) and runs it through the `app-server` adapter; when detection finds nothing, prompting fails with the detection report instead of falling back to the fake. The scripted adapter remains for the shell's tests. The fixed regions are not built yet. |
