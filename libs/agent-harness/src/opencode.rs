@@ -792,7 +792,10 @@ async fn read_turn(
 ) -> HarnessResult<HarnessEvent> {
     let mut transcript = OpenCodeTranscript::new(session.clone());
     let mut admitted = false;
-    let mut approvals = HashSet::new();
+    let mut approvals = PendingApprovals {
+        ids: HashSet::new(),
+        sender,
+    };
     let admission_deadline = Instant::now() + REQUEST_TIMEOUT;
     loop {
         let event = if admitted {
@@ -848,20 +851,31 @@ async fn read_turn(
         };
         match &event {
             HarnessEvent::ApprovalRequested { request } => {
-                register_approval(&mut approvals, &request.approval_id)?;
+                register_approval(&mut approvals.ids, &request.approval_id)?;
             }
             HarnessEvent::ApprovalResolved { approval_id, .. } => {
-                approvals.remove(approval_id);
+                approvals.ids.remove(approval_id);
             }
-            HarnessEvent::TurnFinished { .. } => {
-                for approval_id in approvals {
-                    publish(sender, HarnessEvent::ApprovalWithdrawn { approval_id })?;
-                }
-                return Ok(event);
-            }
+            HarnessEvent::TurnFinished { .. } => return Ok(event),
             _ => {}
         }
         publish_stream_event(sender, stream_capacity, event).await?;
+    }
+}
+
+struct PendingApprovals<'a> {
+    ids: HashSet<ApprovalId>,
+    sender: &'a mpsc::UnboundedSender<HarnessEvent>,
+}
+
+impl Drop for PendingApprovals<'_> {
+    fn drop(&mut self) {
+        for approval_id in self.ids.drain() {
+            if publish(self.sender, HarnessEvent::ApprovalWithdrawn { approval_id }).is_err() {
+                tracing::debug!("could not withdraw pending OpenCode approval");
+                break;
+            }
+        }
     }
 }
 
@@ -2254,6 +2268,30 @@ mod tests {
         "/api/session/{sessionID}/permission/{requestID}/reply": {"post": {}}
     }}"#;
 
+    #[tokio::test]
+    async fn cancelling_reader_withdraws_pending_approvals()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        let (ready, waiting) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            let mut pending = PendingApprovals {
+                ids: HashSet::new(),
+                sender: &sender,
+            };
+            register_approval(&mut pending.ids, &ApprovalId::new("per_1"))?;
+            ready.send(()).map_err(|_| HarnessError::ChannelClosed)?;
+            std::future::pending::<()>().await;
+            Ok::<_, HarnessError>(())
+        });
+        waiting.await?;
+        task.abort();
+        assert!(task.await.is_err_and(|error| error.is_cancelled()));
+        assert!(
+            matches!(receiver.try_recv(), Ok(HarnessEvent::ApprovalWithdrawn { approval_id }) if approval_id.as_str() == "per_1")
+        );
+        Ok(())
+    }
+
     #[test]
     fn repeated_pending_approval_is_rejected_without_replacement() -> HarnessResult<()> {
         let mut pending = HashSet::new();
@@ -2311,6 +2349,7 @@ mod tests {
         assert!(error.to_string().contains("pending approval limit"));
         let mut requested = 0;
         let mut resolved = 0;
+        let mut withdrawn = HashSet::new();
         while let Ok(event) = receiver.try_recv() {
             match event {
                 HarnessEvent::ApprovalRequested { request } => {
@@ -2318,11 +2357,17 @@ mod tests {
                     requested += 1;
                 }
                 HarnessEvent::ApprovalResolved { .. } => resolved += 1,
+                HarnessEvent::ApprovalWithdrawn { approval_id } => {
+                    withdrawn.insert(approval_id);
+                }
                 _ => return Err("unexpected event".into()),
             }
         }
         assert_eq!(requested, MAX_PENDING_APPROVALS + 1);
         assert_eq!(resolved, 1);
+        assert_eq!(withdrawn.len(), MAX_PENDING_APPROVALS);
+        assert!(!withdrawn.contains(&ApprovalId::new("per_0")));
+        assert!(withdrawn.contains(&ApprovalId::new("per_extra")));
         fixture.await?.map_err(|error| error.to_string())?;
         Ok(())
     }
