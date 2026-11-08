@@ -1227,7 +1227,10 @@ placeholder tabs and no unearned state badges.
   fixtures exercise both. If the input writer fails while stdout remains open,
   the reader reports the failure, stops the child and releases pending requests;
   local subprocess fixtures cover that path and an unexpected writer exit while
-  stdout has a partial frame. Failed or cancelled Codex initialization also stops
+  stdout has a partial frame. If process-group cleanup fails after a reader
+  error or closed stdout, the error is reported and the child remains available
+  for a later shutdown retry; an injected-failure fixture covers both paths.
+  Failed or cancelled Codex initialization also stops
   its group, covered by a local fixture. Cancelling Codex project or model
   discovery while awaiting a response also stops the group; a fixture covers
   both paths. OpenCode also stops its group on a

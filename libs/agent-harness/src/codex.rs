@@ -1117,6 +1117,7 @@ impl CodexHarness {
             stderr_drained,
             writer_failed,
             Arc::downgrade(&child),
+            stop_codex_process_group,
             #[cfg(any(test, feature = "live-test-support"))]
             self.wire_capture.clone(),
         ));
@@ -2625,6 +2626,7 @@ fn spawn_reader(
     stderr_drained: oneshot::Receiver<()>,
     mut writer_failed: oneshot::Receiver<()>,
     child: std::sync::Weak<AsyncMutex<Child>>,
+    stop_group: fn(&Child) -> std::io::Result<()>,
     #[cfg(any(test, feature = "live-test-support"))] capture: Option<WireCapture>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
@@ -2671,26 +2673,17 @@ fn spawn_reader(
         let outcome = {
             let mut child = child.lock().await;
             if let Some(message) = protocol_failure {
-                if let Err(error) = stop_codex_process_group(&child) {
-                    tracing::warn!(%error, "could not stop the Codex app-server process group");
-                }
-                if let Err(error) = child.kill().await {
-                    tracing::debug!(%error, "could not stop Codex after invalid protocol output");
-                }
-                Err(message)
+                Err(stop_failed_app_server(&mut child, stop_group, message).await)
             } else {
                 match timeout(Duration::from_millis(250), child.wait()).await {
                     Ok(Ok(status)) => Ok(status.code()),
                     Ok(Err(error)) => Err(format!("Could not read the Codex exit status: {error}")),
-                    Err(_) => {
-                        if let Err(error) = stop_codex_process_group(&child) {
-                            tracing::warn!(%error, "could not stop the Codex app-server process group");
-                        }
-                        if let Err(error) = child.kill().await {
-                            tracing::debug!(%error, "could not stop Codex after stdout closed");
-                        }
-                        Err("Codex closed its protocol stream while still running.".into())
-                    }
+                    Err(_) => Err(stop_failed_app_server(
+                        &mut child,
+                        stop_group,
+                        "Codex closed its protocol stream while still running.".into(),
+                    )
+                    .await),
                 }
             }
         };
@@ -2721,6 +2714,20 @@ fn spawn_reader(
         }
         pending.lock().await.responses.clear();
     })
+}
+
+async fn stop_failed_app_server(
+    child: &mut Child,
+    stop_group: fn(&Child) -> std::io::Result<()>,
+    message: String,
+) -> String {
+    if let Err(error) = stop_group(child) {
+        return format!("{message} Could not stop the Codex process group: {error}");
+    }
+    if let Err(error) = child.kill().await {
+        return format!("{message} Could not stop the Codex process: {error}");
+    }
+    message
 }
 
 struct AppServerStartupGroup(Option<std::sync::Weak<AsyncMutex<Child>>>);
@@ -3294,6 +3301,61 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn reader_reports_group_stop_failure_and_retains_the_child_for_retry()
+    -> Result<(), Box<dyn std::error::Error>> {
+        for script in [
+            "printf 'invalid\\n'; exec sleep 30",
+            "exec 1>&-; exec sleep 30",
+        ] {
+            let mut command = Command::new("/bin/sh");
+            command
+                .args(["-c", script])
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .kill_on_drop(true);
+            command.process_group(0);
+            let mut child = command.spawn()?;
+            let stdout = child.stdout.take().ok_or("missing stdout")?;
+            let child = Arc::new(AsyncMutex::new(child));
+            let (sender, mut events) = mpsc::unbounded_channel();
+            let (outgoing, _requests) = mpsc::channel(1);
+            let (_failure, writer_failed) = oneshot::channel();
+            let (drained, stderr_drained) = oneshot::channel();
+            drained.send(()).map_err(|_| "stderr receiver closed")?;
+            let reader = spawn_reader(
+                stdout,
+                sender,
+                Arc::new(AsyncMutex::new(Pending::default())),
+                outgoing,
+                Arc::new(Mutex::new(VecDeque::new())),
+                Arc::new(AtomicBool::new(false)),
+                Arc::new(AtomicBool::new(false)),
+                stderr_drained,
+                writer_failed,
+                Arc::downgrade(&child),
+                |_| Err(std::io::Error::other("fixture group failure")),
+                None,
+            );
+            assert!(matches!(
+                timeout(Duration::from_secs(5), events.recv()).await?,
+                Some(HarnessEvent::ConnectionFailed { text, .. }) if text.contains("fixture group failure")
+            ));
+            reader.await?;
+            {
+                let mut child = child.lock().await;
+                assert!(child.id().is_some());
+                assert!(child.try_wait()?.is_none());
+            }
+            let mut harness = CodexHarness::new();
+            harness.started = true;
+            harness.child = Some(child.clone());
+            harness.shutdown().await?;
+            assert!(harness.child.is_none());
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn closed_app_server_input_stops_child_and_fails_pending_requests()
     -> Result<(), Box<dyn std::error::Error>> {
         let directory = TempDir::new()?;
@@ -3336,6 +3398,7 @@ mod tests {
             stderr_drained,
             writer_failed,
             Arc::downgrade(&child),
+            stop_codex_process_group,
             None,
         );
         outgoing.try_send(json!({"id": 1, "method": "fixture"}).into())?;
@@ -3383,6 +3446,7 @@ mod tests {
             stderr_drained,
             writer_failed,
             Arc::downgrade(&child),
+            stop_codex_process_group,
             None,
         );
         drop(failure);
@@ -3428,6 +3492,7 @@ mod tests {
             stderr_drained,
             writer_failed,
             Arc::downgrade(&child),
+            stop_codex_process_group,
             None,
         );
         assert!(matches!(
