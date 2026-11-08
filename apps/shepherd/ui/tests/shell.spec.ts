@@ -63,6 +63,10 @@ test.beforeEach(async ({ context }) => {
     const unwatchedFiles: string[] = []
     const watchedSourceFiles = new Map<string | null, Set<string>>()
     let nextFileSearch = 1
+    let releaseWorkspaceRead: (() => void) | undefined
+    let pauseNextWorkspaceRead = false
+    let pausedWorkspaceRead = false
+    let workspaceReads = 0
     let releaseTerminalWrite: (() => void) | undefined
     let expiringTerminalSubscription: string | undefined
     const options = new URLSearchParams(window.location.search)
@@ -587,8 +591,17 @@ test.beforeEach(async ({ context }) => {
             window.__emitCoreEvent({ type: 'projectListChanged', data: projectList() })
             return null
           }
-          case 'task_workspace':
-            return workspace(args.taskId)
+          case 'task_workspace': {
+            workspaceReads += 1
+            const snapshot = workspace(args.taskId)
+            if (pauseNextWorkspaceRead) {
+              pauseNextWorkspaceRead = false
+              pausedWorkspaceRead = true
+              await new Promise<void>((resolve) => { releaseWorkspaceRead = resolve })
+              pausedWorkspaceRead = false
+            }
+            return snapshot
+          }
           case 'reserve_task_search':
             return `search-${nextTaskSearch++}`
           case 'cancel_task_search':
@@ -1041,6 +1054,12 @@ test.beforeEach(async ({ context }) => {
     } })
     window.__emitCoreEvent = (event: ShepherdEvent) =>
       callbacks.get(eventChannel)?.({ index: eventIndex++, message: event })
+    Object.assign(window, {
+      __pauseWorkspaceRead: () => { pauseNextWorkspaceRead = true },
+      __workspaceReadPaused: () => pausedWorkspaceRead,
+      __releaseWorkspaceRead: () => releaseWorkspaceRead?.(),
+      __workspaceReads: () => workspaceReads,
+    })
     Object.assign(window, { __missTaskUpdate: () => {
       const index = tasks.findIndex((task) => task.id === 'task-1')
       if (index < 0) throw new Error('Missing fixture task')
@@ -3860,4 +3879,36 @@ test('resynchronizes snapshots after missed core events', async ({ page }) => {
     fixture.__emitCoreEvent({ type: 'resyncRequired' })
   })
   await expect(page.getByText('Recovered transcript')).toBeVisible()
+})
+
+
+test('keeps newer snapshots during event recovery without restarting for unrelated events', async ({ page }) => {
+  await page.goto('/')
+  await expect(page.getByText('ready to go')).toBeVisible()
+  const reads = await page.evaluate(() => {
+    const fixture = window as unknown as {
+      __pauseWorkspaceRead: () => void; __workspaceReads: () => number;
+      __missTaskUpdate: () => void; __emitCoreEvent: (event: ShepherdEvent) => void
+    }
+    const count = fixture.__workspaceReads()
+    fixture.__missTaskUpdate()
+    fixture.__pauseWorkspaceRead()
+    fixture.__emitCoreEvent({ type: 'resyncRequired' })
+    return count
+  })
+  await expect.poll(() => page.evaluate(() => (window as unknown as { __workspaceReadPaused: () => boolean }).__workspaceReadPaused())).toBe(true)
+  await page.evaluate(() => {
+    const fixture = window as unknown as {
+      __emitCoreEvent: (event: ShepherdEvent) => void;
+      __setTranscript: (taskId: string, entries: Entry[]) => void;
+      __releaseWorkspaceRead: () => void
+    }
+    fixture.__emitCoreEvent({ type: 'taskNeedsInput', data: { taskId: 'unrelated-task' } })
+    fixture.__setTranscript('task-1', [{ id: 'newer', sequence: 11,
+      kind: { type: 'agentText', data: { text: 'Newer transcript' } } }])
+    fixture.__releaseWorkspaceRead()
+  })
+  await expect(page.getByText('Newer transcript')).toBeVisible()
+  await expect(page.getByText('Recovered transcript')).toHaveCount(0)
+  await expect.poll(() => page.evaluate(() => (window as unknown as { __workspaceReads: () => number }).__workspaceReads())).toBe(reads + 1)
 })

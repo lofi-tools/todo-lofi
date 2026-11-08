@@ -1055,9 +1055,14 @@ export function App() {
     }
   })
 
-  let eventRevision = 0
   let resyncRunning = false
   let resyncRequested = false
+  let resyncUpdates: {
+    projects: boolean
+    taskLists: Map<string, bridge.TaskSummary[]>
+    workspaces: Set<string>
+    terminalLists: Set<string>
+  } | undefined
 
   async function resyncSnapshots() {
     if (resyncRunning) {
@@ -1068,7 +1073,13 @@ export function App() {
     try {
       do {
         resyncRequested = false
-        const revision = eventRevision
+        const updates = {
+          projects: false,
+          taskLists: new Map<string, bridge.TaskSummary[]>(),
+          workspaces: new Set<string>(),
+          terminalLists: new Set<string>(),
+        }
+        resyncUpdates = updates
         const projectId = selectedProjectId()
         const taskId = selectedTaskId()
         const reviewing = reviewOnly()
@@ -1079,33 +1090,44 @@ export function App() {
           projectId ? bridge.terminalList(projectId) : undefined,
           reviewing ? bridge.reviewTaskLists() : undefined,
         ])
-        if (revision !== eventRevision || projectId !== selectedProjectId() ||
+        if (resyncRequested || projectId !== selectedProjectId() ||
             taskId !== selectedTaskId() || reviewing !== reviewOnly()) {
           resyncRequested = true
           continue
         }
-        setProjects(projectList.projects)
+        if (!updates.projects) setProjects(projectList.projects)
         if (taskList && projectId) {
-          setTasks(taskList.tasks)
+          if (!updates.taskLists.has(projectId)) setTasks(taskList.tasks)
           setLoadedTasksFor(projectId)
           setApprovalChange({ projectId })
         }
-        if (taskWorkspace) setWorkspace(taskWorkspace)
-        if (terminalList) setTerminalListEvent(terminalList)
+        if (taskWorkspace && taskId && !updates.workspaces.has(taskId)) setWorkspace(taskWorkspace)
+        if (terminalList && projectId && !updates.terminalLists.has(projectId)) setTerminalListEvent(terminalList)
         if (reviewLists) {
-          setReviewLists(new Map(reviewLists.map(({ projectId, tasks }) => [projectId, tasks] as const)))
+          setReviewLists(new Map([
+            ...reviewLists.map(({ projectId, tasks }) => [projectId, tasks] as const),
+            ...[...updates.taskLists].map(([projectId, tasks]) => [projectId, tasks.filter((task) => task.state === 'review')] as const),
+          ]))
           reconcileReviewSelection()
         }
       } while (resyncRequested)
     } catch (failure) {
       setError(`Could not refresh after missed updates: ${describe(failure)}`)
     } finally {
+      resyncUpdates = undefined
       resyncRunning = false
     }
   }
 
   function handleEvent(event: CoreEvent) {
-    eventRevision += 1
+    if (resyncUpdates) {
+      switch (event.type) {
+        case 'projectListChanged': resyncUpdates.projects = true; break
+        case 'taskListChanged': resyncUpdates.taskLists.set(event.data.projectId, event.data.tasks); break
+        case 'taskWorkspaceChanged': resyncUpdates.workspaces.add(event.data.task.id); break
+        case 'terminalListChanged': resyncUpdates.terminalLists.add(event.data.projectId); break
+      }
+    }
     switch (event.type) {
       case 'resyncRequired':
         void resyncSnapshots()
