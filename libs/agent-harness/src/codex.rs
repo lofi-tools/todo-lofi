@@ -49,6 +49,7 @@ pub const SUPPORTED_METHODS: [&str; 7] = [
 /// JSON-RPC code for an unsupported request. Answering with it keeps the
 /// session alive instead of leaving the server waiting on Shepherd.
 const METHOD_NOT_FOUND: i64 = -32601;
+const MAX_PENDING_APPROVALS: usize = 64;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const PROBE_TIMEOUT: Duration = Duration::from_secs(20);
 const STDERR_TAIL_LINES: usize = 20;
@@ -2791,6 +2792,32 @@ async fn handle_server_request(
         .unwrap_or(approval_id.as_str())
         .to_string();
 
+    let mut approvals = pending.lock().await;
+    if approvals
+        .approvals
+        .values()
+        .any(|existing| *existing == server_id)
+    {
+        tracing::debug!("codex repeated a pending server request ID");
+        return;
+    }
+    let rejection = if approvals.approvals.contains_key(&approval_id) {
+        Some("an approval for this item is already pending")
+    } else if approvals.approvals.len() >= MAX_PENDING_APPROVALS {
+        Some("too many pending approvals")
+    } else {
+        None
+    };
+    if let Some(message) = rejection {
+        drop(approvals);
+        if outgoing
+            .send(json!({"id": id, "error": {"code": -32000, "message": message}}))
+            .is_err()
+        {
+            tracing::debug!("codex approval rejection could not be delivered");
+        }
+        return;
+    }
     let request = ApprovalRequest {
         approval_id: ApprovalId::new(approval_id.clone()),
         tool_call_id: ToolCallId::new(tool_call_id),
@@ -2800,16 +2827,17 @@ async fn handle_server_request(
         patch: approval_patch(&method, &params),
         choices: None,
     };
-    pending
-        .lock()
-        .await
-        .approvals
-        .insert(approval_id, server_id);
+    approvals.approvals.insert(approval_id.clone(), server_id);
+    drop(approvals);
     if sender
         .send(HarnessEvent::ApprovalRequested { request })
         .is_err()
     {
         tracing::debug!("the core stopped listening to codex events");
+        pending.lock().await.approvals.remove(&approval_id);
+        if outgoing.send(json!({"id": id, "error": {"code": -32000, "message": "approval handler unavailable"}})).is_err() {
+            tracing::debug!("codex approval failure could not be delivered");
+        }
     }
 }
 
@@ -3138,6 +3166,123 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+
+    #[tokio::test]
+    async fn approval_requests_are_bounded_and_duplicate_items_do_not_replace_pending_requests()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let pending = Arc::new(AsyncMutex::new(Pending::default()));
+        let (events, mut received) = mpsc::unbounded_channel();
+        let (outgoing, mut responses) = mpsc::unbounded_channel();
+        let method = "item/commandExecution/requestApproval";
+        for number in 0..MAX_PENDING_APPROVALS {
+            handle_server_request(
+                json!(number),
+                method.into(),
+                json!({"itemId": format!("item-{number}")}),
+                &events,
+                &pending,
+                &outgoing,
+            )
+            .await;
+        }
+        assert_eq!(pending.lock().await.approvals.len(), MAX_PENDING_APPROVALS);
+        for _ in 0..MAX_PENDING_APPROVALS {
+            assert!(matches!(
+                received.try_recv(),
+                Ok(HarnessEvent::ApprovalRequested { .. })
+            ));
+        }
+        handle_server_request(
+            json!(100),
+            method.into(),
+            json!({"itemId": "item-0"}),
+            &events,
+            &pending,
+            &outgoing,
+        )
+        .await;
+        let duplicate = responses.try_recv()?;
+        assert_eq!(duplicate["id"], 100);
+        assert!(
+            duplicate["error"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("already pending"))
+        );
+        assert_eq!(pending.lock().await.approvals.get("item-0"), Some(&0));
+        handle_server_request(
+            json!(0),
+            method.into(),
+            json!({"itemId": "item-0"}),
+            &events,
+            &pending,
+            &outgoing,
+        )
+        .await;
+        assert!(responses.try_recv().is_err());
+        handle_server_request(
+            json!(101),
+            method.into(),
+            json!({"itemId": "extra"}),
+            &events,
+            &pending,
+            &outgoing,
+        )
+        .await;
+        let overflow = responses.try_recv()?;
+        assert_eq!(overflow["id"], 101);
+        assert!(
+            overflow["error"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("too many"))
+        );
+
+        handle_notification(
+            "serverRequest/resolved",
+            &json!({"requestId": 0}),
+            &events,
+            &pending,
+        )
+        .await;
+        assert!(matches!(
+            received.try_recv(),
+            Ok(HarnessEvent::ApprovalWithdrawn { .. })
+        ));
+        handle_server_request(
+            json!(102),
+            method.into(),
+            json!({"itemId": "extra"}),
+            &events,
+            &pending,
+            &outgoing,
+        )
+        .await;
+        assert!(matches!(
+            received.try_recv(),
+            Ok(HarnessEvent::ApprovalRequested { .. })
+        ));
+        assert_eq!(pending.lock().await.approvals.len(), MAX_PENDING_APPROVALS);
+
+        drop(received);
+        handle_notification(
+            "serverRequest/resolved",
+            &json!({"requestId": 1}),
+            &events,
+            &pending,
+        )
+        .await;
+        handle_server_request(
+            json!(103),
+            method.into(),
+            json!({"itemId": "undeliverable"}),
+            &events,
+            &pending,
+            &outgoing,
+        )
+        .await;
+        assert_eq!(responses.try_recv()?["id"], 103);
+        assert!(!pending.lock().await.approvals.contains_key("undeliverable"));
+        Ok(())
+    }
 
     #[tokio::test]
     async fn stderr_reader_bounds_long_lines_and_drains_following_output()
