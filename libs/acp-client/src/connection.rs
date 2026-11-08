@@ -1656,6 +1656,96 @@ pub fn stderr_summary(lines: &[String]) -> String {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn update_overflow_stops_the_agent_process_group()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let marker = directory.path().join("descendant-ran");
+        let ready = directory.path().join("descendant-ready");
+        let trigger = directory.path().join("descendant-trigger");
+        let script = r#"
+import json, os, subprocess, sys, time
+child = '''import pathlib,sys,time
+pathlib.Path(sys.argv[1]).write_text("ready")
+for _ in range(500):
+    if pathlib.Path(sys.argv[2]).exists():
+        pathlib.Path(sys.argv[3]).write_text("ran")
+        break
+    time.sleep(0.01)'''
+for line in sys.stdin:
+    request = json.loads(line)
+    method = request.get('method')
+    if method == 'initialize':
+        print(json.dumps({'jsonrpc':'2.0','id':request['id'],'result':{'protocolVersion':1}}), flush=True)
+    elif method == 'session/new':
+        print(json.dumps({'jsonrpc':'2.0','id':request['id'],'result':{'sessionId':'fixture'}}), flush=True)
+    elif method == 'session/prompt':
+        subprocess.Popen([sys.executable, '-c', child, os.environ['FIXTURE_READY'], os.environ['FIXTURE_TRIGGER'], os.environ['FIXTURE_MARKER']], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        for _ in range(200):
+            if os.path.exists(os.environ['FIXTURE_READY']):
+                break
+            time.sleep(0.005)
+        update = {'jsonrpc':'2.0','method':'session/update','params':{'sessionId':'fixture','update':{'sessionUpdate':'agent_message_chunk','content':{'type':'text','text':'fixture'}}}}
+        try:
+            for _ in range(4097):
+                print(json.dumps(update), flush=True)
+        except BrokenPipeError:
+            pass
+        time.sleep(30)
+"#;
+        let launch = SpawnSpec {
+            program: PathBuf::from("/usr/bin/env"),
+            args: vec!["python3".into(), "-u".into(), "-c".into(), script.into()],
+            cwd: directory.path().to_path_buf(),
+            env: [
+                (
+                    "FIXTURE_MARKER".into(),
+                    marker.to_string_lossy().into_owned(),
+                ),
+                ("FIXTURE_READY".into(), ready.to_string_lossy().into_owned()),
+                (
+                    "FIXTURE_TRIGGER".into(),
+                    trigger.to_string_lossy().into_owned(),
+                ),
+            ]
+            .into_iter()
+            .collect(),
+        };
+        let options = ConnectOptions {
+            roots: SessionRoots::new([directory.path().to_path_buf()]),
+            tool_permissions: ToolPermissions::default(),
+        };
+        let mut connection = connect_spawn(launch, options).await?;
+        let (session, _, _) = connection
+            .requester
+            .new_session(directory.path().to_path_buf(), Vec::new(), Vec::new())
+            .await?;
+        let result = tokio::time::timeout(
+            Duration::from_secs(10),
+            connection.requester.prompt(&session, "go".into()),
+        )
+        .await?;
+        assert!(
+            matches!(result, Err(AcpError::Protocol(message)) if message.contains("queue exceeded"))
+        );
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while let Some(event) = connection.events.recv().await {
+                if matches!(event, AcpEvent::Exited { .. }) {
+                    return Ok::<(), std::io::Error>(());
+                }
+            }
+            Err(std::io::Error::other("agent exit was not reported"))
+        })
+        .await??;
+        assert!(ready.exists(), "the agent descendant did not start");
+        std::fs::write(trigger, "go")?;
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        assert!(!marker.exists(), "the agent descendant survived overflow");
+        connection.close_and_wait().await?;
+        Ok(())
+    }
+
     #[tokio::test]
     async fn permission_cancellation_wins_when_answer_is_also_ready()
     -> Result<(), Box<dyn std::error::Error>> {

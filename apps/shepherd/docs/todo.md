@@ -1566,7 +1566,9 @@ placeholder tabs and no unearned state badges.
   capacity without waiting, charged by serialized size in 16 KiB units against
   a 64 MiB budget. Overflow reports a protocol failure, fails the pending
   prompt and stops the connection; a fake-agent fixture verifies the failure
-  and preserves already queued updates. A second fixture verifies that a prompt
+  and preserves already queued updates. A local subprocess fixture verifies
+  that overflow also stops an already-started descendant in the agent's process
+  group. A second fixture verifies that a prompt
   response is delivered even when the update capacity is full. Text and tool
   events retain their permits through Shepherd's harness queue; a fixture fills
   that queue and checks the failure. Mapped plan, usage and mode updates also
