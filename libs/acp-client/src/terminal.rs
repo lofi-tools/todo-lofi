@@ -543,26 +543,28 @@ impl TerminalRegistry {
         while let Some(event) = events.recv().await {
             match event {
                 TerminalProcessEvent::Output(bytes) => {
-                    pending.extend(bytes);
-                    let incomplete = pending.utf8_chunks().last().map_or(0, |chunk| {
-                        let invalid = chunk.invalid();
-                        if std::str::from_utf8(invalid)
-                            .is_err_and(|error| error.error_len().is_none())
+                    for part in bytes.chunks(MAX_OUTPUT_EVENT_BYTES) {
+                        pending.extend_from_slice(part);
+                        let incomplete = pending.utf8_chunks().last().map_or(0, |chunk| {
+                            let invalid = chunk.invalid();
+                            if std::str::from_utf8(invalid)
+                                .is_err_and(|error| error.error_len().is_none())
+                            {
+                                invalid.len()
+                            } else {
+                                0
+                            }
+                        });
+                        let tail = pending.split_off(pending.len() - incomplete);
+                        if !pending.is_empty()
+                            && !self
+                                .push(&key, String::from_utf8_lossy(&pending).into_owned())
+                                .await
                         {
-                            invalid.len()
-                        } else {
-                            0
+                            return;
                         }
-                    });
-                    let tail = pending.split_off(pending.len() - incomplete);
-                    if !pending.is_empty()
-                        && !self
-                            .push(&key, String::from_utf8_lossy(&pending).into_owned())
-                            .await
-                    {
-                        return;
+                        pending = tail;
                     }
-                    pending = tail;
                 }
                 TerminalProcessEvent::Exited(exit) => {
                     status = exit;
@@ -807,6 +809,49 @@ mod tests {
         async fn stop(&self, _id: &str) -> Result<(), String> {
             Ok(())
         }
+    }
+
+    #[tokio::test]
+    async fn backend_large_output_preserves_utf8_across_internal_and_event_boundaries()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let (events, receiver) = tokio::sync::mpsc::unbounded_channel();
+        drop(receiver);
+        let registry = TerminalRegistry::new(
+            SessionRoots::new([directory.path().to_path_buf()]),
+            &events,
+            Some(Arc::new(IdleBackend)),
+        );
+        registry.register("fixture", MAX_OUTPUT_LIMIT);
+        let text = format!(
+            "{}界{}🙂end",
+            "x".repeat(MAX_OUTPUT_EVENT_BYTES - 1),
+            "z".repeat(MAX_OUTPUT_EVENT_BYTES * 10)
+        );
+        let bytes = text.as_bytes();
+        let split = bytes.len() - "🙂end".len() + 2;
+        let (sender, output) = tokio::sync::mpsc::channel(4);
+        sender
+            .send(TerminalProcessEvent::Output(
+                bytes.get(..split).ok_or("invalid first split")?.to_vec(),
+            ))
+            .await?;
+        sender
+            .send(TerminalProcessEvent::Output(
+                bytes.get(split..).ok_or("invalid second split")?.to_vec(),
+            ))
+            .await?;
+        sender
+            .send(TerminalProcessEvent::Exited(
+                TerminalExitStatus::new().exit_code(Some(0)),
+            ))
+            .await?;
+        drop(sender);
+        registry.pump_backend("fixture".into(), output).await;
+        let result = registry.output(&TerminalId::new("fixture"));
+        assert_eq!(result.output, text);
+        assert!(!result.truncated);
+        Ok(())
     }
 
     #[tokio::test]
