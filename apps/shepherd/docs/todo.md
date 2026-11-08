@@ -1702,6 +1702,9 @@ placeholder tabs and no unearned state badges.
   Recovery also refreshes approvals for the project currently shown in
   Settings, even when a different project is selected; a headless fixture
   checks that view after a missed update.
+  If the selected task was deleted during a gap, recovery reconciles its task
+  list and clears the missing selection; a headless fixture verifies the empty
+  project view and preserves normal workspace-error reporting.
   The full headless Chromium suite passed 115 tests at `0659181`, including
   both event-recovery regressions; it uses mocked IPC, not a native window.
   At `e3cf447`, the two-launch hidden macOS smoke passed with a scripted

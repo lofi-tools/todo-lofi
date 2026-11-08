@@ -1067,6 +1067,12 @@ test.beforeEach(async ({ context }) => {
       __failWorkspaceRead: () => { failPausedWorkspaceRead = true; releaseWorkspaceRead?.() },
       __workspaceReads: () => workspaceReads,
     })
+    Object.assign(window, { __missTaskDeletion: () => {
+      const index = tasks.findIndex((task) => task.id === 'task-1')
+      if (index < 0) throw new Error('Missing fixture task')
+      tasks.splice(index, 1)
+      project.lastTaskId = null
+    } })
     Object.assign(window, { __missNotesApproval: () => {
       notesGrants = [{ id: 'notes-grant', agent: 'claude', title: 'Recovered permission', arguments: {}, paths: [] }]
     } })
@@ -3983,4 +3989,18 @@ test('refreshes the project settings being viewed after missed events', async ({
   })
   await expect(approvals).toContainText('Recovered permission')
   await expect(repository).toHaveAttribute('aria-current', 'true')
+})
+
+
+test('clears a deleted selected task when recovering missed events', async ({ page }) => {
+  await page.goto('/')
+  await expect(page.getByText('ready to go')).toBeVisible()
+  await page.evaluate(() => {
+    const fixture = window as unknown as { __missTaskDeletion: () => void; __emitCoreEvent: (event: ShepherdEvent) => void }
+    fixture.__missTaskDeletion()
+    fixture.__emitCoreEvent({ type: 'resyncRequired' })
+  })
+  await expect(page.getByText('ready to go')).toHaveCount(0)
+  await expect(page.getByRole('heading', { name: 'What should Codex build in demo?' })).toBeVisible()
+  await expect(page.getByText(/Could not refresh after missed updates/)).toHaveCount(0)
 })

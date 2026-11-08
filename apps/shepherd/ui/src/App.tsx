@@ -4,7 +4,7 @@
  * frontend model.
  */
 
-import { For, Show, createEffect, createMemo, createResource, createSignal, createUniqueId, onCleanup, onMount, type JSX } from 'solid-js'
+import { For, Show, batch, createEffect, createMemo, createResource, createSignal, createUniqueId, onCleanup, onMount, type JSX } from 'solid-js'
 import { isTauri } from '@tauri-apps/api/core'
 import { homeDir } from '@tauri-apps/api/path'
 import { getCurrentWindow } from '@tauri-apps/api/window'
@@ -1064,11 +1064,10 @@ export function App() {
     terminalLists: Set<string>
   } | undefined
 
-  function loadResyncSnapshots(projectId: string | null, taskId: string | null, reviewing: boolean) {
+  function loadResyncSnapshots(projectId: string | null, reviewing: boolean) {
     return Promise.all([
       bridge.projectList(),
       projectId ? bridge.taskList(projectId) : undefined,
-      taskId ? bridge.taskWorkspace(taskId) : undefined,
       projectId ? bridge.terminalList(projectId) : undefined,
       reviewing ? bridge.reviewTaskLists() : undefined,
     ])
@@ -1095,7 +1094,7 @@ export function App() {
         const reviewing = reviewOnly()
         let snapshots: Awaited<ReturnType<typeof loadResyncSnapshots>>
         try {
-          snapshots = await loadResyncSnapshots(projectId, taskId, reviewing)
+          snapshots = await loadResyncSnapshots(projectId, reviewing)
         } catch (failure) {
           if (resyncRequested || projectId !== selectedProjectId() ||
               taskId !== selectedTaskId() || reviewing !== reviewOnly()) {
@@ -1104,7 +1103,38 @@ export function App() {
           }
           throw failure
         }
-        const [projectList, taskList, taskWorkspace, terminalList, reviewLists] = snapshots
+        const [projectList, taskList, terminalList, reviewLists] = snapshots
+        if (resyncRequested || projectId !== selectedProjectId() ||
+            taskId !== selectedTaskId() || reviewing !== reviewOnly()) {
+          resyncRequested = true
+          continue
+        }
+        const currentTasks = projectId ? updates.taskLists.get(projectId) ?? taskList?.tasks : undefined
+        if (taskId && currentTasks && !currentTasks.some((task) => task.id === taskId) && !updates.workspaces.has(taskId)) {
+          setSearchJump(undefined)
+          clearTurnOptions(taskId)
+          clearPromptFiles(taskId)
+          batch(() => {
+            setTasks(currentTasks)
+            if (projectId) setLoadedTasksFor(projectId)
+            setSelectedTaskId(null)
+            setWorkspace(null)
+          })
+          resyncRequested = true
+          continue
+        }
+        let taskWorkspace: bridge.TaskWorkspace | undefined
+        try {
+          taskWorkspace = taskId ? await bridge.taskWorkspace(taskId) : undefined
+        } catch (failure) {
+          const latestTasks = projectId ? updates.taskLists.get(projectId) : undefined
+          if (resyncRequested || projectId !== selectedProjectId() || taskId !== selectedTaskId() ||
+              reviewing !== reviewOnly() || (taskId && latestTasks && !latestTasks.some((task) => task.id === taskId))) {
+            resyncRequested = true
+            continue
+          }
+          if (!taskId || !updates.workspaces.has(taskId)) throw failure
+        }
         if (resyncRequested || projectId !== selectedProjectId() ||
             taskId !== selectedTaskId() || reviewing !== reviewOnly()) {
           resyncRequested = true
