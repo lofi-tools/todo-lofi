@@ -1422,7 +1422,8 @@ placeholder tabs and no unearned state badges.
   Codex app-server limits its outbound writer queue to 128 messages. Saturation
   fails a user approval before enqueueing so it can be retried; failure to queue
   a server-request reply ends the transport with a protocol error. A local
-  fixture checks saturation and recovery after capacity becomes available.
+  fixture checks saturation and recovery after capacity becomes available; a
+  subprocess fixture checks the reader reports the error and stops the child.
   ACP file reads and writes share a 32-worker limit per connection; excess
   requests receive an error. An injected exhausted-capacity fixture verifies
   both operations can be retried successfully when capacity returns.

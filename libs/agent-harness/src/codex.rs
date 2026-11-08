@@ -3265,6 +3265,48 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn full_outbound_queue_fails_the_app_server_reader()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut command = Command::new("/bin/sh");
+        command
+            .args([
+                "-c",
+                "printf '%s\\n' '{\"id\":9,\"method\":\"unsupported\"}'; exec sleep 30",
+            ])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .kill_on_drop(true);
+        command.process_group(0);
+        let mut child = command.spawn()?;
+        let stdout = child.stdout.take().ok_or("missing stdout")?;
+        let child = Arc::new(AsyncMutex::new(child));
+        let (sender, mut events) = mpsc::unbounded_channel();
+        let (outgoing, _requests) = mpsc::channel(1);
+        outgoing.try_send(json!({"id": 1}).into())?;
+        let (drained, stderr_drained) = oneshot::channel();
+        drained.send(()).map_err(|_| "stderr receiver closed")?;
+        let reader = spawn_reader(
+            stdout,
+            sender,
+            Arc::new(AsyncMutex::new(Pending::default())),
+            outgoing,
+            Arc::new(Mutex::new(VecDeque::new())),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+            stderr_drained,
+            Arc::downgrade(&child),
+            None,
+        );
+        assert!(matches!(
+            timeout(Duration::from_secs(5), events.recv()).await?,
+            Some(HarnessEvent::ConnectionFailed { kind: FailureKind::Protocol, text }) if text.contains("outbound queue is full")
+        ));
+        reader.await?;
+        assert!(child.lock().await.try_wait()?.is_some());
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn full_outbound_queue_reports_error_and_allows_approval_retry()
     -> Result<(), Box<dyn std::error::Error>> {
         let mut harness = CodexHarness::new();
