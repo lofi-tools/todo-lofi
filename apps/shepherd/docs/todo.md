@@ -1384,6 +1384,9 @@ placeholder tabs and no unearned state badges.
   child handle still depends on the runtime remaining available. A separate
   scripted core fixture verifies that an admission cancellation failure leaves
   the task failed, retains the prompt across database reopen and runs cleanup.
+  Cancelling an OpenCode prompt attempts both queue removal and session
+  interruption even if the first request fails; the local HTTP fixture verifies
+  both errors are reported when both requests fail.
   Core sessions distinguish a disconnected adapter from completed cleanup.
   Retry, task deletion, batch archive and quit all attempt shutdown before
   discarding a disconnected session; an injected-failure fixture verifies that

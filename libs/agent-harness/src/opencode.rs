@@ -1636,9 +1636,19 @@ impl OpenCodeServer {
     async fn cancel_prompt(&self, session: &SessionId, prompt_id: &str) -> HarnessResult<()> {
         let path = format!("{}/inbox/{prompt_id}", session_path(session)?);
         // The prompt may still be queued when Cancel arrives. Deleting a delivered item is a no-op.
-        send_request(self.request(Method::DELETE, &path)).await?;
-        self.interrupt_session(session).await?;
-        Ok(())
+        let removal = send_request(self.request(Method::DELETE, &path)).await;
+        let interruption = self.interrupt_session(session).await;
+        match (removal, interruption) {
+            (Ok(_), Ok(_)) => Ok(()),
+            (Err(error), Ok(_)) => Err(error),
+            (Ok(_), Err(error)) => Err(error),
+            (Err(removal), Err(interruption)) => Err(HarnessError::Reported {
+                kind: FailureKind::classify(&removal).unwrap_or(FailureKind::Protocol),
+                message: format!(
+                    "could not remove the queued OpenCode prompt: {removal}; could not interrupt the OpenCode session: {interruption}"
+                ),
+            }),
+        }
     }
 
     pub async fn shutdown(&self) -> HarnessResult<()> {
@@ -2559,6 +2569,16 @@ exec sleep 60
                     .contains("could not cancel the unconfirmed OpenCode prompt")
             );
             assert!(error.to_string().contains("fixture record cleanup failure"));
+            assert!(
+                error
+                    .to_string()
+                    .contains("could not remove the queued OpenCode prompt")
+            );
+            assert!(
+                error
+                    .to_string()
+                    .contains("could not interrupt the OpenCode session")
+            );
             assert!(matches!(
                 harness.prompt(PromptInput::text("must not start")).await,
                 Err(HarnessError::Protocol(message)) if message.contains("needs cleanup")
@@ -2739,6 +2759,12 @@ exec sleep 60
             let (reader, mut writer) = socket.into_split();
             let (request, _) = read_fixture_request(reader).await?;
             assert!(request.starts_with("DELETE /api/session/ses_fixture/inbox/msg_"));
+            writer.write_all(b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await?;
+            writer.shutdown().await?;
+            let (socket, _) = listener.accept().await?;
+            let (reader, mut writer) = socket.into_split();
+            let (request, _) = read_fixture_request(reader).await?;
+            assert_eq!(request, "POST /api/session/ses_fixture/interrupt HTTP/1.1");
             writer.write_all(b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await?;
             writer.shutdown().await?;
         }
