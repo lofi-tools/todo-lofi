@@ -1375,8 +1375,9 @@ placeholder tabs and no unearned state badges.
   If OpenCode prompt admission fails and cancellation also fails, Shepherd
   stops the server, reports the combined error and blocks further prompts until
   cleanup; failure to clear its process record remains retryable. A local HTTP
-  fixture covers this path. Cancellation
-  of the admission future itself still needs a cleanup guard.
+  fixture covers this path. A cancelled admission future now stops the server
+  in a background cleanup task, reports the outcome and blocks another prompt;
+  local fixtures cover cancellation and a stop failure retained for retry.
   Core sessions distinguish a disconnected adapter from completed cleanup.
   Retry, task deletion, batch archive and quit all attempt shutdown before
   discarding a disconnected session; an injected-failure fixture verifies that
