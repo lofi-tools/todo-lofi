@@ -1437,7 +1437,8 @@ placeholder tabs and no unearned state badges.
   duration of the prompt. ACP line-limited reads stream only the requested range
   and honor a limit even when the start line is omitted; a fixture checks that
   reading stops early.
-  Full-file reads and individual long lines still need a resource limit.
+  Responses are capped at 8 MiB, including full-file reads and individual
+  lines; oversized results return an error, while skipped lines are streamed.
   Agent launch environment commands resolve at spawn with a five-second timeout
   and bounded output; errors exclude their output. Resolution updates the
   environment only after every

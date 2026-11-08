@@ -9,6 +9,8 @@ use std::sync::{Arc, Mutex};
 
 use crate::schema::SessionId;
 
+const MAX_READ_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
+
 /// The directories a session is allowed to touch.
 #[derive(Clone, Debug, Default)]
 pub struct SessionRoots {
@@ -322,41 +324,65 @@ pub fn read_text_file(
 }
 
 fn read_selected_lines(
-    mut input: impl Read,
+    input: impl Read,
     line: Option<u32>,
     limit: Option<u32>,
 ) -> std::io::Result<String> {
     if line.is_none() && limit.is_none() {
-        let mut content = String::new();
-        input.read_to_string(&mut content)?;
-        return Ok(content);
+        let mut bytes = Vec::new();
+        input
+            .take((MAX_READ_RESPONSE_BYTES + 1) as u64)
+            .read_to_end(&mut bytes)?;
+        if bytes.len() > MAX_READ_RESPONSE_BYTES {
+            return Err(read_limit_error());
+        }
+        return String::from_utf8(bytes)
+            .map_err(|error| std::io::Error::new(ErrorKind::InvalidData, error));
     }
     let mut reader = BufReader::new(input);
-    let mut buffer = String::new();
     for _ in 0..line.unwrap_or(1).saturating_sub(1) {
-        buffer.clear();
-        if reader.read_line(&mut buffer)? == 0 {
+        if reader.skip_until(b'\n')? == 0 {
             return Ok(String::new());
         }
     }
     let mut output = String::new();
+    let mut buffer = Vec::new();
     for index in 0..limit.unwrap_or(u32::MAX) {
         buffer.clear();
-        if reader.read_line(&mut buffer)? == 0 {
+        let remaining = MAX_READ_RESPONSE_BYTES.saturating_sub(output.len());
+        if (&mut reader)
+            .take((remaining + 3) as u64)
+            .read_until(b'\n', &mut buffer)?
+            == 0
+        {
             break;
         }
-        if buffer.ends_with('\n') {
+        if buffer.last() == Some(&b'\n') {
             buffer.pop();
-            if buffer.ends_with('\r') {
+            if buffer.last() == Some(&b'\r') {
                 buffer.pop();
             }
+        }
+        let separator = usize::from(index > 0);
+        if buffer.len().saturating_add(separator) > remaining {
+            return Err(read_limit_error());
         }
         if index > 0 {
             output.push('\n');
         }
-        output.push_str(&buffer);
+        output.push_str(
+            std::str::from_utf8(&buffer)
+                .map_err(|error| std::io::Error::new(ErrorKind::InvalidData, error))?,
+        );
     }
     Ok(output)
+}
+
+fn read_limit_error() -> std::io::Error {
+    std::io::Error::new(
+        ErrorKind::InvalidData,
+        "ACP file read result exceeds the 8 MiB limit; request a smaller line range",
+    )
 }
 
 /// Write a text file, creating its parent directory when needed.
@@ -412,6 +438,38 @@ mod tests {
             "first\nsecond\n"
         );
         assert_eq!(read_selected_lines(&b"first\n"[..], None, Some(0))?, "");
+        Ok(())
+    }
+
+    #[test]
+    fn file_reads_limit_responses_and_skip_large_unselected_lines() -> anyhow::Result<()> {
+        let oversized = vec![b'x'; MAX_READ_RESPONSE_BYTES + 1];
+        for (line, limit) in [(None, None), (Some(1), Some(1))] {
+            let error = read_selected_lines(oversized.as_slice(), line, limit)
+                .err()
+                .ok_or_else(|| anyhow::anyhow!("oversized read unexpectedly succeeded"))?;
+            assert!(error.to_string().contains("8 MiB limit"));
+        }
+        let mut content = oversized;
+        content.extend_from_slice(b"\nsmall\n");
+        assert_eq!(
+            read_selected_lines(content.as_slice(), Some(2), Some(1))?,
+            "small"
+        );
+        let exact = vec![b'y'; MAX_READ_RESPONSE_BYTES];
+        assert_eq!(
+            read_selected_lines(exact.as_slice(), None, None)?.len(),
+            MAX_READ_RESPONSE_BYTES
+        );
+        let mut exact_line = exact.clone();
+        exact_line.extend_from_slice(b"\r\n");
+        assert_eq!(
+            read_selected_lines(exact_line.as_slice(), Some(1), Some(1))?.len(),
+            MAX_READ_RESPONSE_BYTES
+        );
+        let mut multiple_lines = b"a\n".to_vec();
+        multiple_lines.extend_from_slice(&exact);
+        assert!(read_selected_lines(multiple_lines.as_slice(), Some(1), None).is_err());
         Ok(())
     }
 
