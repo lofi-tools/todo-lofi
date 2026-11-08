@@ -1283,9 +1283,17 @@ placeholder tabs and no unearned state badges.
   failures. When an agent leader exits, its record is retained if the recorded
   group and session still have members. Inspection reports the group as
   unverified, since reuse prevents proving ownership; a local fixture covers
-  retention and eventual cleanup. Group scans are snapshots and do not prove
-  that every descendant is found. Stopping a recorded group whose leader exited
-  remains open because its members' identities cannot be verified.
+  retention and eventual cleanup.  Group scans are snapshots and do not prove
+  that every descendant is found. When the leader has exited, a recorded group
+  can still be stopped: each launch carries a token in
+  `SHEPHERD_PROCESS_TOKEN`, descendants inherit it, and Shepherd signals a
+  surviving session member only while its environment still carries that
+  launch's token (read through `KERN_PROCARGS2` on macOS and
+  `/proc/<pid>/environ` on Linux). A record without a token, or a member whose
+  environment cannot be read, makes the stop fail without signalling anything.
+  Real process-tree fixtures cover a stopped tokened member, a member of
+  another launch and an unrelated process left running, the untokened refusal,
+  and the original group stop while the leader still matches.
   Newly recorded agents hold a per-record OS lock while owned by this instance;
   cross-process and crash fixtures verify that another process cannot acquire
   it until the owner exits. Existing records have no such ownership evidence.

@@ -138,6 +138,7 @@ pub(crate) fn capture_process_record(
     pid: libc::pid_t,
     kind: &str,
     owner_id: &str,
+    token: &str,
 ) -> Option<ProcessRecord> {
     if pid <= 1 {
         return None;
@@ -161,7 +162,87 @@ pub(crate) fn capture_process_record(
         process_group: u32::try_from(group).ok()?,
         session_id: u32::try_from(session).ok()?,
         boot_id,
+        token: token.to_owned(),
     })
+}
+
+/// Whether a same-user process still carries `needle` in its environment.
+///
+/// macOS only exposes another process's environment through `KERN_PROCARGS2`,
+/// and `ps -E` prints nothing for the same process, so the launch token can be
+/// read this way but not through `ps`. A failing read is an error rather than a
+/// negative answer, because the caller must refuse to signal an unverified PID.
+#[cfg(unix)]
+pub(crate) fn process_environment_contains(
+    pid: libc::pid_t,
+    needle: &[u8],
+) -> std::io::Result<bool> {
+    const MAX_ENVIRONMENT_BYTES: usize = 4 * 1024 * 1024;
+    let environment = read_process_environment(pid, MAX_ENVIRONMENT_BYTES)?;
+    Ok(environment
+        .split(|byte| *byte == 0)
+        .any(|entry| entry == needle))
+}
+
+#[cfg(target_os = "macos")]
+fn read_process_environment(pid: libc::pid_t, limit: usize) -> std::io::Result<Vec<u8>> {
+    let mut mib = [libc::CTL_KERN, libc::KERN_PROCARGS2, pid];
+    let mut size: libc::size_t = 0;
+    if unsafe {
+        libc::sysctl(
+            mib.as_mut_ptr(),
+            3,
+            std::ptr::null_mut(),
+            &mut size,
+            std::ptr::null_mut(),
+            0,
+        )
+    } != 0
+    {
+        return Err(std::io::Error::last_os_error());
+    }
+    if size == 0 {
+        return Err(std::io::Error::other("process environment is empty"));
+    }
+    if size > limit {
+        return Err(std::io::Error::other("process environment is too large"));
+    }
+    let mut buffer = vec![0u8; size];
+    if unsafe {
+        libc::sysctl(
+            mib.as_mut_ptr(),
+            3,
+            buffer.as_mut_ptr().cast(),
+            &mut size,
+            std::ptr::null_mut(),
+            0,
+        )
+    } != 0
+    {
+        return Err(std::io::Error::last_os_error());
+    }
+    buffer.truncate(size.min(limit));
+    Ok(buffer)
+}
+
+#[cfg(target_os = "linux")]
+fn read_process_environment(pid: libc::pid_t, limit: usize) -> std::io::Result<Vec<u8>> {
+    use std::io::Read as _;
+    let file = std::fs::File::open(format!("/proc/{pid}/environ"))?;
+    let mut buffer = Vec::new();
+    file.take(limit as u64 + 1).read_to_end(&mut buffer)?;
+    if buffer.len() > limit {
+        return Err(std::io::Error::other("process environment is too large"));
+    }
+    Ok(buffer)
+}
+
+#[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
+fn read_process_environment(_pid: libc::pid_t, _limit: usize) -> std::io::Result<Vec<u8>> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "reading another process's environment is unavailable on this platform",
+    ))
 }
 
 #[cfg(target_os = "macos")]
@@ -419,6 +500,7 @@ struct TerminalSessions {
 struct ExitedSession {
     terminal_id: String,
     members: Vec<ProcessIdentity>,
+    token: String,
 }
 
 #[cfg(unix)]
@@ -468,6 +550,11 @@ impl TerminalSessions {
                     session_id,
                     ExitedSession {
                         terminal_id: id.into(),
+                        token: session
+                            .process
+                            .as_ref()
+                            .map(|process| process.token.clone())
+                            .unwrap_or_default(),
                         members,
                     },
                 );
@@ -640,6 +727,7 @@ impl PtyTerminals {
                         session_id: u32::try_from(session_id)
                             .map_err(|error| TerminalError::Backend(error.to_string()))?,
                         boot_id: boot_id.clone(),
+                        token: session.token.clone(),
                     });
                 }
             }
@@ -774,6 +862,8 @@ impl TerminalService for PtyTerminals {
         command.env("TERM", "xterm-256color");
         command.env("COLORTERM", "truecolor");
         command.env("SHEPHERD_TERMINAL_ID", terminal_id.as_str());
+        let token = uuid::Uuid::new_v4().to_string();
+        command.env(agent_harness::PROCESS_TOKEN_ENV, &token);
         for (key, value) in &spec.environment {
             command.env(key, value);
         }
@@ -852,7 +942,7 @@ impl TerminalService for PtyTerminals {
             .and_then(|pid| libc::pid_t::try_from(pid).ok());
         #[cfg(unix)]
         let process = session_id
-            .and_then(|pid| capture_process_record(pid, "terminal", terminal_id.as_str()));
+            .and_then(|pid| capture_process_record(pid, "terminal", terminal_id.as_str(), &token));
         #[cfg(not(unix))]
         let process = None;
         self.sessions()?.live.insert(
@@ -1007,7 +1097,7 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let pid = libc::pid_t::try_from(std::process::id())?;
         let mut record =
-            capture_process_record(pid, "agent", "task").ok_or("identity unavailable")?;
+            capture_process_record(pid, "agent", "task", "token").ok_or("identity unavailable")?;
         let current_boot = record.boot_id.clone();
         record.boot_id = format!("different-{current_boot}");
         assert!(!process_group_has_other_members(&record)?);
@@ -1022,7 +1112,9 @@ mod tests {
     fn captured_process_record_includes_verified_identity() -> Result<(), Box<dyn std::error::Error>>
     {
         let pid = libc::pid_t::try_from(std::process::id())?;
-        let record = capture_process_record(pid, "agent", "task").ok_or("identity unavailable")?;
+        let record =
+            capture_process_record(pid, "agent", "task", "token").ok_or("identity unavailable")?;
+        assert_eq!(record.token, "token");
         assert_eq!(record.pid, u32::try_from(pid)?);
         assert_eq!(record.kind, "agent");
         assert_eq!(record.owner_id, "task");
@@ -1036,7 +1128,7 @@ mod tests {
             u32::try_from(unsafe { libc::getsid(pid) })?
         );
         assert_eq!(Some(record.boot_id), boot_id());
-        assert!(capture_process_record(1, "agent", "task").is_none());
+        assert!(capture_process_record(1, "agent", "task", "token").is_none());
         Ok(())
     }
 

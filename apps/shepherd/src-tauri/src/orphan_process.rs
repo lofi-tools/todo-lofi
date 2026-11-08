@@ -358,23 +358,45 @@ pub(crate) fn inspect(records: Vec<ProcessRecord>) -> Vec<ProcessInspection> {
 /// Stop a process recorded by an earlier instance.
 ///
 /// The retained lease proves that no running instance still owns the process.
-/// The leader's identity must match before signalling, and escalation only
-/// targets members of the recorded session and group, so a reused PID is never
-/// signalled.
+/// While the leader still matches, its recorded session and group identify its
+/// members. Once the leader has exited, membership is proven by the launch
+/// token in each member's environment instead, so a reused PID or another
+/// launch is never signalled; without a token, or when the environment cannot
+/// be read, the stop is refused.
 #[cfg(unix)]
 pub(crate) fn stop(leases: &ProcessLeases, record: &ProcessRecord) -> io::Result<()> {
     let _lease = leases.adopt(&record.id)?;
     _lease.verify_entry(&leases.directory_handle, &record.id)?;
-    ensure_matching(record)?;
-    let mut members = crate::pty_terminal::session_members(record)?;
+    let status = classify(record, &observe(record, crate::pty_terminal::boot_id()));
+    match status {
+        ProcessStatus::Matching => stop_members(record, None),
+        ProcessStatus::Gone | ProcessStatus::GroupUnverified => {
+            stop_members(record, Some(record.token.as_str()))
+        }
+        _ => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "the recorded process identity no longer matches a live process",
+        )),
+    }
+}
+
+#[cfg(unix)]
+fn stop_members(record: &ProcessRecord, token: Option<&str>) -> io::Result<()> {
+    let mut members = verified_members(record, token)?;
     if members.is_empty() {
-        return Ok(());
+        return match token {
+            Some(_) => Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "no surviving member carried the recorded launch token",
+            )),
+            None => Ok(()),
+        };
     }
     signal_members(&members, libc::SIGTERM)?;
     let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
     loop {
         std::thread::sleep(std::time::Duration::from_millis(10));
-        members = crate::pty_terminal::session_members(record)?;
+        members = verified_members(record, token)?;
         if members.is_empty() {
             return Ok(());
         }
@@ -386,23 +408,36 @@ pub(crate) fn stop(leases: &ProcessLeases, record: &ProcessRecord) -> io::Result
     Ok(())
 }
 
+/// Session members that can be attributed to this launch. A token filter only
+/// keeps processes whose environment still carries it, and refuses the whole
+/// stop when any member's environment cannot be read.
+#[cfg(unix)]
+fn verified_members(record: &ProcessRecord, token: Option<&str>) -> io::Result<Vec<libc::pid_t>> {
+    let members = crate::pty_terminal::session_members(record)?;
+    let Some(token) = token else {
+        return Ok(members);
+    };
+    if token.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "the recorded process has no launch token, so its members cannot be verified",
+        ));
+    }
+    let needle = format!("{}={token}", agent_harness::PROCESS_TOKEN_ENV).into_bytes();
+    let mut verified = Vec::new();
+    for pid in members {
+        if crate::pty_terminal::process_environment_contains(pid, &needle)? {
+            verified.push(pid);
+        }
+    }
+    Ok(verified)
+}
+
 #[cfg(not(unix))]
 pub(crate) fn stop(_leases: &ProcessLeases, _record: &ProcessRecord) -> io::Result<()> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
         "stopping recorded processes is unavailable on this platform",
-    ))
-}
-
-#[cfg(unix)]
-fn ensure_matching(record: &ProcessRecord) -> io::Result<()> {
-    let observed = observe(record, crate::pty_terminal::boot_id());
-    if classify(record, &observed) == ProcessStatus::Matching {
-        return Ok(());
-    }
-    Err(io::Error::new(
-        io::ErrorKind::InvalidData,
-        "the recorded process identity no longer matches a live process",
     ))
 }
 
@@ -616,8 +651,13 @@ mod tests {
                 }
                 let child = command.spawn()?;
                 let pid = libc::pid_t::try_from(child.id())?;
-                let record = crate::pty_terminal::capture_process_record(pid, "agent", "fixture")
-                    .ok_or("could not capture the fixture process")?;
+                let record = crate::pty_terminal::capture_process_record(
+                    pid,
+                    "agent",
+                    "fixture",
+                    "fixture-token",
+                )
+                .ok_or("could not capture the fixture process")?;
                 Ok((child, record))
             };
 
@@ -651,6 +691,158 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(unix)]
+    fn alive(pid: libc::pid_t) -> bool {
+        (unsafe { libc::kill(pid, 0) }) == 0
+    }
+
+    #[cfg(unix)]
+    fn wait_for_member_pids(
+        path: &Path,
+        count: usize,
+    ) -> Result<Vec<libc::pid_t>, Box<dyn std::error::Error>> {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            if let Ok(contents) = std::fs::read_to_string(path) {
+                let pids: Vec<libc::pid_t> = contents
+                    .lines()
+                    .filter_map(|line| line.trim().parse().ok())
+                    .collect();
+                if pids.len() >= count {
+                    return Ok(pids);
+                }
+            }
+            if std::time::Instant::now() >= deadline {
+                return Err("the fixture did not record its members".into());
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
+    /// A leader that exits leaves its children running in the recorded session.
+    /// The launch token decides which of them belong to this launch.
+    #[cfg(unix)]
+    #[test]
+    fn stop_signals_only_tokened_members_of_a_leaderless_group()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::process::CommandExt as _;
+        if crate::pty_terminal::boot_id().is_none() {
+            eprintln!("Skipping process stop check: the OS boot identifier is unavailable");
+            return Ok(());
+        }
+        let root = tempfile::tempdir()?;
+        let directory = root.path().join("leases");
+        let leases = ProcessLeases::new(directory.clone())?;
+        let members_file = root.path().join("members");
+        let token = "launch-token-fixture";
+        let mut command = std::process::Command::new("/bin/sh");
+        command
+            .args([
+                "-c",
+                "sleep 30 & echo $! >> \"$1\"; SHEPHERD_PROCESS_TOKEN=other-launch sleep 30 & echo $! >> \"$1\"; sleep 0.5; exit 3",
+                "fixture",
+            ])
+            .arg(&members_file)
+            .env(agent_harness::PROCESS_TOKEN_ENV, token)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        unsafe {
+            command.pre_exec(|| {
+                if libc::setsid() < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let mut leader = command.spawn()?;
+        let leader_pid = libc::pid_t::try_from(leader.id())?;
+        let record =
+            crate::pty_terminal::capture_process_record(leader_pid, "agent", "fixture", token)
+                .ok_or("could not capture the fixture process")?;
+        let members = wait_for_member_pids(&members_file, 2)?;
+        leader.wait()?;
+        assert!(!alive(leader_pid));
+        let tokened = members[0];
+        let other = members[1];
+        assert!(alive(tokened) && alive(other));
+        let mut unrelated = std::process::Command::new("sleep")
+            .arg("30")
+            .env(agent_harness::PROCESS_TOKEN_ENV, token)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()?;
+        let unrelated_pid = libc::pid_t::try_from(unrelated.id())?;
+
+        drop(ProcessLease::create(&directory, &record.id)?);
+        stop(&leases, &record)?;
+
+        assert!(!alive(tokened), "a member of this launch should be stopped");
+        assert!(alive(other), "a member of another launch must survive");
+        assert!(alive(unrelated_pid), "an unrelated process must survive");
+
+        unsafe {
+            libc::kill(other, libc::SIGKILL);
+            libc::kill(unrelated_pid, libc::SIGKILL);
+        }
+        unrelated.wait()?;
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stop_refuses_a_leaderless_group_without_a_launch_token()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::process::CommandExt as _;
+        if crate::pty_terminal::boot_id().is_none() {
+            eprintln!("Skipping process stop check: the OS boot identifier is unavailable");
+            return Ok(());
+        }
+        let root = tempfile::tempdir()?;
+        let directory = root.path().join("leases");
+        let leases = ProcessLeases::new(directory.clone())?;
+        let member_file = root.path().join("member");
+        let mut command = std::process::Command::new("/bin/sh");
+        command
+            .args([
+                "-c",
+                "sleep 30 & echo $! > \"$1\"; sleep 0.4; exit 0",
+                "fixture",
+            ])
+            .arg(&member_file)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        unsafe {
+            command.pre_exec(|| {
+                if libc::setsid() < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let mut leader = command.spawn()?;
+        let leader_pid = libc::pid_t::try_from(leader.id())?;
+        let record =
+            crate::pty_terminal::capture_process_record(leader_pid, "agent", "fixture", "")
+                .ok_or("could not capture the fixture process")?;
+        let members = wait_for_member_pids(&member_file, 1)?;
+        leader.wait()?;
+        let member = members[0];
+        assert!(alive(member));
+
+        drop(ProcessLease::create(&directory, &record.id)?);
+        let error = stop(&leases, &record)
+            .err()
+            .ok_or("stopped a process group without a launch token")?;
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(alive(member), "an unverified member must survive a refusal");
+
+        unsafe { libc::kill(member, libc::SIGKILL) };
+        Ok(())
+    }
+
     #[test]
     fn inspection_refuses_unverified_and_reused_identities() {
         let record = ProcessRecord {
@@ -662,6 +854,7 @@ mod tests {
             process_group: 123,
             session_id: 123,
             boot_id: "boot".into(),
+            token: String::new(),
         };
         let mut observed = Observation {
             boot_id: Some("boot".into()),

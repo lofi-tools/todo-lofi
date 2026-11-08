@@ -74,6 +74,10 @@ pub struct ProcessRecord {
     pub process_group: u32,
     pub session_id: u32,
     pub boot_id: String,
+    /// Copied into the launch environment as `SHEPHERD_PROCESS_TOKEN`. Members
+    /// of the recorded session inherit it, which proves a surviving member
+    /// belongs to this launch even after the leader's PID could be reused.
+    pub token: String,
 }
 
 impl TerminalRecord {

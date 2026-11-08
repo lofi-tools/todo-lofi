@@ -240,6 +240,10 @@ const MIGRATIONS: &[Migration] = &[
         name: "0016_worktree_deletion_identity.sql",
         sql: include_str!("../toasty/migrations/0016_worktree_deletion_identity.sql"),
     },
+    Migration {
+        name: "0017_process_token.sql",
+        sql: include_str!("../toasty/migrations/0017_process_token.sql"),
+    },
 ];
 
 /// The durable store used by the application. The database handle is guarded
@@ -901,9 +905,9 @@ impl Store for TursoStore {
         let mut db = self.db.lock().await;
         let started_at = i64::try_from(process.started_at)
             .map_err(|error| StoreError::Backend(error.to_string()))?;
-        toasty::sql::statement("INSERT INTO processes (id, kind, owner_id, pid, started_at, process_group, session_id, boot_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)")
+        toasty::sql::statement("INSERT INTO processes (id, kind, owner_id, pid, started_at, process_group, session_id, boot_id, token) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)")
             .bind(&process.id).bind(&process.kind).bind(&process.owner_id).bind(i64::from(process.pid))
-            .bind(started_at).bind(i64::from(process.process_group)).bind(i64::from(process.session_id)).bind(&process.boot_id)
+            .bind(started_at).bind(i64::from(process.process_group)).bind(i64::from(process.session_id)).bind(&process.boot_id).bind(&process.token)
             .exec(&mut *db).await?;
         Ok(())
     }
@@ -919,8 +923,8 @@ impl Store for TursoStore {
 
     async fn load_processes(&self) -> Result<Vec<ProcessRecord>, StoreError> {
         let mut db = self.db.lock().await;
-        let rows = toasty::sql::query("SELECT id, kind, owner_id, pid, started_at, process_group, session_id, boot_id FROM processes ORDER BY id")
-            .column_types([Type::String, Type::String, Type::String, Type::I64, Type::I64, Type::I64, Type::I64, Type::String])
+        let rows = toasty::sql::query("SELECT id, kind, owner_id, pid, started_at, process_group, session_id, boot_id, token FROM processes ORDER BY id")
+            .column_types([Type::String, Type::String, Type::String, Type::I64, Type::I64, Type::I64, Type::I64, Type::String, Type::String])
             .exec(&mut *db).await?;
         rows.into_iter()
             .map(|row| {
@@ -939,6 +943,7 @@ impl Store for TursoStore {
                     session_id: u32::try_from(required_u64(fields.get(6))?)
                         .map_err(|error| StoreError::InvalidRow(error.to_string()))?,
                     boot_id: required_string(fields.get(7))?,
+                    token: required_string(fields.get(8))?,
                 })
             })
             .collect()
@@ -3473,6 +3478,7 @@ mod tests {
             process_group: 123,
             session_id: 123,
             boot_id: "boot-a".into(),
+            token: "token-a".into(),
         };
         for store in [
             Box::new(MemoryStore::new()) as Box<dyn Store>,

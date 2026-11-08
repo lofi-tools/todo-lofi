@@ -67,7 +67,10 @@ pub fn configured_launch(settings: &AgentSettings) -> HarnessResult<Option<Spawn
 }
 
 pub async fn project_modes(spec: &SpawnSpec) -> HarnessResult<Vec<AgentMode>> {
-    let hide_diagnostics = !spec.environment.is_empty();
+    let hide_diagnostics = spec
+        .environment
+        .keys()
+        .any(|key| key != crate::PROCESS_TOKEN_ENV);
     let (server, mut startup_group) = OpenCodeServer::start_guarded(spec, None)
         .await
         .map_err(|error| crate::protect_discovery_error(error, hide_diagnostics))?;

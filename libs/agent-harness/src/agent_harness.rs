@@ -597,11 +597,17 @@ pub trait ProjectApprovalPolicy: Send + Sync {
     async fn remember(&self, key: &str, request: &ApprovalRequest) -> Result<(), String>;
 }
 
+/// Environment variable carrying the launch token. Every descendant of a
+/// launched agent inherits it, so a surviving member can be attributed to its
+/// launch after the leader's PID is gone.
+pub const PROCESS_TOKEN_ENV: &str = "SHEPHERD_PROCESS_TOKEN";
+
 #[allow(
     clippy::double_must_use,
     reason = "async_trait generates must-use futures"
 )]
 #[async_trait]
+
 pub trait AgentProcessTracker: Send + Sync {
     async fn started(&self, pid: u32) -> Result<String, String>;
     async fn stopped(&self, record_id: &str) -> Result<(), String>;

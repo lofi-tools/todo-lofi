@@ -241,6 +241,7 @@ struct AgentProcessStore {
     store: Arc<OnceLock<Arc<dyn Store>>>,
     task_id: String,
     leases: Option<Arc<crate::orphan_process::ProcessLeases>>,
+    token: String,
 }
 
 #[async_trait]
@@ -250,7 +251,7 @@ impl agent_harness::AgentProcessTracker for AgentProcessStore {
         #[cfg(unix)]
         let record = {
             let pid = libc::pid_t::try_from(pid).map_err(|error| error.to_string())?;
-            crate::pty_terminal::capture_process_record(pid, "agent", &self.task_id)
+            crate::pty_terminal::capture_process_record(pid, "agent", &self.task_id, &self.token)
                 .ok_or("could not capture agent process identity")?
         };
         #[cfg(not(unix))]
@@ -319,11 +320,13 @@ impl TerminalHost {
     pub(crate) fn agent_process_tracker(
         &self,
         task_id: &TaskId,
+        token: String,
     ) -> Arc<dyn agent_harness::AgentProcessTracker> {
         Arc::new(AgentProcessStore {
             store: self.process_store.clone(),
             task_id: task_id.to_string(),
             leases: self.process_leases.get().cloned(),
+            token,
         })
     }
 
@@ -5066,13 +5069,15 @@ mod tests {
         let tracker = AgentProcessStore {
             store: slot,
             task_id: "task-fixture".into(),
+            token: String::new(),
             leases: Some(Arc::new(crate::orphan_process::ProcessLeases::new(
                 directory.path().join("leases"),
             )?)),
         };
         let pid = libc::pid_t::try_from(std::process::id())?;
-        let mut record = crate::pty_terminal::capture_process_record(pid, "agent", "task-fixture")
-            .ok_or("identity unavailable")?;
+        let mut record =
+            crate::pty_terminal::capture_process_record(pid, "agent", "task-fixture", "")
+                .ok_or("identity unavailable")?;
         record.process_group = 1;
         store.save_process(&record).await?;
         let error = agent_harness::AgentProcessTracker::stopped(&tracker, &record.id)
@@ -5095,6 +5100,7 @@ mod tests {
         let tracker = AgentProcessStore {
             store: slot,
             task_id: "task-fixture".into(),
+            token: String::new(),
             leases: Some(Arc::new(crate::orphan_process::ProcessLeases::new(
                 directory.path().join("leases"),
             )?)),
@@ -5203,6 +5209,7 @@ mod tests {
         let tracker = Arc::new(AgentProcessStore {
             store: slot,
             task_id: "task-fixture".into(),
+            token: String::new(),
             leases: Some(Arc::new(crate::orphan_process::ProcessLeases::new(
                 directory.path().join("leases"),
             )?)),
@@ -5347,6 +5354,7 @@ mod tests {
             let tracker = Arc::new(AgentProcessStore {
                 store: slot,
                 task_id: "crash-task".into(),
+                token: String::new(),
                 leases: Some(Arc::new(crate::orphan_process::ProcessLeases::new(
                     data.join("leases"),
                 )?)),
@@ -6562,6 +6570,7 @@ mod tests {
             process_group: 123,
             session_id: 123,
             boot_id: "boot".into(),
+            token: "token".into(),
         };
         state.core.lock().await.record_process(&record).await?;
         assert!(state.previous_processes.lock().await.is_empty());

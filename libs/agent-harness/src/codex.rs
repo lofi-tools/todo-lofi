@@ -808,7 +808,10 @@ struct CodexEffort {
 }
 
 pub async fn project_models(spec: SpawnSpec) -> HarnessResult<CodexProjectModels> {
-    let hide_diagnostics = !spec.environment.is_empty();
+    let hide_diagnostics = spec
+        .environment
+        .keys()
+        .any(|key| key != crate::PROCESS_TOKEN_ENV);
     let mut harness = CodexHarness::new();
     let mut discovery_group = None;
     let result = async {
