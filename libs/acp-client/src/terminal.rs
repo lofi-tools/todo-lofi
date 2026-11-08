@@ -70,6 +70,7 @@ struct TerminalEntry {
     output: String,
     truncated: bool,
     exit: Option<TerminalExitStatus>,
+    exit_failure: Option<String>,
     waiters: Vec<TerminalWaiter>,
     byte_limit: usize,
     cancelled: tokio::sync::watch::Sender<bool>,
@@ -78,7 +79,7 @@ struct TerminalEntry {
 
 struct TerminalWaiter {
     token: Arc<()>,
-    sender: oneshot::Sender<TerminalExitStatus>,
+    sender: oneshot::Sender<Result<TerminalExitStatus, String>>,
 }
 
 struct WaiterGuard {
@@ -303,7 +304,15 @@ impl TerminalRegistry {
                 Ok(status) => terminal_exit_status(status),
                 Err(error) => {
                     tracing::warn!("terminal {key} could not be waited on: {error}");
-                    TerminalExitStatus::new()
+                    registry.record_wait_failure(
+                        &key,
+                        format!("could not wait for terminal process: {error}"),
+                    );
+                    drop(stop_requests);
+                    for task in [stdout_task, stderr_task] {
+                        task.abort();
+                    }
+                    return;
                 }
             };
             registry.record_exit(&key, &exit);
@@ -327,6 +336,7 @@ impl TerminalRegistry {
                 output: String::new(),
                 truncated: false,
                 exit: None,
+                exit_failure: None,
                 waiters: Vec::new(),
                 byte_limit,
                 cancelled,
@@ -364,6 +374,9 @@ impl TerminalRegistry {
             let entry = guard
                 .get_mut(terminal_id.0.as_ref())
                 .ok_or_else(|| format!("unknown terminal {}", terminal_id.0))?;
+            if let Some(error) = &entry.exit_failure {
+                return Err(error.clone());
+            }
             match &entry.exit {
                 Some(exit) => return Ok(WaitForTerminalExitResponse::new(exit.clone())),
                 None => {
@@ -397,7 +410,8 @@ impl TerminalRegistry {
         tokio::select! {
             biased;
             result = rx => match result {
-                Ok(exit) => Ok(WaitForTerminalExitResponse::new(exit)),
+                Ok(Ok(exit)) => Ok(WaitForTerminalExitResponse::new(exit)),
+                Ok(Err(error)) => Err(error),
                 Err(_) => Err("terminal was released before it exited".to_string()),
             },
             result = cancelled.changed() => match result {
@@ -699,10 +713,27 @@ impl TerminalRegistry {
                 return;
             };
             entry.exit = Some(exit.clone());
+            entry.exit_failure = None;
             std::mem::take(&mut entry.waiters)
         };
         for waiter in waiters {
-            if waiter.sender.send(exit.clone()).is_err() {
+            if waiter.sender.send(Ok(exit.clone())).is_err() {
+                tracing::debug!("ACP terminal exit waiter closed");
+            }
+        }
+    }
+
+    fn record_wait_failure(&self, key: &str, error: String) {
+        let waiters = {
+            let mut guard = self.entries();
+            let Some(entry) = guard.get_mut(key) else {
+                return;
+            };
+            entry.exit_failure = Some(error.clone());
+            std::mem::take(&mut entry.waiters)
+        };
+        for waiter in waiters {
+            if waiter.sender.send(Err(error.clone())).is_err() {
                 tracing::debug!("ACP terminal exit waiter closed");
             }
         }
@@ -824,6 +855,32 @@ mod tests {
         async fn stop(&self, _id: &str) -> Result<(), String> {
             Ok(())
         }
+    }
+
+    #[tokio::test]
+    async fn terminal_wait_failure_reaches_current_and_later_waiters()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let (events, _receiver) = tokio::sync::mpsc::unbounded_channel();
+        let registry = TerminalRegistry::new(
+            SessionRoots::new([directory.path().to_path_buf()]),
+            &events,
+            None,
+        );
+        registry.register("fixture", MAX_OUTPUT_LIMIT);
+        let terminal = TerminalId::new("fixture");
+        let mut first = Box::pin(registry.wait_for_exit(&terminal));
+        let mut second = Box::pin(registry.wait_for_exit(&terminal));
+        assert!(futures::poll!(first.as_mut()).is_pending());
+        assert!(futures::poll!(second.as_mut()).is_pending());
+        registry.record_wait_failure("fixture", "fixture wait failure".into());
+        assert!(matches!(first.await, Err(error) if error == "fixture wait failure"));
+        assert!(matches!(second.await, Err(error) if error == "fixture wait failure"));
+        assert!(
+            matches!(registry.wait_for_exit(&terminal).await, Err(error) if error == "fixture wait failure")
+        );
+        assert!(registry.output(&terminal).exit_status.is_none());
+        Ok(())
     }
 
     #[tokio::test]

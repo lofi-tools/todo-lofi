@@ -1424,6 +1424,10 @@ placeholder tabs and no unearned state badges.
   explicitly and can be retried after capacity becomes available.
   A closed direct-terminal supervisor channel reports failure unless an exit
   was recorded, retaining the terminal rather than claiming it stopped.
+  A direct terminal process wait failure is also returned to current and later
+  exit waiters instead of being recorded as an exit with unknown status. A
+  registry fixture covers propagation; recovery of the child after that OS
+  wait failure remains open.
   Output permits remain held through the harness queue until the core
   consumes the events. A direct terminal's exit wait completes even if a
   descendant keeps an output pipe open, and shutdown rejects new terminals.
