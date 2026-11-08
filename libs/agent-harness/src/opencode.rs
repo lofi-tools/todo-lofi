@@ -260,7 +260,14 @@ impl OpenCodeHarness {
 struct ActiveTurn {
     id: String,
     finished: Arc<AtomicBool>,
+    approval: Arc<Mutex<ApprovalResponseState>>,
     reader: JoinHandle<()>,
+}
+
+#[derive(Default)]
+struct ApprovalResponseState {
+    active: Option<ApprovalId>,
+    submitted: bool,
 }
 
 struct StopOnDrop {
@@ -604,18 +611,27 @@ impl AgentHarness for OpenCodeHarness {
         admission.disarm();
         self.cleanup_required = false;
         let finished = Arc::new(AtomicBool::new(false));
+        let approval = Arc::new(Mutex::new(ApprovalResponseState::default()));
         let reader = tokio::spawn({
             let id = id.clone();
             let sender = self.sender.clone();
             let stream_capacity = self.stream_capacity.clone();
             let finished = finished.clone();
+            let approval = approval.clone();
             let remove = server.request(Method::DELETE, &format!("{path}/inbox/{id}"));
             let interrupt = server.request(Method::POST, &format!("{path}/interrupt"));
             let child = server.child.clone();
             let stderr = server.stderr.clone();
             async move {
-                let terminal = match read_turn(events, session, &id, &sender, &stream_capacity)
-                    .await
+                let terminal = match read_turn(
+                    events,
+                    session,
+                    &id,
+                    &sender,
+                    &stream_capacity,
+                    &approval,
+                )
+                .await
                 {
                     Ok(event) => event,
                     Err(error) => {
@@ -673,6 +689,7 @@ impl AgentHarness for OpenCodeHarness {
         self.turn = Some(ActiveTurn {
             id,
             finished,
+            approval,
             reader,
         });
         Ok(())
@@ -746,6 +763,16 @@ impl AgentHarness for OpenCodeHarness {
                 return Err(HarnessError::ApprovalOptionUnavailable);
             }
         };
+        {
+            let turn = self.turn.as_ref().ok_or(HarnessError::NoPendingApproval)?;
+            let mut state = turn.approval.lock().map_err(|_| {
+                HarnessError::Protocol("OpenCode approval state is unavailable".into())
+            })?;
+            if state.active.as_ref() != Some(&approval_id) || state.submitted {
+                return Err(HarnessError::NoPendingApproval);
+            }
+            state.submitted = true;
+        }
         send_request(
             server
                 .request(Method::POST, &path)
@@ -789,6 +816,7 @@ async fn read_turn(
     prompt_id: &str,
     sender: &mpsc::UnboundedSender<HarnessEvent>,
     stream_capacity: &Arc<Semaphore>,
+    approval_state: &Arc<Mutex<ApprovalResponseState>>,
 ) -> HarnessResult<HarnessEvent> {
     let mut transcript = OpenCodeTranscript::new(session.clone());
     let mut admitted = false;
@@ -796,6 +824,7 @@ async fn read_turn(
         ids: HashSet::new(),
         active: None,
         queued: VecDeque::new(),
+        state: approval_state.clone(),
         sender,
     };
     let admission_deadline = Instant::now() + REQUEST_TIMEOUT;
@@ -870,6 +899,7 @@ struct PendingApprovals<'a> {
     ids: HashSet<ApprovalId>,
     active: Option<ApprovalId>,
     queued: VecDeque<ApprovalRequest>,
+    state: Arc<Mutex<ApprovalResponseState>>,
     sender: &'a mpsc::UnboundedSender<HarnessEvent>,
 }
 
@@ -885,8 +915,15 @@ impl PendingApprovals<'_> {
             && let Some(request) = self.queued.pop_front()
         {
             let id = request.approval_id.clone();
-            publish(self.sender, HarnessEvent::ApprovalRequested { request })?;
+            {
+                let mut state = self.state.lock().map_err(|_| {
+                    HarnessError::Protocol("OpenCode approval state is unavailable".into())
+                })?;
+                state.active = Some(id.clone());
+                state.submitted = false;
+            }
             self.active = Some(id);
+            publish(self.sender, HarnessEvent::ApprovalRequested { request })?;
         }
         Ok(())
     }
@@ -902,6 +939,13 @@ impl PendingApprovals<'_> {
         }
         if self.active.as_ref() == Some(&approval_id) {
             self.active = None;
+            {
+                let mut state = self.state.lock().map_err(|_| {
+                    HarnessError::Protocol("OpenCode approval state is unavailable".into())
+                })?;
+                state.active = None;
+                state.submitted = false;
+            }
             publish(
                 self.sender,
                 HarnessEvent::ApprovalResolved {
@@ -921,6 +965,13 @@ impl PendingApprovals<'_> {
 
 impl Drop for PendingApprovals<'_> {
     fn drop(&mut self) {
+        match self.state.lock() {
+            Ok(mut state) => {
+                state.active = None;
+                state.submitted = false;
+            }
+            Err(error) => tracing::warn!(%error, "could not clear OpenCode approval state"),
+        }
         if let Some(approval_id) = self.active.take()
             && publish(self.sender, HarnessEvent::ApprovalWithdrawn { approval_id }).is_err()
         {
@@ -2326,6 +2377,7 @@ mod tests {
             ids: HashSet::new(),
             active: None,
             queued: VecDeque::new(),
+            state: Arc::new(Mutex::new(ApprovalResponseState::default())),
             sender: &sender,
         };
         for id in ["per_1", "per_2", "per_3"] {
@@ -2380,6 +2432,7 @@ mod tests {
                 ids: HashSet::new(),
                 active: None,
                 queued: VecDeque::new(),
+                state: Arc::new(Mutex::new(ApprovalResponseState::default())),
                 sender: &sender,
             };
             pending.enqueue(
@@ -2460,6 +2513,7 @@ mod tests {
             "msg_1",
             &sender,
             &Arc::new(Semaphore::new(2)),
+            &Arc::new(Mutex::new(ApprovalResponseState::default())),
         )
         .await
         .err()
@@ -3389,13 +3443,23 @@ exec sleep 60
                 };
                 assert_eq!(id.as_str(), expected);
                 if expected == "per_first" {
+                    assert!(matches!(
+                        harness
+                            .respond(ApprovalId::new("per_second"), Decision::Allow)
+                            .await,
+                        Err(HarnessError::NoPendingApproval)
+                    ));
                     assert!(
                         timeout(Duration::from_millis(30), harness.receiver.recv())
                             .await
                             .is_err()
                     );
                 }
-                harness.respond(id, decision).await?;
+                harness.respond(id.clone(), decision).await?;
+                assert!(matches!(
+                    harness.respond(id, decision).await,
+                    Err(HarnessError::NoPendingApproval)
+                ));
             }
             loop {
                 match harness.receiver.recv().await.ok_or("event stream closed")? {
@@ -3890,6 +3954,7 @@ exec sleep 60
                 &prompt_id,
                 &sender,
                 &Arc::new(Semaphore::new(STREAM_BUFFER_CHUNKS)),
+                &Arc::new(Mutex::new(ApprovalResponseState::default())),
             ),
         )
         .await??;
