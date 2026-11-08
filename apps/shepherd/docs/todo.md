@@ -1392,7 +1392,9 @@ placeholder tabs and no unearned state badges.
   checks that cancelling waiting starts frees capacity for another creation.
   Protocol cancellation while a start waits for the registry lock returns a
   cancellation response and does not launch the terminal; once startup begins,
-  it finishes so the backend's resources remain tracked.
+  it finishes so the backend's resources remain tracked. A fake-agent fixture
+  cancels a second start while the first is blocked and checks that only the
+  first reaches the backend.
   Terminal kill and release handlers share a 64-request limit; saturation
   returns an error before spawning more tasks, and a fixture checks recovery.
   Connection shutdown also unblocks pending waits if a terminal stop fails.

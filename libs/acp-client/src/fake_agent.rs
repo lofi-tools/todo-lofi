@@ -52,6 +52,7 @@ pub struct FakeScript {
     /// Ask the client to run a command.
     pub terminal: Option<(String, Vec<String>)>,
     pub cancelled_terminal_waits: usize,
+    pub cancel_waiting_terminal_creation: bool,
     pub release_terminal: bool,
     /// Ask the client to read these paths in order.
     pub read_paths: Vec<PathBuf>,
@@ -78,6 +79,7 @@ pub struct FakeObservations {
     pub permission_burst_overflow: Option<Result<(), String>>,
     pub permission_burst_cancellations: Vec<Result<(), String>>,
     pub terminal_output: Vec<String>,
+    pub terminal_creation_cancellation: Option<Result<(), String>>,
     pub terminal_exit: Vec<Option<u32>>,
     pub terminal_wait_cancellations: Vec<Result<(), String>>,
     pub file_reads: Vec<Result<String, String>>,
@@ -416,58 +418,25 @@ async fn run_turn(
         }
     }
     if let Some((command, args)) = &script.terminal {
-        let created = connection
-            .send_request(
+        if script.cancel_waiting_terminal_creation {
+            let first = connection.send_request(
                 CreateTerminalRequest::new(session_id.clone(), command.clone()).args(args.clone()),
-            )
-            .block_task()
-            .await?;
-        for _ in 0..script.cancelled_terminal_waits {
-            let wait = connection.send_request(WaitForTerminalExitRequest::new(
-                session_id.clone(),
-                created.terminal_id.clone(),
-            ));
-            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-            wait.cancel()?;
-            let result = wait
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            let waiting = connection.send_request(
+                CreateTerminalRequest::new(session_id.clone(), command.clone()).args(args.clone()),
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            waiting.cancel()?;
+            let result = waiting
                 .block_task()
                 .await
                 .map(|_| ())
                 .map_err(|error| error.to_string());
             if let Ok(mut state) = observations.lock() {
-                state.terminal_wait_cancellations.push(result);
+                state.terminal_creation_cancellation = Some(result);
             }
-        }
-        if script.cancelled_terminal_waits > 0 {
-            connection
-                .send_request(KillTerminalRequest::new(
-                    session_id.clone(),
-                    created.terminal_id.clone(),
-                ))
-                .block_task()
-                .await?;
-        }
-        // Wait first, then snapshot: `terminal/output` is a point-in-time read,
-        // so an early call legitimately returns nothing yet.
-        let exit = connection
-            .send_request(WaitForTerminalExitRequest::new(
-                session_id.clone(),
-                created.terminal_id.clone(),
-            ))
-            .block_task()
-            .await?;
-        let output = connection
-            .send_request(TerminalOutputRequest::new(
-                session_id.clone(),
-                created.terminal_id.clone(),
-            ))
-            .block_task()
-            .await?;
-        if let Ok(mut state) = observations.lock() {
-            state.terminal_output.push(output.output.clone());
-            state.terminal_exit.push(exit.exit_status.exit_code);
-        }
-        if script.release_terminal {
+            let created = first.block_task().await?;
             connection
                 .send_request(ReleaseTerminalRequest::new(
                     session_id.clone(),
@@ -475,6 +444,68 @@ async fn run_turn(
                 ))
                 .block_task()
                 .await?;
+        } else {
+            let created = connection
+                .send_request(
+                    CreateTerminalRequest::new(session_id.clone(), command.clone())
+                        .args(args.clone()),
+                )
+                .block_task()
+                .await?;
+            for _ in 0..script.cancelled_terminal_waits {
+                let wait = connection.send_request(WaitForTerminalExitRequest::new(
+                    session_id.clone(),
+                    created.terminal_id.clone(),
+                ));
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                wait.cancel()?;
+                let result = wait
+                    .block_task()
+                    .await
+                    .map(|_| ())
+                    .map_err(|error| error.to_string());
+                if let Ok(mut state) = observations.lock() {
+                    state.terminal_wait_cancellations.push(result);
+                }
+            }
+            if script.cancelled_terminal_waits > 0 {
+                connection
+                    .send_request(KillTerminalRequest::new(
+                        session_id.clone(),
+                        created.terminal_id.clone(),
+                    ))
+                    .block_task()
+                    .await?;
+            }
+            // Wait first, then snapshot: `terminal/output` is a point-in-time read,
+            // so an early call legitimately returns nothing yet.
+            let exit = connection
+                .send_request(WaitForTerminalExitRequest::new(
+                    session_id.clone(),
+                    created.terminal_id.clone(),
+                ))
+                .block_task()
+                .await?;
+            let output = connection
+                .send_request(TerminalOutputRequest::new(
+                    session_id.clone(),
+                    created.terminal_id.clone(),
+                ))
+                .block_task()
+                .await?;
+            if let Ok(mut state) = observations.lock() {
+                state.terminal_output.push(output.output.clone());
+                state.terminal_exit.push(exit.exit_status.exit_code);
+            }
+            if script.release_terminal {
+                connection
+                    .send_request(ReleaseTerminalRequest::new(
+                        session_id.clone(),
+                        created.terminal_id,
+                    ))
+                    .block_task()
+                    .await?;
+            }
         }
     }
     let cancelled = cancel_count() > initial_cancels;
@@ -1224,6 +1255,86 @@ mod tests {
             std::fs::read_to_string(dir.path().join(&target)).unwrap(),
             "hello"
         );
+    }
+
+    #[tokio::test]
+    async fn cancelled_waiting_terminal_creation_never_reaches_backend()
+    -> Result<(), Box<dyn std::error::Error>> {
+        struct BlockingBackend {
+            started: tokio::sync::Semaphore,
+            resume: tokio::sync::Semaphore,
+            calls: std::sync::atomic::AtomicUsize,
+        }
+        #[async_trait::async_trait]
+        impl crate::terminal::TerminalBackend for BlockingBackend {
+            async fn spawn(
+                &self,
+                _launch: crate::terminal::TerminalLaunch,
+                _events: tokio::sync::mpsc::Sender<crate::terminal::TerminalProcessEvent>,
+            ) -> Result<(), String> {
+                self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                self.started.add_permits(1);
+                self.resume
+                    .acquire()
+                    .await
+                    .map_err(|error| error.to_string())?
+                    .forget();
+                Ok(())
+            }
+            async fn stop(&self, _id: &str) -> Result<(), String> {
+                Ok(())
+            }
+        }
+        let directory = tempfile::tempdir()?;
+        let backend = Arc::new(BlockingBackend {
+            started: tokio::sync::Semaphore::new(0),
+            resume: tokio::sync::Semaphore::new(0),
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let (connection, observations) = connect_fake_agent_with_terminals(
+            FakeScript {
+                terminal: Some(("fixture".into(), Vec::new())),
+                cancel_waiting_terminal_creation: true,
+                ..Default::default()
+            },
+            ConnectOptions {
+                roots: SessionRoots::new([directory.path().to_path_buf()]),
+                tool_permissions: confirm_all(),
+            },
+            backend.clone(),
+        )
+        .await?;
+        let session = new_session(&connection, &directory).await;
+        let turn = tokio::spawn({
+            let requester = connection.requester.clone();
+            async move { requester.prompt(&session, "go".into()).await }
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(5), backend.started.acquire())
+            .await??
+            .forget();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if observations
+                    .lock()
+                    .map_err(|error| error.to_string())?
+                    .terminal_creation_cancellation
+                    .is_some()
+                {
+                    return Ok::<(), String>(());
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await?
+        .map_err(std::io::Error::other)?;
+        backend.resume.add_permits(1);
+        tokio::time::timeout(std::time::Duration::from_secs(5), turn).await???;
+        let observed = observations.lock().map_err(|error| error.to_string())?;
+        assert!(
+            matches!(&observed.terminal_creation_cancellation, Some(Err(error)) if error.to_lowercase().contains("cancel"))
+        );
+        assert_eq!(backend.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        Ok(())
     }
 
     #[cfg(unix)]
