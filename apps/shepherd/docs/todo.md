@@ -1687,6 +1687,10 @@ placeholder tabs and no unearned state badges.
   a headless fixture streams through 1,000 transcript entries while a 12,000-line
   diff loads. Project snapshots no longer re-query an unchanged attachment limit,
   and a fixture checks that streaming preserves the Files path and preview.
+  Turn baselines hash staged and unstaged binary diffs as Git streams them,
+  without retaining the full diff; a temporary-repository fixture compares the
+  digests with complete Git output and checks error reporting. If the reader
+  cannot start, Git is stopped and reaped; a subprocess fixture covers cleanup.
   Git and Review reads run outside the core lock on blocking workers. A real
   worktree fixture verifies an agent approval can finish during a stalled read,
   then checks both ends of a 12,000-line diff.

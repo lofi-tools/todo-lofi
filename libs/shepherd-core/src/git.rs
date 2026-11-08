@@ -6,7 +6,7 @@
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -393,7 +393,7 @@ impl GitService {
             if cached {
                 args.push("--cached");
             }
-            git_bytes(path, &args).map(|bytes| Sha256::digest(bytes).into())
+            git_digest(path, &args)
         };
         let mut untracked = Vec::new();
         let names = git_bytes(path, &["ls-files", "--others", "--exclude-standard", "-z"])?;
@@ -1171,6 +1171,85 @@ pub(crate) fn run_git(cwd: &Path, args: &[&str]) -> Result<String, GitError> {
         .to_string())
 }
 
+fn git_digest(cwd: &Path, args: &[&str]) -> Result<[u8; 32], GitError> {
+    let mut child = Command::new("git")
+        .arg("-C")
+        .arg(cwd)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|source| GitError::Io { source })?;
+    let Some(stdout) = child.stdout.take() else {
+        return Err(stop_git_after_reader_failure(
+            &mut child,
+            std::io::Error::other("Git stdout was not captured"),
+        ));
+    };
+    let digest = match std::thread::Builder::new()
+        .name("git-diff-digest".into())
+        .spawn(move || {
+            let mut stdout = stdout;
+            let mut hash = Sha256::new();
+            let mut buffer = [0; 8192];
+            loop {
+                let length = stdout.read(&mut buffer)?;
+                if length == 0 {
+                    break;
+                }
+                hash.update(&buffer[..length]);
+            }
+            Ok::<[u8; 32], std::io::Error>(hash.finalize().into())
+        }) {
+        Ok(thread) => thread,
+        Err(error) => return Err(stop_git_after_reader_failure(&mut child, error)),
+    };
+    let output = child
+        .wait_with_output()
+        .map_err(|source| GitError::Io { source });
+    let digest = digest
+        .join()
+        .map_err(|_| GitError::Io {
+            source: std::io::Error::other("Git output reader panicked"),
+        })?
+        .map_err(|source| GitError::Io { source });
+    let output = output?;
+    if !output.status.success() {
+        return Err(GitError::CommandFailed {
+            command: format!("git -C {} {}", cwd.display(), args.join(" ")),
+            status: output.status,
+            stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+        });
+    }
+    digest
+}
+
+fn stop_git_after_reader_failure(child: &mut Child, error: std::io::Error) -> GitError {
+    let cleanup = match child.try_wait() {
+        Ok(Some(_)) => Ok(()),
+        Ok(None) => match child.kill() {
+            Ok(()) => child.wait().map(|_| ()),
+            Err(error) => match child.try_wait() {
+                Ok(Some(_)) => Ok(()),
+                Ok(None) => Err(error),
+                Err(wait_error) => Err(std::io::Error::other(format!(
+                    "could not stop Git: {error}; could not check its exit: {wait_error}"
+                ))),
+            },
+        },
+        Err(error) => Err(error),
+    };
+    match cleanup {
+        Ok(()) => GitError::Io { source: error },
+        Err(cleanup) => GitError::Io {
+            source: std::io::Error::other(format!(
+                "Git output reader failed: {error}; process cleanup failed: {cleanup}"
+            )),
+        },
+    }
+}
+
 fn git_bytes(cwd: &Path, args: &[&str]) -> Result<Vec<u8>, GitError> {
     let output = Command::new("git")
         .arg("-C")
@@ -1192,6 +1271,55 @@ fn git_bytes(cwd: &Path, args: &[&str]) -> Result<Vec<u8>, GitError> {
 mod tests {
     use super::*;
     use crate::test_support::{TestDirectory, TestRepository};
+
+    #[cfg(unix)]
+    #[test]
+    fn reader_start_failure_stops_and_reaps_the_git_process()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut child = Command::new("sh").args(["-c", "exec sleep 30"]).spawn()?;
+        let error = stop_git_after_reader_failure(
+            &mut child,
+            std::io::Error::other("fixture reader failure"),
+        );
+        assert!(error.to_string().contains("fixture reader failure"));
+        assert!(child.try_wait()?.is_some());
+        Ok(())
+    }
+
+    #[test]
+    fn streamed_baseline_digests_match_git_output_and_report_failures()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fixture = TestRepository::new()?;
+        let staged = format!("{}\n", "staged\n".repeat(100_000));
+        fixture.write_file("README.md", &staged)?;
+        GitService.stage(fixture.path(), Some("README.md"))?;
+        fixture.write_file("README.md", &format!("{staged}unstaged\n"))?;
+        let baseline = GitService.turn_baseline(fixture.path())?;
+        let expected_staged: [u8; 32] = Sha256::digest(git_bytes(
+            fixture.path(),
+            &[
+                "diff",
+                "--no-ext-diff",
+                "--no-textconv",
+                "--binary",
+                "--cached",
+            ],
+        )?)
+        .into();
+        let expected_unstaged: [u8; 32] = Sha256::digest(git_bytes(
+            fixture.path(),
+            &["diff", "--no-ext-diff", "--no-textconv", "--binary"],
+        )?)
+        .into();
+        assert_eq!(baseline.staged, expected_staged);
+        assert_eq!(baseline.unstaged, expected_unstaged);
+        assert_ne!(baseline.staged, baseline.unstaged);
+        assert!(matches!(
+            git_digest(fixture.path(), &["diff", "--definitely-invalid-option"]),
+            Err(GitError::CommandFailed { .. })
+        ));
+        Ok(())
+    }
 
     #[cfg(unix)]
     #[test]
