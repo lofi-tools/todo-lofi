@@ -1635,6 +1635,8 @@ placeholder tabs and no unearned state badges.
   A completion without a turn ID during a pending or active turn is a protocol
   error instead of a false completion; a fixture checks state and approvals are
   not changed before the error is handled.
+  A subprocess fixture verifies that this error reaches the connection, releases
+  pending requests and stops the agent process group, including a descendant.
   App-server turn starts are emitted by the protocol reader before completion,
   including when a fast turn finishes before its start reply is processed;
   an offline fixture checks reply and notification ordering. While that reply

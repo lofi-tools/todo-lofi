@@ -6060,6 +6060,64 @@ exit 0
 
     #[cfg(unix)]
     #[tokio::test]
+    async fn unidentified_completion_stops_app_server_and_releases_waiters()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = TempDir::new()?;
+        let line = r#"{"method":"turn/completed","params":{"turn":{"status":"completed"}}}"#;
+        let mut command = Command::new("/bin/sh");
+        command
+            .args(["-c", &format!("(sleep 1; printf escaped > escaped) >/dev/null 2>&1 & printf '%s\\n' '{line}'; exec sleep 30")])
+            .current_dir(directory.path())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            .process_group(0);
+        let mut child = command.spawn()?;
+        let stdout = child.stdout.take().ok_or("missing stdout")?;
+        let child = Arc::new(AsyncMutex::new(child));
+        let (sender, mut events) = mpsc::unbounded_channel();
+        let pending = Arc::new(AsyncMutex::new(Pending::default()));
+        let (response, response_waiter) = oneshot::channel();
+        {
+            let mut state = pending.lock().await;
+            state.start_request = Some(1);
+            state.responses.insert(1, response);
+        }
+        let (outgoing, _requests) = mpsc::channel(1);
+        let (_writer, writer_failed) = oneshot::channel();
+        let (drained, stderr_drained) = oneshot::channel();
+        drained.send(()).map_err(|_| "stderr receiver closed")?;
+        let reader = spawn_reader(
+            stdout,
+            sender,
+            pending,
+            outgoing,
+            Arc::new(Mutex::new(VecDeque::new())),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+            stderr_drained,
+            writer_failed,
+            Arc::downgrade(&child),
+            stop_codex_process_group,
+            None,
+        );
+        assert!(
+            matches!(timeout(Duration::from_secs(5), events.recv()).await?,
+            Some(HarnessEvent::ConnectionFailed { kind: FailureKind::Protocol, text }) if text.contains("missing its turn ID"))
+        );
+        assert!(
+            timeout(Duration::from_secs(1), response_waiter)
+                .await?
+                .is_err()
+        );
+        reader.await?;
+        assert!(child.lock().await.try_wait()?.is_some());
+        tokio::time::sleep(Duration::from_millis(1300)).await;
+        assert!(!directory.path().join("escaped").exists());
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn app_server_stream_overflow_stops_child_and_releases_waiters()
     -> Result<(), Box<dyn std::error::Error>> {
         let line = r#"{"method":"item/agentMessage/delta","params":{"itemId":"message","delta":"fixture"}}"#;
