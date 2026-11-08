@@ -1698,7 +1698,8 @@ placeholder tabs and no unearned state badges.
   not restart the refresh. Backend and headless browser fixtures cover lag
   detection, restoring the selected task, and an update during a paused read.
   A newer recovery request is retained if an earlier snapshot read fails;
-  headless fixtures also verify an unreplaced failure reaches the error toast.
+  headless fixtures also verify an unreplaced failure reaches the error toast
+  while independently loaded project and task snapshots still refresh.
   Recovery also refreshes approvals for the project currently shown in
   Settings, even when a different project is selected; a headless fixture
   checks that view after a missed update.

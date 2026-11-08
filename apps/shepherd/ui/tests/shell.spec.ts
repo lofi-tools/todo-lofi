@@ -1067,6 +1067,7 @@ test.beforeEach(async ({ context }) => {
       __failWorkspaceRead: () => { failPausedWorkspaceRead = true; releaseWorkspaceRead?.() },
       __workspaceReads: () => workspaceReads,
     })
+    Object.assign(window, { __missProjectRename: () => { project.name = 'Renamed demo' } })
     Object.assign(window, { __missTaskDeletion: () => {
       const index = tasks.findIndex((task) => task.id === 'task-1')
       if (index < 0) throw new Error('Missing fixture task')
@@ -3960,14 +3961,17 @@ test('reports a recovery snapshot failure when there is no newer request', async
   await expect(page.getByText('ready to go')).toBeVisible()
   await page.evaluate(() => {
     const fixture = window as unknown as {
-      __pauseWorkspaceRead: () => void; __emitCoreEvent: (event: ShepherdEvent) => void
+      __pauseWorkspaceRead: () => void; __missProjectRename: () => void; __emitCoreEvent: (event: ShepherdEvent) => void
     }
+    fixture.__missProjectRename()
     fixture.__pauseWorkspaceRead()
     fixture.__emitCoreEvent({ type: 'resyncRequired' })
   })
   await expect.poll(() => page.evaluate(() => (window as unknown as { __workspaceReadPaused: () => boolean }).__workspaceReadPaused())).toBe(true)
   await page.evaluate(() => (window as unknown as { __failWorkspaceRead: () => void }).__failWorkspaceRead())
   await expect(page.getByRole('alert')).toContainText('Could not refresh after missed updates')
+  await expect(page.getByRole('button', { name: 'Renamed demo', exact: true })).toBeVisible()
+  await expect(page.getByText('ready to go')).toBeVisible()
 })
 
 

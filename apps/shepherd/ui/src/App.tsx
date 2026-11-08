@@ -1128,6 +1128,7 @@ export function App() {
           continue
         }
         let taskWorkspace: bridge.TaskWorkspace | undefined
+        let workspaceFailure: { error: unknown } | undefined
         try {
           taskWorkspace = taskId ? await bridge.taskWorkspace(taskId) : undefined
         } catch (failure) {
@@ -1137,7 +1138,7 @@ export function App() {
             resyncRequested = true
             continue
           }
-          if (!taskId || !updates.workspaces.has(taskId)) throw failure
+          if (!taskId || !updates.workspaces.has(taskId)) workspaceFailure = { error: failure }
         }
         if (resyncRequested || projectId !== selectedProjectId() ||
             taskId !== selectedTaskId() || reviewing !== reviewOnly()) {
@@ -1166,6 +1167,7 @@ export function App() {
           ]))
           reconcileReviewSelection()
         }
+        if (workspaceFailure) setError(`Could not refresh after missed updates: ${describe(workspaceFailure.error)}`)
       } while (resyncRequested)
     } catch (failure) {
       setError(`Could not refresh after missed updates: ${describe(failure)}`)
