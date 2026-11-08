@@ -1426,9 +1426,15 @@ impl AgentHarness for CodexHarness {
         }
         let response = self.request("turn/start", params).await?;
 
-        read_turn_id(&response).ok_or_else(|| {
-            HarnessError::Protocol("the turn response did not include turn.id".to_string())
-        })?;
+        if read_turn_id(&response).is_none() {
+            let message = "the turn response did not include turn.id";
+            return match self.shutdown().await {
+                Ok(()) => Err(HarnessError::Protocol(message.into())),
+                Err(error) => Err(HarnessError::Protocol(format!(
+                    "{message}; could not stop Codex after uncertain turn admission: {error}"
+                ))),
+            };
+        }
         self.model = input.codex.model.or(self.model.take());
         self.reasoning_effort = input.codex.effort.or(self.reasoning_effort.take());
         Ok(())
@@ -4402,6 +4408,33 @@ done
             .expect("the stub app-server starts");
         harness.open_session(None).await.expect("a thread opens");
         (harness, capabilities)
+    }
+
+    #[tokio::test]
+    async fn missing_turn_id_stops_uncertain_admission_and_descendants()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = TempDir::new()?;
+        let original = r#"      printf '{"id":%s,"result":{"turn":{"id":"turn_1","status":"inProgress"}}}\n' "$id""#;
+        let replacement = r#"      (sleep 1; printf escaped > "$directory/escaped") >/dev/null 2>&1 &
+      printf '{"id":%s,"result":{}}\n' "$id"
+      sleep 30"#;
+        assert!(PROTOCOL_STUB.contains(original));
+        let script = PROTOCOL_STUB.replace(original, replacement);
+        let stub = write_stub(&directory, "codex-missing-turn", &script);
+        let (mut harness, _) = start_session(&stub, directory.path()).await;
+        let result = timeout(
+            Duration::from_secs(5),
+            harness.prompt(PromptInput::text("start")),
+        )
+        .await?;
+        assert!(
+            matches!(result, Err(HarnessError::Protocol(message)) if message.contains("did not include turn.id"))
+        );
+        assert!(harness.child.is_none());
+        assert!(!harness.started);
+        tokio::time::sleep(Duration::from_millis(1300)).await;
+        assert!(!directory.path().join("escaped").exists());
+        Ok(())
     }
 
     #[tokio::test]
