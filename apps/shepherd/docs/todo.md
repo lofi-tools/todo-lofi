@@ -1544,6 +1544,9 @@ placeholder tabs and no unearned state badges.
   cloned permits and cancellation. Displayed OpenCode approval requests also
   use that capacity; queued approvals remain under their separate pending limit,
   so replies to queued requests can still be processed when the stream is full.
+  OpenCode failure messages also hold capacity by their UTF-8 byte size and
+  cap displayed details at 64 KiB with an omission marker. Fixtures cover
+  Unicode truncation, permit release and a backpressured error.
   A fixture checks both reply handling and recovery when a permit is released. A core
   fixture fills the queue and verifies that 150 scripted messages and 150 tool
   calls reach the transcript in order. Codex app-server text, reasoning,

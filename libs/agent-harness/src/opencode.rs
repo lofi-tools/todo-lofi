@@ -33,6 +33,8 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 const STREAM_CHUNK_BYTES: usize = 8 * 1024;
 const STREAM_BUFFER_CHUNKS: usize = 64;
+const MAX_STREAM_ERROR_BYTES: usize = 64 * 1024;
+const STREAM_ERROR_OMITTED: &str = "\n[… error details omitted …]";
 const MAX_PENDING_APPROVALS: usize = 64;
 const USERNAME: &str = "opencode";
 const SERVER_ARGS: [&str; 5] = ["serve", "--hostname", "127.0.0.1", "--port", "0"];
@@ -906,14 +908,16 @@ async fn read_turn(
                 } else {
                     FailureKind::from_message(message, FailureKind::AgentRejected)
                 };
-                publish(
+                publish_stream_event(
                     sender,
+                    stream_capacity,
                     HarnessEvent::TurnError {
                         kind,
                         text: message.to_owned(),
                         stream_permit: None,
                     },
-                )?;
+                )
+                .await?;
             }
         }
         let Some(event) = transcript.apply(event)? else {
@@ -1048,6 +1052,27 @@ async fn publish_stream_event(
     capacity: &Arc<Semaphore>,
     mut event: HarnessEvent,
 ) -> HarnessResult<()> {
+    if let HarnessEvent::TurnError {
+        text,
+        stream_permit,
+        ..
+    } = &mut event
+    {
+        if text.len() > MAX_STREAM_ERROR_BYTES {
+            let end = text.floor_char_boundary(MAX_STREAM_ERROR_BYTES - STREAM_ERROR_OMITTED.len());
+            text.truncate(end);
+            text.push_str(STREAM_ERROR_OMITTED);
+        }
+        let units = u32::try_from(text.len().div_ceil(STREAM_CHUNK_BYTES).max(1))
+            .map_err(|_| HarnessError::Protocol("OpenCode error exceeds queue capacity".into()))?;
+        let permit = capacity
+            .clone()
+            .acquire_many_owned(units)
+            .await
+            .map_err(|_| HarnessError::ChannelClosed)?;
+        *stream_permit = Some(Arc::new(permit));
+        return publish(sender, event);
+    }
     if let HarnessEvent::ToolCall { stream_permit, .. } = &mut event {
         let permit = capacity
             .clone()
@@ -2663,6 +2688,120 @@ mod tests {
         assert_eq!(withdrawn.len(), 1);
         assert!(withdrawn.contains(&ApprovalId::new("per_1")));
         fixture.await?.map_err(|error| error.to_string())?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn native_failure_event_retains_stream_capacity() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let address = listener.local_addr()?;
+        let fixture = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await?;
+            let (reader, mut writer) = socket.into_split();
+            read_fixture_request(reader).await?;
+            let body = format!(
+                "data: {}\n\ndata: {}\n\n",
+                json!({"type":"session.inbox.enqueued", "data":{"sessionID":"ses_1", "inboxID":"msg_1"}}),
+                json!({"type":"session.execution.failed", "data":{"sessionID":"ses_1", "error":{"message":"fixture failure"}}})
+            );
+            writer.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await?;
+            Ok::<_, Box<dyn std::error::Error + Send + Sync>>(())
+        });
+        let response = Client::new()
+            .get(format!("http://{address}/events"))
+            .send()
+            .await?;
+        let events = OpenCodeEvents {
+            response,
+            decoder: EventDecoder::default(),
+            pending: bytes::Bytes::new(),
+        };
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        let capacity = Arc::new(Semaphore::new(1));
+        let outcome = read_turn(
+            events,
+            SessionId::new("ses_1"),
+            "msg_1",
+            &sender,
+            &capacity,
+            &Arc::new(Mutex::new(ApprovalResponseState::default())),
+        )
+        .await?;
+        assert!(matches!(
+            outcome,
+            HarnessEvent::TurnFinished {
+                reason: TurnFinishReason::Failed
+            }
+        ));
+        let error = receiver.recv().await.ok_or("missing error")?;
+        assert!(
+            matches!(&error, HarnessEvent::TurnError { text, stream_permit: Some(_), .. } if text == "fixture failure")
+        );
+        assert_eq!(capacity.available_permits(), 0);
+        drop(error);
+        assert_eq!(capacity.available_permits(), 1);
+        fixture.await?.map_err(|error| error.to_string())?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn streamed_errors_wait_until_previous_error_is_consumed()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        let capacity = Arc::new(Semaphore::new(1));
+        let error = || HarnessEvent::TurnError {
+            kind: FailureKind::Protocol,
+            text: "failure".into(),
+            stream_permit: None,
+        };
+        publish_stream_event(&sender, &capacity, error()).await?;
+        let first = receiver.recv().await.ok_or("missing first error")?;
+        let second = publish_stream_event(&sender, &capacity, error());
+        tokio::pin!(second);
+        assert!(
+            timeout(Duration::from_millis(30), second.as_mut())
+                .await
+                .is_err()
+        );
+        drop(first);
+        second.await?;
+        assert!(matches!(
+            receiver.recv().await,
+            Some(HarnessEvent::TurnError { .. })
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn streamed_errors_hold_capacity_and_bound_large_unicode_details()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        let capacity = Arc::new(Semaphore::new(STREAM_BUFFER_CHUNKS));
+        publish_stream_event(
+            &sender,
+            &capacity,
+            HarnessEvent::TurnError {
+                kind: FailureKind::AgentRejected,
+                text: "界".repeat(MAX_STREAM_ERROR_BYTES),
+                stream_permit: None,
+            },
+        )
+        .await?;
+        let error = receiver.recv().await.ok_or("missing error")?;
+        let HarnessEvent::TurnError {
+            text,
+            stream_permit: Some(_),
+            ..
+        } = &error
+        else {
+            return Err("unexpected event".into());
+        };
+        assert!(text.len() <= MAX_STREAM_ERROR_BYTES);
+        assert!(text.ends_with(STREAM_ERROR_OMITTED));
+        assert_eq!(capacity.available_permits(), STREAM_BUFFER_CHUNKS - 8);
+        drop(error);
+        assert_eq!(capacity.available_permits(), STREAM_BUFFER_CHUNKS);
         Ok(())
     }
 
