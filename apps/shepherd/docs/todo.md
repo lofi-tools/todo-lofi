@@ -1661,9 +1661,12 @@ placeholder tabs and no unearned state badges.
   log-capture fixture covers unsolicited and late replies.
   The ACP SDK 2.1.0 logs complete incoming request and notification messages
   at debug level, including their parameters. A host that enables verbose SDK
-  tracing can therefore expose agent-provided content; filter those SDK targets
-  or remove the payload logging before treating verbose logging as safe. No
-  Shepherd tracing subscriber installation was found in the desktop sources;
+  tracing can therefore expose agent-provided content. Taskstream Desktop now
+  filters SDK events even when verbose logging is enabled, since SDK warnings
+  can also include agent-provided errors, while keeping application debug logs;
+  a log-capture fixture
+  checks the filter. Other hosts must apply equivalent filtering or remove
+  the payload logging. No Shepherd tracing subscriber installation was found in the desktop sources;
   this does not establish how other hosts configure the shared client. Other
   adapter-internal logs and live-adapter behavior remain to be audited.
   On 2026-11-07 the default offline headless agent-harness suite passed 124

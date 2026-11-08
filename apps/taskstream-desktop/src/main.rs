@@ -2827,13 +2827,64 @@ fn init_logging(notices: NoticeSink) {
         .with(tracing_subscriber::fmt::layer().with_target(true))
         .with(NoticeLayer::new(notices))
         .with(filter)
+        .with(tracing_subscriber::filter::filter_fn(safe_logging_metadata))
         .init();
+}
+
+fn safe_logging_metadata(metadata: &tracing::Metadata<'_>) -> bool {
+    let target = metadata.target();
+    let is_acp_sdk =
+        target == "agent_client_protocol" || target.starts_with("agent_client_protocol::");
+    !is_acp_sdk
 }
 
 #[cfg(test)]
 mod layout_tests {
     use super::*;
     use gpui::TestAppContext;
+
+    #[test]
+    fn logging_filters_verbose_acp_payloads_even_when_trace_is_enabled() {
+        use std::sync::{Arc, Mutex};
+
+        #[derive(Clone)]
+        struct Capture(Arc<Mutex<Vec<u8>>>);
+        impl std::io::Write for Capture {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0
+                    .lock()
+                    .map_err(|error| std::io::Error::other(error.to_string()))?
+                    .write(bytes)
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let output = Arc::new(Mutex::new(Vec::new()));
+        let capture = Capture(output.clone());
+        let subscriber = tracing_subscriber::registry()
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .without_time()
+                    .with_ansi(false)
+                    .with_writer(move || capture.clone()),
+            )
+            .with(EnvFilter::new("trace"))
+            .with(tracing_subscriber::filter::filter_fn(safe_logging_metadata));
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::debug!(target: "agent_client_protocol::jsonrpc", "private payload");
+            tracing::trace!(target: "agent_client_protocol::jsonrpc", "private trace");
+            tracing::warn!(target: "agent_client_protocol::jsonrpc", "SDK warning");
+            tracing::debug!(target: "acp_client", "client debug");
+        });
+        let output = output.lock().expect("capture lock");
+        let output = String::from_utf8_lossy(&output);
+        assert!(!output.contains("private payload"));
+        assert!(!output.contains("private trace"));
+        assert!(!output.contains("SDK warning"));
+        assert!(output.contains("client debug"));
+    }
 
     struct NoticeFilterPills;
 
