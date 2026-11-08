@@ -1640,8 +1640,12 @@ placeholder tabs and no unearned state badges.
   A successful turn-start reply missing its turn ID also stops the app-server
   because admission is uncertain; a subprocess fixture verifies descendant
   cleanup. A timed-out turn-start request also stops the server and its process
-  group; an offline subprocess fixture verifies descendant cleanup. Cancellation
-  of the admission future still needs review.
+  group; an offline subprocess fixture verifies descendant cleanup. Dropping an
+  in-flight admission marks the connection closed, signals its process group and
+  reports cleanup asynchronously; a local fixture verifies descendant cleanup,
+  pending-request removal and a subsequent shutdown. If the child lock is
+  contended, cleanup still depends on the Tokio runtime remaining available.
+  Cancellation while handling a malformed successful reply still needs review.
   App-server turn starts are emitted by the protocol reader before completion,
   including when a fast turn finishes before its start reply is processed;
   an offline fixture checks reply and notification ordering. While that reply

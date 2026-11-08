@@ -1071,11 +1071,30 @@ impl CodexHarness {
             return Err(error);
         }
 
+        let mut admission_guard = if method == "turn/start" {
+            self.child.as_ref().map(|child| TurnAdmissionGuard {
+                child: Some(child.clone()),
+                pending: self.pending.clone(),
+                sender: self.sender.clone(),
+                closed: self.closed.clone(),
+                closing: self.closing.clone(),
+                runtime: tokio::runtime::Handle::current(),
+                request_id: id,
+            })
+        } else {
+            None
+        };
         #[cfg(test)]
         let request_timeout = self.request_timeout;
         #[cfg(not(test))]
         let request_timeout = REQUEST_TIMEOUT;
-        match timeout(request_timeout, receiver).await {
+        let response = timeout(request_timeout, receiver).await;
+        if response.is_ok()
+            && let Some(guard) = &mut admission_guard
+        {
+            guard.disarm();
+        }
+        match response {
             Err(_) => {
                 {
                     let mut pending = self.pending.lock().await;
@@ -1086,7 +1105,11 @@ impl CodexHarness {
                 }
                 let message = format!("codex did not answer {method}");
                 if method == "turn/start" {
-                    return match self.shutdown().await {
+                    let cleanup = self.shutdown().await;
+                    if let Some(guard) = &mut admission_guard {
+                        guard.disarm();
+                    }
+                    return match cleanup {
                         Ok(()) => Err(HarnessError::Protocol(message)),
                         Err(error) => Err(HarnessError::Protocol(format!(
                             "{message}; could not stop Codex after uncertain turn admission: {error}"
@@ -2834,6 +2857,77 @@ async fn stop_failed_app_server(
     message
 }
 
+struct TurnAdmissionGuard {
+    child: Option<Arc<AsyncMutex<Child>>>,
+    pending: Arc<AsyncMutex<Pending>>,
+    sender: mpsc::UnboundedSender<HarnessEvent>,
+    closed: Arc<AtomicBool>,
+    closing: Arc<AtomicBool>,
+    runtime: tokio::runtime::Handle,
+    request_id: i64,
+}
+
+impl TurnAdmissionGuard {
+    fn disarm(&mut self) {
+        self.child = None;
+    }
+}
+
+impl Drop for TurnAdmissionGuard {
+    fn drop(&mut self) {
+        let Some(child) = self.child.take() else {
+            return;
+        };
+        self.closed.store(true, Ordering::Relaxed);
+        self.closing.store(true, Ordering::Relaxed);
+        let signal = child
+            .try_lock()
+            .ok()
+            .map(|child| stop_codex_process_group(&child));
+        if let Some(Err(error)) = &signal {
+            tracing::warn!(%error, "could not stop Codex after cancelled turn admission");
+        }
+        let sender = self.sender.clone();
+        let pending = self.pending.clone();
+        let request_id = self.request_id;
+        self.runtime.spawn(async move {
+            {
+                let mut pending = pending.lock().await;
+                pending.responses.remove(&request_id);
+                if pending.start_request == Some(request_id) {
+                    pending.start_request = None;
+                }
+            }
+            let result = match signal {
+                Some(Err(error)) => Err(error),
+                Some(Ok(())) => child.lock().await.kill().await,
+                None => {
+                    let mut child = child.lock().await;
+                    match stop_codex_process_group(&child) {
+                        Ok(()) => child.kill().await,
+                        Err(error) => Err(error),
+                    }
+                }
+            };
+            let text = match result {
+                Ok(()) => "Codex turn admission was cancelled; the server was stopped.".to_string(),
+                Err(error) => format!(
+                    "Codex turn admission was cancelled; could not stop the server: {error}"
+                ),
+            };
+            if sender
+                .send(HarnessEvent::ConnectionFailed {
+                    kind: FailureKind::Protocol,
+                    text,
+                })
+                .is_err()
+            {
+                tracing::debug!("could not report cancelled Codex turn admission");
+            }
+        });
+    }
+}
+
 struct AppServerStartupGroup(Option<std::sync::Weak<AsyncMutex<Child>>>);
 
 impl AppServerStartupGroup {
@@ -4425,6 +4519,53 @@ done
             .expect("the stub app-server starts");
         harness.open_session(None).await.expect("a thread opens");
         (harness, capabilities)
+    }
+
+    #[tokio::test]
+    async fn cancelled_turn_admission_stops_server_and_allows_cleanup()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = TempDir::new()?;
+        let original = r#"      printf '{"id":%s,"result":{"turn":{"id":"turn_1","status":"inProgress"}}}\n' "$id""#;
+        let replacement = r#"      (sleep 1; printf escaped > "$directory/escaped") >/dev/null 2>&1 &
+      printf ready > "$directory/admission-ready"
+      sleep 30"#;
+        assert!(PROTOCOL_STUB.contains(original));
+        let script = PROTOCOL_STUB.replace(original, replacement);
+        let stub = write_stub(&directory, "codex-cancel-turn", &script);
+        let (mut harness, _) = start_session(&stub, directory.path()).await;
+        let mut prompt = Box::pin(harness.prompt(PromptInput::text("start")));
+        timeout(Duration::from_secs(5), async {
+            loop {
+                tokio::select! {
+                    result = &mut prompt => return Err(format!("prompt finished early: {result:?}")),
+                    _ = tokio::time::sleep(Duration::from_millis(10)) => {
+                        if directory.path().join("admission-ready").exists() { return Ok(()); }
+                    }
+                }
+            }
+        }).await??;
+        drop(prompt);
+        assert!(harness.closed.load(Ordering::Relaxed));
+        timeout(Duration::from_secs(5), async {
+            loop {
+                match harness.events().recv().await {
+                    Some(HarnessEvent::ConnectionFailed { text, .. })
+                        if text.contains("admission was cancelled") =>
+                    {
+                        break Ok::<(), Box<dyn std::error::Error>>(());
+                    }
+                    Some(_) => {}
+                    None => break Err("missing cancellation failure".into()),
+                }
+            }
+        })
+        .await??;
+        assert!(harness.pending.lock().await.responses.is_empty());
+        harness.shutdown().await?;
+        assert!(harness.child.is_none());
+        tokio::time::sleep(Duration::from_millis(1300)).await;
+        assert!(!directory.path().join("escaped").exists());
+        Ok(())
     }
 
     #[tokio::test]
