@@ -1372,6 +1372,9 @@ placeholder tabs and no unearned state badges.
   Terminal saves similarly validate project and task ownership, reject owner
   changes and late writes, and preserve project-scoped terminals when a task is
   deleted; both stores have an ownership fixture.
+  Terminal layout saves require an existing project; the same check protects
+  task deletion, which rolls back if its accompanying layout cannot be saved.
+  A shared fixture verifies both stores and a successful retry.
   Workspace layout saves require the task to exist at the write, so a late
   resize cannot recreate layout state after deletion; both stores are covered.
   Task deletion stages the checkout before the database transaction so a

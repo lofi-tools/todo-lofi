@@ -59,6 +59,8 @@ pub enum StoreError {
     SessionOwnerMissing { task_id: TaskId, session_id: String },
     #[error("terminal {terminal_id} cannot be saved for its project and task")]
     TerminalOwnerMissing { terminal_id: String },
+    #[error("terminal layout cannot be saved for missing project {project_id}")]
+    TerminalLayoutOwnerMissing { project_id: ProjectId },
     #[error("approval cannot be saved for missing project {project_id}")]
     ApprovalOwnerMissing { project_id: ProjectId },
     #[error("workspace layout cannot be saved for missing task {task_id}")]
@@ -631,10 +633,16 @@ async fn write_terminal_layout(
 ) -> Result<(), StoreError> {
     let json =
         serde_json::to_string(layout).map_err(|error| StoreError::Backend(error.to_string()))?;
-    toasty::sql::statement(
-        "INSERT INTO terminal_layouts (project_id, layout_json, updated_at) VALUES (?1, ?2, ?3)
+    let updated = toasty::sql::statement(
+        "INSERT INTO terminal_layouts (project_id, layout_json, updated_at) \
+         SELECT id, ?2, ?3 FROM projects WHERE id = ?1 \
          ON CONFLICT (project_id) DO UPDATE SET layout_json = excluded.layout_json, updated_at = excluded.updated_at",
     ).bind(project_id.as_str()).bind(json).bind(crate::projects::now_millis() as i64).exec(executor).await?;
+    if updated != 1 {
+        return Err(StoreError::TerminalLayoutOwnerMissing {
+            project_id: project_id.clone(),
+        });
+    }
     Ok(())
 }
 
@@ -2036,6 +2044,13 @@ impl Store for MemoryStore {
         let mut tasks = self.tasks.write().await;
         let mut sessions = self.sessions.write().await;
         let mut projects = self.projects.write().await;
+        if let Some((project_id, _)) = layout
+            && !projects.contains_key(project_id.as_str())
+        {
+            return Err(StoreError::TerminalLayoutOwnerMissing {
+                project_id: project_id.clone(),
+            });
+        }
         let mut transcripts = self.transcripts.write().await;
         let mut workspace_layouts = self.workspace_layouts.write().await;
         let mut terminal_layouts = self.terminal_layouts.write().await;
@@ -2130,6 +2145,12 @@ impl Store for MemoryStore {
         project_id: &ProjectId,
         layout: &TerminalLayout,
     ) -> Result<(), StoreError> {
+        let projects = self.projects.read().await;
+        if !projects.contains_key(project_id.as_str()) {
+            return Err(StoreError::TerminalLayoutOwnerMissing {
+                project_id: project_id.clone(),
+            });
+        }
         self.terminal_layouts
             .write()
             .await
@@ -2490,6 +2511,58 @@ mod tests {
         verify(&MemoryStore::new(), directory.path()).await?;
         verify(
             &TursoStore::open_at(&directory.join("archive-state.db")).await?,
+            directory.path(),
+        )
+        .await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn terminal_layout_requires_a_project_and_failed_deletion_preserves_task()
+    -> Result<(), Box<dyn std::error::Error>> {
+        async fn verify(store: &dyn Store, root: &Path) -> Result<(), Box<dyn std::error::Error>> {
+            let project = Project::new(root.join("present"));
+            let missing = Project::new(root.join("missing"));
+            let task = Task::draft(project.id.clone(), "Task", root);
+            let layout = TerminalLayout {
+                revision: 3,
+                ..TerminalLayout::default()
+            };
+            assert!(matches!(
+                store.save_terminal_layout(&missing.id, &layout).await,
+                Err(StoreError::TerminalLayoutOwnerMissing { .. })
+            ));
+            store.save_project(&project).await?;
+            store.save_task(&task).await?;
+            assert!(matches!(
+                store
+                    .delete_task(&task.id, Some((&missing.id, &layout)))
+                    .await,
+                Err(StoreError::TerminalLayoutOwnerMissing { .. })
+            ));
+            assert!(
+                store
+                    .load_tasks()
+                    .await?
+                    .iter()
+                    .any(|stored| stored.id == task.id)
+            );
+            assert!(store.load_terminal_layouts().await?.is_empty());
+            store.save_terminal_layout(&project.id, &layout).await?;
+            store
+                .delete_task(&task.id, Some((&project.id, &layout)))
+                .await?;
+            assert!(store.load_tasks().await?.is_empty());
+            assert_eq!(
+                store.load_terminal_layouts().await?,
+                vec![(project.id, layout)]
+            );
+            Ok(())
+        }
+        let directory = TestDirectory::new()?;
+        verify(&MemoryStore::new(), directory.path()).await?;
+        verify(
+            &TursoStore::open_at(&directory.join("terminal-layout-owner.db")).await?,
             directory.path(),
         )
         .await?;
