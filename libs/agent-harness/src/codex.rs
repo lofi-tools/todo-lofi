@@ -861,6 +861,8 @@ pub async fn project_models(spec: SpawnSpec) -> HarnessResult<CodexProjectModels
 
 struct Pending {
     responses: HashMap<i64, oneshot::Sender<HarnessResult<Value>>>,
+    start_request: Option<i64>,
+    announced_turn: Option<String>,
     approvals: HashMap<String, i64>,
     approval_writes: BTreeSet<String>,
     thread_id: Option<String>,
@@ -873,6 +875,8 @@ impl Default for Pending {
     fn default() -> Self {
         Self {
             responses: HashMap::new(),
+            start_request: None,
+            announced_turn: None,
             approvals: HashMap::new(),
             approval_writes: BTreeSet::new(),
             thread_id: None,
@@ -1049,15 +1053,27 @@ impl CodexHarness {
                 )));
             }
             pending.responses.insert(id, sender);
+            if method == "turn/start" {
+                pending.start_request = Some(id);
+                pending.announced_turn = None;
+            }
         }
         if let Err(error) = self.send(json!({ "method": method, "id": id, "params": params })) {
-            self.pending.lock().await.responses.remove(&id);
+            let mut pending = self.pending.lock().await;
+            pending.responses.remove(&id);
+            if pending.start_request == Some(id) {
+                pending.start_request = None;
+            }
             return Err(error);
         }
 
         match timeout(REQUEST_TIMEOUT, receiver).await {
             Err(_) => {
-                self.pending.lock().await.responses.remove(&id);
+                let mut pending = self.pending.lock().await;
+                pending.responses.remove(&id);
+                if pending.start_request == Some(id) {
+                    pending.start_request = None;
+                }
                 Err(HarnessError::Protocol(format!(
                     "codex did not answer {method}"
                 )))
@@ -1410,17 +1426,11 @@ impl AgentHarness for CodexHarness {
         }
         let response = self.request("turn/start", params).await?;
 
-        let turn_id = read_turn_id(&response).ok_or_else(|| {
+        read_turn_id(&response).ok_or_else(|| {
             HarnessError::Protocol("the turn response did not include turn.id".to_string())
         })?;
         self.model = input.codex.model.or(self.model.take());
         self.reasoning_effort = input.codex.effort.or(self.reasoning_effort.take());
-        self.pending.lock().await.turn_id = Some(turn_id.clone());
-        self.sender
-            .send(HarnessEvent::TurnStarted {
-                turn_id: TurnId::new(turn_id),
-            })
-            .map_err(|_| HarnessError::ChannelClosed)?;
         Ok(())
     }
 
@@ -2911,7 +2921,8 @@ async fn route_incoming(
                 tracing::warn!("codex answered with a non-numeric id");
                 return Ok(());
             };
-            let waiter = pending.lock().await.responses.remove(&request_id);
+            let mut state = pending.lock().await;
+            let waiter = state.responses.remove(&request_id);
             let Some(waiter) = waiter else {
                 tracing::debug!("codex answered a request nobody is waiting for");
                 return Ok(());
@@ -2920,6 +2931,15 @@ async fn route_incoming(
                 Some(error) => Err(codex_rpc_error(error)),
                 None => Ok(message.get("result").cloned().unwrap_or(Value::Null)),
             };
+            if state.start_request == Some(request_id) {
+                if let Ok(response) = &outcome
+                    && let Some(turn_id) = read_turn_id(response)
+                {
+                    announce_app_turn(&mut state, turn_id, sender)?;
+                }
+                state.start_request = None;
+            }
+            drop(state);
             if waiter.send(outcome).is_err() {
                 tracing::debug!("the answer arrived after its caller gave up");
             }
@@ -2932,6 +2952,28 @@ async fn route_incoming(
         (None, None) => tracing::warn!("codex sent a message with neither id nor method"),
     }
     Ok(())
+}
+
+fn announce_app_turn(
+    pending: &mut Pending,
+    turn_id: String,
+    sender: &mpsc::UnboundedSender<HarnessEvent>,
+) -> HarnessResult<()> {
+    if let Some(announced) = &pending.announced_turn {
+        if announced != &turn_id {
+            return Err(HarnessError::Protocol(
+                "Codex reported conflicting turn IDs.".into(),
+            ));
+        }
+        return Ok(());
+    }
+    pending.turn_id = Some(turn_id.clone());
+    pending.announced_turn = Some(turn_id.clone());
+    sender
+        .send(HarnessEvent::TurnStarted {
+            turn_id: TurnId::new(turn_id),
+        })
+        .map_err(|_| HarnessError::ChannelClosed)
 }
 
 fn codex_rpc_error(error: &Value) -> HarnessError {
@@ -3054,7 +3096,15 @@ async fn handle_notification(
         "turn/started" => {
             if let Some(turn_id) = read_turn_id(params) {
                 let mut pending = pending.lock().await;
-                pending.turn_id = Some(turn_id);
+                if pending.start_request.is_some() {
+                    announce_app_turn(&mut pending, turn_id, sender)?;
+                } else if pending.announced_turn.as_deref() == Some(turn_id.as_str())
+                    && pending.turn_id.is_none()
+                {
+                    return Ok(());
+                } else {
+                    pending.turn_id = Some(turn_id);
+                }
                 pending.turn_error = None;
             }
         }
@@ -3130,6 +3180,11 @@ async fn handle_notification(
                 _ => turn_finish_reason(params),
             };
             let mut pending = pending.lock().await;
+            if pending.start_request.is_some()
+                && let Some(turn_id) = read_turn_id(params)
+            {
+                announce_app_turn(&mut pending, turn_id, sender)?;
+            }
             if let (Some(active), Some(completed)) =
                 (pending.turn_id.as_deref(), read_turn_id(params))
                 && active != completed
@@ -3435,6 +3490,50 @@ mod tests {
     }
 
     use super::*;
+
+    #[tokio::test]
+    async fn app_server_orders_start_and_completion_around_start_reply() -> HarnessResult<()> {
+        for order in 0..4 {
+            let pending = Arc::new(AsyncMutex::new(Pending::default()));
+            let (reply, response) = oneshot::channel();
+            {
+                let mut state = pending.lock().await;
+                state.responses.insert(1, reply);
+                state.start_request = Some(1);
+            }
+            let (sender, mut events) = mpsc::unbounded_channel();
+            let (outgoing, _requests) = mpsc::channel(1);
+            let start = json!({"method":"turn/started", "params":{"turn":{"id":"turn"}}});
+            let finish = json!({"method":"turn/completed", "params":{"turn":{"id":"turn", "status":"completed"}}});
+            let answer = json!({"id":1, "result":{"turn":{"id":"turn"}}});
+            let messages = match order {
+                0 => vec![answer, start, finish],
+                1 => vec![start, finish, answer],
+                2 => vec![finish, answer, start],
+                _ => vec![answer, finish, start],
+            };
+            for message in messages {
+                route_incoming(message, &sender, &pending, &outgoing).await?;
+            }
+            assert!(
+                response
+                    .await
+                    .map_err(|_| HarnessError::ChannelClosed)?
+                    .is_ok()
+            );
+            assert!(matches!(
+                events.try_recv(),
+                Ok(HarnessEvent::TurnStarted { .. })
+            ));
+            assert!(matches!(
+                events.try_recv(),
+                Ok(HarnessEvent::TurnFinished { .. })
+            ));
+            assert!(events.try_recv().is_err());
+            assert!(pending.lock().await.turn_id.is_none());
+        }
+        Ok(())
+    }
 
     #[tokio::test]
     async fn turn_errors_require_a_matching_active_turn() -> HarnessResult<()> {

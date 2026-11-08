@@ -1559,6 +1559,9 @@ placeholder tabs and no unearned state badges.
   the active turn and its pending approvals untouched; a fixture covers stale
   and matching completions. Turn errors are retained only when their ID matches
   an active turn; missing IDs do not match an idle session.
+  App-server turn starts are emitted by the protocol reader before completion,
+  including when a fast turn finishes before its start reply is processed;
+  an offline fixture checks reply and notification ordering.
   Event folding handles at
   most 256 events per session per pass, including during commands, and
   reschedules remaining events so one busy agent cannot monopolize other
