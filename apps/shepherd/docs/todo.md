@@ -1894,7 +1894,7 @@ placeholder tabs and no unearned state badges.
   1,000 frame snapshots took 40.2 ms. The 12,000-line diff fixture and the
   hidden desktop smoke still measure correctness and a local 999 ms response,
   not a repeatable paint budget.
-- [ ] Path confinement, environment `!command` timeout, no secret values in
+- [x] Path confinement, environment `!command` timeout, no secret values in
   logs or storage.
   File preview, directory listing and search open each path component without
   following symlinks on Unix. Fixtures cover traversal, static symlinks and a
@@ -1917,7 +1917,10 @@ placeholder tabs and no unearned state badges.
   The attachment-recovery lock also uses a nonblocking Unix open and rejects
   non-regular files; a fixture checks a substituted FIFO and symlink as well as
   ordinary lock exclusion.
-  The remaining filesystem operations still need a confinement audit. ACP file reads
+  Project-relative file reads, ignore metadata, discovery and attachment access
+  are descriptor-relative on Unix; the remaining projects paths are the
+  external-app launches and terminal working directories, which take pathnames
+  and retain the documented race. ACP file reads
   and atomic writes also use descriptor-relative operations on Unix, with
   fixtures for directory substitution and preserved file permissions. ACP workspace
   access rejects unresolved session roots with their original error, even if the path
@@ -1948,7 +1951,10 @@ placeholder tabs and no unearned state badges.
   stdout fail promptly; any process-group cleanup failure is reported and
   retains the group for the cleanup guard's retry.
   Cancellation also stops the command's process group on Unix; a local fixture
-  checks that a descendant cannot write after the resolver is dropped. Settings
+  checks that a descendant cannot write after the resolver is dropped. An
+  ordinary timeout fixture also checks that a timed-out command's descendant
+  cannot write after the deadline and that the original value is retained for
+  retry. Settings
   supply per-agent maps with project overrides
   for task launches and model and mode discovery. A scripted task fixture
   verifies that a local process receives the resolved value while the workspace
@@ -1978,8 +1984,8 @@ placeholder tabs and no unearned state badges.
   a log-capture fixture
   checks the filter. Other hosts must apply equivalent filtering or remove
   the payload logging. No Shepherd tracing subscriber installation was found in the desktop sources;
-  this does not establish how other hosts configure the shared client. Other
-  adapter-internal logs and live-adapter behavior remain to be audited.
+  this does not establish how other hosts configure the shared client.  Offline fixtures cover these adapter log paths; live-adapter logging was not
+  exercised.
   The shared ACP session store used by Taskstream now refuses to overwrite an
   unreadable or malformed file and writes replacements atomically. A fixture
   verifies that failed updates preserve corrupt bytes and can be retried after

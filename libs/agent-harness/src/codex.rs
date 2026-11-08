@@ -5839,12 +5839,12 @@ esac
                 ":"
             };
             let script = format!(
-                "#!/bin/sh\n(sleep 1; printf escaped > escaped) &\nread -r request\n{response}\nsleep 30\n"
+                "#!/bin/sh\n(sleep 2.5; printf escaped > escaped) &\nread -r request\n{response}\nsleep 30\n"
             );
             let stub = write_stub(&directory, "codex-start.sh", &script);
             let mut harness = CodexHarness::new();
             let start = timeout(
-                Duration::from_millis(300),
+                Duration::from_millis(1500),
                 harness.start(spec(&stub, directory.path())),
             )
             .await;
@@ -5853,7 +5853,7 @@ esac
             } else {
                 assert!(start.is_err());
             }
-            tokio::time::sleep(Duration::from_millis(1300)).await;
+            tokio::time::sleep(Duration::from_millis(2800)).await;
             assert!(!directory.path().join("escaped").exists());
         }
         Ok(())

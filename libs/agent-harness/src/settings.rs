@@ -312,6 +312,27 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
+    async fn environment_timeout_stops_the_command_process_group()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let command = "!(sleep 1; printf leaked > escaped) & sleep 30";
+        let mut values = BTreeMap::from([("TOKEN".into(), command.into())]);
+        let error = resolve_environment_with_timeout(
+            &mut values,
+            directory.path(),
+            std::time::Duration::from_millis(50),
+        )
+        .await
+        .expect_err("must time out");
+        assert!(error.to_string().contains("timed out"), "{error}");
+        assert_eq!(values.get("TOKEN").map(String::as_str), Some(command));
+        tokio::time::sleep(std::time::Duration::from_millis(1300)).await;
+        assert!(!directory.path().join("escaped").exists());
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn invalid_environment_is_rejected_before_running_commands()
     -> Result<(), Box<dyn std::error::Error>> {
         let directory = tempfile::tempdir()?;
