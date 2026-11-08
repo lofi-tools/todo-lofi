@@ -724,18 +724,21 @@ impl TerminalRegistry {
     }
 
     fn record_wait_failure(&self, key: &str, error: String) {
-        let waiters = {
+        let (waiters, changed) = {
             let mut guard = self.entries();
             let Some(entry) = guard.get_mut(key) else {
                 return;
             };
+            let changed = entry.exit_failure.as_deref() != Some(error.as_str());
             entry.exit_failure = Some(error.clone());
-            std::mem::take(&mut entry.waiters)
+            (std::mem::take(&mut entry.waiters), changed)
         };
-        self.publish(AcpEvent::TerminalFailed {
-            terminal_id: key.to_owned(),
-            message: error.clone(),
-        });
+        if changed {
+            self.publish(AcpEvent::TerminalFailed {
+                terminal_id: key.to_owned(),
+                message: error.clone(),
+            });
+        }
         for waiter in waiters {
             if waiter.sender.send(Err(error.clone())).is_err() {
                 tracing::debug!("ACP terminal exit waiter closed");
@@ -943,6 +946,39 @@ mod tests {
         async fn stop(&self, _id: &str) -> Result<(), String> {
             Ok(())
         }
+    }
+
+    #[tokio::test]
+    async fn repeated_terminal_wait_failure_notifies_only_on_change()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let (events, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let registry = TerminalRegistry::new(
+            SessionRoots::new([directory.path().to_path_buf()]),
+            &events,
+            None,
+        );
+        registry.register("fixture", MAX_OUTPUT_LIMIT);
+        let terminal = TerminalId::new("fixture");
+        registry.record_wait_failure("fixture", "first failure".into());
+        assert!(
+            matches!(receiver.try_recv()?, AcpEvent::TerminalFailed { message, .. } if message == "first failure")
+        );
+        registry.record_wait_failure("fixture", "first failure".into());
+        assert!(receiver.try_recv().is_err());
+        assert!(
+            matches!(registry.wait_for_exit(&terminal).await, Err(error) if error == "first failure")
+        );
+        registry.record_wait_failure("fixture", "different failure".into());
+        assert!(
+            matches!(receiver.try_recv()?, AcpEvent::TerminalFailed { message, .. } if message == "different failure")
+        );
+        registry.record_exit("fixture", &TerminalExitStatus::new());
+        registry.record_wait_failure("fixture", "different failure".into());
+        assert!(
+            matches!(receiver.try_recv()?, AcpEvent::TerminalFailed { message, .. } if message == "different failure")
+        );
+        Ok(())
     }
 
     #[tokio::test]

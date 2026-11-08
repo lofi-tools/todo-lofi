@@ -1439,6 +1439,8 @@ placeholder tabs and no unearned state badges.
   core redacts details when launch environment values are configured. A core
   fixture checks that a terminal error notice is persisted during an active
   turn and survives task reopen, while unfinished agent text stays unsaved.
+  Identical repeated wait failures do not create duplicate notices; changed
+  failures and failures after a recorded exit are reported separately.
   Output permits remain held through the harness queue until the core
   consumes the events. A direct terminal's exit wait completes even if a
   descendant keeps an output pipe open, and shutdown rejects new terminals.
