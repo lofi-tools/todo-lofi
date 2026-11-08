@@ -6328,6 +6328,24 @@ mod tests {
         assert_eq!(restored.task.state, TaskState::Review);
         assert_eq!(summaries(&restored), transcript);
         assert_eq!(reopened.review_file_diff(&task_id, "large.txt")?, diff);
+        for index in [0, 32, 999] {
+            let text = format!("message {index:04}");
+            let entry = restored
+                .transcript
+                .iter()
+                .find(|entry| {
+                    matches!(
+                        &entry.kind,
+                        agent_harness::EntryKind::AgentText { text: message } if message == &text
+                    )
+                })
+                .ok_or("missing indexed message")?;
+            let hits = reopened.task_search().search(&format!("{text} ")).await?;
+            assert!(
+                hits.iter()
+                    .any(|hit| hit.task_id == task_id.as_str() && hit.entry_id == entry.id)
+            );
+        }
         Ok(())
     }
 
