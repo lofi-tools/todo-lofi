@@ -2104,10 +2104,15 @@ placeholder tabs and no unearned state badges.
   real 12,000-line worktree diff, then reopens the database and compares the
   complete transcript and diff. After batching indexed writes, that fixture took
   2.87 seconds on this Mac; it does not measure interactive responsiveness.
-- [ ] Three-agent/two-project concurrency test.
-  The local scripted fixture covers overlapping approval waits, mixed decisions
-  on identical approval IDs, and independent worktree writes; a live multi-agent
-  run remains unverified.
+- [x] Three-agent/two-project concurrency test.
+  `three_agent_sessions_keep_projects_approvals_and_worktrees_isolated` keeps
+  three scripted agents in flight across two projects, checks every worktree and
+  branch is distinct, resolves the same approval ID with mixed allow and deny
+  decisions, and verifies each transcript and result file stays in its own task
+  and project, including after a database reopen. It runs in the normal
+  `shepherd-core` suite. A live multi-agent run was not exercised here because
+  it needs installed agents and their credentials; the scripted fixture is the
+  offline acceptance evidence.
 - [ ] Release checklist on both target platforms.
 
 ### Gate

@@ -4529,17 +4529,33 @@ mod tests {
             );
             assert_eq!(waiting.task.state, TaskState::Waiting);
             assert_eq!(waiting.task.project_id, project.as_str());
-            tasks.push((
-                id,
-                agent,
-                PathBuf::from(waiting.task.worktree_path.ok_or("missing worktree")?),
-            ));
+            let worktree = waiting.task.worktree_path.ok_or("missing worktree")?;
+            let branch = waiting.task.branch.ok_or("missing branch")?;
+            tasks.push((id, agent, PathBuf::from(worktree), branch));
         }
-        assert!(tasks.iter().all(|(id, _, _)| {
+        assert!(tasks.iter().all(|(id, _, _, _)| {
             core.task_workspace(id)
                 .is_ok_and(|workspace| workspace.task.state == TaskState::Waiting)
         }));
-        for (index, (id, agent, path)) in tasks.iter().enumerate().rev() {
+        let mut worktrees: Vec<_> = tasks.iter().map(|(_, _, path, _)| path).collect();
+        worktrees.sort();
+        worktrees.dedup();
+        assert_eq!(
+            worktrees.len(),
+            tasks.len(),
+            "each task must own a distinct worktree"
+        );
+        let mut branches: Vec<_> = tasks.iter().map(|(_, _, _, branch)| branch).collect();
+        branches.sort();
+        branches.dedup();
+        assert_eq!(
+            branches.len(),
+            tasks.len(),
+            "each task must own a distinct branch"
+        );
+        assert_eq!(core.task_list(&first_project)?.tasks.len(), 2);
+        assert_eq!(core.task_list(&second_project)?.tasks.len(), 1);
+        for (index, (id, agent, path, _)) in tasks.iter().enumerate().rev() {
             let denied = *agent == Agent::Claude;
             let completed = workspace_of(
                 core.execute(Command::ResolveApproval {
@@ -4573,7 +4589,7 @@ mod tests {
                 agent_harness::EntryKind::Permission { approval_id, decision: Some(decision), .. }
                     if approval_id == "same-approval-id" && *decision == if denied { Decision::Deny } else { Decision::Allow }
             )));
-            for (other_id, other_agent, other_path) in &tasks[..index] {
+            for (other_id, other_agent, other_path, _) in &tasks[..index] {
                 assert_eq!(
                     core.task_workspace(other_id)?.task.state,
                     TaskState::Waiting
@@ -4588,7 +4604,7 @@ mod tests {
             Box::new(UnavailableHarnessFactory),
         )
         .await?;
-        for (id, agent, _) in tasks {
+        for (id, agent, _, _) in tasks {
             let restored = reopened.open_task_workspace(&id).await?;
             assert!(restored.transcript.iter().any(|entry| matches!(
                 &entry.kind,
