@@ -121,6 +121,10 @@ pub struct TerminalRegistry {
     creation_permits: Arc<tokio::sync::Semaphore>,
     control_permits: Arc<tokio::sync::Semaphore>,
     exit_wait_permits: Arc<tokio::sync::Semaphore>,
+    event_budget: Option<(
+        Arc<tokio::sync::Semaphore>,
+        tokio::sync::watch::Sender<bool>,
+    )>,
 }
 
 impl TerminalRegistry {
@@ -139,7 +143,40 @@ impl TerminalRegistry {
             creation_permits: Arc::new(tokio::sync::Semaphore::new(MAX_PENDING_CREATIONS)),
             control_permits: Arc::new(tokio::sync::Semaphore::new(MAX_PENDING_CONTROLS)),
             exit_wait_permits: Arc::new(tokio::sync::Semaphore::new(MAX_PENDING_EXIT_WAITS)),
+            event_budget: None,
         }
+    }
+
+    pub(crate) fn new_with_event_budget(
+        roots: SessionRoots,
+        events: &tokio::sync::mpsc::UnboundedSender<AcpEvent>,
+        backend: Option<Arc<dyn TerminalBackend>>,
+        capacity: Arc<tokio::sync::Semaphore>,
+        overflow: tokio::sync::watch::Sender<bool>,
+    ) -> Self {
+        let mut registry = Self::new(roots, events, backend);
+        registry.event_budget = Some((capacity, overflow));
+        registry
+    }
+
+    fn event_permit<T: serde::Serialize>(
+        &self,
+        value: &T,
+    ) -> Result<Option<Arc<tokio::sync::OwnedSemaphorePermit>>, String> {
+        let Some((capacity, overflow)) = &self.event_budget else {
+            return Ok(None);
+        };
+        if *overflow.borrow() {
+            return Err(crate::connection::UPDATE_OVERFLOW.into());
+        }
+        if let Some(permit) = crate::connection::reserve_update(capacity, value) {
+            return Ok(Some(permit));
+        }
+        self.publish(AcpEvent::ProtocolFailed {
+            message: crate::connection::UPDATE_OVERFLOW.into(),
+        });
+        overflow.send_replace(true);
+        Err(crate::connection::UPDATE_OVERFLOW.into())
     }
 
     /// Start a command for the agent. Returns as soon as the process is up.
@@ -212,6 +249,7 @@ impl TerminalRegistry {
             })
             .unwrap_or(DEFAULT_OUTPUT_LIMIT);
         if let Some(backend) = &self.backend {
+            let event_permit = self.event_permit(&request)?;
             let title = request.command.clone();
             let launch = TerminalLaunch {
                 id: key.clone(),
@@ -230,6 +268,7 @@ impl TerminalRegistry {
                 session_id: request.session_id,
                 terminal_id: key.clone(),
                 title,
+                permit: event_permit,
             });
             let registry = self.clone();
             tokio::spawn(async move { registry.pump_backend(key, receiver).await });
@@ -470,8 +509,10 @@ impl TerminalRegistry {
             if self.entries().contains_key(key) {
                 backend.stop(key).await?;
                 self.entries().remove(key);
+                let permit = self.event_permit(&key)?;
                 self.publish(AcpEvent::TerminalReleased {
                     terminal_id: key.to_owned(),
+                    permit,
                 });
             }
         } else {
@@ -738,10 +779,14 @@ impl TerminalRegistry {
             (std::mem::take(&mut entry.waiters), changed)
         };
         if changed {
-            self.publish(AcpEvent::TerminalFailed {
-                terminal_id: key.to_owned(),
-                message: error.clone(),
-            });
+            match self.event_permit(&(&key, &error)) {
+                Ok(permit) => self.publish(AcpEvent::TerminalFailed {
+                    terminal_id: key.to_owned(),
+                    message: error.clone(),
+                    permit,
+                }),
+                Err(_) => tracing::debug!("ACP terminal failure notification exceeded capacity"),
+            }
         }
         for waiter in waiters {
             if waiter.sender.send(Err(error.clone())).is_err() {
@@ -752,11 +797,15 @@ impl TerminalRegistry {
 
     fn publish_exit(&self, key: &str, exit: &TerminalExitStatus) {
         if self.entries().contains_key(key) {
-            self.publish(AcpEvent::TerminalExited {
-                terminal_id: key.to_string(),
-                exit_code: exit.exit_code,
-                signal: exit.signal.clone(),
-            });
+            match self.event_permit(&(&key, &exit)) {
+                Ok(permit) => self.publish(AcpEvent::TerminalExited {
+                    terminal_id: key.to_string(),
+                    exit_code: exit.exit_code,
+                    signal: exit.signal.clone(),
+                    permit,
+                }),
+                Err(_) => tracing::debug!("ACP terminal exit notification exceeded capacity"),
+            }
         }
     }
 
@@ -936,6 +985,123 @@ fn shell_command(command: &str, args: &[String]) -> String {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn lifecycle_capacity_rejects_start_and_still_cleans_up_on_release()
+    -> Result<(), Box<dyn std::error::Error>> {
+        #[derive(Default)]
+        struct Backend {
+            starts: std::sync::atomic::AtomicUsize,
+            stops: std::sync::atomic::AtomicUsize,
+            streams: Mutex<Vec<tokio::sync::mpsc::Sender<TerminalProcessEvent>>>,
+        }
+        #[async_trait]
+        impl TerminalBackend for Backend {
+            async fn spawn(
+                &self,
+                _: TerminalLaunch,
+                events: tokio::sync::mpsc::Sender<TerminalProcessEvent>,
+            ) -> Result<(), String> {
+                self.starts
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                self.streams
+                    .lock()
+                    .map_err(|error| error.to_string())?
+                    .push(events);
+                Ok(())
+            }
+            async fn stop(&self, _: &str) -> Result<(), String> {
+                self.stops.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(())
+            }
+        }
+        let directory = tempfile::tempdir()?;
+        let backend = Arc::new(Backend::default());
+        let (events, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (overflow, _) = tokio::sync::watch::channel(false);
+        let blocked = TerminalRegistry::new_with_event_budget(
+            SessionRoots::new([directory.path().to_path_buf()]),
+            &events,
+            Some(backend.clone()),
+            Arc::new(tokio::sync::Semaphore::new(0)),
+            overflow,
+        );
+        assert!(
+            blocked
+                .create(CreateTerminalRequest::new("session", "fixture"))
+                .await
+                .is_err()
+        );
+        assert_eq!(backend.starts.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert!(matches!(
+            receiver.try_recv()?,
+            AcpEvent::ProtocolFailed { .. }
+        ));
+
+        let (events, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (overflow, _) = tokio::sync::watch::channel(false);
+        let capacity = Arc::new(tokio::sync::Semaphore::new(1));
+        let registry = TerminalRegistry::new_with_event_budget(
+            SessionRoots::new([directory.path().to_path_buf()]),
+            &events,
+            Some(backend.clone()),
+            capacity.clone(),
+            overflow,
+        );
+        let terminal = registry
+            .create(CreateTerminalRequest::new("session", "fixture"))
+            .await
+            .map_err(std::io::Error::other)?
+            .terminal_id;
+        assert_eq!(capacity.available_permits(), 0);
+        assert!(registry.release(&terminal).await.is_err());
+        assert_eq!(backend.stops.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(registry.entries().is_empty());
+        assert!(matches!(
+            receiver.try_recv()?,
+            AcpEvent::TerminalStarted { .. }
+        ));
+        assert_eq!(capacity.available_permits(), 1);
+        assert!(matches!(
+            receiver.try_recv()?,
+            AcpEvent::ProtocolFailed { .. }
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn distinct_terminal_failures_are_bounded_and_report_overflow()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let (events, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (overflow, overflow_state) = tokio::sync::watch::channel(false);
+        let capacity = Arc::new(tokio::sync::Semaphore::new(1));
+        let registry = TerminalRegistry::new_with_event_budget(
+            SessionRoots::new([directory.path().to_path_buf()]),
+            &events,
+            None,
+            capacity.clone(),
+            overflow,
+        );
+        registry.register("fixture", MAX_OUTPUT_LIMIT);
+        registry.record_wait_failure("fixture", "first".into());
+        registry.record_wait_failure("fixture", "second".into());
+        assert!(*overflow_state.borrow());
+        assert!(
+            matches!(receiver.try_recv()?, AcpEvent::TerminalFailed { message, .. } if message == "first")
+        );
+        assert!(matches!(
+            receiver.try_recv()?,
+            AcpEvent::ProtocolFailed { .. }
+        ));
+        assert_eq!(capacity.available_permits(), 1);
+        let error = registry
+            .wait_for_exit(&TerminalId::new("fixture"))
+            .await
+            .expect_err("wait must report the latest failure");
+        assert_eq!(error, "second");
+        Ok(())
+    }
+
     struct IdleBackend;
 
     #[async_trait]
@@ -1045,7 +1211,7 @@ mod tests {
         assert!(registry.wait_for_exit(&terminal).await.is_err());
         assert!(registry.output(&terminal).exit_status.is_none());
         assert!(
-            matches!(receiver.try_recv()?, AcpEvent::TerminalFailed { terminal_id, message } if terminal_id == "fixture" && message.contains("closed without an exit status"))
+            matches!(receiver.try_recv()?, AcpEvent::TerminalFailed { terminal_id, message, .. } if terminal_id == "fixture" && message.contains("closed without an exit status"))
         );
         assert!(registry.entries().contains_key("fixture"));
         registry

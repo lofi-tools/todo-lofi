@@ -49,7 +49,7 @@ const STDERR_LINES: usize = 250;
 const PENDING_STDERR_EVENTS: usize = 64;
 const UPDATE_CAPACITY_UNITS: usize = 4096;
 const UPDATE_UNIT_BYTES: usize = 16 * 1024;
-const UPDATE_OVERFLOW: &str = "ACP session update queue exceeded its limit";
+pub(crate) const UPDATE_OVERFLOW: &str = "ACP session update queue exceeded its limit";
 
 #[derive(Default)]
 struct ByteCounter(usize);
@@ -65,7 +65,7 @@ impl std::io::Write for ByteCounter {
     }
 }
 
-fn reserve_update<T: serde::Serialize>(
+pub(crate) fn reserve_update<T: serde::Serialize>(
     capacity: &Arc<tokio::sync::Semaphore>,
     value: &T,
 ) -> Option<Arc<tokio::sync::OwnedSemaphorePermit>> {
@@ -683,7 +683,13 @@ where
     let write_permits = file_permits;
     let terminal_create = events_tx.clone();
     let auto_approvals = events_tx.clone();
-    let registry = TerminalRegistry::new(roots_for_handlers.clone(), &events_tx, terminals);
+    let registry = TerminalRegistry::new_with_event_budget(
+        roots_for_handlers.clone(),
+        &events_tx,
+        terminals,
+        update_capacity.clone(),
+        overflow_tx.clone(),
+    );
     // One clone per handler: the `async move` closures own their captures, so a
     // single shared variable cannot be moved into several of them.
     let roots_for_read = roots.clone();

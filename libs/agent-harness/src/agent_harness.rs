@@ -637,17 +637,21 @@ pub enum HarnessEvent {
     AgentTerminalStarted {
         id: String,
         title: String,
+        stream_permit: Option<Arc<tokio::sync::OwnedSemaphorePermit>>,
     },
     AgentTerminalExited {
         id: String,
         exit_code: Option<u32>,
+        stream_permit: Option<Arc<tokio::sync::OwnedSemaphorePermit>>,
     },
     AgentTerminalError {
         id: String,
         text: String,
+        stream_permit: Option<Arc<tokio::sync::OwnedSemaphorePermit>>,
     },
     AgentTerminalRemoved {
         id: String,
+        stream_permit: Option<Arc<tokio::sync::OwnedSemaphorePermit>>,
     },
     Plan {
         rows: Vec<PlanRow>,

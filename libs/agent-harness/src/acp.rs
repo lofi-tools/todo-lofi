@@ -695,25 +695,25 @@ async fn drive_session(
                     Some(AcpEvent::TerminalOutput { terminal_id, chunk, permit, .. }) if prompt.is_some() => {
                         updates.terminal_output(&sender, terminal_id, chunk, Arc::new(permit))?;
                     }
-                    Some(AcpEvent::TerminalStarted { session_id, terminal_id, title })
+                    Some(AcpEvent::TerminalStarted { session_id, terminal_id, title, permit })
                         if session_id == session => {
                         terminals.insert(terminal_id.clone());
-                        publish(&sender, HarnessEvent::AgentTerminalStarted { id: terminal_id, title })?;
+                        publish(&sender, HarnessEvent::AgentTerminalStarted { id: terminal_id, title, stream_permit: permit })?;
                     }
-                    Some(AcpEvent::TerminalExited { terminal_id, exit_code, .. })
+                    Some(AcpEvent::TerminalExited { terminal_id, exit_code, permit, .. })
                         if terminals.contains(&terminal_id) => {
-                        publish(&sender, HarnessEvent::AgentTerminalExited { id: terminal_id, exit_code })?;
+                        publish(&sender, HarnessEvent::AgentTerminalExited { id: terminal_id, exit_code, stream_permit: permit })?;
                     }
-                    Some(AcpEvent::TerminalFailed { terminal_id, message }) if terminals.contains(&terminal_id) => {
-                        publish(&sender, HarnessEvent::AgentTerminalError { id: terminal_id, text: format!("Agent terminal error: {message}") })?;
+                    Some(AcpEvent::TerminalFailed { terminal_id, message, permit }) if terminals.contains(&terminal_id) => {
+                        publish(&sender, HarnessEvent::AgentTerminalError { id: terminal_id, text: format!("Agent terminal error: {message}"), stream_permit: permit })?;
                     }
-                    Some(AcpEvent::TerminalReleased { terminal_id }) if terminals.remove(&terminal_id) => {
+                    Some(AcpEvent::TerminalReleased { terminal_id, permit }) if terminals.remove(&terminal_id) => {
                         if prompt.is_some() {
-                            publish(&sender, HarnessEvent::AgentTerminalExited { id: terminal_id.clone(), exit_code: None })?;
-                            released.push(terminal_id);
+                            publish(&sender, HarnessEvent::AgentTerminalExited { id: terminal_id.clone(), exit_code: None, stream_permit: permit.clone() })?;
+                            released.push((terminal_id, permit));
                         } else {
                             updates.forget_terminal(&terminal_id);
-                            publish(&sender, HarnessEvent::AgentTerminalRemoved { id: terminal_id })?;
+                            publish(&sender, HarnessEvent::AgentTerminalRemoved { id: terminal_id, stream_permit: permit })?;
                         }
                     }
                     Some(AcpEvent::Exited { code, stderr }) => {
@@ -742,9 +742,9 @@ async fn drive_session(
                 prompt = None;
                 cancelling = false;
                 withdraw_approvals(&sender, &mut approvals)?;
-                for id in released.drain(..) {
+                for (id, permit) in released.drain(..) {
                     updates.forget_terminal(&id);
-                    publish(&sender, HarnessEvent::AgentTerminalRemoved { id })?;
+                    publish(&sender, HarnessEvent::AgentTerminalRemoved { id, stream_permit: permit })?;
                 }
                 if matches!(outcome, Err(AcpError::TransportClosed(_))) {
                     // The process supervisor can report the actual status after the wire closes.
@@ -2371,18 +2371,26 @@ done
         let mut removed = false;
         loop {
             match next(&mut harness).await? {
-                HarnessEvent::AgentTerminalStarted { id, title } => {
+                HarnessEvent::AgentTerminalStarted {
+                    id,
+                    title,
+                    stream_permit,
+                } => {
                     assert_eq!(title, "fixture");
+                    assert!(stream_permit.is_some());
                     terminal = Some(id);
                 }
                 HarnessEvent::AgentTerminalExited {
                     id,
                     exit_code: Some(7),
+                    stream_permit,
                 } => {
+                    assert!(stream_permit.is_some());
                     assert_eq!(terminal.as_deref(), Some(id.as_str()));
                     exited = true;
                 }
-                HarnessEvent::AgentTerminalRemoved { id } => {
+                HarnessEvent::AgentTerminalRemoved { id, stream_permit } => {
+                    assert!(stream_permit.is_some());
                     assert_eq!(terminal.as_deref(), Some(id.as_str()));
                     removed = true;
                 }

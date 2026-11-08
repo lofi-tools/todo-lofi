@@ -213,6 +213,7 @@ impl FakeHarness {
                     self.send(HarnessEvent::AgentTerminalError {
                         id: id.clone(),
                         text: text.clone(),
+                        stream_permit: None,
                     })?;
                 }
                 FakeStep::Message(text) => {

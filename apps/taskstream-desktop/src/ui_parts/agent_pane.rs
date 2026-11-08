@@ -1657,6 +1657,7 @@ impl AgentPane {
                 AcpEvent::TerminalFailed {
                     terminal_id,
                     message,
+                    ..
                 } => {
                     entry
                         .transcript

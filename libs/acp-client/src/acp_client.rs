@@ -107,13 +107,16 @@ pub enum AcpEvent {
         session_id: schema::SessionId,
         terminal_id: String,
         title: String,
+        permit: Option<std::sync::Arc<tokio::sync::OwnedSemaphorePermit>>,
     },
     TerminalReleased {
         terminal_id: String,
+        permit: Option<std::sync::Arc<tokio::sync::OwnedSemaphorePermit>>,
     },
     TerminalFailed {
         terminal_id: String,
         message: String,
+        permit: Option<std::sync::Arc<tokio::sync::OwnedSemaphorePermit>>,
     },
     /// A terminal started by the agent produced output.
     TerminalOutput {
@@ -127,6 +130,7 @@ pub enum AcpEvent {
         terminal_id: String,
         exit_code: Option<u32>,
         signal: Option<String>,
+        permit: Option<std::sync::Arc<tokio::sync::OwnedSemaphorePermit>>,
     },
     /// A line captured from the agent's stderr.
     Stderr(StderrMessage),
@@ -213,7 +217,7 @@ impl std::fmt::Debug for AcpEvent {
                 .field("session_id", session_id)
                 .field("terminal_id", terminal_id)
                 .finish(),
-            Self::TerminalReleased { terminal_id } => f
+            Self::TerminalReleased { terminal_id, .. } => f
                 .debug_tuple("TerminalReleased")
                 .field(terminal_id)
                 .finish(),

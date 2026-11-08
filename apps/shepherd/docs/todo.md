@@ -1585,6 +1585,11 @@ placeholder tabs and no unearned state badges.
   both limits until consumption; fixtures check capacity release and byte
   charging. An exhausted-budget fake-agent fixture verifies that a manual
   request is rejected before reaching the UI and the prompt fails.
+  ACP terminal start, exit, release and failure events also reserve from that
+  budget and retain their permits through the harness. Saturation rejects a
+  new start before spawning, while a release still stops and removes its
+  terminal before reporting overflow. Fixtures cover both, repeated failures,
+  and permit propagation through terminal lifecycle events.
   Transcript folding similarly selects the tail of an oversized command-output
   chunk before allocating it, with a UTF-8 regression for the retained output.
 - [ ] Multiple agents and projects: three agents across two projects, no state

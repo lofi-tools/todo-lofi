@@ -353,7 +353,7 @@ impl HarnessSession {
                 }
             }
             match &event {
-                HarnessEvent::AgentTerminalStarted { id, title } => {
+                HarnessEvent::AgentTerminalStarted { id, title, .. } => {
                     self.capabilities.agent_terminals = true;
                     self.agent_terminals.push(AgentTerminal {
                         id: id.clone(),
@@ -362,7 +362,7 @@ impl HarnessSession {
                         exit_code: None,
                     });
                 }
-                HarnessEvent::AgentTerminalExited { id, exit_code } => {
+                HarnessEvent::AgentTerminalExited { id, exit_code, .. } => {
                     if let Some(terminal) = self
                         .agent_terminals
                         .iter_mut()
@@ -372,7 +372,7 @@ impl HarnessSession {
                         terminal.exit_code = exit_code.or(terminal.exit_code);
                     }
                 }
-                HarnessEvent::AgentTerminalRemoved { id } => {
+                HarnessEvent::AgentTerminalRemoved { id, .. } => {
                     self.agent_terminals.retain(|terminal| terminal.id != *id);
                 }
                 HarnessEvent::ToolCall {
