@@ -28,6 +28,7 @@ const MAX_EXIT_WAITERS_PER_TERMINAL: usize = 64;
 const MAX_PENDING_STOP_REQUESTS: usize = 64;
 const MAX_PENDING_CREATIONS: usize = 32;
 const MAX_PENDING_CONTROLS: usize = 64;
+const MAX_PENDING_EXIT_WAITS: usize = 256;
 
 pub struct TerminalLaunch {
     pub id: String,
@@ -117,6 +118,7 @@ pub struct TerminalRegistry {
     output_permits: Arc<tokio::sync::Semaphore>,
     creation_permits: Arc<tokio::sync::Semaphore>,
     control_permits: Arc<tokio::sync::Semaphore>,
+    exit_wait_permits: Arc<tokio::sync::Semaphore>,
 }
 
 impl TerminalRegistry {
@@ -134,6 +136,7 @@ impl TerminalRegistry {
             output_permits: Arc::new(tokio::sync::Semaphore::new(MAX_PENDING_OUTPUT_EVENTS)),
             creation_permits: Arc::new(tokio::sync::Semaphore::new(MAX_PENDING_CREATIONS)),
             control_permits: Arc::new(tokio::sync::Semaphore::new(MAX_PENDING_CONTROLS)),
+            exit_wait_permits: Arc::new(tokio::sync::Semaphore::new(MAX_PENDING_EXIT_WAITS)),
         }
     }
 
@@ -160,6 +163,13 @@ impl TerminalRegistry {
             .clone()
             .try_acquire_owned()
             .map_err(|_| "too many pending terminal control requests".into())
+    }
+
+    pub(crate) fn reserve_exit_wait(&self) -> Result<tokio::sync::OwnedSemaphorePermit, String> {
+        self.exit_wait_permits
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| "too many pending terminal exit waits for connection".into())
     }
 
     pub(crate) async fn create_reserved(

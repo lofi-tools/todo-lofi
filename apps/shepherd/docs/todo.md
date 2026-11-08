@@ -1381,6 +1381,8 @@ placeholder tabs and no unearned state badges.
   frees a slot and existing waiters still receive the exit status. The ACP
   handler honors request cancellation; a fake agent cancels 65 waits and then
   successfully waits for the same terminal to exit.
+  A connection-wide limit of 256 exit waits also bounds handler tasks across
+  terminals; a fake-agent fixture fills it, cancels the waits, and repeats.
   ACP allows at most 64 pending manual permission requests per connection;
   additional requests receive an error. A fake-agent burst verifies the limit,
   cancellation and recovery after the queued requests are released.

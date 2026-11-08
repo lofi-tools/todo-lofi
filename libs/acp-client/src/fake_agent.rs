@@ -52,6 +52,7 @@ pub struct FakeScript {
     /// Ask the client to run a command.
     pub terminal: Option<(String, Vec<String>)>,
     pub cancelled_terminal_waits: usize,
+    pub terminal_wait_burst: bool,
     pub cancel_waiting_terminal_creation: bool,
     pub cancel_started_terminal_creation: bool,
     pub release_terminal: bool,
@@ -85,6 +86,7 @@ pub struct FakeObservations {
     pub terminal_creation_cancel_sent: bool,
     pub terminal_exit: Vec<Option<u32>>,
     pub terminal_wait_cancellations: Vec<Result<(), String>>,
+    pub terminal_wait_overflow: Option<Result<(), String>>,
     pub file_reads: Vec<Result<String, String>>,
     pub file_writes: Vec<Result<(), String>>,
     pub file_cancellations_sent: bool,
@@ -461,7 +463,59 @@ async fn run_turn(
         }
     }
     if let Some((command, args)) = &script.terminal {
-        if script.cancel_started_terminal_creation {
+        if script.terminal_wait_burst {
+            let mut terminals = Vec::new();
+            for _ in 0..5 {
+                let created = connection
+                    .send_request(
+                        CreateTerminalRequest::new(session_id.clone(), command.clone())
+                            .args(args.clone()),
+                    )
+                    .block_task()
+                    .await?;
+                terminals.push(created.terminal_id);
+            }
+            let mut waits = Vec::new();
+            for terminal in terminals.iter().take(4) {
+                for _ in 0..64 {
+                    waits.push(connection.send_request(WaitForTerminalExitRequest::new(
+                        session_id.clone(),
+                        terminal.clone(),
+                    )));
+                }
+            }
+            if let Some(terminal) = terminals.last() {
+                let overflow = connection
+                    .send_request(WaitForTerminalExitRequest::new(
+                        session_id.clone(),
+                        terminal.clone(),
+                    ))
+                    .block_task()
+                    .await
+                    .map(|_| ())
+                    .map_err(|error| error.to_string());
+                if let Ok(mut state) = observations.lock() {
+                    state.terminal_wait_overflow = Some(overflow);
+                }
+            }
+            for wait in waits {
+                wait.cancel()?;
+                let result = wait
+                    .block_task()
+                    .await
+                    .map(|_| ())
+                    .map_err(|error| error.to_string());
+                if let Ok(mut state) = observations.lock() {
+                    state.terminal_wait_cancellations.push(result);
+                }
+            }
+            for terminal in terminals {
+                connection
+                    .send_request(ReleaseTerminalRequest::new(session_id.clone(), terminal))
+                    .block_task()
+                    .await?;
+            }
+        } else if script.cancel_started_terminal_creation {
             let request = connection.send_request(
                 CreateTerminalRequest::new(session_id.clone(), command.clone()).args(args.clone()),
             );
@@ -1368,6 +1422,62 @@ mod tests {
             std::fs::read_to_string(dir.path().join(&target)).unwrap(),
             "hello"
         );
+    }
+
+    #[tokio::test]
+    async fn terminal_exit_wait_limit_is_shared_across_terminals()
+    -> Result<(), Box<dyn std::error::Error>> {
+        struct Backend(
+            std::sync::Mutex<Vec<tokio::sync::mpsc::Sender<crate::terminal::TerminalProcessEvent>>>,
+        );
+        #[async_trait::async_trait]
+        impl crate::terminal::TerminalBackend for Backend {
+            async fn spawn(
+                &self,
+                _launch: crate::terminal::TerminalLaunch,
+                events: tokio::sync::mpsc::Sender<crate::terminal::TerminalProcessEvent>,
+            ) -> Result<(), String> {
+                self.0
+                    .lock()
+                    .map_err(|error| error.to_string())?
+                    .push(events);
+                Ok(())
+            }
+            async fn stop(&self, _id: &str) -> Result<(), String> {
+                Ok(())
+            }
+        }
+        let directory = tempfile::tempdir()?;
+        let (connection, observations) = connect_fake_agent_with_terminals(
+            FakeScript {
+                terminal: Some(("fixture".into(), Vec::new())),
+                terminal_wait_burst: true,
+                ..Default::default()
+            },
+            ConnectOptions {
+                roots: SessionRoots::new([directory.path().to_path_buf()]),
+                tool_permissions: confirm_all(),
+            },
+            Arc::new(Backend(std::sync::Mutex::new(Vec::new()))),
+        )
+        .await?;
+        let session = new_session(&connection, &directory).await;
+        for turn in 1..=2 {
+            tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                connection.requester.prompt(&session, "go".into()),
+            )
+            .await??;
+            let observed = observations.lock().map_err(|error| error.to_string())?;
+            assert!(
+                matches!(&observed.terminal_wait_overflow, Some(Err(error)) if error.contains("for connection"))
+            );
+            assert_eq!(observed.terminal_wait_cancellations.len(), turn * 256);
+            assert!(observed.terminal_wait_cancellations.iter().all(
+                |result| matches!(result, Err(error) if error.to_lowercase().contains("cancel"))
+            ));
+        }
+        Ok(())
     }
 
     #[tokio::test]
