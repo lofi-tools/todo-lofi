@@ -2043,6 +2043,10 @@ export function App() {
                         .map(([, label]) => label).join(', ') || 'None reported'}</dd>
                     </>}
                   </Show>
+                  <Show when={workspace()?.capabilities?.approvals && !workspace()?.capabilities?.unreviewedTools && workspace()?.task.agent === 'pi'}>
+                    <dt>Tool review</dt>
+                    <dd>Pi tool calls wait for Shepherd's approval through the bundled extension.</dd>
+                  </Show>
                   <Show when={workspace()?.capabilities?.unreviewedTools}>
                     <dt>Tool review</dt>
                     <dd>Unreviewed tools: the Pi approval bridge is unavailable, so tool calls follow Pi's configuration and are never approved by Shepherd.</dd>

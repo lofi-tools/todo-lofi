@@ -31,6 +31,8 @@ const MAX_QUEUED_EVENTS: usize = 32;
 const STDERR_TAIL_BYTES: usize = 16 * 1024;
 const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(3);
+const APPROVAL_EXTENSION: &str = include_str!("../assets/pi_approval_extension.ts");
+const APPROVAL_EXTENSION_DIRECTORY: &str = "shepherd-pi-approval";
 
 pub struct PiRpc {
     input: Option<mpsc::Sender<Vec<u8>>>,
@@ -486,8 +488,8 @@ fn bridge_lock(bridge: &Bridge) -> std::sync::MutexGuard<'_, PiBridge> {
 ///
 /// Pi has no tool-approval protocol of its own. A `confirm` extension dialog is
 /// the only question Shepherd can answer with a decision, so it becomes the
-/// approval card; the bundled extension that forwards tool calls is a separate
-/// concern from this transport bridge.
+/// approval card; `start` installs the bundled extension that turns every tool
+/// call into that dialog.
 pub struct PiHarness {
     rpc: Option<PiRpc>,
     events: mpsc::UnboundedReceiver<HarnessEvent>,
@@ -497,6 +499,7 @@ pub struct PiHarness {
     bridge: Bridge,
     cancelled: Arc<AtomicBool>,
     dialogs: mpsc::UnboundedReceiver<()>,
+    approval_extension: bool,
     pump: Option<JoinHandle<()>>,
     diagnostics: AgentDiagnostics,
 }
@@ -509,6 +512,17 @@ impl Default for PiHarness {
 
 impl PiHarness {
     pub fn new() -> Self {
+        Self::with_approval_extension(true)
+    }
+
+    /// A Pi that cannot load the bundled extension. Tool calls follow Pi's own
+    /// configuration, so the harness reports `unreviewed tools` instead of
+    /// pretending an approval happened.
+    pub fn without_approval_extension() -> Self {
+        Self::with_approval_extension(false)
+    }
+
+    fn with_approval_extension(approval_extension: bool) -> Self {
         let (sender, events) = mpsc::unbounded_channel();
         let (_dialogs, dialogs) = mpsc::unbounded_channel();
         Self {
@@ -520,6 +534,7 @@ impl PiHarness {
             bridge: Bridge::default(),
             cancelled: Arc::new(AtomicBool::new(false)),
             dialogs,
+            approval_extension,
             pump: None,
             diagnostics: AgentDiagnostics::default(),
         }
@@ -542,9 +557,14 @@ impl AgentHarness for PiHarness {
         self.diagnostics.clone()
     }
 
-    async fn start(&mut self, spec: SpawnSpec) -> HarnessResult<Capabilities> {
+    async fn start(&mut self, mut spec: SpawnSpec) -> HarnessResult<Capabilities> {
         if self.rpc.is_some() {
             return Err(protocol("Pi harness is already started"));
+        }
+        if self.approval_extension {
+            let extension = install_approval_extension()?;
+            spec.args.push("--extension".into());
+            spec.args.push(extension.to_string_lossy().into_owned());
         }
         self.diagnostics.command = command_line(&spec);
         self.diagnostics.protocol = "pi rpc".into();
@@ -568,7 +588,7 @@ impl AgentHarness for PiHarness {
             thoughts: true,
             tool_calls: true,
             approvals: true,
-            unreviewed_tools: true,
+            unreviewed_tools: !self.approval_extension,
             resume,
             cancel: true,
             images: true,
@@ -750,6 +770,43 @@ async fn pump_events(
             return;
         }
     }
+}
+
+fn approval_extension_path() -> std::path::PathBuf {
+    std::env::temp_dir()
+        .join(APPROVAL_EXTENSION_DIRECTORY)
+        .join("pi-approval.ts")
+}
+
+fn install_approval_extension() -> HarnessResult<std::path::PathBuf> {
+    let path = approval_extension_path();
+    let directory = path
+        .parent()
+        .ok_or_else(|| protocol("the Pi approval extension has no directory"))?;
+    std::fs::create_dir_all(directory).map_err(|error| {
+        protocol(format!(
+            "could not create the Pi approval extension directory {}: {error}",
+            directory.display()
+        ))
+    })?;
+    if std::fs::read_to_string(&path).ok().as_deref() != Some(APPROVAL_EXTENSION) {
+        // Write beside the target and rename so concurrent sessions never load a
+        // half-written extension.
+        let staged = directory.join(format!("pi-approval-{}.ts", uuid::Uuid::new_v4()));
+        std::fs::write(&staged, APPROVAL_EXTENSION).map_err(|error| {
+            protocol(format!(
+                "could not write the Pi approval extension {}: {error}",
+                staged.display()
+            ))
+        })?;
+        std::fs::rename(&staged, &path).map_err(|error| {
+            protocol(format!(
+                "could not install the Pi approval extension {}: {error}",
+                path.display()
+            ))
+        })?;
+    }
+    Ok(path)
 }
 
 /// A Pi session can only be reopened through its session file, so that path is
@@ -1602,7 +1659,7 @@ exec sleep 30
         std::fs::write(
             &script,
             r#"
-[ "$1" = --mode ] && [ "$2" = rpc ] || exit 2
+case " $* " in *" --mode rpc "*) ;; *) exit 2;; esac
 IFS= read -r state || exit 3
 state_id=$(printf '%s\n' "$state" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
 printf '{"type":"response","id":"%s","command":"get_state","success":true,"data":{"sessionId":"pi-fixture","sessionFile":null,"isStreaming":false,"isCompacting":false,"pendingMessageCount":0}}\r\n' "$state_id"
@@ -1692,7 +1749,7 @@ exit 23
         std::fs::write(
             &script,
             r#"
-[ "$1" = --mode ] && [ "$2" = rpc ] || exit 2
+case " $* " in *" --mode rpc "*) ;; *) exit 2;; esac
 IFS= read -r state || exit 3
 state_id=$(printf '%s\n' "$state" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
 sed -n '1p' session.jsonl | sed "s/\"id\":\"1\"/\"id\":\"$state_id\"/"
@@ -1756,6 +1813,135 @@ sed -n '3p' session.jsonl | sed "s/\"id\":\"2\"/\"id\":\"$prompt_id\"/"
 
     #[cfg(unix)]
     #[tokio::test]
+    async fn harness_installs_the_extension_and_reviews_tool_calls()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let args_path = directory.path().join("args.txt");
+        let script = directory.path().join("pi-harness-bridge.sh");
+        std::fs::write(
+            &script,
+            r#"
+case " $* " in *" --mode rpc "*) ;; *) exit 2;; esac
+printf '%s\n' "$@" > "$ARGS_FILE"
+IFS= read -r state || exit 3
+state_id=$(printf '%s\n' "$state" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
+printf '{"type":"response","id":"%s","command":"get_state","success":true,"data":{"sessionId":"pi-bridge","isStreaming":false,"isCompacting":false,"pendingMessageCount":0}}\n' "$state_id"
+IFS= read -r prompt || exit 4
+prompt_id=$(printf '%s\n' "$prompt" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
+printf '{"type":"response","id":"%s","command":"prompt","success":true,"data":{"disposition":"started"}}\n' "$prompt_id"
+printf '{"type":"extension_ui_request","id":"ext-allow","method":"confirm","title":"Allow Pi to run bash?","message":"{}"}\n'
+IFS= read -r allow || exit 5
+case "$allow" in *'"confirmed":true'*) ;; *) exit 6;; esac
+printf '{"type":"tool_execution_start","toolCallId":"call-allow","toolName":"bash","args":{}}\n'
+printf '{"type":"tool_execution_end","toolCallId":"call-allow","toolName":"bash","result":{"content":[{"type":"text","text":"ok"}]},"isError":false}\n'
+printf '{"type":"extension_ui_request","id":"ext-deny","method":"confirm","title":"Allow Pi to run write?","message":"{}"}\n'
+IFS= read -r deny || exit 7
+case "$deny" in *'"confirmed":false'*) ;; *) exit 8;; esac
+printf '{"type":"tool_execution_end","toolCallId":"call-deny","toolName":"write","result":{"content":[{"type":"text","text":"Denied in Shepherd"}]},"isError":true}\n'
+printf '{"type":"agent_settled","aborted":false}\n'
+exec sleep 30
+"#,
+        )?;
+        let mut spec = pi_script_spec(&script, directory.path());
+        spec.environment
+            .insert("ARGS_FILE".into(), args_path.to_string_lossy().into_owned());
+        let mut harness = PiHarness::new();
+        let capabilities = harness.start(spec).await?;
+        assert!(
+            !capabilities.unreviewed_tools,
+            "the installed bridge reviews tool calls"
+        );
+        let extension_path = approval_extension_path();
+        let arguments = std::fs::read_to_string(&args_path)?;
+        assert!(arguments.contains("--extension"));
+        assert!(arguments.contains(&*extension_path.to_string_lossy()));
+        let extension = std::fs::read_to_string(&extension_path)?;
+        assert!(extension.contains("tool_call") && extension.contains("ctx.ui.confirm"));
+        assert_eq!(harness.open_session(None).await?.as_str(), "pi-bridge");
+        harness.prompt(PromptInput::text("fixture")).await?;
+        let first = wait_for_approval(&mut harness).await?;
+        assert_eq!(first.title, "Allow Pi to run bash?");
+        harness
+            .respond(first.approval_id.clone(), Decision::Allow)
+            .await?;
+        let mut resolved = Vec::new();
+        let mut tools = Vec::new();
+        let second = loop {
+            match harness_event(&mut harness).await? {
+                HarnessEvent::ApprovalRequested { request } => break request,
+                HarnessEvent::ApprovalResolved { decision, .. } => resolved.push(decision),
+                HarnessEvent::ToolCall { status, .. } => tools.push(status),
+                other => {
+                    assert!(
+                        !matches!(other, HarnessEvent::TurnFinished { .. }),
+                        "the turn finished before the second approval"
+                    );
+                }
+            }
+        };
+        assert_eq!(second.title, "Allow Pi to run write?");
+        harness
+            .respond(second.approval_id.clone(), Decision::Deny)
+            .await?;
+        let mut finished = None;
+        while finished.is_none() {
+            match harness_event(&mut harness).await? {
+                HarnessEvent::ApprovalResolved { decision, .. } => resolved.push(decision),
+                HarnessEvent::ToolCall { status, .. } => tools.push(status),
+                HarnessEvent::TurnFinished { reason } => finished = Some(reason),
+                _ => {}
+            }
+        }
+        assert_eq!(resolved, [Decision::Allow, Decision::Deny]);
+        assert_eq!(finished, Some(TurnFinishReason::Completed));
+        assert!(tools.contains(&ToolStatus::Completed));
+        assert!(tools.contains(&ToolStatus::Failed));
+        harness.shutdown().await?;
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn harness_without_the_extension_reports_unreviewed_tools()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let args_path = directory.path().join("args.txt");
+        let script = directory.path().join("pi-harness-unreviewed.sh");
+        std::fs::write(
+            &script,
+            r#"
+case " $* " in *" --mode rpc "*) ;; *) exit 2;; esac
+printf '%s\n' "$@" > "$ARGS_FILE"
+IFS= read -r state || exit 3
+state_id=$(printf '%s\n' "$state" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
+printf '{"type":"response","id":"%s","command":"get_state","success":true,"data":{"sessionId":"pi-unreviewed","isStreaming":false,"isCompacting":false,"pendingMessageCount":0}}\n' "$state_id"
+exec sleep 30
+"#,
+        )?;
+        let mut spec = pi_script_spec(&script, directory.path());
+        spec.environment
+            .insert("ARGS_FILE".into(), args_path.to_string_lossy().into_owned());
+        let mut harness = PiHarness::without_approval_extension();
+        let capabilities = harness.start(spec).await?;
+        assert!(capabilities.unreviewed_tools);
+        let arguments = std::fs::read_to_string(&args_path)?;
+        assert!(!arguments.contains("--extension"));
+        harness.shutdown().await?;
+        Ok(())
+    }
+
+    async fn wait_for_approval(
+        harness: &mut PiHarness,
+    ) -> Result<ApprovalRequest, Box<dyn std::error::Error>> {
+        loop {
+            if let HarnessEvent::ApprovalRequested { request } = harness_event(harness).await? {
+                return Ok(request);
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn harness_resumes_a_session_file() -> Result<(), Box<dyn std::error::Error>> {
         let directory = tempfile::tempdir()?;
         let resumed = directory.path().join("resumed.jsonl");
@@ -1763,7 +1949,7 @@ sed -n '3p' session.jsonl | sed "s/\"id\":\"2\"/\"id\":\"$prompt_id\"/"
         std::fs::write(
             &script,
             r#"
-[ "$1" = --mode ] && [ "$2" = rpc ] || exit 2
+case " $* " in *" --mode rpc "*) ;; *) exit 2;; esac
 IFS= read -r state || exit 3
 state_id=$(printf '%s\n' "$state" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
 printf '{"type":"response","id":"%s","command":"get_state","success":true,"data":{"sessionId":"pi-fresh","isStreaming":false,"isCompacting":false,"pendingMessageCount":0}}\n' "$state_id"
@@ -1828,7 +2014,7 @@ exec sleep 30
         std::fs::write(
             &script,
             r#"
-[ "$1" = --mode ] && [ "$2" = rpc ] || exit 2
+case " $* " in *" --mode rpc "*) ;; *) exit 2;; esac
 IFS= read -r state || exit 3
 state_id=$(printf '%s\n' "$state" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
 printf '{"type":"response","id":"%s","command":"get_state","success":true,"data":{"sessionId":"pi-harness","isStreaming":false,"isCompacting":false,"pendingMessageCount":0}}\n' "$state_id"
@@ -1853,7 +2039,7 @@ exec sleep 30
             capabilities.streaming
                 && capabilities.approvals
                 && capabilities.cancel
-                && capabilities.unreviewed_tools
+                && !capabilities.unreviewed_tools
         );
         assert_eq!(harness.open_session(None).await?.as_str(), "pi-harness");
         harness.prompt(PromptInput::text("fixture")).await?;
@@ -1909,7 +2095,7 @@ exec sleep 30
         std::fs::write(
             &script,
             r#"
-[ "$1" = --mode ] && [ "$2" = rpc ] || exit 2
+case " $* " in *" --mode rpc "*) ;; *) exit 2;; esac
 IFS= read -r state || exit 3
 state_id=$(printf '%s\n' "$state" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
 sed -n '1p' session.jsonl | sed "s/\"id\":\"1\"/\"id\":\"$state_id\"/"
@@ -1964,7 +2150,7 @@ exec sleep 30
         std::fs::write(
             &script,
             r#"
-[ "$1" = --mode ] && [ "$2" = rpc ] || exit 2
+case " $* " in *" --mode rpc "*) ;; *) exit 2;; esac
 IFS= read -r state || exit 3
 state_id=$(printf '%s\n' "$state" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
 printf '{"type":"response","id":"%s","command":"get_state","success":true,"data":{"sessionId":"pi-harness","isStreaming":false,"isCompacting":false,"pendingMessageCount":0}}\n' "$state_id"

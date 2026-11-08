@@ -927,11 +927,14 @@ If Pi’s RPC probe is blocked, proceed with ACP while resolving it.
   `extension_ui_response`; other dialog methods are logged rather than mapped to
   a decision. Reopening sends `switch_session` with the stored session file and
   refreshes the state, so the adapter session ID is that file; a session started
-  with `--no-session` reports no resume support. Because no tool-approval
-  extension ships yet, the harness reports `unreviewed tools`, and the task
-  header and diagnostics say that Pi's tool calls follow Pi's configuration and
-  are never approved by Shepherd. The bundled extension remains open, as does
-  recording a live model turn for `agent_settled` and tool approval records.
+  with `--no-session` reports no resume support. The harness writes its bundled
+  `pi-approval.ts` extension to a temporary directory, starts Pi with
+  `--extension`, and fails startup if the extension cannot be installed. Every
+  tool call then raises a confirm dialog that the approval cards allow or deny,
+  so the task no longer reports `unreviewed tools`; a Pi started through
+  `PiHarness::without_approval_extension` still does, and its header and
+  diagnostics say the calls follow Pi's configuration. Recording a live model
+  turn for `agent_settled` and real extension approval records remains open.
 - [x] ACP adapter using `libs/acp-client`; no duplicate protocol client.
   Use this adapter for OpenCode when its native protocol is unavailable.
   The shared client accepts an exact configured command, validates ACP v1,
@@ -992,8 +995,10 @@ If Pi’s RPC probe is blocked, proceed with ACP while resolving it.
   lifecycle records; `PiHarness` maps those shapes in a fake-Pi script that
   covers `agent_start`, text and thinking deltas, tool execution and
   `agent_settled`, and the recorded confirm dialog replays as an approval the
-  harness answers. None of this is a live model capture; recording a real turn
-  stays in the gated smoke item below.
+  harness answers. A second script answers the installed extension's allow and
+  deny confirmations, and capabilities report `unreviewed tools` only when the
+  extension is absent. None of this is a live model capture; recording a real
+  turn stays in the gated smoke item below.
 - [ ] One live smoke per installed OpenCode, Pi and Claude/ACP integration,
   gated in CI.
   The opt-in Shepherd adapter smoke workflow selects one preinstalled agent on
