@@ -25,6 +25,7 @@ pub mod test_support;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use agent_harness::{
     Decision, FailureKind, HarnessEvent, PromptAttachment, PromptInput, SessionId, Transcript,
@@ -51,6 +52,10 @@ use crate::terminal::{
     InspectorTab, ProcessRecord, TerminalId, TerminalLayout, TerminalList, TerminalRecord,
     TerminalSnapshot,
 };
+
+/// Events buffered between drains. A shell drains after every command and pump,
+/// so overflow means it stopped reading and must reload its snapshots.
+const MAX_PENDING_EVENTS: usize = 256;
 
 /// A failure reported by the core. Errors are returned to the caller; the core
 /// does not turn a failed command into a successful event.
@@ -191,8 +196,9 @@ pub struct Core {
     shutdown: ShutdownState,
     shutdown_events: BTreeMap<TaskId, Vec<HarnessEvent>>,
     shutdown_interrupted: BTreeSet<TaskId>,
-    events: mpsc::UnboundedSender<Event>,
-    event_receiver: mpsc::UnboundedReceiver<Event>,
+    events: mpsc::Sender<Event>,
+    event_receiver: mpsc::Receiver<Event>,
+    events_saturated: AtomicBool,
 }
 
 pub struct TaskGitRead {
@@ -283,7 +289,7 @@ impl Core {
     /// A core bound to a durable store and an adapter factory. Callers that want
     /// to continue a previous run should use [`Core::load`] instead.
     pub fn with_services(store: Box<dyn Store>, harness_factory: Box<dyn HarnessFactory>) -> Self {
-        let (events, event_receiver) = mpsc::unbounded_channel();
+        let (events, event_receiver) = mpsc::channel(MAX_PENDING_EVENTS);
         Self {
             projects: BTreeMap::new(),
             project_order: Vec::new(),
@@ -305,6 +311,7 @@ impl Core {
             shutdown_interrupted: BTreeSet::new(),
             events,
             event_receiver,
+            events_saturated: AtomicBool::new(false),
         }
     }
 
@@ -1026,12 +1033,16 @@ impl Core {
         }
     }
 
-    /// Events produced since the last drain. Events are never dropped; the
-    /// channel is unbounded because task events must not be coalesced away.
+    /// Events produced since the last drain. A full queue drops its newest
+    /// event and reports [`Event::ResyncRequired`] with the next drain so the
+    /// shell reloads snapshots instead of missing a change silently.
     pub fn drain_events(&mut self) -> Vec<Event> {
         let mut events = Vec::new();
         while let Ok(event) = self.event_receiver.try_recv() {
             events.push(event);
+        }
+        if self.events_saturated.swap(false, Ordering::Relaxed) {
+            events.push(Event::ResyncRequired);
         }
         events
     }
@@ -2893,8 +2904,16 @@ impl Core {
     }
 
     fn emit(&self, event: Event) {
-        if let Err(error) = self.events.send(event) {
-            tracing::debug!(%error, "core event receiver closed");
+        match self.events.try_send(event) {
+            Ok(()) => {}
+            // Dropping the event is safe only because the next drain asks the
+            // shell to reload its snapshots.
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                self.events_saturated.store(true, Ordering::Relaxed);
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                tracing::debug!("core event receiver closed");
+            }
         }
     }
 }
@@ -3830,6 +3849,20 @@ mod tests {
 
     fn summaries(workspace: &TaskWorkspace) -> Vec<String> {
         workspace.transcript.iter().map(Entry::summary).collect()
+    }
+
+    #[tokio::test]
+    async fn saturated_event_queue_reports_a_resync() {
+        let mut core = Core::new();
+        for index in 0..MAX_PENDING_EVENTS + 5 {
+            core.emit(Event::TaskNeedsInput {
+                task_id: format!("task-{index}"),
+            });
+        }
+        let events = core.drain_events();
+        assert_eq!(events.len(), MAX_PENDING_EVENTS + 1);
+        assert!(matches!(events.last(), Some(Event::ResyncRequired)));
+        assert!(core.drain_events().is_empty());
     }
 
     #[cfg(unix)]

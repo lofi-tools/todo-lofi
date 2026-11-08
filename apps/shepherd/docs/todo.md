@@ -1699,8 +1699,11 @@ placeholder tabs and no unearned state badges.
   Event folding handles at
   most 256 events per session per pass, including during commands, and
   reschedules remaining events so one busy agent cannot monopolize other
-  sessions. Shutdown drains the remaining events. Critical event
-  queues still need backpressure. If the bounded shell broadcast falls behind,
+  sessions. Shutdown drains the remaining events. The core buffers at most 256
+  events between drains; an overflow drops the newest event and the next drain
+  ends with `ResyncRequired`, so a stalled shell reloads its snapshots instead
+  of missing a change. A core fixture covers saturation and the quiet drain
+  after it. If the bounded shell broadcast falls behind,
   it discards stale buffered events and requests a frontend snapshot refresh.
   Newer events take precedence over matching snapshots, and unrelated events do
   not restart the refresh. Backend and headless browser fixtures cover lag
