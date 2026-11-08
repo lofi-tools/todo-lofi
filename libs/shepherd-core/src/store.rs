@@ -59,6 +59,8 @@ pub enum StoreError {
     SessionOwnerMissing { task_id: TaskId, session_id: String },
     #[error("terminal {terminal_id} cannot be saved for its project and task")]
     TerminalOwnerMissing { terminal_id: String },
+    #[error("approval cannot be saved for missing project {project_id}")]
+    ApprovalOwnerMissing { project_id: ProjectId },
     #[error("workspace layout cannot be saved for missing task {task_id}")]
     WorkspaceOwnerMissing { task_id: TaskId },
     #[error("task {task_id} cannot be saved for project {project_id}")]
@@ -954,15 +956,33 @@ impl Store for TursoStore {
             StoreError::InvalidRow(format!("could not encode project approval: {error}"))
         })?;
         let mut db = self.db.lock().await;
-        toasty::sql::statement(
+        let updated = toasty::sql::statement(
             "INSERT INTO project_approvals (project_id, id, grant_json) \
-             VALUES (?1, ?2, ?3) ON CONFLICT (project_id, id) DO NOTHING",
+             SELECT id, ?2, ?3 FROM projects WHERE id = ?1 \
+             ON CONFLICT (project_id, id) DO NOTHING",
         )
         .bind(project.as_str())
         .bind(&grant.id)
         .bind(&json)
         .exec(&mut *db)
         .await?;
+        if updated == 0 {
+            let existing = toasty::sql::query(
+                "SELECT project_approvals.id FROM project_approvals JOIN projects \
+                 ON projects.id = project_approvals.project_id \
+                 WHERE project_approvals.project_id = ?1 AND project_approvals.id = ?2",
+            )
+            .column_types([Type::String])
+            .bind(project.as_str())
+            .bind(&grant.id)
+            .exec(&mut *db)
+            .await?;
+            if existing.is_empty() {
+                return Err(StoreError::ApprovalOwnerMissing {
+                    project_id: project.clone(),
+                });
+            }
+        }
         Ok(())
     }
 
@@ -1880,6 +1900,12 @@ impl Store for MemoryStore {
         project: &ProjectId,
         grant: &ProjectApproval,
     ) -> Result<(), StoreError> {
+        let projects = self.projects.read().await;
+        if !projects.contains_key(project.as_str()) {
+            return Err(StoreError::ApprovalOwnerMissing {
+                project_id: project.clone(),
+            });
+        }
         self.project_approvals
             .write()
             .await
@@ -2314,6 +2340,43 @@ mod tests {
             .save_transcript_entries(&session, &entries.iter().collect::<Vec<_>>())
             .await?;
         assert_eq!(store.load_transcript(&task.id).await?, entries);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn project_approval_requires_an_existing_project_and_preserves_grants()
+    -> Result<(), Box<dyn std::error::Error>> {
+        async fn verify(store: &dyn Store, root: &Path) -> Result<(), Box<dyn std::error::Error>> {
+            let project = Project::new(root.join("approval-project"));
+            let grant = ProjectApproval {
+                id: "grant".into(),
+                agent: Agent::Codex,
+                title: "original".into(),
+                arguments: serde_json::json!({"command": "echo"}),
+                paths: vec![],
+            };
+            assert!(matches!(
+                store.save_project_approval(&project.id, &grant).await,
+                Err(StoreError::ApprovalOwnerMissing { .. })
+            ));
+            assert!(!store.has_project_approval(&project.id, &grant.id).await?);
+            store.save_project(&project).await?;
+            store.save_project_approval(&project.id, &grant).await?;
+            let mut replacement = grant.clone();
+            replacement.title = "replacement".into();
+            store
+                .save_project_approval(&project.id, &replacement)
+                .await?;
+            assert_eq!(store.project_approvals(&project.id).await?, vec![grant]);
+            Ok(())
+        }
+        let directory = TestDirectory::new()?;
+        verify(&MemoryStore::new(), directory.path()).await?;
+        verify(
+            &TursoStore::open_at(&directory.join("approval-owner.db")).await?,
+            directory.path(),
+        )
+        .await?;
         Ok(())
     }
 

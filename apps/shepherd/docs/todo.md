@@ -1361,6 +1361,8 @@ placeholder tabs and no unearned state badges.
   It also holds the task, session, project and associated-state locks through
   task deletion; a concurrency fixture verifies a competing transcript save
   cannot recreate a deleted task.
+  Project approval grants require an existing project in both stores; a shared
+  fixture checks rejection and preserves the original grant on retry.
   Session saves require an existing task and cannot move an existing session
   ID to another task. Both stores reject a late save after deletion; the Turso
   check is part of the write statement.
