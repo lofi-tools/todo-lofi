@@ -1645,7 +1645,9 @@ placeholder tabs and no unearned state badges.
   reports cleanup asynchronously; a local fixture verifies descendant cleanup,
   pending-request removal and a subsequent shutdown. If the child lock is
   contended, cleanup still depends on the Tokio runtime remaining available.
-  Cancellation while handling a malformed successful reply still needs review.
+  The same guard protects cleanup of a malformed successful reply; a subprocess
+  fixture cancels that cleanup while the child lock is held and checks that
+  cleanup completes after the lock is released.
   App-server turn starts are emitted by the protocol reader before completion,
   including when a fast turn finishes before its start reply is processed;
   an offline fixture checks reply and notification ordering. While that reply

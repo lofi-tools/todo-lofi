@@ -1045,6 +1045,18 @@ impl CodexHarness {
         outgoing.try_send(message.into()).map_err(outbound_error)
     }
 
+    fn turn_admission_guard(&self, request_id: Option<i64>) -> Option<TurnAdmissionGuard> {
+        self.child.as_ref().map(|child| TurnAdmissionGuard {
+            child: Some(child.clone()),
+            pending: self.pending.clone(),
+            sender: self.sender.clone(),
+            closed: self.closed.clone(),
+            closing: self.closing.clone(),
+            runtime: tokio::runtime::Handle::current(),
+            request_id,
+        })
+    }
+
     async fn request(&mut self, method: &str, params: Value) -> HarnessResult<Value> {
         let id = self.next_request_id;
         self.next_request_id += 1;
@@ -1072,15 +1084,7 @@ impl CodexHarness {
         }
 
         let mut admission_guard = if method == "turn/start" {
-            self.child.as_ref().map(|child| TurnAdmissionGuard {
-                child: Some(child.clone()),
-                pending: self.pending.clone(),
-                sender: self.sender.clone(),
-                closed: self.closed.clone(),
-                closing: self.closing.clone(),
-                runtime: tokio::runtime::Handle::current(),
-                request_id: id,
-            })
+            self.turn_admission_guard(Some(id))
         } else {
             None
         };
@@ -1468,7 +1472,12 @@ impl AgentHarness for CodexHarness {
 
         if read_turn_id(&response).is_none() {
             let message = "the turn response did not include turn.id";
-            return match self.shutdown().await {
+            let mut guard = self.turn_admission_guard(None);
+            let cleanup = self.shutdown().await;
+            if let Some(guard) = &mut guard {
+                guard.disarm();
+            }
+            return match cleanup {
                 Ok(()) => Err(HarnessError::Protocol(message.into())),
                 Err(error) => Err(HarnessError::Protocol(format!(
                     "{message}; could not stop Codex after uncertain turn admission: {error}"
@@ -2864,7 +2873,7 @@ struct TurnAdmissionGuard {
     closed: Arc<AtomicBool>,
     closing: Arc<AtomicBool>,
     runtime: tokio::runtime::Handle,
-    request_id: i64,
+    request_id: Option<i64>,
 }
 
 impl TurnAdmissionGuard {
@@ -2893,9 +2902,11 @@ impl Drop for TurnAdmissionGuard {
         self.runtime.spawn(async move {
             {
                 let mut pending = pending.lock().await;
-                pending.responses.remove(&request_id);
-                if pending.start_request == Some(request_id) {
-                    pending.start_request = None;
+                if let Some(request_id) = request_id {
+                    pending.responses.remove(&request_id);
+                    if pending.start_request == Some(request_id) {
+                        pending.start_request = None;
+                    }
                 }
             }
             let result = match signal {
@@ -4590,6 +4601,59 @@ done
         );
         assert!(harness.child.is_none());
         assert!(!harness.started);
+        tokio::time::sleep(Duration::from_millis(1300)).await;
+        assert!(!directory.path().join("escaped").exists());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cancelled_malformed_turn_cleanup_stops_server_after_lock_released()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = TempDir::new()?;
+        let original = r#"      printf '{"id":%s,"result":{"turn":{"id":"turn_1","status":"inProgress"}}}\n' "$id""#;
+        let replacement = r#"      (sleep 1; printf escaped > "$directory/escaped") >/dev/null 2>&1 &
+      printf '{"id":%s,"result":{}}\n' "$id"
+      sleep 30"#;
+        assert!(PROTOCOL_STUB.contains(original));
+        let stub = write_stub(
+            &directory,
+            "codex-cancel-malformed",
+            &PROTOCOL_STUB.replace(original, replacement),
+        );
+        let (mut harness, _) = start_session(&stub, directory.path()).await;
+        let child = harness.child.as_ref().ok_or("missing child")?.clone();
+        let child_lock = child.lock().await;
+        let closing = harness.closing.clone();
+        let mut prompt = Box::pin(harness.prompt(PromptInput::text("start")));
+        timeout(Duration::from_secs(5), async {
+            loop {
+                tokio::select! {
+                    result = &mut prompt => return Err(format!("prompt finished early: {result:?}")),
+                    _ = tokio::time::sleep(Duration::from_millis(10)) => {
+                        if closing.load(Ordering::Relaxed) { return Ok(()); }
+                    }
+                }
+            }
+        }).await??;
+        drop(prompt);
+        assert!(harness.closed.load(Ordering::Relaxed));
+        drop(child_lock);
+        timeout(Duration::from_secs(5), async {
+            loop {
+                match harness.events().recv().await {
+                    Some(HarnessEvent::ConnectionFailed { text, .. })
+                        if text.contains("admission was cancelled") =>
+                    {
+                        break Ok::<(), Box<dyn std::error::Error>>(());
+                    }
+                    Some(_) => {}
+                    None => break Err("missing cancellation failure".into()),
+                }
+            }
+        })
+        .await??;
+        harness.shutdown().await?;
+        assert!(harness.child.is_none());
         tokio::time::sleep(Duration::from_millis(1300)).await;
         assert!(!directory.path().join("escaped").exists());
         Ok(())
