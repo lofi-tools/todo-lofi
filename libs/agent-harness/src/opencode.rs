@@ -749,6 +749,11 @@ impl AgentHarness for OpenCodeHarness {
         if let Some(fallback) = &mut self.fallback {
             return fallback.respond(approval_id, decision).await;
         }
+        if self.cleanup_required {
+            return Err(HarnessError::Protocol(
+                "OpenCode needs cleanup before answering an approval".into(),
+            ));
+        }
         let server = self.server.as_ref().ok_or(HarnessError::NotStarted)?;
         let session = self.session.as_ref().ok_or(HarnessError::SessionMissing)?;
         let id = approval_id.as_str();
@@ -763,8 +768,11 @@ impl AgentHarness for OpenCodeHarness {
                 return Err(HarnessError::ApprovalOptionUnavailable);
             }
         };
+        let turn = self.turn.as_ref().ok_or(HarnessError::NoPendingApproval)?;
+        let runtime = tokio::runtime::Handle::try_current().map_err(|error| {
+            HarnessError::Protocol(format!("OpenCode requires an async runtime: {error}"))
+        })?;
         {
-            let turn = self.turn.as_ref().ok_or(HarnessError::NoPendingApproval)?;
             let mut state = turn.approval.lock().map_err(|_| {
                 HarnessError::Protocol("OpenCode approval state is unavailable".into())
             })?;
@@ -773,12 +781,41 @@ impl AgentHarness for OpenCodeHarness {
             }
             state.submitted = true;
         }
-        send_request(
+        self.cleanup_required = true;
+        let mut cleanup = StopOnDrop {
+            child: Some(server.child.clone()),
+            sender: self.sender.clone(),
+            signal_group: signal_server_group,
+            runtime,
+            operation: "approval response",
+            active_turn: Some((turn.reader.abort_handle(), turn.finished.clone())),
+        };
+        if let Err(error) = send_request(
             server
                 .request(Method::POST, &path)
                 .json(&json!({"decision": reply})),
         )
-        .await?;
+        .await
+        {
+            turn.reader.abort();
+            turn.finished.store(true, Ordering::Release);
+            let kind = FailureKind::classify(&error).unwrap_or(FailureKind::Protocol);
+            let mut message = format!("Could not deliver the OpenCode approval response: {error}");
+            if let Err(stop) = server.shutdown().await {
+                message.push_str(&format!("; could not stop the OpenCode server: {stop}"));
+            }
+            cleanup.disarm();
+            publish(
+                &self.sender,
+                HarnessEvent::ConnectionFailed {
+                    kind,
+                    text: message.clone(),
+                },
+            )?;
+            return Err(HarnessError::Reported { kind, message });
+        }
+        cleanup.disarm();
+        self.cleanup_required = false;
         Ok(())
     }
 
@@ -2942,7 +2979,7 @@ exec sleep 60
             )]),
             ..SpawnSpec::default()
         };
-        let fixture = serve_native_fixture(listener, &directory, false, None, None, false);
+        let fixture = serve_native_fixture(listener, &directory, false, None, None, 0);
         let client = async {
             let mut harness = OpenCodeHarness::default();
             let tracker = Arc::new(Tracker {
@@ -3025,7 +3062,7 @@ exec sleep 60
             )]),
             ..SpawnSpec::default()
         };
-        let fixture = serve_native_fixture(listener, &directory, true, None, None, false);
+        let fixture = serve_native_fixture(listener, &directory, true, None, None, 0);
         let client = async {
             let mut harness = OpenCodeHarness::default();
             harness.set_process_tracker(Arc::new(Tracker(AtomicBool::new(true))));
@@ -3099,7 +3136,7 @@ exec sleep 60
             false,
             Some((started, released)),
             None,
-            false,
+            0,
         );
         let client = async {
             let mut harness = OpenCodeHarness::default();
@@ -3171,7 +3208,7 @@ exec sleep 60
             false,
             None,
             Some((started, released)),
-            false,
+            0,
         );
         let client = async {
             let mut harness = OpenCodeHarness::default();
@@ -3259,7 +3296,7 @@ exec sleep 60
             false,
             None,
             Some((started, released)),
-            false,
+            0,
         );
         let client = async {
             let mut harness = OpenCodeHarness::default();
@@ -3347,7 +3384,7 @@ exec sleep 60
             false,
             None,
             Some((started, released)),
-            false,
+            0,
         );
         let client = async {
             let mut harness = OpenCodeHarness::default();
@@ -3419,7 +3456,7 @@ exec sleep 60
             )]),
             ..SpawnSpec::default()
         };
-        let fixture = serve_native_fixture(listener, &directory, false, None, None, true);
+        let fixture = serve_native_fixture(listener, &directory, false, None, None, 1);
         let client = async {
             let mut harness = OpenCodeHarness::default();
             harness.start(spec).await?;
@@ -3478,6 +3515,120 @@ exec sleep 60
     }
 
     #[cfg(unix)]
+    #[tokio::test]
+    async fn failed_or_interrupted_approval_response_stops_the_server()
+    -> Result<(), Box<dyn std::error::Error>> {
+        struct Tracker(AtomicBool);
+        #[async_trait]
+        impl crate::AgentProcessTracker for Tracker {
+            async fn started(&self, _: u32) -> Result<String, String> {
+                Ok("fixture-record".into())
+            }
+            async fn stopped(&self, _: &str) -> Result<(), String> {
+                if self.0.swap(false, Ordering::SeqCst) {
+                    Err("fixture record cleanup failure".into())
+                } else {
+                    Ok(())
+                }
+            }
+        }
+        for mode in [2, 3] {
+            let root = tempfile::tempdir()?;
+            let directory = root.path().canonicalize()?;
+            let listener = TcpListener::bind("127.0.0.1:0").await?;
+            let program = fixture_launcher(
+                &directory,
+                r#"#!/bin/sh
+[ "$*" = "serve --hostname 127.0.0.1 --port 0" ] || exit 2
+printf 'opencode server listening on %s\n' "$SHEPHERD_TEST_OPENCODE_URL"
+exec sleep 60
+"#,
+            )?;
+            let spec = SpawnSpec {
+                program,
+                cwd: directory.clone(),
+                environment: BTreeMap::from([(
+                    "SHEPHERD_TEST_OPENCODE_URL".into(),
+                    format!("http://{}", listener.local_addr()?),
+                )]),
+                ..SpawnSpec::default()
+            };
+            let (started, waiting) = tokio::sync::oneshot::channel();
+            let (release, released) = tokio::sync::oneshot::channel();
+            let gate = (mode == 3).then_some((started, released));
+            let fixture = serve_native_fixture(listener, &directory, false, gate, None, mode);
+            let client = async {
+                let mut harness = OpenCodeHarness::default();
+                if mode == 2 {
+                    harness.set_process_tracker(Arc::new(Tracker(AtomicBool::new(true))));
+                }
+                harness.start(spec).await?;
+                harness.open_session(None).await?;
+                harness
+                    .prompt(PromptInput::text("Reply with local fixture text only"))
+                    .await?;
+                let id = loop {
+                    if let Some(HarnessEvent::ApprovalRequested { request }) =
+                        harness.receiver.recv().await
+                    {
+                        break request.approval_id;
+                    }
+                };
+                if mode == 2 {
+                    let error = harness
+                        .respond(id, Decision::Allow)
+                        .await
+                        .err()
+                        .ok_or("response unexpectedly succeeded")?;
+                    assert!(
+                        error
+                            .to_string()
+                            .contains("Could not deliver the OpenCode approval response")
+                    );
+                    assert!(error.to_string().contains("fixture record cleanup failure"));
+                } else {
+                    let mut response = Box::pin(harness.respond(id, Decision::Allow));
+                    tokio::select! {
+                        result = &mut response => return Err(format!("response completed unexpectedly: {result:?}").into()),
+                        result = waiting => result?,
+                    }
+                    drop(response);
+                    release.send(()).map_err(|_| "fixture ended early")?;
+                }
+                assert!(harness.cleanup_required);
+                let event = timeout(Duration::from_secs(5), async {
+                    loop {
+                        match harness.receiver.recv().await {
+                            Some(event @ HarnessEvent::ConnectionFailed { .. }) => break Ok(event),
+                            Some(_) => continue,
+                            None => break Err("event stream closed"),
+                        }
+                    }
+                })
+                .await??;
+                assert!(
+                    matches!(event, HarnessEvent::ConnectionFailed { text, .. } if text.contains("approval response"))
+                );
+                assert!(
+                    harness
+                        .server
+                        .as_ref()
+                        .ok_or("missing server")?
+                        .child
+                        .lock()
+                        .await
+                        .try_wait()?
+                        .is_some()
+                );
+                harness.shutdown().await?;
+                Ok::<_, Box<dyn std::error::Error>>(())
+            };
+            timeout(REQUEST_TIMEOUT, async { tokio::try_join!(fixture, client) }).await??;
+        }
+        Ok(())
+    }
+
+    #[cfg(unix)]
     async fn serve_native_fixture(
         listener: TcpListener,
         directory: &Path,
@@ -3490,7 +3641,7 @@ exec sleep 60
             tokio::sync::oneshot::Sender<()>,
             tokio::sync::oneshot::Receiver<u8>,
         )>,
-        approval_fixture: bool,
+        approval_fixture: u8,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let mut stream = None;
         for expected in [
@@ -3528,7 +3679,9 @@ exec sleep 60
                     let prompt_id = body["id"].as_str().ok_or("expected prompt ID")?;
                     assert_eq!(body["text"], "Reply with local fixture text only");
                     assert_eq!(body["resume"], true);
-                    if let Some((started, release)) = hang_prompt.take() {
+                    if approval_fixture != 3
+                        && let Some((started, release)) = hang_prompt.take()
+                    {
                         started.send(()).map_err(|_| "prompt waiter dropped")?;
                         release.await?;
                         return Ok(());
@@ -3560,7 +3713,7 @@ exec sleep 60
                             ),
                         ] {
                             if kind == "session.execution.succeeded"
-                                && (hang_cancel.is_some() || approval_fixture)
+                                && (hang_cancel.is_some() || approval_fixture != 0)
                             {
                                 continue;
                             }
@@ -3569,7 +3722,7 @@ exec sleep 60
                                 .write_all(format!("data: {event}\n\n").as_bytes())
                                 .await?;
                         }
-                        if approval_fixture {
+                        if approval_fixture != 0 {
                             for id in ["per_first", "per_second"] {
                                 let event = json!({"type":"permission.asked", "data":{"sessionID":"ses_fixture", "id":id, "action":"read", "resources":[]}});
                                 stream
@@ -3590,7 +3743,7 @@ exec sleep 60
             writer.write_all(response.as_bytes()).await?;
             writer.shutdown().await?;
         }
-        if approval_fixture {
+        if approval_fixture != 0 {
             for (id, decision, reply) in [
                 ("per_first", "once", "once"),
                 ("per_second", "reject", "reject"),
@@ -3606,6 +3759,17 @@ exec sleep 60
                     serde_json::from_slice::<Value>(&body)?,
                     json!({"decision": decision})
                 );
+                if approval_fixture == 2 {
+                    writer.write_all(b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await?;
+                    writer.shutdown().await?;
+                    return Ok(());
+                }
+                if approval_fixture == 3 {
+                    let (started, release) = hang_prompt.take().ok_or("missing approval gate")?;
+                    started.send(()).map_err(|_| "approval waiter dropped")?;
+                    release.await?;
+                    return Ok(());
+                }
                 writer
                     .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
                     .await?;

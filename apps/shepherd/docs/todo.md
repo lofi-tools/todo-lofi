@@ -1449,8 +1449,9 @@ placeholder tabs and no unearned state badges.
   local HTTP fixture sends two approvals and verifies both decisions and turn
   completion through the native adapter. Only the displayed approval can be
   answered, and a submitted answer cannot be sent twice while awaiting the
-  agent's resolution event. An interrupted or failed HTTP request leaves the
-  answer blocked because delivery may be uncertain.
+  agent's resolution event. If its HTTP request fails or is interrupted,
+  Shepherd stops the server because delivery may be uncertain; fixtures cover
+  both paths and a process-record cleanup failure followed by retry.
   The visible approval is withdrawn when the event stream fails or its reader is
   cancelled; fixtures cover queued requests and a dropped reader.
   Codex app-server likewise limits pending approvals to 64 and rejects a second
