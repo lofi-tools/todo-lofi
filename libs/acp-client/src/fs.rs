@@ -33,23 +33,8 @@ impl SessionRoots {
                 Ok(resolved) => {
                     #[cfg(unix)]
                     {
-                        use rustix::fs::{Mode, OFlags, fstat, open};
-                        use std::os::unix::fs::MetadataExt;
-                        let flags =
-                            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
-                        let opened = initial_metadata.and_then(|metadata| {
-                            let handle = open(&resolved, flags, Mode::empty())
-                                .map_err(std::io::Error::from)?;
-                            let opened_metadata = fstat(&handle).map_err(std::io::Error::from)?;
-                            if metadata.dev() != opened_metadata.st_dev as u64
-                                || metadata.ino() != opened_metadata.st_ino as u64
-                            {
-                                return Err(std::io::Error::other(
-                                    "session root changed while opening",
-                                ));
-                            }
-                            Ok(handle)
-                        });
+                        let opened = initial_metadata
+                            .and_then(|metadata| open_verified_root(&resolved, &metadata));
                         match opened {
                             Ok(handle) => root_handles.push(Some(Arc::new(handle))),
                             Err(error) => {
@@ -155,6 +140,25 @@ impl SessionRoots {
             .ok_or_else(|| anyhow::anyhow!("session root {} is unavailable", root.display()))?;
         Ok((root, handle))
     }
+}
+
+#[cfg(unix)]
+fn open_verified_root(
+    root: &Path,
+    initial_metadata: &std::fs::Metadata,
+) -> std::io::Result<std::os::fd::OwnedFd> {
+    use rustix::fs::{Mode, OFlags, fstat, open};
+    use std::os::unix::fs::MetadataExt;
+
+    let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    let handle = open(root, flags, Mode::empty()).map_err(std::io::Error::from)?;
+    let opened_metadata = fstat(&handle).map_err(std::io::Error::from)?;
+    if initial_metadata.dev() != opened_metadata.st_dev as u64
+        || initial_metadata.ino() != opened_metadata.st_ino as u64
+    {
+        return Err(std::io::Error::other("session root changed while opening"));
+    }
+    Ok(handle)
 }
 
 #[cfg(unix)]
@@ -495,6 +499,26 @@ pub fn write_text_file(path: &Path, content: &str) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_root_replacement_before_opening() -> anyhow::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let root = directory.path().join("workspace");
+        std::fs::create_dir(&root)?;
+        let original = std::fs::metadata(&root)?;
+        std::fs::rename(&root, directory.path().join("original"))?;
+        std::fs::create_dir(&root)?;
+        let error = open_verified_root(&root, &original)
+            .err()
+            .ok_or_else(|| anyhow::anyhow!("replacement root was accepted"))?;
+        assert!(
+            error
+                .to_string()
+                .contains("session root changed while opening")
+        );
+        Ok(())
+    }
 
     #[cfg(unix)]
     #[test]
