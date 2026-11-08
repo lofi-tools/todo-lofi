@@ -6,6 +6,7 @@ use std::sync::Mutex;
 use serde::{Deserialize, Serialize};
 
 const MAX_DIAGNOSTIC_RECORD_BYTES: usize = 256 * 1024;
+const MAX_DIAGNOSTIC_HISTORY_RECORDS: usize = 200;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -78,54 +79,84 @@ impl DiagnosticLog {
             use std::os::unix::fs::OpenOptionsExt;
             options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
         }
-        let file = match options.open(&self.path) {
+        let mut file = match options.open(&self.path) {
             Ok(file) => file,
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
             Err(error) => return Err(error),
         };
         ensure_regular_file(&file)?;
         file.lock_shared()?;
-        let mut records = std::collections::VecDeque::new();
+        let start = recent_history_start(&mut file)?;
+        file.seek(SeekFrom::Start(start))?;
+        let mut records = Vec::new();
         let mut reader = BufReader::new(file);
         let mut line = Vec::new();
         let mut line_number = 0;
         loop {
             line.clear();
+            let line_offset = reader.stream_position()?;
             let Some(truncated) = read_diagnostic_line(&mut reader, &mut line)? else {
                 break;
             };
             line_number += 1;
+            let location = if start == 0 {
+                format!("line {line_number}")
+            } else {
+                format!("byte {line_offset}")
+            };
             let record = if truncated {
                 Diagnostic {
-                    id: format!("invalid-log-line-{line_number}"),
+                    id: format!("invalid-log-byte-{line_offset}"),
                     time: "Unknown time".into(),
                     operation: "diagnostic_history".into(),
                     message: "A diagnostic history record could not be read.".into(),
                     details: format!(
-                        "Diagnostic record on line {line_number} exceeds the {MAX_DIAGNOSTIC_RECORD_BYTES}-byte limit."
+                        "Diagnostic record at {location} exceeds the {MAX_DIAGNOSTIC_RECORD_BYTES}-byte limit."
                     ),
                 }
             } else {
                 match serde_json::from_slice(&line) {
                     Ok(record) => record,
                     Err(error) => Diagnostic {
-                        id: format!("invalid-log-line-{line_number}"),
+                        id: format!("invalid-log-byte-{line_offset}"),
                         time: "Unknown time".into(),
                         operation: "diagnostic_history".into(),
                         message: "A diagnostic history record could not be read.".into(),
-                        details: format!(
-                            "Invalid diagnostic record on line {line_number}: {error}"
-                        ),
+                        details: format!("Invalid diagnostic record at {location}: {error}"),
                     },
                 }
             };
-            if records.len() == 200 {
-                records.pop_front();
-            }
-            records.push_back(record);
+            records.push(record);
         }
-        Ok(records.into_iter().collect())
+        Ok(records)
     }
+}
+
+fn recent_history_start(file: &mut fs::File) -> io::Result<u64> {
+    let end = file.metadata()?.len();
+    if end == 0 {
+        return Ok(0);
+    }
+    let mut position = end;
+    let mut delimiters = 0;
+    let mut buffer = [0; 8192];
+    while position > 0 {
+        let length =
+            usize::try_from(position.min(buffer.len() as u64)).map_err(io::Error::other)?;
+        position -= length as u64;
+        file.seek(SeekFrom::Start(position))?;
+        file.read_exact(&mut buffer[..length])?;
+        for index in (0..length).rev() {
+            let offset = position + index as u64;
+            if buffer[index] == b'\n' && offset + 1 < end {
+                delimiters += 1;
+                if delimiters == MAX_DIAGNOSTIC_HISTORY_RECORDS {
+                    return Ok(offset + 1);
+                }
+            }
+        }
+    }
+    Ok(0)
 }
 
 struct LimitedDiagnosticBuffer {
@@ -367,6 +398,29 @@ mod tests {
             history.get(2).map(|record| record.id.as_str()),
             Some("after")
         );
+        Ok(())
+    }
+
+    #[test]
+    fn history_reads_the_latest_records_and_reports_absolute_offsets()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("errors.jsonl");
+        let log = DiagnosticLog::new(path.clone());
+        let mut file = OpenOptions::new().create(true).append(true).open(&path)?;
+        for index in 0..205 {
+            writeln!(
+                file,
+                "{{\"id\":\"{index}\",\"time\":\"t\",\"operation\":\"o\",\"message\":\"m\",\"details\":\"d\"}}"
+            )?;
+        }
+        write!(file, "invalid")?;
+        drop(file);
+        let history = log.recent()?;
+        assert_eq!(history.len(), MAX_DIAGNOSTIC_HISTORY_RECORDS);
+        assert_eq!(history[0].id, "6");
+        assert_eq!(history[198].id, "204");
+        assert!(history[199].details.contains("at byte "));
         Ok(())
     }
 
