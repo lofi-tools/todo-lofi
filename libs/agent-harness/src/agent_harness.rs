@@ -623,6 +623,8 @@ pub enum HarnessEvent {
         output: Option<String>,
         diffs: Vec<FileDiff>,
         terminal_id: Option<String>,
+        /// Retains backpressure while the event is queued or in use.
+        stream_permit: Option<Arc<tokio::sync::OwnedSemaphorePermit>>,
     },
     CommandOutput {
         tool_call_id: ToolCallId,
@@ -960,6 +962,7 @@ impl Transcript {
                 output,
                 diffs,
                 terminal_id,
+                ..
             } => self.upsert_tool_call(
                 tool_call_id.as_str(),
                 title,
@@ -1374,6 +1377,7 @@ mod tests {
             output: None,
             diffs: Vec::new(),
             terminal_id: None,
+            stream_permit: None,
         }
     }
 
@@ -1426,6 +1430,7 @@ mod tests {
             output: None,
             diffs: Vec::new(),
             terminal_id: None,
+            stream_permit: None,
         };
         transcript.apply(&call);
         transcript.apply(&HarnessEvent::CommandOutput {
@@ -1472,6 +1477,7 @@ mod tests {
             output: Some("earlier output".to_string()),
             diffs: Vec::new(),
             terminal_id: None,
+            stream_permit: None,
         });
         let text = format!("{}tail", "界".repeat(MAX_COMMAND_OUTPUT_BYTES));
         let mut expected = format!("earlier output{text}");

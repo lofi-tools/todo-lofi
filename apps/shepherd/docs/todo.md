@@ -1513,9 +1513,11 @@ placeholder tabs and no unearned state badges.
   can be cancelled. Codex exec message and reasoning events now use the same
   limits across turns, and its post-exit drain pauses its deadline while the
   consumer is backpressured. Local fixtures cover UTF-8, multiple turns,
-  cancellation and a slow consumer. A core fixture fills the queue and verifies
-  that 150 scripted messages reach the transcript in order. Other OpenCode and
-  Codex exec events and other adapters still need coordinated backpressure. A
+  cancellation and a slow consumer. Codex exec tool events share that capacity;
+  a fixture checks ordering, cloned-event permit retention and cancellation of
+  a blocked producer. A core fixture fills the queue and verifies that 150
+  scripted messages reach the transcript in order. Other OpenCode and Codex
+  exec events and other adapters still need coordinated backpressure. A
   Codex fixture verifies that a command reply remains reachable after 100
   unconsumed stream events; a bounded design must preserve that behavior.
   Event folding handles at

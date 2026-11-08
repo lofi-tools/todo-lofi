@@ -1074,6 +1074,7 @@ impl OpenCodeTranscript {
             output,
             diffs: Vec::new(),
             terminal_id: None,
+            stream_permit: None,
         })
     }
 }

@@ -1335,6 +1335,7 @@ fn tool_event(entry: &acp_client::Entry) -> Option<HarnessEvent> {
             })
             .collect(),
         terminal_id: terminal_id.clone(),
+        stream_permit: None,
     })
 }
 

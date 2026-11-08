@@ -2236,8 +2236,17 @@ async fn publish_exec_event(
     capacity: &Arc<tokio::sync::Semaphore>,
     backpressured: &AtomicBool,
     progress: &AtomicU64,
-    event: HarnessEvent,
+    mut event: HarnessEvent,
 ) -> Result<(), ()> {
+    if let HarnessEvent::ToolCall { stream_permit, .. } = &mut event {
+        backpressured.store(true, Ordering::Release);
+        let permit = capacity.clone().acquire_owned().await.map_err(|_| ())?;
+        backpressured.store(false, Ordering::Release);
+        *stream_permit = Some(Arc::new(permit));
+        sender.send(event).map_err(|_| ())?;
+        progress.fetch_add(1, Ordering::Relaxed);
+        return Ok(());
+    }
     let HarnessEvent::Delta {
         item_id,
         kind,
@@ -2537,6 +2546,7 @@ fn exec_tool_event(
         output,
         diffs: Vec::new(),
         terminal_id: None,
+        stream_permit: None,
     }
 }
 
@@ -3149,6 +3159,7 @@ fn tool_call_from_item(item: &Value) -> Option<HarnessEvent> {
         output,
         diffs,
         terminal_id: None,
+        stream_permit: None,
     })
 }
 
@@ -5577,6 +5588,80 @@ exit 0
             }
         )));
         harness.shutdown().await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn exec_tool_events_share_stream_capacity_and_release_on_cancel()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        let capacity = Arc::new(tokio::sync::Semaphore::new(2));
+        let blocked = Arc::new(AtomicBool::new(false));
+        let progress = Arc::new(AtomicU64::new(0));
+        let producer = tokio::spawn({
+            let capacity = capacity.clone();
+            let blocked = blocked.clone();
+            let progress = progress.clone();
+            async move {
+                for id in ["one", "two", "three"] {
+                    publish_exec_event(
+                        &sender,
+                        &capacity,
+                        &blocked,
+                        &progress,
+                        exec_tool_event(id, id.into(), "command", ToolStatus::Running, None),
+                    )
+                    .await?;
+                }
+                Ok::<_, ()>(())
+            }
+        });
+        let first = receiver.recv().await.ok_or("missing first tool")?;
+        let second = receiver.recv().await.ok_or("missing second tool")?;
+        assert_eq!(capacity.available_permits(), 0);
+        assert!(
+            timeout(Duration::from_millis(30), receiver.recv())
+                .await
+                .is_err()
+        );
+        let retained = first.clone();
+        drop(first);
+        assert!(
+            timeout(Duration::from_millis(30), receiver.recv())
+                .await
+                .is_err()
+        );
+        drop(retained);
+        let third = receiver.recv().await.ok_or("missing third tool")?;
+        producer.await?.map_err(|()| "stream closed")?;
+        assert!(
+            matches!(third, HarnessEvent::ToolCall { ref tool_call_id, .. } if tool_call_id.as_str() == "three")
+        );
+        drop(second);
+        drop(third);
+        assert_eq!(capacity.available_permits(), 2);
+        let held = capacity.clone().acquire_many_owned(2).await?;
+        let stalled = tokio::spawn({
+            let capacity = capacity.clone();
+            let blocked = blocked.clone();
+            let progress = progress.clone();
+            async move {
+                let (sender, _receiver) = mpsc::unbounded_channel();
+                publish_exec_event(
+                    &sender,
+                    &capacity,
+                    &blocked,
+                    &progress,
+                    exec_tool_event("four", "four".into(), "command", ToolStatus::Running, None),
+                )
+                .await
+            }
+        });
+        tokio::task::yield_now().await;
+        stalled.abort();
+        assert!(stalled.await.is_err());
+        drop(held);
+        assert_eq!(capacity.available_permits(), 2);
         Ok(())
     }
 

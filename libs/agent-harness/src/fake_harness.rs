@@ -236,6 +236,7 @@ impl FakeHarness {
                         output: output.clone(),
                         diffs: diffs.clone(),
                         terminal_id: None,
+                        stream_permit: None,
                     })?;
                 }
                 FakeStep::Approval(request) => {
