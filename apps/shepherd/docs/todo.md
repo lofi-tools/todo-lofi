@@ -1500,6 +1500,10 @@ placeholder tabs and no unearned state badges.
   A separate hidden desktop smoke loads a real 12,000-line worktree diff while
   a scripted approval completes; on this Mac the diff and response appeared
   999 ms after opening the diff. It does not measure live-agent streaming.
+  Transcript persistence batches up to 32 entries per indexed insert in the
+  same transaction. The 1,000-message recovery fixture on this Mac fell from
+  120 seconds to 2.87 seconds; storage fixtures cover search, attachment
+  restoration and rollback across batch boundaries.
 - [ ] Path confinement, environment `!command` timeout, no secret values in
   logs or storage.
   File preview, directory listing and search open each path component without
@@ -1632,8 +1636,8 @@ placeholder tabs and no unearned state badges.
   mocked diff while 1,000 earlier transcript entries remain present.
   A core fixture also checks all 1,000 scripted messages and every line of a
   real 12,000-line worktree diff, then reopens the database and compares the
-  complete transcript and diff. On this Mac that database fixture took about
-  two minutes; it does not measure interactive responsiveness.
+  complete transcript and diff. After batching indexed writes, that fixture took
+  2.87 seconds on this Mac; it does not measure interactive responsiveness.
 - [ ] Three-agent/two-project concurrency test.
   The local scripted fixture covers overlapping approval waits, mixed decisions
   on identical approval IDs, and independent worktree writes; a live multi-agent

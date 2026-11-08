@@ -372,50 +372,69 @@ async fn write_transcript_entries(
     entries: &[&Entry],
 ) -> Result<(), StoreError> {
     let owners = toasty::sql::query(
-            "SELECT sessions.id FROM sessions JOIN tasks ON tasks.id = sessions.task_id \
+            "SELECT sessions.id, tasks.title, projects.name FROM sessions JOIN tasks ON tasks.id = sessions.task_id \
              JOIN projects ON projects.id = tasks.project_id WHERE sessions.id = ?1 AND tasks.id = ?2",
         )
-        .column_types([Type::String])
+        .column_types([Type::String, Type::String, Type::String])
         .bind(&session.id)
         .bind(session.task_id.as_str())
         .exec(&mut *executor)
         .await?;
-    if owners.is_empty() {
+    let Some(Value::Record(owner)) = owners.first() else {
         return Err(StoreError::TranscriptOwnerMissing {
             task_id: session.task_id.clone(),
             session_id: session.id.clone(),
         });
-    }
+    };
+    let task_title = required_string(owner.get(1))?;
+    let project_name = required_string(owner.get(2))?;
     let created_at = crate::projects::now_millis() as i64;
-    for entry in entries {
-        let mut payload = serde_json::to_value(entry).map_err(|error| {
-            StoreError::InvalidRow(format!("could not encode transcript entry: {error}"))
-        })?;
-        if let Some(fields) = payload.as_object_mut() {
-            fields.remove("attachments");
+    for batch in entries.chunks(32) {
+        let rows = (0..batch.len())
+            .map(|index| {
+                let first = index * 10 + 1;
+                format!(
+                    "({})",
+                    (first..first + 10)
+                        .map(|parameter| format!("?{parameter}"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "INSERT INTO entries (session_id, task_id, id, sequence, kind, payload, created_at, entry_text, task_title, project_name) VALUES {rows} \
+             ON CONFLICT(task_id, id) DO UPDATE SET kind = excluded.kind, payload = excluded.payload, \
+             entry_text = excluded.entry_text, task_title = excluded.task_title, project_name = excluded.project_name"
+        );
+        let mut statement = toasty::sql::statement(sql);
+        for entry in batch {
+            let mut payload = serde_json::to_value(entry).map_err(|error| {
+                StoreError::InvalidRow(format!("could not encode transcript entry: {error}"))
+            })?;
+            if let Some(fields) = payload.as_object_mut() {
+                fields.remove("attachments");
+            }
+            let kind = payload
+                .pointer("/kind/type")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| StoreError::InvalidRow("missing transcript entry kind".into()))?;
+            statement = statement
+                .bind(&session.id)
+                .bind(session.task_id.as_str())
+                .bind(&entry.id)
+                .bind(entry.sequence as i64)
+                .bind(kind)
+                .bind(payload.to_string())
+                .bind(created_at)
+                .bind(entry_text(&entry.kind))
+                .bind(&task_title)
+                .bind(&project_name);
         }
-        let kind = payload
-            .pointer("/kind/type")
-            .and_then(serde_json::Value::as_str)
-            .ok_or_else(|| StoreError::InvalidRow("missing transcript entry kind".into()))?;
-        toasty::sql::statement(
-                "INSERT INTO entries (session_id, task_id, id, sequence, kind, payload, created_at,
-                                      entry_text, task_title, project_name)
-                 SELECT ?1, tasks.id, ?3, ?4, ?5, ?6, ?7, ?8, tasks.title, projects.name
-                 FROM tasks JOIN projects ON projects.id = tasks.project_id WHERE tasks.id = ?2
-                 ON CONFLICT(task_id, id) DO UPDATE SET kind = excluded.kind, payload = excluded.payload,
-                     entry_text = excluded.entry_text, task_title = excluded.task_title, project_name = excluded.project_name",
-            )
-            .bind(&session.id)
-            .bind(session.task_id.as_str())
-            .bind(&entry.id)
-            .bind(entry.sequence as i64)
-            .bind(kind)
-            .bind(payload.to_string())
-            .bind(created_at)
-            .bind(entry_text(&entry.kind))
-            .exec(&mut *executor)
-            .await?;
+        statement.exec(&mut *executor).await?;
+    }
+    for entry in entries {
         if matches!(entry.kind, EntryKind::UserMessage { .. }) {
             for (position, attachment) in entry.attachments.iter().enumerate() {
                 let path = attachment
@@ -2887,9 +2906,11 @@ mod tests {
         if let EntryKind::UserMessage { text } = &mut earlier.kind {
             *text = "An earlier update in this batch must also roll back.".into();
         }
+        let mut failed_batch = vec![&earlier; 32];
+        failed_batch.push(&invalid);
         assert!(
             store
-                .save_transcript_entries(&session, &[&earlier, &invalid])
+                .save_transcript_entries(&session, &failed_batch)
                 .await
                 .is_err()
         );
