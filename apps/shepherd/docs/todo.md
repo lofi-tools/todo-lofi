@@ -1659,7 +1659,13 @@ placeholder tabs and no unearned state badges.
   fixture checks that a private value in an echoed ID is not written. Codex
   app-server also omits numeric response IDs from abandoned-reply logs; a
   log-capture fixture covers unsolicited and late replies.
-  Other adapter-internal logs and live-adapter behavior remain to be audited.
+  The ACP SDK 2.1.0 logs complete incoming request and notification messages
+  at debug level, including their parameters. A host that enables verbose SDK
+  tracing can therefore expose agent-provided content; filter those SDK targets
+  or remove the payload logging before treating verbose logging as safe. No
+  Shepherd tracing subscriber installation was found in the desktop sources;
+  this does not establish how other hosts configure the shared client. Other
+  adapter-internal logs and live-adapter behavior remain to be audited.
   On 2026-11-07 the default offline headless agent-harness suite passed 124
   tests (two live tests ignored), the core suite passed 120 tests (three
   ignored), and the desktop-backend suite passed 95 tests (one local throughput
