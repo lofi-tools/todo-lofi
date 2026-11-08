@@ -140,12 +140,12 @@ fn read_directory(dir: &Path) -> Option<(bool, Vec<PathBuf>)> {
         let Ok(file_type) = entry.file_type() else {
             continue;
         };
-        if !file_type.is_dir() {
+        let name = entry.file_name();
+        if name == ".git" && (file_type.is_dir() || file_type.is_file()) {
+            has_git = true;
             continue;
         }
-        let name = entry.file_name();
-        if name == ".git" {
-            has_git = true;
+        if !file_type.is_dir() {
             continue;
         }
         if SKIPPED_DIRS.contains(&name.to_string_lossy().as_ref()) {
@@ -192,7 +192,31 @@ fn collapse(mut node: RawNode) -> ProjectNode {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::TestDirectory;
+    use crate::test_support::{TestDirectory, TestRepository};
+
+    #[test]
+    fn finds_git_worktrees_with_a_git_file() -> Result<(), Box<dyn std::error::Error>> {
+        let root = TestDirectory::new()?;
+        let repository = TestRepository::new()?;
+        let worktree = root.join("checkout");
+        let status = std::process::Command::new("git")
+            .arg("-C")
+            .arg(repository.path())
+            .args(["worktree", "add", "--detach"])
+            .arg(&worktree)
+            .status()?;
+        assert!(status.success());
+        assert!(worktree.join(".git").is_file());
+        std::fs::create_dir_all(worktree.join("nested/.git"))?;
+
+        let result = scan(root.path());
+        assert_eq!(result.repositories, 1);
+        let checkout = result.tree.first().ok_or("missing worktree")?;
+        assert_eq!(checkout.path, worktree.display().to_string());
+        assert!(checkout.repository);
+        assert!(checkout.children.is_empty());
+        Ok(())
+    }
 
     fn repository(root: &TestDirectory, relative: &str) {
         let path = root.join(relative);

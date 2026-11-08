@@ -184,6 +184,8 @@ current layout and give future changes a point of comparison.
 
 - Exclude `~/.claude`, `~/.codex`, and `~/ComfyUI-Installs` from the home scan
   before forming groups.
+- Discover Git working trees with either a `.git` directory or a `.git` file,
+  and stop the scan at each discovered repository.
 - Use actual directory branches to group repositories. Enumerate siblings
   directly when they share a parent and there is no useful grouping. Collapse
   single-child chains and skip a sole top-level group so the next meaningful
