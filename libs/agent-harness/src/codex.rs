@@ -51,6 +51,7 @@ pub const SUPPORTED_METHODS: [&str; 7] = [
 /// session alive instead of leaving the server waiting on Shepherd.
 const METHOD_NOT_FOUND: i64 = -32601;
 const MAX_PENDING_APPROVALS: usize = 64;
+const MAX_OUTBOUND_MESSAGES: usize = 128;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const PROBE_TIMEOUT: Duration = Duration::from_secs(20);
 const STDERR_TAIL_LINES: usize = 20;
@@ -836,6 +837,7 @@ struct Pending {
     turn_error: Option<HarnessEvent>,
 }
 
+#[derive(Debug)]
 struct OutboundMessage {
     value: Value,
     written: Option<oneshot::Sender<std::io::Result<()>>>,
@@ -850,6 +852,15 @@ impl From<Value> for OutboundMessage {
     }
 }
 
+fn outbound_error(error: mpsc::error::TrySendError<OutboundMessage>) -> HarnessError {
+    match error {
+        mpsc::error::TrySendError::Full(_) => {
+            HarnessError::Protocol("Codex outbound queue is full".into())
+        }
+        mpsc::error::TrySendError::Closed(_) => HarnessError::ChannelClosed,
+    }
+}
+
 #[cfg(any(test, feature = "live-test-support"))]
 use crate::live_codex::{WireCapture, WireEntry, without_api_credentials};
 
@@ -859,7 +870,7 @@ pub struct CodexHarness {
     wire_capture: Option<WireCapture>,
     sender: mpsc::UnboundedSender<HarnessEvent>,
     receiver: mpsc::UnboundedReceiver<HarnessEvent>,
-    outgoing: Option<mpsc::UnboundedSender<OutboundMessage>>,
+    outgoing: Option<mpsc::Sender<OutboundMessage>>,
     child: Option<Arc<AsyncMutex<Child>>>,
     process_tracker: Option<Arc<dyn crate::AgentProcessTracker>>,
     process_record: Option<String>,
@@ -977,9 +988,7 @@ impl CodexHarness {
 
     fn send(&self, message: Value) -> HarnessResult<()> {
         let outgoing = self.outgoing.as_ref().ok_or(HarnessError::NotStarted)?;
-        outgoing
-            .send(message.into())
-            .map_err(|_| HarnessError::ChannelClosed)
+        outgoing.try_send(message.into()).map_err(outbound_error)
     }
 
     async fn request(&mut self, method: &str, params: Value) -> HarnessResult<Value> {
@@ -1087,7 +1096,7 @@ impl CodexHarness {
             })?);
         }
 
-        let (outgoing, outgoing_receiver) = mpsc::unbounded_channel();
+        let (outgoing, outgoing_receiver) = mpsc::channel(MAX_OUTBOUND_MESSAGES);
         self.writer_task = Some(spawn_writer(
             stdin,
             outgoing_receiver,
@@ -1406,19 +1415,16 @@ impl AgentHarness for CodexHarness {
             request_id
         };
         let (written, completed) = oneshot::channel();
-        if outgoing
-            .send(OutboundMessage {
-                value: json!({ "id": request_id, "result": { "decision": answer } }),
-                written: Some(written),
-            })
-            .is_err()
-        {
+        if let Err(error) = outgoing.try_send(OutboundMessage {
+            value: json!({ "id": request_id, "result": { "decision": answer } }),
+            written: Some(written),
+        }) {
             self.pending
                 .lock()
                 .await
                 .approval_writes
                 .remove(approval_id.as_str());
-            return Err(HarnessError::ChannelClosed);
+            return Err(outbound_error(error));
         }
         timeout(REQUEST_TIMEOUT, completed)
             .await
@@ -2532,7 +2538,7 @@ fn exec_tool_event(
 
 fn spawn_writer(
     mut stdin: impl AsyncWrite + Unpin + Send + 'static,
-    mut outgoing: mpsc::UnboundedReceiver<OutboundMessage>,
+    mut outgoing: mpsc::Receiver<OutboundMessage>,
     #[cfg(any(test, feature = "live-test-support"))] capture: Option<WireCapture>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
@@ -2593,7 +2599,7 @@ fn spawn_reader(
     stdout: ChildStdout,
     sender: mpsc::UnboundedSender<HarnessEvent>,
     pending: Arc<AsyncMutex<Pending>>,
-    outgoing: mpsc::UnboundedSender<OutboundMessage>,
+    outgoing: mpsc::Sender<OutboundMessage>,
     stderr: Arc<Mutex<VecDeque<String>>>,
     closed: Arc<AtomicBool>,
     closing: Arc<AtomicBool>,
@@ -2621,7 +2627,9 @@ fn spawn_reader(
             if let Some(capture) = &capture {
                 capture.push(WireEntry::Response(message.clone()));
             }
-            route_incoming(message, &sender, &pending, &outgoing).await;
+            if let Err(error) = route_incoming(message, &sender, &pending, &outgoing).await {
+                break Some(format!("Could not answer Codex request: {error}"));
+            }
         };
 
         closed.store(true, Ordering::Relaxed);
@@ -2791,23 +2799,23 @@ async fn route_incoming(
     message: Value,
     sender: &mpsc::UnboundedSender<HarnessEvent>,
     pending: &Arc<AsyncMutex<Pending>>,
-    outgoing: &mpsc::UnboundedSender<OutboundMessage>,
-) {
+    outgoing: &mpsc::Sender<OutboundMessage>,
+) -> HarnessResult<()> {
     match (message.get("id"), message.get("method")) {
         (Some(id), Some(method)) => {
             let method = method.as_str().unwrap_or_default().to_string();
             let params = message.get("params").cloned().unwrap_or(Value::Null);
-            handle_server_request(id.clone(), method, params, sender, pending, outgoing).await;
+            handle_server_request(id.clone(), method, params, sender, pending, outgoing).await?;
         }
         (Some(id), None) => {
             let Some(request_id) = id.as_i64() else {
                 tracing::warn!("codex answered with a non-numeric id");
-                return;
+                return Ok(());
             };
             let waiter = pending.lock().await.responses.remove(&request_id);
             let Some(waiter) = waiter else {
                 tracing::debug!(request_id, "codex answered a request nobody is waiting for");
-                return;
+                return Ok(());
             };
             let outcome = match message.get("error") {
                 Some(error) => Err(codex_rpc_error(error)),
@@ -2824,6 +2832,7 @@ async fn route_incoming(
         }
         (None, None) => tracing::warn!("codex sent a message with neither id nor method"),
     }
+    Ok(())
 }
 
 fn codex_rpc_error(error: &Value) -> HarnessError {
@@ -2847,8 +2856,8 @@ async fn handle_server_request(
     params: Value,
     sender: &mpsc::UnboundedSender<HarnessEvent>,
     pending: &Arc<AsyncMutex<Pending>>,
-    outgoing: &mpsc::UnboundedSender<OutboundMessage>,
-) {
+    outgoing: &mpsc::Sender<OutboundMessage>,
+) -> HarnessResult<()> {
     let wants_approval = matches!(
         method.as_str(),
         "item/commandExecution/requestApproval"
@@ -2860,18 +2869,16 @@ async fn handle_server_request(
             "id": id,
             "error": {
                 "code": METHOD_NOT_FOUND,
-                "message": format!("shepherd does not support `{method}`"),
+                "message": "shepherd does not support this request",
             },
         });
-        if outgoing.send(response.into()).is_err() {
-            tracing::debug!("codex request could not be answered");
-        }
-        return;
+        outgoing.try_send(response.into()).map_err(outbound_error)?;
+        return Ok(());
     }
 
     let Some(server_id) = id.as_i64() else {
         tracing::warn!(%method, "an approval arrived with a non-numeric id");
-        return;
+        return Ok(());
     };
     let approval_id = params
         .get("itemId")
@@ -2891,7 +2898,7 @@ async fn handle_server_request(
         .any(|existing| *existing == server_id)
     {
         tracing::debug!("codex repeated a pending server request ID");
-        return;
+        return Ok(());
     }
     let rejection = if approvals.approvals.contains_key(&approval_id) {
         Some("an approval for this item is already pending")
@@ -2902,13 +2909,10 @@ async fn handle_server_request(
     };
     if let Some(message) = rejection {
         drop(approvals);
-        if outgoing
-            .send(json!({"id": id, "error": {"code": -32000, "message": message}}).into())
-            .is_err()
-        {
-            tracing::debug!("codex approval rejection could not be delivered");
-        }
-        return;
+        outgoing
+            .try_send(json!({"id": id, "error": {"code": -32000, "message": message}}).into())
+            .map_err(outbound_error)?;
+        return Ok(());
     }
     let request = ApprovalRequest {
         approval_id: ApprovalId::new(approval_id.clone()),
@@ -2927,10 +2931,9 @@ async fn handle_server_request(
     {
         tracing::debug!("the core stopped listening to codex events");
         pending.lock().await.approvals.remove(&approval_id);
-        if outgoing.send(json!({"id": id, "error": {"code": -32000, "message": "approval handler unavailable"}}).into()).is_err() {
-            tracing::debug!("codex approval failure could not be delivered");
-        }
+        outgoing.try_send(json!({"id": id, "error": {"code": -32000, "message": "approval handler unavailable"}}).into()).map_err(outbound_error)?;
     }
+    Ok(())
 }
 
 async fn handle_notification(
@@ -3262,11 +3265,73 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn full_outbound_queue_reports_error_and_allows_approval_retry()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut harness = CodexHarness::new();
+        harness
+            .pending
+            .lock()
+            .await
+            .approvals
+            .insert("item".into(), 42);
+        let (outgoing, mut requests) = mpsc::channel(MAX_OUTBOUND_MESSAGES);
+        for number in 0..MAX_OUTBOUND_MESSAGES {
+            outgoing.try_send(json!({"id": number}).into())?;
+        }
+        harness.outgoing = Some(outgoing.clone());
+        assert!(matches!(
+            harness.respond(ApprovalId::new("item"), Decision::Allow).await,
+            Err(HarnessError::Protocol(message)) if message.contains("queue is full")
+        ));
+        let pending = harness.pending.lock().await;
+        assert_eq!(pending.approvals.get("item"), Some(&42));
+        assert!(pending.approval_writes.is_empty());
+        drop(pending);
+        assert!(matches!(
+            route_incoming(json!({"id": 900, "method": "unsupported", "params": {}}), &harness.sender, &harness.pending, &outgoing).await,
+            Err(HarnessError::Protocol(message)) if message.contains("queue is full")
+        ));
+        requests.recv().await.ok_or("missing queued message")?;
+        route_incoming(
+            json!({"id": 901, "method": "unsupported", "params": {}}),
+            &harness.sender,
+            &harness.pending,
+            &outgoing,
+        )
+        .await?;
+        let mut response = None;
+        while let Ok(message) = requests.try_recv() {
+            if message.value["id"] == 901 {
+                response = Some(message.value);
+            }
+        }
+        assert_eq!(
+            response.ok_or("missing rejection")?["error"]["code"],
+            METHOD_NOT_FOUND
+        );
+        let (writer, reader) = tokio::io::duplex(4096);
+        let writer_task = spawn_writer(writer, requests, None);
+        harness
+            .respond(ApprovalId::new("item"), Decision::Allow)
+            .await?;
+        let mut reader = BufReader::new(reader);
+        let mut line = String::new();
+        reader.read_line(&mut line).await?;
+        let message: Value = serde_json::from_str(&line)?;
+        assert_eq!(message["id"], 42);
+        assert_eq!(message["result"]["decision"], "accept");
+        harness.outgoing = None;
+        drop(outgoing);
+        writer_task.await?;
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn approval_requests_are_bounded_and_duplicate_items_do_not_replace_pending_requests()
     -> Result<(), Box<dyn std::error::Error>> {
         let pending = Arc::new(AsyncMutex::new(Pending::default()));
         let (events, mut received) = mpsc::unbounded_channel();
-        let (outgoing, mut responses) = mpsc::unbounded_channel();
+        let (outgoing, mut responses) = mpsc::channel(MAX_OUTBOUND_MESSAGES);
         let method = "item/commandExecution/requestApproval";
         for number in 0..MAX_PENDING_APPROVALS {
             handle_server_request(
@@ -3277,7 +3342,7 @@ mod tests {
                 &pending,
                 &outgoing,
             )
-            .await;
+            .await?;
         }
         assert_eq!(pending.lock().await.approvals.len(), MAX_PENDING_APPROVALS);
         for _ in 0..MAX_PENDING_APPROVALS {
@@ -3294,7 +3359,7 @@ mod tests {
             &pending,
             &outgoing,
         )
-        .await;
+        .await?;
         let duplicate = responses.try_recv()?.value;
         assert_eq!(duplicate["id"], 100);
         assert!(
@@ -3311,7 +3376,7 @@ mod tests {
             &pending,
             &outgoing,
         )
-        .await;
+        .await?;
         assert!(responses.try_recv().is_err());
         handle_server_request(
             json!(101),
@@ -3321,7 +3386,7 @@ mod tests {
             &pending,
             &outgoing,
         )
-        .await;
+        .await?;
         let overflow = responses.try_recv()?.value;
         assert_eq!(overflow["id"], 101);
         assert!(
@@ -3349,7 +3414,7 @@ mod tests {
             &pending,
             &outgoing,
         )
-        .await;
+        .await?;
         assert!(matches!(
             received.try_recv(),
             Ok(HarnessEvent::ApprovalRequested { .. })
@@ -3372,7 +3437,7 @@ mod tests {
             &pending,
             &outgoing,
         )
-        .await;
+        .await?;
         assert_eq!(responses.try_recv()?.value["id"], 103);
         assert!(!pending.lock().await.approvals.contains_key("undeliverable"));
         Ok(())
@@ -3816,10 +3881,10 @@ done
 
     /// Replay a recorded app-server stream through the same translation the
     /// stdout reader uses, with no child process involved.
-    async fn replay_app_server(name: &str) -> Transcript {
+    async fn replay_app_server(name: &str) -> HarnessResult<Transcript> {
         let (sender, mut receiver) = mpsc::unbounded_channel();
         let pending = Arc::new(AsyncMutex::new(Pending::default()));
-        let (outgoing, _outgoing_receiver) = mpsc::unbounded_channel();
+        let (outgoing, _outgoing_receiver) = mpsc::channel(MAX_OUTBOUND_MESSAGES);
         for message in fixture_lines(name) {
             let params = message.get("params").cloned().unwrap_or(Value::Null);
             match (message.get("id"), message.get("method")) {
@@ -3832,7 +3897,7 @@ done
                         &pending,
                         &outgoing,
                     )
-                    .await;
+                    .await?;
                 }
                 (None, Some(method)) => {
                     handle_notification(
@@ -3853,7 +3918,7 @@ done
         while let Ok(event) = receiver.try_recv() {
             transcript.apply(&event);
         }
-        transcript
+        Ok(transcript)
     }
 
     fn summaries(transcript: &Transcript) -> Vec<String> {
@@ -3861,8 +3926,8 @@ done
     }
 
     #[tokio::test]
-    async fn a_recorded_app_server_session_replays_without_the_cli() {
-        let transcript = replay_app_server("app-server-session.jsonl").await;
+    async fn a_recorded_app_server_session_replays_without_the_cli() -> HarnessResult<()> {
+        let transcript = replay_app_server("app-server-session.jsonl").await?;
         assert_eq!(
             summaries(&transcript),
             vec![
@@ -3870,11 +3935,13 @@ done
                 "cargo test (Completed)".to_string(),
             ]
         );
+        Ok(())
     }
 
     #[tokio::test]
-    async fn a_recorded_approval_with_no_decision_is_withdrawn_when_the_turn_ends() {
-        let transcript = replay_app_server("app-server-approval.jsonl").await;
+    async fn a_recorded_approval_with_no_decision_is_withdrawn_when_the_turn_ends()
+    -> HarnessResult<()> {
+        let transcript = replay_app_server("app-server-approval.jsonl").await?;
         assert_eq!(
             summaries(&transcript),
             vec![
@@ -3882,6 +3949,7 @@ done
                 "approval: cargo test (withdrawn)".to_string(),
             ]
         );
+        Ok(())
     }
 
     #[tokio::test]
@@ -4357,7 +4425,7 @@ esac
     async fn request_does_not_register_after_reader_closes()
     -> Result<(), Box<dyn std::error::Error>> {
         let mut harness = CodexHarness::new();
-        let (outgoing, _receiver) = mpsc::unbounded_channel();
+        let (outgoing, _receiver) = mpsc::channel(MAX_OUTBOUND_MESSAGES);
         harness.outgoing = Some(outgoing);
         let pending = Arc::clone(&harness.pending);
         let closed = Arc::clone(&harness.closed);
@@ -4637,7 +4705,7 @@ done
             .await
             .approvals
             .insert("item".into(), 42);
-        let (disconnected, receiver) = mpsc::unbounded_channel();
+        let (disconnected, receiver) = mpsc::channel(MAX_OUTBOUND_MESSAGES);
         drop(receiver);
         harness.outgoing = Some(disconnected);
         assert!(matches!(
@@ -4652,7 +4720,7 @@ done
         );
         assert!(harness.receiver.try_recv().is_err());
 
-        let (connected, requests) = mpsc::unbounded_channel();
+        let (connected, requests) = mpsc::channel(MAX_OUTBOUND_MESSAGES);
         let (writer, reader) = tokio::io::duplex(4096);
         drop(reader);
         let writer_task = spawn_writer(writer, requests, None);
@@ -4692,7 +4760,7 @@ done
             .approvals
             .insert("item".into(), 43);
 
-        let (connected, requests) = mpsc::unbounded_channel();
+        let (connected, requests) = mpsc::channel(MAX_OUTBOUND_MESSAGES);
         let (writer, reader) = tokio::io::duplex(4096);
         let writer_task = spawn_writer(writer, requests, None);
         harness.outgoing = Some(connected);
@@ -4730,7 +4798,7 @@ done
                 .approvals
                 .insert("item".into(), 42);
             let pending = harness.pending.clone();
-            let (connected, requests) = mpsc::unbounded_channel();
+            let (connected, requests) = mpsc::channel(MAX_OUTBOUND_MESSAGES);
             let (writer, reader) = tokio::io::duplex(1);
             let writer_task = spawn_writer(writer, requests, None);
             harness.outgoing = Some(connected);
@@ -4785,7 +4853,7 @@ done
             .await
             .approvals
             .insert("item".into(), 42);
-        let (connected, requests) = mpsc::unbounded_channel();
+        let (connected, requests) = mpsc::channel(MAX_OUTBOUND_MESSAGES);
         let (writer, reader) = tokio::io::duplex(1);
         let writer_task = spawn_writer(writer, requests, None);
         harness.outgoing = Some(connected);
