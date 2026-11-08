@@ -1073,6 +1073,18 @@ export function App() {
     ])
   }
 
+  function clearMissingTask(taskId: string, projectId: string | null, tasks: bridge.TaskSummary[]) {
+    setSearchJump(undefined)
+    clearTurnOptions(taskId)
+    clearPromptFiles(taskId)
+    batch(() => {
+      setTasks(tasks)
+      if (projectId) setLoadedTasksFor(projectId)
+      setSelectedTaskId(null)
+      setWorkspace(null)
+    })
+  }
+
   async function resyncSnapshots() {
     if (resyncRunning) {
       resyncRequested = true
@@ -1111,15 +1123,7 @@ export function App() {
         }
         const currentTasks = projectId ? updates.taskLists.get(projectId) ?? taskList?.tasks : undefined
         if (taskId && currentTasks && !currentTasks.some((task) => task.id === taskId) && !updates.workspaces.has(taskId)) {
-          setSearchJump(undefined)
-          clearTurnOptions(taskId)
-          clearPromptFiles(taskId)
-          batch(() => {
-            setTasks(currentTasks)
-            if (projectId) setLoadedTasksFor(projectId)
-            setSelectedTaskId(null)
-            setWorkspace(null)
-          })
+          clearMissingTask(taskId, projectId, currentTasks)
           resyncRequested = true
           continue
         }
@@ -1137,6 +1141,12 @@ export function App() {
         }
         if (resyncRequested || projectId !== selectedProjectId() ||
             taskId !== selectedTaskId() || reviewing !== reviewOnly()) {
+          resyncRequested = true
+          continue
+        }
+        const latestTasks = projectId ? updates.taskLists.get(projectId) : undefined
+        if (taskId && latestTasks && !latestTasks.some((task) => task.id === taskId) && !updates.workspaces.has(taskId)) {
+          clearMissingTask(taskId, projectId, latestTasks)
           resyncRequested = true
           continue
         }
@@ -1169,7 +1179,14 @@ export function App() {
     if (resyncUpdates) {
       switch (event.type) {
         case 'projectListChanged': resyncUpdates.projects = true; break
-        case 'taskListChanged': resyncUpdates.taskLists.set(event.data.projectId, event.data.tasks); break
+        case 'taskListChanged': {
+          resyncUpdates.taskLists.set(event.data.projectId, event.data.tasks)
+          const taskId = selectedTaskId()
+          if (taskId && event.data.projectId === selectedProjectId() && !event.data.tasks.some((task) => task.id === taskId)) {
+            resyncUpdates.workspaces.delete(taskId)
+          }
+          break
+        }
         case 'taskWorkspaceChanged': resyncUpdates.workspaces.add(event.data.task.id); break
         case 'terminalListChanged': resyncUpdates.terminalLists.add(event.data.projectId); break
       }

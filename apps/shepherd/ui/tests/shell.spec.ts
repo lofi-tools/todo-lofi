@@ -4004,3 +4004,28 @@ test('clears a deleted selected task when recovering missed events', async ({ pa
   await expect(page.getByRole('heading', { name: 'What should Codex build in demo?' })).toBeVisible()
   await expect(page.getByText(/Could not refresh after missed updates/)).toHaveCount(0)
 })
+
+
+test('does not restore a task deleted during a delayed recovery read', async ({ page }) => {
+  await page.goto('/')
+  await expect(page.getByText('ready to go')).toBeVisible()
+  await page.evaluate(() => {
+    const fixture = window as unknown as { __pauseWorkspaceRead: () => void; __emitCoreEvent: (event: ShepherdEvent) => void }
+    fixture.__pauseWorkspaceRead()
+    fixture.__emitCoreEvent({ type: 'resyncRequired' })
+  })
+  await expect.poll(() => page.evaluate(() => (window as unknown as { __workspaceReadPaused: () => boolean }).__workspaceReadPaused())).toBe(true)
+  await page.evaluate(() => {
+    const fixture = window as unknown as {
+      __missTaskDeletion: () => void; __emitCoreEvent: (event: ShepherdEvent) => void; __releaseWorkspaceRead: () => void;
+      __setTaskRevision: (taskId: string, revision: number) => void
+    }
+    fixture.__setTaskRevision('task-1', 10)
+    fixture.__missTaskDeletion()
+    fixture.__emitCoreEvent({ type: 'taskListChanged', data: { projectId: 'project-1', tasks: [] } })
+    fixture.__releaseWorkspaceRead()
+  })
+  await expect(page.getByText('ready to go')).toHaveCount(0)
+  await expect(page.getByRole('heading', { name: 'What should Codex build in demo?' })).toBeVisible()
+  await expect(page.getByText(/Could not refresh after missed updates/)).toHaveCount(0)
+})
