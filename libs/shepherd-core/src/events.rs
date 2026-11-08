@@ -30,6 +30,7 @@ pub enum ShutdownState {
     rename_all_fields = "camelCase"
 )]
 pub enum Event {
+    ResyncRequired,
     ProjectListChanged(ProjectList),
     ProjectApprovalsChanged {
         project_id: ProjectId,

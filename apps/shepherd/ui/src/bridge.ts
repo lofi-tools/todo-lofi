@@ -374,6 +374,7 @@ export interface TerminalFrame {
 }
 
 export type Event =
+  | { type: 'resyncRequired' }
   | { type: 'projectListChanged'; data: ProjectList }
   | { type: 'projectApprovalsChanged'; data: { projectId: string } }
   | { type: 'terminalBell'; data: { projectId: string; taskId: string | null; terminalId: string } }

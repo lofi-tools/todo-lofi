@@ -1055,8 +1055,61 @@ export function App() {
     }
   })
 
+  let eventRevision = 0
+  let resyncRunning = false
+  let resyncRequested = false
+
+  async function resyncSnapshots() {
+    if (resyncRunning) {
+      resyncRequested = true
+      return
+    }
+    resyncRunning = true
+    try {
+      do {
+        resyncRequested = false
+        const revision = eventRevision
+        const projectId = selectedProjectId()
+        const taskId = selectedTaskId()
+        const reviewing = reviewOnly()
+        const [projectList, taskList, taskWorkspace, terminalList, reviewLists] = await Promise.all([
+          bridge.projectList(),
+          projectId ? bridge.taskList(projectId) : undefined,
+          taskId ? bridge.taskWorkspace(taskId) : undefined,
+          projectId ? bridge.terminalList(projectId) : undefined,
+          reviewing ? bridge.reviewTaskLists() : undefined,
+        ])
+        if (revision !== eventRevision || projectId !== selectedProjectId() ||
+            taskId !== selectedTaskId() || reviewing !== reviewOnly()) {
+          resyncRequested = true
+          continue
+        }
+        setProjects(projectList.projects)
+        if (taskList && projectId) {
+          setTasks(taskList.tasks)
+          setLoadedTasksFor(projectId)
+          setApprovalChange({ projectId })
+        }
+        if (taskWorkspace) setWorkspace(taskWorkspace)
+        if (terminalList) setTerminalListEvent(terminalList)
+        if (reviewLists) {
+          setReviewLists(new Map(reviewLists.map(({ projectId, tasks }) => [projectId, tasks] as const)))
+          reconcileReviewSelection()
+        }
+      } while (resyncRequested)
+    } catch (failure) {
+      setError(`Could not refresh after missed updates: ${describe(failure)}`)
+    } finally {
+      resyncRunning = false
+    }
+  }
+
   function handleEvent(event: CoreEvent) {
+    eventRevision += 1
     switch (event.type) {
+      case 'resyncRequired':
+        void resyncSnapshots()
+        break
       case 'projectListChanged':
         setProjects(event.data.projects)
         reconcileReviewSelection()

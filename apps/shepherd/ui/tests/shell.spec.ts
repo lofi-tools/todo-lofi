@@ -1041,6 +1041,15 @@ test.beforeEach(async ({ context }) => {
     } })
     window.__emitCoreEvent = (event: ShepherdEvent) =>
       callbacks.get(eventChannel)?.({ index: eventIndex++, message: event })
+    Object.assign(window, { __missTaskUpdate: () => {
+      const index = tasks.findIndex((task) => task.id === 'task-1')
+      if (index < 0) throw new Error('Missing fixture task')
+      tasks[index] = { ...tasks[index], title: 'Recovered task' }
+      transcripts['task-1'] = [{
+        id: 'recovered-entry', sequence: 10,
+        kind: { type: 'agentText', data: { text: 'Recovered transcript' } },
+      }]
+    } })
     window.__setTaskState = (taskId: string, state: TaskState) => {
       const index = tasks.findIndex((task) => task.id === taskId)
       if (index < 0) throw new Error(`Unknown fixture task ${taskId}`)
@@ -3839,4 +3848,16 @@ test('releases reported Kitty keys when focus leaves a terminal', async ({ page 
   await page.keyboard.up('b')
   await page.keyboard.press('c')
   await expect.poll(writes).toEqual([...firstKeys, '\x1b[99;;99u', '\x1b[99;1:3u'])
+})
+
+
+test('resynchronizes snapshots after missed core events', async ({ page }) => {
+  await page.goto('/')
+  await expect(page.getByText('ready to go')).toBeVisible()
+  await page.evaluate(() => {
+    const fixture = window as unknown as { __missTaskUpdate: () => void; __emitCoreEvent: (event: ShepherdEvent) => void }
+    fixture.__missTaskUpdate()
+    fixture.__emitCoreEvent({ type: 'resyncRequired' })
+  })
+  await expect(page.getByText('Recovered transcript')).toBeVisible()
 })

@@ -3294,22 +3294,26 @@ pub mod commands {
     ) -> Result<(), BridgeError> {
         let mut receiver = state.inner().subscribe();
         tauri::async_runtime::spawn(async move {
-            loop {
-                match receiver.recv().await {
-                    Ok(event) => {
-                        if let Err(error) = channel.send(event) {
-                            tracing::debug!(%error, "the shell event channel closed");
-                            break;
-                        }
-                    }
-                    Err(broadcast::error::RecvError::Lagged(skipped)) => {
-                        tracing::warn!(skipped, "the shell missed core events; reload snapshots");
-                    }
-                    Err(broadcast::error::RecvError::Closed) => break,
+            while let Some(event) = next_core_event(&mut receiver).await {
+                if let Err(error) = channel.send(event) {
+                    tracing::debug!(%error, "the shell event channel closed");
+                    break;
                 }
             }
         });
         Ok(())
+    }
+}
+
+async fn next_core_event(receiver: &mut broadcast::Receiver<Event>) -> Option<Event> {
+    match receiver.recv().await {
+        Ok(event) => Some(event),
+        Err(broadcast::error::RecvError::Lagged(skipped)) => {
+            tracing::warn!(skipped, "the shell missed core events; reload snapshots");
+            *receiver = receiver.resubscribe();
+            Some(Event::ResyncRequired)
+        }
+        Err(broadcast::error::RecvError::Closed) => None,
     }
 }
 
@@ -3335,6 +3339,32 @@ async fn pause_attachment_deletion_fixture(
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn lagged_core_events_request_a_snapshot_reload_and_skip_stale_events() {
+        let (sender, mut receiver) = tokio::sync::broadcast::channel(2);
+        for _ in 0..3 {
+            assert!(
+                sender
+                    .send(shepherd_core::events::Event::TaskNeedsInput {
+                        task_id: "old".into(),
+                    })
+                    .is_ok()
+            );
+        }
+        assert!(matches!(
+            super::next_core_event(&mut receiver).await,
+            Some(shepherd_core::events::Event::ResyncRequired)
+        ));
+        assert!(
+            sender
+                .send(shepherd_core::events::Event::TaskNeedsInput {
+                    task_id: "new".into(),
+                })
+                .is_ok()
+        );
+        assert!(matches!(super::next_core_event(&mut receiver).await,
+            Some(shepherd_core::events::Event::TaskNeedsInput { task_id }) if task_id == "new"));
+    }
     use shepherd_core::store::MemoryStore;
     use shepherd_core::test_support::{TestDirectory, TestRepository};
     use shepherd_core::{TaskState, TaskSummary};

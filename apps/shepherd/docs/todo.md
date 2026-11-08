@@ -1638,7 +1638,11 @@ placeholder tabs and no unearned state badges.
   most 256 events per session per pass, including during commands, and
   reschedules remaining events so one busy agent cannot monopolize other
   sessions. Shutdown drains the remaining events. Critical event
-  queues still need backpressure.
+  queues still need backpressure. If the bounded shell broadcast falls behind,
+  it discards stale buffered events and requests a frontend snapshot refresh;
+  the refresh retries when newer events arrive before it completes. Backend and
+  headless browser fixtures cover lag detection and restoring the selected task.
+  Transient notifications missed during lag cannot be reconstructed.
   Codex exec and app-server, and OpenCode tool events, bound output to the
   transcript's existing 64 KiB tail before placing it on the event queue,
   avoiding larger queued copies without changing the retained output.
