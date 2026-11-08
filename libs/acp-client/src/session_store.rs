@@ -92,6 +92,7 @@ impl SessionStore {
 
     /// Insert or replace a project's entry.
     pub fn put(&self, session: StoredSession) -> anyhow::Result<()> {
+        let _lock = self.lock_updates()?;
         let mut file = self.load()?;
         match file
             .sessions
@@ -110,6 +111,7 @@ impl SessionStore {
         project_path: &str,
         permissions: ToolPermissions,
     ) -> anyhow::Result<()> {
+        let _lock = self.lock_updates()?;
         let mut file = self.load()?;
         match file
             .sessions
@@ -128,10 +130,32 @@ impl SessionStore {
 
     /// Drop a project's entry (used when its session is torn down).
     pub fn remove(&self, project_path: &str) -> anyhow::Result<()> {
+        let _lock = self.lock_updates()?;
         let mut file = self.load()?;
         file.sessions
             .retain(|session| session.project_path != project_path);
         self.save(&file)
+    }
+
+    fn lock_updates(&self) -> anyhow::Result<std::fs::File> {
+        let parent = self
+            .path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        std::fs::create_dir_all(parent)?;
+        let mut name = self.path.as_os_str().to_owned();
+        name.push(".lock");
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create(true).truncate(false);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let lock = options.open(PathBuf::from(name))?;
+        lock.lock()?;
+        Ok(lock)
     }
 
     fn load(&self) -> anyhow::Result<StoreFile> {
@@ -246,6 +270,32 @@ mod tests {
         std::fs::remove_file(&path)?;
         store.set_tool_permissions("/project", ToolPermissions::default())?;
         assert!(store.get("/project").is_some());
+        Ok(())
+    }
+
+    #[test]
+    fn concurrent_updates_preserve_all_projects() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let store = SessionStore::new(dir.path().join("acp-sessions.json"));
+        let workers = 16;
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(workers));
+        let mut threads = Vec::new();
+        for index in 0..workers {
+            let store = store.clone();
+            let barrier = barrier.clone();
+            threads.push(std::thread::spawn(move || {
+                barrier.wait();
+                store.set_tool_permissions(&format!("/project-{index}"), ToolPermissions::default())
+            }));
+        }
+        for thread in threads {
+            thread
+                .join()
+                .map_err(|_| anyhow::anyhow!("session-store worker panicked"))??;
+        }
+        for index in 0..workers {
+            assert!(store.get(&format!("/project-{index}")).is_some());
+        }
         Ok(())
     }
 
