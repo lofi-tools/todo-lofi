@@ -982,17 +982,18 @@ If Pi’s RPC probe is blocked, proceed with ACP while resolving it.
   and admits only the matching prompt before streaming its session events. The
   Pi subprocess fixture verifies the startup probe, dialog reply correlation,
   handled command disposition, and process exit with stderr kept off the wire.
-- [ ] Pi lifecycle and approval bridge contract fixtures when those paths are
+- [x] Pi lifecycle and approval bridge contract fixtures when those paths are
   implemented.
   A recorded Pi 1.5.0 offline session in `fixtures/pi` replays through the
   transport and pins the startup state shape, the extension approval request
   and reply correlation, the handled prompt disposition and the exit report;
   the replay rewrites only the request IDs, as a live Pi echoes them. The
   recording is an offline extension command, so it holds no agent-turn
-  lifecycle records (no `agent_start`, streaming, turn completion or
-  `agent_settled`), and the transport has no lifecycle or approval bridge to
-  map them to yet. Recording those transitions needs a live model turn with
-  provider credentials and network access.
+  lifecycle records; `PiHarness` maps those shapes in a fake-Pi script that
+  covers `agent_start`, text and thinking deltas, tool execution and
+  `agent_settled`, and the recorded confirm dialog replays as an approval the
+  harness answers. None of this is a live model capture; recording a real turn
+  stays in the gated smoke item below.
 - [ ] One live smoke per installed OpenCode, Pi and Claude/ACP integration,
   gated in CI.
   The opt-in Shepherd adapter smoke workflow selects one preinstalled agent on
