@@ -60,7 +60,7 @@ impl DiagnosticLog {
                 file.write_all(b"\n")?;
             }
         }
-        let mut encoded = serde_json::to_vec(record)?;
+        let mut encoded = encode_diagnostic(record)?;
         encoded.push(b'\n');
         file.write_all(&encoded)?;
         file.unlock()
@@ -126,6 +126,71 @@ impl DiagnosticLog {
         }
         Ok(records.into_iter().collect())
     }
+}
+
+struct LimitedDiagnosticBuffer {
+    bytes: Vec<u8>,
+    exceeded: bool,
+}
+
+impl Write for LimitedDiagnosticBuffer {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        if bytes.len() > (MAX_DIAGNOSTIC_RECORD_BYTES - 1).saturating_sub(self.bytes.len()) {
+            self.exceeded = true;
+            return Err(io::Error::other("diagnostic record exceeds history limit"));
+        }
+        self.bytes.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+fn encode_diagnostic(record: &Diagnostic) -> io::Result<Vec<u8>> {
+    let mut output = LimitedDiagnosticBuffer {
+        bytes: Vec::new(),
+        exceeded: false,
+    };
+    match serde_json::to_writer(&mut output, record) {
+        Ok(()) => Ok(output.bytes),
+        Err(error) if !output.exceeded => Err(io::Error::other(error)),
+        Err(_) => {
+            let shortened = Diagnostic {
+                id: diagnostic_excerpt(&record.id, 1024),
+                time: diagnostic_excerpt(&record.time, 1024),
+                operation: diagnostic_excerpt(&record.operation, 1024),
+                message: diagnostic_excerpt(&record.message, 7 * 1024),
+                details: diagnostic_excerpt(&record.details, 30 * 1024),
+            };
+            let mut output = LimitedDiagnosticBuffer {
+                bytes: Vec::new(),
+                exceeded: false,
+            };
+            serde_json::to_writer(&mut output, &shortened).map_err(io::Error::other)?;
+            Ok(output.bytes)
+        }
+    }
+}
+
+fn diagnostic_excerpt(value: &str, limit: usize) -> String {
+    if value.len() <= limit {
+        return value.to_owned();
+    }
+    let mut head = limit / 2;
+    while !value.is_char_boundary(head) {
+        head -= 1;
+    }
+    let mut tail = value.len() - limit / 2;
+    while !value.is_char_boundary(tail) {
+        tail += 1;
+    }
+    format!(
+        "{}\n[diagnostic field truncated]\n{}",
+        &value[..head],
+        &value[tail..]
+    )
 }
 
 fn read_diagnostic_line(reader: &mut impl BufRead, line: &mut Vec<u8>) -> io::Result<Option<bool>> {
@@ -302,6 +367,33 @@ mod tests {
             history.get(2).map(|record| record.id.as_str()),
             Some("after")
         );
+        Ok(())
+    }
+
+    #[test]
+    fn oversized_diagnostics_are_saved_as_readable_excerpts()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("errors.jsonl");
+        let log = DiagnosticLog::new(path.clone());
+        let record = Diagnostic {
+            id: "fixture".into(),
+            time: "fixture".into(),
+            operation: "fixture".into(),
+            message: "message".into(),
+            details: format!(
+                "start{}end",
+                "\u{0001}é".repeat(MAX_DIAGNOSTIC_RECORD_BYTES)
+            ),
+        };
+        log.append(&record)?;
+        assert!(fs::metadata(path)?.len() <= MAX_DIAGNOSTIC_RECORD_BYTES as u64);
+        let history = log.recent()?;
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].id, "fixture");
+        assert!(history[0].details.starts_with("start"));
+        assert!(history[0].details.contains("[diagnostic field truncated]"));
+        assert!(history[0].details.ends_with("end"));
         Ok(())
     }
 

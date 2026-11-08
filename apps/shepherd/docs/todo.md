@@ -1454,7 +1454,9 @@ placeholder tabs and no unearned state badges.
 - [ ] Bounded transcript, stderr, search and frame buffers.
   Diagnostic history retains at most 256 KiB per record while draining longer
   lines, reports oversized records, and continues to later entries; a local
-  log fixture covers recovery after an oversized line.
+  log fixture covers recovery after an oversized line. New oversized diagnostics
+  are stored as marked, UTF-8-safe field excerpts that fit the same limit;
+  a fixture checks escaped content and retains both ends of the details.
   Search snippets cap the displayed matching word at 65 characters and compare
   case-folded text without allocating a copy of an arbitrarily long word;
   fixtures cover long Unicode matches and exact versus prefix matching.
