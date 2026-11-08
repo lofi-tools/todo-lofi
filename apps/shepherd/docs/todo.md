@@ -1403,6 +1403,8 @@ placeholder tabs and no unearned state badges.
   cover cancellation before and during startup and a failed cleanup retry.
   Terminal kill and release handlers share a 64-request limit; saturation
   returns an error before spawning more tasks, and a fixture checks recovery.
+  Cancelled kill and release requests waiting for the registry lock do not
+  affect the terminal; a fixture checks both and a subsequent successful release.
   Connection shutdown also unblocks pending waits if a terminal stop fails.
   It returns the stop failure and retains the terminal for retry; registry,
   connection and harness fixtures cover a failure followed by a successful retry.

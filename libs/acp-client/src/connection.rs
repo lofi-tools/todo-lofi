@@ -876,11 +876,13 @@ where
                     }
                 };
                 let registry = registry_for_kill.clone();
+                let cancellation = responder.cancellation();
                 tokio::spawn(async move {
-                    let result = registry.kill(&request.terminal_id).await;
+                    let result = registry.kill_cancellable(&request.terminal_id, cancellation.cancelled()).await;
                     drop(permit);
                     let reply = match result {
-                        Ok(response) => responder.respond(response),
+                        Ok(Some(response)) => responder.respond(response),
+                        Ok(None) => responder.respond_with_error(acp::Error::request_cancelled()),
                         Err(error) => responder.respond_with_internal_error(error),
                     };
                     log_reply(reply, "terminal kill");
@@ -899,11 +901,13 @@ where
                     }
                 };
                 let registry = registry_for_release.clone();
+                let cancellation = responder.cancellation();
                 tokio::spawn(async move {
-                    let result = registry.release(&request.terminal_id).await;
+                    let result = registry.release_cancellable(&request.terminal_id, cancellation.cancelled()).await;
                     drop(permit);
                     let reply = match result {
-                        Ok(response) => responder.respond(response),
+                        Ok(Some(response)) => responder.respond(response),
+                        Ok(None) => responder.respond_with_error(acp::Error::request_cancelled()),
                         Err(error) => responder.respond_with_internal_error(error),
                     };
                     log_reply(reply, "terminal release");

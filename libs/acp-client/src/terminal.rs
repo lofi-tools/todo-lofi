@@ -408,25 +408,53 @@ impl TerminalRegistry {
     }
 
     pub async fn kill(&self, terminal_id: &TerminalId) -> Result<KillTerminalResponse, String> {
+        self.kill_cancellable(terminal_id, std::future::pending())
+            .await?
+            .ok_or_else(|| "terminal kill was cancelled".into())
+    }
+
+    pub(crate) async fn kill_cancellable(
+        &self,
+        terminal_id: &TerminalId,
+        cancellation: impl std::future::Future<Output = ()>,
+    ) -> Result<Option<KillTerminalResponse>, String> {
+        let _guard = tokio::select! {
+            biased;
+            () = cancellation => return Ok(None),
+            guard = self.closed.lock() => guard,
+        };
         let key = terminal_id.0.as_ref();
         if let Some(backend) = &self.backend {
-            let _guard = self.closed.lock().await;
             if self.entries().contains_key(key) {
                 backend.stop(key).await?;
             }
         } else {
             self.stop_direct(key).await?;
         }
-        Ok(KillTerminalResponse::new())
+        Ok(Some(KillTerminalResponse::new()))
     }
 
     pub async fn release(
         &self,
         terminal_id: &TerminalId,
     ) -> Result<ReleaseTerminalResponse, String> {
+        self.release_cancellable(terminal_id, std::future::pending())
+            .await?
+            .ok_or_else(|| "terminal release was cancelled".into())
+    }
+
+    pub(crate) async fn release_cancellable(
+        &self,
+        terminal_id: &TerminalId,
+        cancellation: impl std::future::Future<Output = ()>,
+    ) -> Result<Option<ReleaseTerminalResponse>, String> {
+        let _guard = tokio::select! {
+            biased;
+            () = cancellation => return Ok(None),
+            guard = self.closed.lock() => guard,
+        };
         let key = terminal_id.0.as_ref();
         if let Some(backend) = &self.backend {
-            let _guard = self.closed.lock().await;
             if self.entries().contains_key(key) {
                 backend.stop(key).await?;
                 self.entries().remove(key);
@@ -438,7 +466,7 @@ impl TerminalRegistry {
             self.stop_direct(key).await?;
             self.entries().remove(key);
         }
-        Ok(ReleaseTerminalResponse::new())
+        Ok(Some(ReleaseTerminalResponse::new()))
     }
 
     pub(crate) async fn shutdown(&self) -> Result<(), String> {
@@ -779,6 +807,52 @@ mod tests {
         async fn stop(&self, _id: &str) -> Result<(), String> {
             Ok(())
         }
+    }
+
+    #[tokio::test]
+    async fn cancelled_controls_waiting_for_lock_leave_terminal_intact()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let (events, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let registry = TerminalRegistry::new(
+            SessionRoots::new([directory.path().to_path_buf()]),
+            &events,
+            Some(Arc::new(IdleBackend)),
+        );
+        registry.register("fixture", MAX_OUTPUT_LIMIT);
+        let terminal = TerminalId::new("fixture");
+        let guard = registry.closed.lock().await;
+        let (cancel_kill, killed) = tokio::sync::oneshot::channel::<()>();
+        let kill = registry.kill_cancellable(&terminal, async {
+            if killed.await.is_err() {
+                tracing::debug!("test cancellation sender dropped");
+            }
+        });
+        tokio::pin!(kill);
+        assert!(futures::poll!(kill.as_mut()).is_pending());
+        cancel_kill.send(()).map_err(|_| "kill already finished")?;
+        assert!(kill.await.map_err(std::io::Error::other)?.is_none());
+        let (cancel_release, released) = tokio::sync::oneshot::channel::<()>();
+        let release = registry.release_cancellable(&terminal, async {
+            if released.await.is_err() {
+                tracing::debug!("test cancellation sender dropped");
+            }
+        });
+        tokio::pin!(release);
+        assert!(futures::poll!(release.as_mut()).is_pending());
+        cancel_release
+            .send(())
+            .map_err(|_| "release already finished")?;
+        assert!(release.await.map_err(std::io::Error::other)?.is_none());
+        drop(guard);
+        assert!(registry.entries().contains_key("fixture"));
+        assert!(receiver.try_recv().is_err());
+        registry
+            .release(&terminal)
+            .await
+            .map_err(std::io::Error::other)?;
+        assert!(!registry.entries().contains_key("fixture"));
+        Ok(())
     }
 
     #[tokio::test]
