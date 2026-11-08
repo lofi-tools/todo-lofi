@@ -2921,7 +2921,7 @@ mod live_exit {
     use agent_harness::live_codex::LiveCodexRun;
     use agent_harness::{AgentHarness, PromptInput, SpawnSpec};
 
-    use crate::harness::HarnessFactory;
+    use crate::harness::{HarnessFactory, UnavailableHarnessFactory};
     use crate::store::TursoStore;
     use crate::test_support::{TestDatabase, TestRepository};
     use crate::{Agent, Command, CommandResult, Core, CoreError, ProjectId, TaskId, TaskState};
@@ -3038,6 +3038,27 @@ mod live_exit {
             diagnostics.stderr_tail
         );
         run.finish(None)?;
+        drop(core);
+        let mut reopened = Core::load(
+            Box::new(TursoStore::open(&database.uri()).await?),
+            Box::new(UnavailableHarnessFactory),
+        )
+        .await?;
+        let workspace = reopened.open_task_workspace(&task_id).await?;
+        assert_eq!(workspace.task.state, TaskState::Failed);
+        assert!(
+            workspace
+                .task
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("before the turn finished"))
+        );
+        assert!(
+            workspace
+                .transcript
+                .iter()
+                .any(|entry| entry.summary().starts_with("failure:"))
+        );
         Ok(())
     }
 }

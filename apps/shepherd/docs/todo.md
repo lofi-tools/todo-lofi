@@ -1587,7 +1587,12 @@ placeholder tabs and no unearned state badges.
 
 - [ ] Chaos: kill -9 mid-turn, restart, resume or fail honestly.
   A local scripted approval-wait fixture covers SIGKILL and interrupted recovery;
-  live-agent crash and resume behavior still needs verification.
+  live-agent crash and resume behavior still needs verification. On this Mac,
+  the opt-in ChatGPT-plan fixture killed the real Codex app-server mid-turn
+  using GPT-6.1 Terra at low effort and observed a failed task with diagnostics.
+  Its recorded `.cache` replay also verifies that the failure remains visible
+  after reopening. This kills the agent, not the Shepherd process, and does not
+  verify live-agent resume after a Shepherd crash.
 - [x] Missing worktree repair; archived worktree collection; dirty skip.
   A task fixture deletes its checkout between turns and verifies restoration of
   the same branch and transcript across restart. The review lifecycle fixture
