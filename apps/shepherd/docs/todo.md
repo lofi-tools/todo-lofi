@@ -1831,6 +1831,10 @@ placeholder tabs and no unearned state badges.
   and Files badge update on the same subscription.
   The full headless Chromium suite passed 113 tests after this change; it uses
   the mocked IPC bridge and does not verify native FSEvents registration.
+  At `1a541bb`, the two-launch hidden macOS smoke passed with a scripted agent
+  and disposable data. Its first launch checked clean, dirty and clean-again
+  worktree status; the second restored the terminal layout and resumed the
+  interrupted task. It did not simulate a delayed FSEvents registration.
 - [ ] Packaging and CI: macOS 13+, Ubuntu 24.04+, pinned Zig, Tauri build,
   platform smoke.
   The local macOS debug app bundle declares macOS 13.0 in both Info.plist and
