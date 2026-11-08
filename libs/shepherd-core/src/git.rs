@@ -1059,14 +1059,42 @@ fn hash_untracked_file(
     relative: &Path,
     before_open: impl FnOnce(),
 ) -> std::io::Result<[u8; 32]> {
-    let path = root.join(relative);
-    let metadata = path.symlink_metadata()?;
+    #[cfg(unix)]
+    let (directory, name, file_type) = {
+        use rustix::fs::{AtFlags, FileType, statat};
+        let (directory, name) =
+            crate::files::open_parent(root, relative).map_err(std::io::Error::other)?;
+        let metadata =
+            statat(&directory, name, AtFlags::SYMLINK_NOFOLLOW).map_err(std::io::Error::from)?;
+        (directory, name, FileType::from_raw_mode(metadata.st_mode))
+    };
+    #[cfg(unix)]
+    let (is_symlink, is_file) = (
+        file_type == rustix::fs::FileType::Symlink,
+        file_type == rustix::fs::FileType::RegularFile,
+    );
+    #[cfg(not(unix))]
+    let (is_symlink, is_file) = {
+        let metadata = root.join(relative).symlink_metadata()?;
+        (metadata.is_symlink(), metadata.is_file())
+    };
     let mut hash = Sha256::new();
-    if metadata.is_symlink() {
+    before_open();
+    if is_symlink {
         hash.update(b"symlink");
-        hash.update(std::fs::read_link(&path)?.as_os_str().as_encoded_bytes());
-    } else if metadata.is_file() {
-        before_open();
+        #[cfg(unix)]
+        hash.update(
+            rustix::fs::readlinkat(&directory, name, Vec::new())
+                .map_err(std::io::Error::from)?
+                .to_bytes(),
+        );
+        #[cfg(not(unix))]
+        hash.update(
+            std::fs::read_link(root.join(relative))?
+                .as_os_str()
+                .as_encoded_bytes(),
+        );
+    } else if is_file {
         let mut file = crate::files::open_file(root, relative).map_err(std::io::Error::other)?;
         let metadata = file.metadata()?;
         if !metadata.is_file() {
@@ -1145,6 +1173,31 @@ mod tests {
             replacement?;
             assert!(result.is_err());
         }
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn untracked_symlink_baseline_keeps_its_opened_parent() -> Result<(), Box<dyn std::error::Error>>
+    {
+        use std::os::unix::fs::symlink;
+
+        let directory = TestDirectory::new()?;
+        let root = directory.join("workspace");
+        let outside = directory.join("outside");
+        std::fs::create_dir_all(root.join("nested"))?;
+        std::fs::create_dir_all(&outside)?;
+        symlink("inside-target", root.join("nested/link"))?;
+        symlink("outside-target", outside.join("link"))?;
+        let relative = Path::new("nested/link");
+        let expected = hash_untracked_file(&root, relative, || {})?;
+        let mut replacement = Ok(());
+        let actual = hash_untracked_file(&root, relative, || {
+            replacement = std::fs::rename(root.join("nested"), root.join("original"))
+                .and_then(|()| symlink(&outside, root.join("nested")));
+        });
+        replacement?;
+        assert_eq!(actual?, expected);
         Ok(())
     }
 

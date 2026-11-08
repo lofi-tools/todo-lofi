@@ -784,7 +784,7 @@ fn open_ignore(root: &Path, relative: &Path) -> Result<Option<File>, FileError> 
 }
 
 #[cfg(unix)]
-fn open_parent<'a>(
+pub(crate) fn open_parent<'a>(
     root: &Path,
     relative: &'a Path,
 ) -> Result<(std::os::fd::OwnedFd, &'a std::ffi::OsStr), FileError> {

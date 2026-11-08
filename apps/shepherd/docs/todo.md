@@ -1507,7 +1507,8 @@ placeholder tabs and no unearned state badges.
   directory replaced by a symlink after opening. Ignore-file metadata is also
   checked relative to an opened parent on Unix. Git turn-baseline hashing opens
   untracked regular files without following substituted file or parent symlinks;
-  a fixture exercises both substitutions. External editor and file-manager
+  a fixture exercises both substitutions. Untracked symlink targets are read
+  relative to the opened parent, with a parent-replacement fixture. External editor and file-manager
   actions pass a validated pathname to another application; a later path swap
   can change its target, so those actions do not guarantee race-free confinement.
   The remaining filesystem operations still need a confinement audit. ACP file reads
