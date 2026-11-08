@@ -581,9 +581,12 @@ where
         // them through the transcript model.
         .on_receive_notification(
             async move |notification: SessionNotification, _cx| {
-                drop(
-                    events_for_notifications.send(AcpEvent::SessionUpdate(Box::new(notification))),
-                );
+                if events_for_notifications
+                    .send(AcpEvent::SessionUpdate(Box::new(notification)))
+                    .is_err()
+                {
+                    tracing::debug!("ACP session update receiver closed");
+                }
                 Ok(())
             },
             acp::on_receive_notification!(),
@@ -608,10 +611,15 @@ where
                         option.option_id.clone(),
                     )))?;
                     // Report the automatic answer so the transcript records it.
-                    drop(auto_approvals.send(AcpEvent::PermissionAutoDecided {
-                        tool_call: request.tool_call.clone(),
-                        choice: crate::thread::PermissionChoice::from_option(option),
-                    }));
+                    if auto_approvals
+                        .send(AcpEvent::PermissionAutoDecided {
+                            tool_call: request.tool_call.clone(),
+                            choice: crate::thread::PermissionChoice::from_option(option),
+                        })
+                        .is_err()
+                    {
+                        tracing::debug!("ACP automatic permission receiver closed");
+                    }
                     return Ok(());
                 }
                 let permissions = permissions.clone();
@@ -624,12 +632,17 @@ where
                         decision: PermissionReply::new(decision_tx),
                     });
                     if sent.is_err() {
-                        responder.respond(permission_response(PermissionDecision::Cancelled))?;
-                        return Ok::<(), acp::Error>(());
+                        log_reply(
+                            responder.respond(permission_response(PermissionDecision::Cancelled)),
+                            "permission",
+                        );
+                        return;
                     }
                     let decision = decision_rx.await.unwrap_or(PermissionDecision::Cancelled);
-                    responder.respond(permission_response(decision))?;
-                    Ok(())
+                    log_reply(
+                        responder.respond(permission_response(decision)),
+                        "permission",
+                    );
                 });
                 Ok(())
             },
@@ -658,9 +671,7 @@ where
                         Ok(content) => responder.respond(ReadTextFileResponse::new(content)),
                         Err(error) => respond_with_error(responder, error, &events, "read"),
                     };
-                    if let Err(error) = reply {
-                        tracing::debug!(%error, "could not reply to ACP file read");
-                    }
+                    log_reply(reply, "file read");
                 });
                 Ok(())
             },
@@ -671,11 +682,11 @@ where
                 let roots = roots_for_write.clone();
                 let events = writes.clone();
                 tokio::spawn(async move {
-                    match roots.write_text_file(&request.path, &request.content) {
-                        Ok(()) => responder.respond(WriteTextFileResponse::new())?,
-                        Err(error) => respond_with_error(responder, error, &events, "write")?,
-                    }
-                    Ok::<(), acp::Error>(())
+                    let reply = match roots.write_text_file(&request.path, &request.content) {
+                        Ok(()) => responder.respond(WriteTextFileResponse::new()),
+                        Err(error) => respond_with_error(responder, error, &events, "write"),
+                    };
+                    log_reply(reply, "file write");
                 });
                 Ok(())
             },
@@ -686,15 +697,17 @@ where
                 let registry = registry_for_create.clone();
                 let events = terminal_create.clone();
                 tokio::spawn(async move {
-                    match registry.create(request).await {
-                        Ok(response) => responder.respond(response)?,
+                    let reply = match registry.create(request).await {
+                        Ok(response) => responder.respond(response),
                         Err(error) => {
                             let message = format!("terminal failed to start: {error}");
-                            drop(events.send(terminal_notice(message.clone())));
-                            responder.respond_with_internal_error(message)?;
+                            if events.send(terminal_notice(message.clone())).is_err() {
+                                tracing::debug!("ACP terminal error receiver closed");
+                            }
+                            responder.respond_with_internal_error(message)
                         }
-                    }
-                    Ok::<(), acp::Error>(())
+                    };
+                    log_reply(reply, "terminal creation");
                 });
                 Ok(())
             },
@@ -705,8 +718,7 @@ where
                 let registry = registry_for_output.clone();
                 tokio::spawn(async move {
                     let response = registry.output(&request.terminal_id);
-                    responder.respond(response)?;
-                    Ok::<(), acp::Error>(())
+                    log_reply(responder.respond(response), "terminal output");
                 });
                 Ok(())
             },
@@ -716,11 +728,11 @@ where
             async move |request: WaitForTerminalExitRequest, responder, _cx| {
                 let registry = registry_for_wait.clone();
                 tokio::spawn(async move {
-                    match registry.wait_for_exit(&request.terminal_id).await {
-                        Ok(response) => responder.respond(response)?,
-                        Err(error) => responder.respond_with_internal_error(error)?,
-                    }
-                    Ok::<(), acp::Error>(())
+                    let reply = match registry.wait_for_exit(&request.terminal_id).await {
+                        Ok(response) => responder.respond(response),
+                        Err(error) => responder.respond_with_internal_error(error),
+                    };
+                    log_reply(reply, "terminal exit wait");
                 });
                 Ok(())
             },
@@ -730,11 +742,11 @@ where
             async move |request: KillTerminalRequest, responder, _cx| {
                 let registry = registry_for_kill.clone();
                 tokio::spawn(async move {
-                    match registry.kill(&request.terminal_id).await {
-                        Ok(response) => responder.respond(response)?,
-                        Err(error) => responder.respond_with_internal_error(error)?,
-                    }
-                    Ok::<(), acp::Error>(())
+                    let reply = match registry.kill(&request.terminal_id).await {
+                        Ok(response) => responder.respond(response),
+                        Err(error) => responder.respond_with_internal_error(error),
+                    };
+                    log_reply(reply, "terminal kill");
                 });
                 Ok(())
             },
@@ -744,11 +756,11 @@ where
             async move |request: ReleaseTerminalRequest, responder, _cx| {
                 let registry = registry_for_release.clone();
                 tokio::spawn(async move {
-                    match registry.release(&request.terminal_id).await {
-                        Ok(response) => responder.respond(response)?,
-                        Err(error) => responder.respond_with_internal_error(error)?,
-                    }
-                    Ok::<(), acp::Error>(())
+                    let reply = match registry.release(&request.terminal_id).await {
+                        Ok(response) => responder.respond(response),
+                        Err(error) => responder.respond_with_internal_error(error),
+                    };
+                    log_reply(reply, "terminal release");
                 });
                 Ok(())
             },
@@ -888,6 +900,12 @@ fn terminal_notice(message: String) -> AcpEvent {
     AcpEvent::Stderr(message.into())
 }
 
+fn log_reply(reply: Result<(), acp::Error>, operation: &'static str) {
+    if reply.is_err() {
+        tracing::debug!(operation, "could not deliver ACP response");
+    }
+}
+
 fn respond_with_error<T>(
     responder: acp::Responder<T>,
     error: anyhow::Error,
@@ -898,7 +916,12 @@ where
     T: acp::JsonRpcResponse,
 {
     let message = format!("{operation} failed: {error}");
-    drop(events.send(AcpEvent::Stderr(message.clone().into())));
+    if events
+        .send(AcpEvent::Stderr(message.clone().into()))
+        .is_err()
+    {
+        tracing::debug!(operation, "ACP file error receiver closed");
+    }
     responder.respond_with_internal_error(message)
 }
 
@@ -1340,6 +1363,48 @@ pub fn stderr_summary(lines: &[String]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn failed_response_logs_context_without_error_details() -> Result<(), Box<dyn std::error::Error>>
+    {
+        use std::io::Write;
+
+        #[derive(Clone)]
+        struct Writer(Arc<Mutex<Vec<u8>>>);
+        impl Write for Writer {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0
+                    .lock()
+                    .map_err(|error| std::io::Error::other(error.to_string()))?
+                    .extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let logs = Arc::new(Mutex::new(Vec::new()));
+        let writer = Writer(logs.clone());
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .without_time()
+            .with_max_level(tracing::Level::DEBUG)
+            .with_writer(move || writer.clone())
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            log_reply(
+                Err(acp::Error::internal_error().data("fixture-private-value")),
+                "file write",
+            );
+        });
+        let output = String::from_utf8(logs.lock().map_err(|error| error.to_string())?.clone())?;
+        assert!(output.contains("could not deliver ACP response"));
+        assert!(output.contains("file write"));
+        assert!(!output.contains("fixture-private-value"));
+        Ok(())
+    }
 
     #[tokio::test]
     async fn close_wait_retries_supervision_failure() -> Result<(), Box<dyn std::error::Error>> {

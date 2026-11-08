@@ -1454,6 +1454,9 @@ placeholder tabs and no unearned state badges.
   when environment values are present, with local Codex and OpenCode fixtures.
   ACP connection, OpenCode cleanup and Codex exec warnings omit agent-controlled
   error text; a log-capture fixture checks the Codex exec warning.
+  Detached ACP permission, file and terminal response handlers log failed
+  delivery with the operation name, without logging the response error details;
+  a log-capture fixture verifies the context and redaction.
   Codex stderr is retained in the bounded diagnostic tail without logging its
   contents; a debug-log fixture checks that agent output is not exposed.
   Invalid ACP permission patterns are logged without their contents or the
