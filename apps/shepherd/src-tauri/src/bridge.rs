@@ -898,7 +898,8 @@ impl ShellState {
                 match tokio::task::spawn_blocking(move || shepherd_core::project_scan::scan(&home))
                     .await
                 {
-                    Ok(found) => *scan.lock().await = Some(found),
+                    Ok(Ok(found)) => *scan.lock().await = Some(found),
+                    Ok(Err(error)) => tracing::warn!(%error, "the startup project scan failed"),
                     Err(error) => tracing::warn!(%error, "the startup project scan failed"),
                 }
             });
@@ -1649,15 +1650,7 @@ impl ShellState {
         if rescan || cache.is_none() {
             let home = project_scan_root()
                 .ok_or_else(|| BridgeError::new("scan", "no home directory to scan"))?;
-            let found =
-                tokio::task::spawn_blocking(move || shepherd_core::project_scan::scan(&home))
-                    .await
-                    .map_err(|error| {
-                        BridgeError::new(
-                            "scan",
-                            format!("the project scan did not finish: {error}"),
-                        )
-                    })?;
+            let found = scan_project_root(home).await?;
             *cache = Some(found);
         }
         cache
@@ -2307,6 +2300,17 @@ impl ShellState {
             .await
             .remove(subscription_id);
     }
+}
+
+async fn scan_project_root(
+    root: PathBuf,
+) -> Result<shepherd_core::project_scan::ProjectScan, BridgeError> {
+    tokio::task::spawn_blocking(move || shepherd_core::project_scan::scan(&root))
+        .await
+        .map_err(|error| {
+            BridgeError::new("scan", format!("the project scan did not finish: {error}"))
+        })?
+        .map_err(|error| BridgeError::new("scan", error.to_string()))
 }
 
 async fn open_in_browser(url: tauri::Url) -> std::io::Result<()> {
@@ -3221,6 +3225,21 @@ mod tests {
     use shepherd_core::{TaskState, TaskSummary};
 
     use super::*;
+
+    #[tokio::test]
+    async fn project_scan_reports_an_unavailable_root() -> Result<(), Box<dyn std::error::Error>> {
+        let directory = TestDirectory::new()?;
+        let missing = directory.join("missing");
+        let error = scan_project_root(missing.clone())
+            .await
+            .err()
+            .ok_or("missing root was accepted")?;
+        assert_eq!(error.code, "scan");
+        assert!(error.message.contains(&missing.display().to_string()));
+        std::fs::create_dir(&missing)?;
+        assert_eq!(scan_project_root(missing).await?.repositories, 0);
+        Ok(())
+    }
 
     #[cfg(all(feature = "live-codex", any(target_os = "linux", target_os = "macos")))]
     #[tokio::test]

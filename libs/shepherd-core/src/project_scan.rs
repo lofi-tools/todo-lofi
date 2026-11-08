@@ -64,28 +64,29 @@ pub struct ProjectScan {
 }
 
 /// Scan `root`, returning only the directories that lead to repositories.
-pub fn scan(root: &Path) -> ProjectScan {
+pub fn scan(root: &Path) -> std::io::Result<ProjectScan> {
     let mut repositories = 0;
-    let mut tree = root_children(root, &mut repositories);
+    let mut tree = root_children(root, &mut repositories).map_err(|error| {
+        std::io::Error::new(
+            error.kind(),
+            format!("could not scan {}: {error}", root.display()),
+        )
+    })?;
     tree.sort_by(|left, right| left.name.cmp(&right.name));
-    ProjectScan {
+    Ok(ProjectScan {
         root: root.display().to_string(),
         repositories,
         tree,
-    }
+    })
 }
 
 #[cfg(unix)]
-fn root_children(root: &Path, repositories: &mut usize) -> Vec<ProjectNode> {
+fn root_children(root: &Path, repositories: &mut usize) -> std::io::Result<Vec<ProjectNode>> {
     use rustix::fs::{Mode, OFlags, open};
     let flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::DIRECTORY;
-    let Ok(directory) = open(root, flags, Mode::empty()) else {
-        return Vec::new();
-    };
-    let Some((_, children)) = read_directory_at(&directory) else {
-        return Vec::new();
-    };
-    children
+    let directory = open(root, flags, Mode::empty()).map_err(std::io::Error::from)?;
+    let (_, children) = read_directory_at(&directory)?;
+    Ok(children
         .into_iter()
         .filter(|name| {
             !matches!(
@@ -95,14 +96,14 @@ fn root_children(root: &Path, repositories: &mut usize) -> Vec<ProjectNode> {
         })
         .filter_map(|name| walk_at(&directory, &name, &root.join(&name), 1, repositories))
         .map(collapse)
-        .collect()
+        .collect())
 }
 
 #[cfg(not(unix))]
-fn root_children(root: &Path, repositories: &mut usize) -> Vec<ProjectNode> {
-    read_directory(root)
+fn root_children(root: &Path, repositories: &mut usize) -> std::io::Result<Vec<ProjectNode>> {
+    let (_, children) = read_directory(root)?;
+    Ok(children
         .into_iter()
-        .flat_map(|(_, children)| children)
         .filter(|path| {
             !matches!(
                 path.file_name().and_then(|name| name.to_str()),
@@ -111,7 +112,7 @@ fn root_children(root: &Path, repositories: &mut usize) -> Vec<ProjectNode> {
         })
         .filter_map(|path| walk(&path, 1, repositories))
         .map(collapse)
-        .collect()
+        .collect())
 }
 
 struct RawNode {
@@ -135,7 +136,7 @@ fn walk_at(
     }
     let flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::DIRECTORY;
     let directory = openat(parent, name, flags, Mode::empty()).ok()?;
-    let (has_git, subdirectories) = read_directory_at(&directory)?;
+    let (has_git, subdirectories) = read_directory_at(&directory).ok()?;
     let name = leaf_name(path);
     if has_git {
         *repositories += 1;
@@ -172,14 +173,15 @@ fn walk_at(
 #[cfg(unix)]
 fn read_directory_at(
     directory: &impl std::os::fd::AsFd,
-) -> Option<(bool, Vec<std::ffi::OsString>)> {
+) -> std::io::Result<(bool, Vec<std::ffi::OsString>)> {
     use rustix::fs::{AtFlags, Dir, FileType, statat};
     use std::os::unix::ffi::OsStringExt;
 
-    let entries = Dir::read_from(directory).ok()?;
+    let entries = Dir::read_from(directory).map_err(std::io::Error::from)?;
     let mut has_git = false;
     let mut children = Vec::new();
-    for entry in entries.flatten() {
+    for entry in entries {
+        let entry = entry.map_err(std::io::Error::from)?;
         let name = entry.file_name();
         if name.to_bytes() == b"." || name.to_bytes() == b".." {
             continue;
@@ -198,7 +200,7 @@ fn read_directory_at(
             children.push(name);
         }
     }
-    Some((has_git, children))
+    Ok((has_git, children))
 }
 
 #[cfg(not(unix))]
@@ -206,7 +208,7 @@ fn walk(dir: &Path, depth: usize, repositories: &mut usize) -> Option<RawNode> {
     if depth > MAX_SCAN_DEPTH {
         return None;
     }
-    let (has_git, subdirectories) = read_directory(dir)?;
+    let (has_git, subdirectories) = read_directory(dir).ok()?;
     let name = leaf_name(dir);
 
     // A repository stops the descent: repositories nested inside a checkout are
@@ -241,11 +243,12 @@ fn walk(dir: &Path, depth: usize, repositories: &mut usize) -> Option<RawNode> {
 }
 
 #[cfg(not(unix))]
-fn read_directory(dir: &Path) -> Option<(bool, Vec<PathBuf>)> {
-    let entries = std::fs::read_dir(dir).ok()?;
+fn read_directory(dir: &Path) -> std::io::Result<(bool, Vec<PathBuf>)> {
+    let entries = std::fs::read_dir(dir)?;
     let mut has_git = false;
     let mut subdirectories = Vec::new();
-    for entry in entries.flatten() {
+    for entry in entries {
+        let entry = entry?;
         let Ok(file_type) = entry.file_type() else {
             continue;
         };
@@ -263,7 +266,7 @@ fn read_directory(dir: &Path) -> Option<(bool, Vec<PathBuf>)> {
         }
         subdirectories.push(entry.path());
     }
-    Some((has_git, subdirectories))
+    Ok((has_git, subdirectories))
 }
 
 #[cfg(unix)]
@@ -336,6 +339,19 @@ mod tests {
     use crate::test_support::{TestDirectory, TestRepository};
 
     #[test]
+    fn scan_reports_an_unavailable_root() -> Result<(), Box<dyn std::error::Error>> {
+        let root = TestDirectory::new()?;
+        let missing = root.join("missing");
+        let error = scan(&missing).err().ok_or("missing root was accepted")?;
+        assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+        assert!(error.to_string().contains(&missing.display().to_string()));
+        let file = root.join("file");
+        std::fs::write(&file, "not a directory")?;
+        assert!(scan(&file).is_err());
+        Ok(())
+    }
+
+    #[test]
     fn finds_git_worktrees_with_a_git_file() -> Result<(), Box<dyn std::error::Error>> {
         let root = TestDirectory::new()?;
         let repository = TestRepository::new()?;
@@ -350,7 +366,7 @@ mod tests {
         assert!(worktree.join(".git").is_file());
         std::fs::create_dir_all(worktree.join("nested/.git"))?;
 
-        let result = scan(root.path());
+        let result = scan(root.path())?;
         assert_eq!(result.repositories, 1);
         let checkout = result.tree.first().ok_or("missing worktree")?;
         assert_eq!(checkout.path, worktree.display().to_string());
@@ -367,7 +383,7 @@ mod tests {
         std::fs::create_dir_all(root.join("unrelated"))?;
         std::fs::write(root.join("unrelated/.git"), "git")?;
 
-        let result = scan(root.path());
+        let result = scan(root.path())?;
         assert_eq!(result.repositories, 1);
         let child = result.tree.first().ok_or("missing repository")?;
         assert_eq!(
@@ -433,7 +449,7 @@ mod tests {
         let directory = std::fs::File::open(&parent)?;
         std::fs::rename(&parent, root.join("moved"))?;
         symlink(&outside, &parent)?;
-        let (_, names) = read_directory_at(&directory).ok_or("directory enumeration failed")?;
+        let (_, names) = read_directory_at(&directory)?;
         assert_eq!(names, vec![std::ffi::OsString::from("repo")]);
         let mut count = 0;
         assert!(
@@ -486,7 +502,7 @@ mod tests {
         repository(&root, "node_modules/pkg");
         repository(&root, "Documents/private");
 
-        let scan = scan(root.path());
+        let scan = scan(root.path())?;
         assert_eq!(scan.repositories, 2, "tree: {:?}", scan.tree);
 
         let alpha = node(&scan.tree, "alpha");
@@ -506,7 +522,7 @@ mod tests {
         repository(&root, "src/me/project");
         repository(&root, "src/me/other");
 
-        let scan = scan(root.path());
+        let scan = scan(root.path())?;
         let collapsed = node(&scan.tree, "src/me");
         assert_eq!(collapsed.path, root.join("src/me").display().to_string());
         assert!(!collapsed.repository);
@@ -528,7 +544,7 @@ mod tests {
             repository(&root, &format!("many/repo-{index:02}"));
         }
 
-        let scan = scan(root.path());
+        let scan = scan(root.path())?;
         let many = node(&scan.tree, "many");
         assert_eq!(scan.repositories, 12);
         let names: Vec<_> = many
@@ -556,7 +572,7 @@ mod tests {
         repository(&root, "work/.codex/project");
         repository(&root, "work/real");
 
-        let scan = scan(root.path());
+        let scan = scan(root.path())?;
         assert_eq!(scan.repositories, 2);
         assert_eq!(scan.tree.len(), 1);
         let work = node(&scan.tree, "work");

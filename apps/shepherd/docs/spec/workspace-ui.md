@@ -187,6 +187,8 @@ current layout and give future changes a point of comparison.
 - Discover Git working trees with either a `.git` directory or a `.git` file
   containing a Git `gitdir:` marker, and stop the scan at each discovered
   repository.
+- Report an unavailable scan root as an error, while skipping individual
+  subdirectories that cannot be read.
 - Use actual directory branches to group repositories. Enumerate siblings
   directly when they share a parent and there is no useful grouping. Collapse
   single-child chains and skip a sole top-level group so the next meaningful
