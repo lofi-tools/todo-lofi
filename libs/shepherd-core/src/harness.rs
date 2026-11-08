@@ -472,7 +472,16 @@ impl HarnessSession {
             settled
                 || matches!(
                     entry.kind,
-                    EntryKind::UserMessage { .. } | EntryKind::Notice { is_error: true, .. }
+                    EntryKind::UserMessage { .. }
+                        | EntryKind::Notice { is_error: true, .. }
+                        | EntryKind::Permission {
+                            decision: Some(_),
+                            ..
+                        }
+                        | EntryKind::Permission {
+                            withdrawn: true,
+                            ..
+                        }
                 )
         };
         let entries: Vec<_> = self

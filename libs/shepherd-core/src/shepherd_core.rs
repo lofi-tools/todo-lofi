@@ -5784,18 +5784,26 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn approval_failure_folds_queued_disconnect_before_returning()
+    async fn approval_errors_fold_queued_disconnect_and_superseding_request()
     -> Result<(), Box<dyn std::error::Error>> {
         use agent_harness::{
             AgentHarness, ApprovalRequest, Capabilities, DeltaKind, FailureKind, HarnessError,
             HarnessResult, ItemId, SpawnSpec, ToolCallId, TurnId,
         };
         use tokio::sync::mpsc;
-        struct Factory;
+        struct Factory {
+            stale: bool,
+            withdrawn: bool,
+        }
         impl HarnessFactory for Factory {
             fn create(&self) -> Result<Box<dyn AgentHarness>, CoreError> {
                 let (sender, receiver) = mpsc::unbounded_channel();
-                Ok(Box::new(FailingApproval { sender, receiver }))
+                Ok(Box::new(FailingApproval {
+                    sender,
+                    receiver,
+                    stale: self.stale,
+                    withdrawn: self.withdrawn,
+                }))
             }
             fn launch(
                 &self,
@@ -5808,6 +5816,8 @@ mod tests {
         struct FailingApproval {
             sender: mpsc::UnboundedSender<HarnessEvent>,
             receiver: mpsc::UnboundedReceiver<HarnessEvent>,
+            stale: bool,
+            withdrawn: bool,
         }
         #[async_trait::async_trait]
         impl AgentHarness for FailingApproval {
@@ -5842,6 +5852,36 @@ mod tests {
                 Ok(())
             }
             async fn respond(&mut self, _: ApprovalId, _: Decision) -> HarnessResult<()> {
+                if self.stale {
+                    let settled = if self.withdrawn {
+                        HarnessEvent::ApprovalWithdrawn {
+                            approval_id: ApprovalId::new("approval"),
+                        }
+                    } else {
+                        HarnessEvent::ApprovalResolved {
+                            approval_id: ApprovalId::new("approval"),
+                            decision: Decision::Deny,
+                            source: agent_harness::ApprovalSource::Agent,
+                        }
+                    };
+                    self.sender
+                        .send(settled)
+                        .map_err(|_| HarnessError::ChannelClosed)?;
+                    self.sender
+                        .send(HarnessEvent::ApprovalRequested {
+                            request: ApprovalRequest {
+                                approval_id: ApprovalId::new("next"),
+                                tool_call_id: ToolCallId::new("next-tool"),
+                                title: "Next request".into(),
+                                arguments: serde_json::Value::Null,
+                                paths: Vec::new(),
+                                patch: None,
+                                choices: None,
+                            },
+                        })
+                        .map_err(|_| HarnessError::ChannelClosed)?;
+                    return Err(HarnessError::NoPendingApproval);
+                }
                 for _ in 0..300 {
                     self.sender
                         .send(HarnessEvent::Delta {
@@ -5875,52 +5915,100 @@ mod tests {
                 Ok(())
             }
         }
-        let repository = TestRepository::new()?;
-        let database = TestDatabase::new()?;
-        let uri = database.uri();
-        let mut core =
-            Core::with_services(Box::new(TursoStore::open(&uri).await?), Box::new(Factory));
-        let project_id = add_project(&mut core, repository.path().to_path_buf()).await?;
-        let draft = workspace_of(
-            core.execute(Command::CreateDraft {
-                project_id,
-                agent: Agent::OpenCode,
-                title: "Approval failure".into(),
-            })
-            .await?,
-        );
-        let task_id = TaskId::new(draft.task.id);
-        let workspace = workspace_of(
-            core.execute(Command::SendPrompt {
-                task_id: task_id.clone(),
-                input: PromptInput::text("go"),
-            })
-            .await?,
-        );
-        assert_eq!(workspace.task.state, TaskState::Waiting);
-        let error = core
-            .execute(Command::ResolveApproval {
-                task_id: task_id.clone(),
-                approval_id: ApprovalId::new("approval"),
-                decision: Decision::Allow,
-            })
-            .await;
-        assert!(error.is_err());
-        let workspace = core.task_workspace(&task_id)?;
-        assert_eq!(workspace.task.state, TaskState::Failed);
-        assert!(workspace.transcript.iter().any(|entry| matches!(&entry.kind, agent_harness::EntryKind::Permission { approval_id, withdrawn: true, .. } if approval_id == "approval")));
-        assert_eq!(workspace.transcript.iter().filter(|entry| matches!(&entry.kind, agent_harness::EntryKind::Failure { text, .. } if text == "approval delivery failed")).count(), 1);
-        assert!(
-            core.sessions
-                .get(&task_id)
-                .is_some_and(HarnessSession::is_closed)
-        );
-        drop(core);
-        let mut reopened =
-            Core::load(Box::new(TursoStore::open(&uri).await?), Box::new(Factory)).await?;
-        let restored = reopened.open_task_workspace(&task_id).await?;
-        assert_eq!(restored.task.state, TaskState::Failed);
-        assert!(restored.transcript.iter().any(|entry| matches!(&entry.kind, agent_harness::EntryKind::Permission { approval_id, withdrawn: true, .. } if approval_id == "approval")));
+        for (stale, was_withdrawn) in [(false, false), (true, false), (true, true)] {
+            let repository = TestRepository::new()?;
+            let database = TestDatabase::new()?;
+            let uri = database.uri();
+            let mut core = Core::with_services(
+                Box::new(TursoStore::open(&uri).await?),
+                Box::new(Factory {
+                    stale,
+                    withdrawn: was_withdrawn,
+                }),
+            );
+            let project_id = add_project(&mut core, repository.path().to_path_buf()).await?;
+            let draft = workspace_of(
+                core.execute(Command::CreateDraft {
+                    project_id,
+                    agent: Agent::OpenCode,
+                    title: "Approval failure".into(),
+                })
+                .await?,
+            );
+            let task_id = TaskId::new(draft.task.id);
+            let workspace = workspace_of(
+                core.execute(Command::SendPrompt {
+                    task_id: task_id.clone(),
+                    input: PromptInput::text("go"),
+                })
+                .await?,
+            );
+            assert_eq!(workspace.task.state, TaskState::Waiting);
+            let error = core
+                .execute(Command::ResolveApproval {
+                    task_id: task_id.clone(),
+                    approval_id: ApprovalId::new("approval"),
+                    decision: Decision::Allow,
+                })
+                .await;
+            assert!(error.is_err());
+            let workspace = core.task_workspace(&task_id)?;
+            if stale {
+                assert!(matches!(
+                    error,
+                    Err(CoreError::Harness(HarnessError::NoPendingApproval))
+                ));
+                assert_eq!(workspace.task.state, TaskState::Waiting);
+                assert_eq!(
+                    core.sessions
+                        .get(&task_id)
+                        .and_then(HarnessSession::pending_approval)
+                        .map(ApprovalId::as_str),
+                    Some("next")
+                );
+                assert!(workspace.transcript.iter().any(|entry| matches!(&entry.kind, agent_harness::EntryKind::Permission { approval_id, decision, withdrawn, .. } if approval_id == "approval" && *withdrawn == was_withdrawn && (was_withdrawn || *decision == Some(Decision::Deny)))));
+                assert!(workspace.transcript.iter().any(|entry| matches!(&entry.kind, agent_harness::EntryKind::Permission { approval_id, decision: None, .. } if approval_id == "next")));
+                let store = TursoStore::open(&uri).await?;
+                let saved = store.load_transcript(&task_id).await?;
+                assert!(saved.iter().any(|entry| matches!(&entry.kind, agent_harness::EntryKind::Permission { approval_id, decision, withdrawn, .. } if approval_id == "approval" && *withdrawn == was_withdrawn && (was_withdrawn || *decision == Some(Decision::Deny)))));
+                assert!(!saved.iter().any(|entry| matches!(&entry.kind, agent_harness::EntryKind::Permission { approval_id, .. } if approval_id == "next")));
+                drop(store);
+                drop(core);
+                let mut reopened = Core::load(
+                    Box::new(TursoStore::open(&uri).await?),
+                    Box::new(Factory {
+                        stale,
+                        withdrawn: was_withdrawn,
+                    }),
+                )
+                .await?;
+                let restored = reopened.open_task_workspace(&task_id).await?;
+                assert_eq!(restored.task.state, TaskState::Interrupted);
+                assert!(restored.transcript.iter().any(|entry| matches!(&entry.kind, agent_harness::EntryKind::Permission { approval_id, decision, withdrawn, .. } if approval_id == "approval" && *withdrawn == was_withdrawn && (was_withdrawn || *decision == Some(Decision::Deny)))));
+                assert!(!restored.transcript.iter().any(|entry| matches!(&entry.kind, agent_harness::EntryKind::Permission { approval_id, .. } if approval_id == "next")));
+                continue;
+            }
+            assert_eq!(workspace.task.state, TaskState::Failed);
+            assert!(workspace.transcript.iter().any(|entry| matches!(&entry.kind, agent_harness::EntryKind::Permission { approval_id, withdrawn: true, .. } if approval_id == "approval")));
+            assert_eq!(workspace.transcript.iter().filter(|entry| matches!(&entry.kind, agent_harness::EntryKind::Failure { text, .. } if text == "approval delivery failed")).count(), 1);
+            assert!(
+                core.sessions
+                    .get(&task_id)
+                    .is_some_and(HarnessSession::is_closed)
+            );
+            drop(core);
+            let mut reopened = Core::load(
+                Box::new(TursoStore::open(&uri).await?),
+                Box::new(Factory {
+                    stale,
+                    withdrawn: was_withdrawn,
+                }),
+            )
+            .await?;
+            let restored = reopened.open_task_workspace(&task_id).await?;
+            assert_eq!(restored.task.state, TaskState::Failed);
+            assert!(restored.transcript.iter().any(|entry| matches!(&entry.kind, agent_harness::EntryKind::Permission { approval_id, withdrawn: true, .. } if approval_id == "approval")));
+        }
         Ok(())
     }
 
