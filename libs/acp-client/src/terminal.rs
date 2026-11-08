@@ -7,7 +7,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::process::Stdio;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 
 use agent_client_protocol::schema::v1::{
     CreateTerminalRequest, CreateTerminalResponse, KillTerminalResponse, ReleaseTerminalResponse,
@@ -65,10 +65,41 @@ struct TerminalEntry {
     output: String,
     truncated: bool,
     exit: Option<TerminalExitStatus>,
-    waiters: Vec<oneshot::Sender<TerminalExitStatus>>,
+    waiters: Vec<TerminalWaiter>,
     byte_limit: usize,
     cancelled: tokio::sync::watch::Sender<bool>,
     stop: Option<tokio::sync::mpsc::UnboundedSender<oneshot::Sender<Result<(), String>>>>,
+}
+
+struct TerminalWaiter {
+    token: Arc<()>,
+    sender: oneshot::Sender<TerminalExitStatus>,
+}
+
+struct WaiterGuard {
+    registry: Weak<Mutex<HashMap<String, TerminalEntry>>>,
+    terminal_id: String,
+    token: Arc<()>,
+}
+
+impl Drop for WaiterGuard {
+    fn drop(&mut self) {
+        let Some(registry) = self.registry.upgrade() else {
+            return;
+        };
+        let mut entries = match registry.lock() {
+            Ok(entries) => entries,
+            Err(error) => {
+                tracing::error!("ACP terminal registry lock was poisoned during waiter cleanup");
+                error.into_inner()
+            }
+        };
+        if let Some(entry) = entries.get_mut(&self.terminal_id) {
+            entry
+                .waiters
+                .retain(|waiter| !Arc::ptr_eq(&waiter.token, &self.token));
+        }
+    }
 }
 
 /// Shared state for every terminal started in a session.
@@ -279,7 +310,7 @@ impl TerminalRegistry {
         &self,
         terminal_id: &TerminalId,
     ) -> Result<WaitForTerminalExitResponse, String> {
-        let rx = {
+        let (rx, _waiter_guard) = {
             let mut guard = self.entries();
             let entry = guard
                 .get_mut(terminal_id.0.as_ref())
@@ -288,8 +319,19 @@ impl TerminalRegistry {
                 Some(exit) => return Ok(WaitForTerminalExitResponse::new(exit.clone())),
                 None => {
                     let (tx, rx) = oneshot::channel();
-                    entry.waiters.push(tx);
-                    rx
+                    let token = Arc::new(());
+                    entry.waiters.push(TerminalWaiter {
+                        token: token.clone(),
+                        sender: tx,
+                    });
+                    (
+                        rx,
+                        WaiterGuard {
+                            registry: Arc::downgrade(&self.inner),
+                            terminal_id: terminal_id.0.to_string(),
+                            token,
+                        },
+                    )
                 }
             }
         };
@@ -532,7 +574,9 @@ impl TerminalRegistry {
             std::mem::take(&mut entry.waiters)
         };
         for waiter in waiters {
-            drop(waiter.send(exit.clone()));
+            if waiter.sender.send(exit.clone()).is_err() {
+                tracing::debug!("ACP terminal exit waiter closed");
+            }
         }
     }
 
@@ -652,6 +696,107 @@ mod tests {
         async fn stop(&self, _id: &str) -> Result<(), String> {
             Ok(())
         }
+    }
+
+    #[tokio::test]
+    async fn cancelled_exit_waits_release_only_their_own_entries()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let (events, _receiver) = tokio::sync::mpsc::unbounded_channel();
+        let registry = TerminalRegistry::new(
+            SessionRoots::new([directory.path().to_path_buf()]),
+            &events,
+            Some(Arc::new(IdleBackend)),
+        );
+        registry.register("fixture", MAX_OUTPUT_LIMIT);
+        let terminal = TerminalId::new("fixture");
+        let mut first = Box::pin(registry.wait_for_exit(&terminal));
+        let mut second = Box::pin(registry.wait_for_exit(&terminal));
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(10), &mut first)
+                .await
+                .is_err()
+        );
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(10), &mut second)
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            registry
+                .entries()
+                .get("fixture")
+                .ok_or("missing terminal")?
+                .waiters
+                .len(),
+            2
+        );
+        drop(first);
+        assert_eq!(
+            registry
+                .entries()
+                .get("fixture")
+                .ok_or("missing terminal")?
+                .waiters
+                .len(),
+            1
+        );
+        registry.record_exit("fixture", &TerminalExitStatus::new().exit_code(Some(0)));
+        tokio::time::timeout(std::time::Duration::from_secs(1), &mut second)
+            .await?
+            .map_err(std::io::Error::other)?;
+        assert!(
+            registry
+                .entries()
+                .get("fixture")
+                .ok_or("missing terminal")?
+                .waiters
+                .is_empty()
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn old_waiter_cannot_remove_a_reused_terminal_waiter()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let (events, _receiver) = tokio::sync::mpsc::unbounded_channel();
+        let registry = TerminalRegistry::new(
+            SessionRoots::new([directory.path().to_path_buf()]),
+            &events,
+            Some(Arc::new(IdleBackend)),
+        );
+        registry.register("fixture", MAX_OUTPUT_LIMIT);
+        let terminal = TerminalId::new("fixture");
+        let mut old = Box::pin(registry.wait_for_exit(&terminal));
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(10), &mut old)
+                .await
+                .is_err()
+        );
+        assert!(registry.entries().remove("fixture").is_some());
+        registry.register("fixture", MAX_OUTPUT_LIMIT);
+        let mut current = Box::pin(registry.wait_for_exit(&terminal));
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(10), &mut current)
+                .await
+                .is_err()
+        );
+        drop(old);
+        assert_eq!(
+            registry
+                .entries()
+                .get("fixture")
+                .ok_or("missing terminal")?
+                .waiters
+                .len(),
+            1
+        );
+        registry.record_exit("fixture", &TerminalExitStatus::new().exit_code(Some(0)));
+        tokio::time::timeout(std::time::Duration::from_secs(1), &mut current)
+            .await?
+            .map_err(std::io::Error::other)?;
+        Ok(())
     }
 
     #[tokio::test]
