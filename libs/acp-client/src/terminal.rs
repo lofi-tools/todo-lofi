@@ -543,27 +543,8 @@ impl TerminalRegistry {
         while let Some(event) = events.recv().await {
             match event {
                 TerminalProcessEvent::Output(bytes) => {
-                    for part in bytes.chunks(MAX_OUTPUT_EVENT_BYTES) {
-                        pending.extend_from_slice(part);
-                        let incomplete = pending.utf8_chunks().last().map_or(0, |chunk| {
-                            let invalid = chunk.invalid();
-                            if std::str::from_utf8(invalid)
-                                .is_err_and(|error| error.error_len().is_none())
-                            {
-                                invalid.len()
-                            } else {
-                                0
-                            }
-                        });
-                        let tail = pending.split_off(pending.len() - incomplete);
-                        if !pending.is_empty()
-                            && !self
-                                .push(&key, String::from_utf8_lossy(&pending).into_owned())
-                                .await
-                        {
-                            return;
-                        }
-                        pending = tail;
+                    if !self.push_bytes(&key, &mut pending, &bytes).await {
+                        return;
                     }
                 }
                 TerminalProcessEvent::Exited(exit) => {
@@ -584,12 +565,12 @@ impl TerminalRegistry {
 
     async fn pump(&self, mut reader: impl futures::AsyncRead + Unpin, key: String) {
         let mut buffer = [0u8; 8192];
+        let mut pending = Vec::new();
         loop {
             match reader.read(&mut buffer).await {
                 Ok(0) => break,
                 Ok(read) => {
-                    let chunk = String::from_utf8_lossy(&buffer[..read]).into_owned();
-                    if !self.push(&key, chunk).await {
+                    if !self.push_bytes(&key, &mut pending, &buffer[..read]).await {
                         return;
                     }
                 }
@@ -599,6 +580,40 @@ impl TerminalRegistry {
                 }
             }
         }
+        if !pending.is_empty()
+            && !self
+                .push(&key, String::from_utf8_lossy(&pending).into_owned())
+                .await
+        {
+            tracing::debug!(
+                terminal_id = key,
+                "terminal output closed before the final bytes were delivered"
+            );
+        }
+    }
+
+    async fn push_bytes(&self, key: &str, pending: &mut Vec<u8>, bytes: &[u8]) -> bool {
+        for part in bytes.chunks(MAX_OUTPUT_EVENT_BYTES) {
+            pending.extend_from_slice(part);
+            let incomplete = pending.utf8_chunks().last().map_or(0, |chunk| {
+                let invalid = chunk.invalid();
+                if std::str::from_utf8(invalid).is_err_and(|error| error.error_len().is_none()) {
+                    invalid.len()
+                } else {
+                    0
+                }
+            });
+            let tail = pending.split_off(pending.len() - incomplete);
+            if !pending.is_empty()
+                && !self
+                    .push(key, String::from_utf8_lossy(pending).into_owned())
+                    .await
+            {
+                return false;
+            }
+            *pending = tail;
+        }
+        true
     }
 
     async fn push(&self, key: &str, chunk: String) -> bool {
@@ -809,6 +824,29 @@ mod tests {
         async fn stop(&self, _id: &str) -> Result<(), String> {
             Ok(())
         }
+    }
+
+    #[tokio::test]
+    async fn direct_terminal_decodes_split_utf8_and_flushes_incomplete_tail()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let (events, receiver) = tokio::sync::mpsc::unbounded_channel();
+        drop(receiver);
+        let registry = TerminalRegistry::new(
+            SessionRoots::new([directory.path().to_path_buf()]),
+            &events,
+            None,
+        );
+        registry.register("fixture", MAX_OUTPUT_LIMIT);
+        let text = format!("{}界end", "x".repeat(MAX_OUTPUT_EVENT_BYTES - 1));
+        let mut bytes = text.as_bytes().to_vec();
+        bytes.extend_from_slice(&[0xf0, 0x9f]);
+        registry
+            .pump(futures::io::Cursor::new(bytes), "fixture".into())
+            .await;
+        let output = registry.output(&TerminalId::new("fixture"));
+        assert_eq!(output.output, format!("{text}�"));
+        Ok(())
     }
 
     #[tokio::test]

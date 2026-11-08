@@ -1383,6 +1383,8 @@ placeholder tabs and no unearned state badges.
   pump. Large backend output events are decoded in 8 KiB pieces rather than copied
   wholesale into the intermediate UTF-8 buffer; a fixture covers characters
   split across both internal chunks and backend events.
+  Direct terminal output uses the same incremental decoder, preserving
+  characters split across reads and flushing an incomplete final sequence.
   Cancelled terminal exit-wait futures remove their registry entries; fixtures
   also cover a reused terminal ID. Each terminal admits at most 64
   active exit waits and reports an error for excess requests; cancellation
