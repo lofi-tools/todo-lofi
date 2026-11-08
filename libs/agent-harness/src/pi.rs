@@ -1156,6 +1156,101 @@ exit 23
         Ok(())
     }
 
+    fn fixture_records(name: &str) -> Vec<Value> {
+        let path = format!("{}/fixtures/pi/{name}", env!("CARGO_MANIFEST_DIR"));
+        let text = std::fs::read_to_string(&path).expect("the recorded fixture is readable");
+        text.lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| serde_json::from_str(line).expect("a recorded line is JSON"))
+            .collect()
+    }
+
+    /// Replays the recorded Pi 1.5.0 session through the transport: the startup
+    /// reply, the extension approval round-trip and the handled prompt reply.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn recorded_session_routes_startup_and_the_approval_round_trip()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let records = fixture_records("offline-extension-session.jsonl");
+        assert_eq!(records.len(), 3, "the recording holds three records");
+        let session_id = records[0]["data"]["sessionId"]
+            .as_str()
+            .ok_or("the recorded state lacked a session ID")?
+            .to_owned();
+        let directory = tempfile::tempdir()?;
+        std::fs::copy(
+            format!(
+                "{}/fixtures/pi/offline-extension-session.jsonl",
+                env!("CARGO_MANIFEST_DIR")
+            ),
+            directory.path().join("session.jsonl"),
+        )?;
+        let script = directory.path().join("pi-recorded.sh");
+        std::fs::write(
+            &script,
+            r#"
+[ "$1" = --mode ] && [ "$2" = rpc ] || exit 2
+IFS= read -r state || exit 3
+state_id=$(printf '%s\n' "$state" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
+sed -n '1p' session.jsonl | sed "s/\"id\":\"1\"/\"id\":\"$state_id\"/"
+IFS= read -r prompt || exit 4
+case "$prompt" in *'"message":"/shepherd-rpc-fixture"'*) ;; *) exit 5;; esac
+prompt_id=$(printf '%s\n' "$prompt" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
+sed -n '2p' session.jsonl
+dialog_id=$(sed -n '2p' session.jsonl | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
+IFS= read -r reply || exit 6
+case "$reply" in *'"type":"extension_ui_response"'*) ;; *) exit 7;; esac
+case "$reply" in *'"confirmed":true'*) ;; *) exit 7;; esac
+case "$reply" in *"\"id\":\"$dialog_id\""*) ;; *) exit 7;; esac
+sed -n '3p' session.jsonl | sed "s/\"id\":\"2\"/\"id\":\"$prompt_id\"/"
+"#,
+        )?;
+        let spec = SpawnSpec {
+            program: "/bin/sh".into(),
+            args: vec![script.to_string_lossy().into_owned()],
+            cwd: directory.path().to_owned(),
+            ..SpawnSpec::default()
+        };
+        let (mut rpc, state) = PiRpc::start(&spec).await?;
+        assert_eq!(state.session_id, session_id);
+        assert!(!state.is_streaming);
+        let prompt = rpc.request(
+            "prompt",
+            Map::from_iter([("message".into(), json!("/shepherd-rpc-fixture"))]),
+        );
+        let answer = async {
+            let Some(PiRpcEvent::Record(request)) = rpc.next_event().await else {
+                return Err(protocol("expected the recorded extension dialog"));
+            };
+            assert_eq!(
+                request, records[1],
+                "the dialog record is replayed verbatim"
+            );
+            let id = request["id"]
+                .as_str()
+                .ok_or_else(|| protocol("the recorded dialog lacked an ID"))?;
+            rpc.reply_to_extension(id, Map::from_iter([("confirmed".into(), json!(true))]))
+                .await
+        };
+        let (reply, ()) =
+            timeout(PROBE_TIMEOUT, async { tokio::try_join!(prompt, answer) }).await??;
+        assert_eq!(reply, records[2]["data"]);
+        assert_eq!(
+            PromptDisposition::from_reply(reply)?,
+            PromptDisposition::Handled
+        );
+        assert!(matches!(
+            timeout(PROBE_TIMEOUT, rpc.next_event()).await?,
+            Some(PiRpcEvent::Exited {
+                code: Some(0),
+                protocol_error: None,
+                ..
+            })
+        ));
+        rpc.shutdown().await?;
+        Ok(())
+    }
+
     #[cfg(feature = "live-pi")]
     #[tokio::test]
     async fn installed_pi_exchanges_extension_dialog_records()

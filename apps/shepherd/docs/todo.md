@@ -970,6 +970,15 @@ If Pi’s RPC probe is blocked, proceed with ACP while resolving it.
   handled command disposition, and process exit with stderr kept off the wire.
 - [ ] Pi lifecycle and approval bridge contract fixtures when those paths are
   implemented.
+  A recorded Pi 1.5.0 offline session in `fixtures/pi` replays through the
+  transport and pins the startup state shape, the extension approval request
+  and reply correlation, the handled prompt disposition and the exit report;
+  the replay rewrites only the request IDs, as a live Pi echoes them. The
+  recording is an offline extension command, so it holds no agent-turn
+  lifecycle records (no `agent_start`, streaming, turn completion or
+  `agent_settled`), and the transport has no lifecycle or approval bridge to
+  map them to yet. Recording those transitions needs a live model turn with
+  provider credentials and network access.
 - [ ] One live smoke per installed OpenCode, Pi and Claude/ACP integration,
   gated in CI.
   The opt-in Shepherd adapter smoke workflow selects one preinstalled agent on
