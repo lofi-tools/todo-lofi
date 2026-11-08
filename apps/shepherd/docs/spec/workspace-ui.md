@@ -189,6 +189,8 @@ current layout and give future changes a point of comparison.
   repository.
 - Report an unavailable scan root as an error, while skipping individual
   subdirectories that cannot be read.
+- A background startup scan must not replace a later requested scan or hide a
+  later scan failure.
 - Use actual directory branches to group repositories. Enumerate siblings
   directly when they share a parent and there is no useful grouping. Collapse
   single-child chains and skip a sole top-level group so the next meaningful

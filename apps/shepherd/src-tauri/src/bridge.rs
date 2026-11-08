@@ -727,10 +727,24 @@ pub struct ShellState {
     pending_quit: Mutex<Option<QuitSummary>>,
     terminals: TerminalHost,
     previous_processes: Vec<ProcessRecord>,
-    scan: Arc<Mutex<Option<shepherd_core::project_scan::ProjectScan>>>,
+    scan: Arc<Mutex<ProjectScanCache>>,
     file_searches: Mutex<BTreeMap<String, FileSearch>>,
     task_searches: Mutex<BTreeMap<String, TaskSearchRequest>>,
     file_watches: Arc<Mutex<BTreeMap<String, oneshot::Sender<()>>>>,
+}
+
+struct ProjectScanCache {
+    value: Option<shepherd_core::project_scan::ProjectScan>,
+    startup_valid: bool,
+}
+
+impl Default for ProjectScanCache {
+    fn default() -> Self {
+        Self {
+            value: None,
+            startup_valid: true,
+        }
+    }
 }
 
 #[derive(Default)]
@@ -810,7 +824,7 @@ impl ShellState {
             pending_quit: Mutex::new(None),
             terminals,
             previous_processes: Vec::new(),
-            scan: Arc::new(Mutex::new(None)),
+            scan: Arc::new(Mutex::new(ProjectScanCache::default())),
             file_searches: Mutex::new(BTreeMap::new()),
             task_searches: Mutex::new(BTreeMap::new()),
             file_watches: Arc::new(Mutex::new(BTreeMap::new())),
@@ -895,11 +909,8 @@ impl ShellState {
         if let Some(home) = project_scan_root() {
             let scan = state.scan.clone();
             tauri::async_runtime::spawn(async move {
-                match tokio::task::spawn_blocking(move || shepherd_core::project_scan::scan(&home))
-                    .await
-                {
-                    Ok(Ok(found)) => *scan.lock().await = Some(found),
-                    Ok(Err(error)) => tracing::warn!(%error, "the startup project scan failed"),
+                match scan_project_root(home).await {
+                    Ok(found) => install_startup_scan(&scan, found).await,
                     Err(error) => tracing::warn!(%error, "the startup project scan failed"),
                 }
             });
@@ -1646,16 +1657,12 @@ impl ShellState {
         &self,
         rescan: bool,
     ) -> Result<shepherd_core::project_scan::ProjectScan, BridgeError> {
-        let mut cache = self.scan.lock().await;
-        if rescan || cache.is_none() {
+        request_project_scan(&self.scan, rescan, async {
             let home = project_scan_root()
                 .ok_or_else(|| BridgeError::new("scan", "no home directory to scan"))?;
-            let found = scan_project_root(home).await?;
-            *cache = Some(found);
-        }
-        cache
-            .clone()
-            .ok_or_else(|| BridgeError::new("scan", "the project scan produced no result"))
+            scan_project_root(home).await
+        })
+        .await
     }
 
     pub async fn task_list(&self, project_id: String) -> Result<TaskList, BridgeError> {
@@ -2300,6 +2307,34 @@ impl ShellState {
             .await
             .remove(subscription_id);
     }
+}
+
+async fn install_startup_scan(
+    cache: &Mutex<ProjectScanCache>,
+    found: shepherd_core::project_scan::ProjectScan,
+) {
+    let mut cache = cache.lock().await;
+    if cache.startup_valid && cache.value.is_none() {
+        cache.value = Some(found);
+    }
+}
+
+async fn request_project_scan(
+    cache: &Mutex<ProjectScanCache>,
+    rescan: bool,
+    scan: impl std::future::Future<
+        Output = Result<shepherd_core::project_scan::ProjectScan, BridgeError>,
+    >,
+) -> Result<shepherd_core::project_scan::ProjectScan, BridgeError> {
+    let mut cache = cache.lock().await;
+    if rescan || cache.value.is_none() {
+        cache.startup_valid = false;
+        cache.value = Some(scan.await?);
+    }
+    cache
+        .value
+        .clone()
+        .ok_or_else(|| BridgeError::new("scan", "the project scan produced no result"))
 }
 
 async fn scan_project_root(
@@ -3225,6 +3260,70 @@ mod tests {
     use shepherd_core::{TaskState, TaskSummary};
 
     use super::*;
+
+    #[tokio::test]
+    async fn startup_scan_cannot_overwrite_a_later_scan_or_its_failure()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fixture = |root: &str| shepherd_core::project_scan::ProjectScan {
+            root: root.into(),
+            repositories: 0,
+            tree: Vec::new(),
+        };
+        for fail in [false, true] {
+            let cache = Arc::new(Mutex::new(ProjectScanCache::default()));
+            let (started, waiting) = oneshot::channel();
+            let (release, released) = oneshot::channel();
+            let request = tokio::spawn({
+                let cache = cache.clone();
+                async move {
+                    request_project_scan(&cache, true, async move {
+                        started
+                            .send(())
+                            .map_err(|_| BridgeError::new("scan", "test receiver closed"))?;
+                        released
+                            .await
+                            .map_err(|_| BridgeError::new("scan", "test sender closed"))?;
+                        if fail {
+                            Err(BridgeError::new("scan", "fixture failure"))
+                        } else {
+                            Ok(fixture("fresh"))
+                        }
+                    })
+                    .await
+                }
+            });
+            waiting.await?;
+            let startup = tokio::spawn({
+                let cache = cache.clone();
+                async move { install_startup_scan(&cache, fixture("stale")).await }
+            });
+            release.send(()).map_err(|_| "request ended early")?;
+            let result = request.await?;
+            startup.await?;
+            if fail {
+                assert!(result.is_err());
+                assert!(cache.lock().await.value.is_none());
+                assert_eq!(
+                    request_project_scan(&cache, false, async { Ok(fixture("retry")) })
+                        .await?
+                        .root,
+                    "retry"
+                );
+            } else {
+                assert_eq!(result?.root, "fresh");
+                assert_eq!(
+                    cache
+                        .lock()
+                        .await
+                        .value
+                        .as_ref()
+                        .map(|scan| scan.root.as_str()),
+                    Some("fresh")
+                );
+            }
+        }
+        Ok(())
+    }
 
     #[tokio::test]
     async fn project_scan_reports_an_unavailable_root() -> Result<(), Box<dyn std::error::Error>> {
