@@ -1503,7 +1503,9 @@ placeholder tabs and no unearned state badges.
   a scripted approval completes; on this Mac the diff and response appeared
   999 ms after opening the diff. It does not measure live-agent streaming.
   Transcript persistence batches up to 32 entries per indexed insert in the
-  same transaction. The 1,000-message recovery fixture on this Mac fell from
+  same transaction, limiting accumulated encoded values to 1 MiB except for
+  a single larger entry. A fixture checks large entries still round-trip. The
+  1,000-message recovery fixture on this Mac fell from
   120 seconds to 2.87 seconds; storage fixtures cover search, attachment
   restoration and rollback across batch boundaries.
 - [ ] Path confinement, environment `!command` timeout, no secret values in

@@ -389,7 +389,48 @@ async fn write_transcript_entries(
     let task_title = required_string(owner.get(1))?;
     let project_name = required_string(owner.get(2))?;
     let created_at = crate::projects::now_millis() as i64;
-    for batch in entries.chunks(32) {
+    let mut remaining = entries.iter();
+    let mut pending = None;
+    loop {
+        let mut batch = Vec::new();
+        let mut batch_bytes = 0_usize;
+        while batch.len() < 32 {
+            let entry = match pending.take().or_else(|| remaining.next().copied()) {
+                Some(entry) => entry,
+                None => break,
+            };
+            let mut payload = serde_json::to_value(entry).map_err(|error| {
+                StoreError::InvalidRow(format!("could not encode transcript entry: {error}"))
+            })?;
+            if let Some(fields) = payload.as_object_mut() {
+                fields.remove("attachments");
+            }
+            let kind = payload
+                .pointer("/kind/type")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| StoreError::InvalidRow("missing transcript entry kind".into()))?
+                .to_owned();
+            let payload = payload.to_string();
+            let text = entry_text(&entry.kind);
+            let entry_bytes = payload
+                .len()
+                .saturating_add(text.len())
+                .saturating_add(kind.len())
+                .saturating_add(entry.id.len())
+                .saturating_add(session.id.len())
+                .saturating_add(session.task_id.as_str().len())
+                .saturating_add(task_title.len())
+                .saturating_add(project_name.len());
+            if !batch.is_empty() && batch_bytes.saturating_add(entry_bytes) > 1024 * 1024 {
+                pending = Some(entry);
+                break;
+            }
+            batch_bytes = batch_bytes.saturating_add(entry_bytes);
+            batch.push((entry, kind, payload, text));
+        }
+        if batch.is_empty() {
+            break;
+        }
         let rows = (0..batch.len())
             .map(|index| {
                 let first = index * 10 + 1;
@@ -409,26 +450,16 @@ async fn write_transcript_entries(
              entry_text = excluded.entry_text, task_title = excluded.task_title, project_name = excluded.project_name"
         );
         let mut statement = toasty::sql::statement(sql);
-        for entry in batch {
-            let mut payload = serde_json::to_value(entry).map_err(|error| {
-                StoreError::InvalidRow(format!("could not encode transcript entry: {error}"))
-            })?;
-            if let Some(fields) = payload.as_object_mut() {
-                fields.remove("attachments");
-            }
-            let kind = payload
-                .pointer("/kind/type")
-                .and_then(serde_json::Value::as_str)
-                .ok_or_else(|| StoreError::InvalidRow("missing transcript entry kind".into()))?;
+        for (entry, kind, payload, text) in batch {
             statement = statement
                 .bind(&session.id)
                 .bind(session.task_id.as_str())
                 .bind(&entry.id)
                 .bind(entry.sequence as i64)
                 .bind(kind)
-                .bind(payload.to_string())
+                .bind(payload)
                 .bind(created_at)
-                .bind(entry_text(&entry.kind))
+                .bind(text)
                 .bind(&task_title)
                 .bind(&project_name);
         }
@@ -2122,6 +2153,30 @@ mod tests {
             directory.path(),
         )
         .await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn large_transcript_entries_survive_size_limited_batches()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database = TestDatabase::new()?;
+        let store = TursoStore::open(&database.uri()).await?;
+        let project = Project::new(database.path().to_path_buf());
+        let task = Task::draft(project.id.clone(), "Large entries", database.path());
+        let session = SessionRecord::started(task.id.clone(), "codex", None);
+        store.save_project(&project).await?;
+        store.save_task(&task).await?;
+        store.save_session(&session).await?;
+        let mut transcript = agent_harness::Transcript::default();
+        transcript.push_user_message("a".repeat(300_000));
+        transcript.push_user_message("b".repeat(300_000));
+        transcript.push_user_message("c".repeat(1_100_000));
+        transcript.push_user_message("after the large entry");
+        let entries = transcript.entries();
+        store
+            .save_transcript_entries(&session, &entries.iter().collect::<Vec<_>>())
+            .await?;
+        assert_eq!(store.load_transcript(&task.id).await?, entries);
         Ok(())
     }
 
