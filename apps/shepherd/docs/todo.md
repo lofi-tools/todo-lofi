@@ -1814,6 +1814,7 @@ Record every gate result here. Do not silently mark a gate passed.
 | 2026-11-06 | S4 | Partial | The hosted Ubuntu x86-64 rerun at `505ffe6` passed both launches and IBus. The 1 MiB burst painted in 79 ms. [Hosted rerun](https://github.com/lofi-tools/todo-lofi/actions/runs/42215694509) |
 | 2026-11-06 | S4 | Partial | The exact tree at `a1c7964` passed both native launches and IBus Pinyin on Ubuntu 24.04 ARM64 under Xvfb in a disposable guest. The 1 MiB burst painted in 51 ms and all 24 paced markers appeared. The candidate panel followed the caret at both positions, and `你` and `尼` each reached the shell once. Fish was skipped. |
 | 2026-11-06 | S4 | Partial | Both launches of the default macOS smoke and the cached Codex approval replay passed with the window hidden and unfocused. The full Linux suite still passed both launches under Xvfb. The macOS window and candidate checks are opt-in. |
+| 2026-11-08 | S4 | Partial | The default hidden macOS smoke passed both launches at `91513b9`, using a disposable project and scripted agent. It covered terminal input and output, bracketed paste, task and project switches, saved layout, terminal restart and interrupted-task recovery. The visible-window, macOS candidate-input and workday checks remain separate. |
 |  | S5 |  |  |
 |  | S6 |  |  |
 |  | S7 |  |  |
