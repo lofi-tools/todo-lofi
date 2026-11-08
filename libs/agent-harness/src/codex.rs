@@ -3060,7 +3060,11 @@ async fn handle_notification(
         }
         "error" if params["willRetry"] == false => {
             let mut pending = pending.lock().await;
-            if params["turnId"].as_str() == pending.turn_id.as_deref() {
+            if pending
+                .turn_id
+                .as_deref()
+                .is_some_and(|turn_id| params["turnId"].as_str() == Some(turn_id))
+            {
                 pending.turn_error = codex_turn_error(&params["error"]);
             }
         }
@@ -3431,6 +3435,24 @@ mod tests {
     }
 
     use super::*;
+
+    #[tokio::test]
+    async fn turn_errors_require_a_matching_active_turn() -> HarnessResult<()> {
+        let pending = Arc::new(AsyncMutex::new(Pending::default()));
+        let (sender, _) = mpsc::unbounded_channel();
+        let error = json!({"willRetry": false, "error": {"message": "orphan"}});
+        handle_notification("error", &error, &sender, &pending).await?;
+        assert!(pending.lock().await.turn_error.is_none());
+        pending.lock().await.turn_id = Some("current".into());
+        handle_notification("error", &error, &sender, &pending).await?;
+        assert!(pending.lock().await.turn_error.is_none());
+        let matching = json!({"willRetry": false, "turnId": "current", "error": {"message": "current failure"}});
+        handle_notification("error", &matching, &sender, &pending).await?;
+        assert!(
+            matches!(pending.lock().await.turn_error.as_ref(), Some(HarnessEvent::TurnError { text, .. }) if text == "current failure")
+        );
+        Ok(())
+    }
 
     #[tokio::test]
     async fn reader_reports_group_stop_failure_and_retains_the_child_for_retry()

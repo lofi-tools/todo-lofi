@@ -1557,7 +1557,8 @@ placeholder tabs and no unearned state badges.
   ordinary replies still pass. Other critical queues still need review.
   App-server completion notifications for a different identified turn leave
   the active turn and its pending approvals untouched; a fixture covers stale
-  and matching completions.
+  and matching completions. Turn errors are retained only when their ID matches
+  an active turn; missing IDs do not match an idle session.
   Event folding handles at
   most 256 events per session per pass, including during commands, and
   reschedules remaining events so one busy agent cannot monopolize other
