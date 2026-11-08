@@ -16,24 +16,63 @@ const MAX_READ_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 pub struct SessionRoots {
     roots: Vec<PathBuf>,
     initialization_errors: Vec<(PathBuf, Arc<std::io::Error>)>,
+    #[cfg(unix)]
+    root_handles: Vec<Option<Arc<std::os::fd::OwnedFd>>>,
 }
 
 impl SessionRoots {
     pub fn new(roots: impl IntoIterator<Item = PathBuf>) -> Self {
         let mut resolved_roots = Vec::new();
         let mut initialization_errors = Vec::new();
+        #[cfg(unix)]
+        let mut root_handles = Vec::new();
         for root in roots {
+            #[cfg(unix)]
+            let initial_metadata = std::fs::metadata(&root);
             match root.canonicalize() {
-                Ok(resolved) => resolved_roots.push(resolved),
+                Ok(resolved) => {
+                    #[cfg(unix)]
+                    {
+                        use rustix::fs::{Mode, OFlags, fstat, open};
+                        use std::os::unix::fs::MetadataExt;
+                        let flags =
+                            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+                        let opened = initial_metadata.and_then(|metadata| {
+                            let handle = open(&resolved, flags, Mode::empty())
+                                .map_err(std::io::Error::from)?;
+                            let opened_metadata = fstat(&handle).map_err(std::io::Error::from)?;
+                            if metadata.dev() != opened_metadata.st_dev as u64
+                                || metadata.ino() != opened_metadata.st_ino as u64
+                            {
+                                return Err(std::io::Error::other(
+                                    "session root changed while opening",
+                                ));
+                            }
+                            Ok(handle)
+                        });
+                        match opened {
+                            Ok(handle) => root_handles.push(Some(Arc::new(handle))),
+                            Err(error) => {
+                                initialization_errors.push((resolved.clone(), Arc::new(error)));
+                                root_handles.push(None);
+                            }
+                        }
+                    }
+                    resolved_roots.push(resolved);
+                }
                 Err(error) => {
                     initialization_errors.push((root.clone(), Arc::new(error)));
                     resolved_roots.push(root);
+                    #[cfg(unix)]
+                    root_handles.push(None);
                 }
             }
         }
         Self {
             roots: resolved_roots,
             initialization_errors,
+            #[cfg(unix)]
+            root_handles,
         }
     }
 
@@ -79,17 +118,8 @@ impl SessionRoots {
         let path = self.resolve(requested)?;
         #[cfg(unix)]
         {
-            let root = self
-                .roots
-                .iter()
-                .find(|root| path.starts_with(root))
-                .ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "{} is outside the session's directories",
-                        requested.display()
-                    )
-                })?;
-            let file = open_confined_file(root, &path)?;
+            let (root, handle) = self.anchored_root(&path)?;
+            let file = open_confined_file_at(root, handle, &path)?;
             read_selected_lines(file, line, limit).map_err(Into::into)
         }
         #[cfg(not(unix))]
@@ -100,21 +130,30 @@ impl SessionRoots {
         let path = self.resolve(requested)?;
         #[cfg(unix)]
         {
-            let root = self
-                .roots
-                .iter()
-                .find(|root| path.starts_with(root))
-                .ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "{} is outside the session's directories",
-                        requested.display()
-                    )
-                })?;
-            let (directory, name) = open_confined_parent(root, &path)?;
+            let (root, handle) = self.anchored_root(&path)?;
+            let (directory, name) = open_confined_parent_at(root, handle, &path)?;
             write_confined_file(&directory, &name, content)
         }
         #[cfg(not(unix))]
         write_text_file(&path, content)
+    }
+
+    #[cfg(unix)]
+    fn anchored_root(&self, path: &Path) -> anyhow::Result<(&Path, &std::os::fd::OwnedFd)> {
+        let (index, root) = self
+            .roots
+            .iter()
+            .enumerate()
+            .find(|(_, root)| path.starts_with(root))
+            .ok_or_else(|| {
+                anyhow::anyhow!("{} is outside the session's directories", path.display())
+            })?;
+        let handle = self
+            .root_handles
+            .get(index)
+            .and_then(Option::as_deref)
+            .ok_or_else(|| anyhow::anyhow!("session root {} is unavailable", root.display()))?;
+        Ok((root, handle))
     }
 }
 
@@ -123,7 +162,20 @@ fn open_confined_parent(
     root: &Path,
     path: &Path,
 ) -> anyhow::Result<(std::os::fd::OwnedFd, std::ffi::OsString)> {
-    use rustix::fs::{Mode, OFlags, open, openat};
+    use rustix::fs::{Mode, OFlags, open};
+
+    let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    let root_handle = open(root, flags, Mode::empty())?;
+    open_confined_parent_at(root, &root_handle, path)
+}
+
+#[cfg(unix)]
+fn open_confined_parent_at(
+    root: &Path,
+    root_handle: &std::os::fd::OwnedFd,
+    path: &Path,
+) -> anyhow::Result<(std::os::fd::OwnedFd, std::ffi::OsString)> {
+    use rustix::fs::{Mode, OFlags, openat};
 
     let relative = path.strip_prefix(root)?;
     let parent = relative
@@ -133,7 +185,7 @@ fn open_confined_parent(
         .file_name()
         .ok_or_else(|| anyhow::anyhow!("file has no name"))?;
     let directory_flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
-    let mut directory = open(root, directory_flags, Mode::empty())?;
+    let mut directory = openat(root_handle, ".", directory_flags, Mode::empty())?;
     for component in parent {
         directory = openat(&directory, component, directory_flags, Mode::empty())?;
     }
@@ -142,11 +194,30 @@ fn open_confined_parent(
 
 #[cfg(unix)]
 fn open_confined_file(root: &Path, path: &Path) -> anyhow::Result<File> {
-    use rustix::fs::{Mode, OFlags, openat};
     let (directory, name) = open_confined_parent(root, path)?;
+    open_file_in(&directory, &name, path)
+}
+
+#[cfg(unix)]
+fn open_confined_file_at(
+    root: &Path,
+    handle: &std::os::fd::OwnedFd,
+    path: &Path,
+) -> anyhow::Result<File> {
+    let (directory, name) = open_confined_parent_at(root, handle, path)?;
+    open_file_in(&directory, &name, path)
+}
+
+#[cfg(unix)]
+fn open_file_in(
+    directory: &std::os::fd::OwnedFd,
+    name: &std::ffi::OsStr,
+    path: &Path,
+) -> anyhow::Result<File> {
+    use rustix::fs::{Mode, OFlags, openat};
     let file = File::from(openat(
-        &directory,
-        &name,
+        directory,
+        name,
         OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
         Mode::empty(),
     )?);
@@ -424,6 +495,32 @@ pub fn write_text_file(path: &Path, content: &str) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn workspace_reads_and_writes_stay_on_open_root_after_replacement() -> anyhow::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let root = directory.path().join("workspace");
+        let moved = directory.path().join("original");
+        std::fs::create_dir(&root)?;
+        std::fs::write(root.join("file"), "original")?;
+        let roots = SessionRoots::new([root.clone()]);
+        let resolved = roots.resolve(Path::new("file"))?;
+        std::fs::rename(&root, &moved)?;
+        std::fs::create_dir(&root)?;
+        std::fs::write(root.join("file"), "replacement")?;
+
+        let (root_path, handle) = roots.anchored_root(&resolved)?;
+        let mut file = open_confined_file_at(root_path, handle, &resolved)?;
+        let mut content = String::new();
+        file.read_to_string(&mut content)?;
+        assert_eq!(content, "original");
+        let (parent, name) = open_confined_parent_at(root_path, handle, &resolved)?;
+        write_confined_file(&parent, &name, "changed")?;
+        assert_eq!(std::fs::read_to_string(moved.join("file"))?, "changed");
+        assert_eq!(std::fs::read_to_string(root.join("file"))?, "replacement");
+        Ok(())
+    }
 
     #[test]
     fn unresolved_session_root_requires_a_new_session_after_repair() -> anyhow::Result<()> {

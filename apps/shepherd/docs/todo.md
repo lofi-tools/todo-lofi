@@ -1433,7 +1433,10 @@ placeholder tabs and no unearned state badges.
   and atomic writes also use descriptor-relative operations on Unix, with
   fixtures for directory substitution and preserved file permissions. ACP workspace
   access rejects unresolved session roots with their original error, even if the path
-  appears later; a fresh session can use a repaired root. ACP reads and writes
+  appears later; a fresh session can use a repaired root. On Unix, file access
+  pins each opened root after checking its identity, so replacing the root path
+  later cannot redirect file reads or writes; a fixture covers both. Terminal
+  working directories still pass through a pathname. ACP reads and writes
   run on blocking workers. ACP attachment grants open every path
   component without following symlinks and retain the opened file for the
   duration of the prompt. ACP line-limited reads stream only the requested range
