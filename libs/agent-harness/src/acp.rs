@@ -43,6 +43,7 @@ pub struct AcpHarness {
     terminals: Option<Arc<dyn TerminalBackend>>,
     process_tracker: Option<Arc<dyn crate::AgentProcessTracker>>,
     replay: Vec<Entry>,
+    startup_events: VecDeque<AcpEvent>,
     sender: mpsc::UnboundedSender<HarnessEvent>,
     events: mpsc::UnboundedReceiver<HarnessEvent>,
 }
@@ -59,6 +60,7 @@ impl Default for AcpHarness {
             terminals: None,
             process_tracker: None,
             replay: Vec::new(),
+            startup_events: VecDeque::new(),
             sender,
             events,
         }
@@ -241,13 +243,13 @@ impl AgentHarness for AcpHarness {
             return Err(protocol("ACP session is already open"));
         }
         let connection = self.connection.as_mut().ok_or(HarnessError::NotStarted)?;
-        let loading = resume.is_some();
+        let startup_events = &mut self.startup_events;
         let (session, modes, config) = if let Some(resume) = resume {
             if !connection.info.load_session {
                 return Err(protocol("ACP agent does not support session/load"));
             }
             let session = schema::SessionId::new(resume.as_str().to_owned());
-            let (modes, config) = session_request(
+            let request = session_request(
                 "session/load",
                 connection.requester.load_session(
                     session.clone(),
@@ -255,8 +257,25 @@ impl AgentHarness for AcpHarness {
                     Vec::new(),
                     Vec::new(),
                 ),
-            )
-            .await?;
+            );
+            let mut history = ReplayHistory::default();
+            tokio::pin!(request);
+            let result = loop {
+                tokio::select! {
+                    result = &mut request => break result,
+                    event = connection.events.recv() => match event {
+                        Some(event) => if let Err(error) = history.apply(&session, event, startup_events) {
+                            break Err(error);
+                        },
+                        None => break Err(HarnessError::ChannelClosed),
+                    }
+                }
+            };
+            let (modes, config) = result?;
+            while let Ok(event) = connection.events.try_recv() {
+                history.apply(&session, event, startup_events)?;
+            }
+            self.replay = history.finish();
             (session, modes, config)
         } else {
             session_request(
@@ -268,18 +287,14 @@ impl AgentHarness for AcpHarness {
             .await?
         };
         self.diagnostics.model = configured_model(&config);
-        let mut events = connection.take_events();
-        let mut startup_events = VecDeque::new();
-        if loading {
-            self.replay = replay_history(&session, &mut events, &mut startup_events)?;
-        }
+        let events = connection.take_events();
         let modes =
             ModeControl::from_config(&config).or_else(|| modes.and_then(ModeControl::from_legacy));
         let id = SessionId::new(session.0.to_string());
         self.runtime = Some(Runtime::start(
             connection.requester.clone(),
             session,
-            (startup_events, events),
+            (std::mem::take(startup_events), events),
             self.sender.clone(),
             self.project_approvals.clone(),
             connection.close_terminals(),
@@ -350,6 +365,7 @@ impl AgentHarness for AcpHarness {
         if let Some(connection) = self.connection.as_mut() {
             connection.close_and_wait().await.map_err(acp_error)?;
             self.connection = None;
+            self.startup_events.clear();
             publish(
                 &self.sender,
                 HarnessEvent::Exited {
@@ -1346,34 +1362,43 @@ fn tool_event(entry: &acp_client::Entry) -> Option<HarnessEvent> {
     })
 }
 
-fn replay_history(
-    session: &schema::SessionId,
-    events: &mut mpsc::UnboundedReceiver<AcpEvent>,
-    startup_events: &mut VecDeque<AcpEvent>,
-) -> HarnessResult<Vec<Entry>> {
-    let mut transcript = Transcript::default();
-    let mut updates = Updates::default();
-    let mut user = None::<(Option<schema::MessageId>, String)>;
-    while let Ok(event) = events.try_recv() {
+#[derive(Default)]
+struct ReplayHistory {
+    transcript: Transcript,
+    updates: Updates,
+    user: Option<(Option<schema::MessageId>, String)>,
+}
+
+impl ReplayHistory {
+    fn apply(
+        &mut self,
+        session: &schema::SessionId,
+        event: AcpEvent,
+        startup_events: &mut VecDeque<AcpEvent>,
+    ) -> HarnessResult<()> {
         match event {
             AcpEvent::SessionUpdate(notification) if &notification.session_id == session => {
                 if let SessionUpdate::UserMessageChunk(chunk) = &notification.update
                     && let ContentBlock::Text(content) = &chunk.content
                 {
-                    if user.as_ref().is_some_and(|(id, _)| id != &chunk.message_id)
-                        && let Some((_, text)) = user.take()
+                    if self
+                        .user
+                        .as_ref()
+                        .is_some_and(|(id, _)| id != &chunk.message_id)
+                        && let Some((_, text)) = self.user.take()
                     {
-                        transcript.push_user_message(text);
+                        self.transcript.push_user_message(text);
                     }
-                    user.get_or_insert_with(|| (chunk.message_id.clone(), String::new()))
+                    self.user
+                        .get_or_insert_with(|| (chunk.message_id.clone(), String::new()))
                         .1
                         .push_str(&content.text);
                 }
-                if let Some(event) = updates.apply(&notification.update) {
-                    if let Some((_, text)) = user.take() {
-                        transcript.push_user_message(text);
+                if let Some(event) = self.updates.apply(&notification.update) {
+                    if let Some((_, text)) = self.user.take() {
+                        self.transcript.push_user_message(text);
                     }
-                    transcript.apply(&event);
+                    self.transcript.apply(&event);
                 }
             }
             AcpEvent::Exited { code, stderr } => {
@@ -1387,14 +1412,18 @@ fn replay_history(
             | AcpEvent::TerminalReleased { .. }) => startup_events.push_back(event),
             _ => {}
         }
+        Ok(())
     }
-    if let Some((_, text)) = user {
-        transcript.push_user_message(text);
+
+    fn finish(mut self) -> Vec<Entry> {
+        if let Some((_, text)) = self.user.take() {
+            self.transcript.push_user_message(text);
+        }
+        self.transcript.apply(&HarnessEvent::TurnFinished {
+            reason: TurnFinishReason::Completed,
+        });
+        self.transcript.entries
     }
-    transcript.apply(&HarnessEvent::TurnFinished {
-        reason: TurnFinishReason::Completed,
-    });
-    Ok(transcript.entries)
 }
 
 #[cfg(test)]
@@ -2373,6 +2402,31 @@ done
                     "updated\n",
                 ))]),
         )
+    }
+
+    #[tokio::test]
+    async fn restores_many_history_updates_in_order() -> Result<(), Box<dyn std::error::Error>> {
+        let updates = (0..600)
+            .map(|index| SessionUpdate::AgentMessageChunk(chunk(&format!("{index},"))))
+            .collect();
+        let (mut harness, _, _) = fake(FakeScript {
+            load_updates: updates,
+            ..FakeScript::default()
+        })
+        .await?;
+        harness
+            .open_session(Some(SessionId::new("history")))
+            .await?;
+        let mut transcript = Transcript::default();
+        transcript.restore(harness.take_replayed_transcript());
+        let expected = (0..600)
+            .map(|index| format!("{index},"))
+            .collect::<String>();
+        assert_eq!(transcript.entries().len(), 1);
+        let entry = transcript.entries().first().ok_or("missing history")?;
+        assert!(entry.summary().contains(&expected));
+        harness.shutdown().await?;
+        Ok(())
     }
 
     #[tokio::test]
