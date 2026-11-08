@@ -1833,6 +1833,10 @@ placeholder tabs and no unearned state badges.
   After the ACP lifecycle event changes, the offline headless desktop-backend
   suite passed 107 tests with one local benchmark ignored; its terminal bridge
   fixture was updated for the added event permit.
+  At `768e66e`, the offline macOS core suite passed 158 tests with three
+  ignored, and the headless desktop library passed 114 with one throughput
+  benchmark ignored. The linked-worktree watcher took over 60 seconds; no
+  live agent or desktop window was used.
   After the store ownership, queue and attachment-integrity changes, the
   offline headless desktop-backend suite passed 109 tests with one local
   throughput benchmark ignored, and backend Clippy passed with warnings
