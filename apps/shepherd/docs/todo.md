@@ -1709,6 +1709,8 @@ placeholder tabs and no unearned state badges.
   recovery read is paused; the later task-list event prevents stale restoration.
   The full headless Chromium suite passed 115 tests at `0659181`, including
   both event-recovery regressions; it uses mocked IPC, not a native window.
+  After the selected-task and project-settings recovery changes, the full
+  headless Chromium suite passed 120 tests at `619a95d`; it also uses mocked IPC.
   At `e3cf447`, the two-launch hidden macOS smoke passed with a scripted
   agent and disposable data, including task and project switches, terminal
   reattachment and restart, and interrupted-task resume. It did not induce
