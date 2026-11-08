@@ -1372,6 +1372,10 @@ placeholder tabs and no unearned state badges.
   group-signal failure verifies the process remains available for a retry.
   A disconnected turn also reports a failed stop alongside the connection
   error and retains the child; a local fixture checks cleanup on retry.
+  Core sessions distinguish a disconnected adapter from completed cleanup.
+  Retry, task deletion, batch archive and quit all attempt shutdown before
+  discarding a disconnected session; an injected-failure fixture verifies that
+  each operation retains it until a later shutdown succeeds.
 - [ ] Bounded transcript, stderr, search and frame buffers.
   Search snippets cap the displayed matching word at 65 characters and compare
   case-folded text without allocating a copy of an arbitrarily long word;

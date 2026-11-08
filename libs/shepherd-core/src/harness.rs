@@ -152,6 +152,7 @@ pub struct HarnessSession {
     cancelling: bool,
     failed: bool,
     closed: bool,
+    cleanup_complete: bool,
     pending_event: Option<HarnessEvent>,
     hide_diagnostics: bool,
 }
@@ -169,6 +170,7 @@ impl HarnessSession {
             cancelling: false,
             failed: false,
             closed: false,
+            cleanup_complete: false,
             pending_event: None,
             hide_diagnostics: false,
         }
@@ -301,10 +303,14 @@ impl HarnessSession {
     }
 
     pub async fn shutdown(&mut self) -> Result<Vec<HarnessEvent>, CoreError> {
+        if self.cleanup_complete {
+            return Ok(Vec::new());
+        }
         self.harness
             .shutdown()
             .await
             .map_err(|error| self.safe_error(error))?;
+        self.cleanup_complete = true;
         self.closed = true;
         self.pending_approval = None;
         self.agent_terminals.clear();
@@ -523,6 +529,10 @@ impl HarnessSession {
 
     pub fn is_closed(&self) -> bool {
         self.closed
+    }
+
+    pub fn needs_shutdown(&self) -> bool {
+        !self.cleanup_complete
     }
 
     pub fn has_failed(&self) -> bool {

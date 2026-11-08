@@ -1545,7 +1545,7 @@ impl Core {
             self.check_task_worktree_removal(task_id)?;
         }
         if let Some(session) = self.sessions.get_mut(task_id)
-            && !session.is_closed()
+            && session.needs_shutdown()
         {
             session.shutdown().await?;
         }
@@ -1800,10 +1800,10 @@ impl Core {
             let Some(session) = self.sessions.get_mut(&task.id) else {
                 continue;
             };
-            let events = if session.is_closed() {
-                Vec::new()
-            } else {
+            let events = if session.needs_shutdown() {
                 session.shutdown().await?
+            } else {
+                Vec::new()
             };
             self.end_session_record(&task.id, &events).await?;
             self.persist_task_transcript(&task.id).await?;
@@ -2235,8 +2235,8 @@ impl Core {
     ) -> Result<SessionOpened, CoreError> {
         self.restore_task_transcript(task_id).await?;
         if let Some(session) = self.sessions.get_mut(task_id)
-            && session.has_failed()
-            && !session.is_closed()
+            && (session.has_failed() || session.is_closed())
+            && session.needs_shutdown()
         {
             session.shutdown().await?;
         }
@@ -2649,9 +2649,7 @@ impl Core {
                         .ok_or_else(|| CoreError::SessionMissing {
                             id: task_id.to_string(),
                         })?;
-                let events = if session.is_closed() {
-                    Vec::new()
-                } else {
+                let events = if session.needs_shutdown() {
                     match session.shutdown().await {
                         Ok(events) => events,
                         Err(error) => {
@@ -2659,6 +2657,8 @@ impl Core {
                             return Err(error);
                         }
                     }
+                } else {
+                    Vec::new()
                 };
                 self.shutdown_events.insert(task_id.clone(), events);
             }
@@ -5089,7 +5089,7 @@ mod tests {
                 Err(HarnessError::NotStarted)
             }
             async fn shutdown(&mut self) -> HarnessResult<()> {
-                if self.attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+                if self.attempts.fetch_add(1, Ordering::SeqCst) < 4 {
                     Err(HarnessError::Protocol("fixture shutdown failed".into()))
                 } else {
                     Ok(())
@@ -5111,15 +5111,34 @@ mod tests {
             .await?,
         );
         let task_id = TaskId::new(draft.task.id);
-        let (_sender, receiver) = mpsc::unbounded_channel();
+        let (sender, receiver) = mpsc::unbounded_channel();
         let attempts = Arc::new(AtomicUsize::new(0));
-        core.sessions.insert(
-            task_id.clone(),
-            HarnessSession::new(Box::new(RetryShutdown {
-                receiver,
-                attempts: attempts.clone(),
-            })),
+        let mut session = HarnessSession::new(Box::new(RetryShutdown {
+            receiver,
+            attempts: attempts.clone(),
+        }));
+        sender.send(HarnessEvent::ConnectionFailed {
+            kind: FailureKind::Protocol,
+            text: "fixture disconnect".into(),
+        })?;
+        session.pump();
+        assert!(session.is_closed());
+        assert!(session.needs_shutdown());
+        core.sessions.insert(task_id.clone(), session);
+        assert!(core.ensure_session(&task_id, None).await.is_err());
+        assert!(core.sessions.contains_key(&task_id));
+        assert!(
+            core.execute(Command::DeleteTask {
+                task_id: task_id.clone(),
+                remove_worktree: false
+            })
+            .await
+            .is_err()
         );
+        assert!(core.task(&task_id).is_ok());
+        core.tasks.get_mut(&task_id).ok_or("missing task")?.state = TaskState::Review;
+        assert!(core.archive_reviewed(vec![task_id.clone()]).await.is_err());
+        assert_eq!(core.task(&task_id)?.state, TaskState::Review);
         assert!(core.execute(Command::Quit { force: true }).await.is_err());
         assert_eq!(core.shutdown_state(), ShutdownState::Draining);
         assert!(core.sessions.contains_key(&task_id));
@@ -5128,7 +5147,7 @@ mod tests {
             core.execute(Command::Quit { force: true }).await?,
             CommandResult::Quit(_)
         ));
-        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+        assert_eq!(attempts.load(Ordering::SeqCst), 5);
         assert_eq!(core.shutdown_state(), ShutdownState::Closed);
         Ok(())
     }
