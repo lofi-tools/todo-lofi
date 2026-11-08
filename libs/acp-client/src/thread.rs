@@ -15,6 +15,9 @@ use agent_client_protocol::schema::v1::{
     ToolCallStatus, ToolCallUpdate, UsageUpdate,
 };
 
+const MAX_COMMAND_OUTPUT_BYTES: usize = 64 * 1024;
+const COMMAND_OUTPUT_OMITTED: &str = "[… earlier command output omitted …]\n";
+
 /// Status of a tool call row.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ToolStatus {
@@ -677,7 +680,10 @@ impl Transcript {
                 (index, true)
             }
         };
-        let (output, diffs, terminal_id) = collect_content(&tool_call.content);
+        let (output, diffs, terminal_id) = collect_content(
+            &tool_call.content,
+            tool_call.kind == agent_client_protocol::schema::v1::ToolKind::Execute,
+        );
         if let Some(EntryKind::ToolCall {
             output: row_output,
             diffs: row_diffs,
@@ -716,8 +722,14 @@ impl Transcript {
                 index
             }
         };
-        let (output, diffs, terminal_id) =
-            collect_content(update.fields.content.as_deref().unwrap_or_default());
+        let is_command = update.fields.kind.as_ref().map_or_else(
+            || matches!(self.entries.get(index).map(|entry| &entry.kind), Some(EntryKind::ToolCall { kind, .. }) if kind == "Execute"),
+            |kind| *kind == agent_client_protocol::schema::v1::ToolKind::Execute,
+        );
+        let (output, diffs, terminal_id) = collect_content(
+            update.fields.content.as_deref().unwrap_or_default(),
+            is_command,
+        );
         if let Some(EntryKind::ToolCall {
             title,
             kind,
@@ -739,6 +751,8 @@ impl Transcript {
             }
             if let Some(output) = output {
                 *row_output = Some(output);
+            } else if is_command && let Some(output) = row_output {
+                limit_command_output(output);
             }
             if !diffs.is_empty() {
                 *row_diffs = diffs;
@@ -772,8 +786,12 @@ fn text_of(content: &ContentBlock) -> String {
 }
 
 /// Flatten a tool call's content into the pieces the pane renders.
-fn collect_content(content: &[ToolCallContent]) -> (Option<String>, Vec<FileDiff>, Option<String>) {
+fn collect_content(
+    content: &[ToolCallContent],
+    is_command: bool,
+) -> (Option<String>, Vec<FileDiff>, Option<String>) {
     let mut output = String::new();
+    let mut truncated = false;
     let mut diffs = Vec::new();
     let mut terminal_id = None;
     for item in content {
@@ -781,9 +799,9 @@ fn collect_content(content: &[ToolCallContent]) -> (Option<String>, Vec<FileDiff
             ToolCallContent::Content(item) => {
                 if let ContentBlock::Text(text) = &item.content {
                     if !output.is_empty() {
-                        output.push('\n');
+                        append_output(&mut output, "\n", is_command, &mut truncated);
                     }
-                    output.push_str(&text.text);
+                    append_output(&mut output, &text.text, is_command, &mut truncated);
                 }
             }
             ToolCallContent::Diff(diff) => diffs.push(FileDiff {
@@ -797,15 +815,98 @@ fn collect_content(content: &[ToolCallContent]) -> (Option<String>, Vec<FileDiff
             _ => {}
         }
     }
+    if truncated {
+        let start = output.ceil_char_boundary(
+            output
+                .len()
+                .saturating_sub(MAX_COMMAND_OUTPUT_BYTES - COMMAND_OUTPUT_OMITTED.len()),
+        );
+        output.replace_range(..start, COMMAND_OUTPUT_OMITTED);
+    }
     ((!output.is_empty()).then_some(output), diffs, terminal_id)
+}
+
+fn append_output(output: &mut String, text: &str, is_command: bool, truncated: &mut bool) {
+    if !is_command {
+        output.push_str(text);
+        return;
+    }
+    if text.len() >= MAX_COMMAND_OUTPUT_BYTES {
+        *truncated |= !output.is_empty() || text.len() > MAX_COMMAND_OUTPUT_BYTES;
+        output.clear();
+        output.push_str(&text[text.ceil_char_boundary(text.len() - MAX_COMMAND_OUTPUT_BYTES)..]);
+    } else {
+        let excess = output
+            .len()
+            .saturating_add(text.len())
+            .saturating_sub(MAX_COMMAND_OUTPUT_BYTES);
+        if excess > 0 {
+            *truncated = true;
+            output.drain(..output.ceil_char_boundary(excess));
+        }
+        output.push_str(text);
+    }
+}
+
+fn limit_command_output(output: &mut String) {
+    if output.len() > MAX_COMMAND_OUTPUT_BYTES {
+        let start = output.ceil_char_boundary(
+            output.len() - MAX_COMMAND_OUTPUT_BYTES + COMMAND_OUTPUT_OMITTED.len(),
+        );
+        output.replace_range(..start, COMMAND_OUTPUT_OMITTED);
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use agent_client_protocol::schema::v1::{
-        ContentChunk, CurrentModeUpdate, SessionConfigKind, TextContent,
+        ContentChunk, CurrentModeUpdate, SessionConfigKind, TextContent, ToolCallUpdateFields,
+        ToolKind,
     };
+
+    #[test]
+    fn command_content_retains_bounded_unicode_tail_across_blocks_and_kind_updates()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let large = "界".repeat(MAX_COMMAND_OUTPUT_BYTES);
+        let content: Vec<ToolCallContent> = serde_json::from_value(serde_json::json!([
+            {"type": "content", "content": {"type": "text", "text": large}},
+            {"type": "content", "content": {"type": "text", "text": "last"}}
+        ]))?;
+        let (bounded, _, _) = collect_content(&content, true);
+        let bounded = bounded.ok_or("missing command output")?;
+        assert!(bounded.len() <= MAX_COMMAND_OUTPUT_BYTES);
+        assert!(bounded.starts_with(COMMAND_OUTPUT_OMITTED));
+        assert!(bounded.ends_with("\nlast"));
+        let (unbounded, _, _) = collect_content(&content, false);
+        assert!(
+            unbounded
+                .as_ref()
+                .is_some_and(|text| text.len() > MAX_COMMAND_OUTPUT_BYTES)
+        );
+
+        let mut transcript = Transcript::default();
+        transcript.apply_update(&SessionUpdate::ToolCall(
+            ToolCall::new("tool", "test").content(content),
+        ));
+        transcript.apply_update(&SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
+            "tool",
+            ToolCallUpdateFields::new().kind(ToolKind::Execute),
+        )));
+        let Some(Entry {
+            kind:
+                EntryKind::ToolCall {
+                    output: Some(output),
+                    ..
+                },
+            ..
+        }) = transcript.entries().first()
+        else {
+            return Err("missing updated command output".into());
+        };
+        assert_eq!(output, &bounded);
+        Ok(())
+    }
 
     /// A `model`-shaped select option, the way an agent advertises one.
     fn model_option(current: &str) -> SessionConfigOption {
