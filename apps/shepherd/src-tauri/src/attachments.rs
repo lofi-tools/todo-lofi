@@ -358,11 +358,7 @@ fn hex_digest(digest: &[u8]) -> String {
 }
 
 fn persist(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    let regular_file = || {
-        path.symlink_metadata()
-            .is_ok_and(|metadata| metadata.is_file())
-    };
-    if regular_file() {
+    if verify_cached_file(path, bytes)? {
         return Ok(());
     }
     let parent = path
@@ -371,16 +367,93 @@ fn persist(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
     temporary.write_all(bytes)?;
     if let Err(error) = temporary.persist_noclobber(path)
-        && (error.error.kind() != ErrorKind::AlreadyExists || !regular_file())
+        && (error.error.kind() != ErrorKind::AlreadyExists || !verify_cached_file(path, bytes)?)
     {
         return Err(error.error);
     }
     Ok(())
 }
 
+fn verify_cached_file(path: &Path, expected: &[u8]) -> io::Result<bool> {
+    #[cfg(not(unix))]
+    match path.symlink_metadata() {
+        Ok(metadata) if metadata.is_file() => {}
+        Ok(_) => return Err(invalid("The cached attachment is not a regular file.")),
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error),
+    }
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    let mut file = match options.open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    let metadata = file.metadata()?;
+    if !metadata.is_file() || metadata.len() != expected.len() as u64 {
+        return Err(io::Error::new(
+            ErrorKind::InvalidData,
+            "Cached attachment does not match its content.",
+        ));
+    }
+    let mut buffer = [0; 8192];
+    for chunk in expected.chunks(buffer.len()) {
+        file.read_exact(&mut buffer[..chunk.len()])?;
+        if &buffer[..chunk.len()] != chunk {
+            return Err(io::Error::new(
+                ErrorKind::InvalidData,
+                "Cached attachment does not match its content.",
+            ));
+        }
+    }
+    if file.read(&mut buffer[..1])? != 0 {
+        return Err(io::Error::new(
+            ErrorKind::InvalidData,
+            "Cached attachment does not match its content.",
+        ));
+    }
+    Ok(true)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cached_files_must_match_content_before_reuse() -> io::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let task = directory
+            .path()
+            .join("attachments")
+            .join(uuid::Uuid::new_v4().to_string());
+        let id = persist_prompt_file(&task, "note.txt", b"first")?;
+        let file = prompt_file(&task, &id)?;
+        assert_eq!(persist_prompt_file(&task, "note.txt", b"first")?, id);
+        fs::write(&file, b"other")?;
+        assert_eq!(
+            persist_prompt_file(&task, "note.txt", b"first")
+                .err()
+                .map(|error| error.kind()),
+            Some(ErrorKind::InvalidData)
+        );
+        assert_eq!(fs::read(&file)?, b"other");
+        let screenshot = b"\x89PNG\r\n\x1a\nimage";
+        let path = persist_preview_screenshot(&task, screenshot)?;
+        fs::write(&path, b"\x89PNG\r\n\x1a\nother")?;
+        assert_eq!(
+            persist_preview_screenshot(&task, screenshot)
+                .err()
+                .map(|error| error.kind()),
+            Some(ErrorKind::InvalidData)
+        );
+        assert_eq!(fs::read(&path)?, b"\x89PNG\r\n\x1a\nother");
+        Ok(())
+    }
 
     #[cfg(unix)]
     #[test]

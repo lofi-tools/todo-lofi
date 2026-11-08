@@ -1060,6 +1060,9 @@ and the task header never overstates the tier.
   read the selected linked text files through Shepherd's bridge during the
   sending turn. Turso saves composer attachment metadata with the prompt
   entry and restores the attachment order when reopening a task.
+  Reusing a content-addressed attachment or preview cache file verifies its
+  bytes first; a mismatch is reported and the existing file is preserved.
+  A fixture covers same-size corruption for both cache paths.
   `attachments.max_file_bytes` supports app defaults and project overrides
   for composer files and preview screenshots. The composer searches workspace
   paths from `@`, inserts a reference, and resolves it against the task
