@@ -649,11 +649,13 @@ pub enum HarnessEvent {
     },
     Plan {
         rows: Vec<PlanRow>,
+        stream_permit: Option<Arc<tokio::sync::OwnedSemaphorePermit>>,
     },
     Usage {
         used: u64,
         size: u64,
         cost: Option<f64>,
+        stream_permit: Option<Arc<tokio::sync::OwnedSemaphorePermit>>,
     },
     ApprovalRequested {
         request: ApprovalRequest,
@@ -674,7 +676,9 @@ pub enum HarnessEvent {
     ApprovalPolicyError {
         text: String,
     },
-    ModeChanged,
+    ModeChanged {
+        stream_permit: Option<Arc<tokio::sync::OwnedSemaphorePermit>>,
+    },
     TurnError {
         kind: FailureKind,
         text: String,
@@ -978,8 +982,10 @@ impl Transcript {
             HarnessEvent::TurnFinished { .. } | HarnessEvent::Exited { .. } => {
                 self.stop_unfinished_commands()
             }
-            HarnessEvent::Plan { rows } => self.upsert_plan(rows.clone()),
-            HarnessEvent::Usage { used, size, cost } => self.upsert_usage(*used, *size, *cost),
+            HarnessEvent::Plan { rows, .. } => self.upsert_plan(rows.clone()),
+            HarnessEvent::Usage {
+                used, size, cost, ..
+            } => self.upsert_usage(*used, *size, *cost),
             HarnessEvent::ApprovalRequested { request } => {
                 self.push_approval(request.clone(), None)
             }

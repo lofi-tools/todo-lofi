@@ -670,11 +670,11 @@ async fn drive_session(
                 match event {
                     Some(AcpEvent::SessionUpdate(notification, permit)) if notification.session_id == session => {
                         if update_modes(&changes.modes, &notification.update) {
-                            publish(&sender, HarnessEvent::ModeChanged)?;
+                            publish(&sender, HarnessEvent::ModeChanged { stream_permit: permit.clone() })?;
                         }
                         if let Some(mut event) = updates.apply(&notification.update) {
                             match &mut event {
-                                HarnessEvent::Delta { stream_permit, .. } | HarnessEvent::ToolCall { stream_permit, .. } => *stream_permit = permit,
+                                HarnessEvent::Delta { stream_permit, .. } | HarnessEvent::ToolCall { stream_permit, .. } | HarnessEvent::Plan { stream_permit, .. } | HarnessEvent::Usage { stream_permit, .. } => *stream_permit = permit,
                                 _ => {}
                             }
                             updates.publish(&sender, event)?;
@@ -1219,11 +1219,13 @@ impl Updates {
                         status: format!("{:?}", entry.status),
                     })
                     .collect(),
+                stream_permit: None,
             }),
             SessionUpdate::UsageUpdate(usage) => Some(HarnessEvent::Usage {
                 used: usage.used,
                 size: usage.size,
                 cost: usage.cost.as_ref().map(|cost| cost.amount),
+                stream_permit: None,
             }),
             _ => None,
         };
@@ -1591,6 +1593,48 @@ mod tests {
         }
         assert_eq!(deltas, 4096);
         assert!(failed);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn plan_usage_and_mode_updates_retain_capacity() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let modes = schema::SessionModeState::new(
+            "ask",
+            vec![
+                schema::SessionMode::new("ask", "Ask"),
+                schema::SessionMode::new("plan", "Plan"),
+            ],
+        );
+        let (mut harness, _, _) = fake(FakeScript {
+            legacy_modes: Some(modes),
+            prompt_updates: vec![
+                SessionUpdate::Plan(schema::Plan::new(Vec::new())),
+                SessionUpdate::UsageUpdate(schema::UsageUpdate::new(1, 100)),
+                SessionUpdate::CurrentModeUpdate(schema::CurrentModeUpdate::new("plan")),
+            ],
+            ..FakeScript::default()
+        })
+        .await?;
+        harness.open_session(None).await?;
+        harness.prompt(PromptInput::text("go")).await?;
+        let mut plan = false;
+        let mut usage = false;
+        let mut mode = false;
+        timeout(Duration::from_secs(5), async {
+            while let Some(event) = harness.events.recv().await {
+                match event {
+                    HarnessEvent::Plan { stream_permit, .. } => plan = stream_permit.is_some(),
+                    HarnessEvent::Usage { stream_permit, .. } => usage = stream_permit.is_some(),
+                    HarnessEvent::ModeChanged { stream_permit } => mode = stream_permit.is_some(),
+                    HarnessEvent::TurnFinished { .. } => break,
+                    _ => {}
+                }
+            }
+        })
+        .await?;
+        assert!(plan && usage && mode);
+        harness.shutdown().await?;
         Ok(())
     }
 

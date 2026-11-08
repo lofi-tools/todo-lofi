@@ -34,6 +34,8 @@ pub struct FakeScript {
     pub mode_config: Option<(SessionConfigOption, SessionConfigOption)>,
     /// Text delivered as streamed agent messages.
     pub chunks: Vec<String>,
+    /// Additional updates emitted during a prompt.
+    pub prompt_updates: Vec<SessionUpdate>,
     /// A tool call announced before the prompt finishes.
     pub tool_call: Option<ToolCall>,
     /// A tool-call update sent after the tool call.
@@ -313,6 +315,10 @@ async fn run_turn(
                 TextContent::new(chunk.clone()),
             ))),
         ))?;
+    }
+    for update in &script.prompt_updates {
+        connection
+            .send_notification(SessionNotification::new(session_id.clone(), update.clone()))?;
     }
     if let Some(tool_call) = &script.tool_call {
         connection.send_notification(SessionNotification::new(

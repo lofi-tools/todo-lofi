@@ -422,7 +422,7 @@ impl HarnessSession {
         if self.closed
             || events
                 .iter()
-                .any(|event| matches!(event, HarnessEvent::ModeChanged))
+                .any(|event| matches!(event, HarnessEvent::ModeChanged { .. }))
         {
             self.capabilities.mode_picker = self.modes().is_some();
         }

@@ -262,13 +262,17 @@ impl FakeHarness {
                     return Ok(());
                 }
                 FakeStep::Plan(rows) => {
-                    self.send(HarnessEvent::Plan { rows: rows.clone() })?;
+                    self.send(HarnessEvent::Plan {
+                        rows: rows.clone(),
+                        stream_permit: None,
+                    })?;
                 }
                 FakeStep::Usage { used, size, cost } => {
                     self.send(HarnessEvent::Usage {
                         used: *used,
                         size: *size,
                         cost: *cost,
+                        stream_permit: None,
                     })?;
                 }
                 FakeStep::WriteFile { path, contents } => {

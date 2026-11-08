@@ -1569,9 +1569,10 @@ placeholder tabs and no unearned state badges.
   and preserves already queued updates. A second fixture verifies that a prompt
   response is delivered even when the update capacity is full. Text and tool
   events retain their permits through Shepherd's harness queue; a fixture fills
-  that queue and checks the failure. Other mapped event types still need
-  downstream capacity tracking. Shepherd and Taskstream fold history while
-  session/load is in flight, each with a 600-update replay fixture.
+  that queue and checks the failure. Mapped plan, usage and mode updates also
+  retain permits through the harness; a fixture checks each kind. Shepherd and
+  Taskstream fold history while session/load is in flight, each with a
+  600-update replay fixture.
   Transcript folding similarly selects the tail of an oversized command-output
   chunk before allocating it, with a UTF-8 regression for the retained output.
 - [ ] Multiple agents and projects: three agents across two projects, no state

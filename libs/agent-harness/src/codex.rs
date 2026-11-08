@@ -2504,6 +2504,7 @@ fn exec_usage(event: &Value) -> Option<HarnessEvent> {
         used,
         size,
         cost: None,
+        stream_permit: None,
     })
 }
 
@@ -2527,7 +2528,10 @@ fn exec_plan(event: &Value) -> Option<HarnessEvent> {
     if rows.is_empty() {
         None
     } else {
-        Some(HarnessEvent::Plan { rows })
+        Some(HarnessEvent::Plan {
+            rows,
+            stream_permit: None,
+        })
     }
 }
 
