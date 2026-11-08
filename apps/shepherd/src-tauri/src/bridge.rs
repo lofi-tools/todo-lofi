@@ -34,7 +34,7 @@ use shepherd_core::{
     Agent, Command, CommandResult, Core, CoreError, Event, ProjectApprovalsSnapshot, ProjectId,
     ProjectList, QuitSummary, TaskId, TaskList, TaskState, TaskWorkspace, WorkspaceLayout,
 };
-use tokio::sync::{Mutex, broadcast, mpsc, oneshot, watch};
+use tokio::sync::{Mutex, Semaphore, broadcast, mpsc, oneshot, watch};
 use tokio::time::Instant;
 
 use crate::attachments::{self, AttachmentLimit};
@@ -44,6 +44,9 @@ use crate::file_watch::{FileWatchUpdate, WatchError, WorkspaceWatch};
 use crate::pty_terminal::PtyTerminals;
 use crate::settings::{DEFAULT_ATTACHMENT_BYTES, DEFAULT_SCROLLBACK, SettingKey, Settings};
 use crate::terminal_screen::{Screen, SearchDirection, TerminalAppearance, TerminalFrame};
+
+const FILE_WATCH_START_TIMEOUT: Duration = Duration::from_secs(5);
+const MAX_PENDING_FILE_WATCH_STARTS: usize = 4;
 
 #[derive(Debug, thiserror::Error, Serialize)]
 #[error("{message}")]
@@ -731,6 +734,7 @@ pub struct ShellState {
     file_searches: Mutex<BTreeMap<String, FileSearch>>,
     task_searches: Mutex<BTreeMap<String, TaskSearchRequest>>,
     file_watches: Arc<Mutex<BTreeMap<String, oneshot::Sender<()>>>>,
+    file_watch_starts: Arc<Semaphore>,
 }
 
 struct ProjectScanCache {
@@ -792,6 +796,34 @@ async fn pump_workspace_watch(
     }
 }
 
+async fn start_file_watcher<T: Send + 'static>(
+    capacity: Arc<Semaphore>,
+    deadline: Duration,
+    start: impl FnOnce() -> Result<T, WatchError> + Send + 'static,
+) -> Result<T, BridgeError> {
+    let permit = capacity
+        .try_acquire_owned()
+        .map_err(|_| BridgeError::new("files", "Too many file watchers are still starting."))?;
+    let worker = tokio::task::spawn_blocking(move || (start(), permit));
+    let (result, _permit) = tokio::time::timeout(deadline, worker)
+        .await
+        .map_err(|_| {
+            BridgeError::new(
+                "files",
+                "The file watcher took too long to start. Please try again.",
+            )
+        })?
+        .map_err(|error| {
+            BridgeError::new(
+                "files",
+                format!("Could not start the file watcher: {error}"),
+            )
+        })?;
+    result.map_err(|error| {
+        BridgeError::new("files", format!("Could not watch workspace files: {error}"))
+    })
+}
+
 impl ShellState {
     #[cfg(test)]
     pub fn new(core: Core) -> Self {
@@ -828,6 +860,7 @@ impl ShellState {
             file_searches: Mutex::new(BTreeMap::new()),
             task_searches: Mutex::new(BTreeMap::new()),
             file_watches: Arc::new(Mutex::new(BTreeMap::new())),
+            file_watch_starts: Arc::new(Semaphore::new(MAX_PENDING_FILE_WATCH_STARTS)),
         }
     }
 
@@ -1751,17 +1784,12 @@ impl ShellState {
         channel: tauri::ipc::Channel<FileWatchUpdate>,
     ) -> Result<String, BridgeError> {
         let root = self.files_directory(project_id, task_id).await?;
-        let mut watcher = tokio::task::spawn_blocking(move || WorkspaceWatch::start(root))
-            .await
-            .map_err(|error| {
-                BridgeError::new(
-                    "files",
-                    format!("Could not start the file watcher: {error}"),
-                )
-            })?
-            .map_err(|error| {
-                BridgeError::new("files", format!("Could not watch workspace files: {error}"))
-            })?;
+        let mut watcher = start_file_watcher(
+            self.file_watch_starts.clone(),
+            FILE_WATCH_START_TIMEOUT,
+            move || WorkspaceWatch::start(root),
+        )
+        .await?;
         let (cancel, mut cancelled) = oneshot::channel();
         let watch_id = uuid::Uuid::new_v4().to_string();
         self.file_watches
@@ -3260,6 +3288,56 @@ mod tests {
     use shepherd_core::{TaskState, TaskSummary};
 
     use super::*;
+
+    #[tokio::test]
+    async fn timed_out_file_watcher_start_holds_capacity_until_worker_finishes()
+    -> Result<(), Box<dyn std::error::Error>> {
+        struct DropMarker(Arc<AtomicBool>, Arc<Semaphore>);
+        impl Drop for DropMarker {
+            fn drop(&mut self) {
+                self.0
+                    .store(self.1.available_permits() == 0, Ordering::SeqCst);
+            }
+        }
+        let capacity = Arc::new(Semaphore::new(1));
+        let dropped = Arc::new(AtomicBool::new(false));
+        let (release, blocked) = std::sync::mpsc::channel();
+        let (entered, started) = oneshot::channel();
+        let waiting = tokio::spawn({
+            let capacity = capacity.clone();
+            let worker_capacity = capacity.clone();
+            let dropped = dropped.clone();
+            async move {
+                start_file_watcher(capacity, Duration::from_millis(100), move || {
+                    entered.send(()).map_err(|_| WatchError::Closed)?;
+                    blocked
+                        .recv()
+                        .map_err(|error| WatchError::Io(std::io::Error::other(error)))?;
+                    Ok(DropMarker(dropped, worker_capacity))
+                })
+                .await
+            }
+        });
+        started.await?;
+        let error = match waiting.await? {
+            Ok(_) => return Err("watcher unexpectedly started".into()),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("too long"));
+        assert_eq!(capacity.available_permits(), 0);
+        let saturated =
+            start_file_watcher(capacity.clone(), Duration::from_secs(1), || Ok(())).await;
+        assert!(matches!(saturated, Err(error) if error.to_string().contains("still starting")));
+        release.send(())?;
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !dropped.load(Ordering::SeqCst) || capacity.available_permits() != 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await?;
+        start_file_watcher(capacity, Duration::from_secs(1), || Ok(())).await?;
+        Ok(())
+    }
 
     #[tokio::test]
     async fn startup_scan_cannot_overwrite_a_later_scan_or_its_failure()

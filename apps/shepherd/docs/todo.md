@@ -1819,6 +1819,12 @@ placeholder tabs and no unearned state badges.
   throughput benchmark ignored, and backend Clippy passed with warnings
   denied. The linked-worktree watcher fixture took over 60 seconds on this run;
   no desktop window or live agent was used.
+  An isolated rerun took 44.75 seconds. A process sample found macOS blocked
+  registering the FSEvents stream. The shell starts watchers on a blocking
+  worker and now returns an error after five seconds, with at most four
+  starts outstanding. A timed-out OS call cannot be cancelled; it keeps its
+  slot until it returns and any late watcher is dropped. A headless fixture
+  verifies timeout, saturation and recovery without relying on FSEvents.
 - [ ] Packaging and CI: macOS 13+, Ubuntu 24.04+, pinned Zig, Tauri build,
   platform smoke.
   The local macOS debug app bundle declares macOS 13.0 in both Info.plist and
