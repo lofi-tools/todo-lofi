@@ -163,19 +163,22 @@ pub fn run() -> Result<(), tauri::Error> {
                 codex_program,
                 codex_detected,
                 opencode_launch,
+                pi_configured,
                 claude_configured,
-            ): (Box<dyn HarnessFactory>, _, _, _, _) = match dev_factory {
-                Some(factory) => (factory, None, false, None, false),
+            ): (Box<dyn HarnessFactory>, _, _, _, _, _) = match dev_factory {
+                Some(factory) => (factory, None, false, None, false, false),
                 None => {
                     let (codex, codex_program, codex_detected) = codex_factory(&data_directory);
-                    let (opencode, claude) = match &agents {
+                    let (opencode, pi, claude) = match &agents {
                         Ok(settings) => (
                             agent_harness::opencode::configured_launch(settings),
+                            settings.command("agents.pi"),
                             settings.command("agents.claude"),
                         ),
                         Err(error) => {
                             let report = error.to_string();
                             (
+                                Err(agent_harness::HarnessError::Protocol(report.clone())),
                                 Err(agent_harness::HarnessError::Protocol(report.clone())),
                                 Err(agent_harness::HarnessError::Protocol(report)),
                             )
@@ -184,15 +187,20 @@ pub fn run() -> Result<(), tauri::Error> {
                     if let Err(error) = &opencode {
                         tracing::warn!(%error, "could not load OpenCode configuration");
                     }
+                    if let Err(error) = &pi {
+                        tracing::warn!(%error, "could not load Pi configuration");
+                    }
                     if let Err(error) = &claude {
                         tracing::warn!(%error, "could not load Claude Code configuration");
                     }
                     let opencode_launch = opencode.as_ref().ok().cloned().flatten();
+                    let pi_configured = matches!(&pi, Ok(Some(_)));
                     let claude_configured = matches!(&claude, Ok(Some(_)));
                     (
                         Box::new(codex_harness::DesktopHarnessFactory {
                             codex,
                             opencode,
+                            pi,
                             claude,
                             settings: agents.as_ref().cloned().map_err(ToString::to_string),
                             terminals: std::sync::Arc::new(terminals.clone()),
@@ -200,6 +208,7 @@ pub fn run() -> Result<(), tauri::Error> {
                         codex_program,
                         codex_detected,
                         opencode_launch,
+                        pi_configured,
                         claude_configured,
                     )
                 }
@@ -213,6 +222,7 @@ pub fn run() -> Result<(), tauri::Error> {
             state.codex_program = codex_program;
             state.codex_detected = codex_detected;
             state.opencode_launch = opencode_launch;
+            state.pi_configured = pi_configured;
             state.claude_configured = claude_configured;
             state.start_event_pump();
             app.manage(state);
@@ -236,6 +246,7 @@ pub fn run() -> Result<(), tauri::Error> {
             bridge::commands::create_draft,
             bridge::commands::set_draft_agent,
             bridge::commands::opencode_configured,
+            bridge::commands::pi_configured,
             bridge::commands::claude_configured,
             bridge::commands::discard_draft,
             bridge::commands::delete_task,

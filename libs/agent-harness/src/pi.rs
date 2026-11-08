@@ -5,8 +5,11 @@ use std::future::Future;
 use std::pin::Pin;
 use std::process::Stdio;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+use async_trait::async_trait;
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWriteExt, BufReader};
@@ -15,7 +18,12 @@ use tokio::sync::{Mutex, mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio::time::timeout;
 
-use crate::{HarnessError, HarnessResult, SpawnSpec};
+use crate::{
+    AgentDiagnostics, AgentHarness, ApprovalId, ApprovalRequest, ApprovalSource, Capabilities,
+    Decision, DeltaKind, FailureKind, HarnessError, HarnessEvent, HarnessResult, ItemId,
+    PromptInput, SessionId, SessionState, SpawnSpec, ToolCallId, ToolStatus, TurnFinishReason,
+    TurnId, command_line,
+};
 
 const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 const MAX_PENDING_REQUESTS: usize = 64;
@@ -27,7 +35,7 @@ const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(3);
 pub struct PiRpc {
     input: Option<mpsc::Sender<Vec<u8>>>,
     replies: Replies,
-    events: Mutex<mpsc::Receiver<PiRpcEvent>>,
+    events: Mutex<Option<mpsc::Receiver<PiRpcEvent>>>,
     supervisor: JoinHandle<HarnessResult<()>>,
     supervisor_complete: bool,
     supervisor_error: Option<String>,
@@ -276,7 +284,7 @@ impl PiRpc {
         let mut rpc = Self {
             input: Some(input),
             replies,
-            events: Mutex::new(receiver),
+            events: Mutex::new(Some(receiver)),
             supervisor,
             supervisor_complete: false,
             supervisor_error: None,
@@ -362,7 +370,17 @@ impl PiRpc {
     }
 
     pub async fn next_event(&self) -> Option<PiRpcEvent> {
-        self.events.lock().await.recv().await
+        let mut events = self.events.lock().await;
+        match events.as_mut() {
+            Some(events) => events.recv().await,
+            None => None,
+        }
+    }
+
+    /// Moves the event receiver to a caller that drains it, so a harness can
+    /// translate records while still sending commands through this handle.
+    pub fn take_events(&mut self) -> Option<mpsc::Receiver<PiRpcEvent>> {
+        self.events.get_mut().take()
     }
 
     pub async fn shutdown(&mut self) -> HarnessResult<()> {
@@ -429,7 +447,10 @@ impl PiRpc {
                 return protocol("Pi did not exit after closing its RPC output during startup");
             }
         }
-        while let Ok(event) = self.events.get_mut().try_recv() {
+        let Some(events) = self.events.get_mut().as_mut() else {
+            return HarnessError::ChannelClosed;
+        };
+        while let Ok(event) = events.try_recv() {
             if let PiRpcEvent::Exited {
                 code,
                 stderr,
@@ -443,6 +464,447 @@ impl PiRpc {
         }
         HarnessError::ChannelClosed
     }
+}
+
+/// Session-level state shared between the command methods and the event pump.
+#[derive(Default)]
+struct PiBridge {
+    turn: u64,
+    running: bool,
+    dialogs: Vec<(ApprovalId, String)>,
+}
+
+type Bridge = Arc<std::sync::Mutex<PiBridge>>;
+
+fn bridge_lock(bridge: &Bridge) -> std::sync::MutexGuard<'_, PiBridge> {
+    bridge
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// One Pi RPC session behind the shared adapter interface.
+///
+/// Pi has no tool-approval protocol of its own. A `confirm` extension dialog is
+/// the only question Shepherd can answer with a decision, so it becomes the
+/// approval card; the bundled extension that forwards tool calls is a separate
+/// concern from this transport bridge.
+pub struct PiHarness {
+    rpc: Option<PiRpc>,
+    events: mpsc::UnboundedReceiver<HarnessEvent>,
+    sender: mpsc::UnboundedSender<HarnessEvent>,
+    state: Option<PiSessionState>,
+    session: Option<SessionId>,
+    bridge: Bridge,
+    cancelled: Arc<AtomicBool>,
+    dialogs: mpsc::UnboundedReceiver<()>,
+    pump: Option<JoinHandle<()>>,
+    diagnostics: AgentDiagnostics,
+}
+
+impl Default for PiHarness {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl PiHarness {
+    pub fn new() -> Self {
+        let (sender, events) = mpsc::unbounded_channel();
+        let (_dialogs, dialogs) = mpsc::unbounded_channel();
+        Self {
+            rpc: None,
+            events,
+            sender,
+            state: None,
+            session: None,
+            bridge: Bridge::default(),
+            cancelled: Arc::new(AtomicBool::new(false)),
+            dialogs,
+            pump: None,
+            diagnostics: AgentDiagnostics::default(),
+        }
+    }
+
+    fn publish(&self, event: HarnessEvent) -> HarnessResult<()> {
+        self.sender
+            .send(event)
+            .map_err(|_| HarnessError::ChannelClosed)
+    }
+}
+
+#[async_trait]
+impl AgentHarness for PiHarness {
+    fn events(&mut self) -> &mut mpsc::UnboundedReceiver<HarnessEvent> {
+        &mut self.events
+    }
+
+    fn diagnostics(&self) -> AgentDiagnostics {
+        self.diagnostics.clone()
+    }
+
+    async fn start(&mut self, spec: SpawnSpec) -> HarnessResult<Capabilities> {
+        if self.rpc.is_some() {
+            return Err(protocol("Pi harness is already started"));
+        }
+        self.diagnostics.command = command_line(&spec);
+        self.diagnostics.protocol = "pi rpc".into();
+        let (mut rpc, state) = PiRpc::start(&spec).await?;
+        let events = rpc
+            .take_events()
+            .ok_or_else(|| protocol("Pi RPC events are already in use"))?;
+        let bridge = self.bridge.clone();
+        let sender = self.sender.clone();
+        let cancelled = self.cancelled.clone();
+        let (dialog_ping, dialogs) = mpsc::unbounded_channel();
+        self.dialogs = dialogs;
+        self.pump = Some(tokio::spawn(async move {
+            pump_events(events, sender, bridge, cancelled, dialog_ping).await;
+        }));
+        self.rpc = Some(rpc);
+        self.state = Some(state);
+        Ok(Capabilities {
+            streaming: true,
+            thoughts: true,
+            tool_calls: true,
+            approvals: true,
+            cancel: true,
+            images: true,
+            ..Capabilities::default()
+        })
+    }
+
+    async fn open_session(&mut self, resume: Option<SessionId>) -> HarnessResult<SessionId> {
+        if self.session.is_some() {
+            return Err(protocol("Pi session is already open"));
+        }
+        if resume.is_some() {
+            return Err(protocol("Pi RPC cannot resume a session by ID"));
+        }
+        let state = self.state.as_ref().ok_or(HarnessError::NotStarted)?;
+        let session = SessionId::new(state.session_id.clone());
+        self.session = Some(session.clone());
+        self.publish(HarnessEvent::SessionState {
+            state: SessionState::Ready,
+        })?;
+        Ok(session)
+    }
+
+    async fn prompt(&mut self, input: PromptInput) -> HarnessResult<()> {
+        if self.session.is_none() {
+            return Err(HarnessError::SessionMissing);
+        }
+        if bridge_lock(&self.bridge).running {
+            return Err(protocol("Pi is already running a turn"));
+        }
+        let rpc = self.rpc.as_ref().ok_or(HarnessError::NotStarted)?;
+        let mut fields = Map::from_iter([("message".into(), json!(input.text))]);
+        if !input.attachments.is_empty() {
+            let mut images = Vec::with_capacity(input.attachments.len());
+            for attachment in &input.attachments {
+                let mime = attachment
+                    .image_mime_type
+                    .as_deref()
+                    .ok_or_else(|| protocol("Pi RPC accepts only image attachments in a prompt"))?;
+                let bytes = tokio::fs::read(&attachment.path).await.map_err(|error| {
+                    protocol(format!(
+                        "could not read image {}: {error}",
+                        attachment.path.display()
+                    ))
+                })?;
+                images.push(json!({
+                    "type": "image",
+                    "data": STANDARD.encode(bytes),
+                    "mimeType": mime,
+                }));
+            }
+            fields.insert("images".into(), Value::Array(images));
+        }
+        let request = rpc.request("prompt", fields);
+        tokio::pin!(request);
+        // An extension command runs before Pi answers, and its dialog can block
+        // that answer. Return once the dialog is pending so the caller can
+        // answer it; the eventual reply has nowhere to go and is dropped.
+        tokio::select! {
+            reply = &mut request => {
+                PromptDisposition::from_reply(reply?)?;
+            }
+            _ = self.dialogs.recv() => {}
+        }
+        Ok(())
+    }
+
+    async fn cancel(&mut self) -> HarnessResult<()> {
+        let rpc = self.rpc.as_ref().ok_or(HarnessError::NotStarted)?;
+        if !bridge_lock(&self.bridge).running {
+            return Err(HarnessError::CancelUnavailable);
+        }
+        self.cancelled.store(true, Ordering::Release);
+        rpc.request("abort", Map::new()).await?;
+        Ok(())
+    }
+
+    async fn respond(&mut self, approval_id: ApprovalId, decision: Decision) -> HarnessResult<()> {
+        let rpc = self.rpc.as_ref().ok_or(HarnessError::NotStarted)?;
+        let method = {
+            let bridge = bridge_lock(&self.bridge);
+            bridge
+                .dialogs
+                .iter()
+                .find(|(id, _)| id == &approval_id)
+                .map(|(_, method)| method.clone())
+                .ok_or(HarnessError::NoPendingApproval)?
+        };
+        if method != "confirm" {
+            return Err(HarnessError::ApprovalOptionUnavailable);
+        }
+        let confirmed = matches!(
+            decision,
+            Decision::Allow | Decision::AllowSession | Decision::AllowProject
+        );
+        rpc.reply_to_extension(
+            approval_id.as_str(),
+            Map::from_iter([("confirmed".into(), json!(confirmed))]),
+        )
+        .await?;
+        bridge_lock(&self.bridge)
+            .dialogs
+            .retain(|(id, _)| id != &approval_id);
+        self.publish(HarnessEvent::ApprovalResolved {
+            approval_id,
+            decision,
+            source: ApprovalSource::User,
+        })
+    }
+
+    async fn shutdown(&mut self) -> HarnessResult<()> {
+        let Some(mut rpc) = self.rpc.take() else {
+            return Ok(());
+        };
+        let result = rpc.shutdown().await;
+        if let Some(pump) = self.pump.take() {
+            pump.abort();
+        }
+        self.session = None;
+        result
+    }
+}
+
+async fn pump_events(
+    mut events: mpsc::Receiver<PiRpcEvent>,
+    sender: mpsc::UnboundedSender<HarnessEvent>,
+    bridge: Bridge,
+    cancelled: Arc<AtomicBool>,
+    dialogs: mpsc::UnboundedSender<()>,
+) {
+    while let Some(event) = events.recv().await {
+        let mut outputs = Vec::new();
+        let mut exited = false;
+        match event {
+            PiRpcEvent::Record(record) => {
+                translate_record(&record, &bridge, &cancelled, &dialogs, &mut outputs);
+            }
+            PiRpcEvent::Exited {
+                code,
+                stderr,
+                protocol_error,
+            } => {
+                exited = true;
+                let running = std::mem::take(&mut bridge_lock(&bridge).running);
+                if let Some(error) = protocol_error {
+                    outputs.push(HarnessEvent::ConnectionFailed {
+                        kind: FailureKind::Protocol,
+                        text: error,
+                    });
+                } else if running {
+                    outputs.push(HarnessEvent::TurnError {
+                        kind: FailureKind::MidTurnExit,
+                        text: format!(
+                            "Pi exited while a turn was running ({code:?}): {}",
+                            stderr.trim()
+                        ),
+                        stream_permit: None,
+                    });
+                }
+                outputs.push(HarnessEvent::Exited { code, stderr });
+            }
+        }
+        for output in outputs {
+            if sender.send(output).is_err() {
+                return;
+            }
+        }
+        if exited {
+            return;
+        }
+    }
+}
+
+fn translate_record(
+    record: &Value,
+    bridge: &Bridge,
+    cancelled: &AtomicBool,
+    dialogs: &mpsc::UnboundedSender<()>,
+    outputs: &mut Vec<HarnessEvent>,
+) {
+    let Some(kind) = record.get("type").and_then(Value::as_str) else {
+        return;
+    };
+    match kind {
+        "agent_start" => {
+            let mut bridge = bridge_lock(bridge);
+            if bridge.running {
+                return;
+            }
+            bridge.turn += 1;
+            bridge.running = true;
+            let turn = bridge.turn;
+            drop(bridge);
+            outputs.push(HarnessEvent::TurnStarted {
+                turn_id: TurnId::new(format!("pi-turn-{turn}")),
+            });
+        }
+        "message_update" => {
+            let Some(update) = record.get("assistantMessageEvent") else {
+                return;
+            };
+            let (kind, field) = match update.get("type").and_then(Value::as_str) {
+                Some("text_delta") => (DeltaKind::Message, "message"),
+                Some("thinking_delta") => (DeltaKind::Thought, "thought"),
+                _ => return,
+            };
+            let Some(delta) = update.get("delta").and_then(Value::as_str) else {
+                return;
+            };
+            let index = update
+                .get("contentIndex")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            let turn = bridge_lock(bridge).turn.max(1);
+            outputs.push(HarnessEvent::Delta {
+                item_id: ItemId::new(format!("pi-{field}-{turn}-{index}")),
+                kind,
+                text: delta.to_owned(),
+                stream_permit: None,
+            });
+        }
+        "tool_execution_start" | "tool_execution_update" | "tool_execution_end" => {
+            let Some(tool_call_id) = record.get("toolCallId").and_then(Value::as_str) else {
+                return;
+            };
+            let name = record
+                .get("toolName")
+                .and_then(Value::as_str)
+                .unwrap_or("tool")
+                .to_owned();
+            let (status, output) = match kind {
+                "tool_execution_start" => (ToolStatus::Running, None),
+                "tool_execution_update" => (
+                    ToolStatus::Running,
+                    tool_result_text(record.get("partialResult")),
+                ),
+                _ => {
+                    let failed = record
+                        .get("isError")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false);
+                    (
+                        if failed {
+                            ToolStatus::Failed
+                        } else {
+                            ToolStatus::Completed
+                        },
+                        tool_result_text(record.get("result")),
+                    )
+                }
+            };
+            outputs.push(HarnessEvent::ToolCall {
+                tool_call_id: ToolCallId::new(tool_call_id),
+                title: name.clone(),
+                kind: name,
+                status,
+                output,
+                diffs: Vec::new(),
+                terminal_id: None,
+                stream_permit: None,
+            });
+        }
+        "extension_ui_request" => {
+            let Some(id) = record.get("id").and_then(Value::as_str) else {
+                return;
+            };
+            let method = record
+                .get("method")
+                .and_then(Value::as_str)
+                .unwrap_or("dialog")
+                .to_owned();
+            if method != "confirm" {
+                tracing::debug!(method, "Pi extension UI method has no approval card");
+                return;
+            }
+            let title = record
+                .get("title")
+                .and_then(Value::as_str)
+                .or_else(|| record.get("message").and_then(Value::as_str))
+                .unwrap_or("Pi extension confirmation")
+                .to_owned();
+            let approval_id = ApprovalId::new(id);
+            bridge_lock(bridge)
+                .dialogs
+                .push((approval_id.clone(), method));
+            if dialogs.send(()).is_err() {
+                tracing::debug!("could not wake the waiting prompt for a Pi dialog");
+            }
+            outputs.push(HarnessEvent::ApprovalRequested {
+                request: ApprovalRequest {
+                    approval_id: approval_id.clone(),
+                    tool_call_id: ToolCallId::new(id),
+                    title,
+                    arguments: record.clone(),
+                    paths: Vec::new(),
+                    patch: None,
+                    choices: Some(vec![Decision::Allow, Decision::Deny]),
+                    stream_permit: None,
+                },
+            });
+        }
+        "extension_error" => {
+            let text = record
+                .get("error")
+                .and_then(Value::as_str)
+                .unwrap_or("a Pi extension failed")
+                .to_owned();
+            outputs.push(HarnessEvent::TurnError {
+                kind: FailureKind::Protocol,
+                text,
+                stream_permit: None,
+            });
+        }
+        "agent_settled" => {
+            let aborted = record
+                .get("aborted")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let was_cancelled = cancelled.swap(false, Ordering::AcqRel);
+            bridge_lock(bridge).running = false;
+            outputs.push(HarnessEvent::TurnFinished {
+                reason: if aborted || was_cancelled {
+                    TurnFinishReason::Cancelled
+                } else {
+                    TurnFinishReason::Completed
+                },
+            });
+        }
+        _ => {}
+    }
+}
+
+fn tool_result_text(result: Option<&Value>) -> Option<String> {
+    let content = result?.get("content")?.as_array()?;
+    let text: Vec<&str> = content
+        .iter()
+        .filter_map(|part| part.get("text").and_then(Value::as_str))
+        .collect();
+    (!text.is_empty()).then(|| text.join("\n"))
 }
 
 #[cfg(unix)]
@@ -1248,6 +1710,207 @@ sed -n '3p' session.jsonl | sed "s/\"id\":\"2\"/\"id\":\"$prompt_id\"/"
             })
         ));
         rpc.shutdown().await?;
+        Ok(())
+    }
+
+    fn pi_script_spec(script: &std::path::Path, cwd: &std::path::Path) -> SpawnSpec {
+        SpawnSpec {
+            program: "/bin/sh".into(),
+            args: vec![script.to_string_lossy().into_owned()],
+            cwd: cwd.to_owned(),
+            ..SpawnSpec::default()
+        }
+    }
+
+    async fn harness_event(
+        harness: &mut PiHarness,
+    ) -> Result<HarnessEvent, Box<dyn std::error::Error>> {
+        timeout(PROBE_TIMEOUT, harness.events().recv())
+            .await?
+            .ok_or_else(|| "the harness event channel closed".into())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn harness_streams_a_turn_and_settles_on_agent_settled()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let script = directory.path().join("pi-harness-turn.sh");
+        std::fs::write(
+            &script,
+            r#"
+[ "$1" = --mode ] && [ "$2" = rpc ] || exit 2
+IFS= read -r state || exit 3
+state_id=$(printf '%s\n' "$state" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
+printf '{"type":"response","id":"%s","command":"get_state","success":true,"data":{"sessionId":"pi-harness","isStreaming":false,"isCompacting":false,"pendingMessageCount":0}}\n' "$state_id"
+IFS= read -r prompt || exit 4
+prompt_id=$(printf '%s\n' "$prompt" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
+printf '{"type":"response","id":"%s","command":"prompt","success":true,"data":{"disposition":"started"}}\n' "$prompt_id"
+printf '{"type":"agent_start"}\n'
+printf '{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"Hello"}}\n'
+printf '{"type":"message_update","assistantMessageEvent":{"type":"thinking_delta","contentIndex":0,"delta":"Plan"}}\n'
+printf '{"type":"tool_execution_start","toolCallId":"call-1","toolName":"bash","args":{}}\n'
+printf '{"type":"tool_execution_end","toolCallId":"call-1","toolName":"bash","result":{"content":[{"type":"text","text":"done"}]},"isError":false}\n'
+printf '{"type":"agent_end","messages":[],"willRetry":false}\n'
+printf '{"type":"agent_settled","aborted":false}\n'
+exec sleep 30
+"#,
+        )?;
+        let mut harness = PiHarness::new();
+        let capabilities = harness
+            .start(pi_script_spec(&script, directory.path()))
+            .await?;
+        assert!(capabilities.streaming && capabilities.approvals && capabilities.cancel);
+        assert_eq!(harness.open_session(None).await?.as_str(), "pi-harness");
+        harness.prompt(PromptInput::text("fixture")).await?;
+        let mut started = false;
+        let mut deltas = Vec::new();
+        let mut tools = Vec::new();
+        let mut finished = None;
+        for _ in 0..8 {
+            match harness_event(&mut harness).await? {
+                HarnessEvent::TurnStarted { .. } => started = true,
+                HarnessEvent::Delta { kind, text, .. } => deltas.push((kind, text)),
+                HarnessEvent::ToolCall { status, output, .. } => tools.push((status, output)),
+                HarnessEvent::TurnFinished { reason } => {
+                    finished = Some(reason);
+                    break;
+                }
+                _ => {}
+            }
+        }
+        assert!(started, "the harness reports the run start");
+        assert_eq!(
+            deltas,
+            [
+                (DeltaKind::Message, "Hello".to_owned()),
+                (DeltaKind::Thought, "Plan".to_owned()),
+            ]
+        );
+        assert_eq!(
+            tools,
+            [
+                (ToolStatus::Running, None),
+                (ToolStatus::Completed, Some("done".to_owned())),
+            ]
+        );
+        assert_eq!(finished, Some(TurnFinishReason::Completed));
+        harness.shutdown().await?;
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn harness_answers_the_recorded_extension_approval()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        std::fs::copy(
+            format!(
+                "{}/fixtures/pi/offline-extension-session.jsonl",
+                env!("CARGO_MANIFEST_DIR")
+            ),
+            directory.path().join("session.jsonl"),
+        )?;
+        let script = directory.path().join("pi-harness-approval.sh");
+        std::fs::write(
+            &script,
+            r#"
+[ "$1" = --mode ] && [ "$2" = rpc ] || exit 2
+IFS= read -r state || exit 3
+state_id=$(printf '%s\n' "$state" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
+sed -n '1p' session.jsonl | sed "s/\"id\":\"1\"/\"id\":\"$state_id\"/"
+IFS= read -r prompt || exit 4
+prompt_id=$(printf '%s\n' "$prompt" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
+sed -n '2p' session.jsonl
+dialog_id=$(sed -n '2p' session.jsonl | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
+IFS= read -r reply || exit 5
+case "$reply" in *'"confirmed":true'*) ;; *) exit 6;; esac
+case "$reply" in *"\"id\":\"$dialog_id\""*) ;; *) exit 6;; esac
+sed -n '3p' session.jsonl | sed "s/\"id\":\"2\"/\"id\":\"$prompt_id\"/"
+exec sleep 30
+"#,
+        )?;
+        let mut harness = PiHarness::new();
+        harness
+            .start(pi_script_spec(&script, directory.path()))
+            .await?;
+        harness.open_session(None).await?;
+        harness
+            .prompt(PromptInput::text("/shepherd-rpc-fixture"))
+            .await?;
+        let request = loop {
+            if let HarnessEvent::ApprovalRequested { request } = harness_event(&mut harness).await?
+            {
+                break request;
+            }
+        };
+        assert_eq!(request.title, "Fixture");
+        assert_eq!(request.choices, Some(vec![Decision::Allow, Decision::Deny]));
+        harness
+            .respond(request.approval_id.clone(), Decision::Allow)
+            .await?;
+        assert!(matches!(
+            harness_event(&mut harness).await?,
+            HarnessEvent::ApprovalResolved {
+                approval_id,
+                decision: Decision::Allow,
+                source: ApprovalSource::User,
+            } if approval_id == request.approval_id
+        ));
+        harness.shutdown().await?;
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn harness_cancellation_settles_and_stops_descendants()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let script = directory.path().join("pi-harness-cancel.sh");
+        std::fs::write(
+            &script,
+            r#"
+[ "$1" = --mode ] && [ "$2" = rpc ] || exit 2
+IFS= read -r state || exit 3
+state_id=$(printf '%s\n' "$state" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
+printf '{"type":"response","id":"%s","command":"get_state","success":true,"data":{"sessionId":"pi-harness","isStreaming":false,"isCompacting":false,"pendingMessageCount":0}}\n' "$state_id"
+IFS= read -r prompt || exit 4
+prompt_id=$(printf '%s\n' "$prompt" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
+printf '{"type":"response","id":"%s","command":"prompt","success":true,"data":{"disposition":"started"}}\n' "$prompt_id"
+printf '{"type":"agent_start"}\n'
+IFS= read -r abort || exit 5
+case "$abort" in *'"type":"abort"'*) ;; *) exit 6;; esac
+abort_id=$(printf '%s\n' "$abort" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
+printf '{"type":"response","id":"%s","command":"abort","success":true}\n' "$abort_id"
+(sleep 2; printf survived > child-survived) &
+printf '{"type":"agent_settled","aborted":true}\n'
+exec sleep 30
+"#,
+        )?;
+        let mut harness = PiHarness::new();
+        harness
+            .start(pi_script_spec(&script, directory.path()))
+            .await?;
+        harness.open_session(None).await?;
+        harness.prompt(PromptInput::text("fixture")).await?;
+        loop {
+            if matches!(
+                harness_event(&mut harness).await?,
+                HarnessEvent::TurnStarted { .. }
+            ) {
+                break;
+            }
+        }
+        harness.cancel().await?;
+        loop {
+            if let HarnessEvent::TurnFinished { reason } = harness_event(&mut harness).await? {
+                assert_eq!(reason, TurnFinishReason::Cancelled);
+                break;
+            }
+        }
+        harness.shutdown().await?;
+        tokio::time::sleep(Duration::from_millis(2500)).await;
+        assert!(!directory.path().join("child-survived").exists());
         Ok(())
     }
 

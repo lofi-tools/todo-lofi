@@ -918,6 +918,16 @@ If Pi’s RPC probe is blocked, proceed with ACP while resolving it.
   `agent_settled`. Continue with ACP while the Pi lifecycle probe is blocked.
   The Pi reference checkout documents the required contract in
   `packages/coding-agent/docs/rpc.md` at `a7a75a9dc6891281eed58906c07c55929e7b6c13`.
+  `PiHarness` now drives a Pi session through the shared adapter interface:
+  `agent_start` opens a turn, `message_update` text and thinking deltas stream,
+  tool execution start/update/end become one tool row, and `agent_settled`
+  finishes it (cancelled when `aborted` or after an `abort` command). `cancel`
+  sends `abort`; shutdown closes stdin and reaps the process group. A `confirm`
+  extension dialog becomes an approval card answered by its ID through
+  `extension_ui_response`; other dialog methods are logged rather than mapped to
+  a decision. Session resume by ID, the bundled tool-approval extension and the
+  `unreviewed tools` label remain open, as does recording a live model turn for
+  `agent_settled` and tool approval records.
 - [ ] ACP adapter using `libs/acp-client`; no duplicate protocol client.
   Use this adapter for OpenCode when its native protocol is unavailable.
   The shared client accepts an exact configured command, validates ACP v1,

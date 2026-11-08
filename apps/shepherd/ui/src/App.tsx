@@ -69,7 +69,7 @@ const DEFAULT_APPROVAL_CHOICES: bridge.Decision[] = ['allow', 'deny']
 const AGENT_OPTIONS: PickerOption[] = [
   { id: 'codex', name: bridge.AGENT_LABELS.codex },
   { id: 'opencode', name: bridge.AGENT_LABELS.opencode },
-  { id: 'pi', name: 'Pi (coming soon)', disabled: true },
+  { id: 'pi', name: bridge.AGENT_LABELS.pi },
   { id: 'claude', name: bridge.AGENT_LABELS.claude },
   { id: 'freebuff', name: 'Freebuff (terminal)' },
 ]
@@ -149,6 +149,7 @@ export function App() {
   const [projectsLoaded, setProjectsLoaded] = createSignal(false)
   const [codexAvailable, setCodexAvailable] = createSignal(false)
   const [opencodeConfigured, setOpencodeConfigured] = createSignal(false)
+  const [piConfigured, setPiConfigured] = createSignal(false)
   const [claudeConfigured, setClaudeConfigured] = createSignal(false)
   const [newTaskAgent, setNewTaskAgent] = createSignal<bridge.Agent>('codex')
   const [selectedProjectId, setSelectedProjectId] = createSignal<string | null>(null)
@@ -433,8 +434,12 @@ export function App() {
   const [shutdownNote, setShutdownNote] = createSignal<string | null>(null)
   let allowClose = false
 
-  const agentConfigured = (agent: bridge.Agent) =>
-    agent === 'codex' || (agent === 'opencode' ? opencodeConfigured() : claudeConfigured())
+  const agentConfigured = (agent: bridge.Agent) => {
+    if (agent === 'codex') return true
+    if (agent === 'opencode') return opencodeConfigured()
+    if (agent === 'pi') return piConfigured()
+    return claudeConfigured()
+  }
 
   const agentOptions = () => {
     const project = selectedProject()
@@ -444,7 +449,7 @@ export function App() {
     return AGENT_OPTIONS.map((agent) => {
       if (agent.id === 'freebuff') return { ...agent, disabled: !canOpen }
       if (agent.id === 'codex') return { ...agent, disabled: !canChange }
-      if (agent.id === 'opencode' || agent.id === 'claude') return {
+      if (agent.id === 'opencode' || agent.id === 'pi' || agent.id === 'claude') return {
         ...agent,
         disabled: !canChange || !agentConfigured(agent.id),
         detail: agentConfigured(agent.id) ? undefined : 'Set the executable in settings.json',
@@ -460,7 +465,7 @@ export function App() {
       setFreebuffProjectId(project.id)
       return
     }
-    if (agent !== 'codex' && agent !== 'opencode' && agent !== 'claude') return
+    if (agent !== 'codex' && agent !== 'opencode' && agent !== 'pi' && agent !== 'claude') return
     if (!agentConfigured(agent)) return
     const task = workspace()?.task
     if (!task) {
@@ -809,6 +814,7 @@ export function App() {
           setCommandNotice([
             `Codex ${available.codex ? 'detected' : 'unavailable'}`,
             `OpenCode ${available.opencode ? 'configured' : 'unconfigured'}`,
+            `Pi ${available.pi ? 'configured' : 'unconfigured'}`,
             `Claude Code ${available.claude ? 'configured' : 'unconfigured'}`,
           ].join(' · '))
         }).catch((failure) => setError(describe(failure)))
@@ -1274,6 +1280,7 @@ export function App() {
     void homeDir().then(setHomeDirectory).catch((error) => console.warn('Could not resolve the home directory', error))
     void reloadKeybindings().catch((failure) => setError(describe(failure)))
     void bridge.opencodeConfigured().then(setOpencodeConfigured).catch((error) => console.warn('Could not read OpenCode availability', error))
+    void bridge.piConfigured().then(setPiConfigured).catch((error) => console.warn('Could not read Pi availability', error))
     void bridge.claudeConfigured().then(setClaudeConfigured).catch((error) => console.warn('Could not read Claude Code availability', error))
     void run(async () => {
       await reloadPreferences().catch((failure) => setError(describe(failure)))

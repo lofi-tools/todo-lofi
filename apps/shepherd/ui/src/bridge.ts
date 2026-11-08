@@ -29,8 +29,8 @@ export type TaskState =
   | 'interrupted'
 
 export type AgentTier = 'native' | 'acp' | 'terminal-wrapper' | 'plain-pane'
-export type Agent = 'codex' | 'opencode' | 'claude'
-export const AGENT_LABELS: Record<Agent, string> = { codex: 'Codex', opencode: 'OpenCode', claude: 'Claude Code' }
+export type Agent = 'codex' | 'opencode' | 'pi' | 'claude'
+export const AGENT_LABELS: Record<Agent, string> = { codex: 'Codex', opencode: 'OpenCode', pi: 'Pi', claude: 'Claude Code' }
 
 export type ShutdownState = 'running' | 'draining' | 'terminating' | 'closed'
 
@@ -433,6 +433,10 @@ export function setDraftAgent(taskId: string, agent: Agent): Promise<TaskWorkspa
 
 export function opencodeConfigured(): Promise<boolean> {
   return invoke<boolean>('opencode_configured')
+}
+
+export function piConfigured(): Promise<boolean> {
+  return invoke<boolean>('pi_configured')
 }
 
 export function claudeConfigured(): Promise<boolean> {

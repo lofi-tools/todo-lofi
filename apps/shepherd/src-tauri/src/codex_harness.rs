@@ -11,6 +11,7 @@ use std::sync::Arc;
 use agent_harness::acp::{AcpHarness, TerminalBackend};
 use agent_harness::codex::{CodexHarness, CodexInstall, CodexTier, ExecHarness};
 use agent_harness::opencode::OpenCodeHarness;
+use agent_harness::pi::PiHarness;
 use agent_harness::settings::{AgentSettings, ConfiguredCommand};
 use agent_harness::{AgentHarness, FailureKind, HarnessError, SpawnSpec};
 use shepherd_core::harness::HarnessFactory;
@@ -21,6 +22,7 @@ const DEFAULT_CODEX_MODEL: &str = "gpt-6.1-terra";
 pub struct DesktopHarnessFactory {
     pub codex: Box<dyn HarnessFactory>,
     pub opencode: Result<Option<SpawnSpec>, HarnessError>,
+    pub pi: Result<Option<ConfiguredCommand>, HarnessError>,
     pub claude: Result<Option<ConfiguredCommand>, HarnessError>,
     pub settings: Result<AgentSettings, String>,
     pub terminals: Arc<crate::bridge::TerminalHost>,
@@ -107,6 +109,14 @@ impl DesktopHarnessFactory {
                         ..launch.clone()
                     },
                 ));
+            }
+            Agent::Pi => {
+                let command = require_configured(&self.pi, "agents.pi.executable")?;
+                (
+                    Box::new(PiHarness::new()),
+                    &command.executable,
+                    command.args.clone(),
+                )
             }
             Agent::Claude => {
                 let command = require_configured(&self.claude, "agents.claude.executable")?;
@@ -299,6 +309,7 @@ mod tests {
                 FailureKind::MissingBinary,
             )),
             opencode: Ok(None),
+            pi: Ok(None),
             claude: Ok(None),
             settings: Ok(settings),
             terminals: Arc::new(crate::bridge::TerminalHost::default()),
@@ -340,6 +351,7 @@ mod tests {
                 FailureKind::MissingBinary,
             )),
             opencode: agent_harness::opencode::configured_launch(&settings),
+            pi: Ok(None),
             claude: Ok(None),
             settings: Ok(settings),
             terminals: Arc::new(crate::bridge::TerminalHost::default()),
@@ -365,6 +377,7 @@ mod tests {
                 FailureKind::MissingBinary,
             )),
             opencode: Ok(None),
+            pi: Ok(None),
             claude: Ok(Some(ConfiguredCommand {
                 executable: executable.clone(),
                 args: vec!["--flag".into(), "value with spaces".into()],

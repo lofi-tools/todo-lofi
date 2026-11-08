@@ -731,6 +731,7 @@ pub struct ShellState {
     pub(crate) codex_program: Option<PathBuf>,
     pub(crate) codex_detected: bool,
     pub(crate) opencode_launch: Option<SpawnSpec>,
+    pub(crate) pi_configured: bool,
     pub(crate) claude_configured: bool,
     events: broadcast::Sender<Event>,
     terminal_subscriptions: Arc<Mutex<BTreeMap<String, TerminalSubscription>>>,
@@ -894,6 +895,7 @@ impl ShellState {
             codex_program: None,
             codex_detected: false,
             opencode_launch: None,
+            pi_configured: false,
             claude_configured: false,
             events,
             terminal_subscriptions: Arc::new(Mutex::new(BTreeMap::new())),
@@ -2563,6 +2565,7 @@ pub mod commands {
         BTreeMap::from([
             ("codex", state.codex_detected),
             ("opencode", state.opencode_launch.is_some()),
+            ("pi", state.pi_configured),
             ("claude", state.claude_configured),
         ])
     }
@@ -2680,6 +2683,11 @@ pub mod commands {
     #[tauri::command]
     pub fn opencode_configured(state: State<'_, ShellState>) -> bool {
         state.opencode_launch.is_some()
+    }
+
+    #[tauri::command]
+    pub fn pi_configured(state: State<'_, ShellState>) -> bool {
+        state.pi_configured
     }
 
     #[tauri::command]

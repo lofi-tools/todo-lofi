@@ -33,6 +33,7 @@ pub enum Agent {
     #[default]
     Codex,
     OpenCode,
+    Pi,
     Claude,
 }
 
@@ -41,6 +42,7 @@ impl Agent {
         match value {
             "codex" => Some(Self::Codex),
             "opencode" => Some(Self::OpenCode),
+            "pi" => Some(Self::Pi),
             "claude" => Some(Self::Claude),
             _ => None,
         }
@@ -50,6 +52,7 @@ impl Agent {
         match self {
             Self::Codex => "codex",
             Self::OpenCode => "opencode",
+            Self::Pi => "pi",
             Self::Claude => "claude",
         }
     }
@@ -57,7 +60,7 @@ impl Agent {
     pub fn default_tier(self) -> AgentTier {
         match self {
             Self::Claude => AgentTier::Acp,
-            Self::Codex | Self::OpenCode => AgentTier::Native,
+            Self::Codex | Self::OpenCode | Self::Pi => AgentTier::Native,
         }
     }
 }
