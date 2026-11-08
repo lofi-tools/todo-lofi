@@ -1097,9 +1097,11 @@ impl CodexHarness {
         }
 
         let (outgoing, outgoing_receiver) = mpsc::channel(MAX_OUTBOUND_MESSAGES);
+        let (writer_failure, writer_failed) = oneshot::channel();
         self.writer_task = Some(spawn_writer(
             stdin,
             outgoing_receiver,
+            Some(writer_failure),
             #[cfg(any(test, feature = "live-test-support"))]
             self.wire_capture.clone(),
         ));
@@ -1113,6 +1115,7 @@ impl CodexHarness {
             Arc::clone(&self.closed),
             Arc::clone(&self.closing),
             stderr_drained,
+            writer_failed,
             Arc::downgrade(&child),
             #[cfg(any(test, feature = "live-test-support"))]
             self.wire_capture.clone(),
@@ -2539,6 +2542,7 @@ fn exec_tool_event(
 fn spawn_writer(
     mut stdin: impl AsyncWrite + Unpin + Send + 'static,
     mut outgoing: mpsc::Receiver<OutboundMessage>,
+    mut failure: Option<oneshot::Sender<()>>,
     #[cfg(any(test, feature = "live-test-support"))] capture: Option<WireCapture>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
@@ -2555,17 +2559,27 @@ fn spawn_writer(
                 Ok(line) => line,
                 Err(error) => {
                     tracing::error!(%error, "could not encode a codex message");
+                    if let Some(failure) = failure.take()
+                        && failure.send(()).is_err()
+                    {
+                        tracing::debug!("codex writer supervisor disconnected");
+                    }
                     if let Some(written) = written
                         && written.send(Err(std::io::Error::other(error))).is_err()
                     {
                         tracing::debug!("codex writer confirmation receiver dropped");
                     }
-                    continue;
+                    return;
                 }
             };
             line.push('\n');
             if let Err(error) = stdin.write_all(line.as_bytes()).await {
                 tracing::debug!(%error, "codex stopped accepting input");
+                if let Some(failure) = failure.take()
+                    && failure.send(()).is_err()
+                {
+                    tracing::debug!("codex writer supervisor disconnected");
+                }
                 if let Some(written) = written
                     && written.send(Err(error)).is_err()
                 {
@@ -2575,6 +2589,11 @@ fn spawn_writer(
             }
             if let Err(error) = stdin.flush().await {
                 tracing::debug!(%error, "could not flush codex input");
+                if let Some(failure) = failure.take()
+                    && failure.send(()).is_err()
+                {
+                    tracing::debug!("codex writer supervisor disconnected");
+                }
                 if let Some(written) = written
                     && written.send(Err(error)).is_err()
                 {
@@ -2604,13 +2623,23 @@ fn spawn_reader(
     closed: Arc<AtomicBool>,
     closing: Arc<AtomicBool>,
     stderr_drained: oneshot::Receiver<()>,
+    mut writer_failed: oneshot::Receiver<()>,
     child: std::sync::Weak<AsyncMutex<Child>>,
     #[cfg(any(test, feature = "live-test-support"))] capture: Option<WireCapture>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         let mut lines = BufReader::new(stdout);
         let protocol_failure = loop {
-            let line = match read_protocol_line(&mut lines).await {
+            let result = tokio::select! {
+                result = read_protocol_line(&mut lines) => result,
+                result = &mut writer_failed => {
+                    break Some(match result {
+                        Ok(()) => "Codex stopped accepting protocol input.",
+                        Err(_) => "The Codex protocol writer stopped unexpectedly.",
+                    }.into());
+                }
+            };
+            let line = match result {
                 Ok(Some(line)) => line,
                 Ok(None) => break None,
                 Err(error) => break Some(format!("Could not read Codex stdout: {error}")),
@@ -3265,6 +3294,108 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn closed_app_server_input_stops_child_and_fails_pending_requests()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = TempDir::new()?;
+        let mut command = Command::new("/bin/sh");
+        command
+            .args(["-c", "exec 0<&-; printf ready > ready; exec sleep 30"])
+            .current_dir(directory.path())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .kill_on_drop(true);
+        command.process_group(0);
+        let mut child = command.spawn()?;
+        let stdin = child.stdin.take().ok_or("missing stdin")?;
+        let stdout = child.stdout.take().ok_or("missing stdout")?;
+        let child = Arc::new(AsyncMutex::new(child));
+        timeout(Duration::from_secs(5), async {
+            while !directory.path().join("ready").is_file() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await?;
+        let (sender, mut events) = mpsc::unbounded_channel();
+        let pending = Arc::new(AsyncMutex::new(Pending::default()));
+        let (response, response_waiter) = oneshot::channel();
+        pending.lock().await.responses.insert(1, response);
+        let (outgoing, requests) = mpsc::channel(MAX_OUTBOUND_MESSAGES);
+        let (writer_failure, writer_failed) = oneshot::channel();
+        let writer = spawn_writer(stdin, requests, Some(writer_failure), None);
+        let (drained, stderr_drained) = oneshot::channel();
+        drained.send(()).map_err(|_| "stderr receiver closed")?;
+        let reader = spawn_reader(
+            stdout,
+            sender,
+            pending,
+            outgoing.clone(),
+            Arc::new(Mutex::new(VecDeque::new())),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+            stderr_drained,
+            writer_failed,
+            Arc::downgrade(&child),
+            None,
+        );
+        outgoing.try_send(json!({"id": 1, "method": "fixture"}).into())?;
+        assert!(matches!(
+            timeout(Duration::from_secs(5), events.recv()).await?,
+            Some(HarnessEvent::ConnectionFailed { kind: FailureKind::Protocol, text }) if text.contains("stopped accepting protocol input")
+        ));
+        assert!(
+            timeout(Duration::from_secs(1), response_waiter)
+                .await?
+                .is_err()
+        );
+        reader.await?;
+        writer.await?;
+        assert!(child.lock().await.try_wait()?.is_some());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn unexpected_writer_exit_stops_reader_with_partial_stdout()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut command = Command::new("/bin/sh");
+        command
+            .args(["-c", "printf '{\\\"partial\\\":'; exec sleep 30"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .kill_on_drop(true);
+        command.process_group(0);
+        let mut child = command.spawn()?;
+        let stdout = child.stdout.take().ok_or("missing stdout")?;
+        let child = Arc::new(AsyncMutex::new(child));
+        let (sender, mut events) = mpsc::unbounded_channel();
+        let (outgoing, _requests) = mpsc::channel(1);
+        let (failure, writer_failed) = oneshot::channel();
+        let (drained, stderr_drained) = oneshot::channel();
+        drained.send(()).map_err(|_| "stderr receiver closed")?;
+        let reader = spawn_reader(
+            stdout,
+            sender,
+            Arc::new(AsyncMutex::new(Pending::default())),
+            outgoing,
+            Arc::new(Mutex::new(VecDeque::new())),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+            stderr_drained,
+            writer_failed,
+            Arc::downgrade(&child),
+            None,
+        );
+        drop(failure);
+        assert!(matches!(
+            timeout(Duration::from_secs(5), events.recv()).await?,
+            Some(HarnessEvent::ConnectionFailed { kind: FailureKind::Protocol, text }) if text.contains("writer stopped unexpectedly")
+        ));
+        reader.await?;
+        assert!(child.lock().await.try_wait()?.is_some());
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn full_outbound_queue_fails_the_app_server_reader()
     -> Result<(), Box<dyn std::error::Error>> {
         let mut command = Command::new("/bin/sh");
@@ -3285,6 +3416,7 @@ mod tests {
         outgoing.try_send(json!({"id": 1}).into())?;
         let (drained, stderr_drained) = oneshot::channel();
         drained.send(()).map_err(|_| "stderr receiver closed")?;
+        let (_failure, writer_failed) = oneshot::channel();
         let reader = spawn_reader(
             stdout,
             sender,
@@ -3294,6 +3426,7 @@ mod tests {
             Arc::new(AtomicBool::new(false)),
             Arc::new(AtomicBool::new(false)),
             stderr_drained,
+            writer_failed,
             Arc::downgrade(&child),
             None,
         );
@@ -3352,7 +3485,7 @@ mod tests {
             METHOD_NOT_FOUND
         );
         let (writer, reader) = tokio::io::duplex(4096);
-        let writer_task = spawn_writer(writer, requests, None);
+        let writer_task = spawn_writer(writer, requests, None, None);
         harness
             .respond(ApprovalId::new("item"), Decision::Allow)
             .await?;
@@ -4765,7 +4898,7 @@ done
         let (connected, requests) = mpsc::channel(MAX_OUTBOUND_MESSAGES);
         let (writer, reader) = tokio::io::duplex(4096);
         drop(reader);
-        let writer_task = spawn_writer(writer, requests, None);
+        let writer_task = spawn_writer(writer, requests, None, None);
         harness.outgoing = Some(connected);
         assert!(matches!(
             harness
@@ -4804,7 +4937,7 @@ done
 
         let (connected, requests) = mpsc::channel(MAX_OUTBOUND_MESSAGES);
         let (writer, reader) = tokio::io::duplex(4096);
-        let writer_task = spawn_writer(writer, requests, None);
+        let writer_task = spawn_writer(writer, requests, None, None);
         harness.outgoing = Some(connected);
         harness
             .respond(ApprovalId::new("item"), Decision::Allow)
@@ -4842,7 +4975,7 @@ done
             let pending = harness.pending.clone();
             let (connected, requests) = mpsc::channel(MAX_OUTBOUND_MESSAGES);
             let (writer, reader) = tokio::io::duplex(1);
-            let writer_task = spawn_writer(writer, requests, None);
+            let writer_task = spawn_writer(writer, requests, None, None);
             harness.outgoing = Some(connected);
             let mut response = tokio::spawn(async move {
                 let result = harness
@@ -4897,7 +5030,7 @@ done
             .insert("item".into(), 42);
         let (connected, requests) = mpsc::channel(MAX_OUTBOUND_MESSAGES);
         let (writer, reader) = tokio::io::duplex(1);
-        let writer_task = spawn_writer(writer, requests, None);
+        let writer_task = spawn_writer(writer, requests, None, None);
         harness.outgoing = Some(connected);
         let mut response = Box::pin(harness.respond(ApprovalId::new("item"), Decision::Allow));
         assert!(

@@ -1224,7 +1224,10 @@ placeholder tabs and no unearned state badges.
   groups and stop those groups on normal shutdown; local fixtures check that
   descendants cannot outlive shutdown. Codex also stops the group on malformed
   output or a closed output stream while the server is still running; local
-  fixtures exercise both. Failed or cancelled Codex initialization also stops
+  fixtures exercise both. If the input writer fails while stdout remains open,
+  the reader reports the failure, stops the child and releases pending requests;
+  local subprocess fixtures cover that path and an unexpected writer exit while
+  stdout has a partial frame. Failed or cancelled Codex initialization also stops
   its group, covered by a local fixture. Cancelling Codex project or model
   discovery while awaiting a response also stops the group; a fixture covers
   both paths. OpenCode also stops its group on a
