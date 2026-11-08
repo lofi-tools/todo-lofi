@@ -1552,7 +1552,9 @@ placeholder tabs and no unearned state badges.
   blocking the stdout reader; a local subprocess fixture checks cleanup and
   pending-request release. Fixtures verify that control replies remain reachable
   while the budget is full and after 100 unconsumed stream events. App-server
-  approval and other critical queues still need coordinated backpressure.
+  approval requests now share that budget; a fixture verifies a resolved but
+  unread approval retains its permit, excess requests are not registered, and
+  ordinary replies still pass. Other critical queues still need review.
   Event folding handles at
   most 256 events per session per pass, including during commands, and
   reschedules remaining events so one busy agent cannot monopolize other

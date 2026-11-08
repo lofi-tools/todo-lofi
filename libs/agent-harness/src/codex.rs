@@ -76,6 +76,22 @@ impl std::io::Write for ByteCounter {
     }
 }
 
+fn reserve_app_stream(
+    capacity: &Arc<tokio::sync::Semaphore>,
+    value: &Value,
+) -> HarnessResult<Arc<tokio::sync::OwnedSemaphorePermit>> {
+    let mut bytes = ByteCounter::default();
+    serde_json::to_writer(&mut bytes, value)
+        .map_err(|_| HarnessError::Protocol("could not measure Codex stream event".into()))?;
+    let units = u32::try_from(bytes.0.div_ceil(APP_STREAM_UNIT_BYTES).max(1))
+        .map_err(|_| HarnessError::Protocol("Codex stream event exceeds queue capacity".into()))?;
+    capacity
+        .clone()
+        .try_acquire_many_owned(units)
+        .map(Arc::new)
+        .map_err(|_| HarnessError::Protocol("Codex stream event queue exceeded its limit".into()))
+}
+
 async fn read_protocol_line<R: AsyncBufRead + Unpin>(
     reader: &mut R,
 ) -> std::io::Result<Option<String>> {
@@ -2997,6 +3013,7 @@ async fn handle_server_request(
             .map_err(outbound_error)?;
         return Ok(());
     }
+    let permit = reserve_app_stream(&approvals.stream_capacity, &params)?;
     let request = ApprovalRequest {
         approval_id: ApprovalId::new(approval_id.clone()),
         tool_call_id: ToolCallId::new(tool_call_id),
@@ -3005,7 +3022,7 @@ async fn handle_server_request(
         paths: approval_paths(&params),
         patch: approval_patch(&method, &params),
         choices: None,
-        stream_permit: None,
+        stream_permit: Some(crate::ApprovalCapacity::Stream(permit)),
     };
     approvals.approvals.insert(approval_id.clone(), server_id);
     drop(approvals);
@@ -3144,18 +3161,8 @@ async fn handle_notification(
                 | HarnessEvent::CommandOutput { .. }
         )
     }) {
-        let mut bytes = ByteCounter::default();
-        serde_json::to_writer(&mut bytes, params)
-            .map_err(|_| HarnessError::Protocol("could not measure Codex stream event".into()))?;
-        let units =
-            u32::try_from(bytes.0.div_ceil(APP_STREAM_UNIT_BYTES).max(1)).map_err(|_| {
-                HarnessError::Protocol("Codex stream event exceeds queue capacity".into())
-            })?;
         let capacity = pending.lock().await.stream_capacity.clone();
-        let permit = capacity.try_acquire_many_owned(units).map_err(|_| {
-            HarnessError::Protocol("Codex stream event queue exceeded its limit".into())
-        })?;
-        Some(Arc::new(permit))
+        Some(reserve_app_stream(&capacity, params)?)
     } else {
         None
     };
@@ -5656,6 +5663,49 @@ exit 0
             }
         )));
         harness.shutdown().await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn app_server_approval_retains_capacity_after_resolution()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (sender, mut events) = mpsc::unbounded_channel();
+        let (outgoing, _receiver) = mpsc::channel(MAX_OUTBOUND_MESSAGES);
+        let pending = Arc::new(AsyncMutex::new(Pending::default()));
+        let capacity = Arc::new(tokio::sync::Semaphore::new(1));
+        pending.lock().await.stream_capacity = capacity.clone();
+        let approval = |id, item: &str| json!({"id":id,"method":"item/commandExecution/requestApproval","params":{"itemId":item}});
+        route_incoming(approval(1, "one"), &sender, &pending, &outgoing).await?;
+        let first = events.recv().await.ok_or("missing approval")?;
+        let copy = first.clone();
+        drop(first);
+        handle_notification(
+            "serverRequest/resolved",
+            &json!({"requestId":1}),
+            &sender,
+            &pending,
+        )
+        .await?;
+        assert!(pending.lock().await.approvals.is_empty());
+        let error = route_incoming(approval(2, "two"), &sender, &pending, &outgoing).await;
+        assert!(
+            matches!(error, Err(HarnessError::Protocol(message)) if message.contains("queue exceeded"))
+        );
+        assert!(pending.lock().await.approvals.is_empty());
+        let (reply, response) = oneshot::channel();
+        pending.lock().await.responses.insert(99, reply);
+        route_incoming(
+            json!({"id":99,"result":{"ok":true}}),
+            &sender,
+            &pending,
+            &outgoing,
+        )
+        .await?;
+        assert_eq!(response.await??["ok"], true);
+        drop(copy);
+        assert_eq!(capacity.available_permits(), 1);
+        route_incoming(approval(2, "two"), &sender, &pending, &outgoing).await?;
+        assert_eq!(pending.lock().await.approvals.len(), 1);
         Ok(())
     }
 
