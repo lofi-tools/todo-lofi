@@ -630,6 +630,7 @@ where
                     return Ok(());
                 }
                 let permissions = permissions.clone();
+                let cancellation = responder.cancellation();
                 tokio::spawn(async move {
                     let (decision_tx, decision_rx) = oneshot::channel();
                     let sent = permissions.send(AcpEvent::PermissionRequested {
@@ -645,11 +646,13 @@ where
                         );
                         return;
                     }
-                    let decision = decision_rx.await.unwrap_or(PermissionDecision::Cancelled);
-                    log_reply(
-                        responder.respond(permission_response(decision)),
-                        "permission",
-                    );
+                    let reply = tokio::select! {
+                        decision = decision_rx => responder.respond(permission_response(
+                            decision.unwrap_or(PermissionDecision::Cancelled),
+                        )),
+                        _ = cancellation.cancelled() => responder.respond_with_error(acp::Error::request_cancelled()),
+                    };
+                    log_reply(reply, "permission");
                 });
                 Ok(())
             },

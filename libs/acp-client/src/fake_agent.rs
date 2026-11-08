@@ -40,6 +40,7 @@ pub struct FakeScript {
     pub tool_update: Option<ToolCallUpdate>,
     /// Ask the client to approve this tool call.
     pub permission: Option<ToolCallUpdate>,
+    pub cancel_permission: bool,
     /// Options offered with the permission request.
     pub permission_options: Vec<PermissionOption>,
     /// `session/load` fails, as an agent without resume support would.
@@ -71,6 +72,7 @@ pub struct FakeObservations {
     pub prompt_content: Vec<Vec<ContentBlock>>,
     pub cancels: Vec<String>,
     pub permission_responses: Vec<String>,
+    pub permission_cancellation: Option<Result<(), String>>,
     pub terminal_output: Vec<String>,
     pub terminal_exit: Vec<Option<u32>>,
     pub terminal_wait_cancellations: Vec<Result<(), String>>,
@@ -311,18 +313,29 @@ async fn run_turn(
         ))?;
     }
     if let Some(tool_call) = &script.permission {
-        let response = connection
-            .send_request(RequestPermissionRequest::new(
-                session_id.clone(),
-                tool_call.clone(),
-                script.permission_options.clone(),
-            ))
-            .block_task()
-            .await?;
-        if let Ok(mut state) = observations.lock() {
-            state
-                .permission_responses
-                .push(format!("{:?}", response.outcome));
+        let request = connection.send_request(RequestPermissionRequest::new(
+            session_id.clone(),
+            tool_call.clone(),
+            script.permission_options.clone(),
+        ));
+        if script.cancel_permission {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            request.cancel()?;
+            let result = request
+                .block_task()
+                .await
+                .map(|_| ())
+                .map_err(|error| error.to_string());
+            if let Ok(mut state) = observations.lock() {
+                state.permission_cancellation = Some(result);
+            }
+        } else {
+            let response = request.block_task().await?;
+            if let Ok(mut state) = observations.lock() {
+                state
+                    .permission_responses
+                    .push(format!("{:?}", response.outcome));
+            }
         }
     }
     for path in &script.read_paths {
@@ -773,6 +786,45 @@ mod tests {
             }
             other => panic!("expected a tool call row, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn cancelled_permission_request_releases_the_pending_answer()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (mut connection, observations, directory) = connect_to_fake(
+            FakeScript {
+                permission: Some(ToolCallUpdate::new(
+                    "cancelled-call",
+                    acp::schema::v1::ToolCallUpdateFields::new(),
+                )),
+                cancel_permission: true,
+                ..Default::default()
+            },
+            confirm_all(),
+        )
+        .await;
+        let session = new_session(&connection, &directory).await;
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            connection.requester.prompt(&session, "go".into()),
+        )
+        .await??;
+        let cancellation = observations
+            .lock()
+            .map_err(|error| error.to_string())?
+            .permission_cancellation
+            .clone()
+            .ok_or("missing cancellation")?;
+        assert!(matches!(cancellation, Err(error) if error.to_lowercase().contains("cancel")));
+        let mut found = false;
+        while let Ok(event) = connection.events.try_recv() {
+            if let AcpEvent::PermissionRequested { decision, .. } = event {
+                assert!(decision.answer(PermissionDecision::Cancelled).is_err());
+                found = true;
+            }
+        }
+        assert!(found, "permission request should have reached the client");
+        Ok(())
     }
 
     #[tokio::test]
