@@ -417,36 +417,10 @@ impl GitService {
             let relative = std::str::from_utf8(relative).map_err(|source| GitError::Io {
                 source: std::io::Error::other(source),
             })?;
-            let file_path = path.join(relative);
-            let mut hash = Sha256::new();
-            let hash_file = || -> std::io::Result<[u8; 32]> {
-                let metadata = file_path.symlink_metadata()?;
-                if metadata.is_symlink() {
-                    hash.update(b"symlink");
-                    hash.update(
-                        std::fs::read_link(&file_path)?
-                            .as_os_str()
-                            .as_encoded_bytes(),
-                    );
-                } else if metadata.is_file() {
-                    #[cfg(unix)]
-                    {
-                        use std::os::unix::fs::PermissionsExt;
-                        hash.update((metadata.permissions().mode() & 0o111).to_le_bytes());
-                    }
-                    let mut file = std::fs::File::open(&file_path)?;
-                    let mut buffer = [0; 8192];
-                    loop {
-                        let count = file.read(&mut buffer)?;
-                        if count == 0 {
-                            break;
-                        }
-                        hash.update(&buffer[..count]);
-                    }
-                }
-                Ok(hash.finalize().into())
-            };
-            untracked.push(hash_file().map_err(|source| GitError::Io { source })?);
+            untracked.push(
+                hash_untracked_file(path, Path::new(relative), || {})
+                    .map_err(|source| GitError::Io { source })?,
+            );
         }
         Ok(TurnBaseline {
             head: run_git(path, &["rev-parse", "HEAD"])?,
@@ -1080,6 +1054,43 @@ fn deletion_marker(git_dir: &Path, identity: &str) -> Result<PathBuf, GitError> 
     Ok(git_dir.join(format!("shepherd-deletion-{id}")))
 }
 
+fn hash_untracked_file(
+    root: &Path,
+    relative: &Path,
+    before_open: impl FnOnce(),
+) -> std::io::Result<[u8; 32]> {
+    let path = root.join(relative);
+    let metadata = path.symlink_metadata()?;
+    let mut hash = Sha256::new();
+    if metadata.is_symlink() {
+        hash.update(b"symlink");
+        hash.update(std::fs::read_link(&path)?.as_os_str().as_encoded_bytes());
+    } else if metadata.is_file() {
+        before_open();
+        let mut file = crate::files::open_file(root, relative).map_err(std::io::Error::other)?;
+        let metadata = file.metadata()?;
+        if !metadata.is_file() {
+            return Err(std::io::Error::other(
+                "untracked path is no longer a regular file",
+            ));
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            hash.update((metadata.permissions().mode() & 0o111).to_le_bytes());
+        }
+        let mut buffer = [0; 8192];
+        loop {
+            let count = file.read(&mut buffer)?;
+            if count == 0 {
+                break;
+            }
+            hash.update(&buffer[..count]);
+        }
+    }
+    Ok(hash.finalize().into())
+}
+
 pub(crate) fn run_git(cwd: &Path, args: &[&str]) -> Result<String, GitError> {
     Ok(String::from_utf8_lossy(&git_bytes(cwd, args)?)
         .trim()
@@ -1107,6 +1118,35 @@ fn git_bytes(cwd: &Path, args: &[&str]) -> Result<Vec<u8>, GitError> {
 mod tests {
     use super::*;
     use crate::test_support::{TestDirectory, TestRepository};
+
+    #[cfg(unix)]
+    #[test]
+    fn untracked_baseline_rejects_symlink_substitution() -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::fs::symlink;
+
+        for replace_parent in [false, true] {
+            let directory = TestDirectory::new()?;
+            let root = directory.join("workspace");
+            let outside = directory.join("outside");
+            std::fs::create_dir_all(root.join("nested"))?;
+            std::fs::create_dir_all(&outside)?;
+            std::fs::write(root.join("nested/file"), "inside")?;
+            std::fs::write(outside.join("file"), "outside")?;
+            let mut replacement = Ok(());
+            let result = hash_untracked_file(&root, Path::new("nested/file"), || {
+                replacement = if replace_parent {
+                    std::fs::rename(root.join("nested"), root.join("original"))
+                        .and_then(|()| symlink(&outside, root.join("nested")))
+                } else {
+                    std::fs::remove_file(root.join("nested/file"))
+                        .and_then(|()| symlink(outside.join("file"), root.join("nested/file")))
+                };
+            });
+            replacement?;
+            assert!(result.is_err());
+        }
+        Ok(())
+    }
 
     #[test]
     fn discovers_the_repository_and_creates_a_worktree_under_the_git_dir() {

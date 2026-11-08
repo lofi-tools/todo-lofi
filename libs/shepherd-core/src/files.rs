@@ -805,7 +805,7 @@ fn open_parent<'a>(
 }
 
 #[cfg(unix)]
-fn open_file(root: &Path, relative: &Path) -> Result<File, FileError> {
+pub(crate) fn open_file(root: &Path, relative: &Path) -> Result<File, FileError> {
     use rustix::fs::{Mode, OFlags, openat};
     let (directory, name) = open_parent(root, relative)?;
     let file = openat(
@@ -819,7 +819,7 @@ fn open_file(root: &Path, relative: &Path) -> Result<File, FileError> {
 }
 
 #[cfg(not(unix))]
-fn open_file(root: &Path, relative: &Path) -> Result<File, FileError> {
+pub(crate) fn open_file(root: &Path, relative: &Path) -> Result<File, FileError> {
     Ok(File::open(checked_regular_path(root, relative)?)?)
 }
 
