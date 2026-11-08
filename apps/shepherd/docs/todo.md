@@ -1382,6 +1382,8 @@ placeholder tabs and no unearned state badges.
   connection and harness fixtures cover a failure followed by a successful retry.
   Direct terminal stop requests have a 64-request queue; excess requests fail
   explicitly and can be retried after capacity becomes available.
+  A closed direct-terminal supervisor channel reports failure unless an exit
+  was recorded, retaining the terminal rather than claiming it stopped.
   Output permits remain held through the harness queue until the core
   consumes the events. A direct terminal's exit wait completes even if a
   descendant keeps an output pipe open, and shutdown rejects new terminals.

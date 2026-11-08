@@ -440,7 +440,7 @@ impl TerminalRegistry {
         let (response, result) = oneshot::channel();
         match stop.try_send(response) {
             Ok(()) => {}
-            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => return Ok(()),
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(response)) => drop(response),
             Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
                 return Err("too many pending terminal stop requests".into());
             }
@@ -733,6 +733,38 @@ mod tests {
         async fn stop(&self, _id: &str) -> Result<(), String> {
             Ok(())
         }
+    }
+
+    #[tokio::test]
+    async fn closed_direct_stop_channel_requires_recorded_exit()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let (events, _receiver) = tokio::sync::mpsc::unbounded_channel();
+        let registry = TerminalRegistry::new(
+            SessionRoots::new([directory.path().to_path_buf()]),
+            &events,
+            None,
+        );
+        registry.register("fixture", MAX_OUTPUT_LIMIT);
+        let (stop, requests) = tokio::sync::mpsc::channel(MAX_PENDING_STOP_REQUESTS);
+        registry
+            .entries()
+            .get_mut("fixture")
+            .ok_or("missing terminal")?
+            .stop = Some(stop);
+        drop(requests);
+
+        assert!(
+            registry
+                .shutdown()
+                .await
+                .is_err_and(|error| error.contains("before confirming termination"))
+        );
+        assert!(registry.entries().contains_key("fixture"));
+        registry.record_exit("fixture", &TerminalExitStatus::new());
+        registry.shutdown().await.map_err(std::io::Error::other)?;
+        assert!(!registry.entries().contains_key("fixture"));
+        Ok(())
     }
 
     #[tokio::test]
