@@ -347,7 +347,6 @@ impl AgentHarness for AcpHarness {
     async fn shutdown(&mut self) -> HarnessResult<()> {
         self.runtime = None;
         if let Some(connection) = self.connection.as_mut() {
-            connection.close_terminals().await;
             connection.close_and_wait().await.map_err(acp_error)?;
             self.connection = None;
             publish(
@@ -581,7 +580,7 @@ impl Runtime {
         events: AgentEvents,
         sender: mpsc::UnboundedSender<HarnessEvent>,
         project_approvals: Option<Arc<dyn ProjectApprovalPolicy>>,
-        close_terminals: impl Future<Output = ()> + Send + 'static,
+        close_terminals: impl Future<Output = Result<(), String>> + Send + 'static,
         mode: Option<ModeControl>,
     ) -> Self {
         let (commands, incoming) = mpsc::channel(8);
@@ -605,7 +604,9 @@ impl Runtime {
             {
                 tracing::debug!("ACP harness event loop ended with an error");
             }
-            close_terminals.await;
+            if close_terminals.await.is_err() {
+                tracing::warn!("ACP terminal cleanup did not complete");
+            }
         });
         Self {
             commands,
@@ -1958,6 +1959,67 @@ done
         async fn stop(&self, _: &str) -> Result<(), String> {
             Ok(())
         }
+    }
+
+    #[tokio::test]
+    async fn shutdown_reports_terminal_stop_failure_and_retries()
+    -> Result<(), Box<dyn std::error::Error>> {
+        struct FailingOnce(std::sync::atomic::AtomicUsize);
+        #[async_trait]
+        impl TerminalBackend for FailingOnce {
+            async fn spawn(
+                &self,
+                _: TerminalLaunch,
+                events: mpsc::Sender<TerminalProcessEvent>,
+            ) -> Result<(), String> {
+                events
+                    .send(TerminalProcessEvent::Exited(
+                        TerminalExitStatus::new().exit_code(0),
+                    ))
+                    .await
+                    .map_err(|error| error.to_string())
+            }
+            async fn stop(&self, _: &str) -> Result<(), String> {
+                if self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                    Err("fixture terminal stop failure".to_owned())
+                } else {
+                    Ok(())
+                }
+            }
+        }
+        let directory = tempfile::tempdir()?;
+        let cwd = directory.path().to_path_buf();
+        let backend = Arc::new(FailingOnce(std::sync::atomic::AtomicUsize::new(0)));
+        let (connection, _) = connect_fake_agent_with_terminals(
+            FakeScript {
+                terminal: Some(("fixture".into(), Vec::new())),
+                ..Default::default()
+            },
+            ConnectOptions {
+                roots: SessionRoots::new([cwd.clone()]),
+                tool_permissions: ToolPermissions::default(),
+            },
+            backend.clone(),
+        )
+        .await?;
+        let mut harness = AcpHarness::default();
+        harness.attach(connection, cwd, "fake-acp".into());
+        harness.open_session(None).await?;
+        harness.prompt(PromptInput::text("run a terminal")).await?;
+        loop {
+            if matches!(next(&mut harness).await?, HarnessEvent::TurnFinished { .. }) {
+                break;
+            }
+        }
+        let error = match harness.shutdown().await {
+            Ok(()) => return Err("terminal stop failure was not reported".into()),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("fixture terminal stop failure"));
+        assert!(harness.connection.is_some());
+        harness.shutdown().await?;
+        assert_eq!(backend.0.load(std::sync::atomic::Ordering::SeqCst), 2);
+        Ok(())
     }
 
     #[tokio::test]

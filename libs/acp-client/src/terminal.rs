@@ -393,7 +393,7 @@ impl TerminalRegistry {
         Ok(ReleaseTerminalResponse::new())
     }
 
-    pub(crate) async fn shutdown(&self) {
+    pub(crate) async fn shutdown(&self) -> Result<(), String> {
         let mut closed = self.closed.lock().await;
         *closed = true;
         self.output_permits.close();
@@ -401,6 +401,7 @@ impl TerminalRegistry {
             entry.cancelled.send_replace(true);
         }
         let terminal_ids: Vec<_> = self.entries().keys().cloned().collect();
+        let mut failures = Vec::new();
         for id in terminal_ids {
             let result = match &self.backend {
                 Some(backend) => backend.stop(&id).await,
@@ -411,9 +412,21 @@ impl TerminalRegistry {
                     self.entries().remove(&id);
                 }
                 Err(error) => {
-                    tracing::warn!(terminal_id = id, %error, "could not stop ACP terminal during shutdown")
+                    tracing::warn!(
+                        terminal_id = id,
+                        "could not stop ACP terminal during shutdown"
+                    );
+                    failures.push(format!("terminal {id}: {error}"));
                 }
             }
+        }
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(format!(
+                "could not stop ACP terminals: {}",
+                failures.join("; ")
+            ))
         }
     }
 
@@ -755,7 +768,7 @@ mod tests {
     #[tokio::test]
     async fn shutdown_unblocks_exit_waits_even_when_terminal_stop_fails()
     -> Result<(), Box<dyn std::error::Error>> {
-        struct FailingBackend;
+        struct FailingBackend(std::sync::atomic::AtomicUsize);
         #[async_trait]
         impl TerminalBackend for FailingBackend {
             async fn spawn(
@@ -766,7 +779,11 @@ mod tests {
                 Ok(())
             }
             async fn stop(&self, _id: &str) -> Result<(), String> {
-                Err("fixture stop failure".to_owned())
+                if self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                    Err("fixture stop failure".to_owned())
+                } else {
+                    Ok(())
+                }
             }
         }
         let directory = tempfile::tempdir()?;
@@ -774,13 +791,17 @@ mod tests {
         let registry = TerminalRegistry::new(
             SessionRoots::new([directory.path().to_path_buf()]),
             &events,
-            Some(Arc::new(FailingBackend)),
+            Some(Arc::new(FailingBackend(
+                std::sync::atomic::AtomicUsize::new(0),
+            ))),
         );
         registry.register("fixture", MAX_OUTPUT_LIMIT);
         let terminal = TerminalId::new("fixture");
         let mut waiter = Box::pin(registry.wait_for_exit(&terminal));
         assert!(futures::poll!(waiter.as_mut()).is_pending());
-        registry.shutdown().await;
+        assert!(
+            matches!(registry.shutdown().await, Err(error) if error.contains("fixture stop failure"))
+        );
         let result = tokio::time::timeout(std::time::Duration::from_secs(1), waiter).await?;
         assert!(matches!(result, Err(error) if error.contains("shutting down")));
         assert!(
@@ -794,6 +815,8 @@ mod tests {
         assert!(
             matches!(registry.wait_for_exit(&terminal).await, Err(error) if error.contains("shutting down"))
         );
+        registry.shutdown().await.map_err(std::io::Error::other)?;
+        assert!(!registry.entries().contains_key("fixture"));
         Ok(())
     }
 
@@ -1024,7 +1047,7 @@ mod tests {
                 .await
                 .is_err()
         );
-        registry.shutdown().await;
+        registry.shutdown().await.map_err(std::io::Error::other)?;
         assert!(!tokio::time::timeout(std::time::Duration::from_secs(2), pending).await??);
         Ok(())
     }
@@ -1035,7 +1058,7 @@ mod tests {
         let root = directory.path().canonicalize()?;
         let (events, _receiver) = tokio::sync::mpsc::unbounded_channel();
         let registry = TerminalRegistry::new(SessionRoots::new([root.clone()]), &events, None);
-        registry.shutdown().await;
+        registry.shutdown().await.map_err(std::io::Error::other)?;
         let request = CreateTerminalRequest::new("session", "true").cwd(root);
         let result = registry.create(request).await;
         assert!(matches!(result, Err(error) if error.contains("connection is closed")));
@@ -1107,7 +1130,7 @@ mod tests {
             })
             .await??;
             if shutdown {
-                registry.shutdown().await;
+                registry.shutdown().await.map_err(std::io::Error::other)?;
             } else {
                 registry
                     .release(&terminal)

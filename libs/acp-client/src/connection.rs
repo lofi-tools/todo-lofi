@@ -379,6 +379,13 @@ impl AcpConnection {
     }
 
     async fn close_and_wait_with_timeout(&mut self, deadline: Duration) -> Result<(), AcpError> {
+        let end = tokio::time::Instant::now() + deadline;
+        tokio::time::timeout_at(end, self.close_terminals())
+            .await
+            .map_err(|_| {
+                AcpError::Protocol("ACP terminals did not stop before the shutdown deadline".into())
+            })?
+            .map_err(AcpError::Protocol)?;
         self.shutdown_now();
         if let Some(error) = &self.supervision_failure {
             return Err(AcpError::Protocol(error.clone()));
@@ -390,7 +397,7 @@ impl AcpConnection {
                 })?;
                 supervision.retry_needed = false;
             }
-            let result = tokio::time::timeout(deadline, supervision.results.recv())
+            let result = tokio::time::timeout_at(end, supervision.results.recv())
                 .await
                 .map_err(|_| {
                     AcpError::Protocol(
@@ -413,7 +420,7 @@ impl AcpConnection {
         Ok(())
     }
 
-    pub fn close_terminals(&self) -> impl Future<Output = ()> + Send + 'static {
+    pub fn close_terminals(&self) -> impl Future<Output = Result<(), String>> + Send + 'static {
         let terminals = self.terminals.clone();
         async move { terminals.shutdown().await }
     }
@@ -835,7 +842,9 @@ where
         if connection.await.is_err() {
             tracing::warn!("agent connection ended with an error");
         }
-        registry.shutdown().await;
+        if registry.shutdown().await.is_err() {
+            tracing::warn!("ACP terminal cleanup did not complete");
+        }
     });
 
     let (requester, info) = match ready_rx.await {
@@ -1367,6 +1376,103 @@ pub fn stderr_summary(lines: &[String]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn close_and_wait_reports_and_retries_terminal_stop_failure()
+    -> Result<(), Box<dyn std::error::Error>> {
+        struct FailingOnce(std::sync::atomic::AtomicUsize);
+        #[async_trait::async_trait]
+        impl TerminalBackend for FailingOnce {
+            async fn spawn(
+                &self,
+                _launch: crate::terminal::TerminalLaunch,
+                _events: tokio::sync::mpsc::Sender<crate::terminal::TerminalProcessEvent>,
+            ) -> Result<(), String> {
+                Ok(())
+            }
+            async fn stop(&self, _id: &str) -> Result<(), String> {
+                if self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                    Err("fixture terminal stop failure".to_owned())
+                } else {
+                    Ok(())
+                }
+            }
+        }
+        let directory = tempfile::tempdir()?;
+        let backend = Arc::new(FailingOnce(std::sync::atomic::AtomicUsize::new(0)));
+        let options = ConnectOptions {
+            roots: SessionRoots::new([directory.path().to_path_buf()]),
+            tool_permissions: ToolPermissions::default(),
+        };
+        let (mut connection, _) = crate::fake_agent::connect_fake_agent_with_terminals(
+            Default::default(),
+            options,
+            backend.clone(),
+        )
+        .await?;
+        connection
+            .terminals
+            .create(CreateTerminalRequest::new("session", "fixture"))
+            .await
+            .map_err(std::io::Error::other)?;
+        let error = match connection.close_and_wait().await {
+            Ok(()) => return Err("terminal stop failure was not reported".into()),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("fixture terminal stop failure"));
+        connection.close_and_wait().await?;
+        assert_eq!(backend.0.load(std::sync::atomic::Ordering::SeqCst), 2);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn close_and_wait_times_out_terminal_cleanup_and_can_retry()
+    -> Result<(), Box<dyn std::error::Error>> {
+        struct SlowOnce(std::sync::atomic::AtomicUsize);
+        #[async_trait::async_trait]
+        impl TerminalBackend for SlowOnce {
+            async fn spawn(
+                &self,
+                _launch: crate::terminal::TerminalLaunch,
+                _events: tokio::sync::mpsc::Sender<crate::terminal::TerminalProcessEvent>,
+            ) -> Result<(), String> {
+                Ok(())
+            }
+            async fn stop(&self, _id: &str) -> Result<(), String> {
+                if self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                    std::future::pending().await
+                } else {
+                    Ok(())
+                }
+            }
+        }
+        let directory = tempfile::tempdir()?;
+        let backend = Arc::new(SlowOnce(std::sync::atomic::AtomicUsize::new(0)));
+        let options = ConnectOptions {
+            roots: SessionRoots::new([directory.path().to_path_buf()]),
+            tool_permissions: ToolPermissions::default(),
+        };
+        let (mut connection, _) = crate::fake_agent::connect_fake_agent_with_terminals(
+            Default::default(),
+            options,
+            backend.clone(),
+        )
+        .await?;
+        connection
+            .terminals
+            .create(CreateTerminalRequest::new("session", "fixture"))
+            .await
+            .map_err(std::io::Error::other)?;
+        let result = connection
+            .close_and_wait_with_timeout(Duration::from_millis(20))
+            .await;
+        assert!(
+            matches!(result, Err(error) if error.to_string().contains("terminals did not stop"))
+        );
+        connection.close_and_wait().await?;
+        assert_eq!(backend.0.load(std::sync::atomic::Ordering::SeqCst), 2);
+        Ok(())
+    }
 
     #[test]
     fn failed_response_logs_context_without_error_details() -> Result<(), Box<dyn std::error::Error>>
