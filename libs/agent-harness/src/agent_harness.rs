@@ -560,7 +560,7 @@ pub struct ApprovalRequest {
     pub patch: Option<FileDiff>,
     pub choices: Option<Vec<Decision>>,
     /// Retains request capacity until the queued approval has been consumed.
-    pub stream_permit: Option<Arc<tokio::sync::OwnedSemaphorePermit>>,
+    pub stream_permit: Option<Arc<acp_client::permissions::PermissionCapacity>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]

@@ -757,6 +757,14 @@ where
                         return Ok(());
                     }
                 };
+                let Some(event_permit) = reserve_update(&approval_capacity, &request) else {
+                    if permissions.send(AcpEvent::ProtocolFailed { message: UPDATE_OVERFLOW.into() }).is_err() {
+                        tracing::debug!("ACP protocol failure receiver closed");
+                    }
+                    approval_overflow.send_replace(true);
+                    responder.respond_with_internal_error(UPDATE_OVERFLOW)?;
+                    return Ok(());
+                };
                 let permissions = permissions.clone();
                 let cancellation = responder.cancellation();
                 let request_id = permission_ids.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -768,7 +776,7 @@ where
                         session_id: request.session_id.clone(),
                         tool_call: request.tool_call.clone(),
                         options: request.options.clone(),
-                        decision: PermissionReply::limited(decision_tx, permit, confirmed_rx),
+                        decision: PermissionReply::limited(decision_tx, permit, event_permit, confirmed_rx),
                     });
                     if sent.is_err() {
                         log_reply(
@@ -1655,6 +1663,18 @@ pub fn stderr_summary(lines: &[String]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn event_capacity_is_charged_by_serialized_size_and_recovers() {
+        let capacity = Arc::new(tokio::sync::Semaphore::new(2));
+        let value = serde_json::json!({"text": "x".repeat(UPDATE_UNIT_BYTES)});
+        let permit = reserve_update(&capacity, &value).expect("two capacity units");
+        assert_eq!(capacity.available_permits(), 0);
+        assert!(reserve_update(&capacity, &serde_json::json!("small")).is_none());
+        drop(permit);
+        assert_eq!(capacity.available_permits(), 2);
+        assert!(reserve_update(&capacity, &serde_json::json!("small")).is_some());
+    }
 
     #[cfg(unix)]
     #[tokio::test]

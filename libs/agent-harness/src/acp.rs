@@ -1561,9 +1561,11 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let capacity = Arc::new(tokio::sync::Semaphore::new(1));
         let permit = capacity.clone().acquire_owned().await?;
+        let event_capacity = Arc::new(tokio::sync::Semaphore::new(1));
+        let event_permit = Arc::new(event_capacity.clone().acquire_owned().await?);
         let (answer, _answer_receiver) = futures_channel::oneshot::channel();
         let (_confirm, confirmation) = futures_channel::oneshot::channel();
-        let reply = PermissionReply::new_with_capacity(answer, permit, confirmation);
+        let reply = PermissionReply::new_with_capacity(answer, permit, event_permit, confirmation);
         let pending = PendingApproval::new(
             42,
             ToolCallUpdate::new("tool", ToolCallUpdateFields::new()),
@@ -1583,6 +1585,7 @@ mod tests {
         cancel_approval(&sender, &mut approvals, &grants, None, 42).await?;
         assert!(approvals.is_empty());
         assert_eq!(capacity.available_permits(), 0);
+        assert_eq!(event_capacity.available_permits(), 0);
         let event = events.recv().await.ok_or("missing approval")?;
         let copy = event.clone();
         let mut transcript = Transcript::default();
@@ -1591,6 +1594,7 @@ mod tests {
         assert_eq!(capacity.available_permits(), 0);
         drop(copy);
         assert_eq!(capacity.available_permits(), 1);
+        assert_eq!(event_capacity.available_permits(), 1);
         assert!(!transcript.entries().is_empty());
         Ok(())
     }

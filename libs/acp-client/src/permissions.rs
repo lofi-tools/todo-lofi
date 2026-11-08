@@ -227,9 +227,15 @@ pub enum PermissionDecision {
 ///
 /// Wrapping the sender keeps the async channel type out of the UI crate's
 /// dependencies.
+#[derive(Debug)]
+pub struct PermissionCapacity {
+    _pending: tokio::sync::OwnedSemaphorePermit,
+    _events: std::sync::Arc<tokio::sync::OwnedSemaphorePermit>,
+}
+
 pub struct PermissionReply {
     sender: oneshot::Sender<PermissionDecision>,
-    permit: Option<std::sync::Arc<tokio::sync::OwnedSemaphorePermit>>,
+    permit: Option<std::sync::Arc<PermissionCapacity>>,
     confirmation: Option<oneshot::Receiver<bool>>,
 }
 
@@ -257,11 +263,15 @@ impl PermissionReply {
     pub(crate) fn limited(
         sender: oneshot::Sender<PermissionDecision>,
         permit: tokio::sync::OwnedSemaphorePermit,
+        events: std::sync::Arc<tokio::sync::OwnedSemaphorePermit>,
         confirmation: oneshot::Receiver<bool>,
     ) -> Self {
         Self {
             sender,
-            permit: Some(std::sync::Arc::new(permit)),
+            permit: Some(std::sync::Arc::new(PermissionCapacity {
+                _pending: permit,
+                _events: events,
+            })),
             confirmation: Some(confirmation),
         }
     }
@@ -270,13 +280,14 @@ impl PermissionReply {
     pub fn new_with_capacity(
         sender: oneshot::Sender<PermissionDecision>,
         permit: tokio::sync::OwnedSemaphorePermit,
+        events: std::sync::Arc<tokio::sync::OwnedSemaphorePermit>,
         confirmation: oneshot::Receiver<bool>,
     ) -> Self {
-        Self::limited(sender, permit, confirmation)
+        Self::limited(sender, permit, events, confirmation)
     }
 
     /// Retain the request's capacity while its approval event remains queued.
-    pub fn capacity_permit(&self) -> Option<std::sync::Arc<tokio::sync::OwnedSemaphorePermit>> {
+    pub fn capacity_permit(&self) -> Option<std::sync::Arc<PermissionCapacity>> {
         self.permit.clone()
     }
 
@@ -323,7 +334,12 @@ mod tests {
             let permit = std::sync::Arc::new(tokio::sync::Semaphore::new(1))
                 .acquire_owned()
                 .await?;
-            let reply = PermissionReply::limited(sender, permit, confirmed);
+            let events = std::sync::Arc::new(
+                std::sync::Arc::new(tokio::sync::Semaphore::new(1))
+                    .acquire_owned()
+                    .await?,
+            );
+            let reply = PermissionReply::limited(sender, permit, events, confirmed);
             let answer = reply.answer_confirmed(PermissionDecision::Cancelled);
             let receiver = async {
                 decision.await.map_err(|_| "missing decision")?;
