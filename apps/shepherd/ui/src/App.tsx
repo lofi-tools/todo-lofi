@@ -1064,6 +1064,16 @@ export function App() {
     terminalLists: Set<string>
   } | undefined
 
+  function loadResyncSnapshots(projectId: string | null, taskId: string | null, reviewing: boolean) {
+    return Promise.all([
+      bridge.projectList(),
+      projectId ? bridge.taskList(projectId) : undefined,
+      taskId ? bridge.taskWorkspace(taskId) : undefined,
+      projectId ? bridge.terminalList(projectId) : undefined,
+      reviewing ? bridge.reviewTaskLists() : undefined,
+    ])
+  }
+
   async function resyncSnapshots() {
     if (resyncRunning) {
       resyncRequested = true
@@ -1083,13 +1093,18 @@ export function App() {
         const projectId = selectedProjectId()
         const taskId = selectedTaskId()
         const reviewing = reviewOnly()
-        const [projectList, taskList, taskWorkspace, terminalList, reviewLists] = await Promise.all([
-          bridge.projectList(),
-          projectId ? bridge.taskList(projectId) : undefined,
-          taskId ? bridge.taskWorkspace(taskId) : undefined,
-          projectId ? bridge.terminalList(projectId) : undefined,
-          reviewing ? bridge.reviewTaskLists() : undefined,
-        ])
+        let snapshots: Awaited<ReturnType<typeof loadResyncSnapshots>>
+        try {
+          snapshots = await loadResyncSnapshots(projectId, taskId, reviewing)
+        } catch (failure) {
+          if (resyncRequested || projectId !== selectedProjectId() ||
+              taskId !== selectedTaskId() || reviewing !== reviewOnly()) {
+            resyncRequested = true
+            continue
+          }
+          throw failure
+        }
+        const [projectList, taskList, taskWorkspace, terminalList, reviewLists] = snapshots
         if (resyncRequested || projectId !== selectedProjectId() ||
             taskId !== selectedTaskId() || reviewing !== reviewOnly()) {
           resyncRequested = true

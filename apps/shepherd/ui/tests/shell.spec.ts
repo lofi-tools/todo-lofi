@@ -66,6 +66,7 @@ test.beforeEach(async ({ context }) => {
     let releaseWorkspaceRead: (() => void) | undefined
     let pauseNextWorkspaceRead = false
     let pausedWorkspaceRead = false
+    let failPausedWorkspaceRead = false
     let workspaceReads = 0
     let releaseTerminalWrite: (() => void) | undefined
     let expiringTerminalSubscription: string | undefined
@@ -599,6 +600,10 @@ test.beforeEach(async ({ context }) => {
               pausedWorkspaceRead = true
               await new Promise<void>((resolve) => { releaseWorkspaceRead = resolve })
               pausedWorkspaceRead = false
+              if (failPausedWorkspaceRead) {
+                failPausedWorkspaceRead = false
+                throw new Error('Fixture workspace read failed')
+              }
             }
             return snapshot
           }
@@ -1058,6 +1063,7 @@ test.beforeEach(async ({ context }) => {
       __pauseWorkspaceRead: () => { pauseNextWorkspaceRead = true },
       __workspaceReadPaused: () => pausedWorkspaceRead,
       __releaseWorkspaceRead: () => releaseWorkspaceRead?.(),
+      __failWorkspaceRead: () => { failPausedWorkspaceRead = true; releaseWorkspaceRead?.() },
       __workspaceReads: () => workspaceReads,
     })
     Object.assign(window, { __missTaskUpdate: () => {
@@ -3911,4 +3917,45 @@ test('keeps newer snapshots during event recovery without restarting for unrelat
   await expect(page.getByText('Newer transcript')).toBeVisible()
   await expect(page.getByText('Recovered transcript')).toHaveCount(0)
   await expect.poll(() => page.evaluate(() => (window as unknown as { __workspaceReads: () => number }).__workspaceReads())).toBe(reads + 1)
+})
+
+
+test('retries a newer recovery request when an earlier snapshot read fails', async ({ page }) => {
+  await page.goto('/')
+  await expect(page.getByText('ready to go')).toBeVisible()
+  await page.evaluate(() => {
+    const fixture = window as unknown as {
+      __pauseWorkspaceRead: () => void; __missTaskUpdate: () => void;
+      __emitCoreEvent: (event: ShepherdEvent) => void
+    }
+    fixture.__missTaskUpdate()
+    fixture.__pauseWorkspaceRead()
+    fixture.__emitCoreEvent({ type: 'resyncRequired' })
+  })
+  await expect.poll(() => page.evaluate(() => (window as unknown as { __workspaceReadPaused: () => boolean }).__workspaceReadPaused())).toBe(true)
+  await page.evaluate(() => {
+    const fixture = window as unknown as {
+      __emitCoreEvent: (event: ShepherdEvent) => void; __failWorkspaceRead: () => void
+    }
+    fixture.__emitCoreEvent({ type: 'resyncRequired' })
+    fixture.__failWorkspaceRead()
+  })
+  await expect(page.getByText('Recovered transcript')).toBeVisible()
+  await expect(page.getByText(/Could not refresh after missed updates/)).toHaveCount(0)
+})
+
+
+test('reports a recovery snapshot failure when there is no newer request', async ({ page }) => {
+  await page.goto('/')
+  await expect(page.getByText('ready to go')).toBeVisible()
+  await page.evaluate(() => {
+    const fixture = window as unknown as {
+      __pauseWorkspaceRead: () => void; __emitCoreEvent: (event: ShepherdEvent) => void
+    }
+    fixture.__pauseWorkspaceRead()
+    fixture.__emitCoreEvent({ type: 'resyncRequired' })
+  })
+  await expect.poll(() => page.evaluate(() => (window as unknown as { __workspaceReadPaused: () => boolean }).__workspaceReadPaused())).toBe(true)
+  await page.evaluate(() => (window as unknown as { __failWorkspaceRead: () => void }).__failWorkspaceRead())
+  await expect(page.getByRole('alert')).toContainText('Could not refresh after missed updates')
 })
