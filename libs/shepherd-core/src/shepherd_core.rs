@@ -6071,6 +6071,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn terminal_error_notice_is_saved_while_turn_is_running()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let repository = TestRepository::new()?;
+        let database = TestDatabase::new()?;
+        let scripts = vec![vec![FakeTurn::new(vec![
+            FakeStep::Message("unfinished answer".into()),
+            FakeStep::TerminalError {
+                id: "terminal".into(),
+                text: "Agent terminal error: missing exit status".into(),
+            },
+            FakeStep::approval("pending", "Await approval"),
+        ])]];
+        let mut core = Core::with_services(
+            Box::new(TursoStore::open(&database.uri()).await?),
+            Box::new(FakeHarnessFactory::new(scripts)),
+        );
+        let project_id = add_project(&mut core, repository.path().to_path_buf()).await?;
+        let draft = workspace_of(
+            core.execute(Command::CreateDraft {
+                project_id,
+                title: "terminal error".into(),
+                agent: Agent::Codex,
+            })
+            .await?,
+        );
+        let task_id = TaskId::new(draft.task.id);
+        core.execute(Command::SendPrompt {
+            task_id: task_id.clone(),
+            input: PromptInput::text("run"),
+        })
+        .await?;
+        assert_eq!(core.task(&task_id)?.state, TaskState::Waiting);
+        let store = TursoStore::open(&database.uri()).await?;
+        let saved = store.load_transcript(&task_id).await?;
+        assert!(saved.iter().any(|entry| matches!(&entry.kind, agent_harness::EntryKind::Notice { text, is_error: true } if text.contains("missing exit status"))));
+        assert!(!saved.iter().any(|entry| matches!(&entry.kind, agent_harness::EntryKind::AgentText { text } if text.contains("unfinished answer"))));
+        drop(store);
+        drop(core);
+        let mut reopened = Core::load(
+            Box::new(TursoStore::open(&database.uri()).await?),
+            Box::new(UnavailableHarnessFactory),
+        )
+        .await?;
+        let workspace = reopened.open_task_workspace(&task_id).await?;
+        assert!(workspace.transcript.iter().any(|entry| matches!(&entry.kind, agent_harness::EntryKind::Notice { text, is_error: true } if text.contains("missing exit status"))));
+        assert!(!workspace.transcript.iter().any(|entry| matches!(&entry.kind, agent_harness::EntryKind::AgentText { text } if text.contains("unfinished answer"))));
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn terminal_error_notice_survives_task_reopen() -> Result<(), Box<dyn std::error::Error>>
     {
         let repository = TestRepository::new()?;

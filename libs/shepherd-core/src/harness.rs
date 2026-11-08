@@ -456,8 +456,13 @@ impl HarnessSession {
         task: Option<&Task>,
     ) -> Result<bool, CoreError> {
         let transcript = &self.transcript;
-        let can_save =
-            |entry: &Entry| settled || matches!(entry.kind, EntryKind::UserMessage { .. });
+        let can_save = |entry: &Entry| {
+            settled
+                || matches!(
+                    entry.kind,
+                    EntryKind::UserMessage { .. } | EntryKind::Notice { is_error: true, .. }
+                )
+        };
         let entries: Vec<_> = self
             .dirty_entries
             .iter()

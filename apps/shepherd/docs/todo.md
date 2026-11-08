@@ -1435,7 +1435,8 @@ placeholder tabs and no unearned state badges.
   covers the missing-status case. Terminal wait failures also reach the task
   transcript as error notices; the harness fixture covers propagation and the
   core redacts details when launch environment values are configured. A core
-  fixture checks that a settled terminal error notice survives task reopen.
+  fixture checks that a terminal error notice is persisted during an active
+  turn and survives task reopen, while unfinished agent text stays unsaved.
   Output permits remain held through the harness queue until the core
   consumes the events. A direct terminal's exit wait completes even if a
   descendant keeps an output pipe open, and shutdown rejects new terminals.
