@@ -473,6 +473,7 @@ impl HarnessSession {
                 || matches!(
                     entry.kind,
                     EntryKind::UserMessage { .. }
+                        | EntryKind::Failure { .. }
                         | EntryKind::Notice { is_error: true, .. }
                         | EntryKind::Permission {
                             decision: Some(_),
@@ -619,6 +620,10 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let directory = TestDirectory::new()?;
         let turn = FakeTurn::new(vec![
+            FakeStep::TurnError {
+                kind: FailureKind::Protocol,
+                text: "fixture-private-value".into(),
+            },
             FakeStep::TerminalError {
                 id: "terminal".into(),
                 text: "fixture-private-value".into(),
@@ -639,6 +644,7 @@ mod tests {
             .await?;
         session.open_session(None).await?;
         let events = session.prompt(PromptInput::text("go")).await?;
+        assert!(events.iter().any(|event| matches!(event, HarnessEvent::TurnError { text, .. } if text == HIDDEN_DIAGNOSTIC)));
         assert!(events.iter().any(|event| matches!(event, HarnessEvent::Exited { stderr, .. } if stderr == HIDDEN_DIAGNOSTIC)));
         assert!(events.iter().any(|event| matches!(event, HarnessEvent::AgentTerminalError { text, .. } if text == HIDDEN_DIAGNOSTIC)));
         assert!(!format!("{events:?}").contains("fixture-private-value"));

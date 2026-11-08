@@ -12,8 +12,8 @@ use tokio::sync::mpsc;
 
 use crate::{
     AgentDiagnostics, AgentHarness, ApprovalId, ApprovalRequest, Capabilities, Decision, DeltaKind,
-    FileDiff, HarnessError, HarnessEvent, HarnessResult, ItemId, PlanRow, PromptInput, SessionId,
-    SessionRoots, SpawnSpec, ToolCallId, ToolStatus, TurnFinishReason, TurnId,
+    FailureKind, FileDiff, HarnessError, HarnessEvent, HarnessResult, ItemId, PlanRow, PromptInput,
+    SessionId, SessionRoots, SpawnSpec, ToolCallId, ToolStatus, TurnFinishReason, TurnId,
 };
 
 /// One scripted step inside a turn.
@@ -21,6 +21,10 @@ use crate::{
 pub enum FakeStep {
     Message(String),
     Thought(String),
+    TurnError {
+        kind: FailureKind,
+        text: String,
+    },
     TerminalError {
         id: String,
         text: String,
@@ -198,6 +202,12 @@ impl FakeHarness {
         for (offset, step) in steps.iter().enumerate() {
             let offset = offset_base + offset;
             match step {
+                FakeStep::TurnError { kind, text } => {
+                    self.send(HarnessEvent::TurnError {
+                        kind: *kind,
+                        text: text.clone(),
+                    })?;
+                }
                 FakeStep::TerminalError { id, text } => {
                     self.send(HarnessEvent::AgentTerminalError {
                         id: id.clone(),

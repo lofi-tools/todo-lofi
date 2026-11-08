@@ -1512,8 +1512,8 @@ placeholder tabs and no unearned state badges.
   covers the missing-status case. Terminal wait failures also reach the task
   transcript as error notices; the harness fixture covers propagation and the
   core redacts details when launch environment values are configured. A core
-  fixture checks that a terminal error notice is persisted during an active
-  turn and survives task reopen, while unfinished agent text stays unsaved.
+  fixture checks that terminal notices and agent turn errors are persisted during
+  an active turn and survive task reopen, while unfinished text stays unsaved.
   Identical repeated wait failures do not create duplicate notices; changed
   failures and failures after a recorded exit are reported separately.
   Output permits remain held through the harness queue until the core

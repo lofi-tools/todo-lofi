@@ -6562,12 +6562,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn terminal_error_notice_is_saved_while_turn_is_running()
+    async fn live_turn_errors_are_saved_while_unfinished_text_is_not()
     -> Result<(), Box<dyn std::error::Error>> {
         let repository = TestRepository::new()?;
         let database = TestDatabase::new()?;
         let scripts = vec![vec![FakeTurn::new(vec![
             FakeStep::Message("unfinished answer".into()),
+            FakeStep::TurnError {
+                kind: agent_harness::FailureKind::Protocol,
+                text: "fixture turn error".into(),
+            },
             FakeStep::TerminalError {
                 id: "terminal".into(),
                 text: "Agent terminal error: missing exit status".into(),
@@ -6597,6 +6601,7 @@ mod tests {
         let store = TursoStore::open(&database.uri()).await?;
         let saved = store.load_transcript(&task_id).await?;
         assert!(saved.iter().any(|entry| matches!(&entry.kind, agent_harness::EntryKind::Notice { text, is_error: true } if text.contains("missing exit status"))));
+        assert!(saved.iter().any(|entry| matches!(&entry.kind, agent_harness::EntryKind::Failure { text, .. } if text == "fixture turn error")));
         assert!(!saved.iter().any(|entry| matches!(&entry.kind, agent_harness::EntryKind::AgentText { text } if text.contains("unfinished answer"))));
         drop(store);
         drop(core);
@@ -6607,6 +6612,7 @@ mod tests {
         .await?;
         let workspace = reopened.open_task_workspace(&task_id).await?;
         assert!(workspace.transcript.iter().any(|entry| matches!(&entry.kind, agent_harness::EntryKind::Notice { text, is_error: true } if text.contains("missing exit status"))));
+        assert!(workspace.transcript.iter().any(|entry| matches!(&entry.kind, agent_harness::EntryKind::Failure { text, .. } if text == "fixture turn error")));
         assert!(!workspace.transcript.iter().any(|entry| matches!(&entry.kind, agent_harness::EntryKind::AgentText { text } if text.contains("unfinished answer"))));
         Ok(())
     }
