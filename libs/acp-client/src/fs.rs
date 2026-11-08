@@ -3,7 +3,7 @@
 
 use std::collections::{HashMap, hash_map::Entry};
 use std::fs::File;
-use std::io::{ErrorKind, Read, Seek, SeekFrom, Write};
+use std::io::{BufRead, BufReader, ErrorKind, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -74,10 +74,8 @@ impl SessionRoots {
                         requested.display()
                     )
                 })?;
-            let mut file = open_confined_file(root, &path)?;
-            let mut content = String::new();
-            file.read_to_string(&mut content)?;
-            Ok(select_lines(content, line, limit))
+            let file = open_confined_file(root, &path)?;
+            read_selected_lines(file, line, limit).map_err(Into::into)
         }
         #[cfg(not(unix))]
         read_text_file(&path, line, limit)
@@ -253,11 +251,10 @@ impl PromptReads {
         let mut file = file
             .lock()
             .map_err(|_| anyhow::anyhow!("attachment read is unavailable"))?;
-        let mut content = String::new();
         file.seek(SeekFrom::Start(0))?;
-        file.read_to_string(&mut content)
+        let content = read_selected_lines(&mut *file, line, limit)
             .map_err(|error| anyhow::anyhow!("failed to read {}: {error}", path.display()))?;
-        Ok(Some(select_lines(content, line, limit)))
+        Ok(Some(content))
     }
 }
 
@@ -318,25 +315,48 @@ pub fn read_text_file(
     line: Option<u32>,
     limit: Option<u32>,
 ) -> anyhow::Result<String> {
-    let content = std::fs::read_to_string(path)
-        .map_err(|e| anyhow::anyhow!("failed to read {}: {e}", path.display()))?;
-    Ok(select_lines(content, line, limit))
+    let file = File::open(path)
+        .map_err(|error| anyhow::anyhow!("failed to open {}: {error}", path.display()))?;
+    read_selected_lines(file, line, limit)
+        .map_err(|error| anyhow::anyhow!("failed to read {}: {error}", path.display()))
 }
 
-fn select_lines(content: String, line: Option<u32>, limit: Option<u32>) -> String {
-    let Some(start) = line else {
-        return content;
-    };
-    let start = start.saturating_sub(1) as usize;
-    let lines: Vec<&str> = content.lines().collect();
-    let end = match limit {
-        Some(limit) => start.saturating_add(limit as usize).min(lines.len()),
-        None => lines.len(),
-    };
-    if start >= lines.len() {
-        return String::new();
+fn read_selected_lines(
+    mut input: impl Read,
+    line: Option<u32>,
+    limit: Option<u32>,
+) -> std::io::Result<String> {
+    if line.is_none() && limit.is_none() {
+        let mut content = String::new();
+        input.read_to_string(&mut content)?;
+        return Ok(content);
     }
-    lines[start..end].join("\n")
+    let mut reader = BufReader::new(input);
+    let mut buffer = String::new();
+    for _ in 0..line.unwrap_or(1).saturating_sub(1) {
+        buffer.clear();
+        if reader.read_line(&mut buffer)? == 0 {
+            return Ok(String::new());
+        }
+    }
+    let mut output = String::new();
+    for index in 0..limit.unwrap_or(u32::MAX) {
+        buffer.clear();
+        if reader.read_line(&mut buffer)? == 0 {
+            break;
+        }
+        if buffer.ends_with('\n') {
+            buffer.pop();
+            if buffer.ends_with('\r') {
+                buffer.pop();
+            }
+        }
+        if index > 0 {
+            output.push('\n');
+        }
+        output.push_str(&buffer);
+    }
+    Ok(output)
 }
 
 /// Write a text file, creating its parent directory when needed.
@@ -365,6 +385,35 @@ pub fn write_text_file(path: &Path, content: &str) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ranged_reads_honor_limit_without_a_start_line_and_stop_early() -> anyhow::Result<()> {
+        struct OneChunk(Option<&'static [u8]>);
+        impl Read for OneChunk {
+            fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+                let bytes = self
+                    .0
+                    .take()
+                    .ok_or_else(|| std::io::Error::other("read beyond requested range"))?;
+                buffer[..bytes.len()].copy_from_slice(bytes);
+                Ok(bytes.len())
+            }
+        }
+        assert_eq!(
+            read_selected_lines(OneChunk(Some(b"first\n")), None, Some(1))?,
+            "first"
+        );
+        assert_eq!(
+            read_selected_lines(&b"first\r\nsecond\nthird\n"[..], Some(2), Some(2))?,
+            "second\nthird"
+        );
+        assert_eq!(
+            read_selected_lines(&b"first\nsecond\n"[..], None, None)?,
+            "first\nsecond\n"
+        );
+        assert_eq!(read_selected_lines(&b"first\n"[..], None, Some(0))?, "");
+        Ok(())
+    }
 
     #[cfg(unix)]
     #[test]

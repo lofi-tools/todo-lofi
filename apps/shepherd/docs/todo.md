@@ -1433,10 +1433,14 @@ placeholder tabs and no unearned state badges.
   and atomic writes also use descriptor-relative operations on Unix, with
   fixtures for directory substitution and preserved file permissions. ACP reads
   and writes run on blocking workers. ACP attachment grants open every path
-  component without following symlinks and
-  retain the opened file for the duration of the prompt. Agent launch environment
-  commands resolve at spawn with a five-second timeout and bounded output; errors
-  exclude their output. Resolution updates the environment only after every
+  component without following symlinks and retain the opened file for the
+  duration of the prompt. ACP line-limited reads stream only the requested range
+  and honor a limit even when the start line is omitted; a fixture checks that
+  reading stops early.
+  Full-file reads and individual long lines still need a resource limit.
+  Agent launch environment commands resolve at spawn with a five-second timeout
+  and bounded output; errors exclude their output. Resolution updates the
+  environment only after every
   command succeeds, so a failed attempt can be retried from the original map.
   Invalid environment names and NUL-containing values are rejected before
   any resolver command runs.
