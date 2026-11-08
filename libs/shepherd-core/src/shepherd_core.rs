@@ -5846,6 +5846,7 @@ mod tests {
                             paths: Vec::new(),
                             patch: None,
                             choices: None,
+                            stream_permit: None,
                         },
                     })
                     .map_err(|_| HarnessError::ChannelClosed)?;
@@ -5877,6 +5878,7 @@ mod tests {
                                 paths: Vec::new(),
                                 patch: None,
                                 choices: None,
+                                stream_permit: None,
                             },
                         })
                         .map_err(|_| HarnessError::ChannelClosed)?;

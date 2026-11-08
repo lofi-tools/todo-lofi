@@ -981,6 +981,7 @@ impl PendingApproval {
                 .collect(),
             patch,
             choices: Some(choices),
+            stream_permit: reply.capacity_permit(),
         };
         Self {
             request_id,
@@ -1552,6 +1553,45 @@ mod tests {
             Some("active output")
         );
         assert!(updates.terminal_tools.contains_key("active"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cancelled_approval_retains_capacity_until_its_event_is_consumed()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let capacity = Arc::new(tokio::sync::Semaphore::new(1));
+        let permit = capacity.clone().acquire_owned().await?;
+        let (answer, _answer_receiver) = futures_channel::oneshot::channel();
+        let (_confirm, confirmation) = futures_channel::oneshot::channel();
+        let reply = PermissionReply::new_with_capacity(answer, permit, confirmation);
+        let pending = PendingApproval::new(
+            42,
+            ToolCallUpdate::new("tool", ToolCallUpdateFields::new()),
+            vec![PermissionOption::new(
+                "once",
+                "Allow",
+                PermissionOptionKind::AllowOnce,
+            )],
+            reply,
+            false,
+        );
+        let mut approvals = VecDeque::from([pending]);
+        let (sender, mut events) = mpsc::unbounded_channel();
+        let (changes, _) = watch::channel(Vec::new());
+        let grants = SessionGrants::new(changes);
+        show_next_approval(&sender, &mut approvals, &grants, None).await?;
+        cancel_approval(&sender, &mut approvals, &grants, None, 42).await?;
+        assert!(approvals.is_empty());
+        assert_eq!(capacity.available_permits(), 0);
+        let event = events.recv().await.ok_or("missing approval")?;
+        let copy = event.clone();
+        let mut transcript = Transcript::default();
+        transcript.apply(&event);
+        drop(event);
+        assert_eq!(capacity.available_permits(), 0);
+        drop(copy);
+        assert_eq!(capacity.available_permits(), 1);
+        assert!(!transcript.entries().is_empty());
         Ok(())
     }
 

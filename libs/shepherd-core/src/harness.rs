@@ -674,6 +674,7 @@ mod tests {
             paths: Vec::new(),
             patch: None,
             choices: None,
+            stream_permit: None,
         };
         let key = "exact ACP input";
         {

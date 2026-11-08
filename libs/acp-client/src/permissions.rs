@@ -229,7 +229,7 @@ pub enum PermissionDecision {
 /// dependencies.
 pub struct PermissionReply {
     sender: oneshot::Sender<PermissionDecision>,
-    _permit: Option<tokio::sync::OwnedSemaphorePermit>,
+    permit: Option<std::sync::Arc<tokio::sync::OwnedSemaphorePermit>>,
     confirmation: Option<oneshot::Receiver<bool>>,
 }
 
@@ -237,7 +237,7 @@ impl PermissionReply {
     pub fn new(sender: oneshot::Sender<PermissionDecision>) -> Self {
         Self {
             sender,
-            _permit: None,
+            permit: None,
             confirmation: None,
         }
     }
@@ -249,7 +249,7 @@ impl PermissionReply {
     ) -> Self {
         Self {
             sender,
-            _permit: None,
+            permit: None,
             confirmation: Some(confirmation),
         }
     }
@@ -261,9 +261,23 @@ impl PermissionReply {
     ) -> Self {
         Self {
             sender,
-            _permit: Some(permit),
+            permit: Some(std::sync::Arc::new(permit)),
             confirmation: Some(confirmation),
         }
+    }
+
+    #[cfg(feature = "test-support")]
+    pub fn new_with_capacity(
+        sender: oneshot::Sender<PermissionDecision>,
+        permit: tokio::sync::OwnedSemaphorePermit,
+        confirmation: oneshot::Receiver<bool>,
+    ) -> Self {
+        Self::limited(sender, permit, confirmation)
+    }
+
+    /// Retain the request's capacity while its approval event remains queued.
+    pub fn capacity_permit(&self) -> Option<std::sync::Arc<tokio::sync::OwnedSemaphorePermit>> {
+        self.permit.clone()
     }
 
     /// Answer the agent. Returns the decision back when nobody is listening

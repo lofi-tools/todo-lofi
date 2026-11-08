@@ -2972,6 +2972,7 @@ async fn handle_server_request(
         paths: approval_paths(&params),
         patch: approval_patch(&method, &params),
         choices: None,
+        stream_permit: None,
     };
     approvals.approvals.insert(approval_id.clone(), server_id);
     drop(approvals);

@@ -559,6 +559,8 @@ pub struct ApprovalRequest {
     pub paths: Vec<PathBuf>,
     pub patch: Option<FileDiff>,
     pub choices: Option<Vec<Decision>>,
+    /// Retains request capacity until the queued approval has been consumed.
+    pub stream_permit: Option<Arc<tokio::sync::OwnedSemaphorePermit>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -1581,6 +1583,7 @@ mod tests {
                 paths: Vec::new(),
                 patch: None,
                 choices: None,
+                stream_permit: None,
             },
         });
         transcript.apply(&HarnessEvent::ApprovalResolved {

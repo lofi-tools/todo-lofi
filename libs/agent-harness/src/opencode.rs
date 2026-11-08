@@ -1337,6 +1337,7 @@ impl PermissionRequest {
             paths: Vec::new(),
             patch: None,
             choices: None,
+            stream_permit: None,
         }
     }
 }
