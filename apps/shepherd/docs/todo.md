@@ -1814,6 +1814,11 @@ placeholder tabs and no unearned state badges.
   After the ACP lifecycle event changes, the offline headless desktop-backend
   suite passed 107 tests with one local benchmark ignored; its terminal bridge
   fixture was updated for the added event permit.
+  After the store ownership, queue and attachment-integrity changes, the
+  offline headless desktop-backend suite passed 109 tests with one local
+  throughput benchmark ignored, and backend Clippy passed with warnings
+  denied. The linked-worktree watcher fixture took over 60 seconds on this run;
+  no desktop window or live agent was used.
 - [ ] Packaging and CI: macOS 13+, Ubuntu 24.04+, pinned Zig, Tauri build,
   platform smoke.
   The local macOS debug app bundle declares macOS 13.0 in both Info.plist and
