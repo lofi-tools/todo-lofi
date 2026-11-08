@@ -548,6 +548,28 @@ async fn migrations_pending(db: &mut toasty::db::Db) -> Result<bool, StoreError>
 }
 
 async fn backup_database(db: &mut toasty::db::Db, path: &Path) -> Result<(), StoreError> {
+    backup_database_with(db, path, verify_snapshot).await
+}
+
+/// A snapshot only counts as a backup if it is a readable SQLite database. The
+/// header check catches a truncated or replaced file before it is retained.
+fn verify_snapshot(path: &Path) -> Result<(), String> {
+    let bytes =
+        std::fs::read(path).map_err(|error| format!("could not read the snapshot: {error}"))?;
+    if bytes.len() < 512 || &bytes[..16] != b"SQLite format 3\0" {
+        return Err(format!(
+            "the snapshot is not a SQLite database ({} bytes)",
+            bytes.len()
+        ));
+    }
+    Ok(())
+}
+
+async fn backup_database_with(
+    db: &mut toasty::db::Db,
+    path: &Path,
+    verify: fn(&Path) -> Result<(), String>,
+) -> Result<(), StoreError> {
     let mut name = path.as_os_str().to_owned();
     name.push(format!(".pre-migration-{}", uuid::Uuid::new_v4()));
     let final_directory = PathBuf::from(&name);
@@ -567,23 +589,46 @@ async fn backup_database(db: &mut toasty::db::Db, path: &Path) -> Result<(), Sto
         })?;
     let backup = directory.join("snapshot.db");
     let display = backup.display().to_string();
-    let destination = backup.to_str().ok_or_else(|| StoreError::Backup {
-        path: display.clone(),
-        reason: "the backup path is not UTF-8".into(),
-    })?;
+    let Some(destination) = backup.to_str() else {
+        return Err(discard_backup(
+            &directory,
+            &display,
+            "the backup path is not UTF-8".into(),
+        ));
+    };
     let statement = format!("VACUUM INTO \"{}\"", destination.replace('"', "\"\""));
-    toasty::sql::statement(&statement)
-        .exec(&mut *db)
-        .await
-        .map_err(|error| StoreError::Backup {
-            path: display,
-            reason: error.to_string(),
-        })?;
-    std::fs::rename(&directory, &final_directory).map_err(|error| StoreError::Backup {
-        path: final_directory.display().to_string(),
-        reason: error.to_string(),
-    })?;
+    if let Err(error) = toasty::sql::statement(&statement).exec(&mut *db).await {
+        return Err(discard_backup(&directory, &display, error.to_string()));
+    }
+    if let Err(reason) = verify(&backup) {
+        return Err(discard_backup(
+            &directory,
+            &display,
+            format!("snapshot verification failed: {reason}"),
+        ));
+    }
+    if let Err(error) = std::fs::rename(&directory, &final_directory) {
+        return Err(discard_backup(
+            &directory,
+            &final_directory.display().to_string(),
+            error.to_string(),
+        ));
+    }
     Ok(())
+}
+
+fn discard_backup(directory: &Path, path: &str, reason: String) -> StoreError {
+    let reason = match std::fs::remove_dir_all(directory) {
+        Ok(()) => reason,
+        Err(error) => format!(
+            "{reason}; could not remove the incomplete backup {}: {error}",
+            directory.display()
+        ),
+    };
+    StoreError::Backup {
+        path: path.to_owned(),
+        reason,
+    }
 }
 
 async fn write_transcript_entries(
@@ -4488,6 +4533,60 @@ mod tests {
             .exec(&mut *migrated.db.lock().await)
             .await?;
         assert_eq!(rows.len(), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_failed_snapshot_verification_removes_the_backup_and_blocks_migration()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("shepherd.db");
+        let mut db = toasty::Db::builder()
+            .build(Turso::file(&path).experimental_index_method(true))
+            .await?;
+        let (last, previous) = MIGRATIONS.split_last().ok_or("missing migrations")?;
+        apply_migration_set(&mut db, previous).await?;
+        let failed = backup_database_with(&mut db, &path, |_| {
+            Err("injected verification failure".into())
+        })
+        .await;
+        assert!(
+            matches!(&failed, Err(StoreError::Backup { reason, .. }) if reason.contains("injected verification failure")),
+            "unexpected result: {failed:?}"
+        );
+        let entries = std::fs::read_dir(directory.path())?.collect::<Result<Vec<_>, _>>()?;
+        assert!(!entries.iter().any(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .contains(".pre-migration-")
+        }));
+        let rows = toasty::sql::query("SELECT name FROM _migrations_history WHERE name = ?1")
+            .column_types([Type::String])
+            .bind(last.name)
+            .exec(&mut db)
+            .await?;
+        assert!(rows.is_empty());
+        drop(db);
+        let migrated = TursoStore::open_at(&path).await?;
+        let rows = toasty::sql::query("SELECT name FROM _migrations_history WHERE name = ?1")
+            .column_types([Type::String])
+            .bind(last.name)
+            .exec(&mut *migrated.db.lock().await)
+            .await?;
+        assert_eq!(rows.len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn snapshot_verification_rejects_a_corrupt_file() -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let short = directory.path().join("short.db");
+        std::fs::write(&short, b"not a database")?;
+        assert!(verify_snapshot(&short).is_err());
+        let wrong_header = directory.path().join("header.db");
+        std::fs::write(&wrong_header, vec![0_u8; 4096])?;
+        assert!(verify_snapshot(&wrong_header).is_err());
         Ok(())
     }
 

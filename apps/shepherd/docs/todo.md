@@ -1382,7 +1382,7 @@ placeholder tabs and no unearned state badges.
   an archived task also verifies pending collection recovery first. Existing
   paths are validated as task worktrees on the recorded branch before their
   pending markers are cleared; fixtures cover symlink and branch replacements.
-- [ ] Database backup, migration checks, malformed migration handling and
+- [x] Database backup, migration checks, malformed migration handling and
   transactional writes.
   Existing file databases receive a retained Turso snapshot in a private
   `<database>.pre-migration-<id>/snapshot.db` directory before pending
@@ -1406,16 +1406,19 @@ placeholder tabs and no unearned state badges.
   checks remain possible; hard-linked aliases remain unsupported on other platforms.
   A Unix fixture denies backup
   directory creation, verifies the old history remains intact, then retries
-  successfully after access is restored. An inaccessible database path also
+  successfully after access is restored. Every snapshot is checked for a
+  readable SQLite header before it is retained; a failed write, verification or
+  rename removes the incomplete directory and reports the reason, and a fixture
+  injects a verification failure, checks no backup artifact remains and retries
+  the migration successfully. An inaccessible database path also
   fails before opening or migrating instead of being treated as a new database.
   Turso's parser validates migration statements before changes and rejects
   transaction-control statements that could escape the migration transaction;
   fixtures verify rejection before any migration or history table is created.
   A migration list with an empty or duplicate name is also rejected before any
-  schema or history changes; a fixture covers both cases. A failed
+  schema or history changes; a fixture covers both cases.  A failed
   statement rolls back its migration and history entry; a fixture retries the
-  repaired migration on the same connection. Broader transaction
-  checks remain. Transcript batches reject missing or mismatched task/session
+  repaired migration on the same connection. Transcript batches reject missing or mismatched task/session
   owners; fixtures verify failed attachment updates roll back the whole batch.
   Normal task-state saves and interrupted shutdowns commit eligible transcript
   entries in the same transaction. Both transcript write paths explicitly
