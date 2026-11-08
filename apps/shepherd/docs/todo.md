@@ -1372,7 +1372,9 @@ placeholder tabs and no unearned state badges.
   requests at 1 MiB per terminal. ACP terminal output has a shared 64-event
   backpressure limit with 8 KiB chunks; release or shutdown unblocks a stalled
   pump. Cancelled terminal exit-wait futures remove their registry entries;
-  fixtures also cover a reused terminal ID. Active waiters remain unbounded.
+  fixtures also cover a reused terminal ID. Each terminal admits at most 64
+  active exit waits and reports an error for excess requests; cancellation
+  frees a slot and existing waiters still receive the exit status.
   Output permits remain held through the harness queue until the core
   consumes the events. A direct terminal's exit wait completes even if a
   descendant keeps an output pipe open, and shutdown rejects new terminals.

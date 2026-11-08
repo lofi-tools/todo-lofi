@@ -24,6 +24,7 @@ const DEFAULT_OUTPUT_LIMIT: usize = 256 * 1024;
 const MAX_OUTPUT_LIMIT: usize = 1024 * 1024;
 const MAX_PENDING_OUTPUT_EVENTS: usize = 64;
 const MAX_OUTPUT_EVENT_BYTES: usize = 8192;
+const MAX_EXIT_WAITERS_PER_TERMINAL: usize = 64;
 
 pub struct TerminalLaunch {
     pub id: String,
@@ -318,6 +319,12 @@ impl TerminalRegistry {
             match &entry.exit {
                 Some(exit) => return Ok(WaitForTerminalExitResponse::new(exit.clone())),
                 None => {
+                    if entry.waiters.len() >= MAX_EXIT_WAITERS_PER_TERMINAL {
+                        return Err(format!(
+                            "terminal {} has too many pending exit waits",
+                            terminal_id.0
+                        ));
+                    }
                     let (tx, rx) = oneshot::channel();
                     let token = Arc::new(());
                     entry.waiters.push(TerminalWaiter {
@@ -696,6 +703,42 @@ mod tests {
         async fn stop(&self, _id: &str) -> Result<(), String> {
             Ok(())
         }
+    }
+
+    #[tokio::test]
+    async fn exit_wait_limit_rejects_excess_and_recovers_after_cancellation()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let (events, _receiver) = tokio::sync::mpsc::unbounded_channel();
+        let registry = TerminalRegistry::new(
+            SessionRoots::new([directory.path().to_path_buf()]),
+            &events,
+            Some(Arc::new(IdleBackend)),
+        );
+        registry.register("fixture", MAX_OUTPUT_LIMIT);
+        let terminal = TerminalId::new("fixture");
+        let mut waiters = Vec::new();
+        for _ in 0..MAX_EXIT_WAITERS_PER_TERMINAL {
+            let mut waiter = Box::pin(registry.wait_for_exit(&terminal));
+            assert!(futures::poll!(waiter.as_mut()).is_pending());
+            waiters.push(waiter);
+        }
+        assert!(
+            matches!(registry.wait_for_exit(&terminal).await, Err(error) if error.contains("too many pending exit waits"))
+        );
+        drop(waiters.pop());
+        let mut replacement = Box::pin(registry.wait_for_exit(&terminal));
+        assert!(futures::poll!(replacement.as_mut()).is_pending());
+        waiters.push(replacement);
+        registry.record_exit("fixture", &TerminalExitStatus::new().exit_code(Some(0)));
+        for waiter in waiters {
+            waiter.await.map_err(std::io::Error::other)?;
+        }
+        registry
+            .wait_for_exit(&terminal)
+            .await
+            .map_err(std::io::Error::other)?;
+        Ok(())
     }
 
     #[tokio::test]
