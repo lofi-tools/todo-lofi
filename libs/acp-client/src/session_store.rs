@@ -5,6 +5,7 @@
 //! as the Todoist token (`$MY_TODO_CONFIG_DIR`, else `~/.config/my-todo`).
 //! Entries are keyed by project path, which survives tag renames.
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -77,15 +78,21 @@ impl SessionStore {
 
     /// The project's entry, if one was stored.
     pub fn get(&self, project_path: &str) -> Option<StoredSession> {
-        self.load()
-            .sessions
+        let file = match self.load() {
+            Ok(file) => file,
+            Err(error) => {
+                tracing::warn!(%error, "could not load ACP sessions");
+                return None;
+            }
+        };
+        file.sessions
             .into_iter()
             .find(|session| session.project_path == project_path)
     }
 
     /// Insert or replace a project's entry.
     pub fn put(&self, session: StoredSession) -> anyhow::Result<()> {
-        let mut file = self.load();
+        let mut file = self.load()?;
         match file
             .sessions
             .iter_mut()
@@ -103,7 +110,7 @@ impl SessionStore {
         project_path: &str,
         permissions: ToolPermissions,
     ) -> anyhow::Result<()> {
-        let mut file = self.load();
+        let mut file = self.load()?;
         match file
             .sessions
             .iter_mut()
@@ -121,15 +128,24 @@ impl SessionStore {
 
     /// Drop a project's entry (used when its session is torn down).
     pub fn remove(&self, project_path: &str) -> anyhow::Result<()> {
-        let mut file = self.load();
+        let mut file = self.load()?;
         file.sessions
             .retain(|session| session.project_path != project_path);
         self.save(&file)
     }
 
-    fn load(&self) -> StoreFile {
-        let Ok(raw) = std::fs::read_to_string(&self.path) else {
-            return StoreFile::default();
+    fn load(&self) -> anyhow::Result<StoreFile> {
+        let raw = match std::fs::read_to_string(&self.path) {
+            Ok(raw) => raw,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(StoreFile::default());
+            }
+            Err(error) => {
+                return Err(anyhow::anyhow!(
+                    "failed to read {}: {error}",
+                    self.path.display()
+                ));
+            }
         };
         // Parse through the legacy shape so a stored `auto_approve: true`
         // with no policy yet migrates to a global allow instead of being
@@ -157,33 +173,37 @@ impl SessionStore {
                         session
                     })
                     .collect();
-                StoreFile {
+                Ok(StoreFile {
                     version: legacy.version,
                     sessions,
-                }
+                })
             }
-            Err(error) => {
-                // A corrupt store must not stop the agent panel from working;
-                // starting from empty loses only resume ids.
-                tracing::warn!("ignoring unreadable {}: {error}", self.path.display());
-                StoreFile::default()
-            }
+            Err(error) => Err(anyhow::anyhow!(
+                "failed to parse {}: {error}",
+                self.path.display()
+            )),
         }
     }
 
     fn save(&self, file: &StoreFile) -> anyhow::Result<()> {
-        if let Some(parent) = self.path.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| anyhow::anyhow!("failed to create {}: {e}", parent.display()))?;
-        }
+        let parent = self
+            .path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        std::fs::create_dir_all(parent)
+            .map_err(|e| anyhow::anyhow!("failed to create {}: {e}", parent.display()))?;
         let file = StoreFile {
             version: STORE_VERSION,
             sessions: file.sessions.clone(),
         };
         let raw = serde_json::to_string_pretty(&file)
             .map_err(|e| anyhow::anyhow!("failed to serialize sessions: {e}"))?;
-        std::fs::write(&self.path, raw)
-            .map_err(|e| anyhow::anyhow!("failed to write {}: {e}", self.path.display()))
+        let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
+        temporary.write_all(raw.as_bytes())?;
+        temporary.as_file().sync_all()?;
+        temporary.persist(&self.path)?;
+        Ok(())
     }
 }
 
@@ -207,6 +227,27 @@ pub fn now_secs() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn corrupt_store_is_not_overwritten_by_updates() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("acp-sessions.json");
+        let original = b"{ invalid json";
+        std::fs::write(&path, original)?;
+        let store = SessionStore::new(&path);
+        assert!(store.put(StoredSession::default()).is_err());
+        assert!(
+            store
+                .set_tool_permissions("/project", ToolPermissions::default())
+                .is_err()
+        );
+        assert!(store.remove("/project").is_err());
+        assert_eq!(std::fs::read(&path)?, original);
+        std::fs::remove_file(&path)?;
+        store.set_tool_permissions("/project", ToolPermissions::default())?;
+        assert!(store.get("/project").is_some());
+        Ok(())
+    }
 
     #[test]
     fn legacy_auto_approve_migrates_to_a_global_allow() {

@@ -1671,6 +1671,10 @@ placeholder tabs and no unearned state badges.
   the payload logging. No Shepherd tracing subscriber installation was found in the desktop sources;
   this does not establish how other hosts configure the shared client. Other
   adapter-internal logs and live-adapter behavior remain to be audited.
+  The shared ACP session store used by Taskstream now refuses to overwrite an
+  unreadable or malformed file and writes replacements atomically. A fixture
+  verifies that failed updates preserve corrupt bytes and can be retried after
+  repair; concurrent writers are not coordinated.
   On 2026-11-07 the default offline headless agent-harness suite passed 124
   tests (two live tests ignored), the core suite passed 120 tests (three
   ignored), and the desktop-backend suite passed 95 tests (one local throughput
