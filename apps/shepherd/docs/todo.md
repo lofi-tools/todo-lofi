@@ -1568,10 +1568,9 @@ placeholder tabs and no unearned state badges.
   notification callback alone can still leave a prompt reporting success; the
   failure must also reach the pending request and stop the connection. Both
   Shepherd now folds history while session/load is in flight, with a 600-update
-  replay fixture; Taskstream still waits for the load response before consuming
-  history. A fixed notification limit also requires concurrent history
-  consumption there to avoid rejecting legitimate long sessions. The prototype
-  was removed until both conditions can be handled.
+  replay fixture. Taskstream likewise folds history while loading, with its own
+  600-update fixture. The queue-limit prototype was removed pending a reliable
+  way to fail the pending request and stop the connection on overflow.
   Transcript folding similarly selects the tail of an oversized command-output
   chunk before allocating it, with a UTF-8 regression for the retained output.
 - [ ] Multiple agents and projects: three agents across two projects, no state

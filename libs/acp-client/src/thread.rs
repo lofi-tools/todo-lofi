@@ -260,7 +260,7 @@ pub struct SessionControls {
     pub title: Option<String>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct Transcript {
     entries: Vec<Entry>,
     /// `tool_call_id -> row index`, so updates are O(1).

@@ -15,7 +15,7 @@ use std::sync::Arc;
 use acp_client::schema::{
     McpServer, PermissionOptionId, SessionConfigId, SessionConfigKind, SessionConfigOption,
     SessionConfigOptionCategory, SessionConfigOptionValue, SessionConfigSelectOptions, SessionId,
-    SessionModeId, SessionModeState, ToolCallUpdate,
+    SessionModeId, SessionModeState, SessionUpdate, ToolCallUpdate,
 };
 use acp_client::{
     AcpConnection, AcpError, AcpEvent, Activity, AgentServer, AuthMethodRow, ConnectOptions,
@@ -1026,11 +1026,12 @@ impl AgentPane {
         let session_mode_version = agent.opencode_version();
         let store = self.session_store.clone();
         let endpoint = entry.mcp.clone();
+        let transcript = resume.then(|| entry.transcript.clone());
 
         let launch = gpui_tokio::Tokio::spawn_result(cx, async move {
             let roots =
                 SessionRoots::new(std::iter::once(cwd.clone()).chain(additional.iter().cloned()));
-            let connection = connect(agent, &spec, |_| ConnectOptions {
+            let mut connection = connect(agent, &spec, |_| ConnectOptions {
                 roots,
                 tool_permissions: tool_permissions.clone(),
             })
@@ -1055,20 +1056,24 @@ impl AgentPane {
             } else {
                 None
             };
+            let mut replay = None;
+            let mut startup_events = Vec::new();
             let created = match stored {
                 Some(previous) if connection.info.load_session => {
                     let session_id = SessionId::new(previous.session_id.clone());
-                    match connection
-                        .requester
-                        .load_session(
-                            session_id.clone(),
-                            cwd.clone(),
-                            additional.clone(),
-                            mcp_servers.clone(),
-                        )
-                        .await
+                    match load_session_with_history(
+                        &mut connection,
+                        session_id.clone(),
+                        cwd.clone(),
+                        additional.clone(),
+                        mcp_servers.clone(),
+                        transcript.unwrap_or_default(),
+                        &mut startup_events,
+                    )
+                    .await
                     {
-                        Ok((modes, config_options)) => {
+                        Ok((modes, config_options, history)) => {
+                            replay = Some(Box::new(history));
                             Ok((session_id, modes, config_options, None))
                         }
                         Err(error) => {
@@ -1155,6 +1160,8 @@ impl AgentPane {
                 modes,
                 config_options,
                 notice,
+                replay,
+                startup_events,
             })
         });
 
@@ -1178,6 +1185,7 @@ impl AgentPane {
         result: anyhow::Result<LaunchOutcome>,
         cx: &mut Context<Self>,
     ) {
+        let mut startup_events = Vec::new();
         let Some(entry) = self.projects.get_mut(tag_name) else {
             return;
         };
@@ -1191,9 +1199,15 @@ impl AgentPane {
                 modes,
                 config_options,
                 notice,
+                replay,
+                startup_events: pending,
             }) => {
                 let events = forward_events(&mut connection, tag_name, cx);
+                if let Some(replay) = replay {
+                    entry.transcript = *replay;
+                }
                 entry.transcript.seed_controls(modes, config_options);
+                startup_events = pending;
                 if let Some(notice) = notice {
                     // An agent failure belongs in the app's notification log
                     // as well as the transcript, which the pane owns.
@@ -1231,6 +1245,9 @@ impl AgentPane {
                     detail: error.to_string(),
                 };
             }
+        }
+        if !startup_events.is_empty() {
+            self.on_agent_events(tag_name, startup_events, cx);
         }
         self.set_busy(tag_name, false, cx);
         self.sync_scroller(cx);
@@ -2357,6 +2374,8 @@ enum LaunchOutcome {
         modes: Option<SessionModeState>,
         config_options: Vec<SessionConfigOption>,
         notice: Option<String>,
+        replay: Option<Box<Transcript>>,
+        startup_events: Vec<AcpEvent>,
     },
     Auth {
         connection: AcpConnection,
@@ -2408,6 +2427,67 @@ async fn create_session(
         .new_session(cwd.to_path_buf(), additional.to_vec(), mcp_servers)
         .await?;
     Ok((session_id, modes, config_options))
+}
+
+async fn load_session_with_history(
+    connection: &mut AcpConnection,
+    session_id: SessionId,
+    cwd: PathBuf,
+    additional: Vec<PathBuf>,
+    mcp_servers: Vec<McpServer>,
+    mut transcript: Transcript,
+    pending: &mut Vec<AcpEvent>,
+) -> anyhow::Result<(
+    Option<SessionModeState>,
+    Vec<SessionConfigOption>,
+    Transcript,
+)> {
+    let requester = connection.requester.clone();
+    let request = requester.load_session(session_id.clone(), cwd, additional, mcp_servers);
+    tokio::pin!(request);
+    let mut mode = None;
+    let mut config = None;
+    let mut fold = |event| -> anyhow::Result<()> {
+        match event {
+            AcpEvent::SessionUpdate(notification) if notification.session_id == session_id => {
+                match &notification.update {
+                    SessionUpdate::CurrentModeUpdate(_) => {
+                        mode = Some(AcpEvent::SessionUpdate(notification))
+                    }
+                    SessionUpdate::ConfigOptionUpdate(_) => {
+                        config = Some(AcpEvent::SessionUpdate(notification))
+                    }
+                    _ => {
+                        transcript.apply(&notification);
+                    }
+                }
+            }
+            AcpEvent::ProtocolFailed { message } => {
+                anyhow::bail!("ACP connection failed while loading history: {message}")
+            }
+            AcpEvent::Exited { code, stderr } => {
+                anyhow::bail!("ACP agent exited while loading history ({code:?}): {stderr}")
+            }
+            event => pending.push(event),
+        }
+        Ok(())
+    };
+    let result = loop {
+        tokio::select! {
+            result = &mut request => break result?,
+            event = connection.events.recv() => match event {
+                Some(event) => fold(event)?,
+                None => anyhow::bail!("ACP connection closed while loading history"),
+            }
+        }
+    };
+    while let Ok(event) = connection.events.try_recv() {
+        fold(event)?;
+    }
+    drop(fold);
+    pending.extend(mode);
+    pending.extend(config);
+    Ok((result.0, result.1, transcript))
 }
 
 /// Flatten a select-valued config option for the chip UI.
@@ -4272,6 +4352,53 @@ mod tests {
         ContentBlock, ContentChunk, SessionMode, SessionNotification, SessionUpdate, TextContent,
         ToolCall,
     };
+
+    #[tokio::test]
+    async fn loads_long_history_in_order() -> anyhow::Result<()> {
+        use acp_client::fake_agent::{FakeScript, connect_fake_agent};
+        let cwd = std::env::temp_dir();
+        let updates = (0..600)
+            .map(|index| {
+                SessionUpdate::AgentMessageChunk(ContentChunk::new(ContentBlock::Text(
+                    TextContent::new(format!("{index},")),
+                )))
+            })
+            .collect();
+        let (mut connection, _) = connect_fake_agent(
+            FakeScript {
+                load_updates: updates,
+                ..FakeScript::default()
+            },
+            ConnectOptions {
+                roots: SessionRoots::new([cwd.clone()]),
+                tool_permissions: ToolPermissions::default(),
+            },
+        )
+        .await?;
+        let mut pending = Vec::new();
+        let (_, _, transcript) = load_session_with_history(
+            &mut connection,
+            SessionId::new("history"),
+            cwd,
+            Vec::new(),
+            Vec::new(),
+            Transcript::default(),
+            &mut pending,
+        )
+        .await?;
+        let expected = (0..600)
+            .map(|index| format!("{index},"))
+            .collect::<String>();
+        let entry = transcript
+            .entries()
+            .first()
+            .ok_or_else(|| anyhow::anyhow!("missing history"))?;
+        assert_eq!(transcript.len(), 1);
+        assert!(entry.summary().contains(&expected));
+        assert!(pending.is_empty());
+        connection.close_and_wait().await?;
+        Ok(())
+    }
 
     /// The tag name the pane fixtures key their project under, and the one the
     /// pane is pointed at.
