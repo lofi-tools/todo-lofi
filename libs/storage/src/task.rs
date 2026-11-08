@@ -395,12 +395,11 @@ impl TodoStore {
         // (spawning downstream steps, recording results, auto-completing
         // the run). Reopening just flips the flag back; the engine does
         // not un-spawn.
-        if done {
-            if let Ok(task) = self.get_task(id).await
-                && task.workflow_run_id.is_some()
-            {
-                self.evaluate_workflow_completion(&task).await?;
-            }
+        if done
+            && let Ok(task) = self.get_task(id).await
+            && task.workflow_run_id.is_some()
+        {
+            self.evaluate_workflow_completion(&task).await?;
         }
         Ok(())
     }

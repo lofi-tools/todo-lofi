@@ -112,10 +112,10 @@ fn deadline_for_due(due: &RemoteDue) -> Option<u64> {
     {
         return Some(stamp.as_second() as u64);
     }
-    if let Ok(date) = due.date.parse::<jiff::civil::Date>() {
-        if let Ok(zoned) = date.to_zoned(jiff::tz::TimeZone::UTC) {
-            return Some(zoned.timestamp().as_second() as u64);
-        }
+    if let Ok(date) = due.date.parse::<jiff::civil::Date>()
+        && let Ok(zoned) = date.to_zoned(jiff::tz::TimeZone::UTC)
+    {
+        return Some(zoned.timestamp().as_second() as u64);
     }
     None
 }

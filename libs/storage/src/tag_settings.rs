@@ -449,10 +449,11 @@ impl TodoStore {
             if let toasty::stmt::Value::Record(record) = row {
                 let task = record.first().and_then(|v| v.to_i64()).unwrap_or(0) as u64;
                 let tag = record.get(1).and_then(|v| v.to_i64()).unwrap_or(0) as u64;
-                if child_ids.contains(&tag) && !task_section.contains_key(&task) {
-                    if let Some(label) = label_by_id.get(&tag) {
-                        task_section.insert(task, label.clone());
-                    }
+                if child_ids.contains(&tag)
+                    && !task_section.contains_key(&task)
+                    && let Some(label) = label_by_id.get(&tag)
+                {
+                    task_section.insert(task, label.clone());
                 }
             }
         }

@@ -1891,6 +1891,8 @@ fn encode_path_segment(raw: &str) -> String {
     out
 }
 
+// Keep these signatures aligned with the trait’s explicit Send futures.
+#[allow(clippy::manual_async_fn)]
 impl GithubClient for GithubHttpClient {
     fn list_issues<'a>(
         &'a self,
@@ -3009,6 +3011,7 @@ impl TodoStore {
     /// the next pull find the tag by the pairing rather than by name. The
     /// label *objects* are never deleted or renamed (decision 27); only the
     /// issue stops carrying them.
+    #[allow(clippy::too_many_arguments)]
     async fn mirror_issue_labels<C: GithubClient>(
         &mut self,
         client: &C,
@@ -3075,6 +3078,7 @@ impl TodoStore {
     /// issue the app has just created. Best-effort by design: a failure is
     /// logged by the caller and retried by the next merge, because the issue
     /// already exists by the time this runs.
+    #[allow(clippy::too_many_arguments)]
     async fn push_local_issue_labels<C: GithubClient>(
         &mut self,
         client: &C,

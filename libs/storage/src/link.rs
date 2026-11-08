@@ -140,10 +140,10 @@ impl TodoStore {
 
         let mut ids = Vec::with_capacity(rows.len());
         for row in rows {
-            if let toasty::stmt::Value::Record(record) = row {
-                if let Some(id) = record.first().and_then(|v| v.to_i64()) {
-                    ids.push(id as u64);
-                }
+            if let toasty::stmt::Value::Record(record) = row
+                && let Some(id) = record.first().and_then(|v| v.to_i64())
+            {
+                ids.push(id as u64);
             }
         }
         Ok(ids)
@@ -235,10 +235,10 @@ impl TodoStore {
         })?;
         let mut tasks = Vec::with_capacity(rows.len());
         for row in rows {
-            if let toasty::stmt::Value::Record(record) = row {
-                if let Some(id) = record.first().and_then(|v| v.to_i64()) {
-                    tasks.push(self.get_task(id as u64).await?);
-                }
+            if let toasty::stmt::Value::Record(record) = row
+                && let Some(id) = record.first().and_then(|v| v.to_i64())
+            {
+                tasks.push(self.get_task(id as u64).await?);
             }
         }
         Ok(tasks)
@@ -259,10 +259,10 @@ impl TodoStore {
         })?;
         let mut tasks = Vec::with_capacity(rows.len());
         for row in rows {
-            if let toasty::stmt::Value::Record(record) = row {
-                if let Some(id) = record.first().and_then(|v| v.to_i64()) {
-                    tasks.push(self.get_task(id as u64).await?);
-                }
+            if let toasty::stmt::Value::Record(record) = row
+                && let Some(id) = record.first().and_then(|v| v.to_i64())
+            {
+                tasks.push(self.get_task(id as u64).await?);
             }
         }
         Ok(tasks)

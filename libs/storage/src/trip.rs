@@ -63,7 +63,7 @@ fn stay_items(days: &str) -> Vec<String> {
     let mut items = vec![
         format!("Underwear × {sets}"),
         format!("Socks × {sets}"),
-        format!("T-shirts and tops × {}", sets.min(5).max(2)),
+        format!("T-shirts and tops × {}", sets.clamp(2, 5)),
     ];
     if days > 7 {
         items.push("Plan laundry mid-trip".to_string());

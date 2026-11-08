@@ -1194,7 +1194,7 @@ impl TodoStore {
         slug: &str,
         recipe_json: Value,
     ) -> QueryResult<WorkflowRecipe> {
-        parse_recipe(&recipe_json).map_err(|message| invalid(message))?;
+        parse_recipe(&recipe_json).map_err(invalid)?;
         let rows = toasty::sql::query(r#"SELECT id FROM workflow_recipes WHERE slug = ?1"#)
             .column_types([toasty::stmt::Type::I64])
             .bind(slug)
@@ -1323,7 +1323,7 @@ impl TodoStore {
         let recipe_row = self.get_recipe(recipe_id).await?;
         let recipe = parse_recipe(&recipe_row.recipe_json.0)
             .map_err(|message| invalid(format!("recipe {recipe_id}: {message}")))?;
-        let effective = resolve_params(&recipe, params).map_err(|message| invalid(message))?;
+        let effective = resolve_params(&recipe, params).map_err(invalid)?;
         let run = WorkflowRun::create()
             .recipe_id(recipe_id)
             .schedule_id(schedule_id)
@@ -1712,7 +1712,7 @@ impl TodoStore {
                 }
                 "timer" => {
                     let duration = resolve_duration(&recipe, &run, edge.condition_value.as_ref())
-                        .map_err(|message| invalid(message))?;
+                        .map_err(invalid)?;
                     let scheduled_at = now_secs() + duration;
                     self.spawn_node_task(
                         &recipe,
@@ -1924,7 +1924,7 @@ impl TodoStore {
         .context(crate::error::QueryTagsSnafu {
             context: "find open node task",
         })?;
-        Ok(rows.first().and_then(|row| row_id(row)))
+        Ok(rows.first().and_then(row_id))
     }
 
     /// Re-open an automated task (done=false, result cleared). Pending rows

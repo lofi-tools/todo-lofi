@@ -485,13 +485,12 @@ impl TodoStore {
             let Ok(task) = self.get_task(task_id).await else {
                 continue;
             };
-            if let Some(deadline) = task.deadline {
-                if let Some(date) = jiff::Timestamp::from_second(deadline as i64)
+            if let Some(deadline) = task.deadline
+                && let Some(date) = jiff::Timestamp::from_second(deadline as i64)
                     .ok()
                     .map(|stamp| stamp.to_zoned(zone.clone()).date())
-                {
-                    anchor = Some(anchor.map_or(date, |first: jiff::civil::Date| first.min(date)));
-                }
+            {
+                anchor = Some(anchor.map_or(date, |first: jiff::civil::Date| first.min(date)));
             }
         }
         let anchor = anchor.unwrap_or(today);
