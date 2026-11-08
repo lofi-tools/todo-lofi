@@ -1190,7 +1190,8 @@ placeholder tabs and no unearned state badges.
   plus start time, reused-PID refusal.
   A headless subprocess fixture is killed with SIGKILL while a scripted agent
   waits for approval; reopening its database restores the prompt and marks the
-  task interrupted without inventing the unfinished answer.
+  task interrupted without inventing the unfinished answer. It also verifies
+  that an error notice recorded during the turn survives the crash.
   PTY process-group shutdown checks each member's recorded start time before
   signalling; a fixture rejects a matching PID with a different start time.
   A headless SIGKILL fixture verifies that a surviving PTY process is recognised

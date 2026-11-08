@@ -5235,6 +5235,10 @@ mod tests {
                 Box::new(TursoStore::open(&uri).await?),
                 Box::new(FakeHarnessFactory::new(vec![vec![FakeTurn::new(vec![
                     FakeStep::Message("unfinished answer".into()),
+                    FakeStep::TerminalError {
+                        id: "crash-terminal".into(),
+                        text: "Agent terminal error: missing exit status".into(),
+                    },
                     FakeStep::approval("crash-approval", "Run tests"),
                 ])]])),
             );
@@ -5309,6 +5313,7 @@ mod tests {
         assert_eq!(workspace.task.state, TaskState::Interrupted);
         let text = summaries(&workspace).join("\n");
         assert!(text.contains("persist this prompt"));
+        assert!(workspace.transcript.iter().any(|entry| matches!(&entry.kind, agent_harness::EntryKind::Notice { text, is_error: true } if text.contains("missing exit status"))));
         assert!(!text.contains("unfinished answer"));
         assert!(!recovered.sessions.contains_key(&task_id));
         Ok(())
