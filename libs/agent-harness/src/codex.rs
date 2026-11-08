@@ -1068,6 +1068,9 @@ impl CodexHarness {
                     "codex is no longer running; cannot call {method}"
                 )));
             }
+            pending
+                .responses
+                .retain(|_, response| !response.is_closed());
             pending.responses.insert(id, sender);
             if method == "turn/start" {
                 pending.start_request = Some(id);
@@ -5428,6 +5431,40 @@ esac
         );
         tokio::time::sleep(Duration::from_millis(1300)).await;
         assert!(!directory.path().join("escaped").exists());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cancelled_requests_release_pending_response_slots_on_retry()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut harness = CodexHarness::new();
+        let (outgoing, mut requests) = mpsc::channel(MAX_OUTBOUND_MESSAGES);
+        harness.outgoing = Some(outgoing);
+        let pending = harness.pending.clone();
+        for _ in 0..200 {
+            let mut request = Box::pin(harness.request("config/read", json!({})));
+            tokio::select! {
+                sent = requests.recv() => { sent.ok_or("outgoing queue closed")?; }
+                result = &mut request => return Err(format!("request finished early: {result:?}").into()),
+            }
+            assert_eq!(pending.lock().await.responses.len(), 1);
+            drop(request);
+        }
+        let mut request = Box::pin(harness.request("config/read", json!({})));
+        tokio::select! {
+            sent = requests.recv() => { sent.ok_or("outgoing queue closed")?; }
+            result = &mut request => return Err(format!("request finished early: {result:?}").into()),
+        }
+        let response = {
+            let mut state = pending.lock().await;
+            assert_eq!(state.responses.len(), 1);
+            let id = *state.responses.keys().next().ok_or("missing response")?;
+            state.responses.remove(&id).ok_or("missing waiter")?
+        };
+        response
+            .send(Ok(json!({"ready": true})))
+            .map_err(|_| "request was dropped")?;
+        assert_eq!(request.await?, json!({"ready": true}));
         Ok(())
     }
 

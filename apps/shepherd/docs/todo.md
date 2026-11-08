@@ -1411,6 +1411,8 @@ placeholder tabs and no unearned state badges.
   App-server requests check for reader closure while holding the pending map
   lock, preventing registration after disconnect cleanup; a fixture covers
   the contested lock case.
+  Cancelled app-server requests have their closed response waiters removed on
+  the next request; a fixture checks 200 cancellations and a successful retry.
   Codex exec shutdown retains its waiter after a timeout so a later quit can
   retry, and reports a waiter failure on subsequent attempts. Cancellation and
   shutdown also report process-group or child-stop errors while retaining the
