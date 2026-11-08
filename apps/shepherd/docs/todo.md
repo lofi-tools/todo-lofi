@@ -1436,7 +1436,9 @@ placeholder tabs and no unearned state badges.
   appears later; a fresh session can use a repaired root. On Unix, file access
   pins each opened root after checking its identity, so replacing the root path
   later cannot redirect file reads or writes; fixtures cover replacement both
-  during opening and afterward. Terminal
+  during opening and afterward. Missing write directories are created relative
+  to that root without following symlink substitutions; filesystem and fake-agent
+  fixtures cover nested writes. Terminal
   working directories still pass through a pathname. ACP reads and writes
   run on blocking workers. ACP attachment grants open every path
   component without following symlinks and retain the opened file for the

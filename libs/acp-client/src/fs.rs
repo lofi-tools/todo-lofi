@@ -116,7 +116,7 @@ impl SessionRoots {
         #[cfg(unix)]
         {
             let (root, handle) = self.anchored_root(&path)?;
-            let (directory, name) = open_confined_parent_at(root, handle, &path)?;
+            let (directory, name) = open_confined_parent_at(root, handle, &path, true)?;
             write_confined_file(&directory, &name, content)
         }
         #[cfg(not(unix))]
@@ -170,7 +170,7 @@ fn open_confined_parent(
 
     let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
     let root_handle = open(root, flags, Mode::empty())?;
-    open_confined_parent_at(root, &root_handle, path)
+    open_confined_parent_at(root, &root_handle, path, false)
 }
 
 #[cfg(unix)]
@@ -178,8 +178,9 @@ fn open_confined_parent_at(
     root: &Path,
     root_handle: &std::os::fd::OwnedFd,
     path: &Path,
+    create: bool,
 ) -> anyhow::Result<(std::os::fd::OwnedFd, std::ffi::OsString)> {
-    use rustix::fs::{Mode, OFlags, openat};
+    use rustix::fs::{Mode, OFlags, mkdirat, openat};
 
     let relative = path.strip_prefix(root)?;
     let parent = relative
@@ -191,7 +192,17 @@ fn open_confined_parent_at(
     let directory_flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
     let mut directory = openat(root_handle, ".", directory_flags, Mode::empty())?;
     for component in parent {
-        directory = openat(&directory, component, directory_flags, Mode::empty())?;
+        directory = match openat(&directory, component, directory_flags, Mode::empty()) {
+            Ok(opened) => opened,
+            Err(rustix::io::Errno::NOENT) if create => {
+                match mkdirat(&directory, component, Mode::from_raw_mode(0o777)) {
+                    Ok(()) | Err(rustix::io::Errno::EXIST) => {}
+                    Err(error) => return Err(error.into()),
+                }
+                openat(&directory, component, directory_flags, Mode::empty())?
+            }
+            Err(error) => return Err(error.into()),
+        };
     }
     Ok((directory, name.to_owned()))
 }
@@ -208,7 +219,7 @@ fn open_confined_file_at(
     handle: &std::os::fd::OwnedFd,
     path: &Path,
 ) -> anyhow::Result<File> {
-    let (directory, name) = open_confined_parent_at(root, handle, path)?;
+    let (directory, name) = open_confined_parent_at(root, handle, path, false)?;
     open_file_in(&directory, &name, path)
 }
 
@@ -373,30 +384,35 @@ fn open_attachment(path: &Path) -> anyhow::Result<File> {
     Ok(file)
 }
 
-/// Canonicalize a path that may not exist yet by canonicalizing its parent.
+/// Canonicalize a path that may not exist yet using its nearest existing ancestor.
 fn canonicalize_allow_missing(path: &Path) -> anyhow::Result<PathBuf> {
-    match path.canonicalize() {
-        Ok(resolved) => return Ok(resolved),
-        Err(error) if error.kind() == ErrorKind::NotFound => {
-            // A dangling symlink is an existing path with an unknown target,
-            // not a missing file that can be created under its parent.
-            match path.symlink_metadata() {
-                Err(error) if error.kind() == ErrorKind::NotFound => {}
-                _ => anyhow::bail!("{} cannot be resolved: {error}", path.display()),
+    let mut ancestor = path;
+    let mut missing = Vec::new();
+    loop {
+        match ancestor.canonicalize() {
+            Ok(mut resolved) => {
+                for component in missing.into_iter().rev() {
+                    resolved.push(component);
+                }
+                return Ok(resolved);
             }
+            Err(error) if error.kind() == ErrorKind::NotFound => {
+                // A dangling symlink must not be treated as a missing directory.
+                match ancestor.symlink_metadata() {
+                    Err(error) if error.kind() == ErrorKind::NotFound => {}
+                    _ => anyhow::bail!("{} cannot be resolved: {error}", ancestor.display()),
+                }
+                let name = ancestor.file_name().ok_or_else(|| {
+                    anyhow::anyhow!("{} has no usable path component", ancestor.display())
+                })?;
+                missing.push(name.to_os_string());
+                ancestor = ancestor.parent().ok_or_else(|| {
+                    anyhow::anyhow!("{} has no parent directory", ancestor.display())
+                })?;
+            }
+            Err(error) => anyhow::bail!("{} cannot be resolved: {error}", ancestor.display()),
         }
-        Err(error) => anyhow::bail!("{} cannot be resolved: {error}", path.display()),
     }
-    let parent = path
-        .parent()
-        .ok_or_else(|| anyhow::anyhow!("{} has no parent directory", path.display()))?;
-    let parent = parent
-        .canonicalize()
-        .map_err(|e| anyhow::anyhow!("{} is not accessible: {e}", parent.display()))?;
-    Ok(match path.file_name() {
-        Some(name) => parent.join(name),
-        None => parent,
-    })
 }
 
 /// Read a text file, optionally from `line` (1-based) for at most `limit` lines.
@@ -502,6 +518,33 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn confined_write_creates_missing_parents_without_following_substitutions() -> anyhow::Result<()>
+    {
+        let directory = tempfile::tempdir()?;
+        let outside = tempfile::tempdir()?;
+        let root = directory.path().canonicalize()?;
+        let roots = SessionRoots::new([root.clone()]);
+        roots.write_text_file(Path::new("new/deep/file.txt"), "content")?;
+        assert_eq!(
+            std::fs::read_to_string(root.join("new/deep/file.txt"))?,
+            "content"
+        );
+        assert!(
+            roots
+                .write_text_file(Path::new("missing/../../escape"), "bad")
+                .is_err()
+        );
+
+        let resolved = roots.resolve(Path::new("swapped/deep/file.txt"))?;
+        std::os::unix::fs::symlink(outside.path(), root.join("swapped"))?;
+        let (root_path, handle) = roots.anchored_root(&resolved)?;
+        assert!(open_confined_parent_at(root_path, handle, &resolved, true).is_err());
+        assert!(!outside.path().join("deep").exists());
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn rejects_root_replacement_before_opening() -> anyhow::Result<()> {
         let directory = tempfile::tempdir()?;
         let root = directory.path().join("workspace");
@@ -539,7 +582,7 @@ mod tests {
         let mut content = String::new();
         file.read_to_string(&mut content)?;
         assert_eq!(content, "original");
-        let (parent, name) = open_confined_parent_at(root_path, handle, &resolved)?;
+        let (parent, name) = open_confined_parent_at(root_path, handle, &resolved, true)?;
         write_confined_file(&parent, &name, "changed")?;
         assert_eq!(std::fs::read_to_string(moved.join("file"))?, "changed");
         assert_eq!(std::fs::read_to_string(root.join("file"))?, "replacement");

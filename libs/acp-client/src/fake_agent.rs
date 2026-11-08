@@ -950,7 +950,7 @@ mod tests {
     async fn file_requests_are_confined_to_the_session_roots() {
         // Relative paths resolve against the session's first root, so both requests
         // are expressed before the temporary directory exists.
-        let target = PathBuf::from("notes.txt");
+        let target = PathBuf::from("nested/deeper/notes.txt");
         let outside = std::env::temp_dir().join("acp-client-outside.txt");
         let (connection, observations, dir) = connect_to_fake(
             FakeScript {
