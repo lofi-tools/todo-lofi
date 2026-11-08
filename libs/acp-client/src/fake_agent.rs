@@ -840,6 +840,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn file_requests_reject_excess_and_recover_capacity()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        std::fs::write(directory.path().join("input"), "source")?;
+        let script = FakeScript {
+            read_paths: vec!["input".into()],
+            write: Some(("output".into(), "saved".into())),
+            ..Default::default()
+        };
+        let (transport, observations) = spawn_fake_agent(script);
+        let permits = Arc::new(tokio::sync::Semaphore::new(0));
+        let connection = crate::connection::connect_over_with_file_permits(
+            move |_, _| transport,
+            ConnectOptions {
+                roots: SessionRoots::new([directory.path().to_path_buf()]),
+                tool_permissions: confirm_all(),
+            },
+            None,
+            permits.clone(),
+        )
+        .await?;
+        let session = new_session(&connection, &directory).await;
+        connection
+            .requester
+            .prompt(&session, "first".into())
+            .await?;
+        {
+            let observed = observations.lock().map_err(|error| error.to_string())?;
+            assert!(
+                matches!(observed.file_reads.first(), Some(Err(error)) if error.contains("too many pending"))
+            );
+            assert!(
+                matches!(observed.file_writes.first(), Some(Err(error)) if error.contains("too many pending"))
+            );
+        }
+        assert!(!directory.path().join("output").exists());
+        permits.add_permits(1);
+        connection
+            .requester
+            .prompt(&session, "retry".into())
+            .await?;
+        let observed = observations.lock().map_err(|error| error.to_string())?;
+        assert!(matches!(observed.file_reads.get(1), Some(Ok(content)) if content == "source"));
+        assert!(matches!(observed.file_writes.get(1), Some(Ok(()))));
+        assert_eq!(
+            std::fs::read_to_string(directory.path().join("output"))?,
+            "saved"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn permission_burst_is_bounded_and_capacity_recovers()
     -> Result<(), Box<dyn std::error::Error>> {
         let (mut connection, observations, directory) = connect_to_fake(

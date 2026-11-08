@@ -48,6 +48,7 @@ use crate::{AcpError, AcpEvent, SessionSpec, StderrMessage, schema};
 const STDERR_LINES: usize = 250;
 const PENDING_STDERR_EVENTS: usize = 64;
 const MAX_PENDING_PERMISSIONS: usize = 64;
+const MAX_PENDING_FILE_REQUESTS: usize = 32;
 const MAX_PROTOCOL_LINE_BYTES: usize = 8 * 1024 * 1024;
 
 fn record_agent_stderr(
@@ -547,6 +548,27 @@ pub(crate) async fn connect_over_with_terminals<T>(
 where
     T: ConnectTo<Client> + 'static,
 {
+    connect_over_with_file_permits(
+        build_transport,
+        options,
+        terminals,
+        Arc::new(tokio::sync::Semaphore::new(MAX_PENDING_FILE_REQUESTS)),
+    )
+    .await
+}
+
+pub(crate) async fn connect_over_with_file_permits<T>(
+    build_transport: impl FnOnce(
+        tokio::sync::mpsc::UnboundedSender<AcpEvent>,
+        Arc<Mutex<VecDeque<String>>>,
+    ) -> T,
+    options: ConnectOptions,
+    terminals: Option<Arc<dyn TerminalBackend>>,
+    file_permits: Arc<tokio::sync::Semaphore>,
+) -> Result<AcpConnection, AcpError>
+where
+    T: ConnectTo<Client> + 'static,
+{
     let (events_tx, mut events_rx) = tokio::sync::mpsc::unbounded_channel();
     let stderr_buffer = Arc::new(Mutex::new(VecDeque::new()));
     let transport = build_transport(events_tx.clone(), stderr_buffer.clone());
@@ -565,6 +587,8 @@ where
     let permission_ids = std::sync::atomic::AtomicU64::new(0);
     let reads = events_tx.clone();
     let writes = events_tx.clone();
+    let read_permits = file_permits.clone();
+    let write_permits = file_permits;
     let terminal_create = events_tx.clone();
     let auto_approvals = events_tx.clone();
     let registry = TerminalRegistry::new(roots_for_handlers.clone(), &events_tx, terminals);
@@ -677,6 +701,13 @@ where
         )
         .on_receive_request(
             async move |request: ReadTextFileRequest, responder, _cx| {
+                let permit = match read_permits.clone().try_acquire_owned() {
+                    Ok(permit) => permit,
+                    Err(_) => {
+                        responder.respond_with_internal_error("too many pending file requests")?;
+                        return Ok(());
+                    }
+                };
                 let roots = roots_for_read.clone();
                 let prompt_reads = prompt_reads_for_handler.clone();
                 let events = reads.clone();
@@ -694,6 +725,7 @@ where
                                 roots.read_text_file(&request.path, request.line, request.limit)
                             }
                         });
+                    drop(permit);
                     let reply = match content {
                         Ok(content) => responder.respond(ReadTextFileResponse::new(content)),
                         Err(error) => respond_with_error(responder, error, &events, "read"),
@@ -706,10 +738,19 @@ where
         )
         .on_receive_request(
             async move |request: WriteTextFileRequest, responder, _cx| {
+                let permit = match write_permits.clone().try_acquire_owned() {
+                    Ok(permit) => permit,
+                    Err(_) => {
+                        responder.respond_with_internal_error("too many pending file requests")?;
+                        return Ok(());
+                    }
+                };
                 let roots = roots_for_write.clone();
                 let events = writes.clone();
                 tokio::task::spawn_blocking(move || {
-                    let reply = match roots.write_text_file(&request.path, &request.content) {
+                    let result = roots.write_text_file(&request.path, &request.content);
+                    drop(permit);
+                    let reply = match result {
                         Ok(()) => responder.respond(WriteTextFileResponse::new()),
                         Err(error) => respond_with_error(responder, error, &events, "write"),
                     };

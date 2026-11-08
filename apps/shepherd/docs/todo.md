@@ -1384,6 +1384,9 @@ placeholder tabs and no unearned state badges.
   ACP allows at most 64 pending manual permission requests per connection;
   additional requests receive an error. A fake-agent burst verifies the limit,
   cancellation and recovery after the queued requests are released.
+  ACP file reads and writes share a 32-worker limit per connection; excess
+  requests receive an error. An injected exhausted-capacity fixture verifies
+  both operations can be retried successfully when capacity returns.
   Connection shutdown also unblocks pending waits if a terminal stop fails.
   It returns the stop failure and retains the terminal for retry; registry,
   connection and harness fixtures cover a failure followed by a successful retry.
