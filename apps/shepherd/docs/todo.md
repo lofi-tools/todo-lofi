@@ -567,7 +567,12 @@ task-scoped, persistent and fast enough.
   marks in separate chunks and checks the grid, the frame and the following
   wide glyph. The pinned parser passed all 36 regular Rust tests and both
   desktop launches on macOS and emulated Ubuntu x86-64. The Ubuntu run also
-  passed the native IBus probe.
+  passed the native IBus probe. Normal-suite tests also cover the configured
+  scrollback tail, main-screen cursor restoration after leaving the alternate
+  screen, and a combining mark split from its base and following wide glyph
+  across process calls. System candidate selection and placement on macOS
+  remain the only unchecked criterion; that smoke needs a live desktop session
+  and Pinyin, so this item stays open.
 - [x] Add the binary frame protocol, dirty-row rendering and a frame smoke test.
 - [x] Build the Terminals tab split tree, resize, focus and presets.
   Single and Quad save through the project layout, preserve slots for other

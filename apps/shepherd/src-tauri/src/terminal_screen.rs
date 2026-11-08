@@ -1094,6 +1094,58 @@ mod tests {
     }
 
     #[test]
+    fn scrollback_retains_only_the_configured_tail() {
+        let mut screen = Screen::with_scrollback(8, 2, 2);
+        for line in 0..6 {
+            screen.process(format!("{line}\r\n").as_bytes());
+        }
+        screen.process(b"5");
+        screen.scroll(100);
+
+        let frame = screen.frame();
+        assert_eq!(frame.display_offset, 2);
+        assert_eq!(row(&frame, 0).trim_end(), "3");
+        assert_eq!(row(&frame, 1).trim_end(), "4");
+    }
+
+    #[test]
+    fn leaving_the_alternate_screen_restores_the_main_cursor() {
+        let mut screen = Screen::new(20, 4);
+        screen.process(b"main\r\nline");
+        let before = screen.frame();
+        assert_eq!((before.cursor_column, before.cursor_row), (4, 1));
+
+        screen.process(b"\x1b[?1049h\x1b[2J\x1b[Halternate");
+        assert!(row(&screen.frame(), 0).starts_with("alternate"));
+        screen.process(b"\x1b[?1049l");
+
+        let after = screen.frame();
+        assert_eq!((after.cursor_column, after.cursor_row), (4, 1));
+        assert_eq!(after.display_offset, 0);
+        assert!(row(&after, 0).starts_with("main"));
+        assert!(row(&after, 1).starts_with("line"));
+    }
+
+    #[test]
+    fn combining_marks_keep_their_grapheme_when_chunks_split() {
+        let mut screen = Screen::new(10, 2);
+        screen.process(b"e");
+        screen.process("\u{301}".as_bytes());
+        screen.process("界".as_bytes());
+
+        let frame = screen.frame();
+        assert_eq!(
+            frame
+                .cells
+                .first()
+                .map(|cell| (cell.text.as_str(), cell.width)),
+            Some(("e\u{301}", 1))
+        );
+        assert_eq!(frame.cells.get(1).map(|cell| cell.width), Some(2));
+        assert_eq!(frame.cells.get(2).map(|cell| cell.width), Some(0));
+    }
+
+    #[test]
     fn scrollback_and_alternate_screen_keep_separate_contents() {
         let mut screen = Screen::new(12, 3);
         screen.process(b"first\r\nsecond\r\nthird\r\nfourth");
