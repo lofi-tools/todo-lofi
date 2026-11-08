@@ -47,6 +47,7 @@ use crate::terminal_screen::{Screen, SearchDirection, TerminalAppearance, Termin
 
 const FILE_WATCH_START_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_PENDING_FILE_WATCH_STARTS: usize = 4;
+const FILE_WATCH_RETRY_DELAY: Duration = Duration::from_secs(5);
 
 #[derive(Debug, thiserror::Error, Serialize)]
 #[error("{message}")]
@@ -822,6 +823,43 @@ async fn start_file_watcher<T: Send + 'static>(
     result.map_err(|error| {
         BridgeError::new("files", format!("Could not watch workspace files: {error}"))
     })
+}
+
+async fn retry_file_watcher<T, F, Fut>(
+    cancelled: &mut oneshot::Receiver<()>,
+    retry_delay: Duration,
+    mut start: F,
+    mut report: impl FnMut(String) -> Result<(), String>,
+) -> Option<T>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T, BridgeError>>,
+{
+    let mut reported = false;
+    loop {
+        let result = tokio::select! {
+            biased;
+            _ = &mut *cancelled => return None,
+            result = start() => result,
+        };
+        match result {
+            Ok(watcher) => return Some(watcher),
+            Err(error) => {
+                let message = error.to_string();
+                if !reported {
+                    if let Err(error) = report(message.clone()) {
+                        tracing::debug!(%error, "the workspace file watch detached");
+                        return None;
+                    }
+                    reported = true;
+                }
+            }
+        }
+        tokio::select! {
+            _ = &mut *cancelled => return None,
+            _ = tokio::time::sleep(retry_delay) => {}
+        }
+    }
 }
 
 impl ShellState {
@@ -1784,12 +1822,6 @@ impl ShellState {
         channel: tauri::ipc::Channel<FileWatchUpdate>,
     ) -> Result<String, BridgeError> {
         let root = self.files_directory(project_id, task_id).await?;
-        let mut watcher = start_file_watcher(
-            self.file_watch_starts.clone(),
-            FILE_WATCH_START_TIMEOUT,
-            move || WorkspaceWatch::start(root),
-        )
-        .await?;
         let (cancel, mut cancelled) = oneshot::channel();
         let watch_id = uuid::Uuid::new_v4().to_string();
         self.file_watches
@@ -1797,12 +1829,32 @@ impl ShellState {
             .await
             .insert(watch_id.clone(), cancel);
         let watches = self.file_watches.clone();
+        let capacity = self.file_watch_starts.clone();
         let id = watch_id.clone();
         tauri::async_runtime::spawn(async move {
-            pump_workspace_watch(&mut watcher, &mut cancelled, |update| {
-                channel.send(update).map_err(|error| error.to_string())
-            })
+            let watcher = retry_file_watcher(
+                &mut cancelled,
+                FILE_WATCH_RETRY_DELAY,
+                || {
+                    let capacity = capacity.clone();
+                    let root = root.clone();
+                    start_file_watcher(capacity, FILE_WATCH_START_TIMEOUT, move || {
+                        WorkspaceWatch::start(root)
+                    })
+                },
+                |message| {
+                    channel
+                        .send(FileWatchUpdate::Error { message })
+                        .map_err(|error| error.to_string())
+                },
+            )
             .await;
+            if let Some(mut watcher) = watcher {
+                pump_workspace_watch(&mut watcher, &mut cancelled, |update| {
+                    channel.send(update).map_err(|error| error.to_string())
+                })
+                .await;
+            }
             watches.lock().await.remove(&id);
         });
         Ok(watch_id)
@@ -3288,6 +3340,122 @@ mod tests {
     use shepherd_core::{TaskState, TaskSummary};
 
     use super::*;
+
+    #[tokio::test]
+    async fn file_watcher_retries_once_reported_failure_and_stops_on_cancel()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use std::sync::atomic::AtomicUsize;
+
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let (_keep_open, mut cancelled) = oneshot::channel();
+        let mut errors = Vec::new();
+        let result = retry_file_watcher(
+            &mut cancelled,
+            Duration::from_millis(5),
+            || {
+                let attempt = attempts.fetch_add(1, Ordering::SeqCst);
+                async move {
+                    if attempt < 2 {
+                        Err(BridgeError::new("files", "fixture unavailable"))
+                    } else {
+                        Ok(7)
+                    }
+                }
+            },
+            |message| {
+                errors.push(message);
+                Ok(())
+            },
+        )
+        .await;
+        assert_eq!(result, Some(7));
+        assert_eq!(attempts.load(Ordering::SeqCst), 3);
+        assert_eq!(errors, ["fixture unavailable"]);
+
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let (cancel, mut cancelled) = oneshot::channel();
+        let (reported, received) = oneshot::channel();
+        let worker = tokio::spawn({
+            let attempts = attempts.clone();
+            async move {
+                let mut reported = Some(reported);
+                retry_file_watcher(
+                    &mut cancelled,
+                    Duration::from_secs(30),
+                    || {
+                        attempts.fetch_add(1, Ordering::SeqCst);
+                        async { Err::<(), _>(BridgeError::new("files", "fixture unavailable")) }
+                    },
+                    |message| {
+                        if let Some(reported) = reported.take() {
+                            reported
+                                .send(message)
+                                .map_err(|_| "test listener closed".to_string())?;
+                        }
+                        Ok(())
+                    },
+                )
+                .await
+            }
+        });
+        assert_eq!(received.await?, "fixture unavailable");
+        cancel.send(()).map_err(|_| "watcher already stopped")?;
+        assert!(
+            tokio::time::timeout(Duration::from_secs(2), worker)
+                .await??
+                .is_none()
+        );
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn closing_file_watch_cancels_an_in_flight_start()
+    -> Result<(), Box<dyn std::error::Error>> {
+        struct DropMarker(Arc<AtomicBool>);
+        impl Drop for DropMarker {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+        let dropped = Arc::new(AtomicBool::new(false));
+        let (cancel, mut cancelled) = oneshot::channel();
+        let (started, ready) = oneshot::channel();
+        let worker = tokio::spawn({
+            let dropped = dropped.clone();
+            async move {
+                let mut started = Some(started);
+                retry_file_watcher(
+                    &mut cancelled,
+                    Duration::from_secs(30),
+                    || {
+                        let marker = DropMarker(dropped.clone());
+                        let started = started.take();
+                        async move {
+                            if let Some(started) = started {
+                                started.send(()).map_err(|_| {
+                                    BridgeError::new("files", "test listener closed")
+                                })?;
+                            }
+                            let _marker = marker;
+                            std::future::pending::<Result<(), BridgeError>>().await
+                        }
+                    },
+                    |_| Ok(()),
+                )
+                .await
+            }
+        });
+        ready.await?;
+        cancel.send(()).map_err(|_| "watcher already stopped")?;
+        assert!(
+            tokio::time::timeout(Duration::from_secs(2), worker)
+                .await??
+                .is_none()
+        );
+        assert!(dropped.load(Ordering::SeqCst));
+        Ok(())
+    }
 
     #[tokio::test]
     async fn timed_out_file_watcher_start_holds_capacity_until_worker_finishes()
