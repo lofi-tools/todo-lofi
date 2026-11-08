@@ -1348,6 +1348,21 @@ async fn apply_migration_set(
     db: &mut toasty::db::Db,
     migrations: &[Migration],
 ) -> Result<(), StoreError> {
+    let mut names = std::collections::HashSet::new();
+    for migration in migrations {
+        if migration.name.trim().is_empty() {
+            return Err(StoreError::InvalidMigration {
+                name: migration.name.to_owned(),
+                reason: "migration name is empty".into(),
+            });
+        }
+        if !names.insert(migration.name) {
+            return Err(StoreError::InvalidMigration {
+                name: migration.name.to_owned(),
+                reason: "migration name is duplicated".into(),
+            });
+        }
+    }
     let statements = migrations
         .iter()
         .map(parse_migration)
@@ -3159,6 +3174,33 @@ mod tests {
                 .column_types([Type::String])
                 .exec(&mut db).await?;
             assert!(tables.is_empty(), "schema changed for {statement}");
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn migration_rejects_invalid_names_before_applying_any_migration()
+    -> Result<(), Box<dyn std::error::Error>> {
+        for (name, reason) in [("first.sql", "duplicated"), ("  ", "empty")] {
+            let mut db = toasty::Db::builder().build(Turso::in_memory()).await?;
+            let migrations = [
+                Migration {
+                    name: "first.sql",
+                    sql: "CREATE TABLE first_table (value TEXT);",
+                },
+                Migration {
+                    name,
+                    sql: "CREATE TABLE second_table (value TEXT);",
+                },
+            ];
+            assert!(matches!(apply_migration_set(&mut db, &migrations).await,
+                Err(StoreError::InvalidMigration { reason: message, .. }) if message.contains(reason)));
+            let tables = toasty::sql::query("SELECT name FROM sqlite_schema WHERE name IN ('first_table', 'second_table', '_migrations_history')")
+                .column_types([Type::String]).exec(&mut db).await?;
+            assert!(
+                tables.is_empty(),
+                "schema changed for invalid name {name:?}"
+            );
         }
         Ok(())
     }
