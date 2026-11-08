@@ -684,6 +684,9 @@ async fn drive_session(
                         if terminals.contains(&terminal_id) => {
                         publish(&sender, HarnessEvent::AgentTerminalExited { id: terminal_id, exit_code })?;
                     }
+                    Some(AcpEvent::TerminalFailed { terminal_id, message }) if terminals.contains(&terminal_id) => {
+                        publish(&sender, HarnessEvent::AgentTerminalError { id: terminal_id, text: format!("Agent terminal error: {message}") })?;
+                    }
                     Some(AcpEvent::TerminalReleased { terminal_id }) if terminals.remove(&terminal_id) => {
                         if prompt.is_some() {
                             publish(&sender, HarnessEvent::AgentTerminalExited { id: terminal_id.clone(), exit_code: None })?;
@@ -2015,6 +2018,55 @@ done
             }
             harness.shutdown().await?;
         }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn missing_terminal_exit_surfaces_an_error_notice()
+    -> Result<(), Box<dyn std::error::Error>> {
+        struct DisconnectedTerminal;
+        #[async_trait]
+        impl TerminalBackend for DisconnectedTerminal {
+            async fn spawn(
+                &self,
+                _: TerminalLaunch,
+                _: mpsc::Sender<TerminalProcessEvent>,
+            ) -> Result<(), String> {
+                Ok(())
+            }
+            async fn stop(&self, _: &str) -> Result<(), String> {
+                Ok(())
+            }
+        }
+        let directory = tempfile::tempdir()?;
+        let cwd = directory.path().to_path_buf();
+        let (connection, _) = connect_fake_agent_with_terminals(
+            FakeScript {
+                terminal: Some(("fixture".into(), Vec::new())),
+                ..Default::default()
+            },
+            ConnectOptions {
+                roots: SessionRoots::new([cwd.clone()]),
+                tool_permissions: ToolPermissions::default(),
+            },
+            Arc::new(DisconnectedTerminal),
+        )
+        .await?;
+        let mut harness = AcpHarness::default();
+        harness.attach(connection, cwd, "fake-acp".into());
+        harness.open_session(None).await?;
+        harness.prompt(PromptInput::text("run terminal")).await?;
+        let mut transcript = Transcript::default();
+        loop {
+            let event = next(&mut harness).await?;
+            let reported = matches!(&event, HarnessEvent::AgentTerminalError { text, .. } if text.contains("closed without an exit status"));
+            transcript.apply(&event);
+            if reported {
+                break;
+            }
+        }
+        assert!(transcript.entries().iter().any(|entry| matches!(&entry.kind, crate::EntryKind::Notice { text, is_error: true } if text.contains("closed without an exit status"))));
+        harness.shutdown().await?;
         Ok(())
     }
 

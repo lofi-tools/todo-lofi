@@ -107,6 +107,10 @@ pub enum AcpEvent {
     TerminalReleased {
         terminal_id: String,
     },
+    TerminalFailed {
+        terminal_id: String,
+        message: String,
+    },
     /// A terminal started by the agent produced output.
     TerminalOutput {
         terminal_id: String,
@@ -208,6 +212,10 @@ impl std::fmt::Debug for AcpEvent {
             Self::TerminalReleased { terminal_id } => f
                 .debug_tuple("TerminalReleased")
                 .field(terminal_id)
+                .finish(),
+            Self::TerminalFailed { terminal_id, .. } => f
+                .debug_struct("TerminalFailed")
+                .field("terminal_id", terminal_id)
                 .finish(),
             Self::TerminalExited {
                 terminal_id,

@@ -638,6 +638,10 @@ pub enum HarnessEvent {
         id: String,
         exit_code: Option<u32>,
     },
+    AgentTerminalError {
+        id: String,
+        text: String,
+    },
     AgentTerminalRemoved {
         id: String,
     },
@@ -989,7 +993,8 @@ impl Transcript {
             HarnessEvent::ApprovalWithdrawn { approval_id } => {
                 self.settle_approval(approval_id.as_str(), None)
             }
-            HarnessEvent::ApprovalPolicyError { text } => self.push_notice(text, true),
+            HarnessEvent::ApprovalPolicyError { text }
+            | HarnessEvent::AgentTerminalError { text, .. } => self.push_notice(text, true),
             HarnessEvent::TurnError { kind, text }
             | HarnessEvent::ConnectionFailed { kind, text } => {
                 if matches!(event, HarnessEvent::ConnectionFailed { .. }) {

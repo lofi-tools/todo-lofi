@@ -21,6 +21,10 @@ use crate::{
 pub enum FakeStep {
     Message(String),
     Thought(String),
+    TerminalError {
+        id: String,
+        text: String,
+    },
     ToolCall {
         tool_call_id: String,
         title: String,
@@ -194,6 +198,12 @@ impl FakeHarness {
         for (offset, step) in steps.iter().enumerate() {
             let offset = offset_base + offset;
             match step {
+                FakeStep::TerminalError { id, text } => {
+                    self.send(HarnessEvent::AgentTerminalError {
+                        id: id.clone(),
+                        text: text.clone(),
+                    })?;
+                }
                 FakeStep::Message(text) => {
                     self.send(HarnessEvent::Delta {
                         item_id: ItemId::new(format!("message-{}-{offset}", self.next_turn)),

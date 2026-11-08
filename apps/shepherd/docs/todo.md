@@ -1432,7 +1432,9 @@ placeholder tabs and no unearned state badges.
   and injected-failure subprocess fixtures cover these paths.
   A terminal backend stream that closes without reporting an exit likewise
   fails exit waits and retains the terminal for cleanup; a registry fixture
-  covers the missing-status case.
+  covers the missing-status case. Terminal wait failures also reach the task
+  transcript as error notices; the harness fixture covers propagation and the
+  core redacts details when launch environment values are configured.
   Output permits remain held through the harness queue until the core
   consumes the events. A direct terminal's exit wait completes even if a
   descendant keeps an output pipe open, and shutdown rejects new terminals.

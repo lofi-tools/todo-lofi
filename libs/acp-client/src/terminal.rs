@@ -732,6 +732,10 @@ impl TerminalRegistry {
             entry.exit_failure = Some(error.clone());
             std::mem::take(&mut entry.waiters)
         };
+        self.publish(AcpEvent::TerminalFailed {
+            terminal_id: key.to_owned(),
+            message: error.clone(),
+        });
         for waiter in waiters {
             if waiter.sender.send(Err(error.clone())).is_err() {
                 tracing::debug!("ACP terminal exit waiter closed");
@@ -963,7 +967,9 @@ mod tests {
         );
         assert!(registry.wait_for_exit(&terminal).await.is_err());
         assert!(registry.output(&terminal).exit_status.is_none());
-        assert!(receiver.try_recv().is_err());
+        assert!(
+            matches!(receiver.try_recv()?, AcpEvent::TerminalFailed { terminal_id, message } if terminal_id == "fixture" && message.contains("closed without an exit status"))
+        );
         assert!(registry.entries().contains_key("fixture"));
         registry
             .release(&terminal)

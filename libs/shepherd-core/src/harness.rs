@@ -333,7 +333,8 @@ impl HarnessSession {
                     }
                     HarnessEvent::ConnectionFailed { text, .. }
                     | HarnessEvent::TurnError { text, .. }
-                    | HarnessEvent::ApprovalPolicyError { text } => {
+                    | HarnessEvent::ApprovalPolicyError { text }
+                    | HarnessEvent::AgentTerminalError { text, .. } => {
                         *text = HIDDEN_DIAGNOSTIC.into()
                     }
                     _ => {}
@@ -587,10 +588,16 @@ mod tests {
     async fn configured_environment_hides_agent_diagnostic_output()
     -> Result<(), Box<dyn std::error::Error>> {
         let directory = TestDirectory::new()?;
-        let turn = FakeTurn::new(vec![FakeStep::Exit {
-            code: 1,
-            stderr: "fixture-private-value".into(),
-        }]);
+        let turn = FakeTurn::new(vec![
+            FakeStep::TerminalError {
+                id: "terminal".into(),
+                text: "fixture-private-value".into(),
+            },
+            FakeStep::Exit {
+                code: 1,
+                stderr: "fixture-private-value".into(),
+            },
+        ]);
         let mut session = HarnessSession::new(Box::new(FakeHarness::one_turn(turn)));
         session
             .start(SpawnSpec {
@@ -603,6 +610,7 @@ mod tests {
         session.open_session(None).await?;
         let events = session.prompt(PromptInput::text("go")).await?;
         assert!(events.iter().any(|event| matches!(event, HarnessEvent::Exited { stderr, .. } if stderr == HIDDEN_DIAGNOSTIC)));
+        assert!(events.iter().any(|event| matches!(event, HarnessEvent::AgentTerminalError { text, .. } if text == HIDDEN_DIAGNOSTIC)));
         assert!(!format!("{events:?}").contains("fixture-private-value"));
         let error = session.safe_error(HarnessError::TransportClosed(
             "fixture-private-value".into(),
