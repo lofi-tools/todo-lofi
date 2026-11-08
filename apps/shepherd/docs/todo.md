@@ -1340,6 +1340,8 @@ placeholder tabs and no unearned state badges.
   Terminal saves similarly validate project and task ownership, reject owner
   changes and late writes, and preserve project-scoped terminals when a task is
   deleted; both stores have an ownership fixture.
+  Workspace layout saves require the task to exist at the write, so a late
+  resize cannot recreate layout state after deletion; both stores are covered.
   Task deletion stages the checkout before the database transaction so a
   failed deletion can restore ignored files as well as tracked files.
   A deletion journal now survives task deletion and database reopen in both

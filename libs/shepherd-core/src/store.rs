@@ -59,6 +59,8 @@ pub enum StoreError {
     SessionOwnerMissing { task_id: TaskId, session_id: String },
     #[error("terminal {terminal_id} cannot be saved for its project and task")]
     TerminalOwnerMissing { terminal_id: String },
+    #[error("workspace layout cannot be saved for missing task {task_id}")]
+    WorkspaceOwnerMissing { task_id: TaskId },
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -1231,8 +1233,9 @@ impl Store for TursoStore {
         let json = serde_json::to_string(&layout)
             .map_err(|error| StoreError::Backend(error.to_string()))?;
         let mut db = self.db.lock().await;
-        toasty::sql::statement(
-            "INSERT INTO layouts (task_id, workspace_json, updated_at) VALUES (?1, ?2, ?3)
+        let updated = toasty::sql::statement(
+            "INSERT INTO layouts (task_id, workspace_json, updated_at)
+             SELECT ?1, ?2, ?3 FROM tasks WHERE id = ?1
              ON CONFLICT (task_id) DO UPDATE SET workspace_json = excluded.workspace_json, updated_at = excluded.updated_at",
         )
         .bind(task_id.as_str())
@@ -1240,6 +1243,11 @@ impl Store for TursoStore {
         .bind(crate::projects::now_millis() as i64)
         .exec(&mut *db)
         .await?;
+        if updated != 1 {
+            return Err(StoreError::WorkspaceOwnerMissing {
+                task_id: task_id.clone(),
+            });
+        }
         Ok(())
     }
 
@@ -1994,6 +2002,12 @@ impl Store for MemoryStore {
         task_id: &TaskId,
         layout: WorkspaceLayout,
     ) -> Result<(), StoreError> {
+        let tasks = self.tasks.read().await;
+        if !tasks.contains_key(task_id.as_str()) {
+            return Err(StoreError::WorkspaceOwnerMissing {
+                task_id: task_id.clone(),
+            });
+        }
         self.workspace_layouts
             .write()
             .await
@@ -2257,6 +2271,48 @@ mod tests {
             .save_transcript_entries(&session, &entries.iter().collect::<Vec<_>>())
             .await?;
         assert_eq!(store.load_transcript(&task.id).await?, entries);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn workspace_layout_saves_require_an_existing_task()
+    -> Result<(), Box<dyn std::error::Error>> {
+        async fn verify(store: &dyn Store, root: &Path) -> Result<(), Box<dyn std::error::Error>> {
+            let project = Project::new(root.to_path_buf());
+            let task = Task::draft(project.id.clone(), "Task", root);
+            let layout = WorkspaceLayout {
+                inspector_width: Some(400),
+            };
+            assert!(matches!(
+                store.save_workspace_layout(&task.id, layout).await,
+                Err(StoreError::WorkspaceOwnerMissing { .. })
+            ));
+            store.save_project(&project).await?;
+            store.save_task(&task).await?;
+            store.save_workspace_layout(&task.id, layout).await?;
+            let updated = WorkspaceLayout {
+                inspector_width: Some(600),
+            };
+            store.save_workspace_layout(&task.id, updated).await?;
+            assert_eq!(
+                store.load_workspace_layouts().await?,
+                vec![(task.id.clone(), updated)]
+            );
+            store.delete_task(&task.id, None).await?;
+            assert!(matches!(
+                store.save_workspace_layout(&task.id, layout).await,
+                Err(StoreError::WorkspaceOwnerMissing { .. })
+            ));
+            assert!(store.load_workspace_layouts().await?.is_empty());
+            Ok(())
+        }
+        let directory = TestDirectory::new()?;
+        verify(&MemoryStore::new(), directory.path()).await?;
+        verify(
+            &TursoStore::open_at(&directory.join("workspace-owner.db")).await?,
+            directory.path(),
+        )
+        .await?;
         Ok(())
     }
 
