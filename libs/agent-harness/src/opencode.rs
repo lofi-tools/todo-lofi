@@ -282,10 +282,19 @@ impl Drop for AdmissionGuard {
         };
         let sender = self.sender.clone();
         let signal_group = self.signal_group;
+        let immediate_signal = child.try_lock().ok().map(|child| signal_group(&child));
+        if let Some(Err(error)) = &immediate_signal {
+            tracing::warn!(%error, "could not signal OpenCode after cancelled admission");
+        }
         self.runtime.spawn(async move {
             let mut text =
                 "OpenCode prompt admission was cancelled; the server was stopped.".to_string();
-            if let Err(error) = stop_server_with(&mut *child.lock().await, signal_group).await {
+            let result = match immediate_signal {
+                Some(Ok(())) => child.lock().await.kill().await,
+                Some(Err(error)) => Err(error),
+                None => stop_server_with(&mut *child.lock().await, signal_group).await,
+            };
+            if let Err(error) = result {
                 text = format!(
                     "OpenCode prompt admission was cancelled; could not stop the server: {error}"
                 );
@@ -2033,14 +2042,56 @@ mod tests {
             signal_group: signal_server_group,
             runtime: tokio::runtime::Handle::try_current()?,
         };
+        let locked_child = child.lock().await;
         std::thread::spawn(move || drop(guard))
             .join()
             .map_err(|_| "cleanup thread panicked")?;
+        drop(locked_child);
         assert!(matches!(
             timeout(Duration::from_secs(5), events.recv()).await?,
             Some(HarnessEvent::ConnectionFailed { text, .. }) if text.contains("server was stopped")
         ));
         assert!(child.lock().await.try_wait()?.is_some());
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cancelled_admission_signals_child_after_runtime_shutdown()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+        let child = runtime.block_on(async {
+            let mut command = Command::new("/bin/sleep");
+            command.arg("30").process_group(0).kill_on_drop(true);
+            command.spawn()
+        })?;
+        let child = Arc::new(AsyncMutex::new(child));
+        let (sender, _events) = mpsc::unbounded_channel();
+        let guard = AdmissionGuard {
+            child: Some(child.clone()),
+            sender,
+            signal_group: signal_server_group,
+            runtime: runtime.handle().clone(),
+        };
+        drop(runtime);
+        drop(guard);
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            if child
+                .try_lock()
+                .map_err(|_| "child is locked")?
+                .try_wait()?
+                .is_some()
+            {
+                break;
+            }
+            if std::time::Instant::now() >= deadline {
+                return Err("child survived runtime shutdown".into());
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
         Ok(())
     }
 

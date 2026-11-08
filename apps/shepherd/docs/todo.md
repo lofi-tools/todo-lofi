@@ -1378,8 +1378,10 @@ placeholder tabs and no unearned state badges.
   fixture covers this path. A cancelled admission future now stops the server
   in a background cleanup task, reports the outcome and blocks another prompt;
   local fixtures cover cancellation, a stop failure retained for retry and a
-  future dropped from a thread outside the runtime. Cleanup still depends on
-  the captured runtime remaining available to run its task.
+  future dropped from a thread outside the runtime. When the child handle is
+  immediately available, the guard signals its group synchronously even after
+  runtime shutdown; a local subprocess fixture covers that case. A contended
+  child handle still depends on the runtime remaining available.
   Core sessions distinguish a disconnected adapter from completed cleanup.
   Retry, task deletion, batch archive and quit all attempt shutdown before
   discarding a disconnected session; an injected-failure fixture verifies that
