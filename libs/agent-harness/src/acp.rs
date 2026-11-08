@@ -19,7 +19,7 @@ use acp_client::{
 };
 use async_trait::async_trait;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use tokio::sync::{mpsc, oneshot, watch};
+use tokio::sync::{Semaphore, mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 use tokio::time::{Instant, sleep_until, timeout};
 
@@ -33,6 +33,9 @@ use crate::{
 };
 
 const SESSION_TIMEOUT: Duration = Duration::from_secs(15);
+const ERROR_QUEUE_CAPACITY: usize = 64;
+const MAX_TURN_ERROR_BYTES: usize = 64 * 1024;
+const ERROR_OMITTED: &str = "\n[… error details omitted …]";
 
 pub struct AcpHarness {
     connection: Option<AcpConnection>,
@@ -46,6 +49,7 @@ pub struct AcpHarness {
     startup_events: VecDeque<AcpEvent>,
     sender: mpsc::UnboundedSender<HarnessEvent>,
     events: mpsc::UnboundedReceiver<HarnessEvent>,
+    error_capacity: Arc<Semaphore>,
 }
 
 impl Default for AcpHarness {
@@ -63,6 +67,7 @@ impl Default for AcpHarness {
             startup_events: VecDeque::new(),
             sender,
             events,
+            error_capacity: Arc::new(Semaphore::new(ERROR_QUEUE_CAPACITY)),
         }
     }
 }
@@ -295,7 +300,7 @@ impl AgentHarness for AcpHarness {
             connection.requester.clone(),
             session,
             (std::mem::take(startup_events), events),
-            self.sender.clone(),
+            (self.sender.clone(), self.error_capacity.clone()),
             self.project_approvals.clone(),
             connection.close_terminals(),
             modes,
@@ -595,7 +600,7 @@ impl Runtime {
         requester: acp_client::Requester,
         session: schema::SessionId,
         events: AgentEvents,
-        sender: mpsc::UnboundedSender<HarnessEvent>,
+        (sender, error_capacity): (mpsc::UnboundedSender<HarnessEvent>, Arc<Semaphore>),
         project_approvals: Option<Arc<dyn ProjectApprovalPolicy>>,
         close_terminals: impl Future<Output = Result<(), String>> + Send + 'static,
         mode: Option<ModeControl>,
@@ -609,7 +614,7 @@ impl Runtime {
                 session,
                 events,
                 incoming,
-                sender,
+                (sender, error_capacity),
                 project_approvals.as_deref(),
                 SessionChanges {
                     grants: grant_changes,
@@ -645,7 +650,7 @@ async fn drive_session(
     session: schema::SessionId,
     (mut startup_events, mut events): AgentEvents,
     mut commands: mpsc::Receiver<Command>,
-    sender: mpsc::UnboundedSender<HarnessEvent>,
+    (sender, error_capacity): (mpsc::UnboundedSender<HarnessEvent>, Arc<Semaphore>),
     project_approvals: Option<&dyn ProjectApprovalPolicy>,
     changes: SessionChanges,
 ) -> HarnessResult<()> {
@@ -751,7 +756,7 @@ async fn drive_session(
                     disconnect_deadline = Some(Instant::now() + Duration::from_secs(1));
                     continue;
                 }
-                let reason = finish_turn(&sender, outcome)?;
+                let reason = finish_turn(&sender, &error_capacity, outcome).await?;
                 publish(&sender, HarnessEvent::TurnFinished { reason })?;
             }
             _ = async {
@@ -808,11 +813,12 @@ async fn drive_session(
     }
 }
 
-fn finish_turn(
+async fn finish_turn(
     sender: &mpsc::UnboundedSender<HarnessEvent>,
+    capacity: &Arc<Semaphore>,
     outcome: Result<StopReason, AcpError>,
 ) -> HarnessResult<TurnFinishReason> {
-    let (kind, text) = match outcome {
+    let (kind, mut text) = match outcome {
         Ok(StopReason::EndTurn) => return Ok(TurnFinishReason::Completed),
         Ok(StopReason::Cancelled) => return Ok(TurnFinishReason::Cancelled),
         Ok(StopReason::MaxTokens) => (
@@ -839,12 +845,22 @@ fn finish_turn(
             )
         }
     };
+    if text.len() > MAX_TURN_ERROR_BYTES {
+        let end = text.floor_char_boundary(MAX_TURN_ERROR_BYTES - ERROR_OMITTED.len());
+        text.truncate(end);
+        text.push_str(ERROR_OMITTED);
+    }
+    let permit = capacity
+        .clone()
+        .acquire_owned()
+        .await
+        .map_err(|_| HarnessError::ChannelClosed)?;
     publish(
         sender,
         HarnessEvent::TurnError {
             kind,
             text,
-            stream_permit: None,
+            stream_permit: Some(Arc::new(permit)),
         },
     )?;
     Ok(TurnFinishReason::Failed)
@@ -1452,6 +1468,47 @@ mod tests {
     };
 
     use super::*;
+
+    #[tokio::test]
+    async fn turn_errors_are_bounded_and_wait_for_consumption()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (sender, mut events) = mpsc::unbounded_channel();
+        let capacity = Arc::new(Semaphore::new(1));
+        let result = finish_turn(
+            &sender,
+            &capacity,
+            Err(AcpError::AuthRequired("界".repeat(MAX_TURN_ERROR_BYTES))),
+        )
+        .await?;
+        assert_eq!(result, TurnFinishReason::Failed);
+        let first = events.recv().await.ok_or("missing error")?;
+        let HarnessEvent::TurnError {
+            kind,
+            text,
+            stream_permit: Some(_),
+            ..
+        } = &first
+        else {
+            return Err("unexpected event".into());
+        };
+        assert_eq!(*kind, FailureKind::AuthRequired);
+        assert!(text.len() <= MAX_TURN_ERROR_BYTES);
+        assert!(text.ends_with(ERROR_OMITTED));
+        let next = finish_turn(&sender, &capacity, Ok(StopReason::Refusal));
+        tokio::pin!(next);
+        assert!(
+            timeout(Duration::from_millis(30), next.as_mut())
+                .await
+                .is_err()
+        );
+        drop(first);
+        assert_eq!(next.await?, TurnFinishReason::Failed);
+        assert!(matches!(
+            events.recv().await,
+            Some(HarnessEvent::TurnError { .. })
+        ));
+        Ok(())
+    }
 
     #[test]
     fn replay_preserves_terminal_failure_order_and_capacity()
@@ -2225,7 +2282,7 @@ done
                     HarnessEvent::TurnError {
                         kind: FailureKind::AuthRequired,
                         text,
-                        ..
+                        stream_permit: Some(_),
                     },
                 ) => {
                     assert!(

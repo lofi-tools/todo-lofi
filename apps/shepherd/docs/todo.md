@@ -1603,6 +1603,9 @@ placeholder tabs and no unearned state badges.
   Automatic ACP permission decisions share the same capacity and reserve an
   audit event before responding; saturation fails the connection without
   authorizing an unrecordable decision. A fake-agent burst covers the limit.
+  ACP prompt errors use a separate 64-event queue across turns, with 64 KiB
+  UTF-8-safe error details; fixtures cover backpressure, release and an
+  authentication failure from the fake agent.
   Manual ACP approval events retain their pending-request slot until Shepherd
   consumes the event, even if the agent cancels first; a fixture checks cloned
   events and confirms the stored transcript does not retain the slot. Manual
