@@ -295,26 +295,33 @@ impl TursoStore {
 }
 
 async fn acquire_database_migration_lock(path: &Path) -> Result<std::fs::File, StoreError> {
-    let path = path.to_path_buf();
-    let display = path.display().to_string();
-    let (file, lock_path) =
-        tokio::task::spawn_blocking(move || open_database_migration_lock(&path))
+    let requested_path = path.to_path_buf();
+    let worker_path = requested_path.clone();
+    let (file, lock_path, target) =
+        tokio::task::spawn_blocking(move || open_database_migration_lock(&worker_path))
             .await
             .map_err(|error| {
                 StoreError::Backend(format!("migration lock worker failed: {error}"))
             })??;
-    wait_for_database_migration_lock(file, lock_path, &display).await
+    wait_for_database_migration_lock(file, lock_path, requested_path, target).await
 }
 
 async fn wait_for_database_migration_lock(
     file: std::fs::File,
     lock_path: PathBuf,
-    display: &str,
+    requested_path: PathBuf,
+    target: PathBuf,
 ) -> Result<std::fs::File, StoreError> {
     loop {
         match file.try_lock() {
             Ok(()) => {
                 verify_database_migration_lock(&file, &lock_path)?;
+                if resolve_database_migration_target(&requested_path)? != target {
+                    return Err(StoreError::Backend(format!(
+                        "database path changed while acquiring its migration lock: {}",
+                        requested_path.display()
+                    )));
+                }
                 return Ok(file);
             }
             Err(std::fs::TryLockError::WouldBlock) => {
@@ -322,7 +329,8 @@ async fn wait_for_database_migration_lock(
             }
             Err(std::fs::TryLockError::Error(error)) => {
                 return Err(StoreError::Backend(format!(
-                    "could not acquire database migration lock for {display}: {error}"
+                    "could not acquire database migration lock for {}: {error}",
+                    requested_path.display()
                 )));
             }
         }
@@ -331,7 +339,7 @@ async fn wait_for_database_migration_lock(
 
 #[cfg(test)]
 fn lock_database_migrations(path: &Path) -> Result<std::fs::File, StoreError> {
-    let (file, lock_path) = open_database_migration_lock(path)?;
+    let (file, lock_path, _) = open_database_migration_lock(path)?;
     file.lock().map_err(|error| {
         StoreError::Backend(format!(
             "could not acquire database migration lock for {}: {error}",
@@ -403,20 +411,24 @@ fn resolve_previously_missing_database_path(path: &Path) -> Result<PathBuf, Stor
     }
 }
 
-fn open_database_migration_lock(path: &Path) -> Result<(std::fs::File, PathBuf), StoreError> {
-    let canonical = match std::fs::canonicalize(path) {
-        Ok(path) => path,
+fn resolve_database_migration_target(path: &Path) -> Result<PathBuf, StoreError> {
+    match std::fs::canonicalize(path) {
+        Ok(path) => Ok(path),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            resolve_previously_missing_database_path(path)?
+            resolve_previously_missing_database_path(path)
         }
-        Err(error) => {
-            return Err(StoreError::Backend(format!(
-                "could not inspect database path {}: {error}",
-                path.display()
-            )));
-        }
-    };
-    let mut lock_path = canonical.into_os_string();
+        Err(error) => Err(StoreError::Backend(format!(
+            "could not inspect database path {}: {error}",
+            path.display()
+        ))),
+    }
+}
+
+fn open_database_migration_lock(
+    path: &Path,
+) -> Result<(std::fs::File, PathBuf, PathBuf), StoreError> {
+    let canonical = resolve_database_migration_target(path)?;
+    let mut lock_path = canonical.clone().into_os_string();
     lock_path.push(".migration.lock");
     let lock_path = PathBuf::from(lock_path);
     let mut options = std::fs::OpenOptions::new();
@@ -452,7 +464,7 @@ fn open_database_migration_lock(path: &Path) -> Result<(std::fs::File, PathBuf),
             lock_path.display()
         )));
     }
-    Ok((file, lock_path))
+    Ok((file, lock_path, canonical))
 }
 
 async fn migrations_pending(db: &mut toasty::db::Db) -> Result<bool, StoreError> {
@@ -2731,15 +2743,50 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
+    async fn redirected_database_path_is_rejected_after_waiting_for_lock()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = TestDirectory::new()?;
+        let first = directory.join("first.db");
+        let second = directory.join("second.db");
+        std::fs::write(&first, "first")?;
+        std::fs::write(&second, "second")?;
+        let alias = directory.join("alias.db");
+        std::os::unix::fs::symlink(&first, &alias)?;
+        let held = lock_database_migrations(&first)?;
+        let (waiting_file, lock_path, target) = open_database_migration_lock(&alias)?;
+        let requested_path = alias.clone();
+        let mut waiting = tokio::spawn(async move {
+            wait_for_database_migration_lock(waiting_file, lock_path, requested_path, target).await
+        });
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(150), &mut waiting)
+                .await
+                .is_err()
+        );
+        std::fs::remove_file(&alias)?;
+        std::os::unix::fs::symlink(&second, &alias)?;
+        drop(held);
+        let result = tokio::time::timeout(std::time::Duration::from_secs(5), waiting).await??;
+        assert!(
+            matches!(result, Err(StoreError::Backend(message)) if message.contains("database path changed"))
+        );
+        assert_eq!(std::fs::read_to_string(&first)?, "first");
+        assert_eq!(std::fs::read_to_string(&second)?, "second");
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn replaced_migration_lock_is_rejected_before_database_open()
     -> Result<(), Box<dyn std::error::Error>> {
         let directory = TestDirectory::new()?;
         let path = directory.join("replace.db");
         let held = lock_database_migrations(&path)?;
-        let (waiting_file, lock_path) = open_database_migration_lock(&path)?;
+        let (waiting_file, lock_path, target) = open_database_migration_lock(&path)?;
         let wait_path = lock_path.clone();
+        let requested_path = path.clone();
         let mut waiting = tokio::spawn(async move {
-            wait_for_database_migration_lock(waiting_file, wait_path, "fixture").await
+            wait_for_database_migration_lock(waiting_file, wait_path, requested_path, target).await
         });
         assert!(
             tokio::time::timeout(std::time::Duration::from_millis(150), &mut waiting)

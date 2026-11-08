@@ -1339,7 +1339,9 @@ placeholder tabs and no unearned state badges.
   not occupy a blocking worker while the lock is held. Unix checks reject
   dangling database symlinks and symlinked lock files. On Unix, the acquired
   lock is checked against its pathname; a fixture verifies replacement while
-  waiting is rejected before database open. Replacement after that check remains
+  waiting is rejected before database open. The database pathname is also
+  resolved again after acquiring the lock; a fixture rejects an alias redirected
+  during the wait. Replacement after that check remains
   possible, and hard-linked database aliases do not share this lock.
   A Unix fixture denies backup
   directory creation, verifies the old history remains intact, then retries
