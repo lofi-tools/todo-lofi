@@ -3312,6 +3312,29 @@ async fn handle_notification(
         "serverRequest/resolved" => {
             if let Some(request_id) = params.get("requestId").and_then(Value::as_i64) {
                 let mut pending = pending.lock().await;
+                let wrong_thread =
+                    params
+                        .get("threadId")
+                        .and_then(Value::as_str)
+                        .is_some_and(|thread| {
+                            pending
+                                .thread_id
+                                .as_deref()
+                                .is_some_and(|current| thread != current)
+                        });
+                let wrong_turn = params
+                    .get("turnId")
+                    .and_then(Value::as_str)
+                    .is_some_and(|turn| {
+                        pending
+                            .turn_id
+                            .as_deref()
+                            .is_some_and(|current| turn != current)
+                    });
+                if wrong_thread || wrong_turn {
+                    tracing::debug!("ignoring an approval resolution from another session or turn");
+                    return Ok(());
+                }
                 let approval_id = pending
                     .approvals
                     .iter()
@@ -4165,6 +4188,55 @@ mod tests {
         harness.outgoing = None;
         drop(outgoing);
         writer_task.await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn stale_approval_resolution_preserves_the_active_request()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let pending = Arc::new(AsyncMutex::new(Pending::default()));
+        {
+            let mut state = pending.lock().await;
+            state.thread_id = Some("current-thread".into());
+            state.turn_id = Some("current-turn".into());
+            state.approvals.insert("approval".into(), 7);
+            state.approval_writes.insert("approval".into());
+        }
+        let (sender, mut events) = mpsc::unbounded_channel();
+        for (thread, turn) in [
+            ("other-thread", "current-turn"),
+            ("current-thread", "other-turn"),
+        ] {
+            handle_notification(
+                "serverRequest/resolved",
+                &json!({
+                    "requestId": 7, "threadId": thread, "turnId": turn,
+                }),
+                &sender,
+                &pending,
+            )
+            .await?;
+            let state = pending.lock().await;
+            assert_eq!(state.approvals.get("approval"), Some(&7));
+            assert!(state.approval_writes.contains("approval"));
+            assert!(events.try_recv().is_err());
+        }
+        handle_notification(
+            "serverRequest/resolved",
+            &json!({
+                "requestId": 7, "threadId": "current-thread", "turnId": "current-turn",
+            }),
+            &sender,
+            &pending,
+        )
+        .await?;
+        assert!(matches!(
+            events.try_recv(),
+            Ok(HarnessEvent::ApprovalWithdrawn { .. })
+        ));
+        let state = pending.lock().await;
+        assert!(state.approvals.is_empty());
+        assert!(state.approval_writes.is_empty());
         Ok(())
     }
 

@@ -1528,6 +1528,9 @@ placeholder tabs and no unearned state badges.
   rejected; a fixture checks that a matching approval remains available. Requests
   omitting identity fields remain compatible, and an approval arriving before
   the start response identifies its turn cannot yet be checked against it.
+  Identified resolution notifications from another session or turn cannot
+  withdraw the active approval; a fixture checks both mismatches and a valid
+  resolution. Notifications omitting those identities remain compatible.
   Repeated
   server request IDs are ignored while pending. A local protocol fixture covers
   saturation, withdrawal, retry and an unavailable event consumer.
