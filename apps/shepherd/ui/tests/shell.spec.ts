@@ -999,6 +999,11 @@ test.beforeEach(async ({ context }) => {
     window.__fileActions = fileActions
     window.__unwatchedFiles = unwatchedFiles
     window.__fileWatchIds = () => [...fileWatchers.keys()]
+    ;(window as unknown as { __publishFileError: (id: string, message: string) => void }).__publishFileError = (id, message) => {
+      const watcher = fileWatchers.get(id)
+      if (!watcher) throw new Error(`Unknown fixture watcher ${id}`)
+      callbacks.get(watcher.channel)?.({ index: watcher.index++, message: { type: 'error', message } })
+    }
     window.__publishFileChanges = (id: string, files: FileChange[], branch?: string | null) => {
       const watcher = fileWatchers.get(id)
       if (!watcher) throw new Error(`Unknown fixture watcher ${id}`)
@@ -2037,6 +2042,30 @@ test('filters filenames as the user types and opens a match', async ({ page }) =
   await query.fill('main')
   await expect(results.getByRole('button', { name: 'src/main.rs' })).toBeVisible()
   expect((await searches()).at(-1)).toMatchObject({ taskId: null, mode: 'name' })
+})
+
+test('recovers Files and Git status after a watcher startup error', async ({ page }) => {
+  await page.goto('/')
+  await expect(page.getByRole('region', { name: 'Task chat' }).getByText('ready to go')).toBeVisible()
+  await page.getByRole('tab', { name: 'Files' }).click()
+  await expect.poll(() => page.evaluate(() => window.__fileWatchIds())).toEqual(['file-watch-1'])
+  const status = page.locator('.status-bar')
+  await expect(status).toContainText('0 changed files')
+  await page.evaluate(() => {
+    const fixture = window as unknown as { __publishFileError: (id: string, message: string) => void }
+    fixture.__publishFileError('file-watch-1', 'Watcher startup timed out')
+  })
+  await expect(page.getByRole('alert')).toContainText('Watcher startup timed out')
+  await expect(status).toContainText('Git status unavailable')
+  await page.evaluate(() => window.__publishFileChanges('file-watch-1', [
+    { path: 'src/main.rs', kind: 'modified', originalPath: null },
+  ]))
+  await expect(status).toContainText('1 changed file')
+  const files = page.getByRole('region', { name: 'Workspace files' })
+  await files.getByRole('button', { name: 'src', exact: true }).click()
+  await expect(files.getByRole('button', { name: /main\.rs/ }).getByRole('img', { name: 'Modified' })).toBeVisible()
+  expect(await page.evaluate(() => window.__fileWatchIds())).toEqual(['file-watch-1'])
+  expect(await page.evaluate(() => window.__unwatchedFiles)).toEqual([])
 })
 
 test('shares worktree status with Files and stops watching unused roots', async ({ page }) => {

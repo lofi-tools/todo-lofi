@@ -1827,6 +1827,8 @@ placeholder tabs and no unearned state badges.
   verifies timeout, saturation and recovery without relying on FSEvents.
   The shared Files/Git subscription reports a startup failure once and retries
   while subscribed; a headless fixture checks recovery and cancellation.
+  A headless Chromium fixture also checks the error toast, Git status recovery
+  and Files badge update on the same subscription.
 - [ ] Packaging and CI: macOS 13+, Ubuntu 24.04+, pinned Zig, Tauri build,
   platform smoke.
   The local macOS debug app bundle declares macOS 13.0 in both Info.plist and
