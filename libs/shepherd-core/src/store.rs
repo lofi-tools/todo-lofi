@@ -1859,8 +1859,8 @@ impl Store for MemoryStore {
 
     async fn save_draft(&self, project: &Project, task: &Task) -> Result<(), StoreError> {
         validate_draft_owner(project, task)?;
-        let mut projects = self.projects.write().await;
         let mut tasks = self.tasks.write().await;
+        let mut projects = self.projects.write().await;
         projects.insert(project.id.as_str().to_string(), project.clone());
         tasks.insert(task.id.as_str().to_string(), task.clone());
         Ok(())
@@ -2209,6 +2209,57 @@ mod tests {
             .save_transcript_entries(&session, &entries.iter().collect::<Vec<_>>())
             .await?;
         assert_eq!(store.load_transcript(&task.id).await?, entries);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn memory_draft_and_transcript_saves_do_not_deadlock()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = TestDirectory::new()?;
+        let store = Arc::new(MemoryStore::new());
+        let mut project = Project::new(directory.path().to_path_buf());
+        let task = Task::draft(project.id.clone(), "Current", directory.path());
+        store.save_project(&project).await?;
+        store.save_task(&task).await?;
+        let session = SessionRecord::started(task.id.clone(), "codex", None);
+        store.save_session(&session).await?;
+        let sessions = store.sessions.write().await;
+        let transcript_save = tokio::spawn({
+            let store = store.clone();
+            async move { store.save_task_with_transcript(&task, &session, &[]).await }
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while store.tasks.try_write().is_ok() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await?;
+        let new_task = Task::draft(project.id.clone(), "New", directory.path());
+        project.last_task_id = Some(new_task.id.clone());
+        let (started, starting) = tokio::sync::oneshot::channel();
+        let draft_save = tokio::spawn({
+            let store = store.clone();
+            async move {
+                started
+                    .send(())
+                    .map_err(|_| StoreError::Backend("test listener closed".into()))?;
+                store.save_draft(&project, &new_task).await
+            }
+        });
+        starting.await?;
+        tokio::task::yield_now().await;
+        assert!(
+            store.projects.try_write().is_ok(),
+            "draft must not hold the project lock while waiting for tasks"
+        );
+        drop(sessions);
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            transcript_save.await??;
+            draft_save.await??;
+            Ok::<(), Box<dyn std::error::Error>>(())
+        })
+        .await??;
+        assert_eq!(store.load_tasks().await?.len(), 2);
         Ok(())
     }
 

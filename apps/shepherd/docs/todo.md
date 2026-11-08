@@ -1329,6 +1329,8 @@ placeholder tabs and no unearned state badges.
   rolls back a mid-deletion failure, preserving those records, transcripts and
   attachments for retry. Draft creation commits the project selection and new
   task together, with a rollback and retry fixture for a failed task write.
+  The in-memory store takes task and project locks in the same order for draft
+  and transcript saves; a concurrency fixture checks they cannot deadlock.
   Task deletion stages the checkout before the database transaction so a
   failed deletion can restore ignored files as well as tracked files.
   A deletion journal now survives task deletion and database reopen in both
