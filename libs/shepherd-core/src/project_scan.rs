@@ -134,6 +134,16 @@ fn walk(dir: &Path, depth: usize, repositories: &mut usize) -> Option<RawNode> {
 }
 
 fn read_directory(dir: &Path) -> Option<(bool, Vec<PathBuf>)> {
+    #[cfg(unix)]
+    let directory = {
+        use rustix::fs::{Mode, OFlags, open};
+        open(
+            dir,
+            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::DIRECTORY,
+            Mode::empty(),
+        )
+        .ok()?
+    };
     let entries = std::fs::read_dir(dir).ok()?;
     let mut has_git = false;
     let mut subdirectories = Vec::new();
@@ -143,7 +153,11 @@ fn read_directory(dir: &Path) -> Option<(bool, Vec<PathBuf>)> {
         };
         let name = entry.file_name();
         if name == ".git" {
-            has_git = file_type.is_dir() || (file_type.is_file() && is_gitdir_file(&entry.path()));
+            #[cfg(unix)]
+            let marker_file = file_type.is_file() && is_gitdir_file_at(&directory, &name);
+            #[cfg(not(unix))]
+            let marker_file = file_type.is_file() && is_gitdir_file(&entry.path());
+            has_git = file_type.is_dir() || marker_file;
             continue;
         }
         if !file_type.is_dir() {
@@ -157,20 +171,26 @@ fn read_directory(dir: &Path) -> Option<(bool, Vec<PathBuf>)> {
     Some((has_git, subdirectories))
 }
 
+#[cfg(unix)]
+fn is_gitdir_file_at(directory: &impl std::os::fd::AsFd, name: &std::ffi::OsStr) -> bool {
+    use rustix::fs::{Mode, OFlags, openat};
+    let file = openat(
+        directory,
+        name,
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map(std::fs::File::from)
+    .map_err(std::io::Error::from);
+    is_gitdir_file_contents(file)
+}
+
+#[cfg(not(unix))]
 fn is_gitdir_file(path: &Path) -> bool {
-    #[cfg(unix)]
-    let file = {
-        use rustix::fs::{Mode, OFlags, open};
-        open(
-            path,
-            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
-            Mode::empty(),
-        )
-        .map(std::fs::File::from)
-        .map_err(std::io::Error::from)
-    };
-    #[cfg(not(unix))]
-    let file = std::fs::File::open(path);
+    is_gitdir_file_contents(std::fs::File::open(path))
+}
+
+fn is_gitdir_file_contents(file: std::io::Result<std::fs::File>) -> bool {
     let mut prefix = [0; 8];
     file.and_then(|mut file| {
         if !file.metadata()?.is_file() {
@@ -270,15 +290,36 @@ mod tests {
         use std::os::unix::fs::symlink;
 
         let root = TestDirectory::new()?;
+        let directory = std::fs::File::open(root.path())?;
         std::fs::write(root.join("marker"), "gitdir: /fixture\n")?;
         symlink(root.join("marker"), root.join("link"))?;
-        assert!(!is_gitdir_file(&root.join("link")));
+        assert!(!is_gitdir_file_at(&directory, "link".as_ref()));
         let status = std::process::Command::new("mkfifo")
             .arg(root.join("pipe"))
             .status()?;
         assert!(status.success());
-        assert!(!is_gitdir_file(&root.join("pipe")));
-        assert!(is_gitdir_file(&root.join("marker")));
+        assert!(!is_gitdir_file_at(&directory, "pipe".as_ref()));
+        assert!(is_gitdir_file_at(&directory, "marker".as_ref()));
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn gitdir_marker_reader_keeps_the_open_parent_after_replacement()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::fs::symlink;
+
+        let root = TestDirectory::new()?;
+        let original = root.join("projects");
+        let outside = root.join("outside");
+        std::fs::create_dir(&original)?;
+        std::fs::create_dir(&outside)?;
+        std::fs::write(original.join(".git"), "gitdir: /fixture\n")?;
+        std::fs::write(outside.join(".git"), "not a gitdir")?;
+        let directory = std::fs::File::open(&original)?;
+        std::fs::rename(&original, root.join("moved"))?;
+        symlink(&outside, &original)?;
+        assert!(is_gitdir_file_at(&directory, ".git".as_ref()));
         Ok(())
     }
 

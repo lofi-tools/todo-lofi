@@ -890,7 +890,10 @@ If Pi’s RPC probe is blocked, proceed with ACP while resolving it.
   verifies the leader remains available and the retry succeeds.
   A failed child wait is also reported and retried without signalling the
   group again; a local fixture verifies that the child handle is retained.
-  Descendants surviving an already-reaped leader still need recovery.
+  Descendants surviving an already-reaped leader still need recovery. A macOS
+  experiment that observed exit before reaping successfully stopped a surviving
+  child, but signaling an empty exited group returned EPERM in existing tests;
+  that approach was not retained pending a safe way to distinguish the cases.
   Startup waits for the exit report so it can retain process diagnostics.
   The installed Nix-profile Pi 0.75.4 passed the isolated dialog smoke, but its
   prompt reply omitted `disposition` and its shipped RPC/session code lacks
@@ -1517,8 +1520,9 @@ placeholder tabs and no unearned state badges.
   untracked regular files without following substituted file or parent symlinks;
   a fixture exercises both substitutions. Untracked symlink targets are read
   relative to the opened parent, with a parent-replacement fixture. Project
-  discovery opens `.git` marker files without following the final symlink or
-  blocking on a substituted pipe; its parent traversal remains pathname-based.
+  discovery opens `.git` marker files relative to the opened parent without
+  following the final symlink or blocking on a substituted pipe; a fixture
+  replaces the parent. Directory enumeration and traversal remain pathname-based.
   External editor and file-manager
   actions pass a validated pathname to another application; a later path swap
   can change its target, so those actions do not guarantee race-free confinement.
