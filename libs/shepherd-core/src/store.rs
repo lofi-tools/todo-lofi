@@ -371,31 +371,15 @@ fn verify_database_migration_lock(_file: &std::fs::File, _path: &Path) -> Result
     Ok(())
 }
 
-fn open_database_migration_lock(path: &Path) -> Result<(std::fs::File, PathBuf), StoreError> {
-    let canonical = match std::fs::canonicalize(path) {
-        Ok(path) => path,
+fn resolve_previously_missing_database_path(path: &Path) -> Result<PathBuf, StoreError> {
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => std::fs::canonicalize(path).map_err(|error| {
+            StoreError::Backend(format!(
+                "could not resolve database path {} after it appeared: {error}",
+                path.display()
+            ))
+        }),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            match std::fs::symlink_metadata(path) {
-                Ok(metadata) if metadata.file_type().is_symlink() => {
-                    return Err(StoreError::Backend(format!(
-                        "database path is a dangling symbolic link: {}",
-                        path.display()
-                    )));
-                }
-                Ok(_) => {
-                    return Err(StoreError::Backend(format!(
-                        "database path changed while acquiring its migration lock: {}",
-                        path.display()
-                    )));
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => {
-                    return Err(StoreError::Backend(format!(
-                        "could not inspect database path {}: {error}",
-                        path.display()
-                    )));
-                }
-            }
             let parent = path
                 .parent()
                 .filter(|parent| !parent.as_os_str().is_empty())
@@ -403,14 +387,27 @@ fn open_database_migration_lock(path: &Path) -> Result<(std::fs::File, PathBuf),
             let name = path
                 .file_name()
                 .ok_or_else(|| StoreError::Backend("database path has no filename".into()))?;
-            std::fs::canonicalize(parent)
+            Ok(std::fs::canonicalize(parent)
                 .map_err(|error| {
                     StoreError::Backend(format!(
                         "could not inspect database directory {}: {error}",
                         parent.display()
                     ))
                 })?
-                .join(name)
+                .join(name))
+        }
+        Err(error) => Err(StoreError::Backend(format!(
+            "could not inspect database path {}: {error}",
+            path.display()
+        ))),
+    }
+}
+
+fn open_database_migration_lock(path: &Path) -> Result<(std::fs::File, PathBuf), StoreError> {
+    let canonical = match std::fs::canonicalize(path) {
+        Ok(path) => path,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            resolve_previously_missing_database_path(path)?
         }
         Err(error) => {
             return Err(StoreError::Backend(format!(
@@ -2567,6 +2564,20 @@ mod tests {
             directory.path(),
         )
         .await?;
+        Ok(())
+    }
+
+    #[test]
+    fn database_appearing_during_lock_path_resolution_is_rechecked()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = TestDirectory::new()?;
+        let path = directory.join("appearing.db");
+        assert!(std::fs::canonicalize(&path).is_err());
+        std::fs::write(&path, "created by another opener")?;
+        assert_eq!(
+            resolve_previously_missing_database_path(&path)?,
+            std::fs::canonicalize(&path)?
+        );
         Ok(())
     }
 

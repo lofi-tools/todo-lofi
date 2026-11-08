@@ -1330,7 +1330,9 @@ placeholder tabs and no unearned state badges.
   migrations; a failed backup, unknown migration or gap in migration history
   blocks the migration before schema changes. File-database openers resolving
   to the same canonical path hold a retained migration lock across existence
-  checks, backup and migrations; concurrent-open fixtures verify waiting and a
+  checks, backup and migrations; a database appearing during initial path
+  resolution is rechecked, with a fixture for that race. Concurrent-open
+  fixtures verify waiting and a
   single preserved snapshot. A separate-process fixture verifies that another
   opener waits and proceeds after the lock holder is killed. Lock contention
   uses cancellable async retries; a fixture verifies cancelling an opener does
