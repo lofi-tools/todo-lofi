@@ -266,6 +266,7 @@ struct AdmissionGuard {
     child: Option<Arc<AsyncMutex<Child>>>,
     sender: mpsc::UnboundedSender<HarnessEvent>,
     signal_group: fn(&Child) -> std::io::Result<()>,
+    runtime: tokio::runtime::Handle,
 }
 
 impl AdmissionGuard {
@@ -281,11 +282,7 @@ impl Drop for AdmissionGuard {
         };
         let sender = self.sender.clone();
         let signal_group = self.signal_group;
-        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
-            tracing::error!("cannot clean up cancelled OpenCode admission without a runtime");
-            return;
-        };
-        runtime.spawn(async move {
+        self.runtime.spawn(async move {
             let mut text =
                 "OpenCode prompt admission was cancelled; the server was stopped.".to_string();
             if let Err(error) = stop_server_with(&mut *child.lock().await, signal_group).await {
@@ -543,11 +540,15 @@ impl AgentHarness for OpenCodeHarness {
         let path = session_path(&session)?;
         let events = server.subscribe().await?;
         let id = format!("msg_{}", uuid::Uuid::new_v4().simple());
+        let runtime = tokio::runtime::Handle::try_current().map_err(|error| {
+            HarnessError::Protocol(format!("OpenCode requires an async runtime: {error}"))
+        })?;
         self.cleanup_required = true;
         let mut admission = AdmissionGuard {
             child: Some(server.child.clone()),
             sender: self.sender.clone(),
             signal_group: signal_server_group,
+            runtime,
         };
         if let Err(error) = server.enqueue_prompt(&session, &id, &input, true).await {
             if let Err(cleanup) = server.cancel_prompt(&session, &id).await {
@@ -2003,6 +2004,7 @@ mod tests {
             child: Some(child.clone()),
             sender,
             signal_group: |_| Err(std::io::Error::other("fixture stop failure")),
+            runtime: tokio::runtime::Handle::try_current()?,
         };
         drop(guard);
         assert!(matches!(
@@ -2014,6 +2016,31 @@ mod tests {
         assert!(child.try_wait()?.is_none());
         stop_server(&mut child).await?;
         assert!(child.try_wait()?.is_some());
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cancelled_admission_cleans_up_when_dropped_outside_the_runtime()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut command = Command::new("/bin/sleep");
+        command.arg("30").process_group(0).kill_on_drop(true);
+        let child = Arc::new(AsyncMutex::new(command.spawn()?));
+        let (sender, mut events) = mpsc::unbounded_channel();
+        let guard = AdmissionGuard {
+            child: Some(child.clone()),
+            sender,
+            signal_group: signal_server_group,
+            runtime: tokio::runtime::Handle::try_current()?,
+        };
+        std::thread::spawn(move || drop(guard))
+            .join()
+            .map_err(|_| "cleanup thread panicked")?;
+        assert!(matches!(
+            timeout(Duration::from_secs(5), events.recv()).await?,
+            Some(HarnessEvent::ConnectionFailed { text, .. }) if text.contains("server was stopped")
+        ));
+        assert!(child.lock().await.try_wait()?.is_some());
         Ok(())
     }
 
