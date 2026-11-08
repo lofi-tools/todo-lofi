@@ -1944,17 +1944,22 @@ impl Store for MemoryStore {
 
     async fn archive_tasks(&self, archived: &[Task]) -> Result<(), StoreError> {
         let mut tasks = self.tasks.write().await;
+        let mut seen = std::collections::BTreeSet::new();
         if let Some(task) = archived.iter().find(|task| {
-            tasks
-                .get(task.id.as_str())
-                .is_none_or(|stored| stored.state != TaskState::Review)
+            !seen.insert(task.id.clone())
+                || tasks
+                    .get(task.id.as_str())
+                    .is_none_or(|stored| stored.state != TaskState::Review)
         }) {
             return Err(StoreError::ReviewStateChanged {
                 task_id: task.id.clone(),
             });
         }
         for task in archived {
-            tasks.insert(task.id.as_str().to_string(), task.clone());
+            if let Some(stored) = tasks.get_mut(task.id.as_str()) {
+                stored.state = TaskState::Done;
+                stored.updated_at = task.updated_at;
+            }
         }
         Ok(())
     }
@@ -2271,6 +2276,54 @@ mod tests {
             .save_transcript_entries(&session, &entries.iter().collect::<Vec<_>>())
             .await?;
         assert_eq!(store.load_transcript(&task.id).await?, entries);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn archive_rejects_duplicates_and_preserves_current_task_fields()
+    -> Result<(), Box<dyn std::error::Error>> {
+        async fn verify(store: &dyn Store, root: &Path) -> Result<(), Box<dyn std::error::Error>> {
+            let project = Project::new(root.to_path_buf());
+            let mut task = Task::draft(project.id.clone(), "Current title", root);
+            task.state = TaskState::Review;
+            store.save_project(&project).await?;
+            store.save_task(&task).await?;
+            let mut stale = task.clone();
+            stale.title = "Stale title".into();
+            stale.project_id = ProjectId::new("other-project");
+            stale.updated_at = task.updated_at + 1;
+            assert!(matches!(
+                store.archive_tasks(&[stale.clone(), stale.clone()]).await,
+                Err(StoreError::ReviewStateChanged { .. })
+            ));
+            let original = store
+                .load_tasks()
+                .await?
+                .into_iter()
+                .next()
+                .ok_or("missing task")?;
+            assert_eq!(original.state, TaskState::Review);
+            assert_eq!(original.title, "Current title");
+            store.archive_tasks(&[stale.clone()]).await?;
+            let archived = store
+                .load_tasks()
+                .await?
+                .into_iter()
+                .next()
+                .ok_or("missing archived task")?;
+            assert_eq!(archived.state, TaskState::Done);
+            assert_eq!(archived.title, "Current title");
+            assert_eq!(archived.project_id, project.id);
+            assert_eq!(archived.updated_at, stale.updated_at);
+            Ok(())
+        }
+        let directory = TestDirectory::new()?;
+        verify(&MemoryStore::new(), directory.path()).await?;
+        verify(
+            &TursoStore::open_at(&directory.join("archive-state.db")).await?,
+            directory.path(),
+        )
+        .await?;
         Ok(())
     }
 

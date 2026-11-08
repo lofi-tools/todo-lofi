@@ -1329,6 +1329,9 @@ placeholder tabs and no unearned state badges.
   rolls back a mid-deletion failure, preserving those records, transcripts and
   attachments for retry. Draft creation commits the project selection and new
   task together, with a rollback and retry fixture for a failed task write.
+  Batch archive rejects duplicate task IDs in both stores and changes only the
+  state and timestamp, preserving newer task fields; a shared fixture checks
+  rejection and a subsequent successful archive.
   The in-memory store takes task and project locks in the same order for draft
   and transcript saves; a concurrency fixture checks they cannot deadlock.
   It also holds the task, session, project and associated-state locks through
