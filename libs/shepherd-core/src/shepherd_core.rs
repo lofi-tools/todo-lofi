@@ -66,6 +66,10 @@ pub enum CoreError {
     #[error("project path is already registered: {path}")]
     DuplicateProject { path: String },
     #[error(
+        "task worktree path already exists: {path}; another task in this project may have the same title"
+    )]
+    WorktreePathTaken { path: String },
+    #[error(
         "Enter a loopback HTTP or HTTPS URL without credentials, such as http://localhost:3000."
     )]
     InvalidPreviewUrl,
@@ -2223,9 +2227,8 @@ impl Core {
         let task = self.task(task_id)?.clone();
         let project_path = self.project_path(&task.project_id)?;
         if task.proposed_worktree_path.exists() {
-            return Err(CoreError::Io {
+            return Err(CoreError::WorktreePathTaken {
                 path: task.proposed_worktree_path.display().to_string(),
-                source: std::io::Error::other("task worktree path already exists"),
             });
         }
 
@@ -3880,6 +3883,90 @@ mod tests {
         Ok(ProjectId::new(project.id.clone()))
     }
 
+    struct NamedAgentFactory;
+
+    impl HarnessFactory for NamedAgentFactory {
+        fn create(&self) -> Result<Box<dyn agent_harness::AgentHarness>, CoreError> {
+            Err(CoreError::HarnessUnavailable)
+        }
+
+        fn launch(
+            &self,
+            agent: Agent,
+            cwd: PathBuf,
+        ) -> Result<
+            (
+                Box<dyn agent_harness::AgentHarness>,
+                agent_harness::SpawnSpec,
+            ),
+            CoreError,
+        > {
+            let name = agent.as_str();
+            let turn = FakeTurn::new(vec![
+                FakeStep::Message(format!("{name} started")),
+                FakeStep::approval("shared-approval", "Approve tool"),
+                FakeStep::WriteFile {
+                    path: "agent-result.txt".into(),
+                    contents: name.into(),
+                },
+                FakeStep::Message(format!("{name} finished")),
+            ]);
+            Ok((
+                Box::new(agent_harness::fake_harness::FakeHarness::one_turn(turn)),
+                self.spawn_spec(cwd),
+            ))
+        }
+    }
+
+    fn repository_at(path: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
+        std::fs::create_dir_all(path)?;
+        let git = |args: &[&str]| -> Result<(), Box<dyn std::error::Error>> {
+            let status = std::process::Command::new("git")
+                .arg("-C")
+                .arg(path)
+                .args(args)
+                .status()?;
+            if !status.success() {
+                return Err(std::io::Error::other(format!("git {args:?} failed")).into());
+            }
+            Ok(())
+        };
+        git(&["init", "-b", "main"])?;
+        git(&["config", "user.name", "Shepherd Test"])?;
+        git(&["config", "user.email", "shepherd@example.com"])?;
+        git(&["config", "commit.gpgsign", "false"])?;
+        std::fs::write(path.join("README.md"), "initial\n")?;
+        git(&["add", "README.md"])?;
+        git(&["commit", "-m", "initial"])?;
+        Ok(())
+    }
+
+    async fn prompt_task(
+        core: &mut Core,
+        project: &ProjectId,
+        title: &str,
+        agent: Agent,
+    ) -> Result<(TaskId, PathBuf), Box<dyn std::error::Error>> {
+        let draft = workspace_of(
+            core.execute(Command::CreateDraft {
+                project_id: project.clone(),
+                title: title.to_string(),
+                agent,
+            })
+            .await?,
+        );
+        let id = TaskId::new(draft.task.id);
+        let waiting = workspace_of(
+            core.execute(Command::SendPrompt {
+                task_id: id.clone(),
+                input: PromptInput::text("fixture prompt"),
+            })
+            .await?,
+        );
+        let path = PathBuf::from(waiting.task.worktree_path.ok_or("missing worktree")?);
+        Ok((id, path))
+    }
+
     fn workspace_of(result: CommandResult) -> TaskWorkspace {
         match result {
             CommandResult::TaskWorkspace(workspace) => workspace,
@@ -4148,6 +4235,226 @@ mod tests {
         let text = summaries(&restored).join("\n");
         assert!(text.contains("Keep this prompt"));
         assert!(text.contains("fixture admission cancelled"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn same_named_projects_keep_identical_tasks_and_approvals_isolated()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let roots = TestDirectory::new()?;
+        let first_path = roots.join("left/app");
+        let second_path = roots.join("right/app");
+        repository_at(&first_path)?;
+        repository_at(&second_path)?;
+        let database = TestDatabase::new()?;
+        let uri = database.uri();
+        let mut core = Core::with_services(
+            Box::new(TursoStore::open(&uri).await?),
+            Box::new(NamedAgentFactory),
+        );
+        let first_project = add_project(&mut core, first_path).await?;
+        let second_project = add_project(&mut core, second_path).await?;
+        let (first, first_worktree) =
+            prompt_task(&mut core, &first_project, "Same title", Agent::Codex).await?;
+        let (second, second_worktree) =
+            prompt_task(&mut core, &second_project, "Same title", Agent::OpenCode).await?;
+        assert_ne!(first, second);
+        assert_ne!(first_worktree, second_worktree);
+        assert_eq!(core.task_workspace(&first)?.task.state, TaskState::Waiting);
+        assert_eq!(core.task_workspace(&second)?.task.state, TaskState::Waiting);
+
+        let first_done = workspace_of(
+            core.execute(Command::ResolveApproval {
+                task_id: first.clone(),
+                approval_id: ApprovalId::new("shared-approval"),
+                decision: Decision::Allow,
+            })
+            .await?,
+        );
+        assert_eq!(first_done.task.state, TaskState::Review);
+        assert_eq!(
+            std::fs::read_to_string(first_worktree.join("agent-result.txt"))?,
+            "codex"
+        );
+        assert!(!second_worktree.join("agent-result.txt").exists());
+        assert_eq!(core.task_workspace(&second)?.task.state, TaskState::Waiting);
+        let first_text = summaries(&first_done).join("\n");
+        assert!(first_text.contains("codex finished"));
+        assert!(!first_text.contains("opencode started"));
+
+        let second_done = workspace_of(
+            core.execute(Command::ResolveApproval {
+                task_id: second.clone(),
+                approval_id: ApprovalId::new("shared-approval"),
+                decision: Decision::Deny,
+            })
+            .await?,
+        );
+        assert_ne!(second_done.task.state, TaskState::Waiting);
+        assert!(!second_worktree.join("agent-result.txt").exists());
+        let second_text = summaries(&second_done).join("\n");
+        assert!(!second_text.contains("codex started"));
+        assert!(!second_text.contains("opencode finished"));
+
+        assert!(
+            core.project_approvals(&first_project)
+                .await?
+                .saved
+                .is_empty()
+        );
+        assert!(
+            core.project_approvals(&second_project)
+                .await?
+                .saved
+                .is_empty()
+        );
+        assert!(
+            core.task_list(&first_project)?
+                .tasks
+                .iter()
+                .all(|task| task.id != second.as_str())
+        );
+        assert!(
+            core.task_list(&second_project)?
+                .tasks
+                .iter()
+                .all(|task| task.id != first.as_str())
+        );
+
+        drop(core);
+        let mut reopened = Core::load(
+            Box::new(TursoStore::open(&uri).await?),
+            Box::new(UnavailableHarnessFactory),
+        )
+        .await?;
+        assert_eq!(
+            reopened.task_workspace(&first)?.task.state,
+            TaskState::Review
+        );
+        assert!(reopened.task_workspace(&second)?.task.state != TaskState::Waiting);
+        assert!(
+            reopened
+                .project_approvals(&first_project)
+                .await?
+                .saved
+                .is_empty()
+        );
+        assert!(
+            reopened
+                .project_approvals(&second_project)
+                .await?
+                .saved
+                .is_empty()
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn two_agents_in_one_project_keep_approvals_and_grants_separate()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let repository = TestRepository::new()?;
+        let database = TestDatabase::new()?;
+        let uri = database.uri();
+        let mut core = Core::with_services(
+            Box::new(TursoStore::open(&uri).await?),
+            Box::new(NamedAgentFactory),
+        );
+        let project = add_project(&mut core, repository.path().to_path_buf()).await?;
+        let (codex, codex_worktree) =
+            prompt_task(&mut core, &project, "First task", Agent::Codex).await?;
+        let (opencode, opencode_worktree) =
+            prompt_task(&mut core, &project, "Second task", Agent::OpenCode).await?;
+        let codex_done = workspace_of(
+            core.execute(Command::ResolveApproval {
+                task_id: codex.clone(),
+                approval_id: ApprovalId::new("shared-approval"),
+                decision: Decision::Allow,
+            })
+            .await?,
+        );
+        assert_eq!(codex_done.task.state, TaskState::Review);
+        assert_eq!(
+            std::fs::read_to_string(codex_worktree.join("agent-result.txt"))?,
+            "codex"
+        );
+        assert_eq!(
+            core.task_workspace(&opencode)?.task.state,
+            TaskState::Waiting
+        );
+        assert!(!opencode_worktree.join("agent-result.txt").exists());
+
+        let opencode_done = workspace_of(
+            core.execute(Command::ResolveApproval {
+                task_id: opencode.clone(),
+                approval_id: ApprovalId::new("shared-approval"),
+                decision: Decision::Deny,
+            })
+            .await?,
+        );
+        assert_ne!(opencode_done.task.state, TaskState::Waiting);
+        assert!(!opencode_worktree.join("agent-result.txt").exists());
+        assert!(
+            summaries(&opencode_done)
+                .join("\n")
+                .contains("opencode started")
+        );
+        assert!(
+            !summaries(&opencode_done)
+                .join("\n")
+                .contains("codex finished")
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_same_title_task_reports_a_worktree_conflict_without_touching_the_first()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let repository = TestRepository::new()?;
+        let database = TestDatabase::new()?;
+        let mut core = Core::with_services(
+            Box::new(TursoStore::open(&database.uri()).await?),
+            Box::new(NamedAgentFactory),
+        );
+        let project = add_project(&mut core, repository.path().to_path_buf()).await?;
+        let (first, first_worktree) =
+            prompt_task(&mut core, &project, "Same title", Agent::Codex).await?;
+        let duplicate = workspace_of(
+            core.execute(Command::CreateDraft {
+                project_id: project.clone(),
+                title: "Same title".into(),
+                agent: Agent::OpenCode,
+            })
+            .await?,
+        );
+        let duplicate_id = TaskId::new(duplicate.task.id);
+        let failed = core
+            .execute(Command::SendPrompt {
+                task_id: duplicate_id.clone(),
+                input: PromptInput::text("second prompt"),
+            })
+            .await;
+        assert!(matches!(failed, Err(CoreError::WorktreePathTaken { .. })));
+        assert!(first_worktree.exists());
+        assert_eq!(core.task_workspace(&first)?.task.state, TaskState::Waiting);
+        assert_eq!(
+            core.task_workspace(&duplicate_id)?.task.state,
+            TaskState::Draft
+        );
+        assert!(!first_worktree.join("agent-result.txt").exists());
+
+        let completed = workspace_of(
+            core.execute(Command::ResolveApproval {
+                task_id: first,
+                approval_id: ApprovalId::new("shared-approval"),
+                decision: Decision::Allow,
+            })
+            .await?,
+        );
+        assert_eq!(completed.task.state, TaskState::Review);
+        assert_eq!(
+            std::fs::read_to_string(first_worktree.join("agent-result.txt"))?,
+            "codex"
+        );
         Ok(())
     }
 

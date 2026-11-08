@@ -1843,14 +1843,20 @@ placeholder tabs and no unearned state badges.
   a fixture also checks their capacity is retained until consumption.
   Transcript folding similarly selects the tail of an oversized command-output
   chunk before allocating it, with a UTF-8 regression for the retained output.
-- [ ] Multiple agents and projects: three agents across two projects, no state
+- [x] Multiple agents and projects: three agents across two projects, no state
   bleed, no polling.
   A three-session fixture holds Codex, OpenCode and Claude tasks at approvals
   across two projects, denies one and allows the others with identical approval
   IDs, and verifies worktree and persisted decision/transcript isolation. Agent events wake the
   shell directly instead of using a periodic poll; fixtures cover multiple
   receivers and delivery between commands. The event pump exits on shutdown
-  or shell disposal without retaining the core. Live adapters remain unverified.
+  or shell disposal without retaining the core. Further fixtures keep two
+  projects whose directories share a name, and whose tasks share a title,
+  isolated in project IDs, worktrees, approvals and recovered transcripts; keep
+  two agents' identical approval requests and session grants separate inside
+  one project; and report a same-title worktree conflict as its own error
+  without touching the existing task. Live adapter coverage remains with the
+  gated smoke item.
 - [ ] Performance: cold start under 1.2 s, streaming while a large diff renders,
   terminal burst budget.
   Review and Git retain in-flight diff requests across transcript-only updates;
