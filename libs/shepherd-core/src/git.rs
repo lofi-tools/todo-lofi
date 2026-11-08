@@ -314,14 +314,7 @@ impl GitService {
         &self,
         repository: &GitRepository,
     ) -> Result<WorktreeDeletionLock, GitError> {
-        let directory = repository.git_dir.join("shepherd");
-        std::fs::create_dir_all(&directory).map_err(|source| GitError::Io { source })?;
-        let lock = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(directory.join("worktree-deletions.lock"))
+        let lock = open_worktree_deletion_lock(&repository.git_dir)
             .map_err(|source| GitError::Io { source })?;
         lock.try_lock().map_err(|error| GitError::Io {
             source: std::io::Error::other(format!("could not lock worktree deletions: {error}")),
@@ -869,6 +862,59 @@ impl GitService {
         let status = run_git(worktree_path, &["status", "--porcelain"])?;
         Ok(!status.is_empty())
     }
+}
+
+#[cfg(unix)]
+fn open_worktree_deletion_lock(git_dir: &Path) -> std::io::Result<std::fs::File> {
+    use rustix::fs::{Mode, OFlags, mkdirat, open, openat};
+    let git_dir = open(
+        git_dir,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )?;
+    match mkdirat(&git_dir, "shepherd", Mode::from_raw_mode(0o700)) {
+        Ok(()) | Err(rustix::io::Errno::EXIST) => {}
+        Err(error) => return Err(error.into()),
+    }
+    let directory = openat(
+        &git_dir,
+        "shepherd",
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )?;
+    let lock = openat(
+        &directory,
+        "worktree-deletions.lock",
+        OFlags::RDWR | OFlags::CREATE | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+        Mode::from_raw_mode(0o600),
+    )?;
+    let lock = std::fs::File::from(lock);
+    if !lock.metadata()?.is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "worktree deletion lock is not a regular file",
+        ));
+    }
+    Ok(lock)
+}
+
+#[cfg(not(unix))]
+fn open_worktree_deletion_lock(git_dir: &Path) -> std::io::Result<std::fs::File> {
+    let directory = git_dir.join("shepherd");
+    std::fs::create_dir_all(&directory)?;
+    let lock = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(directory.join("worktree-deletions.lock"))?;
+    if !lock.metadata()?.is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "worktree deletion lock is not a regular file",
+        ));
+    }
+    Ok(lock)
 }
 
 #[derive(Debug, Serialize)]
@@ -1525,6 +1571,55 @@ mod tests {
                 &["show-ref", "--verify", "refs/heads/shepherd/example"]
             )
             .is_ok()
+        );
+        Ok(())
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn worktree_deletion_lock_rejects_symlinked_directory_and_lock()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::fs::symlink;
+        let fixture = TestRepository::new()?;
+        let outside = tempfile::tempdir()?;
+        let directory = fixture.repository().git_dir.join("shepherd");
+        let target = outside.path().join("target");
+        std::fs::write(&target, "preserve")?;
+        symlink(outside.path(), &directory)?;
+        assert!(
+            GitService
+                .lock_worktree_deletions(fixture.repository())
+                .is_err()
+        );
+        assert!(!outside.path().join("worktree-deletions.lock").exists());
+        std::fs::remove_file(&directory)?;
+        std::fs::create_dir(&directory)?;
+        symlink(&target, directory.join("worktree-deletions.lock"))?;
+        assert!(
+            GitService
+                .lock_worktree_deletions(fixture.repository())
+                .is_err()
+        );
+        assert_eq!(std::fs::read_to_string(&target)?, "preserve");
+        std::fs::remove_file(directory.join("worktree-deletions.lock"))?;
+        std::fs::create_dir(directory.join("worktree-deletions.lock"))?;
+        assert!(
+            GitService
+                .lock_worktree_deletions(fixture.repository())
+                .is_err()
+        );
+        std::fs::remove_dir(directory.join("worktree-deletions.lock"))?;
+        let lock = GitService.lock_worktree_deletions(fixture.repository())?;
+        assert!(
+            GitService
+                .lock_worktree_deletions(fixture.repository())
+                .is_err()
+        );
+        drop(lock);
+        assert!(
+            GitService
+                .lock_worktree_deletions(fixture.repository())
+                .is_ok()
         );
         Ok(())
     }

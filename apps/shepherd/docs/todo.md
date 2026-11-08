@@ -1709,6 +1709,10 @@ placeholder tabs and no unearned state badges.
   External editor and file-manager
   actions pass a validated pathname to another application; a later path swap
   can change its target, so those actions do not guarantee race-free confinement.
+  On Unix, the worktree-deletion journal lock is opened relative to the Git
+  directory without following symlinks, uses nonblocking open, and must be a
+  regular file. A temporary-repository fixture checks symlinked directories,
+  symlinked lock files, non-regular paths and normal lock exclusion.
   The remaining filesystem operations still need a confinement audit. ACP file reads
   and atomic writes also use descriptor-relative operations on Unix, with
   fixtures for directory substitution and preserved file permissions. ACP workspace
