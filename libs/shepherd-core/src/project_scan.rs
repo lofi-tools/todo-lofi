@@ -7,6 +7,7 @@
 //! level regardless of how many there are.
 
 use std::collections::BTreeMap;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
@@ -141,8 +142,8 @@ fn read_directory(dir: &Path) -> Option<(bool, Vec<PathBuf>)> {
             continue;
         };
         let name = entry.file_name();
-        if name == ".git" && (file_type.is_dir() || file_type.is_file()) {
-            has_git = true;
+        if name == ".git" {
+            has_git = file_type.is_dir() || (file_type.is_file() && is_gitdir_file(&entry.path()));
             continue;
         }
         if !file_type.is_dir() {
@@ -154,6 +155,14 @@ fn read_directory(dir: &Path) -> Option<(bool, Vec<PathBuf>)> {
         subdirectories.push(entry.path());
     }
     Some((has_git, subdirectories))
+}
+
+fn is_gitdir_file(path: &Path) -> bool {
+    let mut prefix = [0; 8];
+    std::fs::File::open(path)
+        .and_then(|mut file| file.read_exact(&mut prefix))
+        .is_ok()
+        && &prefix == b"gitdir: "
 }
 
 fn leaf_name(dir: &Path) -> String {
@@ -215,6 +224,25 @@ mod tests {
         assert_eq!(checkout.path, worktree.display().to_string());
         assert!(checkout.repository);
         assert!(checkout.children.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn ignores_non_git_marker_files_and_keeps_scanning() -> Result<(), Box<dyn std::error::Error>> {
+        let root = TestDirectory::new()?;
+        std::fs::create_dir_all(root.join("projects/child/.git"))?;
+        std::fs::write(root.join("projects/.git"), "not a gitdir")?;
+        std::fs::create_dir_all(root.join("unrelated"))?;
+        std::fs::write(root.join("unrelated/.git"), "git")?;
+
+        let result = scan(root.path());
+        assert_eq!(result.repositories, 1);
+        let child = result.tree.first().ok_or("missing repository")?;
+        assert_eq!(
+            child.path,
+            root.join("projects/child").display().to_string()
+        );
+        assert!(child.repository);
         Ok(())
     }
 
