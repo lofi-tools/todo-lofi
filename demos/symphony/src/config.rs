@@ -553,10 +553,10 @@ fn expand_home(input: &str) -> String {
     if input == "~" {
         return home_directory().unwrap_or_else(|| input.to_string());
     }
-    if let Some(remainder) = input.strip_prefix("~/") {
-        if let Some(home) = home_directory() {
-            return format!("{home}/{remainder}");
-        }
+    if let Some(remainder) = input.strip_prefix("~/")
+        && let Some(home) = home_directory()
+    {
+        return format!("{home}/{remainder}");
     }
     input.to_string()
 }

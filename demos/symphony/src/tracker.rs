@@ -68,6 +68,7 @@ fn issue_states_by_ids_query() -> String {
 }
 
 /// Trait defining the tracker interface Symphony expects (Section 11.1).
+#[allow(clippy::double_must_use)]
 #[async_trait::async_trait]
 pub trait IssueTracker: Send + Sync {
     /// Fetch candidate issues in active states for the configured project.

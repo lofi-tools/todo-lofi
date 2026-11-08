@@ -703,13 +703,13 @@ impl<T: IssueTracker + 'static> Orchestrator<T> {
 
     /// Stop a running issue according to the termination reason.
     async fn terminate(&mut self, issue_id: &str, reason: TerminationReason) {
-        if let Some(handle) = self.workers.remove(issue_id) {
-            if handle.cancel.send(true).is_err() {
-                debug!(
-                    target: "symphony",
-                    "issue_id={issue_id} outcome=ignored message=worker already finished"
-                );
-            }
+        if let Some(handle) = self.workers.remove(issue_id)
+            && handle.cancel.send(true).is_err()
+        {
+            debug!(
+                target: "symphony",
+                "issue_id={issue_id} outcome=ignored message=worker already finished"
+            );
         }
 
         let entry = { self.lock_state().running.remove(issue_id) };
@@ -789,7 +789,7 @@ impl<T: IssueTracker + 'static> Orchestrator<T> {
                 .filter(|entry| entry.due_at_ms <= now_ms)
                 .cloned()
                 .collect();
-            due.sort_by(|left, right| left.due_at_ms.cmp(&right.due_at_ms));
+            due.sort_by_key(|entry| entry.due_at_ms);
             due
         };
 
@@ -1178,6 +1178,7 @@ fn schedule_retry(
 }
 
 /// Run one worker attempt: workspace, hooks, agent turns, teardown (Section 16.5).
+#[allow(clippy::too_many_arguments)]
 async fn run_worker<T: IssueTracker>(
     tracker: Arc<T>,
     workspace_manager: Arc<WorkspaceManager>,

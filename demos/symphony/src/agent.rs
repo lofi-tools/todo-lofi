@@ -32,6 +32,7 @@ handoff state. Do not repeat work that is already complete, and do not resend th
 prompt.";
 
 /// A client-side tool advertised to the coding agent (Section 10.5).
+#[allow(clippy::double_must_use)]
 #[async_trait::async_trait]
 pub trait ClientTool: Send + Sync {
     /// Tool name advertised to the agent.
@@ -751,7 +752,7 @@ impl AgentClient {
                 let turn_id = params
                     .get("turnId")
                     .and_then(Value::as_str)
-                    .or_else(|| self.current_turn_id.as_deref())
+                    .or(self.current_turn_id.as_deref())
                     .unwrap_or_default()
                     .to_string();
                 let message =
@@ -766,7 +767,7 @@ impl AgentClient {
                 let turn_id = params
                     .get("turnId")
                     .and_then(Value::as_str)
-                    .or_else(|| self.current_turn_id.as_deref())
+                    .or(self.current_turn_id.as_deref())
                     .unwrap_or_default()
                     .to_string();
                 on_event(AgentEvent::TurnCancelled { turn_id });
