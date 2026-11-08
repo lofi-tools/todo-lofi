@@ -277,6 +277,7 @@ export interface AgentCapabilities {
   thoughts: boolean
   toolCalls: boolean
   approvals: boolean
+  unreviewedTools: boolean
   resume: boolean
   cancel: boolean
   modelPicker: boolean

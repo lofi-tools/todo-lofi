@@ -927,9 +927,11 @@ If Pi’s RPC probe is blocked, proceed with ACP while resolving it.
   `extension_ui_response`; other dialog methods are logged rather than mapped to
   a decision. Reopening sends `switch_session` with the stored session file and
   refreshes the state, so the adapter session ID is that file; a session started
-  with `--no-session` reports no resume support. The bundled tool-approval
-  extension and the `unreviewed tools` label remain open, as does recording a
-  live model turn for `agent_settled` and tool approval records.
+  with `--no-session` reports no resume support. Because no tool-approval
+  extension ships yet, the harness reports `unreviewed tools`, and the task
+  header and diagnostics say that Pi's tool calls follow Pi's configuration and
+  are never approved by Shepherd. The bundled extension remains open, as does
+  recording a live model turn for `agent_settled` and tool approval records.
 - [ ] ACP adapter using `libs/acp-client`; no duplicate protocol client.
   Use this adapter for OpenCode when its native protocol is unavailable.
   The shared client accepts an exact configured command, validates ACP v1,

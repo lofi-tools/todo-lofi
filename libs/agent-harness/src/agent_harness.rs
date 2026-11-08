@@ -374,6 +374,9 @@ pub struct Capabilities {
     pub thoughts: bool,
     pub tool_calls: bool,
     pub approvals: bool,
+    /// Tool calls run without Shepherd deciding them, so the UI must say so
+    /// instead of offering an approval that the adapter cannot produce.
+    pub unreviewed_tools: bool,
     pub resume: bool,
     pub cancel: bool,
     pub model_picker: bool,

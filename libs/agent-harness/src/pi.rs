@@ -568,6 +568,7 @@ impl AgentHarness for PiHarness {
             thoughts: true,
             tool_calls: true,
             approvals: true,
+            unreviewed_tools: true,
             resume,
             cancel: true,
             images: true,
@@ -1848,7 +1849,12 @@ exec sleep 30
         let capabilities = harness
             .start(pi_script_spec(&script, directory.path()))
             .await?;
-        assert!(capabilities.streaming && capabilities.approvals && capabilities.cancel);
+        assert!(
+            capabilities.streaming
+                && capabilities.approvals
+                && capabilities.cancel
+                && capabilities.unreviewed_tools
+        );
         assert_eq!(harness.open_session(None).await?.as_str(), "pi-harness");
         harness.prompt(PromptInput::text("fixture")).await?;
         let mut started = false;

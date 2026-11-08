@@ -43,7 +43,7 @@ const RECOVERY_LABELS: Record<bridge.SessionRecovery, string> = {
   reconnect: 'Reconnect',
   startNew: 'Start new session',
 }
-const CAPABILITY_LABELS: Record<keyof bridge.AgentCapabilities, string> = {
+const CAPABILITY_LABELS: Record<Exclude<keyof bridge.AgentCapabilities, 'unreviewedTools'>, string> = {
   streaming: 'Streaming deltas',
   thoughts: 'Thoughts',
   toolCalls: 'Tool activity',
@@ -1967,6 +1967,9 @@ export function App() {
                 <Show when={current().adapterTier}>
                   {(tier) => <span class="chat__adapter">{TIER_LABELS[tier()]}{current().diagnostics?.fallbackReason && ' · fallback'}</span>}
                 </Show>
+                <Show when={current().capabilities?.unreviewedTools}>
+                  <span class="chat__adapter" title="Pi's tools run under Pi's configuration; Shepherd cannot approve them">unreviewed tools</span>
+                </Show>
                 <span class="chat__state">{current().task.state}</span>
                 <Show when={current().task.state !== 'draft'}>
                   <button type="button" class="project-action" disabled={pending() || LIVE_STATES.includes(current().task.state)}
@@ -2039,6 +2042,10 @@ export function App() {
                         .filter(([key]) => capabilities()[key as keyof bridge.AgentCapabilities])
                         .map(([, label]) => label).join(', ') || 'None reported'}</dd>
                     </>}
+                  </Show>
+                  <Show when={workspace()?.capabilities?.unreviewedTools}>
+                    <dt>Tool review</dt>
+                    <dd>Unreviewed tools: the Pi approval bridge is unavailable, so tool calls follow Pi's configuration and are never approved by Shepherd.</dd>
                   </Show>
                   <Show when={diagnostics().stderrTail}>
                     <dt>stderr</dt>
