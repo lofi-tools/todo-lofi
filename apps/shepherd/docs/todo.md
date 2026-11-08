@@ -1536,6 +1536,11 @@ placeholder tabs and no unearned state badges.
   command; other tool content remains unchanged.
   Codex exec also selects the retained command-output tail before allocating
   the event's string, avoiding a full extra copy of a large protocol field.
+  OpenCode bounds the intermediate output while joining tool text parts; a
+  multipart Unicode fixture verifies the retained tail. ACP's SDK dispatches
+  notifications and replies on one ordered loop, so waiting for queue capacity
+  inside its notification callback can delay control responses; its remaining
+  queue limit needs a design that preserves response progress.
   Transcript folding similarly selects the tail of an oversized command-output
   chunk before allocating it, with a UTF-8 regression for the retained output.
 - [ ] Multiple agents and projects: three agents across two projects, no state

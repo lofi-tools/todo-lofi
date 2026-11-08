@@ -1060,21 +1060,32 @@ impl OpenCodeTranscript {
         }
         let name = self.tools.get(&id).map_or("Tool", String::as_str);
         let title = tool.metadata["title"].as_str().unwrap_or(name).to_owned();
-        let output = tool
+        let mut output = String::new();
+        let mut first = true;
+        for text in tool
             .content
             .iter()
             .filter(|part| part["type"] == "text")
             .filter_map(|part| part["text"].as_str())
-            .collect::<Vec<_>>()
-            .join("\n");
-        let mut output = if output.is_empty() {
-            tool.error["message"].as_str().map(str::to_owned)
+        {
+            if !first {
+                output.push('\n');
+            }
+            first = false;
+            if text.len() > crate::MAX_COMMAND_OUTPUT_BYTES {
+                output = crate::bounded_command_output(text);
+            } else {
+                output.push_str(text);
+                crate::limit_command_output(&mut output);
+            }
+        }
+        let output = if output.is_empty() {
+            tool.error["message"]
+                .as_str()
+                .map(crate::bounded_command_output)
         } else {
             Some(output)
         };
-        if let Some(output) = &mut output {
-            crate::limit_command_output(output);
-        }
         Ok(HarnessEvent::ToolCall {
             tool_call_id: ToolCallId::new(id),
             title,
@@ -3370,6 +3381,24 @@ exec sleep 60
                 _ => return Err("expected tool output".into()),
             }
         }
+        Ok(())
+    }
+
+    #[test]
+    fn tool_output_preserves_the_bounded_tail_across_parts()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let large = "界".repeat(crate::MAX_COMMAND_OUTPUT_BYTES);
+        let parts = ["small", large.as_str(), "", "end"];
+        let expected = crate::bounded_command_output(&parts.join("\n"));
+        let mut mapping = OpenCodeTranscript::new(SessionId::new("ses_1"));
+        let event = mapping.apply(OpenCodeEvent {
+            kind: "session.tool.success".into(),
+            data: json!({"sessionID": "ses_1", "assistantMessageID": "msg_1", "id": "call_1",
+                "content": parts.iter().map(|text| json!({"type": "text", "text": text})).collect::<Vec<_>>() }),
+        })?;
+        assert!(
+            matches!(event, Some(HarnessEvent::ToolCall { output: Some(output), .. }) if output == expected)
+        );
         Ok(())
     }
 
