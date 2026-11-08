@@ -65,7 +65,7 @@ pub fn scan(cx: &impl AppContext) -> Task<anyhow::Result<Vec<Project>>> {
         let root = scan_root();
         let mut repos = Vec::new();
         walk(&root, 0, &mut repos);
-        repos.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+        repos.sort_by_key(|a| a.name.to_lowercase());
         Ok(repos)
     })
 }

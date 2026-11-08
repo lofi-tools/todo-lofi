@@ -57,10 +57,10 @@ struct ClientFile {
 /// Config root: `~/.config/my-todo` (`MY_TODO_CONFIG_DIR` overrides for
 /// tests). Holds `todoist.json` and the app database.
 pub(crate) fn config_dir() -> anyhow::Result<std::path::PathBuf> {
-    if let Ok(dir) = std::env::var("MY_TODO_CONFIG_DIR") {
-        if !dir.is_empty() {
-            return Ok(std::path::PathBuf::from(dir));
-        }
+    if let Ok(dir) = std::env::var("MY_TODO_CONFIG_DIR")
+        && !dir.is_empty()
+    {
+        return Ok(std::path::PathBuf::from(dir));
     }
     let home =
         dirs::home_dir().ok_or_else(|| anyhow::anyhow!("Could not locate the home directory"))?;
@@ -178,19 +178,19 @@ pub fn has_stored_credentials() -> bool {
 /// `~/.config/my-todo/todoist.json`) on first use. `TODOIST_CLIENT_ID` in
 /// the environment overrides the file for local development.
 async fn ensure_client() -> anyhow::Result<ClientFile> {
-    if let Ok(id) = std::env::var("TODOIST_CLIENT_ID") {
-        if !id.is_empty() {
-            return Ok(ClientFile {
-                client_id: id,
-                client_secret: None,
-                redirect_uris: vec![REDIRECT_URI.to_string()],
-                scope: SCOPE.to_string(),
-                access_token: None,
-                refresh_token: None,
-                expires_at: None,
-                from_env: true,
-            });
-        }
+    if let Ok(id) = std::env::var("TODOIST_CLIENT_ID")
+        && !id.is_empty()
+    {
+        return Ok(ClientFile {
+            client_id: id,
+            client_secret: None,
+            redirect_uris: vec![REDIRECT_URI.to_string()],
+            scope: SCOPE.to_string(),
+            access_token: None,
+            refresh_token: None,
+            expires_at: None,
+            from_env: true,
+        });
     }
     if let Some(client) = load_client_file()? {
         return Ok(client);
@@ -234,7 +234,7 @@ fn base64url_no_pad(bytes: &[u8]) -> String {
     const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
     let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
     let (full, rest) = bytes.split_at(bytes.len() / 3 * 3);
-    for chunk in full.chunks_exact(3) {
+    for chunk in full.as_chunks::<3>().0 {
         let word = (chunk[0] as u32) << 16 | (chunk[1] as u32) << 8 | chunk[2] as u32;
         out.push(ALPHABET[(word >> 18 & 0x3f) as usize] as char);
         out.push(ALPHABET[(word >> 12 & 0x3f) as usize] as char);

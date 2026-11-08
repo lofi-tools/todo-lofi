@@ -2075,6 +2075,7 @@ impl Layout {
 
     /// Collision dialog: sync the Todoist project into the existing managed
     /// tag, or remap it to a fresh `todoist/<name>` tag.
+    #[allow(clippy::too_many_arguments)]
     fn open_todoist_collision_dialog(
         layout: gpui::WeakEntity<Self>,
         store: Store,

@@ -5,6 +5,9 @@ use gpui::{
 use gpui_component::StyledExt;
 use std::rc::Rc;
 
+type ToggleHandler = Rc<dyn Fn(bool, &mut Window, &mut App)>;
+type SelectHandler = Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>;
+
 /// One row of a mini task list: the look the details pane gives a coding
 /// run's workflow items — a state glyph, the title, and a "done" tag once
 /// the task is complete — shared by an expanded task row's subtasks and by
@@ -19,9 +22,9 @@ pub struct MiniTaskItem {
     blocked: bool,
     /// Ticking the task by clicking its state glyph; the new state is
     /// passed in. Without it the glyph is a plain marker.
-    on_toggle: Option<Rc<dyn Fn(bool, &mut Window, &mut App)>>,
+    on_toggle: Option<ToggleHandler>,
     /// Selecting the task by clicking its title.
-    on_select: Option<Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>>,
+    on_select: Option<SelectHandler>,
 }
 
 impl MiniTaskItem {

@@ -224,7 +224,7 @@ fn save_at(path: &std::path::Path, client: &GithubFile) -> anyhow::Result<()> {
         std::fs::create_dir_all(parent)
             .map_err(|e| anyhow::anyhow!("Could not create {}: {e}", parent.display()))?;
     }
-    std::fs::write(&path, serde_json::to_string_pretty(client)?)
+    std::fs::write(path, serde_json::to_string_pretty(client)?)
         .map_err(|e| anyhow::anyhow!("Could not write {}: {e}", path.display()))?;
     #[cfg(unix)]
     {
@@ -914,12 +914,12 @@ fn invalidate_token_at(path: &std::path::Path, rejected_token: &str) -> anyhow::
         {
             file.login = None;
         }
-        save_at(&path, &file)?;
+        save_at(path, &file)?;
         return Ok(true);
     }
     if file.access_token.as_deref() == Some(rejected_token) {
         clear_oauth_tokens(&mut file);
-        save_at(&path, &file)?;
+        save_at(path, &file)?;
         return Ok(true);
     }
     Ok(false)

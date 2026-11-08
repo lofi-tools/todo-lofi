@@ -325,9 +325,7 @@ impl AppSettings {
         if tag.is_project() {
             return Some("Backs a local folder".to_string());
         }
-        let Some(bindings) = self.bindings_by_tag.get(&tag_id) else {
-            return None;
-        };
+        let bindings = self.bindings_by_tag.get(&tag_id)?;
         if bindings.iter().any(|(app, _)| *app == app_id) {
             return Some("Already attached".to_string());
         }

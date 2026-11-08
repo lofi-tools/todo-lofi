@@ -7,6 +7,10 @@ use storage::task::TaskCreate;
 use crate::coding_git;
 use crate::ui_parts::agent_pane::RunCheckout;
 
+type IntegrationTagPair = (String, String, u64, String);
+type AppBindings = (App, Vec<(AppTagBinding, storage::Tag)>);
+type TaskSectionGroups = (Vec<String>, std::collections::HashMap<u64, String>);
+
 #[derive(Clone)]
 pub struct Store(pub(crate) Arc<StoreLock>);
 
@@ -1117,7 +1121,7 @@ impl Store {
         &self,
         integration_id: u64,
         cx: &impl AppContext,
-    ) -> Task<anyhow::Result<Vec<(String, String, u64, String)>>> {
+    ) -> Task<anyhow::Result<Vec<IntegrationTagPair>>> {
         let store = self.0.clone();
         gpui_tokio::Tokio::spawn_result(cx, async move {
             let mut s = store.lock().await;
@@ -1555,10 +1559,7 @@ impl Store {
 
     /// ─── Apps ─────────────────────────────────────────────────────────────
     /// Every registered app with the tags it is bound to, for the Apps panel.
-    pub fn list_apps(
-        &self,
-        cx: &impl AppContext,
-    ) -> Task<anyhow::Result<Vec<(App, Vec<(AppTagBinding, storage::Tag)>)>>> {
+    pub fn list_apps(&self, cx: &impl AppContext) -> Task<anyhow::Result<Vec<AppBindings>>> {
         let store = self.0.clone();
         gpui_tokio::Tokio::spawn_result(cx, async move {
             let mut s = store.lock().await;
@@ -2464,7 +2465,7 @@ impl Store {
         tag_name: String,
         task_ids: Vec<u64>,
         cx: &impl AppContext,
-    ) -> Task<anyhow::Result<(Vec<String>, std::collections::HashMap<u64, String>)>> {
+    ) -> Task<anyhow::Result<TaskSectionGroups>> {
         let store = self.0.clone();
         gpui_tokio::Tokio::spawn_result(cx, async move {
             let mut s = store.lock().await;

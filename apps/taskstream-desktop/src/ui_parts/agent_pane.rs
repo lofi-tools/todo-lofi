@@ -875,10 +875,9 @@ impl AgentPane {
             if matches!(
                 self.projects.get(&tag_name).map(|entry| &entry.state),
                 Some(PaneState::Failed { .. })
-            ) {
-                if let Some((cwd, _)) = resolution {
-                    self.restart_in_place(&tag_name, resumable, cwd, cx);
-                }
+            ) && let Some((cwd, _)) = resolution
+            {
+                self.restart_in_place(&tag_name, resumable, cwd, cx);
             }
             return;
         }
@@ -1233,7 +1232,7 @@ impl AgentPane {
                 };
             }
         }
-        let _ = self.set_busy(tag_name, false, cx);
+        self.set_busy(tag_name, false, cx);
         self.sync_scroller(cx);
         cx.notify();
     }
@@ -1294,10 +1293,10 @@ impl AgentPane {
             this.update(cx, |pane, cx| pane.on_turn_finished(&tag_owned, result, cx))
                 .ok();
         });
-        if let Some(entry) = self.projects.get_mut(tag_name) {
-            if let Some(live) = entry.live_mut() {
-                live._turn_task = Some(task);
-            }
+        if let Some(entry) = self.projects.get_mut(tag_name)
+            && let Some(live) = entry.live_mut()
+        {
+            live._turn_task = Some(task);
         }
     }
 
@@ -1346,22 +1345,21 @@ impl AgentPane {
             };
             let dropped = entry.queue.len();
             entry.queue.clear();
-            if let Some(live) = entry.live() {
-                if let Some(session_id) = &live.session_id {
-                    if let Err(error) = live.connection.requester.cancel(session_id) {
-                        tracing::warn!("could not cancel the ACP turn: {error}");
-                    }
-                }
+            if let Some(live) = entry.live()
+                && let Some(session_id) = &live.session_id
+                && let Err(error) = live.connection.requester.cancel(session_id)
+            {
+                tracing::warn!("could not cancel the ACP turn: {error}");
             }
             dropped
         };
-        if dropped > 0 {
-            if let Some(entry) = self.projects.get_mut(&tag_name) {
-                entry.transcript.push_notice(
-                    NoticeLevel::Info,
-                    format!("Stop cleared {dropped} queued message(s)"),
-                );
-            }
+        if dropped > 0
+            && let Some(entry) = self.projects.get_mut(&tag_name)
+        {
+            entry.transcript.push_notice(
+                NoticeLevel::Info,
+                format!("Stop cleared {dropped} queued message(s)"),
+            );
         }
         self.sync_scroller(cx);
         cx.notify();
@@ -1554,10 +1552,10 @@ impl AgentPane {
                 .clone()
                 .map(|path| (path, entry.tool_permissions.clone()))
         };
-        if let Some((path, permissions)) = persisted {
-            if let Err(error) = self.session_store.set_tool_permissions(&path, permissions) {
-                tracing::warn!("could not persist the tool approval policy: {error}");
-            }
+        if let Some((path, permissions)) = persisted
+            && let Err(error) = self.session_store.set_tool_permissions(&path, permissions)
+        {
+            tracing::warn!("could not persist the tool approval policy: {error}");
         }
         cx.notify();
     }
@@ -1764,17 +1762,16 @@ impl AgentPane {
         if let Some(token) = entry.mcp.as_ref().map(|mcp| mcp.token.clone()) {
             cx.emit(AgentPaneEvent::McpSessionClosed { token });
         }
-        if let Some(live) = entry.live() {
-            if let Some(session_id) = &live.session_id {
-                if let Err(error) = live.connection.requester.cancel(session_id) {
-                    tracing::debug!("cancel on teardown failed: {error}");
-                }
-            }
+        if let Some(live) = entry.live()
+            && let Some(session_id) = &live.session_id
+            && let Err(error) = live.connection.requester.cancel(session_id)
+        {
+            tracing::debug!("cancel on teardown failed: {error}");
         }
-        if let Some(path) = &entry.stored_path {
-            if let Err(error) = self.session_store.remove(path) {
-                tracing::warn!("could not forget the stored session: {error}");
-            }
+        if let Some(path) = &entry.stored_path
+            && let Err(error) = self.session_store.remove(path)
+        {
+            tracing::warn!("could not forget the stored session: {error}");
         }
         self.set_busy(tag_name, false, cx);
     }

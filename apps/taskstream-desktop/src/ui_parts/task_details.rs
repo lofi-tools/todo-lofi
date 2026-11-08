@@ -267,10 +267,7 @@ fn phase_prompt(
             }
             let round = round_number(notes);
             if round > 1 {
-                let last_rejection = notes
-                    .iter()
-                    .filter(|note| note.kind == "reject")
-                    .next_back();
+                let last_rejection = notes.iter().rfind(|note| note.kind == "reject");
                 target.push_str(&format!("\n\nThis is round {round}."));
                 if let Some(note) = last_rejection
                     && !note.body.trim().is_empty()
@@ -451,6 +448,7 @@ pub enum TaskDetailsEvent {
 /// Something that should happen once the current field edits are resolved.
 /// `Select`/`Deselect` navigate; `BeginField` opens another field editor;
 /// `Stay` only prompts for the dirty field itself.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone)]
 enum PendingTarget {
     Select(TaskWithMeta),

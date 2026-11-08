@@ -338,67 +338,67 @@ impl Render for DateTimePicker {
             );
         }
 
-        if self.show_time_picker {
-            if let Some(date) = self.picked_date {
-                let hour = self.hour;
-                let minute = self.minute;
-                panel = panel.child(
-                    div()
-                        .px_3()
-                        .py_2()
-                        .border_t_1()
-                        .border_color(rgb(HAIRLINE))
-                        .h_flex()
-                        .items_center()
-                        .gap_2()
-                        .child(
-                            div()
-                                .text_sm()
-                                .text_color(rgb(0xe5e5e5))
-                                .child(date.to_string()),
-                        )
-                        .child(mini_button("hour-down", "-").on_click(cx.listener(
+        if self.show_time_picker
+            && let Some(date) = self.picked_date
+        {
+            let hour = self.hour;
+            let minute = self.minute;
+            panel = panel.child(
+                div()
+                    .px_3()
+                    .py_2()
+                    .border_t_1()
+                    .border_color(rgb(HAIRLINE))
+                    .h_flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(rgb(0xe5e5e5))
+                            .child(date.to_string()),
+                    )
+                    .child(
+                        mini_button("hour-down", "-").on_click(cx.listener(|this, _, _, cx| {
+                            this.shift_hour(-1, cx);
+                        })),
+                    )
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(rgb(0xe5e5e5))
+                            .child(format!("{hour:02}")),
+                    )
+                    .child(
+                        mini_button("hour-up", "+").on_click(cx.listener(|this, _, _, cx| {
+                            this.shift_hour(1, cx);
+                        })),
+                    )
+                    .child(div().text_sm().text_color(rgb(0xa3a3a3)).child(":"))
+                    .child(mini_button("minute-down", "-").on_click(cx.listener(
+                        |this, _, _, cx| {
+                            this.shift_minute(-15, cx);
+                        },
+                    )))
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(rgb(0xe5e5e5))
+                            .child(format!("{minute:02}")),
+                    )
+                    .child(
+                        mini_button("minute-up", "+").on_click(cx.listener(|this, _, _, cx| {
+                            this.shift_minute(15, cx);
+                        })),
+                    )
+                    .child(
+                        mini_button("set-until-datetime", "Set").on_click(cx.listener(
                             |this, _, _, cx| {
-                                this.shift_hour(-1, cx);
+                                this.commit_datetime(cx);
                             },
-                        )))
-                        .child(
-                            div()
-                                .text_sm()
-                                .text_color(rgb(0xe5e5e5))
-                                .child(format!("{hour:02}")),
-                        )
-                        .child(mini_button("hour-up", "+").on_click(cx.listener(
-                            |this, _, _, cx| {
-                                this.shift_hour(1, cx);
-                            },
-                        )))
-                        .child(div().text_sm().text_color(rgb(0xa3a3a3)).child(":"))
-                        .child(mini_button("minute-down", "-").on_click(cx.listener(
-                            |this, _, _, cx| {
-                                this.shift_minute(-15, cx);
-                            },
-                        )))
-                        .child(
-                            div()
-                                .text_sm()
-                                .text_color(rgb(0xe5e5e5))
-                                .child(format!("{minute:02}")),
-                        )
-                        .child(mini_button("minute-up", "+").on_click(cx.listener(
-                            |this, _, _, cx| {
-                                this.shift_minute(15, cx);
-                            },
-                        )))
-                        .child(
-                            mini_button("set-until-datetime", "Set").on_click(cx.listener(
-                                |this, _, _, cx| {
-                                    this.commit_datetime(cx);
-                                },
-                            )),
-                        ),
-                );
-            }
+                        )),
+                    ),
+            );
         }
 
         panel

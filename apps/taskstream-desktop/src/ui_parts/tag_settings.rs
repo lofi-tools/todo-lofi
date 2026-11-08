@@ -281,7 +281,7 @@ impl TagSettingsPanel {
                 .into_iter()
                 .map(|tag| (tag.id, tag.label()))
                 .collect();
-            all_tags.sort_by(|a, b| a.1.to_lowercase().cmp(&b.1.to_lowercase()));
+            all_tags.sort_by_key(|a| a.1.to_lowercase());
             this.update(cx, |this, cx| {
                 this.parents = parents;
                 this.dirs = dirs;

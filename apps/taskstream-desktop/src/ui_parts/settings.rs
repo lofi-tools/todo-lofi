@@ -19,10 +19,10 @@ use crate::ui_parts::apps::{AppSettings, TagAttachPicker};
 use crate::ui_parts::todoist_sync::{TodoistSyncEvent, TodoistSyncPicker};
 
 fn config_dir() -> anyhow::Result<std::path::PathBuf> {
-    if let Ok(dir) = std::env::var("MY_TODO_CONFIG_DIR") {
-        if !dir.is_empty() {
-            return Ok(std::path::PathBuf::from(dir));
-        }
+    if let Ok(dir) = std::env::var("MY_TODO_CONFIG_DIR")
+        && !dir.is_empty()
+    {
+        return Ok(std::path::PathBuf::from(dir));
     }
     let home =
         dirs::home_dir().ok_or_else(|| anyhow::anyhow!("Could not locate the home directory"))?;

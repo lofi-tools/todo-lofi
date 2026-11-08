@@ -18,6 +18,7 @@ use crate::store::Store;
 use crate::theme::HAIRLINE;
 use std::rc::Rc;
 
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone)]
 pub enum TaskListEvent {
     Selected(TaskWithMeta),
@@ -373,13 +374,12 @@ impl TaskListView {
     /// funnel through here so the details panel stays in sync via the
     /// emitted event.
     fn select(&mut self, task: TaskWithMeta, record: bool, cx: &mut Context<Self>) {
-        if record {
-            if let Some(current) = self.selected.clone() {
-                if current.id != task.id {
-                    self.back.push(current);
-                    self.forward.clear();
-                }
-            }
+        if record
+            && let Some(current) = self.selected.clone()
+            && current.id != task.id
+        {
+            self.back.push(current);
+            self.forward.clear();
         }
         let selected_id = task.id;
         for row in self.task_views.clone() {
@@ -473,7 +473,7 @@ impl TaskListView {
     pub fn on_task_done_toggled(&mut self, task_id: u64, done: bool, cx: &mut Context<Self>) {
         // Update the local blocker copies so blocked flags can be
         // recomputed without a DB round-trip.
-        for (_, blockers) in self.blockers_map.iter_mut() {
+        for blockers in self.blockers_map.values_mut() {
             for blocker in blockers.iter_mut() {
                 if blocker.id == task_id {
                     blocker.task.done = done;
@@ -1025,6 +1025,7 @@ impl TaskListView {
         }));
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn set_tasks_with_path(
         &mut self,
         tasks: Vec<TaskWithMeta>,
@@ -2296,6 +2297,9 @@ const ROW_GAP: f32 = 7.0;
 /// lower one.
 const GAP_BAND_RISE: f32 = (GAP_BAND_HEIGHT - ROW_GAP) / 2.0;
 
+type TaskListRenderer =
+    Box<dyn Fn(&ListEntry, &mut Window, &mut gpui::App) -> AnyElement + 'static>;
+
 /// Reusable virtualized task-list body: the flat item run, the list state
 /// the view owns (it has to outlive the element), and how to render one
 /// item. Used by the main tag/project view and by the travel checklist view
@@ -2303,7 +2307,7 @@ const GAP_BAND_RISE: f32 = (GAP_BAND_HEIGHT - ROW_GAP) / 2.0;
 pub struct ScrollableTaskList {
     entries: Rc<Vec<ListEntry>>,
     list_state: ListState,
-    render_item: Box<dyn Fn(&ListEntry, &mut Window, &mut gpui::App) -> AnyElement + 'static>,
+    render_item: TaskListRenderer,
 }
 
 impl ScrollableTaskList {

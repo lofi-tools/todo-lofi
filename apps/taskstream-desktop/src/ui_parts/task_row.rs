@@ -13,6 +13,7 @@ use crate::components::{Checkbox, MiniTaskItem, mini_task_list, tag_chip};
 use crate::store::Store;
 use crate::theme::{APP_BG, HAIRLINE};
 
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone)]
 pub enum TaskRowEvent {
     Selected(TaskWithMeta),
@@ -116,6 +117,7 @@ pub struct TaskRow {
 }
 
 impl TaskRow {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         task: TaskWithMeta,
         blocking: RowBlocking,

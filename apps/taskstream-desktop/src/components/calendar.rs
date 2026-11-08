@@ -124,13 +124,11 @@ pub fn month_block(
                 cell = cell.hover(|s| s.bg(rgb(0x2a2a2a)));
             }
         }
-        if !is_past {
-            if let Some(date) = date {
-                let on_select_day = on_select_day.clone();
-                cell = cell.on_click(move |_, window, cx| {
-                    on_select_day(date, window, cx);
-                });
-            }
+        if !is_past && let Some(date) = date {
+            let on_select_day = on_select_day.clone();
+            cell = cell.on_click(move |_, window, cx| {
+                on_select_day(date, window, cx);
+            });
         }
         cells.push(cell.into_any_element());
     }
