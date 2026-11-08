@@ -1476,7 +1476,7 @@ impl AcpServer {
     /// Client `fs/*` requests have a bounded wait, but elicitation requests
     /// intentionally do not: the conversation must remain paused until the
     /// user answers, skips, or the connection closes.
-
+    ///
     /// Forward `ask_user` tool calls to the client via the ACP Elicitation
     /// standard and route the user's answers back to the waiting tool.
     async fn drain_ask_user(
@@ -1625,8 +1625,8 @@ impl AcpServer {
         let interview_id: Option<String> = if is_interview {
             let tid = uuid_short();
             // Extract the target from the prompt.
-            let target = if text.starts_with("/interview ") {
-                text["/interview ".len()..].trim().to_string()
+            let target = if let Some(target) = text.strip_prefix("/interview ") {
+                target.trim().to_string()
             } else {
                 String::new()
             };
@@ -1829,15 +1829,15 @@ impl AcpServer {
                     // ask_user questions as notifications and remember the
                     // spec file the agent writes (Write tool, `file_path`
                     // input) for the completion notification.
-                    if let Some(ref iid) = interview_id {
-                        if let AgentEvent::ToolStart { name, id: _, input } = &other {
-                            if name == "ask_user" {
-                                self.send_interview_question_from_input(&session_id, iid, input);
-                            } else if name == "Write"
-                                && let Some(path) = input.get("file_path").and_then(Value::as_str)
-                            {
-                                spec_file_path = Some(path.to_string());
-                            }
+                    if let Some(ref iid) = interview_id
+                        && let AgentEvent::ToolStart { name, id: _, input } = &other
+                    {
+                        if name == "ask_user" {
+                            self.send_interview_question_from_input(&session_id, iid, input);
+                        } else if name == "Write"
+                            && let Some(path) = input.get("file_path").and_then(Value::as_str)
+                        {
+                            spec_file_path = Some(path.to_string());
                         }
                     }
                     // Accumulate the agent's reply so the completion

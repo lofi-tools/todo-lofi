@@ -54,6 +54,7 @@ pub type SubAgentProviders =
 /// `fs/read_text_file` returns unsaved editor buffers; `fs/write_text_file`
 /// lets the client track edits the agent made during a run. Implemented by
 /// the ACP server; the TUI/headless paths supply `None` (no editor to consult).
+#[allow(clippy::double_must_use)]
 #[async_trait::async_trait]
 pub trait AcpFs: Send + Sync {
     /// `true` if the client advertised `fs.readTextFile`. Lets the wrapping

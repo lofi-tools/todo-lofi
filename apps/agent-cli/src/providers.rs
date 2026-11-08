@@ -116,6 +116,7 @@ fn find_model<'a>(provider: &'a Provider, model: &str) -> Option<&'a ConfiguredM
 /// basics) plus the `ReadDocs` (Context7 library docs), `SyntheticOutput`
 /// (structured output), `spawn_agents` (freebuff-style sub-agents), and
 /// `suggest_followups` tools — matching the freebuff agent's tool surface.
+#[allow(clippy::too_many_arguments)]
 pub fn agent_tools(
     resolved: &Resolved,
     parent: crate::subagents::ParentHandle,

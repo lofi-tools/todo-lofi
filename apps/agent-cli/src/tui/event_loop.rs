@@ -1220,17 +1220,16 @@ fn handle_mouse(state: &mut AppState, mouse: MouseEvent) {
             // is the mouse path for copying: it works in every terminal, even
             // ones that intercept Cmd+C (macOS terminals, the Zed terminal)
             // before the TUI ever sees the key.
-            if let Some((x, y, w, h)) = state.feedback_area {
-                if mouse.row >= y
-                    && mouse.row < y + h
-                    && mouse.column >= x
-                    && mouse.column < x + w
-                    && state.has_copyable_selection()
-                {
-                    copy_selection(state);
-                    state.dirty = true;
-                    return;
-                }
+            if let Some((x, y, w, h)) = state.feedback_area
+                && mouse.row >= y
+                && mouse.row < y + h
+                && mouse.column >= x
+                && mouse.column < x + w
+                && state.has_copyable_selection()
+            {
+                copy_selection(state);
+                state.dirty = true;
+                return;
             }
             if let Some(pos) = output_click_pos(state, mouse.row, mouse.column) {
                 state.selection = Some(Selection {

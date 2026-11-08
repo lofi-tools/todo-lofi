@@ -56,6 +56,12 @@ impl AskUserTool {
     }
 }
 
+impl Default for AskUserTool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[async_trait]
 impl Tool for AskUserTool {
     fn name(&self) -> &str {
@@ -166,7 +172,7 @@ impl Tool for AskUserTool {
 
         let q_count = parsed.questions.len();
 
-        if self.ask_user_tx.is_some() && self.answer_rx.is_some() {
+        if let (Some(ask_user_tx), Some(answer_rx)) = (&self.ask_user_tx, &self.answer_rx) {
             // Send the questions to the TUI and await an answer.
             let request_id = self
                 .request_counter
@@ -179,7 +185,7 @@ impl Tool for AskUserTool {
                 questions: questions_json.clone(),
             };
 
-            if self.ask_user_tx.as_ref().unwrap().send(request).is_err() {
+            if ask_user_tx.send(request).is_err() {
                 return ToolResult::error(
                     "ask_user channel closed — cannot await user answer".to_string(),
                 );
@@ -188,7 +194,7 @@ impl Tool for AskUserTool {
             // Wait indefinitely for the user's answer. This is deliberately
             // not wrapped in a timeout: an unanswered question must keep the
             // conversation paused for as long as the user needs.
-            let mut rx_guard = self.answer_rx.as_ref().unwrap().lock().await;
+            let mut rx_guard = answer_rx.lock().await;
             loop {
                 match rx_guard.recv().await {
                     Some(answer) if answer.request_id == request_id => {

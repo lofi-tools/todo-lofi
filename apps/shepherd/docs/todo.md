@@ -1651,10 +1651,11 @@ placeholder tabs and no unearned state badges.
   backend pass offline Clippy with warnings denied. Their offline suites passed
   52, 145, 126 and 104 tests respectively; two agent-harness tests, three core
   tests and one desktop benchmark were ignored. No live agent or window was used.
-  The workspace formatting check passes. The `symphony`, `ai_providers` and
-  `storage` libraries pass Clippy with warnings denied; `agent-cli` warnings
-  remain. Storage's offline library tests passed with one network-dependent
-  Todoist test excluded and one previously ignored test.
+  The workspace formatting check passes. `symphony`, `ai_providers`, `storage`
+  and `agent-cli` pass Clippy with warnings denied. Workspace Clippy now stops
+  at a non-exhaustive ACP event match in `taskstream-desktop`. Storage's offline
+  library tests passed with one network-dependent Todoist test excluded and one
+  previously ignored test.
 - [ ] Packaging and CI: macOS 13+, Ubuntu 24.04+, pinned Zig, Tauri build,
   platform smoke.
   The local macOS debug app bundle declares macOS 13.0 in both Info.plist and

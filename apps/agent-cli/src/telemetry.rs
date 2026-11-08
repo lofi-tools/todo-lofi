@@ -524,7 +524,7 @@ impl AgentStore {
                     "attempts": candidate.weighted_attempts,
                     "cooldown": candidate
                         .in_cooldown
-                        .map(|until| to_millis(until)),
+                        .map(to_millis),
                     "pacing": candidate.pacing_pressure,
                     "penalty": candidate.penalty,
                 })
@@ -635,18 +635,14 @@ impl AgentStore {
                 Some((provider, model)) => (provider.to_string(), model.to_string()),
                 None => continue,
             };
-            if let Err(error) = self
-                .set_cooldown(
-                    &ModelKey::new(provider, model),
-                    from_millis(until_ms as i64),
-                    FailureKind::Unknown {
-                        message: "imported".into(),
-                    },
-                )
-                .await
-            {
-                return Err(error);
-            }
+            self.set_cooldown(
+                &ModelKey::new(provider, model),
+                from_millis(until_ms as i64),
+                FailureKind::Unknown {
+                    message: "imported".into(),
+                },
+            )
+            .await?;
             imported += 1;
         }
         let migrated = path.with_extension("json.migrated");
@@ -1061,19 +1057,20 @@ pub async fn run_sessions_command(
                 return Ok(());
             }
             println!(
-                "{:<10} {:<20} {:<10} {:>7} {:>13} {:<9} {}",
-                "ID", "STARTED (UTC)", "TURNS", "TOOLS", "TOKENS I/O", "OUTCOME", "MODEL"
+                "{:<10} {:<20} {:<10} {:>7} {:>13} {:<9} MODEL",
+                "ID", "STARTED (UTC)", "TURNS", "TOOLS", "TOKENS I/O", "OUTCOME"
             );
             for session in sessions {
+                let tokens = format!("{}/{}", session.input_tokens, session.output_tokens);
                 println!(
                     "{:<10} {:<20} {:<10} {:>7} {:>13} {:<9} {}",
                     session.short_id(),
                     format_time(session.started_at),
                     session.turn_count,
                     "-",
-                    format!("{}/{}", session.input_tokens, session.output_tokens),
+                    tokens,
                     session.outcome.as_deref().unwrap_or("(open)"),
-                    format!(
+                    format_args!(
                         "{}/{}",
                         session.provider,
                         session.effective_model.as_deref().unwrap_or(&session.model)
@@ -1101,12 +1098,11 @@ pub async fn run_sessions_command(
                 session.effective_model.as_deref().unwrap_or("-"),
             );
             println!(
-                "  outcome   {} ({})",
+                "  outcome   {} ({} turns, {} in / {} out tokens)",
                 session.outcome.as_deref().unwrap_or("(open)"),
-                format!(
-                    "{} turns, {} in / {} out tokens",
-                    session.turn_count, session.input_tokens, session.output_tokens
-                )
+                session.turn_count,
+                session.input_tokens,
+                session.output_tokens
             );
 
             let turns = store.session_turns(&session.id).await?;
