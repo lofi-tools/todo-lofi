@@ -20,9 +20,10 @@ use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::io::{
-    AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWriteExt, BufReader, ReadBuf,
+    AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader,
+    ReadBuf,
 };
-use tokio::process::{Child, ChildStdin, ChildStdout, Command};
+use tokio::process::{Child, ChildStdout, Command};
 use tokio::sync::{Mutex as AsyncMutex, mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio::time::{Instant, timeout, timeout_at};
@@ -829,9 +830,24 @@ pub async fn project_models(spec: SpawnSpec) -> HarnessResult<CodexProjectModels
 struct Pending {
     responses: HashMap<i64, oneshot::Sender<HarnessResult<Value>>>,
     approvals: HashMap<String, i64>,
+    approval_writes: BTreeSet<String>,
     thread_id: Option<String>,
     turn_id: Option<String>,
     turn_error: Option<HarnessEvent>,
+}
+
+struct OutboundMessage {
+    value: Value,
+    written: Option<oneshot::Sender<std::io::Result<()>>>,
+}
+
+impl From<Value> for OutboundMessage {
+    fn from(value: Value) -> Self {
+        Self {
+            value,
+            written: None,
+        }
+    }
 }
 
 #[cfg(any(test, feature = "live-test-support"))]
@@ -843,7 +859,7 @@ pub struct CodexHarness {
     wire_capture: Option<WireCapture>,
     sender: mpsc::UnboundedSender<HarnessEvent>,
     receiver: mpsc::UnboundedReceiver<HarnessEvent>,
-    outgoing: Option<mpsc::UnboundedSender<Value>>,
+    outgoing: Option<mpsc::UnboundedSender<OutboundMessage>>,
     child: Option<Arc<AsyncMutex<Child>>>,
     process_tracker: Option<Arc<dyn crate::AgentProcessTracker>>,
     process_record: Option<String>,
@@ -962,7 +978,7 @@ impl CodexHarness {
     fn send(&self, message: Value) -> HarnessResult<()> {
         let outgoing = self.outgoing.as_ref().ok_or(HarnessError::NotStarted)?;
         outgoing
-            .send(message)
+            .send(message.into())
             .map_err(|_| HarnessError::ChannelClosed)
     }
 
@@ -1193,7 +1209,11 @@ impl CodexHarness {
         }
         self.started = false;
         self.session_id = None;
-        self.pending.lock().await.approvals.clear();
+        {
+            let mut pending = self.pending.lock().await;
+            pending.approvals.clear();
+            pending.approval_writes.clear();
+        }
 
         self.sender
             .send(HarnessEvent::Exited {
@@ -1369,14 +1389,60 @@ impl AgentHarness for CodexHarness {
                 return Err(HarnessError::ApprovalOptionUnavailable);
             }
         };
-        {
+        let outgoing = self.outgoing.as_ref().ok_or(HarnessError::NotStarted)?;
+        let request_id = {
             let mut pending = self.pending.lock().await;
             let request_id = pending
                 .approvals
                 .get(approval_id.as_str())
                 .copied()
                 .ok_or(HarnessError::NoPendingApproval)?;
-            self.send(json!({ "id": request_id, "result": { "decision": answer } }))?;
+            if !pending
+                .approval_writes
+                .insert(approval_id.as_str().to_owned())
+            {
+                return Err(HarnessError::Protocol("the Codex approval response may already have been sent; wait for the agent or restart the session".into()));
+            }
+            request_id
+        };
+        let (written, completed) = oneshot::channel();
+        if outgoing
+            .send(OutboundMessage {
+                value: json!({ "id": request_id, "result": { "decision": answer } }),
+                written: Some(written),
+            })
+            .is_err()
+        {
+            self.pending
+                .lock()
+                .await
+                .approval_writes
+                .remove(approval_id.as_str());
+            return Err(HarnessError::ChannelClosed);
+        }
+        timeout(REQUEST_TIMEOUT, completed)
+            .await
+            .map_err(|_| {
+                HarnessError::Protocol(
+                    "timed out writing the Codex approval response; delivery is unknown".into(),
+                )
+            })?
+            .map_err(|_| {
+                HarnessError::TransportClosed(
+                    "Codex writer stopped before confirming the approval response".into(),
+                )
+            })?
+            .map_err(|error| {
+                HarnessError::TransportClosed(format!(
+                    "could not write the Codex approval response: {error}"
+                ))
+            })?;
+        {
+            let mut pending = self.pending.lock().await;
+            pending.approval_writes.remove(approval_id.as_str());
+            if pending.approvals.get(approval_id.as_str()) != Some(&request_id) {
+                return Err(HarnessError::NoPendingApproval);
+            }
             pending.approvals.remove(approval_id.as_str());
         }
         self.sender
@@ -2465,12 +2531,16 @@ fn exec_tool_event(
 }
 
 fn spawn_writer(
-    mut stdin: ChildStdin,
-    mut outgoing: mpsc::UnboundedReceiver<Value>,
+    mut stdin: impl AsyncWrite + Unpin + Send + 'static,
+    mut outgoing: mpsc::UnboundedReceiver<OutboundMessage>,
     #[cfg(any(test, feature = "live-test-support"))] capture: Option<WireCapture>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
-        while let Some(message) = outgoing.recv().await {
+        while let Some(OutboundMessage {
+            value: message,
+            written,
+        }) = outgoing.recv().await
+        {
             #[cfg(any(test, feature = "live-test-support"))]
             if let Some(capture) = &capture {
                 capture.push(WireEntry::Request(message.clone()));
@@ -2479,17 +2549,37 @@ fn spawn_writer(
                 Ok(line) => line,
                 Err(error) => {
                     tracing::error!(%error, "could not encode a codex message");
+                    if let Some(written) = written
+                        && written.send(Err(std::io::Error::other(error))).is_err()
+                    {
+                        tracing::debug!("codex writer confirmation receiver dropped");
+                    }
                     continue;
                 }
             };
             line.push('\n');
             if let Err(error) = stdin.write_all(line.as_bytes()).await {
                 tracing::debug!(%error, "codex stopped accepting input");
+                if let Some(written) = written
+                    && written.send(Err(error)).is_err()
+                {
+                    tracing::debug!("codex writer confirmation receiver dropped");
+                }
                 return;
             }
             if let Err(error) = stdin.flush().await {
                 tracing::debug!(%error, "could not flush codex input");
+                if let Some(written) = written
+                    && written.send(Err(error)).is_err()
+                {
+                    tracing::debug!("codex writer confirmation receiver dropped");
+                }
                 return;
+            }
+            if let Some(written) = written
+                && written.send(Ok(())).is_err()
+            {
+                tracing::debug!("codex writer confirmation receiver dropped");
             }
         }
     })
@@ -2503,7 +2593,7 @@ fn spawn_reader(
     stdout: ChildStdout,
     sender: mpsc::UnboundedSender<HarnessEvent>,
     pending: Arc<AsyncMutex<Pending>>,
-    outgoing: mpsc::UnboundedSender<Value>,
+    outgoing: mpsc::UnboundedSender<OutboundMessage>,
     stderr: Arc<Mutex<VecDeque<String>>>,
     closed: Arc<AtomicBool>,
     closing: Arc<AtomicBool>,
@@ -2701,7 +2791,7 @@ async fn route_incoming(
     message: Value,
     sender: &mpsc::UnboundedSender<HarnessEvent>,
     pending: &Arc<AsyncMutex<Pending>>,
-    outgoing: &mpsc::UnboundedSender<Value>,
+    outgoing: &mpsc::UnboundedSender<OutboundMessage>,
 ) {
     match (message.get("id"), message.get("method")) {
         (Some(id), Some(method)) => {
@@ -2757,7 +2847,7 @@ async fn handle_server_request(
     params: Value,
     sender: &mpsc::UnboundedSender<HarnessEvent>,
     pending: &Arc<AsyncMutex<Pending>>,
-    outgoing: &mpsc::UnboundedSender<Value>,
+    outgoing: &mpsc::UnboundedSender<OutboundMessage>,
 ) {
     let wants_approval = matches!(
         method.as_str(),
@@ -2773,7 +2863,7 @@ async fn handle_server_request(
                 "message": format!("shepherd does not support `{method}`"),
             },
         });
-        if outgoing.send(response).is_err() {
+        if outgoing.send(response.into()).is_err() {
             tracing::debug!("codex request could not be answered");
         }
         return;
@@ -2813,7 +2903,7 @@ async fn handle_server_request(
     if let Some(message) = rejection {
         drop(approvals);
         if outgoing
-            .send(json!({"id": id, "error": {"code": -32000, "message": message}}))
+            .send(json!({"id": id, "error": {"code": -32000, "message": message}}).into())
             .is_err()
         {
             tracing::debug!("codex approval rejection could not be delivered");
@@ -2837,7 +2927,7 @@ async fn handle_server_request(
     {
         tracing::debug!("the core stopped listening to codex events");
         pending.lock().await.approvals.remove(&approval_id);
-        if outgoing.send(json!({"id": id, "error": {"code": -32000, "message": "approval handler unavailable"}})).is_err() {
+        if outgoing.send(json!({"id": id, "error": {"code": -32000, "message": "approval handler unavailable"}}).into()).is_err() {
             tracing::debug!("codex approval failure could not be delivered");
         }
     }
@@ -2918,6 +3008,7 @@ async fn handle_notification(
                     .find_map(|(id, server_id)| (*server_id == request_id).then(|| id.clone()));
                 if let Some(approval_id) = approval_id {
                     pending.approvals.remove(&approval_id);
+                    pending.approval_writes.remove(&approval_id);
                     events.push(HarnessEvent::ApprovalWithdrawn {
                         approval_id: ApprovalId::new(approval_id),
                     });
@@ -2932,6 +3023,7 @@ async fn handle_notification(
             };
             let mut pending = pending.lock().await;
             pending.turn_id = None;
+            pending.approval_writes.clear();
             let reported_error = pending.turn_error.take();
             events.extend(pending.approvals.drain().map(|(id, _)| {
                 HarnessEvent::ApprovalWithdrawn {
@@ -3203,7 +3295,7 @@ mod tests {
             &outgoing,
         )
         .await;
-        let duplicate = responses.try_recv()?;
+        let duplicate = responses.try_recv()?.value;
         assert_eq!(duplicate["id"], 100);
         assert!(
             duplicate["error"]["message"]
@@ -3230,7 +3322,7 @@ mod tests {
             &outgoing,
         )
         .await;
-        let overflow = responses.try_recv()?;
+        let overflow = responses.try_recv()?.value;
         assert_eq!(overflow["id"], 101);
         assert!(
             overflow["error"]["message"]
@@ -3281,7 +3373,7 @@ mod tests {
             &outgoing,
         )
         .await;
-        assert_eq!(responses.try_recv()?["id"], 103);
+        assert_eq!(responses.try_recv()?.value["id"], 103);
         assert!(!pending.lock().await.approvals.contains_key("undeliverable"));
         Ok(())
     }
@@ -4560,13 +4652,58 @@ done
         );
         assert!(harness.receiver.try_recv().is_err());
 
-        let (connected, mut requests) = mpsc::unbounded_channel();
+        let (connected, requests) = mpsc::unbounded_channel();
+        let (writer, reader) = tokio::io::duplex(4096);
+        drop(reader);
+        let writer_task = spawn_writer(writer, requests, None);
+        harness.outgoing = Some(connected);
+        assert!(matches!(
+            harness
+                .respond(ApprovalId::new("item"), Decision::Allow)
+                .await,
+            Err(HarnessError::TransportClosed(_))
+        ));
+        writer_task.await?;
+        assert_eq!(
+            harness.pending.lock().await.approvals.get("item"),
+            Some(&42)
+        );
+        assert!(harness.receiver.try_recv().is_err());
+
+        assert!(matches!(
+            harness.respond(ApprovalId::new("item"), Decision::Allow).await,
+            Err(HarnessError::Protocol(message)) if message.contains("may already have been sent")
+        ));
+        handle_notification(
+            "serverRequest/resolved",
+            &json!({"requestId": 42}),
+            &harness.sender,
+            &harness.pending,
+        )
+        .await;
+        assert!(matches!(
+            harness.receiver.try_recv(),
+            Ok(HarnessEvent::ApprovalWithdrawn { .. })
+        ));
+        harness
+            .pending
+            .lock()
+            .await
+            .approvals
+            .insert("item".into(), 43);
+
+        let (connected, requests) = mpsc::unbounded_channel();
+        let (writer, reader) = tokio::io::duplex(4096);
+        let writer_task = spawn_writer(writer, requests, None);
         harness.outgoing = Some(connected);
         harness
             .respond(ApprovalId::new("item"), Decision::Allow)
             .await?;
-        let request = requests.try_recv()?;
-        assert_eq!(request["id"], 42);
+        let mut reader = BufReader::new(reader);
+        let mut line = String::new();
+        reader.read_line(&mut line).await?;
+        let request: Value = serde_json::from_str(&line)?;
+        assert_eq!(request["id"], 43);
         assert_eq!(request["result"]["decision"], "accept");
         assert!(!harness.pending.lock().await.approvals.contains_key("item"));
         assert!(matches!(
@@ -4576,6 +4713,111 @@ done
                 ..
             })
         ));
+        harness.outgoing = None;
+        writer_task.await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn approval_waits_for_writer_and_does_not_resolve_a_withdrawn_request()
+    -> Result<(), Box<dyn std::error::Error>> {
+        for withdraw in [false, true] {
+            let mut harness = CodexHarness::new();
+            harness
+                .pending
+                .lock()
+                .await
+                .approvals
+                .insert("item".into(), 42);
+            let pending = harness.pending.clone();
+            let (connected, requests) = mpsc::unbounded_channel();
+            let (writer, reader) = tokio::io::duplex(1);
+            let writer_task = spawn_writer(writer, requests, None);
+            harness.outgoing = Some(connected);
+            let mut response = tokio::spawn(async move {
+                let result = harness
+                    .respond(ApprovalId::new("item"), Decision::Allow)
+                    .await;
+                (harness, result)
+            });
+            assert!(
+                timeout(Duration::from_millis(50), &mut response)
+                    .await
+                    .is_err()
+            );
+            assert_eq!(pending.lock().await.approvals.get("item"), Some(&42));
+            if withdraw {
+                pending.lock().await.approvals.remove("item");
+            }
+            let reader_task = tokio::spawn(async move {
+                let mut reader = BufReader::new(reader);
+                let mut line = String::new();
+                reader.read_line(&mut line).await?;
+                Ok::<_, std::io::Error>(line)
+            });
+            let (mut harness, result) = response.await?;
+            let line = reader_task.await??;
+            let message: Value = serde_json::from_str(&line)?;
+            assert_eq!(message["id"], 42);
+            if withdraw {
+                assert!(matches!(result, Err(HarnessError::NoPendingApproval)));
+                assert!(harness.receiver.try_recv().is_err());
+            } else {
+                result?;
+                assert!(matches!(
+                    harness.receiver.try_recv(),
+                    Ok(HarnessEvent::ApprovalResolved { .. })
+                ));
+            }
+            harness.outgoing = None;
+            writer_task.await?;
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cancelled_approval_write_cannot_be_retried_while_delivery_is_unknown()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut harness = CodexHarness::new();
+        harness
+            .pending
+            .lock()
+            .await
+            .approvals
+            .insert("item".into(), 42);
+        let (connected, requests) = mpsc::unbounded_channel();
+        let (writer, reader) = tokio::io::duplex(1);
+        let writer_task = spawn_writer(writer, requests, None);
+        harness.outgoing = Some(connected);
+        let mut response = Box::pin(harness.respond(ApprovalId::new("item"), Decision::Allow));
+        assert!(
+            timeout(Duration::from_millis(50), &mut response)
+                .await
+                .is_err()
+        );
+        drop(response);
+        assert!(matches!(
+            harness.respond(ApprovalId::new("item"), Decision::Deny).await,
+            Err(HarnessError::Protocol(message)) if message.contains("may already have been sent")
+        ));
+        let reader_task = tokio::spawn(async move {
+            let mut reader = BufReader::new(reader);
+            let mut line = String::new();
+            reader.read_line(&mut line).await?;
+            Ok::<_, std::io::Error>(line)
+        });
+        let message: Value = serde_json::from_str(&reader_task.await??)?;
+        assert_eq!(message["result"]["decision"], "accept");
+        handle_notification(
+            "serverRequest/resolved",
+            &json!({"requestId": 42}),
+            &harness.sender,
+            &harness.pending,
+        )
+        .await;
+        assert!(harness.pending.lock().await.approval_writes.is_empty());
+        harness.outgoing = None;
+        writer_task.await?;
         Ok(())
     }
 

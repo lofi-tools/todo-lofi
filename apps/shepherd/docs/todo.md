@@ -1414,8 +1414,11 @@ placeholder tabs and no unearned state badges.
   server request IDs are ignored while pending. A local protocol fixture covers
   saturation, withdrawal, retry and an unavailable event consumer.
   If enqueueing a Codex approval response fails, its pending request remains
-  available for retry; a fixture covers failure and retry. Enqueue acceptance
-  does not establish that the writer delivered the response to the process.
+  available for retry. The adapter now waits for its writer to flush the
+  response before reporting the decision; if a write fails, times out or is
+  cancelled after enqueueing, it prevents another answer while delivery is
+  uncertain. Local fixtures cover failure, cancellation and withdrawal. A
+  successful write does not establish that the agent accepted the decision.
   ACP file reads and writes share a 32-worker limit per connection; excess
   requests receive an error. An injected exhausted-capacity fixture verifies
   both operations can be retried successfully when capacity returns.
