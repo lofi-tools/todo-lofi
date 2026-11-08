@@ -1645,7 +1645,9 @@ placeholder tabs and no unearned state badges.
   group; an offline subprocess fixture verifies descendant cleanup. Dropping an
   in-flight admission marks the connection closed, signals its process group and
   reports cleanup asynchronously; a local fixture verifies descendant cleanup,
-  pending-request removal and a subsequent shutdown. If the child lock is
+  pending-request removal and a subsequent shutdown. An injected signal
+  failure is reported while retaining the child for a later successful shutdown.
+  If the child lock is
   contended, cleanup still depends on the Tokio runtime remaining available.
   The same guard protects cleanup of a malformed successful reply; a subprocess
   fixture cancels that cleanup while the child lock is held and checks that

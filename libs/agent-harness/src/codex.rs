@@ -1053,6 +1053,7 @@ impl CodexHarness {
             closed: self.closed.clone(),
             closing: self.closing.clone(),
             runtime: tokio::runtime::Handle::current(),
+            signal_group: stop_codex_process_group,
             request_id,
         })
     }
@@ -2876,6 +2877,7 @@ struct TurnAdmissionGuard {
     closed: Arc<AtomicBool>,
     closing: Arc<AtomicBool>,
     runtime: tokio::runtime::Handle,
+    signal_group: fn(&Child) -> std::io::Result<()>,
     request_id: Option<i64>,
 }
 
@@ -2892,10 +2894,8 @@ impl Drop for TurnAdmissionGuard {
         };
         self.closed.store(true, Ordering::Relaxed);
         self.closing.store(true, Ordering::Relaxed);
-        let signal = child
-            .try_lock()
-            .ok()
-            .map(|child| stop_codex_process_group(&child));
+        let signal_group = self.signal_group;
+        let signal = child.try_lock().ok().map(|child| signal_group(&child));
         if let Some(Err(error)) = &signal {
             tracing::warn!(%error, "could not stop Codex after cancelled turn admission");
         }
@@ -2917,7 +2917,7 @@ impl Drop for TurnAdmissionGuard {
                 Some(Ok(())) => child.lock().await.kill().await,
                 None => {
                     let mut child = child.lock().await;
-                    match stop_codex_process_group(&child) {
+                    match signal_group(&child) {
                         Ok(()) => child.kill().await,
                         Err(error) => Err(error),
                     }
@@ -4533,6 +4533,37 @@ done
             .expect("the stub app-server starts");
         harness.open_session(None).await.expect("a thread opens");
         (harness, capabilities)
+    }
+
+    #[tokio::test]
+    async fn failed_cancelled_admission_signal_is_reported_and_can_be_retried()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = TempDir::new()?;
+        let stub = write_stub(&directory, "codex-cancel-signal", PROTOCOL_STUB);
+        let (mut harness, _) = start_session(&stub, directory.path()).await;
+        let child = harness.child.as_ref().ok_or("missing child")?.clone();
+        let mut guard = harness.turn_admission_guard(None).ok_or("missing guard")?;
+        guard.signal_group = |_| Err(std::io::Error::other("fixture signal failure"));
+        drop(guard);
+        let failure = timeout(Duration::from_secs(5), async {
+            loop {
+                match harness.events().recv().await {
+                    Some(HarnessEvent::ConnectionFailed { text, .. }) => {
+                        break Ok::<_, Box<dyn std::error::Error>>(text);
+                    }
+                    Some(_) => {}
+                    None => break Err("missing cleanup failure".into()),
+                }
+            }
+        })
+        .await??;
+        assert!(failure.contains("fixture signal failure"));
+        assert!(harness.closed.load(Ordering::Relaxed));
+        assert!(child.lock().await.try_wait()?.is_none());
+        harness.shutdown().await?;
+        assert!(harness.child.is_none());
+        assert!(child.lock().await.try_wait()?.is_some());
+        Ok(())
     }
 
     #[tokio::test]
