@@ -1390,6 +1390,8 @@ placeholder tabs and no unearned state badges.
   ACP terminal creation admits at most 32 pending starts per connection before
   spawning handler tasks; excess requests receive an error. A registry fixture
   checks that cancelling waiting starts frees capacity for another creation.
+  Terminal kill and release handlers share a 64-request limit; saturation
+  returns an error before spawning more tasks, and a fixture checks recovery.
   Connection shutdown also unblocks pending waits if a terminal stop fails.
   It returns the stop failure and retains the terminal for retry; registry,
   connection and harness fixtures cover a failure followed by a successful retry.

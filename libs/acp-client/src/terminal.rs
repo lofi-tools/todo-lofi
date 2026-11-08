@@ -27,6 +27,7 @@ const MAX_OUTPUT_EVENT_BYTES: usize = 8192;
 const MAX_EXIT_WAITERS_PER_TERMINAL: usize = 64;
 const MAX_PENDING_STOP_REQUESTS: usize = 64;
 const MAX_PENDING_CREATIONS: usize = 32;
+const MAX_PENDING_CONTROLS: usize = 64;
 
 pub struct TerminalLaunch {
     pub id: String,
@@ -115,6 +116,7 @@ pub struct TerminalRegistry {
     closed: Arc<tokio::sync::Mutex<bool>>,
     output_permits: Arc<tokio::sync::Semaphore>,
     creation_permits: Arc<tokio::sync::Semaphore>,
+    control_permits: Arc<tokio::sync::Semaphore>,
 }
 
 impl TerminalRegistry {
@@ -131,6 +133,7 @@ impl TerminalRegistry {
             closed: Arc::new(tokio::sync::Mutex::new(false)),
             output_permits: Arc::new(tokio::sync::Semaphore::new(MAX_PENDING_OUTPUT_EVENTS)),
             creation_permits: Arc::new(tokio::sync::Semaphore::new(MAX_PENDING_CREATIONS)),
+            control_permits: Arc::new(tokio::sync::Semaphore::new(MAX_PENDING_CONTROLS)),
         }
     }
 
@@ -148,6 +151,13 @@ impl TerminalRegistry {
             .clone()
             .try_acquire_owned()
             .map_err(|_| "too many pending terminal creations".into())
+    }
+
+    pub(crate) fn reserve_control(&self) -> Result<tokio::sync::OwnedSemaphorePermit, String> {
+        self.control_permits
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| "too many pending terminal control requests".into())
     }
 
     pub(crate) async fn create_reserved(
@@ -752,6 +762,39 @@ mod tests {
         async fn stop(&self, _id: &str) -> Result<(), String> {
             Ok(())
         }
+    }
+
+    #[tokio::test]
+    async fn terminal_control_capacity_is_shared_and_recovers()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let (events, _receiver) = tokio::sync::mpsc::unbounded_channel();
+        let registry = TerminalRegistry::new(
+            SessionRoots::new([directory.path().to_path_buf()]),
+            &events,
+            Some(Arc::new(IdleBackend)),
+        );
+        let other = registry.clone();
+        let permits = (0..MAX_PENDING_CONTROLS)
+            .map(|_| registry.reserve_control().map_err(std::io::Error::other))
+            .collect::<Result<Vec<_>, _>>()?;
+        assert!(
+            other
+                .reserve_control()
+                .is_err_and(|error| error.contains("too many pending"))
+        );
+        drop(permits);
+        let permit = other.reserve_control().map_err(std::io::Error::other)?;
+        other
+            .kill(&TerminalId::new("absent"))
+            .await
+            .map_err(std::io::Error::other)?;
+        drop(permit);
+        assert_eq!(
+            registry.control_permits.available_permits(),
+            MAX_PENDING_CONTROLS
+        );
+        Ok(())
     }
 
     #[tokio::test]

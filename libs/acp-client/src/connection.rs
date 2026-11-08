@@ -819,9 +819,18 @@ where
         )
         .on_receive_request(
             async move |request: KillTerminalRequest, responder, _cx| {
+                let permit = match registry_for_kill.reserve_control() {
+                    Ok(permit) => permit,
+                    Err(error) => {
+                        responder.respond_with_internal_error(error)?;
+                        return Ok(());
+                    }
+                };
                 let registry = registry_for_kill.clone();
                 tokio::spawn(async move {
-                    let reply = match registry.kill(&request.terminal_id).await {
+                    let result = registry.kill(&request.terminal_id).await;
+                    drop(permit);
+                    let reply = match result {
                         Ok(response) => responder.respond(response),
                         Err(error) => responder.respond_with_internal_error(error),
                     };
@@ -833,9 +842,18 @@ where
         )
         .on_receive_request(
             async move |request: ReleaseTerminalRequest, responder, _cx| {
+                let permit = match registry_for_release.reserve_control() {
+                    Ok(permit) => permit,
+                    Err(error) => {
+                        responder.respond_with_internal_error(error)?;
+                        return Ok(());
+                    }
+                };
                 let registry = registry_for_release.clone();
                 tokio::spawn(async move {
-                    let reply = match registry.release(&request.terminal_id).await {
+                    let result = registry.release(&request.terminal_id).await;
+                    drop(permit);
+                    let reply = match result {
                         Ok(response) => responder.respond(response),
                         Err(error) => responder.respond_with_internal_error(error),
                     };
