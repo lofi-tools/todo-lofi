@@ -2888,7 +2888,7 @@ exec sleep 60
             )]),
             ..SpawnSpec::default()
         };
-        let fixture = serve_native_fixture(listener, &directory, false, None, None);
+        let fixture = serve_native_fixture(listener, &directory, false, None, None, false);
         let client = async {
             let mut harness = OpenCodeHarness::default();
             let tracker = Arc::new(Tracker {
@@ -2971,7 +2971,7 @@ exec sleep 60
             )]),
             ..SpawnSpec::default()
         };
-        let fixture = serve_native_fixture(listener, &directory, true, None, None);
+        let fixture = serve_native_fixture(listener, &directory, true, None, None, false);
         let client = async {
             let mut harness = OpenCodeHarness::default();
             harness.set_process_tracker(Arc::new(Tracker(AtomicBool::new(true))));
@@ -3039,8 +3039,14 @@ exec sleep 60
         };
         let (started, waiting) = tokio::sync::oneshot::channel();
         let (release, released) = tokio::sync::oneshot::channel();
-        let fixture =
-            serve_native_fixture(listener, &directory, false, Some((started, released)), None);
+        let fixture = serve_native_fixture(
+            listener,
+            &directory,
+            false,
+            Some((started, released)),
+            None,
+            false,
+        );
         let client = async {
             let mut harness = OpenCodeHarness::default();
             harness.start(spec).await?;
@@ -3105,8 +3111,14 @@ exec sleep 60
         };
         let (started, waiting) = tokio::sync::oneshot::channel();
         let (release, released) = tokio::sync::oneshot::channel();
-        let fixture =
-            serve_native_fixture(listener, &directory, false, None, Some((started, released)));
+        let fixture = serve_native_fixture(
+            listener,
+            &directory,
+            false,
+            None,
+            Some((started, released)),
+            false,
+        );
         let client = async {
             let mut harness = OpenCodeHarness::default();
             harness.start(spec).await?;
@@ -3187,8 +3199,14 @@ exec sleep 60
         };
         let (started, waiting) = tokio::sync::oneshot::channel();
         let (release, released) = tokio::sync::oneshot::channel();
-        let fixture =
-            serve_native_fixture(listener, &directory, false, None, Some((started, released)));
+        let fixture = serve_native_fixture(
+            listener,
+            &directory,
+            false,
+            None,
+            Some((started, released)),
+            false,
+        );
         let client = async {
             let mut harness = OpenCodeHarness::default();
             harness.start(spec).await?;
@@ -3269,8 +3287,14 @@ exec sleep 60
         };
         let (started, waiting) = tokio::sync::oneshot::channel();
         let (release, released) = tokio::sync::oneshot::channel();
-        let fixture =
-            serve_native_fixture(listener, &directory, false, None, Some((started, released)));
+        let fixture = serve_native_fixture(
+            listener,
+            &directory,
+            false,
+            None,
+            Some((started, released)),
+            false,
+        );
         let client = async {
             let mut harness = OpenCodeHarness::default();
             harness.set_process_tracker(Arc::new(Tracker(AtomicBool::new(true))));
@@ -3318,6 +3342,78 @@ exec sleep 60
     }
 
     #[cfg(unix)]
+    #[tokio::test]
+    async fn queued_approvals_complete_through_native_http()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = tempfile::tempdir()?;
+        let directory = root.path().canonicalize()?;
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let program = fixture_launcher(
+            &directory,
+            r#"#!/bin/sh
+[ "$*" = "serve --hostname 127.0.0.1 --port 0" ] || exit 2
+printf 'opencode server listening on %s\n' "$SHEPHERD_TEST_OPENCODE_URL"
+exec sleep 60
+"#,
+        )?;
+        let spec = SpawnSpec {
+            program,
+            cwd: directory.clone(),
+            environment: BTreeMap::from([(
+                "SHEPHERD_TEST_OPENCODE_URL".into(),
+                format!("http://{}", listener.local_addr()?),
+            )]),
+            ..SpawnSpec::default()
+        };
+        let fixture = serve_native_fixture(listener, &directory, false, None, None, true);
+        let client = async {
+            let mut harness = OpenCodeHarness::default();
+            harness.start(spec).await?;
+            harness.open_session(None).await?;
+            harness
+                .prompt(PromptInput::text("Reply with local fixture text only"))
+                .await?;
+            for (expected, decision) in [
+                ("per_first", Decision::Allow),
+                ("per_second", Decision::Deny),
+            ] {
+                let id = loop {
+                    match harness.receiver.recv().await.ok_or("event stream closed")? {
+                        HarnessEvent::ApprovalRequested { request } => break request.approval_id,
+                        HarnessEvent::TurnFinished { .. }
+                        | HarnessEvent::ConnectionFailed { .. } => {
+                            return Err("turn ended before approval".into());
+                        }
+                        _ => {}
+                    }
+                };
+                assert_eq!(id.as_str(), expected);
+                if expected == "per_first" {
+                    assert!(
+                        timeout(Duration::from_millis(30), harness.receiver.recv())
+                            .await
+                            .is_err()
+                    );
+                }
+                harness.respond(id, decision).await?;
+            }
+            loop {
+                match harness.receiver.recv().await.ok_or("event stream closed")? {
+                    HarnessEvent::TurnFinished {
+                        reason: TurnFinishReason::Completed,
+                    } => break,
+                    HarnessEvent::ConnectionFailed { text, .. } => return Err(text.into()),
+                    _ => {}
+                }
+            }
+            harness.shutdown().await?;
+            Ok::<_, Box<dyn std::error::Error>>(())
+        };
+        timeout(REQUEST_TIMEOUT, async { tokio::try_join!(fixture, client) }).await??;
+        Ok(())
+    }
+
+    #[cfg(unix)]
     async fn serve_native_fixture(
         listener: TcpListener,
         directory: &Path,
@@ -3330,6 +3426,7 @@ exec sleep 60
             tokio::sync::oneshot::Sender<()>,
             tokio::sync::oneshot::Receiver<u8>,
         )>,
+        approval_fixture: bool,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let mut stream = None;
         for expected in [
@@ -3398,13 +3495,23 @@ exec sleep 60
                                 json!({"sessionID": "ses_fixture"}),
                             ),
                         ] {
-                            if kind == "session.execution.succeeded" && hang_cancel.is_some() {
+                            if kind == "session.execution.succeeded"
+                                && (hang_cancel.is_some() || approval_fixture)
+                            {
                                 continue;
                             }
                             let event = json!({"type": kind, "data": data});
                             stream
                                 .write_all(format!("data: {event}\n\n").as_bytes())
                                 .await?;
+                        }
+                        if approval_fixture {
+                            for id in ["per_first", "per_second"] {
+                                let event = json!({"type":"permission.asked", "data":{"sessionID":"ses_fixture", "id":id, "action":"read", "resources":[]}});
+                                stream
+                                    .write_all(format!("data: {event}\n\n").as_bytes())
+                                    .await?;
+                            }
                         }
                         json!({"data": {"id": prompt_id, "sessionID": "ses_fixture"}}).to_string()
                     }
@@ -3418,6 +3525,35 @@ exec sleep 60
             writer.write_all(header.as_bytes()).await?;
             writer.write_all(response.as_bytes()).await?;
             writer.shutdown().await?;
+        }
+        if approval_fixture {
+            for (id, decision, reply) in [
+                ("per_first", "once", "once"),
+                ("per_second", "reject", "reject"),
+            ] {
+                let (socket, _) = listener.accept().await?;
+                let (reader, mut writer) = socket.into_split();
+                let (request, body) = read_fixture_request(reader).await?;
+                assert_eq!(
+                    request,
+                    format!("POST /api/session/ses_fixture/permission/{id}/reply HTTP/1.1")
+                );
+                assert_eq!(
+                    serde_json::from_slice::<Value>(&body)?,
+                    json!({"decision": decision})
+                );
+                writer
+                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                    .await?;
+                writer.shutdown().await?;
+                let stream = stream.as_mut().ok_or("expected an event stream")?;
+                let event = json!({"type":"permission.replied", "data":{"sessionID":"ses_fixture", "requestID":id, "reply":reply}});
+                stream
+                    .write_all(format!("data: {event}\n\n").as_bytes())
+                    .await?;
+            }
+            let stream = stream.as_mut().ok_or("expected an event stream")?;
+            stream.write_all(b"data: {\"type\":\"session.execution.succeeded\",\"data\":{\"sessionID\":\"ses_fixture\"}}\n\n").await?;
         }
         if fail_prompt {
             let (socket, _) = listener.accept().await?;
