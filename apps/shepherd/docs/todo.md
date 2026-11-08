@@ -1430,6 +1430,9 @@ placeholder tabs and no unearned state badges.
   a successful stop. Stop does not report success until the child is reaped;
   repeated wait failures retain it without signalling the group again. Registry
   and injected-failure subprocess fixtures cover these paths.
+  A terminal backend stream that closes without reporting an exit likewise
+  fails exit waits and retains the terminal for cleanup; a registry fixture
+  covers the missing-status case.
   Output permits remain held through the harness queue until the core
   consumes the events. A direct terminal's exit wait completes even if a
   descendant keeps an output pipe open, and shutdown rejects new terminals.

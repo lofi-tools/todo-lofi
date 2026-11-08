@@ -547,7 +547,7 @@ impl TerminalRegistry {
         mut events: tokio::sync::mpsc::Receiver<TerminalProcessEvent>,
     ) {
         let mut pending = Vec::new();
-        let mut status = TerminalExitStatus::new();
+        let mut status = None;
         while let Some(event) = events.recv().await {
             match event {
                 TerminalProcessEvent::Output(bytes) => {
@@ -556,7 +556,7 @@ impl TerminalRegistry {
                     }
                 }
                 TerminalProcessEvent::Exited(exit) => {
-                    status = exit;
+                    status = Some(exit);
                     break;
                 }
             }
@@ -568,7 +568,13 @@ impl TerminalRegistry {
         {
             return;
         }
-        self.finish(&key, status);
+        match status {
+            Some(status) => self.finish(&key, status),
+            None => self.record_wait_failure(
+                &key,
+                "terminal backend closed without an exit status".into(),
+            ),
+        }
     }
 
     async fn pump(&self, mut reader: impl futures::AsyncRead + Unpin, key: String) {
@@ -933,6 +939,38 @@ mod tests {
         async fn stop(&self, _id: &str) -> Result<(), String> {
             Ok(())
         }
+    }
+
+    #[tokio::test]
+    async fn backend_stream_closure_without_exit_reports_failure_and_retains_terminal()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let (events, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let registry = TerminalRegistry::new(
+            SessionRoots::new([directory.path().to_path_buf()]),
+            &events,
+            Some(Arc::new(IdleBackend)),
+        );
+        registry.register("fixture", MAX_OUTPUT_LIMIT);
+        let terminal = TerminalId::new("fixture");
+        let mut wait = Box::pin(registry.wait_for_exit(&terminal));
+        assert!(futures::poll!(wait.as_mut()).is_pending());
+        let (sender, output) = tokio::sync::mpsc::channel(1);
+        drop(sender);
+        registry.pump_backend("fixture".into(), output).await;
+        assert!(
+            matches!(wait.await, Err(error) if error.contains("closed without an exit status"))
+        );
+        assert!(registry.wait_for_exit(&terminal).await.is_err());
+        assert!(registry.output(&terminal).exit_status.is_none());
+        assert!(receiver.try_recv().is_err());
+        assert!(registry.entries().contains_key("fixture"));
+        registry
+            .release(&terminal)
+            .await
+            .map_err(std::io::Error::other)?;
+        assert!(!registry.entries().contains_key("fixture"));
+        Ok(())
     }
 
     #[cfg(unix)]
