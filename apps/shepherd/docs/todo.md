@@ -1377,6 +1377,9 @@ placeholder tabs and no unearned state badges.
   frees a slot and existing waiters still receive the exit status. The ACP
   handler honors request cancellation; a fake agent cancels 65 waits and then
   successfully waits for the same terminal to exit.
+  Connection shutdown also unblocks pending waits if a terminal stop fails;
+  the terminal remains registered, though shutdown currently only logs that
+  stop failure.
   Output permits remain held through the harness queue until the core
   consumes the events. A direct terminal's exit wait completes even if a
   descendant keeps an output pipe open, and shutdown rejects new terminals.

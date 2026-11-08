@@ -311,7 +311,7 @@ impl TerminalRegistry {
         &self,
         terminal_id: &TerminalId,
     ) -> Result<WaitForTerminalExitResponse, String> {
-        let (rx, _waiter_guard) = {
+        let (rx, mut cancelled, _waiter_guard) = {
             let mut guard = self.entries();
             let entry = guard
                 .get_mut(terminal_id.0.as_ref())
@@ -319,6 +319,9 @@ impl TerminalRegistry {
             match &entry.exit {
                 Some(exit) => return Ok(WaitForTerminalExitResponse::new(exit.clone())),
                 None => {
+                    if *entry.cancelled.borrow() {
+                        return Err("terminal connection is shutting down".to_string());
+                    }
                     if entry.waiters.len() >= MAX_EXIT_WAITERS_PER_TERMINAL {
                         return Err(format!(
                             "terminal {} has too many pending exit waits",
@@ -333,6 +336,7 @@ impl TerminalRegistry {
                     });
                     (
                         rx,
+                        entry.cancelled.subscribe(),
                         WaiterGuard {
                             registry: Arc::downgrade(&self.inner),
                             terminal_id: terminal_id.0.to_string(),
@@ -342,9 +346,16 @@ impl TerminalRegistry {
                 }
             }
         };
-        match rx.await {
-            Ok(exit) => Ok(WaitForTerminalExitResponse::new(exit)),
-            Err(_) => Err("terminal was released before it exited".to_string()),
+        tokio::select! {
+            biased;
+            result = rx => match result {
+                Ok(exit) => Ok(WaitForTerminalExitResponse::new(exit)),
+                Err(_) => Err("terminal was released before it exited".to_string()),
+            },
+            result = cancelled.changed() => match result {
+                Ok(()) => Err("terminal connection is shutting down".to_string()),
+                Err(_) => Err("terminal was released before it exited".to_string()),
+            },
         }
     }
 
@@ -738,6 +749,51 @@ mod tests {
             .wait_for_exit(&terminal)
             .await
             .map_err(std::io::Error::other)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn shutdown_unblocks_exit_waits_even_when_terminal_stop_fails()
+    -> Result<(), Box<dyn std::error::Error>> {
+        struct FailingBackend;
+        #[async_trait]
+        impl TerminalBackend for FailingBackend {
+            async fn spawn(
+                &self,
+                _launch: TerminalLaunch,
+                _events: tokio::sync::mpsc::Sender<TerminalProcessEvent>,
+            ) -> Result<(), String> {
+                Ok(())
+            }
+            async fn stop(&self, _id: &str) -> Result<(), String> {
+                Err("fixture stop failure".to_owned())
+            }
+        }
+        let directory = tempfile::tempdir()?;
+        let (events, _receiver) = tokio::sync::mpsc::unbounded_channel();
+        let registry = TerminalRegistry::new(
+            SessionRoots::new([directory.path().to_path_buf()]),
+            &events,
+            Some(Arc::new(FailingBackend)),
+        );
+        registry.register("fixture", MAX_OUTPUT_LIMIT);
+        let terminal = TerminalId::new("fixture");
+        let mut waiter = Box::pin(registry.wait_for_exit(&terminal));
+        assert!(futures::poll!(waiter.as_mut()).is_pending());
+        registry.shutdown().await;
+        let result = tokio::time::timeout(std::time::Duration::from_secs(1), waiter).await?;
+        assert!(matches!(result, Err(error) if error.contains("shutting down")));
+        assert!(
+            registry
+                .entries()
+                .get("fixture")
+                .ok_or("missing retained terminal")?
+                .waiters
+                .is_empty()
+        );
+        assert!(
+            matches!(registry.wait_for_exit(&terminal).await, Err(error) if error.contains("shutting down"))
+        );
         Ok(())
     }
 
