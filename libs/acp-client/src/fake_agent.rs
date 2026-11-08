@@ -973,6 +973,60 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn manual_permission_rejects_exhausted_event_capacity_before_reaching_ui()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let script = FakeScript {
+            permission: Some(ToolCallUpdate::new(
+                "fixture",
+                acp::schema::v1::ToolCallUpdateFields::new(),
+            )),
+            permission_options: vec![PermissionOption::new(
+                "allow",
+                "Allow",
+                PermissionOptionKind::AllowOnce,
+            )],
+            ..FakeScript::default()
+        };
+        let (transport, _) = spawn_fake_agent(script);
+        let options = ConnectOptions {
+            roots: SessionRoots::new([directory.path().to_path_buf()]),
+            tool_permissions: confirm_all(),
+        };
+        let mut connection = crate::connection::connect_over_with_capacities(
+            move |_, _| transport,
+            options,
+            None,
+            Arc::new(tokio::sync::Semaphore::new(32)),
+            Arc::new(tokio::sync::Semaphore::new(0)),
+        )
+        .await?;
+        let session = new_session(&connection, &directory).await;
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            connection.requester.prompt(&session, "go".into()),
+        )
+        .await?;
+        assert!(
+            matches!(result, Err(crate::AcpError::Protocol(message)) if message.contains("queue exceeded"))
+        );
+        let mut failed = false;
+        while let Ok(event) = connection.events.try_recv() {
+            match event {
+                AcpEvent::PermissionRequested { .. } => {
+                    return Err("permission reached the UI without capacity".into());
+                }
+                AcpEvent::ProtocolFailed { message } if message.contains("queue exceeded") => {
+                    failed = true
+                }
+                _ => {}
+            }
+        }
+        assert!(failed);
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn new_session_carries_cwd_and_additional_roots() {
         let (connection, observations, dir) =
             connect_to_fake(FakeScript::default(), confirm_all()).await;

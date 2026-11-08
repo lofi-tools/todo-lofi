@@ -1582,7 +1582,9 @@ placeholder tabs and no unearned state badges.
   consumes the event, even if the agent cancels first; a fixture checks cloned
   events and confirms the stored transcript does not retain the slot. Manual
   approvals also reserve from the shared byte-weighted event budget, retaining
-  both limits until consumption; fixtures check capacity release and byte charging.
+  both limits until consumption; fixtures check capacity release and byte
+  charging. An exhausted-budget fake-agent fixture verifies that a manual
+  request is rejected before reaching the UI and the prompt fails.
   Transcript folding similarly selects the tail of an oversized command-output
   chunk before allocating it, with a UTF-8 regression for the retained output.
 - [ ] Multiple agents and projects: three agents across two projects, no state

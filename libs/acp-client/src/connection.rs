@@ -634,6 +634,29 @@ pub(crate) async fn connect_over_with_file_permits<T>(
 where
     T: ConnectTo<Client> + 'static,
 {
+    connect_over_with_capacities(
+        build_transport,
+        options,
+        terminals,
+        file_permits,
+        Arc::new(tokio::sync::Semaphore::new(UPDATE_CAPACITY_UNITS)),
+    )
+    .await
+}
+
+pub(crate) async fn connect_over_with_capacities<T>(
+    build_transport: impl FnOnce(
+        tokio::sync::mpsc::UnboundedSender<AcpEvent>,
+        Arc<Mutex<VecDeque<String>>>,
+    ) -> T,
+    options: ConnectOptions,
+    terminals: Option<Arc<dyn TerminalBackend>>,
+    file_permits: Arc<tokio::sync::Semaphore>,
+    update_capacity: Arc<tokio::sync::Semaphore>,
+) -> Result<AcpConnection, AcpError>
+where
+    T: ConnectTo<Client> + 'static,
+{
     let (events_tx, mut events_rx) = tokio::sync::mpsc::unbounded_channel();
     let stderr_buffer = Arc::new(Mutex::new(VecDeque::new()));
     let transport = build_transport(events_tx.clone(), stderr_buffer.clone());
@@ -649,7 +672,6 @@ where
     let prompt_reads_for_handler = prompt_reads.clone();
     let roots_for_handlers = roots.clone();
     let events_for_notifications = events_tx.clone();
-    let update_capacity = Arc::new(tokio::sync::Semaphore::new(UPDATE_CAPACITY_UNITS));
     let approval_capacity = update_capacity.clone();
     let approval_overflow = overflow_tx.clone();
     let permissions = events_tx.clone();
