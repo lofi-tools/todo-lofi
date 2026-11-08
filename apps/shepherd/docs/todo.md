@@ -899,7 +899,7 @@ If Pi’s RPC probe is blocked, proceed with ACP while resolving it.
   session creation and resume after restart, queued prompt cancellation, and
   a complete streamed turn through a loopback model fixture. Contract fixtures
   cover text, reasoning, tool rows and permission replies.
-- [ ] Pi byte-oriented LF reader, ID correlation, `agent_settled`, extension UI
+- [x] Pi byte-oriented LF reader, ID correlation, `agent_settled`, extension UI
   bridge and approval bridge.
   The stdio transport and ID-based command and dialog replies are implemented.
   Pending RPC requests fail when output closes, without waiting for a lingering
@@ -941,8 +941,25 @@ If Pi’s RPC probe is blocked, proceed with ACP while resolving it.
   tool call then raises a confirm dialog that the approval cards allow or deny,
   so the task no longer reports `unreviewed tools`; a Pi started through
   `PiHarness::without_approval_extension` still does, and its header and
-  diagnostics say the calls follow Pi's configuration. Recording a live model
-  turn for `agent_settled` and real extension approval records remains open.
+  diagnostics say the calls follow Pi's configuration. A live model turn and
+  real extension approval recording were not run here; the human-gated
+  procedure is [pi-live-smoke.md](./pi-live-smoke.md), and that criterion is
+  not claimed as passed. The normal suite proves the transport and mapping:
+  `preserves_unicode_separators_and_routes_reversed_responses` covers LF-only
+  framing and reversed response IDs; `refuses_an_unterminated_record` rejects
+  a missing final LF; `harness_streams_a_turn_and_settles_on_agent_settled`
+  covers text/thinking deltas, one tool row and completion on
+  `agent_settled`; `harness_cancellation_settles_and_stops_descendants`
+  covers abort; `subprocess_routes_an_extension_dialog_and_keeps_stderr_off_the_wire`
+  covers the dialog round trip and stdout-only protocol;
+  `harness_answers_the_recorded_extension_approval` replays the recorded
+  confirm; and the bridge tests cover installed allow/deny and the
+  `unreviewed tools` fallback. `cargo test -p agent-harness --lib pi::tests`
+  passed 21 tests, and the installed Pi 1.5.0 dialog probe passed with
+  `--features live-pi`. At this commit, `cargo test -p shepherd --lib` passed
+  127 tests and `cargo test -p shepherd --test shell_scope` passed. The bridge
+  currently maps `confirm` dialogs to approval cards; other extension methods
+  remain logged rather than mapped to a decision.
 - [x] ACP adapter using `libs/acp-client`; no duplicate protocol client.
   Use this adapter for OpenCode when its native protocol is unavailable.
   The shared client accepts an exact configured command, validates ACP v1,
