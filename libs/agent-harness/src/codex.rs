@@ -3245,6 +3245,39 @@ async fn handle_notification(
 ) -> HarnessResult<()> {
     let mut events = Vec::new();
 
+    if matches!(
+        method,
+        "item/agentMessage/delta"
+            | "item/reasoning/delta"
+            | "item/agentThought/delta"
+            | "item/commandExecution/outputDelta"
+            | "item/started"
+            | "item/completed"
+    ) {
+        let state = pending.lock().await;
+        let wrong_thread = params
+            .get("threadId")
+            .and_then(Value::as_str)
+            .is_some_and(|thread| {
+                state
+                    .thread_id
+                    .as_deref()
+                    .is_some_and(|current| thread != current)
+            });
+        let wrong_turn =
+            params
+                .get("turnId")
+                .and_then(Value::as_str)
+                .is_some_and(|turn| match state.turn_id.as_deref() {
+                    Some(current) => turn != current,
+                    None => state.start_request.is_none() || state.announced_turn.is_some(),
+                });
+        if wrong_thread || wrong_turn {
+            tracing::debug!("ignoring a Codex item event from another session or turn");
+            return Ok(());
+        }
+    }
+
     match method {
         "turn/started" => {
             if let Some(turn_id) = read_turn_id(params) {
@@ -4188,6 +4221,66 @@ mod tests {
         harness.outgoing = None;
         drop(outgoing);
         writer_task.await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn identified_item_events_from_other_turns_do_not_reach_the_transcript()
+    -> HarnessResult<()> {
+        let pending = Arc::new(AsyncMutex::new(Pending::default()));
+        {
+            let mut state = pending.lock().await;
+            state.thread_id = Some("current-thread".into());
+            state.turn_id = Some("current-turn".into());
+        }
+        let (sender, mut events) = mpsc::unbounded_channel();
+        for method in [
+            "item/agentMessage/delta",
+            "item/reasoning/delta",
+            "item/agentThought/delta",
+            "item/commandExecution/outputDelta",
+            "item/started",
+            "item/completed",
+        ] {
+            for (thread, turn) in [
+                ("other-thread", "current-turn"),
+                ("current-thread", "other-turn"),
+            ] {
+                handle_notification(method, &json!({
+                    "threadId": thread, "turnId": turn, "itemId": "item", "delta": "stale",
+                    "item": {"id": "item", "type": "commandExecution", "command": "pwd", "status": "completed"},
+                }), &sender, &pending).await?;
+                assert!(events.try_recv().is_err());
+            }
+        }
+        handle_notification("item/agentMessage/delta", &json!({
+            "threadId": "current-thread", "turnId": "current-turn", "itemId": "item", "delta": "current",
+        }), &sender, &pending).await?;
+        assert!(
+            matches!(events.try_recv(), Ok(HarnessEvent::Delta { text, .. }) if text == "current")
+        );
+        pending.lock().await.turn_id = None;
+        handle_notification("item/agentMessage/delta", &json!({
+            "threadId": "current-thread", "turnId": "current-turn", "itemId": "item", "delta": "late",
+        }), &sender, &pending).await?;
+        assert!(events.try_recv().is_err());
+        pending.lock().await.start_request = Some(1);
+        handle_notification("item/agentMessage/delta", &json!({
+            "threadId": "current-thread", "turnId": "fast-turn", "itemId": "item", "delta": "early",
+        }), &sender, &pending).await?;
+        assert!(
+            matches!(events.try_recv(), Ok(HarnessEvent::Delta { text, .. }) if text == "early")
+        );
+        handle_notification(
+            "item/agentMessage/delta",
+            &json!({"itemId": "item", "delta": "legacy"}),
+            &sender,
+            &pending,
+        )
+        .await?;
+        assert!(
+            matches!(events.try_recv(), Ok(HarnessEvent::Delta { text, .. }) if text == "legacy")
+        );
         Ok(())
     }
 

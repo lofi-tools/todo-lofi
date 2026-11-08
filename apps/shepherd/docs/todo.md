@@ -1659,6 +1659,10 @@ placeholder tabs and no unearned state badges.
   and duplicate starts cannot erase its reported error.
   Thread-start notifications cannot replace the opened session ID; a local
   protocol fixture checks that a subsequent interrupt targets the right thread.
+  Identified message, reasoning and tool events from another thread or turn are
+  ignored, including after completion; a fixture also preserves fast-start and
+  legacy events without identity fields. Events arriving before a turn is
+  identified cannot yet be checked against it.
   A completion without a turn ID during a pending or active turn is a protocol
   error instead of a false completion; a fixture checks state and approvals are
   not changed before the error is handled.
