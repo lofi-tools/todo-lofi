@@ -137,9 +137,16 @@ pub(crate) fn lock_deletions(data_directory: &Path) -> io::Result<DeletionLock> 
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+        options
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
     }
     let file = options.open(data_directory.join(".attachment-deletions.lock"))?;
+    if !file.metadata()?.is_file() {
+        return Err(invalid(
+            "The attachment recovery lock is not a regular file.",
+        ));
+    }
     file.try_lock().map_err(|error| {
         io::Error::other(format!(
             "could not lock attachment deletion recovery: {error}"
@@ -374,6 +381,38 @@ fn persist(path: &Path, bytes: &[u8]) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn recovery_lock_rejects_symlinks_and_fifos() -> io::Result<()> {
+        use std::os::unix::ffi::OsStrExt;
+        use std::os::unix::fs::symlink;
+
+        let directory = tempfile::tempdir()?;
+        let lock = directory.path().join(".attachment-deletions.lock");
+        let target = directory.path().join("outside");
+        fs::write(&target, b"preserve")?;
+        symlink(&target, &lock)?;
+        assert!(lock_deletions(directory.path()).is_err());
+        assert_eq!(fs::read(&target)?, b"preserve");
+        fs::remove_file(&lock)?;
+        let name = std::ffi::CString::new(lock.as_os_str().as_bytes()).map_err(io::Error::other)?;
+        if unsafe { libc::mkfifo(name.as_ptr(), 0o600) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        assert_eq!(
+            lock_deletions(directory.path())
+                .err()
+                .map(|error| error.kind()),
+            Some(ErrorKind::InvalidInput)
+        );
+        fs::remove_file(&lock)?;
+        let held = lock_deletions(directory.path())?;
+        assert!(lock_deletions(directory.path()).is_err());
+        drop(held);
+        assert!(lock_deletions(directory.path()).is_ok());
+        Ok(())
+    }
 
     #[test]
     fn default_attachment_limit_is_fifty_megabytes() -> Result<(), Box<dyn std::error::Error>> {

@@ -1713,6 +1713,9 @@ placeholder tabs and no unearned state badges.
   directory without following symlinks, uses nonblocking open, and must be a
   regular file. A temporary-repository fixture checks symlinked directories,
   symlinked lock files, non-regular paths and normal lock exclusion.
+  The attachment-recovery lock also uses a nonblocking Unix open and rejects
+  non-regular files; a fixture checks a substituted FIFO and symlink as well as
+  ordinary lock exclusion.
   The remaining filesystem operations still need a confinement audit. ACP file reads
   and atomic writes also use descriptor-relative operations on Unix, with
   fixtures for directory substitution and preserved file permissions. ACP workspace
