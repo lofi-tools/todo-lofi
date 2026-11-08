@@ -862,6 +862,9 @@ impl Store for TursoStore {
         let mut db = self.db.lock().await;
         let mut transaction = db.transaction().await?;
         let result = async {
+            if entries.is_empty() {
+                write_transcript_entries(&mut transaction, session, entries).await?;
+            }
             write_task(&mut transaction, task).await?;
             if !entries.is_empty() {
                 write_transcript_entries(&mut transaction, session, entries).await?;
@@ -1890,12 +1893,11 @@ impl Store for MemoryStore {
         let mut tasks = self.tasks.write().await;
         let sessions = self.sessions.read().await;
         let projects = self.projects.read().await;
-        if !entries.is_empty()
-            && (!tasks.contains_key(task.id.as_str())
-                || !projects.contains_key(task.project_id.as_str())
-                || !sessions
-                    .iter()
-                    .any(|stored| stored.id == session.id && stored.task_id == task.id))
+        if !tasks.contains_key(task.id.as_str())
+            || !projects.contains_key(task.project_id.as_str())
+            || !sessions
+                .iter()
+                .any(|stored| stored.id == session.id && stored.task_id == task.id)
         {
             return Err(StoreError::TranscriptOwnerMissing {
                 task_id: task.id.clone(),
@@ -2207,6 +2209,65 @@ mod tests {
             .save_transcript_entries(&session, &entries.iter().collect::<Vec<_>>())
             .await?;
         assert_eq!(store.load_transcript(&task.id).await?, entries);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn empty_transcript_task_save_requires_a_persisted_session_and_task()
+    -> Result<(), Box<dyn std::error::Error>> {
+        async fn verify(store: &dyn Store, root: &Path) -> Result<(), Box<dyn std::error::Error>> {
+            let project = Project::new(root.to_path_buf());
+            let task = Task::draft(project.id.clone(), "Original", root);
+            store.save_project(&project).await?;
+            store.save_task(&task).await?;
+            let session = SessionRecord::started(task.id.clone(), "codex", None);
+            let mut changed = task.clone();
+            changed.title = "Changed".into();
+            assert!(matches!(
+                store
+                    .save_task_with_transcript(&changed, &session, &[])
+                    .await,
+                Err(StoreError::TranscriptOwnerMissing { .. })
+            ));
+            assert_eq!(
+                store
+                    .load_tasks()
+                    .await?
+                    .first()
+                    .ok_or("missing task")?
+                    .title,
+                "Original"
+            );
+            store.save_session(&session).await?;
+            store
+                .save_task_with_transcript(&changed, &session, &[])
+                .await?;
+            assert_eq!(
+                store
+                    .load_tasks()
+                    .await?
+                    .first()
+                    .ok_or("missing task")?
+                    .title,
+                "Changed"
+            );
+            store.delete_task(&task.id, None).await?;
+            assert!(matches!(
+                store
+                    .save_task_with_transcript(&changed, &session, &[])
+                    .await,
+                Err(StoreError::TranscriptOwnerMissing { .. })
+            ));
+            assert!(store.load_tasks().await?.is_empty());
+            Ok(())
+        }
+        let directory = TestDirectory::new()?;
+        verify(&MemoryStore::new(), directory.path()).await?;
+        verify(
+            &TursoStore::open_at(&directory.join("empty-transcript.db")).await?,
+            directory.path(),
+        )
+        .await?;
         Ok(())
     }
 

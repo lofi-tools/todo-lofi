@@ -1320,8 +1320,11 @@ placeholder tabs and no unearned state badges.
   Normal task-state saves and interrupted shutdowns commit eligible transcript
   entries in the same transaction. Both transcript write paths explicitly
   roll back failures and permit immediate retry. A failed shutdown save retains
-  its session and can be retried while draining. Multi-task archive rolls back on a
-  mid-batch database error and can be retried. Task deletion clears the project's
+  its session and can be retried while draining. Empty transcript batches still
+  verify the persisted session and task before
+  updating state; a fixture checks missing sessions, valid retries and deleted
+  tasks in both stores. Multi-task archive rolls back on a mid-batch database
+  error and can be retried. Task deletion clears the project's
   last-task reference and changed terminal layout in the same transaction and
   rolls back a mid-deletion failure, preserving those records, transcripts and
   attachments for retry. Draft creation commits the project selection and new
