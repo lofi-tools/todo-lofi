@@ -107,6 +107,7 @@ test.beforeEach(async ({ context }) => {
     }
     let legacySession = options.has('legacy-session')
     let projectGrants = []
+    let notesGrants = []
     let sessionGrants = []
     const agentTerminals = new Map<string, AgentTerminal[]>()
 
@@ -506,7 +507,7 @@ test.beforeEach(async ({ context }) => {
           case 'project_approvals':
             return args.projectId === project.id
               ? { saved: [...projectGrants], sessions: [...sessionGrants] }
-              : { saved: [], sessions: [] }
+              : { saved: args.projectId === 'project-notes' ? [...notesGrants] : [], sessions: [] }
           case 'reset_approval_grant':
             if (args.projectId === project.id) {
               if (args.taskId) {
@@ -1066,6 +1067,9 @@ test.beforeEach(async ({ context }) => {
       __failWorkspaceRead: () => { failPausedWorkspaceRead = true; releaseWorkspaceRead?.() },
       __workspaceReads: () => workspaceReads,
     })
+    Object.assign(window, { __missNotesApproval: () => {
+      notesGrants = [{ id: 'notes-grant', agent: 'claude', title: 'Recovered permission', arguments: {}, paths: [] }]
+    } })
     Object.assign(window, { __missTaskUpdate: () => {
       const index = tasks.findIndex((task) => task.id === 'task-1')
       if (index < 0) throw new Error('Missing fixture task')
@@ -3958,4 +3962,25 @@ test('reports a recovery snapshot failure when there is no newer request', async
   await expect.poll(() => page.evaluate(() => (window as unknown as { __workspaceReadPaused: () => boolean }).__workspaceReadPaused())).toBe(true)
   await page.evaluate(() => (window as unknown as { __failWorkspaceRead: () => void }).__failWorkspaceRead())
   await expect(page.getByRole('alert')).toContainText('Could not refresh after missed updates')
+})
+
+
+test('refreshes the project settings being viewed after missed events', async ({ page }) => {
+  await page.goto('/?two-projects')
+  const repository = page.getByRole('button', { name: 'demo', exact: true })
+  const directory = page.getByRole('button', { name: 'notes', exact: true })
+  await expect(repository).toHaveAttribute('aria-current', 'true')
+  await directory.press('Shift+F10')
+  await page.getByRole('menuitem', { name: 'Project settings' }).click()
+  const settings = page.getByRole('region', { name: 'Settings', exact: true })
+  await expect(settings.getByText('/tmp/notes')).toBeVisible()
+  const approvals = settings.getByRole('region', { name: 'Saved project approvals' })
+  await expect(approvals).toContainText('No saved project approvals.')
+  await page.evaluate(() => {
+    const fixture = window as unknown as { __missNotesApproval: () => void; __emitCoreEvent: (event: ShepherdEvent) => void }
+    fixture.__missNotesApproval()
+    fixture.__emitCoreEvent({ type: 'resyncRequired' })
+  })
+  await expect(approvals).toContainText('Recovered permission')
+  await expect(repository).toHaveAttribute('aria-current', 'true')
 })

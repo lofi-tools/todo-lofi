@@ -1114,8 +1114,9 @@ export function App() {
         if (taskList && projectId) {
           if (!updates.taskLists.has(projectId)) setTasks(taskList.tasks)
           setLoadedTasksFor(projectId)
-          setApprovalChange({ projectId })
         }
+        const settingsProjectId = settingsProject()?.id
+        if (settingsProjectId) setApprovalChange({ projectId: settingsProjectId })
         if (taskWorkspace && taskId && !updates.workspaces.has(taskId)) setWorkspace(taskWorkspace)
         if (terminalList && projectId && !updates.terminalLists.has(projectId)) setTerminalListEvent(terminalList)
         if (reviewLists) {

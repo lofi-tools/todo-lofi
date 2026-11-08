@@ -1699,6 +1699,9 @@ placeholder tabs and no unearned state badges.
   detection, restoring the selected task, and an update during a paused read.
   A newer recovery request is retained if an earlier snapshot read fails;
   headless fixtures also verify an unreplaced failure reaches the error toast.
+  Recovery also refreshes approvals for the project currently shown in
+  Settings, even when a different project is selected; a headless fixture
+  checks that view after a missed update.
   The full headless Chromium suite passed 115 tests at `0659181`, including
   both event-recovery regressions; it uses mocked IPC, not a native window.
   At `e3cf447`, the two-launch hidden macOS smoke passed with a scripted
