@@ -3222,6 +3222,296 @@ mod tests {
 
     use super::*;
 
+    #[cfg(all(feature = "live-codex", any(target_os = "linux", target_os = "macos")))]
+    #[tokio::test]
+    #[ignore]
+    async fn live_codex_recovers_after_shell_sigkill() -> Result<(), Box<dyn std::error::Error>> {
+        use agent_harness::AgentHarness as _;
+        use agent_harness::live_codex::LiveCodexRun;
+        use std::os::unix::process::ExitStatusExt as _;
+
+        struct Factory {
+            run: LiveCodexRun,
+            host: TerminalHost,
+        }
+        impl HarnessFactory for Factory {
+            fn create(&self) -> Result<Box<dyn agent_harness::AgentHarness>, CoreError> {
+                Ok(Box::new(self.run.harness("desktop", false)))
+            }
+            fn launch_for_task(
+                &self,
+                task: &TaskId,
+                agent: Agent,
+                cwd: PathBuf,
+            ) -> Result<
+                (
+                    Box<dyn agent_harness::AgentHarness>,
+                    agent_harness::SpawnSpec,
+                ),
+                CoreError,
+            > {
+                if agent != Agent::Codex {
+                    return Err(CoreError::HarnessUnavailable);
+                }
+                let mut harness = self.run.harness("desktop", false);
+                harness.set_process_tracker(self.host.agent_process_tracker(task));
+                Ok((Box::new(harness), self.run.spec(cwd, "desktop", None)))
+            }
+        }
+
+        if let Some(data) = std::env::var_os("SHEPHERD_LIVE_CRASH_DATA") {
+            let data = PathBuf::from(data);
+            let repository = PathBuf::from(
+                std::env::var_os("SHEPHERD_LIVE_CRASH_REPOSITORY").ok_or("missing repository")?,
+            );
+            let ready = PathBuf::from(
+                std::env::var_os("SHEPHERD_LIVE_CRASH_READY").ok_or("missing ready path")?,
+            );
+            let scenario = std::env::var("SHEPHERD_LIVE_CRASH_SCENARIO")?;
+            let run = LiveCodexRun::load(&scenario)
+                .await?
+                .ok_or("Codex is not installed")?;
+            if run.is_replay() {
+                return Err("live crash fixture unexpectedly replayed a cache".into());
+            }
+            let host = TerminalHost::default();
+            let state = ShellState::load(
+                &data,
+                Box::new(Factory {
+                    run: run.clone(),
+                    host: host.clone(),
+                }),
+                host,
+            )
+            .await?;
+            state.start_event_pump();
+            let projects = state.add_project(repository.display().to_string()).await?;
+            let project = projects.projects.first().ok_or("missing project")?;
+            let draft = state
+                .create_draft(project.id.clone(), "Live crash".into(), Agent::Codex)
+                .await?;
+            let task_id = draft.task.id;
+            state
+                .send_prompt(
+                    task_id.clone(),
+                    "Explain in detail how a compiler works, without running any tools.".into(),
+                )
+                .await?;
+            let process = state
+                .core
+                .lock()
+                .await
+                .recorded_processes()
+                .await?
+                .into_iter()
+                .find(|record| record.kind == "agent" && record.owner_id == task_id)
+                .ok_or("missing agent process record")?;
+            let identity = data.join("live-agent-identity");
+            let temporary_identity = identity.with_extension("tmp");
+            std::fs::write(
+                &temporary_identity,
+                format!("{} {}", process.pid, process.started_at),
+            )?;
+            std::fs::rename(temporary_identity, identity)?;
+            let process = tokio::time::timeout(Duration::from_secs(90), async {
+                loop {
+                    let workspace = state.task_workspace(task_id.clone()).await?;
+                    if workspace.task.state.is_live() && workspace.transcript.len() > 1 {
+                        let records = state.core.lock().await.recorded_processes().await?;
+                        if let Some(record) = records
+                            .into_iter()
+                            .find(|record| record.kind == "agent" && record.owner_id == task_id)
+                        {
+                            return Ok::<_, BridgeError>(record);
+                        }
+                    }
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+            })
+            .await??;
+            run.finish(None)?;
+            let temporary = ready.with_extension("tmp");
+            std::fs::write(
+                &temporary,
+                format!("{} {} {}", task_id, process.pid, process.started_at),
+            )?;
+            std::fs::rename(temporary, ready)?;
+            std::future::pending::<()>().await;
+            return Ok(());
+        }
+
+        struct Guard {
+            identity: PathBuf,
+            stopped: bool,
+        }
+        impl Guard {
+            fn stop(&mut self) -> std::io::Result<()> {
+                if self.stopped {
+                    return Ok(());
+                }
+                let contents = match std::fs::read_to_string(&self.identity) {
+                    Ok(contents) => contents,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+                    Err(error) => return Err(error),
+                };
+                let mut fields = contents.split_whitespace();
+                let pid: libc::pid_t = fields
+                    .next()
+                    .ok_or_else(|| std::io::Error::other("missing fixture pid"))?
+                    .parse()
+                    .map_err(std::io::Error::other)?;
+                let started_at: u64 = fields
+                    .next()
+                    .ok_or_else(|| std::io::Error::other("missing fixture start time"))?
+                    .parse()
+                    .map_err(std::io::Error::other)?;
+                if pid <= 1 || u32::try_from(pid).ok() == Some(std::process::id()) {
+                    return Err(std::io::Error::other("invalid fixture pid"));
+                }
+                if crate::pty_terminal::process_start_time(pid) == Some(started_at)
+                    && unsafe { libc::getpgid(pid) } == pid
+                    && unsafe { libc::killpg(pid, libc::SIGKILL) } != 0
+                {
+                    let error = std::io::Error::last_os_error();
+                    if error.raw_os_error() != Some(libc::ESRCH) {
+                        return Err(error);
+                    }
+                }
+                self.stopped = true;
+                Ok(())
+            }
+        }
+        impl Drop for Guard {
+            fn drop(&mut self) {
+                if let Err(error) = self.stop() {
+                    eprintln!("could not stop live crash fixture: {error}");
+                }
+            }
+        }
+        let data = TestDirectory::new()?;
+        let repository = TestRepository::new()?;
+        let ready = data.join("live-crash-ready");
+        let mut guard = Guard {
+            identity: data.join("live-agent-identity"),
+            stopped: false,
+        };
+        let scenario = format!("live-crash-{}", uuid::Uuid::new_v4().simple());
+        let mut child = tokio::process::Command::new(std::env::current_exe()?)
+            .args([
+                "--exact",
+                "bridge::tests::live_codex_recovers_after_shell_sigkill",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env("SHEPHERD_LIVE_CRASH_DATA", data.path())
+            .env("SHEPHERD_LIVE_CRASH_REPOSITORY", repository.path())
+            .env("SHEPHERD_LIVE_CRASH_READY", &ready)
+            .env("SHEPHERD_LIVE_CRASH_SCENARIO", &scenario)
+            .env("SHEPHERD_DEV_PROJECT_ROOT", repository.path())
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .kill_on_drop(true)
+            .spawn()?;
+        let contents = tokio::time::timeout(Duration::from_secs(120), async {
+            loop {
+                match std::fs::read_to_string(&ready) {
+                    Ok(contents) => break Ok::<_, Box<dyn std::error::Error>>(contents),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => break Err(error.into()),
+                }
+                if let Some(status) = child.try_wait()? {
+                    return Err(format!("live crash fixture exited before ready: {status}").into());
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await??;
+        let mut fields = contents.split_whitespace();
+        let task_id = fields.next().ok_or("missing task id")?.to_owned();
+        let pid: libc::pid_t = fields.next().ok_or("missing pid")?.parse()?;
+        let started_at: u64 = fields.next().ok_or("missing start time")?.parse()?;
+        if pid <= 1 || u32::try_from(pid).ok() == Some(std::process::id()) {
+            return Err("invalid fixture pid".into());
+        }
+        let identity = std::fs::read_to_string(&guard.identity)?;
+        assert_eq!(identity, format!("{pid} {started_at}"));
+        child.kill().await?;
+        assert_eq!(child.wait().await?.signal(), Some(libc::SIGKILL));
+        guard.stop()?;
+
+        let resume_scenario = format!("live-crash-resume-{}", uuid::Uuid::new_v4().simple());
+        let run = LiveCodexRun::load(&resume_scenario)
+            .await?
+            .ok_or("Codex is not installed")?;
+        if run.is_replay() {
+            return Err("live resume unexpectedly replayed a cache".into());
+        }
+        let host = TerminalHost::default();
+        let state = ShellState::load(
+            data.path(),
+            Box::new(Factory {
+                run: run.clone(),
+                host: host.clone(),
+            }),
+            host,
+        )
+        .await?;
+        state.start_event_pump();
+        let interrupted = state.task_workspace(task_id.clone()).await?;
+        assert_eq!(interrupted.task.state, TaskState::Interrupted);
+        let recorded = state
+            .core
+            .lock()
+            .await
+            .process_store()
+            .load_sessions()
+            .await?
+            .into_iter()
+            .filter(|session| session.task_id.as_str() == task_id)
+            .max_by_key(|session| session.started_at)
+            .and_then(|session| session.adapter_session_id)
+            .ok_or("missing persisted agent session")?;
+        let resumed = state.resume_task(task_id.clone()).await?;
+        assert_eq!(resumed.task.state, TaskState::Ready);
+        assert!(
+            resumed.transcript.iter().any(|entry| entry
+                .summary()
+                .contains(&format!("resumed the previous agent session {recorded}"))),
+            "resume did not use the recorded agent session"
+        );
+        state
+            .send_prompt(task_id.clone(), "Reply with exactly: resumed".into())
+            .await?;
+        let finished = tokio::time::timeout(Duration::from_secs(90), async {
+            loop {
+                let workspace = state.task_workspace(task_id.clone()).await?;
+                if matches!(
+                    workspace.task.state,
+                    TaskState::Ready | TaskState::Review | TaskState::Failed
+                ) {
+                    return Ok::<_, BridgeError>(workspace);
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await??;
+        assert_ne!(
+            finished.task.state,
+            TaskState::Failed,
+            "{:?}",
+            finished.task.error
+        );
+        assert!(
+            finished
+                .transcript
+                .iter()
+                .any(|entry| matches!(&entry.kind, agent_harness::EntryKind::AgentText { text } if text.to_lowercase().contains("resumed")))
+        );
+        run.finish(None)?;
+        state.quit(true).await?;
+        Ok(())
+    }
+
     #[tokio::test]
     async fn discovery_uses_project_environment_at_spawn() -> Result<(), Box<dyn std::error::Error>>
     {

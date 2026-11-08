@@ -1587,14 +1587,26 @@ placeholder tabs and no unearned state badges.
 
 ### Proof
 
-- [ ] Chaos: kill -9 mid-turn, restart, resume or fail honestly.
+- [x] Chaos: kill -9 mid-turn, restart, resume or fail honestly.
   A local scripted approval-wait fixture covers SIGKILL and interrupted recovery;
-  live-agent crash and resume behavior still needs verification. On this Mac,
+  on this Mac, a headless fixture also killed a test process running the
+  Shepherd shell and core during a real Codex turn, reopened its isolated
+  database, resumed the exact recorded session, and received another answer.
+  The fixture cleans up its
+  agent process if its recorded identity still matches. It is ignored by
+  default and requires `live-codex`, because the actual process crash cannot be
+  validated by response replay. Both live phases recorded their responses under
+  `.cache` using GPT-6.1 Terra at low effort. Run it explicitly with:
+
+  ```sh
+  direnv exec . cargo test -p shepherd --features live-codex --lib bridge::tests::live_codex_recovers_after_shell_sigkill -- --ignored --nocapture
+  ```
+
+  Separately, on this Mac,
   the opt-in ChatGPT-plan fixture killed the real Codex app-server mid-turn
   using GPT-6.1 Terra at low effort and observed a failed task with diagnostics.
   Its recorded `.cache` replay also verifies that the failure remains visible
-  after reopening. This kills the agent, not the Shepherd process, and does not
-  verify live-agent resume after a Shepherd crash.
+  after reopening. This fixture kills the agent, not the Shepherd process.
   A separate ChatGPT-plan fixture dropped and reloaded the core during a live
   Codex turn, resumed the recorded session, and completed another turn using
   GPT-6.1 Terra at low effort on this Mac. Its recorded responses replayed from
