@@ -863,6 +863,7 @@ async fn read_turn(
         queued: VecDeque::new(),
         state: approval_state.clone(),
         sender,
+        capacity: stream_capacity.clone(),
     };
     let admission_deadline = Instant::now() + REQUEST_TIMEOUT;
     loop {
@@ -918,13 +919,13 @@ async fn read_turn(
             continue;
         };
         match event {
-            HarnessEvent::ApprovalRequested { request } => approvals.enqueue(request)?,
+            HarnessEvent::ApprovalRequested { request } => approvals.enqueue(request).await?,
             HarnessEvent::ApprovalResolved {
                 approval_id,
                 decision,
                 source,
             } => {
-                approvals.resolve(approval_id, decision, source)?;
+                approvals.resolve(approval_id, decision, source).await?;
             }
             event @ HarnessEvent::TurnFinished { .. } => return Ok(event),
             event => publish_stream_event(sender, stream_capacity, event).await?,
@@ -938,19 +939,28 @@ struct PendingApprovals<'a> {
     queued: VecDeque<ApprovalRequest>,
     state: Arc<Mutex<ApprovalResponseState>>,
     sender: &'a mpsc::UnboundedSender<HarnessEvent>,
+    capacity: Arc<Semaphore>,
 }
 
 impl PendingApprovals<'_> {
-    fn enqueue(&mut self, request: ApprovalRequest) -> HarnessResult<()> {
+    async fn enqueue(&mut self, request: ApprovalRequest) -> HarnessResult<()> {
         register_approval(&mut self.ids, &request.approval_id)?;
         self.queued.push_back(request);
-        self.show_next()
+        self.show_next().await
     }
 
-    fn show_next(&mut self) -> HarnessResult<()> {
-        if self.active.is_none()
-            && let Some(request) = self.queued.pop_front()
-        {
+    async fn show_next(&mut self) -> HarnessResult<()> {
+        if self.active.is_none() && !self.queued.is_empty() {
+            let permit = self
+                .capacity
+                .clone()
+                .acquire_owned()
+                .await
+                .map_err(|_| HarnessError::ChannelClosed)?;
+            let Some(mut request) = self.queued.pop_front() else {
+                return Ok(());
+            };
+            request.stream_permit = Some(crate::ApprovalCapacity::Stream(Arc::new(permit)));
             let id = request.approval_id.clone();
             {
                 let mut state = self.state.lock().map_err(|_| {
@@ -965,7 +975,7 @@ impl PendingApprovals<'_> {
         Ok(())
     }
 
-    fn resolve(
+    async fn resolve(
         &mut self,
         approval_id: ApprovalId,
         decision: Decision,
@@ -991,7 +1001,7 @@ impl PendingApprovals<'_> {
                     source,
                 },
             )?;
-            self.show_next()?;
+            self.show_next().await?;
         } else {
             self.queued
                 .retain(|request| request.approval_id != approval_id);
@@ -2407,8 +2417,8 @@ mod tests {
         "/api/session/{sessionID}/permission/{requestID}/reply": {"post": {}}
     }}"#;
 
-    #[test]
-    fn approvals_are_presented_one_at_a_time_and_queued_replies_are_skipped()
+    #[tokio::test]
+    async fn approvals_are_presented_one_at_a_time_and_queued_replies_are_skipped()
     -> Result<(), Box<dyn std::error::Error>> {
         let (sender, mut receiver) = mpsc::unbounded_channel();
         let mut pending = PendingApprovals {
@@ -2417,35 +2427,42 @@ mod tests {
             queued: VecDeque::new(),
             state: Arc::new(Mutex::new(ApprovalResponseState::default())),
             sender: &sender,
+            capacity: Arc::new(Semaphore::new(2)),
         };
         for id in ["per_1", "per_2", "per_3"] {
-            pending.enqueue(
-                PermissionRequest {
-                    id: id.into(),
-                    action: "read".into(),
-                    resources: Vec::new(),
-                    metadata: Value::Null,
-                    source: None,
-                    message: None,
-                }
-                .into_approval(),
-            )?;
+            pending
+                .enqueue(
+                    PermissionRequest {
+                        id: id.into(),
+                        action: "read".into(),
+                        resources: Vec::new(),
+                        metadata: Value::Null,
+                        source: None,
+                        message: None,
+                    }
+                    .into_approval(),
+                )
+                .await?;
         }
         assert!(
             matches!(receiver.try_recv(), Ok(HarnessEvent::ApprovalRequested { request }) if request.approval_id.as_str() == "per_1")
         );
         assert!(receiver.try_recv().is_err());
-        pending.resolve(
-            ApprovalId::new("per_3"),
-            Decision::Deny,
-            crate::ApprovalSource::Agent,
-        )?;
+        pending
+            .resolve(
+                ApprovalId::new("per_3"),
+                Decision::Deny,
+                crate::ApprovalSource::Agent,
+            )
+            .await?;
         assert!(receiver.try_recv().is_err());
-        pending.resolve(
-            ApprovalId::new("per_1"),
-            Decision::Allow,
-            crate::ApprovalSource::Agent,
-        )?;
+        pending
+            .resolve(
+                ApprovalId::new("per_1"),
+                Decision::Allow,
+                crate::ApprovalSource::Agent,
+            )
+            .await?;
         assert!(
             matches!(receiver.try_recv(), Ok(HarnessEvent::ApprovalResolved { approval_id, .. }) if approval_id.as_str() == "per_1")
         );
@@ -2461,6 +2478,70 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn approval_capacity_preserves_queued_replies_and_recovers()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        let capacity = Arc::new(Semaphore::new(1));
+        let mut pending = PendingApprovals {
+            ids: HashSet::new(),
+            active: None,
+            queued: VecDeque::new(),
+            state: Arc::new(Mutex::new(ApprovalResponseState::default())),
+            sender: &sender,
+            capacity: capacity.clone(),
+        };
+        for id in ["one", "two", "three"] {
+            pending
+                .enqueue(
+                    PermissionRequest {
+                        id: id.into(),
+                        action: "read".into(),
+                        resources: Vec::new(),
+                        metadata: Value::Null,
+                        source: None,
+                        message: None,
+                    }
+                    .into_approval(),
+                )
+                .await?;
+        }
+        let first = receiver.recv().await.ok_or("missing first approval")?;
+        assert_eq!(capacity.available_permits(), 0);
+        pending
+            .resolve(
+                ApprovalId::new("two"),
+                Decision::Deny,
+                crate::ApprovalSource::Agent,
+            )
+            .await?;
+        let next = pending.resolve(
+            ApprovalId::new("one"),
+            Decision::Allow,
+            crate::ApprovalSource::Agent,
+        );
+        tokio::pin!(next);
+        assert!(
+            timeout(Duration::from_millis(30), next.as_mut())
+                .await
+                .is_err()
+        );
+        assert!(matches!(
+            receiver.try_recv()?,
+            HarnessEvent::ApprovalResolved { .. }
+        ));
+        drop(first);
+        next.await?;
+        let third = receiver.recv().await.ok_or("missing third approval")?;
+        assert!(
+            matches!(&third, HarnessEvent::ApprovalRequested { request } if request.approval_id.as_str() == "three")
+        );
+        assert_eq!(capacity.available_permits(), 0);
+        drop(third);
+        assert_eq!(capacity.available_permits(), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn cancelling_reader_withdraws_pending_approvals()
     -> Result<(), Box<dyn std::error::Error>> {
         let (sender, mut receiver) = mpsc::unbounded_channel();
@@ -2472,18 +2553,21 @@ mod tests {
                 queued: VecDeque::new(),
                 state: Arc::new(Mutex::new(ApprovalResponseState::default())),
                 sender: &sender,
+                capacity: Arc::new(Semaphore::new(2)),
             };
-            pending.enqueue(
-                PermissionRequest {
-                    id: "per_1".into(),
-                    action: "read".into(),
-                    resources: Vec::new(),
-                    metadata: Value::Null,
-                    source: None,
-                    message: None,
-                }
-                .into_approval(),
-            )?;
+            pending
+                .enqueue(
+                    PermissionRequest {
+                        id: "per_1".into(),
+                        action: "read".into(),
+                        resources: Vec::new(),
+                        metadata: Value::Null,
+                        source: None,
+                        message: None,
+                    }
+                    .into_approval(),
+                )
+                .await?;
             ready.send(()).map_err(|_| HarnessError::ChannelClosed)?;
             std::future::pending::<()>().await;
             Ok::<_, HarnessError>(())

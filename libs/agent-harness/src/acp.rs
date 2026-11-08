@@ -981,7 +981,7 @@ impl PendingApproval {
                 .collect(),
             patch,
             choices: Some(choices),
-            stream_permit: reply.capacity_permit(),
+            stream_permit: reply.capacity_permit().map(crate::ApprovalCapacity::Acp),
         };
         Self {
             request_id,

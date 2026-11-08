@@ -551,6 +551,12 @@ pub struct PlanRow {
 /// An approval request. `paths` and `patch` may be absent when the adapter
 /// cannot provide them.
 #[derive(Clone, Debug)]
+pub enum ApprovalCapacity {
+    Acp(Arc<acp_client::permissions::PermissionCapacity>),
+    Stream(Arc<tokio::sync::OwnedSemaphorePermit>),
+}
+
+#[derive(Clone, Debug)]
 pub struct ApprovalRequest {
     pub approval_id: ApprovalId,
     pub tool_call_id: ToolCallId,
@@ -560,7 +566,7 @@ pub struct ApprovalRequest {
     pub patch: Option<FileDiff>,
     pub choices: Option<Vec<Decision>>,
     /// Retains request capacity until the queued approval has been consumed.
-    pub stream_permit: Option<Arc<acp_client::permissions::PermissionCapacity>>,
+    pub stream_permit: Option<ApprovalCapacity>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]

@@ -1541,10 +1541,13 @@ placeholder tabs and no unearned state badges.
   a blocked producer. Codex exec plan and usage events also share that capacity;
   a fixture verifies ordering and retained cloned permits. OpenCode tool
   updates also share its text capacity; a mixed-stream fixture checks ordering,
-  cloned permits and cancellation. A core
+  cloned permits and cancellation. Displayed OpenCode approval requests also
+  use that capacity; queued approvals remain under their separate pending limit,
+  so replies to queued requests can still be processed when the stream is full.
+  A fixture checks both reply handling and recovery when a permit is released. A core
   fixture fills the queue and verifies that 150 scripted messages and 150 tool
-  calls reach the transcript in order. Other OpenCode events and app-server
-  events still need coordinated backpressure. A
+  calls reach the transcript in order. App-server events and other critical
+  queues still need coordinated backpressure. A
   Codex fixture verifies that a command reply remains reachable after 100
   unconsumed stream events; a bounded design must preserve that behavior.
   Event folding handles at
