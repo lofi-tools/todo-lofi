@@ -1647,6 +1647,10 @@ placeholder tabs and no unearned state badges.
   headless fixtures also verify an unreplaced failure reaches the error toast.
   The full headless Chromium suite passed 115 tests at `0659181`, including
   both event-recovery regressions; it uses mocked IPC, not a native window.
+  At `e3cf447`, the two-launch hidden macOS smoke passed with a scripted
+  agent and disposable data, including task and project switches, terminal
+  reattachment and restart, and interrupted-task resume. It did not induce
+  event-stream lag or use a live agent.
   Transient notifications missed during lag cannot be reconstructed.
   Codex exec and app-server, and OpenCode tool events, bound output to the
   transcript's existing 64 KiB tail before placing it on the event queue,
