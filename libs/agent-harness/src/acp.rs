@@ -692,6 +692,7 @@ async fn drive_session(
                             publish(&sender, HarnessEvent::AgentTerminalExited { id: terminal_id.clone(), exit_code: None })?;
                             released.push(terminal_id);
                         } else {
+                            updates.forget_terminal(&terminal_id);
                             publish(&sender, HarnessEvent::AgentTerminalRemoved { id: terminal_id })?;
                         }
                     }
@@ -722,6 +723,7 @@ async fn drive_session(
                 cancelling = false;
                 withdraw_approvals(&sender, &mut approvals)?;
                 for id in released.drain(..) {
+                    updates.forget_terminal(&id);
                     publish(&sender, HarnessEvent::AgentTerminalRemoved { id })?;
                 }
                 if matches!(outcome, Err(AcpError::TransportClosed(_))) {
@@ -1164,6 +1166,11 @@ struct Updates {
 }
 
 impl Updates {
+    fn forget_terminal(&mut self, terminal_id: &str) {
+        self.terminal_tools.remove(terminal_id);
+        self.early_output.remove(terminal_id);
+    }
+
     fn apply(&mut self, update: &SessionUpdate) -> Option<HarnessEvent> {
         match update {
             SessionUpdate::AgentMessageChunk(chunk) => {
@@ -1482,6 +1489,34 @@ mod tests {
             .ok_or("missing early output")?;
         assert!(buffered.len() <= crate::MAX_COMMAND_OUTPUT_BYTES);
         assert!(buffered.ends_with("xxx"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn released_terminal_buffers_can_be_cleared_without_affecting_other_terminals()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let permits = Arc::new(tokio::sync::Semaphore::new(2));
+        let (sender, _receiver) = mpsc::unbounded_channel();
+        let mut updates = Updates::default();
+        for id in ["released", "active"] {
+            updates.terminal_output(
+                &sender,
+                id.into(),
+                format!("{id} output"),
+                Arc::new(permits.clone().acquire_owned().await?),
+            )?;
+            updates
+                .terminal_tools
+                .insert(id.into(), ToolCallId::new(id));
+        }
+        updates.forget_terminal("released");
+        assert!(!updates.early_output.contains_key("released"));
+        assert!(!updates.terminal_tools.contains_key("released"));
+        assert_eq!(
+            updates.early_output.get("active").map(String::as_str),
+            Some("active output")
+        );
+        assert!(updates.terminal_tools.contains_key("active"));
         Ok(())
     }
 
