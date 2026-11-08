@@ -1065,7 +1065,7 @@ export function App() {
   } | undefined
 
   function loadResyncSnapshots(projectId: string | null, reviewing: boolean) {
-    return Promise.all([
+    return Promise.allSettled([
       bridge.projectList(),
       projectId ? bridge.taskList(projectId) : undefined,
       projectId ? bridge.terminalList(projectId) : undefined,
@@ -1115,7 +1115,17 @@ export function App() {
           }
           throw failure
         }
-        const [projectList, taskList, terminalList, reviewLists] = snapshots
+        const [projectResult, taskResult, terminalResult, reviewResult] = snapshots
+        const failures: string[] = []
+        function snapshotValue<T>(result: PromiseSettledResult<T>, label: string): T | undefined {
+          if (result.status === 'fulfilled') return result.value
+          failures.push(`${label}: ${describe(result.reason)}`)
+          return undefined
+        }
+        const projectList = snapshotValue(projectResult, 'Projects')
+        const taskList = snapshotValue(taskResult, 'Tasks')
+        const terminalList = snapshotValue(terminalResult, 'Terminals')
+        const reviewLists = snapshotValue(reviewResult, 'Review')
         if (resyncRequested || projectId !== selectedProjectId() ||
             taskId !== selectedTaskId() || reviewing !== reviewOnly()) {
           resyncRequested = true
@@ -1151,9 +1161,9 @@ export function App() {
           resyncRequested = true
           continue
         }
-        if (!updates.projects) setProjects(projectList.projects)
-        if (taskList && projectId) {
-          if (!updates.taskLists.has(projectId)) setTasks(taskList.tasks)
+        if (projectList && !updates.projects) setProjects(projectList.projects)
+        if (projectId && (taskList || updates.taskLists.has(projectId))) {
+          if (taskList && !updates.taskLists.has(projectId)) setTasks(taskList.tasks)
           setLoadedTasksFor(projectId)
         }
         const settingsProjectId = settingsProject()?.id
@@ -1167,7 +1177,8 @@ export function App() {
           ]))
           reconcileReviewSelection()
         }
-        if (workspaceFailure) setError(`Could not refresh after missed updates: ${describe(workspaceFailure.error)}`)
+        if (workspaceFailure) failures.push(`Workspace: ${describe(workspaceFailure.error)}`)
+        if (failures.length) setError(`Could not refresh after missed updates: ${failures.join('; ')}`)
       } while (resyncRequested)
     } catch (failure) {
       setError(`Could not refresh after missed updates: ${describe(failure)}`)

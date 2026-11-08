@@ -67,6 +67,7 @@ test.beforeEach(async ({ context }) => {
     let pauseNextWorkspaceRead = false
     let pausedWorkspaceRead = false
     let failPausedWorkspaceRead = false
+    let failNextTerminalList = false
     let workspaceReads = 0
     let releaseTerminalWrite: (() => void) | undefined
     let expiringTerminalSubscription: string | undefined
@@ -882,6 +883,10 @@ test.beforeEach(async ({ context }) => {
             else otherInspectorTabs.set(args.projectId, args.tab)
             return null
           case 'terminal_list':
+            if (failNextTerminalList) {
+              failNextTerminalList = false
+              throw new Error('Fixture terminal list failed')
+            }
             return { projectId: args.projectId, revision: 0, terminals: [...terminals] }
           case 'start_terminal':
           case 'restart_terminal': {
@@ -1065,6 +1070,7 @@ test.beforeEach(async ({ context }) => {
       __workspaceReadPaused: () => pausedWorkspaceRead,
       __releaseWorkspaceRead: () => releaseWorkspaceRead?.(),
       __failWorkspaceRead: () => { failPausedWorkspaceRead = true; releaseWorkspaceRead?.() },
+      __failTerminalList: () => { failNextTerminalList = true },
       __workspaceReads: () => workspaceReads,
     })
     Object.assign(window, { __missProjectRename: () => { project.name = 'Renamed demo' } })
@@ -4032,4 +4038,22 @@ test('does not restore a task deleted during a delayed recovery read', async ({ 
   await expect(page.getByText('ready to go')).toHaveCount(0)
   await expect(page.getByRole('heading', { name: 'What should Codex build in demo?' })).toBeVisible()
   await expect(page.getByText(/Could not refresh after missed updates/)).toHaveCount(0)
+})
+
+
+test('recovers other snapshots when a terminal list refresh fails', async ({ page }) => {
+  await page.goto('/')
+  await expect(page.getByText('ready to go')).toBeVisible()
+  await page.evaluate(() => {
+    const fixture = window as unknown as {
+      __missProjectRename: () => void; __failTerminalList: () => void;
+      __emitCoreEvent: (event: ShepherdEvent) => void
+    }
+    fixture.__missProjectRename()
+    fixture.__failTerminalList()
+    fixture.__emitCoreEvent({ type: 'resyncRequired' })
+  })
+  await expect(page.getByRole('alert')).toContainText('Terminals: Fixture terminal list failed')
+  await expect(page.getByRole('button', { name: 'Renamed demo', exact: true })).toBeVisible()
+  await expect(page.getByText('ready to go')).toBeVisible()
 })
