@@ -807,38 +807,61 @@ async fn supervise_direct_child(
     stop: fn(&mut async_process::Child) -> Result<(), String>,
 ) -> Result<std::process::ExitStatus, String> {
     let mut wait_failed = false;
+    let mut signalled = false;
     loop {
-        if wait_failed {
-            let Some(response) = requests.recv().await else {
-                return Err(
-                    "terminal supervisor lost its stop channel after a wait failure".into(),
-                );
-            };
-            let result = stop(child);
-            let stopped = result.is_ok();
-            if response.send(result).is_err() {
-                tracing::debug!(
-                    terminal_id = key,
-                    "terminal termination requester disconnected"
-                );
-            }
-            if stopped {
-                wait_failed = false;
-            }
-            continue;
-        }
-        tokio::select! {
-            status = wait(child) => match status {
-                Ok(status) => return Ok(status),
-                Err(error) => {
-                    registry.record_wait_failure(key, format!("could not wait for terminal process: {error}"));
-                    wait_failed = true;
+        let response = if wait_failed {
+            requests
+                .recv()
+                .await
+                .ok_or("terminal supervisor lost its stop channel after a wait failure")?
+        } else {
+            tokio::select! {
+                status = wait(child) => match status {
+                    Ok(status) => return Ok(status),
+                    Err(error) => {
+                        registry.record_wait_failure(key, format!("could not wait for terminal process: {error}"));
+                        wait_failed = true;
+                        continue;
+                    }
+                },
+                response = requests.recv() => match response {
+                    Some(response) => response,
+                    None => return wait(child).await.map_err(|error| format!("could not wait for terminal process: {error}")),
                 }
-            },
-            Some(response) = requests.recv() => {
-                let result = stop(child);
-                if response.send(result).is_err() {
-                    tracing::debug!(terminal_id = key, "terminal termination requester disconnected");
+            }
+        };
+        if !signalled {
+            if let Err(error) = stop(child) {
+                if response.send(Err(error)).is_err() {
+                    tracing::debug!(
+                        terminal_id = key,
+                        "terminal termination requester disconnected"
+                    );
+                }
+                continue;
+            }
+            signalled = true;
+        }
+        match wait(child).await {
+            Ok(status) => {
+                registry.record_exit(key, &terminal_exit_status(status));
+                if response.send(Ok(())).is_err() {
+                    tracing::debug!(
+                        terminal_id = key,
+                        "terminal termination requester disconnected"
+                    );
+                }
+                return Ok(status);
+            }
+            Err(error) => {
+                let message = format!("could not wait for terminal process: {error}");
+                registry.record_wait_failure(key, message.clone());
+                wait_failed = true;
+                if response.send(Err(message)).is_err() {
+                    tracing::debug!(
+                        terminal_id = key,
+                        "terminal termination requester disconnected"
+                    );
                 }
             }
         }
@@ -929,7 +952,7 @@ mod tests {
                     + '_,
             >,
         > {
-            if WAIT_CALLS.fetch_add(1, Ordering::SeqCst) == 0 {
+            if WAIT_CALLS.fetch_add(1, Ordering::SeqCst) < 2 {
                 Box::pin(async { Err(std::io::Error::other("fixture wait failure")) })
             } else {
                 wait_direct_child(child)
@@ -988,6 +1011,13 @@ mod tests {
                 .await
                 .is_err_and(|error| error.contains("fixture stop failure"))
         );
+        assert!(
+            registry
+                .stop_direct("fixture")
+                .await
+                .is_err_and(|error| error.contains("fixture wait failure"))
+        );
+        assert!(registry.entries().contains_key("fixture"));
         registry
             .stop_direct("fixture")
             .await
@@ -995,7 +1025,7 @@ mod tests {
         tokio::time::timeout(std::time::Duration::from_secs(2), supervisor)
             .await??
             .map_err(std::io::Error::other)?;
-        assert_eq!(WAIT_CALLS.load(Ordering::SeqCst), 2);
+        assert_eq!(WAIT_CALLS.load(Ordering::SeqCst), 3);
         assert_eq!(STOP_CALLS.load(Ordering::SeqCst), 2);
         Ok(())
     }

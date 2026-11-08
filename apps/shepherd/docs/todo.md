@@ -1427,7 +1427,9 @@ placeholder tabs and no unearned state badges.
   A direct terminal process wait failure is also returned to current and later
   exit waiters instead of being recorded as an exit with unknown status. The
   supervisor retains the child, permits stop retries, and retries the wait after
-  a successful stop; registry and injected-failure subprocess fixtures cover it.
+  a successful stop. Stop does not report success until the child is reaped;
+  repeated wait failures retain it without signalling the group again. Registry
+  and injected-failure subprocess fixtures cover these paths.
   Output permits remain held through the harness queue until the core
   consumes the events. A direct terminal's exit wait completes even if a
   descendant keeps an output pipe open, and shutdown rejects new terminals.
