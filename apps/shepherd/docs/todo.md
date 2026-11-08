@@ -1389,7 +1389,9 @@ placeholder tabs and no unearned state badges.
   both errors are reported when both requests fail. If an active turn’s
   cancellation fails or its future is dropped, Shepherd stops the server and
   blocks further work until cleanup; local fixtures cover an interrupted request
-  and successful cancellation without stopping the server.
+  and successful cancellation without stopping the server. A failed cancellation
+  reports request and cleanup errors together, retains cleanup for retry and
+  has a local fixture covering both failures.
   Core sessions distinguish a disconnected adapter from completed cleanup.
   Retry, task deletion, batch archive and quit all attempt shutdown before
   discarding a disconnected session; an injected-failure fixture verifies that
