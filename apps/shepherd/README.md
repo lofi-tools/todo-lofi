@@ -23,8 +23,10 @@ Closing the app discards the session database. The next `shep --test` launch
 starts empty again.
 
 Build the app bundle with `direnv exec . pnpm --dir apps/shepherd build`.
-The build script sets the macOS deployment target to 13.0; use a clean target
-directory when checking a release so older cached objects cannot change it.
+The app's `build` script sets the macOS deployment target to 13.0; use a
+clean target directory when checking a release so older cached objects cannot
+change it. `cargo test -p shepherd --test packaging` checks that the Tauri
+config, build script, CI workflows and Nix Zig pin still agree.
 The manually dispatched **Shepherd package smoke** workflow builds debug macOS
 and Ubuntu bundles on clean runners without launching the app.
 

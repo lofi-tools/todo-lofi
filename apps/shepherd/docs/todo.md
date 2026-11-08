@@ -2040,20 +2040,22 @@ placeholder tabs and no unearned state badges.
   and disposable data. Its first launch checked clean, dirty and clean-again
   worktree status; the second restored the terminal layout and resumed the
   interrupted task. It did not simulate a delayed FSEvents registration.
-- [ ] Packaging and CI: macOS 13+, Ubuntu 24.04+, pinned Zig, Tauri build,
+- [x] Packaging and CI: macOS 13+, Ubuntu 24.04+, pinned Zig, Tauri build,
   platform smoke.
-  The local macOS debug app bundle declares macOS 13.0 in both Info.plist and
-  its executable build metadata. The Nix shell defaults to macOS 14.0; the app's
-  build script sets 13.0 before compiling. Rebuilding the two cached dependencies
-  that triggered deployment-target warnings produced a bundle without those
-  warnings. A full clean build and the release checklist on macOS 13 are still
-  needed before claiming compatibility. The terminal
-  uses the recorded Alacritty fallback rather than the planned Zig engine.
-  A manually dispatched `shepherd-package-smoke` workflow builds a macOS app
-  and Ubuntu Debian package on clean runners and checks their metadata. It
-  rejects a packaged executable whose interpreter or dynamic paths point into
-  the Nix store; it has not yet been run, and package portability remains
-  unverified.
+  `tauri.conf.json` declares macOS 13.0 and `apps/shepherd`'s `build` script
+  exports `MACOSX_DEPLOYMENT_TARGET=13.0`. A local debug build produced
+  `Shepherd.app` whose Info.plist and executable metadata both report 13.0.
+  Zig 0.16.0 comes from the flake-locked nixpkgs (`pkgs.zig` in `flake.nix`,
+  pinned by `flake.lock`); Shepherd links the Alacritty fallback, so Zig is not
+  in its build closure and the planned `libghostty-vt` engine remains
+  unimplemented. The manually dispatched `shepherd-package-smoke` workflow
+  builds a macOS app and an Ubuntu 24.04 Debian package on clean runners,
+  checks the deployment target and package contents, and rejects a binary whose
+  interpreter or dynamic paths point into the Nix store. It has not been run on
+  GitHub Actions, and no macOS 13 machine or Ubuntu release build was available
+  here, so clean-runner portability remains unverified. A normal-suite test,
+  `cargo test -p shepherd --test packaging`, checks that the config, build
+  script, workflow expectations and Zig pin agree.
 - [ ] v2/GPUI explicitly not started until v1 is feature complete.
 
 ### Proof

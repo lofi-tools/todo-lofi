@@ -20,6 +20,8 @@ jobs:
       - uses: DeterminateSystems/determinate-nix-action@v3
       - name: Install frontend dependencies
         run: nix develop --impure -c pnpm --filter shepherd-app --filter shepherd-ui install --frozen-lockfile
+      - name: Check packaging configuration
+        run: nix develop --impure -c cargo test -p shepherd --test packaging
       - name: Build the macOS app bundle
         run: nix develop --impure -c pnpm --dir apps/shepherd build --debug --bundles app
       - name: Verify the macOS deployment target
