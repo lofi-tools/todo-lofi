@@ -19,6 +19,7 @@ use crate::{HarnessError, HarnessResult, SpawnSpec};
 
 const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 const MAX_PENDING_REQUESTS: usize = 64;
+const MAX_QUEUED_EVENTS: usize = 32;
 const STDERR_TAIL_BYTES: usize = 16 * 1024;
 const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(3);
@@ -26,7 +27,7 @@ const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(3);
 pub struct PiRpc {
     input: Option<mpsc::Sender<Vec<u8>>>,
     replies: Replies,
-    events: Mutex<mpsc::UnboundedReceiver<PiRpcEvent>>,
+    events: Mutex<mpsc::Receiver<PiRpcEvent>>,
     supervisor: JoinHandle<HarnessResult<()>>,
     supervisor_complete: bool,
     supervisor_error: Option<String>,
@@ -136,7 +137,7 @@ impl PiRpc {
             return Err(protocol("Pi did not expose its RPC pipes"));
         };
         let (input, outgoing) = mpsc::channel(32);
-        let (events, receiver) = mpsc::unbounded_channel();
+        let (events, receiver) = mpsc::channel(MAX_QUEUED_EVENTS + 1);
         let (shutdown_request, mut shutdown) = mpsc::unbounded_channel();
         let (stop_errors, stop_error_receiver) = mpsc::unbounded_channel();
         let (writer_failure, mut writer_failed) = oneshot::channel();
@@ -258,7 +259,7 @@ impl PiRpc {
                     stderr.abort();
                 }
                 let stderr = String::from_utf8_lossy(&stderr_tail.lock().await).into_owned();
-                if let Err(error) = events.send(PiRpcEvent::Exited {
+                if let Err(error) = events.try_send(PiRpcEvent::Exited {
                     code,
                     stderr,
                     protocol_error: protocol_error.map(|error| error.to_string()),
@@ -514,7 +515,7 @@ async fn write_input(
 async fn read_output(
     mut reader: impl AsyncBufRead + Unpin,
     replies: &Replies,
-    events: &mpsc::UnboundedSender<PiRpcEvent>,
+    events: &mpsc::Sender<PiRpcEvent>,
 ) -> HarnessResult<()> {
     while let Some(record) = read_record(&mut reader).await? {
         let Some(kind) = record["type"].as_str() else {
@@ -533,8 +534,12 @@ async fn read_output(
                 tracing::debug!("Pi RPC caller released its response");
             }
         } else {
+            // Reserve one slot for the exit report if the consumer falls behind.
+            if events.capacity() <= 1 {
+                return Err(protocol("Pi RPC event queue is full"));
+            }
             events
-                .send(PiRpcEvent::Record(record))
+                .try_send(PiRpcEvent::Record(record))
                 .map_err(|_| HarnessError::ChannelClosed)?;
         }
     }
@@ -587,6 +592,51 @@ fn protocol(message: impl Into<String>) -> HarnessError {
 mod tests {
 
     use super::*;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn event_burst_reports_overflow_and_stops_the_process()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let script = directory.path().join("pi-event-burst.sh");
+        std::fs::write(
+            &script,
+            r#"
+IFS= read -r state || exit 3
+state_id=$(printf '%s\n' "$state" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
+printf '{"type":"response","id":"%s","command":"get_state","success":true,"data":{"sessionId":"pi-fixture","sessionFile":null,"isStreaming":false,"isCompacting":false,"pendingMessageCount":0}}\n' "$state_id"
+IFS= read -r request || exit 4
+(sleep 1; printf survived > child-survived) >/dev/null 2>&1 &
+for number in $(seq 1 33); do printf '{"type":"fixture","number":%s}\n' "$number"; done
+exec sleep 30
+"#,
+        )?;
+        let spec = SpawnSpec {
+            program: "/bin/sh".into(),
+            args: vec![script.to_string_lossy().into_owned()],
+            cwd: directory.path().to_owned(),
+            ..SpawnSpec::default()
+        };
+        let (mut rpc, _) = PiRpc::start(&spec).await?;
+        assert!(matches!(
+            timeout(Duration::from_secs(5), rpc.request("get_state", Map::new())).await?,
+            Err(HarnessError::ChannelClosed)
+        ));
+        for number in 1..=MAX_QUEUED_EVENTS {
+            assert!(matches!(
+                rpc.next_event().await,
+                Some(PiRpcEvent::Record(record)) if record["number"] == number
+            ));
+        }
+        assert!(matches!(
+            timeout(Duration::from_secs(5), rpc.next_event()).await?,
+            Some(PiRpcEvent::Exited { protocol_error: Some(error), .. }) if error.contains("event queue is full")
+        ));
+        rpc.shutdown().await?;
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        assert!(!directory.path().join("child-survived").exists());
+        Ok(())
+    }
 
     #[cfg(unix)]
     #[tokio::test]
@@ -697,7 +747,7 @@ while IFS= read -r request; do :; done
             .await
             .pending
             .insert("fixture-private-value".into(), sender);
-        let (events, _receiver) = mpsc::unbounded_channel();
+        let (events, _receiver) = mpsc::channel(MAX_QUEUED_EVENTS + 1);
         read_output(BufReader::new(b"{\"type\":\"response\",\"id\":\"fixture-private-value\",\"command\":\"get_state\",\"success\":true}\n".as_slice()), &replies, &events).await?;
         let output = String::from_utf8(logs.lock().map_err(|error| error.to_string())?.clone())?;
         assert!(output.contains("Pi RPC caller released its response"));
@@ -720,7 +770,7 @@ while IFS= read -r request; do :; done
             .await
             .pending
             .extend([("first".into(), first), ("second".into(), second)]);
-        let (events, mut received) = mpsc::unbounded_channel();
+        let (events, mut received) = mpsc::channel(MAX_QUEUED_EVENTS + 1);
         read_output(
             BufReader::with_capacity(2, frames.as_bytes()),
             &replies,

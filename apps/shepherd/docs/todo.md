@@ -1369,7 +1369,10 @@ placeholder tabs and no unearned state badges.
   are rejected above 8 MiB while reading, with a protocol error. Event queues
   and other buffer limits still need review. Pi admits at most 64 pending RPC
   requests, rejects excess requests and reclaims cancelled requests on the next
-  attempt; a local subprocess fixture checks saturation and recovery. Codex app-server, exec and
+  attempt; a local subprocess fixture checks saturation and recovery. Pi also
+  bounds unread RPC events to 32; overflow fails the transport explicitly,
+  reserving space for its exit report. A subprocess fixture checks the queued
+  events, error and process cleanup. Codex app-server, exec and
   handshake protocol lines have the same limit; oversized exec output fails
   the turn and stops its process group, including a descendant in the local
   fixture. Exec keeps draining output while it makes
