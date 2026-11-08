@@ -268,14 +268,7 @@ impl TursoStore {
 
     async fn open_driver(driver: Turso, path: Option<&Path>) -> Result<Self, StoreError> {
         let _migration_lock = if let Some(path) = path {
-            let path = path.to_path_buf();
-            Some(
-                tokio::task::spawn_blocking(move || lock_database_migrations(&path))
-                    .await
-                    .map_err(|error| {
-                        StoreError::Backend(format!("migration lock worker failed: {error}"))
-                    })??,
-            )
+            Some(acquire_database_migration_lock(path).await?)
         } else {
             None
         };
@@ -301,7 +294,40 @@ impl TursoStore {
     }
 }
 
+async fn acquire_database_migration_lock(path: &Path) -> Result<std::fs::File, StoreError> {
+    let path = path.to_path_buf();
+    let display = path.display().to_string();
+    let file = tokio::task::spawn_blocking(move || open_database_migration_lock(&path))
+        .await
+        .map_err(|error| StoreError::Backend(format!("migration lock worker failed: {error}")))??;
+    loop {
+        match file.try_lock() {
+            Ok(()) => return Ok(file),
+            Err(std::fs::TryLockError::WouldBlock) => {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+            Err(std::fs::TryLockError::Error(error)) => {
+                return Err(StoreError::Backend(format!(
+                    "could not acquire database migration lock for {display}: {error}"
+                )));
+            }
+        }
+    }
+}
+
+#[cfg(test)]
 fn lock_database_migrations(path: &Path) -> Result<std::fs::File, StoreError> {
+    let file = open_database_migration_lock(path)?;
+    file.lock().map_err(|error| {
+        StoreError::Backend(format!(
+            "could not acquire database migration lock for {}: {error}",
+            path.display()
+        ))
+    })?;
+    Ok(file)
+}
+
+fn open_database_migration_lock(path: &Path) -> Result<std::fs::File, StoreError> {
     let canonical = match std::fs::canonicalize(path) {
         Ok(path) => path,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -385,12 +411,6 @@ fn lock_database_migrations(path: &Path) -> Result<std::fs::File, StoreError> {
             lock_path.display()
         )));
     }
-    file.lock().map_err(|error| {
-        StoreError::Backend(format!(
-            "could not acquire database migration lock {}: {error}",
-            lock_path.display()
-        ))
-    })?;
     Ok(file)
 }
 
@@ -2622,6 +2642,35 @@ mod tests {
         child.kill().await?;
         let store = tokio::time::timeout(std::time::Duration::from_secs(10), open).await???;
         assert!(store.load_projects().await?.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn cancelled_database_open_does_not_occupy_a_blocking_worker()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = TestDirectory::new()?;
+        let path = directory.join("cancelled.db");
+        let lock = lock_database_migrations(&path)?;
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .max_blocking_threads(1)
+            .build()?;
+        runtime.block_on(async {
+            let open_path = path.clone();
+            let open = tokio::spawn(async move { TursoStore::open_at(&open_path).await });
+            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+            assert!(!open.is_finished());
+            open.abort();
+            assert!(open.await.is_err());
+            let worker = tokio::task::spawn_blocking(|| 42);
+            assert_eq!(
+                tokio::time::timeout(std::time::Duration::from_secs(2), worker).await??,
+                42
+            );
+            assert!(!path.exists());
+            Ok::<(), Box<dyn std::error::Error>>(())
+        })?;
+        drop(lock);
         Ok(())
     }
 
