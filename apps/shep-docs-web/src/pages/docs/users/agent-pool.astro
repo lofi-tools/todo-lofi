@@ -21,8 +21,9 @@ const toc = [
 >
   <Callout tone="note" title="Pool management is here; task selection is not">
     Settings → Agent pool can inspect existing slots, reorder them, disable or enable them, correct a
-    slot's limit and reset time, and clear its cooldown. New tasks still do not select a pool slot
-    automatically, and the one-turn force control is not in the current build.
+    slot's limit and reset time, clear its cooldown, and force one slot for the next turn. New tasks
+    still do not select a pool slot automatically: automatic selection is
+    not in the current build, so a forced slot is recorded but not used yet.
   </Callout>
 
   <h2 id="status">Status</h2>
@@ -74,7 +75,8 @@ const toc = [
     reset, current task, last error and last-used time. You can move a slot up or down, disable or
     enable it, correct its limit, unit and reset time, and clear its cooldown. The pool UI does not
     display credentials or invent a quota. A saved limit is a local correction, not a provider
-    guarantee. Forcing a slot for one turn is still planned.
+    guarantee. One available slot can be forced for the next turn: the marker is session state, shown
+    at the top of the panel with a clear action, and it is never written to the pool database.
   </p>
 
   <h2 id="limits">What it will not do</h2>
@@ -93,8 +95,9 @@ const toc = [
   <p>
     Use the agent picker per task and keep a terminal open when you need to switch manually. If pool
     slots already exist, Settings → Agent pool lets you inspect their status, reorder them, disable
-    or enable them, correct their limits and reset times, and clear a cooldown. Automatic selection
-    for new tasks is not wired. If an agent is missing or
+    or enable them, correct their limits and reset times, clear a cooldown, and force a slot for the
+    next turn. Automatic selection for new tasks is not wired, so the forced slot is not consumed
+    yet. If an agent is missing or
     its adapter falls back, <a href="/docs/users/troubleshooting#agents">Troubleshooting</a> explains
     what to check. The <a href="/docs/users/releases">releases page</a> tracks the other next-step
     items.

@@ -133,6 +133,7 @@ test.beforeEach(async ({ context }) => {
 
     const poolOperations: string[] = []
     let poolStatusReads = 0
+    let poolForcedSlot: string | null = null
     let poolSlots = [
       {
         id: 'slot-acme', agent: 'codex', providerId: 'acme', providerName: 'Acme', modelId: 'model-a', modelName: 'Model A',
@@ -172,6 +173,7 @@ test.beforeEach(async ({ context }) => {
           latestQuota: poolQuota(slot),
           currentRequest: null,
         })),
+        forcedSlot: poolForcedSlot,
       }
     }
 
@@ -535,6 +537,29 @@ test.beforeEach(async ({ context }) => {
             poolSlots[index] = { ...current, cooldownUntil: null, updatedAt: 1_800_000_000_000 }
             poolOperations.push(`cooldown:${args.slotId}`)
             return { slot: { ...poolSlots[index] }, latestQuota: poolQuota(poolSlots[index], 'user'), availability: poolAvailability(poolSlots[index]), applied: true, reason: 'cooldown cleared by user' }
+          }
+          case 'pool_force_slot': {
+            if (options.has('pool-force-reject')) {
+              return { forcedSlot: poolForcedSlot, applied: false, reason: 'cannot force an exhausted slot: quota exhausted: used 10 of 10 requests' }
+            }
+            if (!poolSlots.some((slot) => slot.id === args.slotId)) {
+              throw { message: `Pool slot ${args.slotId} was not found.` }
+            }
+            if (poolForcedSlot === args.slotId) {
+              return { forcedSlot: poolForcedSlot, applied: false, reason: 'slot is already forced for the next turn' }
+            }
+            poolForcedSlot = args.slotId
+            poolOperations.push(`force:${args.slotId}`)
+            return { forcedSlot: poolForcedSlot, applied: true, reason: 'slot forced for the next turn' }
+          }
+          case 'pool_clear_force': {
+            if (poolForcedSlot == null) {
+              return { forcedSlot: null, applied: false, reason: 'no slot is forced for the next turn' }
+            }
+            const cleared = poolForcedSlot
+            poolForcedSlot = null
+            poolOperations.push(`unforce:${cleared}`)
+            return { forcedSlot: null, applied: true, reason: `force for ${cleared} cleared` }
           }
           case 'subscribe':
             eventChannel = args.channel.id
@@ -3281,6 +3306,50 @@ test('corrects pool quotas, rejects an invalid correction and clears a cooldown'
   await expect(zed.getByRole('button', { name: 'Clear cooldown for Zed · Model B' })).toHaveCount(0)
   await expect.poll(() => page.evaluate(() => (window as unknown as { __poolOperations: string[] }).__poolOperations))
     .toEqual(['correct:slot-acme:20:requests:1800000000000', 'cooldown:slot-zed'])
+})
+
+test('forces a pool slot for one turn with confirmation and clears it', async ({ page }) => {
+  await page.goto('/')
+  await page.getByRole('button', { name: 'Settings', exact: true }).click()
+  await page.getByRole('navigation', { name: 'Settings categories' }).getByRole('button', { name: 'Agent pool' }).click()
+  const pool = page.getByRole('region', { name: 'Agent pool' })
+  const acme = pool.locator('.pool__slot').filter({ hasText: 'Acme · Model A' })
+  const zed = pool.locator('.pool__slot').filter({ hasText: 'Zed · Model B' })
+
+  await expect(zed.getByRole('button', { name: 'Force Zed · Model B for the next turn' })).toBeDisabled()
+  await expect(zed.getByText('Only available slots can be forced.')).toBeVisible()
+
+  await acme.getByRole('button', { name: 'Force Acme · Model A for the next turn' }).click()
+  await expect(acme.getByText('Force Acme · Model A for the next turn?')).toBeVisible()
+  await acme.getByRole('button', { name: 'Cancel forcing Acme · Model A' }).click()
+  await expect(acme.getByRole('button', { name: 'Confirm forcing Acme · Model A' })).toHaveCount(0)
+
+  await acme.getByRole('button', { name: 'Force Acme · Model A for the next turn' }).click()
+  await acme.getByRole('button', { name: 'Confirm forcing Acme · Model A' }).click()
+  await expect(pool.getByRole('status')).toHaveText('slot forced for the next turn')
+  const forced = pool.getByRole('group', { name: 'Forced slot' })
+  await expect(forced).toContainText('Forced for the next turn: Acme · Model A.')
+  await expect(acme.getByText('Forced for the next turn.')).toBeVisible()
+
+  await forced.getByRole('button', { name: 'Clear force' }).click()
+  await expect(pool.getByRole('status')).toHaveText('force for slot-acme cleared')
+  await expect(pool.getByRole('group', { name: 'Forced slot' })).toHaveCount(0)
+  await expect.poll(() => page.evaluate(() => (window as unknown as { __poolOperations: string[] }).__poolOperations))
+    .toEqual(['force:slot-acme', 'unforce:slot-acme'])
+})
+
+test('surfaces a rejected pool force without marking the slot', async ({ page }) => {
+  await page.goto('/?pool-force-reject')
+  await page.getByRole('button', { name: 'Settings', exact: true }).click()
+  await page.getByRole('navigation', { name: 'Settings categories' }).getByRole('button', { name: 'Agent pool' }).click()
+  const pool = page.getByRole('region', { name: 'Agent pool' })
+  const acme = pool.locator('.pool__slot').filter({ hasText: 'Acme · Model A' })
+
+  await acme.getByRole('button', { name: 'Force Acme · Model A for the next turn' }).click()
+  await acme.getByRole('button', { name: 'Confirm forcing Acme · Model A' }).click()
+  await expect(pool.getByRole('status')).toHaveText('cannot force an exhausted slot: quota exhausted: used 10 of 10 requests')
+  await expect(pool.getByRole('group', { name: 'Forced slot' })).toHaveCount(0)
+  await expect(acme.getByRole('button', { name: 'Force Acme · Model A for the next turn' })).toBeVisible()
 })
 
 test('surfaces a pool status failure and retries it', async ({ page }) => {

@@ -2,8 +2,10 @@ import { For, Show, createEffect, createResource, createSignal } from 'solid-js'
 
 import {
   AGENT_LABELS,
+  clearPoolForce,
   clearPoolSlotCooldown,
   correctPoolQuota,
+  forcePoolSlot,
   poolStatus,
   reorderPoolSlots,
   setPoolSlotEnabled,
@@ -73,13 +75,16 @@ function slotName(slot: PoolSlot) {
 function PoolSlotEditor(props: {
   entry: PoolSlotStatus
   busy: boolean
+  forced: boolean
   onCorrect: (limit: number | null, limitUnit: string | null, resetAt: number | null) => void
   onClearCooldown: () => void
+  onForce: () => void
 }) {
   const [limit, setLimit] = createSignal('')
   const [limitUnit, setLimitUnit] = createSignal('')
   const [reset, setReset] = createSignal('')
   const [error, setError] = createSignal('')
+  const [confirming, setConfirming] = createSignal(false)
   const name = () => slotName(props.entry.slot)
   const cooldown = () => props.entry.latestQuota?.cooldownUntil ?? props.entry.slot.cooldownUntil
 
@@ -139,6 +144,29 @@ function PoolSlotEditor(props: {
             onClick={() => { setError(''); props.onClearCooldown() }}>Clear cooldown</button>
         </Show>
       </div>
+      <div class="pool__force-actions">
+        <Show when={props.forced}>
+          <p class="pool__hint">Forced for the next turn.</p>
+        </Show>
+        <Show when={!props.forced && confirming()}>
+          <p class="pool__hint">Force {name()} for the next turn?</p>
+          <button type="button" class="project-action" disabled={props.busy}
+            aria-label={`Confirm forcing ${name()}`}
+            onClick={() => { setConfirming(false); props.onForce() }}>Confirm force</button>
+          <button type="button" class="project-action" disabled={props.busy}
+            aria-label={`Cancel forcing ${name()}`}
+            onClick={() => setConfirming(false)}>Cancel</button>
+        </Show>
+        <Show when={!props.forced && !confirming()}>
+          <button type="button" class="project-action"
+            disabled={props.busy || props.entry.availability.state !== 'available'}
+            aria-label={`Force ${name()} for the next turn`}
+            onClick={() => setConfirming(true)}>Force next turn</button>
+          <Show when={props.entry.availability.state !== 'available'}>
+            <p class="pool__hint">Only available slots can be forced.</p>
+          </Show>
+        </Show>
+      </div>
       <Show when={error()}>
         <p class="pool__field-error" role="alert">{error()}</p>
       </Show>
@@ -160,6 +188,8 @@ export function PoolSettings() {
   })
 
   const slots = () => status.latest?.value?.slots ?? []
+  const forcedSlot = () => status.latest?.value?.forcedSlot ?? null
+  const forcedEntry = () => slots().find((entry) => entry.slot.id === forcedSlot())
   const loadError = () => status.latest?.error ?? ''
   const visibleError = () => actionError() || loadError()
 
@@ -201,6 +231,14 @@ export function PoolSettings() {
     void mutate('cooldown', async () => (await clearPoolSlotCooldown(slotId)).reason)
   }
 
+  function force(slotId: string) {
+    void mutate('force', async () => (await forcePoolSlot(slotId)).reason)
+  }
+
+  function clearForce() {
+    void mutate('force', async () => (await clearPoolForce()).reason)
+  }
+
   return (
     <section class="pool" aria-label="Agent pool" aria-busy={status.loading || !!busy()}>
       <div class="pool__intro">
@@ -211,6 +249,16 @@ export function PoolSettings() {
         <button type="button" class="project-action" disabled={status.loading || !!busy()}
           onClick={() => { setActionError(''); void refetch() }}>Refresh pool</button>
       </div>
+
+      <Show when={forcedEntry()}>
+        {(entry) => (
+          <div class="pool__force" role="group" aria-label="Forced slot">
+            <p>Forced for the next turn: {slotName(entry().slot)}.</p>
+            <button type="button" class="project-action" disabled={status.loading || !!busy()}
+              onClick={() => clearForce()}>Clear force</button>
+          </div>
+        )}
+      </Show>
 
       <Show when={notice()}>
         <p class="pool__notice" role="status">{notice()}</p>
@@ -266,8 +314,10 @@ export function PoolSettings() {
                   onClick={() => toggle(entry.slot)}>{entry.slot.enabled ? 'Disable' : 'Enable'}</button>
               </div>
               <PoolSlotEditor entry={entry} busy={!!busy()}
+                forced={entry.slot.id === forcedSlot()}
                 onCorrect={(limit, limitUnit, resetAt) => correct(entry.slot.id, limit, limitUnit, resetAt)}
-                onClearCooldown={() => clearCooldown(entry.slot.id)} />
+                onClearCooldown={() => clearCooldown(entry.slot.id)}
+                onForce={() => force(entry.slot.id)} />
             </li>
           )}
         </For>

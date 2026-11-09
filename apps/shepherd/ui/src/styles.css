@@ -1245,6 +1245,37 @@ textarea {
   overflow-wrap: anywhere;
 }
 
+.pool__force,
+.pool__force-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.pool__force {
+  justify-content: space-between;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface-raised);
+}
+
+.pool__force-actions {
+  grid-column: 1 / -1;
+}
+
+.pool__force p,
+.pool__hint {
+  margin: 0;
+}
+
+.pool__hint {
+  color: var(--text-muted);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
 .settings__preview-url input,
 .settings__shortcut-row input {
   min-width: 0;

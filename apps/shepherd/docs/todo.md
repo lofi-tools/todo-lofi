@@ -2601,7 +2601,24 @@ implemented; no public deployment exists yet.
     reasons. No migration was needed. The core suite passes 198 tests (4
     ignored); clippy and fmt are clean, the app has 124 passing e2e tests, and
     the docs have 31 passing e2e tests.
-  - [ ] Wire the existing one-turn force override into the pool UI.
+  - [x] Wire the existing one-turn force override into the pool UI.
+    Evidence (2026-11-09): `PoolForceRequest` and `PoolForceOutcome` live in
+    `shepherd-core`, and `Core::{force_pool_slot,clear_pool_force,pool_selection_request}`
+    keep the forced slot in session state, so neither store ever writes it and
+    `PoolStatus.forced_slot` reports the marker. Forcing an available slot
+    applies, a repeat returns `applied: false` with its reason, and a disabled,
+    exhausted, cooling-down, unhealthy or unknown slot is rejected with its
+    availability reason; an empty or missing slot is an error. Building a
+    selection request consumes the marker as the selection override, so it
+    covers exactly one turn, and a reopened Turso store reports no forced slot.
+    Tauri commands `pool_force_slot` and `pool_clear_force` back a per-slot
+    confirmation plus a clear action in Settings → Agent pool, and unavailable
+    slots show a local hint instead of a force button. Tests cover one-turn
+    consumption, repeats, unavailable and missing slots, re-open state, the
+    confirmation and its cancellation, a rejected force and clearing.
+    `cargo test -p shepherd-core` passes 199 tests (4 ignored), clippy and fmt
+    are clean, the app has 126 passing e2e tests, and the docs have 31 passing
+    e2e tests. Task-start selection remains later work.
 
 ---
 

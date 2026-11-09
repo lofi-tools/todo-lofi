@@ -443,6 +443,10 @@ pub struct PoolSlotStatus {
 pub struct PoolStatus {
     pub generated_at: u64,
     pub slots: Vec<PoolSlotStatus>,
+    /// The slot forced for the next turn, which is session state rather than a
+    /// stored pool field, so the stores always report `None` here.
+    #[serde(default)]
+    pub forced_slot: Option<PoolSlotId>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -2205,6 +2209,7 @@ impl Store for TursoStore {
         Ok(PoolStatus {
             generated_at: now,
             slots: statuses,
+            forced_slot: None,
         })
     }
 
@@ -3990,6 +3995,7 @@ impl Store for MemoryStore {
         Ok(PoolStatus {
             generated_at: now,
             slots: statuses,
+            forced_slot: None,
         })
     }
 

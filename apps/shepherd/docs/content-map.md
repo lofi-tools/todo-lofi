@@ -70,7 +70,7 @@ copy.
 
 | Capability | Classification | Public treatment |
 | --- | --- | --- |
-| Quota-aware agent pool | **L** next; **U** agent pool; **C** quota ledger | The landing page says next. The user page says management exists but task selection does not. The contributor page documents slots, the ledger, availability, selection, idle release and the Settings status/reorder/enable/correction/cooldown UI; task-start wiring and the force control are pending. |
+| Quota-aware agent pool | **L** next; **U** agent pool; **C** quota ledger | The landing page says next. The user page says management exists but task selection does not. The contributor page documents slots, the ledger, availability, selection, idle release and the Settings status/reorder/enable/correction/cooldown/force UI; task-start wiring is pending. |
 | Signed macOS/Linux artifacts | **L** next; **U** releases; **C** release pipeline | No signed release yet. The release gate has not been run; no downloads route. |
 | Windows support and installer | **L** planned; **U** releases | Planned with no date; no setup page. |
 | Preview annotation wrapper | **U** preview (user warning); **C** annotation API (token, claim, origin, validation) | The user page explains the capability and the sharing warning; the protocol is contributor-only. |
@@ -121,7 +121,7 @@ a guide page, a contributor note, or not public.
 | `/docs/contributors` | Crate boundaries, runtime shape, status, reading order, ground rules | It is a map of the code, not a product promise. |
 | `/docs/contributors/adapter-contracts` | Tiers, trait, events, turn ownership, capabilities, approvals, failures, contract tests | Adapter authors need the event and capability contract. |
 | `/docs/contributors/annotation-api` | Shared payload, bounds, wrapper security, prompt assembly, tests | Token, claim and origin rules are an implementation boundary. |
-| `/docs/contributors/quota-ledger` | Slot, ledger, availability, selection, idle release and Settings status/reorder/enable/correction/cooldown implemented; force-slot and task-start wiring are planned | Core code, UI code and tests exist; the remaining parts are a design contract. |
+| `/docs/contributors/quota-ledger` | Slot, ledger, availability, selection, idle release and Settings status/reorder/enable/correction/cooldown/force implemented; task-start wiring is planned | Core code, UI code and tests exist; the remaining part is a design contract. |
 | `/docs/contributors/release-pipeline` | Build inputs, smoke workflows, clean-machine gate, artifact checks, signing | Packaging and release evidence are not a user workflow. |
 | `/docs/contributors/test-fixtures` | Test layers, recorded fixtures, fake harness, UI, live smokes, docs tests, rules | Fixture strategy is only useful to contributors. |
 

@@ -35,8 +35,9 @@ use shepherd_core::terminal::{
     TerminalService, TerminalSpec,
 };
 use shepherd_core::{
-    Agent, Command, CommandResult, Core, CoreError, Event, ProjectApprovalsSnapshot, ProjectId,
-    ProjectList, QuitSummary, TaskId, TaskList, TaskState, TaskWorkspace, WorkspaceLayout,
+    Agent, Command, CommandResult, Core, CoreError, Event, PoolForceOutcome, PoolForceRequest,
+    ProjectApprovalsSnapshot, ProjectId, ProjectList, QuitSummary, TaskId, TaskList, TaskState,
+    TaskWorkspace, WorkspaceLayout,
 };
 use tokio::sync::{Mutex, Semaphore, broadcast, mpsc, oneshot, watch};
 use tokio::time::Instant;
@@ -1850,6 +1851,22 @@ impl ShellState {
             .map_err(BridgeError::from)
     }
 
+    pub async fn force_pool_slot(&self, slot_id: String) -> Result<PoolForceOutcome, BridgeError> {
+        let request = PoolForceRequest {
+            slot_id: PoolSlotId::new(slot_id),
+            now: now_millis(),
+        };
+        let mut core = self.core.lock().await;
+        core.force_pool_slot(&request)
+            .await
+            .map_err(BridgeError::from)
+    }
+
+    pub async fn clear_pool_force(&self) -> Result<PoolForceOutcome, BridgeError> {
+        let mut core = self.core.lock().await;
+        Ok(core.clear_pool_force())
+    }
+
     pub async fn reorder_pool_slots(
         &self,
         slot_ids: Vec<String>,
@@ -3124,6 +3141,21 @@ pub mod commands {
         slot_id: String,
     ) -> Result<PoolQuotaCorrectionOutcome, BridgeError> {
         state.inner().clear_pool_slot_cooldown(slot_id).await
+    }
+
+    #[tauri::command]
+    pub async fn pool_force_slot(
+        state: State<'_, ShellState>,
+        slot_id: String,
+    ) -> Result<PoolForceOutcome, BridgeError> {
+        state.inner().force_pool_slot(slot_id).await
+    }
+
+    #[tauri::command]
+    pub async fn pool_clear_force(
+        state: State<'_, ShellState>,
+    ) -> Result<PoolForceOutcome, BridgeError> {
+        state.inner().clear_pool_force().await
     }
 
     #[tauri::command]

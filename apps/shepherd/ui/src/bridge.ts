@@ -152,6 +152,7 @@ export interface PoolSlotStatus {
 export interface PoolStatus {
   generatedAt: number
   slots: PoolSlotStatus[]
+  forcedSlot: string | null
 }
 
 export interface PoolReorderOutcome {
@@ -195,6 +196,20 @@ export function correctPoolQuota(
 
 export function clearPoolSlotCooldown(slotId: string): Promise<PoolQuotaCorrectionOutcome> {
   return invoke('pool_clear_cooldown', { slotId })
+}
+
+export interface PoolForceOutcome {
+  forcedSlot: string | null
+  applied: boolean
+  reason: string
+}
+
+export function forcePoolSlot(slotId: string): Promise<PoolForceOutcome> {
+  return invoke('pool_force_slot', { slotId })
+}
+
+export function clearPoolForce(): Promise<PoolForceOutcome> {
+  return invoke('pool_clear_force')
 }
 
 export interface ProjectSnapshot {

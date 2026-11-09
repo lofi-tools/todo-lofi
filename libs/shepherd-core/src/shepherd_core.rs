@@ -49,8 +49,8 @@ use crate::session::SessionRecord;
 use crate::snapshots::{SessionRecovery, TaskApproval};
 use crate::store::{
     MemoryStore, PoolCooldownClearRequest, PoolQuotaCorrectionOutcome, PoolQuotaCorrectionRequest,
-    PoolReorderOutcome, PoolReorderRequest, PoolSlotEnabledOutcome, PoolSlotEnabledRequest,
-    PoolStatus, Store, StoreError, WorktreeDeletion,
+    PoolReorderOutcome, PoolReorderRequest, PoolSelectionRequest, PoolSlotEnabledOutcome,
+    PoolSlotEnabledRequest, PoolSlotId, PoolStatus, Store, StoreError, WorktreeDeletion,
 };
 use crate::terminal::{
     InspectorTab, ProcessRecord, TerminalId, TerminalLayout, TerminalList, TerminalRecord,
@@ -182,6 +182,21 @@ struct QueuedReviewNote {
     ready: bool,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PoolForceRequest {
+    pub slot_id: PoolSlotId,
+    pub now: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PoolForceOutcome {
+    pub forced_slot: Option<PoolSlotId>,
+    pub applied: bool,
+    pub reason: String,
+}
+
 /// The core owns all mutable state. It is a library, not a daemon.
 pub struct Core {
     projects: BTreeMap<ProjectId, Project>,
@@ -200,6 +215,9 @@ pub struct Core {
     terminals: BTreeMap<TerminalId, TerminalRecord>,
     terminal_list_revision: u64,
     archived_worktree_issues: Vec<ArchivedWorktreeIssue>,
+    /// A slot the user forced for the next turn. This is session state, so it is
+    /// deliberately absent from the store and does not survive a restart.
+    forced_pool_slot: Option<PoolSlotId>,
     store: Arc<dyn Store>,
     harness_factory: Box<dyn HarnessFactory>,
     shutdown: ShutdownState,
@@ -314,6 +332,7 @@ impl Core {
             terminals: BTreeMap::new(),
             terminal_list_revision: 0,
             archived_worktree_issues: Vec::new(),
+            forced_pool_slot: None,
             store: Arc::from(store),
             harness_factory,
             shutdown: ShutdownState::Running,
@@ -901,7 +920,87 @@ impl Core {
     }
 
     pub async fn pool_status(&mut self, now: u64) -> Result<PoolStatus, CoreError> {
-        Ok(self.store.load_pool_status(now).await?)
+        let mut status = self.store.load_pool_status(now).await?;
+        let forced_is_known = self
+            .forced_pool_slot
+            .as_ref()
+            .is_some_and(|forced| status.slots.iter().any(|entry| &entry.slot.id == forced));
+        if !forced_is_known {
+            self.forced_pool_slot = None;
+        }
+        status.forced_slot = self.forced_pool_slot.clone();
+        Ok(status)
+    }
+
+    pub async fn force_pool_slot(
+        &mut self,
+        request: &PoolForceRequest,
+    ) -> Result<PoolForceOutcome, CoreError> {
+        if request.slot_id.as_str().trim().is_empty() {
+            return Err(StoreError::InvalidRow("pool slot id is empty".to_string()).into());
+        }
+        let status = self.pool_status(request.now).await?;
+        let Some(entry) = status
+            .slots
+            .iter()
+            .find(|entry| entry.slot.id == request.slot_id)
+        else {
+            return Err(StoreError::PoolSlotNotFound {
+                slot_id: request.slot_id.clone(),
+            }
+            .into());
+        };
+        if entry.availability.state.as_str() != "available" {
+            return Ok(PoolForceOutcome {
+                forced_slot: self.forced_pool_slot.clone(),
+                applied: false,
+                reason: format!(
+                    "cannot force a {} slot: {}",
+                    entry.availability.state.as_str(),
+                    entry.availability.reason
+                ),
+            });
+        }
+        if self.forced_pool_slot.as_ref() == Some(&request.slot_id) {
+            return Ok(PoolForceOutcome {
+                forced_slot: self.forced_pool_slot.clone(),
+                applied: false,
+                reason: "slot is already forced for the next turn".to_string(),
+            });
+        }
+        self.forced_pool_slot = Some(request.slot_id.clone());
+        Ok(PoolForceOutcome {
+            forced_slot: self.forced_pool_slot.clone(),
+            applied: true,
+            reason: "slot forced for the next turn".to_string(),
+        })
+    }
+
+    pub fn clear_pool_force(&mut self) -> PoolForceOutcome {
+        match self.forced_pool_slot.take() {
+            Some(slot_id) => PoolForceOutcome {
+                forced_slot: None,
+                applied: true,
+                reason: format!("force for {} cleared", slot_id.as_str()),
+            },
+            None => PoolForceOutcome {
+                forced_slot: None,
+                applied: false,
+                reason: "no slot is forced for the next turn".to_string(),
+            },
+        }
+    }
+
+    /// Builds the request a turn's selection uses, consuming a pending force so
+    /// it applies to exactly one turn.
+    pub fn pool_selection_request(
+        &mut self,
+        request_id: impl Into<String>,
+        now: u64,
+    ) -> PoolSelectionRequest {
+        let mut request = PoolSelectionRequest::new(request_id, now);
+        request.override_slot = self.forced_pool_slot.take();
+        request
     }
 
     pub async fn reorder_pool_slots(
@@ -4179,6 +4278,106 @@ mod tests {
             .await,
             Err(CoreError::Store(StoreError::PoolSlotNotFound { .. }))
         ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn pool_force_covers_one_turn_and_does_not_persist()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database = TestDatabase::new()?;
+        let uri = database.uri();
+        let mut core = Core::with_services(
+            Box::new(TursoStore::open(&uri).await?),
+            Box::new(UnavailableHarnessFactory),
+        );
+        let mut slot = PoolSlot::new(Agent::Codex, "acme", "Acme", "model-a", "Model A");
+        slot.id = PoolSlotId::new("force-slot");
+        slot.created_at = 100;
+        slot.updated_at = 100;
+        core.store.save_pool_slot(&slot).await?;
+        let mut entry = PoolQuotaEntry::new(slot.id.clone(), PoolQuotaSource::Provider, 100);
+        entry.used = Some(1);
+        entry.limit = Some(10);
+        entry.limit_unit = Some("requests".into());
+        core.store.append_pool_quota_entry(&entry).await?;
+
+        let forced = core
+            .force_pool_slot(&PoolForceRequest {
+                slot_id: slot.id.clone(),
+                now: 200,
+            })
+            .await?;
+        assert!(forced.applied);
+        assert_eq!(forced.forced_slot.as_ref(), Some(&slot.id));
+        assert_eq!(
+            core.pool_status(210).await?.forced_slot.as_ref(),
+            Some(&slot.id)
+        );
+
+        let repeated = core
+            .force_pool_slot(&PoolForceRequest {
+                slot_id: slot.id.clone(),
+                now: 220,
+            })
+            .await?;
+        assert!(!repeated.applied);
+        assert_eq!(repeated.reason, "slot is already forced for the next turn");
+
+        let request = core.pool_selection_request("turn-1", 230);
+        assert_eq!(request.request_id, "turn-1");
+        assert_eq!(request.override_slot.as_ref(), Some(&slot.id));
+        assert_eq!(core.pool_status(240).await?.forced_slot, None);
+        assert_eq!(
+            core.pool_selection_request("turn-2", 250).override_slot,
+            None
+        );
+
+        assert!(
+            core.force_pool_slot(&PoolForceRequest {
+                slot_id: slot.id.clone(),
+                now: 260,
+            })
+            .await?
+            .applied
+        );
+        let mut cooling = PoolQuotaEntry::new(slot.id.clone(), PoolQuotaSource::Provider, 270);
+        cooling.used = Some(2);
+        cooling.limit = Some(10);
+        cooling.limit_unit = Some("requests".into());
+        cooling.cooldown_until = Some(10_000);
+        core.store.append_pool_quota_entry(&cooling).await?;
+        let rejected = core
+            .force_pool_slot(&PoolForceRequest {
+                slot_id: slot.id.clone(),
+                now: 280,
+            })
+            .await?;
+        assert!(!rejected.applied);
+        assert!(
+            rejected
+                .reason
+                .starts_with("cannot force a cooling-down slot")
+        );
+        assert_eq!(rejected.forced_slot.as_ref(), Some(&slot.id));
+        assert!(matches!(
+            core.force_pool_slot(&PoolForceRequest {
+                slot_id: PoolSlotId::new("missing"),
+                now: 290,
+            })
+            .await,
+            Err(CoreError::Store(StoreError::PoolSlotNotFound { .. }))
+        ));
+
+        let mut reopened = Core::with_services(
+            Box::new(TursoStore::open(&uri).await?),
+            Box::new(UnavailableHarnessFactory),
+        );
+        assert_eq!(reopened.pool_status(300).await?.forced_slot, None);
+
+        let cleared = core.clear_pool_force();
+        assert!(cleared.applied);
+        assert_eq!(cleared.forced_slot, None);
+        assert!(!core.clear_pool_force().applied);
         Ok(())
     }
 

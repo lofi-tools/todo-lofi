@@ -24,8 +24,8 @@ const toc = [
     The pool slot record, the append-only quota ledger, the six availability states, durable
     priority selection, idle release and pool controls now exist. Settings → Agent pool reads the
     status snapshot and supports reordering, enable/disable, limit/reset corrections, cooldown
-    clearing and status refreshes for existing slots. Task-start selection and the one-turn force
-    override are still planned, so tasks do not choose a pool slot yet. This page records the agreed
+    clearing, the one-turn force override and status refreshes for existing slots. Task-start
+    selection is still planned, so tasks do not choose a pool slot yet. This page records the agreed
     contract so the implementation, tests and user guide cannot drift.
   </Callout>
 
@@ -34,9 +34,9 @@ const toc = [
     <Badge tone="warning" variant="subtle">partly implemented</Badge> The pool work is split into
     slot persistence, the quota ledger, priority selection, idle release, core controls, the pool UI
     and task-start wiring. Persistence, the ledger, selection, release, status, reordering,
-    enable/disable, limit/reset correction and cooldown clearing are implemented and tested;
-    Settings → Agent pool exposes all of them. Task-start wiring and the force-slot control are not
-    checked off. The user-facing promise is on the
+    enable/disable, limit/reset correction, cooldown clearing and the force override are implemented
+    and tested; Settings → Agent pool exposes all of them. Task-start wiring is not checked off. The
+    user-facing promise is on the
     <a href="/docs/users/agent-pool">agent pool</a> page; this page is for the implementation.
   </p>
 
@@ -134,8 +134,16 @@ const toc = [
     visible error.
   </p>
   <p>
-    A forced slot still uses the selection request's one-turn override. That control is not wired
-    into the UI yet. The pending work is to expose it, not to add another selection path.
+    A forced slot still uses the selection request's one-turn override, with no separate selection
+    path. The core keeps the forced slot as session state, so it is never written to either store and
+    does not survive a restart; the status snapshot reports it as <code>forcedSlot</code>. Forcing
+    requires an available slot: a disabled, exhausted, cooling-down, unhealthy or unknown slot is
+    rejected with its availability reason, a missing slot is an error, and repeating the current
+    force is a no-op with a reason. Building a turn's selection request consumes the marker, so the
+    override covers exactly one turn and a second turn selects normally. Settings → Agent pool asks
+    for confirmation before forcing, shows the forced slot with a clear action, and disables the
+    control for slots that cannot accept work. Task-start selection is still unwired, so no turn
+    consumes the marker yet.
   </p>
   <p>
     The catalog is advisory. A local ledger and the user's correction are authoritative for local
@@ -152,7 +160,8 @@ const toc = [
     <li>Implemented: pool status, reordering and enable/disable against both stores, including latest quota/availability/active request, disabled selection fallback, repeat calls and rejected duplicate, missing or unknown orders.</li>
     <li>Implemented: the Settings pool UI loads the status snapshot, reorders slots, toggles enable/disable, surfaces outcome reasons and errors, and retries a failed status read.</li>
     <li>Implemented: limit/reset corrections and cooldown clearing against both stores, including preserved usage/error fields, repeat no-ops, concurrent identical corrections writing once, rejected stale observations and missing slots, plus the Settings form and its rejected-correction feedback.</li>
-    <li>Pending: task-start wiring, the one-turn force control, cancellation and restart scheduling.</li>
+    <li>Implemented: the one-turn force override, including applying and clearing it, one-turn consumption as the selection override, repeat no-ops, rejected unavailable and missing slots, no stored state after a Turso re-open, and the Settings confirmation, rejection and clear controls.</li>
+    <li>Pending: task-start wiring, cancellation and restart scheduling.</li>
     <li>Credential redaction in records, logs and diagnostics.</li>
   </ul>
   <p>
