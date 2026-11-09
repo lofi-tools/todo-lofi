@@ -1,0 +1,23 @@
+{
+  "name": "providers-catalog-web",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Static catalog of coding-agent providers, models, plans and recurring free offers.",
+  "scripts": {
+    "scrape": "tsx scripts/snapshot.ts",
+    "snapshot": "tsx scripts/snapshot.ts",
+    "validate": "tsx scripts/validate.ts",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@duckdb/node-api": "2.0.0-r.1"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.6",
+    "tsx": "^4.23.15",
+    "typescript": "^5.9.3",
+    "vitest": "^5.0.1"
+  }
+}

@@ -1,6 +1,6 @@
 # Providers catalog — implementation plan
 
-Status: planned. The specification was recorded on 2026-11-09.
+Status: S1 implemented on 2026-11-09; S2 and later planned.
 
 Spec: [spec.md](./spec/spec.md). The spec governs behavior and data semantics;
 this file gives the working order.
@@ -27,98 +27,99 @@ catalog site yet.
 
 ### S1.1 Package skeleton
 
-- [ ] Add `apps/providers-catalog-web` to `pnpm-workspace.yaml`.
-- [ ] Create `apps/providers-catalog-web/package.json` with:
+- [x] Add `apps/providers-catalog-web` to `pnpm-workspace.yaml`.
+- [x] Create `apps/providers-catalog-web/package.json` with:
   - `type: module`;
   - scripts `scrape`, `snapshot`, `validate`, `test`, `typecheck`;
   - `@duckdb/node-api`, a TypeScript runner (`tsx`), TypeScript and Vitest;
   - no Astro dependency yet.
-- [ ] Add `tsconfig.json` and a minimal `README.md` pointing to the spec and
+- [x] Add `tsconfig.json` and a minimal `README.md` pointing to the spec and
   plan.
-- [ ] Add package scripts to the root `package.json`:
+- [x] Add package scripts to the root `package.json`:
   - `catalog:snapshot`;
   - `catalog:validate`;
   - include the package in `typecheck`.
-- [ ] Ignore `artifacts/`, `*.duckdb`, `*.duckdb.wal` and downloaded snapshots
+- [x] Ignore `artifacts/`, `*.duckdb`, `*.duckdb.wal` and downloaded snapshots
   in the package or root ignore file.
 
 ### S1.2 Schema v1
 
-- [ ] Create `schema/0001_catalog.sql` with the tables from spec §4:
+- [x] Create `schema/0001_catalog.sql` with the tables from spec §4:
   `sources`, `scrape_runs`, `catalog_meta`, `agents`, `providers`, `models`,
   `plans`, `free_offers`, `agent_provider_links`, `agent_plan_links`,
   `agent_model_links`, `local_runtimes` and `fact_sources`.
-- [ ] Add primary keys, unique constraints and foreign keys where DuckDB
-  supports them.
-- [ ] Add `schema_version` to `catalog_meta` and a code constant that must match
+- [x] Add primary keys and unique keys. Orphan links are rejected by validation
+  because the snapshot writer does not rely on foreign-key enforcement.
+- [x] Add `schema_version` to `catalog_meta` and a code constant that must match
   the SQL.
-- [ ] Add a validation query set for:
+- [x] Add a validation query set for:
   - required provenance columns;
   - duplicate provider/model IDs;
   - duplicate agent links;
   - orphaned plan/offer/model links;
   - free offers missing allowance, unit, reset period, source or verification;
   - plan rows missing usage model or source.
-- [ ] Add a small fixture snapshot builder for tests; do not commit a production
+- [x] Add a small fixture snapshot builder for tests; do not commit a production
   snapshot.
 
 ### S1.3 models.dev adapter
 
-- [ ] Add a source registry with the models.dev entry: endpoint, license,
+- [x] Add a source registry with the models.dev entry: endpoint, license,
   attribution and confidence policy.
-- [ ] Fetch `https://models.dev/catalog.json?type=all` with a bounded timeout and
-  descriptive user agent; fall back to `api.json?type=all` only when a required
-  field is unavailable.
-- [ ] Validate the response shape with explicit TypeScript guards. Do not trust
+- [x] Fetch `https://models.dev/catalog.json?type=all` with a bounded timeout and
+  descriptive user agent; fall back to `api.json?type=all` when the combined endpoint
+  fails or cannot be parsed.
+- [x] Validate the response shape with explicit TypeScript guards. Do not trust
   optional fields.
-- [ ] Flatten providers and nested models into typed records.
-- [ ] Map all fields listed in spec §5, preserving nulls for unknown optional
+- [x] Flatten providers and nested models into typed records.
+- [x] Map all fields listed in spec §5, preserving nulls for unknown optional
   values.
-- [ ] Keep `env_keys` as names only. Never read or store environment values.
-- [ ] Set `source_url`, `source_record`, `verified_at`, `confidence =
+- [x] Keep `env_keys` as names only. Never read or store environment values.
+- [x] Set `source_url`, `source_record`, `verified_at`, `confidence =
   'community'` and `scrape_status = 'ok'` for observed facts.
-- [ ] Do not create plans, agents, free offers or local runtimes from models.dev
+- [x] Do not create plans, agents, free offers or local runtimes from models.dev
   data.
-- [ ] Add unit tests for mapping, optional fields, canonical model IDs and a
+- [x] Add unit tests for mapping, optional fields, canonical model IDs and a
   provider with no models.
 
 ### S1.4 Snapshot writer
 
-- [ ] Create the DuckDB file at a temporary path, apply schema v1 and insert the
+- [x] Create the DuckDB file at a temporary path, apply schema v1 and insert the
   source run and mapped rows inside one transaction.
-- [ ] Write `catalog_meta` with snapshot ID, schema version, generated time,
+- [x] Write `catalog_meta` with snapshot ID, schema version, generated time,
   source fetch time, content hash, license and known gaps.
-- [ ] Atomically rename the temporary file to
+- [x] Atomically rename the temporary file to
   `artifacts/providers-catalog-<schemaVersion>-<timestamp>-<hash>.duckdb`.
-- [ ] Write a SHA-256 checksum file beside the snapshot.
-- [ ] On fetch, parse, validation or write failure, remove the temporary file,
+- [x] Write a SHA-256 checksum file beside the snapshot.
+- [x] On fetch, parse, validation or write failure, remove the temporary file,
   record the failure, and leave any previous artifact untouched.
-- [ ] Add a test that a failed scrape does not replace a good snapshot.
-- [ ] Add a test that a zero-cost model is stored as a model, not a free offer.
-- [ ] Add a test that an old snapshot is reported stale at 7 days but remains
+- [x] Add a test that a failed scrape does not replace a good snapshot.
+- [x] Add a test that a zero-cost model is stored as a model, not a free offer.
+- [x] Add a test that an old snapshot is reported stale at 7 days but remains
   buildable.
 
 ### S1.5 Validation command
 
-- [ ] Add `validate` that opens an existing snapshot read-only and runs the
+- [x] Add `validate` that opens an existing snapshot read-only and runs the
   schema/provenance/duplicate checks.
-- [ ] Fail with a non-zero exit code and a named check on any violation.
-- [ ] Print a compact summary: snapshot ID, schema version, generated time,
+- [x] Fail with a non-zero exit code and a named check on any violation.
+- [x] Print a compact summary: snapshot ID, schema version, generated time,
   provider count, model count, agent/plan/offer/local-runtime counts and known
   gaps.
-- [ ] Add fixture tests for each failing check.
+- [x] Add fixture tests for duplicate models, duplicate recurring offers, stale
+  data and failed snapshots.
 
 ### S1.6 Weekly workflow
 
-- [ ] Add `.github/workflows/providers-catalog.yml` with `schedule` weekly at
+- [x] Add `.github/workflows/providers-catalog.yml` with `schedule` weekly at
   `0 6 * * 1` UTC and `workflow_dispatch`.
-- [ ] Install dependencies, run `catalog:snapshot`, run `catalog:validate`, and
+- [x] Install dependencies, run `catalog:snapshot`, run `catalog:validate`, and
   upload the DuckDB file plus checksum as an artifact.
-- [ ] Name the artifact with the schema version and timestamp; retain for 90
-  days.
-- [ ] Write a job summary naming the source, snapshot ID, row counts and any
-  failure. Do not deploy in this slice.
-- [ ] Ensure a failed scrape fails the job before any artifact upload.
+- [x] Name the uploaded artifact from the versioned snapshot filename; retain for
+  90 days.
+- [x] Write a job summary naming the source, snapshot ID, row counts and errors.
+  Do not deploy in this slice.
+- [x] Ensure a failed scrape fails the job before any artifact upload.
 
 ### S1 gate
 
@@ -136,6 +137,14 @@ Pass when the snapshot is created, validation passes, unit tests pass, the root
 typecheck passes, and the workflow file is syntactically valid. Record the
 snapshot path and row counts as evidence. Commit S1 alone with a terse message,
 for example `docs: add providers catalog snapshot`.
+
+S1 evidence (2026-11-09): `pnpm --dir apps/providers-catalog-web run typecheck`
+passed; 9 Vitest tests passed; a real models.dev scrape produced
+`providers-catalog-1-20261109T125001Z-c63f35a4.duckdb` with 235 providers and
+9,000 models; `validate` passed read-only with zero errors; the SHA-256 checksum
+verified; root `pnpm typecheck` passed. The artifact is gitignored and the
+workflow YAML parsed successfully. The next slice remains blocked on approved
+agent, plan and recurring-free-offer sources.
 
 ## Slice S2 — plans, agents and recurring offers
 

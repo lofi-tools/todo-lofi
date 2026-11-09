@@ -18,6 +18,11 @@ test-results/
 /result
 /result-*
 
+# Providers catalog snapshots are generated artifacts, never committed data
+apps/providers-catalog-web/artifacts/
+apps/providers-catalog-web/*.duckdb
+apps/providers-catalog-web/*.duckdb.wal
+
 # Local reference repository checkouts
 /.cache/checkout/
 /.cache/shepherd-live/

@@ -3,6 +3,7 @@ packages:
   - demos/design-system-showcase
   - apps/ts-docs-web
   - apps/shep-docs-web
+  - apps/providers-catalog-web
   - apps/taskstream-web
   - apps/shepherd
   - apps/shepherd/ui

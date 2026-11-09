@@ -1,0 +1,77 @@
+name: Providers catalog snapshot
+
+on:
+  schedule:
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: providers-catalog-snapshot
+  cancel-in-progress: false
+
+jobs:
+  snapshot:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.25.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.21.0'
+          cache: pnpm
+      - name: Install
+        run: pnpm install --frozen-lockfile
+      - name: Scrape models.dev into DuckDB
+        run: pnpm --dir apps/providers-catalog-web run snapshot
+      - name: Validate the snapshot
+        run: |
+          set -o pipefail
+          pnpm --dir apps/providers-catalog-web run validate | tee /tmp/catalog-validation.json
+      - name: Read the artifact name
+        id: snapshot
+        run: |
+          set -euo pipefail
+          file=$(find apps/providers-catalog-web/artifacts -maxdepth 1 -name '*.duckdb' -print | sort | tail -1)
+          test -n "$file"
+          echo "artifact_name=providers-catalog-$(basename "$file" .duckdb)" >> "$GITHUB_OUTPUT"
+      - name: Upload the versioned snapshot
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.snapshot.outputs.artifact_name }}
+          path: |
+            apps/providers-catalog-web/artifacts/*.duckdb
+            apps/providers-catalog-web/artifacts/*.sha256
+          if-no-files-found: error
+          retention-days: 90
+      - name: Summary
+        if: always()
+        run: |
+          set -euo pipefail
+          echo '### Providers catalog snapshot' >> "$GITHUB_STEP_SUMMARY"
+          echo '' >> "$GITHUB_STEP_SUMMARY"
+          if [ -s /tmp/catalog-validation.json ]; then
+            node --input-type=module - <<'JS' >> "$GITHUB_STEP_SUMMARY"
+          import { readFileSync } from 'node:fs'
+          const report = JSON.parse(readFileSync('/tmp/catalog-validation.json', 'utf8'))
+          console.log(`- Source: ${report.sourceUrl ?? 'models.dev'}`)
+          console.log(`- Snapshot: \`${report.snapshotId}\``)
+          console.log(`- Status: ${report.ok ? 'valid' : 'invalid'}`)
+          console.log(`- Providers: ${report.counts.providers}`)
+          console.log(`- Models: ${report.counts.models}`)
+          console.log(`- Agents: ${report.counts.agents}`)
+          console.log(`- Plans: ${report.counts.plans}`)
+          console.log(`- Free offers: ${report.counts.freeOffers}`)
+          console.log(`- Local runtimes: ${report.counts.localRuntimes}`)
+          if (report.errors.length > 0) {
+            console.log(`- Errors: ${report.errors.join('; ')}`)
+          }
+          JS
+          else
+            echo 'No validation report was produced. Check the scrape and validation steps.' >> "$GITHUB_STEP_SUMMARY"
+          fi
