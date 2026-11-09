@@ -2570,8 +2570,22 @@ implemented; no public deployment exists yet.
     `cargo test -p shepherd-core` passes 195 tests (4 ignored), and `cargo
     clippy -p shepherd-core --all-targets -- -D warnings` and `cargo fmt -p
     shepherd-core` pass.
-  - [ ] Build the pool UI and wire limit/reset correction, cooldown clearing,
-    ordering, enable/disable and the existing one-turn force override into it.
+  - [x] Add a Settings pool UI for status, ordering and enable/disable.
+    Evidence (2026-11-09): `Settings → Agent pool` loads `pool_status` and
+    shows provider/model, priority, availability with its reason, known
+    limit/reset, current task, last error and last-used time without exposing
+    the credential reference. It reorders with the full slot list, toggles
+    enable/disable, surfaces each outcome's reason, keeps failed actions and
+    failed status reads visible, and retries a failed read. Tauri commands
+    delegate through `Core::{pool_status,reorder_pool_slots,set_pool_slot_enabled}`
+    to both stores. Playwright covers loading, reordering, disabling and a
+    failed read followed by retry. The core suite passes 196 tests (4 ignored),
+    clippy and fmt are clean, the app builds with 123 passing e2e tests, and the
+    docs build with 31 passing e2e tests. Limit/reset correction, cooldown
+    clearing, the one-turn force control and task-start selection remain later
+    work.
+  - [ ] Wire limit/reset correction, cooldown clearing and the existing
+    one-turn force override into the pool UI.
 
 ---
 

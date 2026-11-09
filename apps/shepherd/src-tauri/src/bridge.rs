@@ -25,7 +25,10 @@ use serde::{Deserialize, Serialize};
 use shepherd_core::files::{self, DirectoryListing, FileSearchQuery, FileSearchResult, TextFile};
 use shepherd_core::git::GitService;
 use shepherd_core::harness::HarnessFactory;
-use shepherd_core::store::{Store, TursoStore};
+use shepherd_core::store::{
+    PoolReorderOutcome, PoolReorderRequest, PoolSlotEnabledOutcome, PoolSlotEnabledRequest,
+    PoolSlotId, PoolStatus, Store, TursoStore,
+};
 use shepherd_core::terminal::{
     InspectorTab, ProcessRecord, TerminalEvent, TerminalId, TerminalList, TerminalRecord,
     TerminalService, TerminalSpec,
@@ -1839,6 +1842,43 @@ impl ShellState {
             .map_err(BridgeError::from)
     }
 
+    pub async fn pool_status(&self) -> Result<PoolStatus, BridgeError> {
+        let mut core = self.core.lock().await;
+        core.pool_status(now_millis())
+            .await
+            .map_err(BridgeError::from)
+    }
+
+    pub async fn reorder_pool_slots(
+        &self,
+        slot_ids: Vec<String>,
+    ) -> Result<PoolReorderOutcome, BridgeError> {
+        let request = PoolReorderRequest {
+            slot_ids: slot_ids.into_iter().map(PoolSlotId::new).collect(),
+            now: now_millis(),
+        };
+        let mut core = self.core.lock().await;
+        core.reorder_pool_slots(&request)
+            .await
+            .map_err(BridgeError::from)
+    }
+
+    pub async fn set_pool_slot_enabled(
+        &self,
+        slot_id: String,
+        enabled: bool,
+    ) -> Result<PoolSlotEnabledOutcome, BridgeError> {
+        let request = PoolSlotEnabledRequest {
+            slot_id: PoolSlotId::new(slot_id),
+            enabled,
+            now: now_millis(),
+        };
+        let mut core = self.core.lock().await;
+        core.set_pool_slot_enabled(&request)
+            .await
+            .map_err(BridgeError::from)
+    }
+
     pub async fn task_workspace(&self, task_id: String) -> Result<TaskWorkspace, BridgeError> {
         let task_id = TaskId::new(task_id);
         Ok(self.core.lock().await.open_task_workspace(&task_id).await?)
@@ -3002,6 +3042,31 @@ pub mod commands {
         project_id: String,
     ) -> Result<TaskList, BridgeError> {
         state.inner().task_list(project_id).await
+    }
+
+    #[tauri::command]
+    pub async fn pool_status(state: State<'_, ShellState>) -> Result<PoolStatus, BridgeError> {
+        state.inner().pool_status().await
+    }
+
+    #[tauri::command]
+    pub async fn pool_reorder_slots(
+        state: State<'_, ShellState>,
+        slot_ids: Vec<String>,
+    ) -> Result<PoolReorderOutcome, BridgeError> {
+        state.inner().reorder_pool_slots(slot_ids).await
+    }
+
+    #[tauri::command]
+    pub async fn pool_set_slot_enabled(
+        state: State<'_, ShellState>,
+        slot_id: String,
+        enabled: bool,
+    ) -> Result<PoolSlotEnabledOutcome, BridgeError> {
+        state
+            .inner()
+            .set_pool_slot_enabled(slot_id, enabled)
+            .await
     }
 
     #[tauri::command]

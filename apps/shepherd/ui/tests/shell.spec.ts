@@ -131,6 +131,39 @@ test.beforeEach(async ({ context }) => {
         isGitRepository: false, lastTaskId: null, unfinishedTaskCount: 0 })
     }
 
+    const poolOperations: string[] = []
+    let poolStatusReads = 0
+    let poolSlots = [
+      {
+        id: 'slot-acme', agent: 'codex', providerId: 'acme', providerName: 'Acme', modelId: 'model-a', modelName: 'Model A',
+        credentialRef: null, priority: 0, enabled: true, used: 3, limit: 10, limitUnit: 'requests', resetAt: 1_800_000_000_000,
+        cooldownUntil: null, lastUsedAt: 1_760_000_100_000, lastError: null, createdAt: 1_760_000_000_000, updatedAt: 1_760_000_000_000,
+      },
+      {
+        id: 'slot-zed', agent: 'claude', providerId: 'zed', providerName: 'Zed', modelId: 'model-b', modelName: 'Model B',
+        credentialRef: null, priority: 1, enabled: true, used: 10, limit: 10, limitUnit: 'requests', resetAt: 1_800_000_000_000,
+        cooldownUntil: null, lastUsedAt: null, lastError: 'provider unavailable', createdAt: 1_760_000_001_000, updatedAt: 1_760_000_001_000,
+      },
+    ]
+    function poolStatus() {
+      return {
+        generatedAt: 1_800_000_000_000,
+        slots: poolSlots.map((slot) => ({
+          slot: { ...slot },
+          availability: !slot.enabled
+            ? { state: 'disabled', reason: 'slot is disabled' }
+            : slot.used != null && slot.limit != null && slot.used >= slot.limit
+              ? { state: 'exhausted', reason: `quota exhausted: used ${slot.used} of ${slot.limit} ${slot.limitUnit}` }
+              : { state: 'available', reason: `quota available: used ${slot.used} of ${slot.limit} ${slot.limitUnit}` },
+          latestQuota: {
+            id: `quota-${slot.id}`, slotId: slot.id, observedAt: 1_760_000_000_000, source: 'provider', used: slot.used,
+            limit: slot.limit, limitUnit: slot.limitUnit, resetAt: slot.resetAt, cooldownUntil: slot.cooldownUntil, error: slot.lastError,
+          },
+          currentRequest: null,
+        })),
+      }
+    }
+
     const scan = {
       root: '/tmp/home',
       repositories: 3,
@@ -441,6 +474,31 @@ test.beforeEach(async ({ context }) => {
           }
           case 'agent_availability':
             return { codex: true, opencode: false, claude: false }
+          case 'pool_status':
+            poolStatusReads += 1
+            if (options.has('pool-status-error') && poolStatusReads === 1) throw { message: 'Pool status unavailable.' }
+            return poolStatus()
+          case 'pool_reorder_slots': {
+            const ids = args.slotIds as string[]
+            const byId = new Map(poolSlots.map((slot) => [slot.id, slot]))
+            if (ids.length !== poolSlots.length || new Set(ids).size !== ids.length) {
+              throw { message: 'Pool reorder must include every slot exactly once.' }
+            }
+            poolSlots = ids.map((id, index) => {
+              const slot = byId.get(id)
+              if (!slot) throw { message: `Unknown pool slot ${id}.` }
+              return { ...slot, priority: index, updatedAt: 1_800_000_000_000 }
+            })
+            poolOperations.push(`reorder:${ids.join(',')}`)
+            return { slots: poolSlots.map((slot) => ({ ...slot })), reason: 'priority order updated by user' }
+          }
+          case 'pool_set_slot_enabled': {
+            const index = poolSlots.findIndex((slot) => slot.id === args.slotId)
+            if (index < 0) throw { message: `Pool slot ${args.slotId} was not found.` }
+            poolSlots[index] = { ...poolSlots[index], enabled: args.enabled, updatedAt: 1_800_000_000_000 }
+            poolOperations.push(`toggle:${args.slotId}:${args.enabled}`)
+            return { slot: { ...poolSlots[index] }, reason: args.enabled ? 'slot enabled by user' : 'slot disabled by user' }
+          }
           case 'subscribe':
             eventChannel = args.channel.id
             return null
@@ -1067,6 +1125,7 @@ test.beforeEach(async ({ context }) => {
     window.__terminalLayout = () => terminalLayout
     window.__notifications = notifications
     window.__annotationWrapperOpens = annotationWrapperOpens
+    ;(window as unknown as { __poolOperations: string[] }).__poolOperations = poolOperations
     window.__sentPrompts = sentPrompts
     window.__terminalAppearances = terminalAppearances
     window.__dockCounts = dockCounts
@@ -3132,6 +3191,42 @@ test('opens settings in the task pane and returns to the current chat', async ({
   await expect(page.getByLabel('Prompt')).toHaveValue('keep this draft')
   await page.getByRole('button', { name: 'demo', exact: true }).press('Shift+F10')
   await expect(page.getByRole('menuitemcheckbox', { name: 'Show archived' })).toHaveAttribute('aria-checked', 'true')
+})
+
+test('loads, reorders and disables agent pool slots from Settings', async ({ page }) => {
+  await page.goto('/')
+  await page.getByRole('button', { name: 'Settings', exact: true }).click()
+  await page.getByRole('navigation', { name: 'Settings categories' }).getByRole('button', { name: 'Agent pool' }).click()
+  const pool = page.getByRole('region', { name: 'Agent pool' })
+  const rows = pool.locator('.pool__slot')
+  await expect(pool.getByRole('heading', { name: 'Acme · Model A' })).toBeVisible()
+  await expect(pool.getByText('3 of 10 requests', { exact: true })).toBeVisible()
+  await expect(rows.first()).toContainText('Acme · Model A')
+  await expect(rows.last()).toContainText('Zed · Model B')
+
+  await pool.getByRole('button', { name: 'Move Acme · Model A down' }).click()
+  await expect(pool.getByRole('status')).toHaveText('priority order updated by user')
+  await expect(rows.first()).toContainText('Zed · Model B')
+  await expect.poll(() => page.evaluate(() => (window as unknown as { __poolOperations: string[] }).__poolOperations))
+    .toEqual(['reorder:slot-zed,slot-acme'])
+
+  await pool.getByRole('button', { name: 'Disable Acme · Model A' }).click()
+  await expect(pool.getByRole('status')).toHaveText('slot disabled by user')
+  await expect(pool.getByRole('button', { name: 'Enable Acme · Model A' })).toBeVisible()
+  await expect(pool.getByText('slot is disabled')).toBeVisible()
+  await expect.poll(() => page.evaluate(() => (window as unknown as { __poolOperations: string[] }).__poolOperations))
+    .toEqual(['reorder:slot-zed,slot-acme', 'toggle:slot-acme:false'])
+})
+
+test('surfaces a pool status failure and retries it', async ({ page }) => {
+  await page.goto('/?pool-status-error')
+  await page.getByRole('button', { name: 'Settings', exact: true }).click()
+  await page.getByRole('navigation', { name: 'Settings categories' }).getByRole('button', { name: 'Agent pool' }).click()
+  const pool = page.getByRole('region', { name: 'Agent pool' })
+  await expect(pool.getByRole('alert')).toContainText('Pool status unavailable.')
+  await pool.getByRole('button', { name: 'Retry pool' }).click()
+  await expect(pool.getByText('3 of 10 requests', { exact: true })).toBeVisible()
+  await expect(pool.getByRole('alert')).toHaveCount(0)
 })
 
 test('applies the Send accent from Appearance and restores it after reload', async ({ page }) => {

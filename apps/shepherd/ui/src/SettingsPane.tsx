@@ -3,8 +3,9 @@ import { For, Show, createEffect, createResource, createSignal, on, type JSX } f
 import { AGENT_LABELS, projectApprovals, resetApprovalGrant, type CommandBinding, type CommandRegistry, type KeybindingEdit, type ProjectApproval, type ProjectSnapshot, type SessionApproval, type SettingsSnapshot, type SettingsEdit, type SettingKey } from './bridge'
 import { displayChord, normalizeChord } from './keybindings'
 import { reportError } from './diagnostics'
+import { PoolSettings } from './PoolSettings'
 
-const categories = ['Workspace', 'Projects', 'Appearance', 'Keyboard shortcuts'] as const
+const categories = ['Workspace', 'Projects', 'Agent pool', 'Appearance', 'Keyboard shortcuts'] as const
 
 export const SEND_ACCENTS = ['Blue', 'Violet', 'Teal', 'Amber', 'Neutral'] as const
 export type SendAccent = (typeof SEND_ACCENTS)[number]
@@ -512,6 +513,9 @@ export function SettingsPane(props: SettingsPaneProps) {
             <button type="button" class="project-action" onClick={props.onAddProject} disabled={props.pending}>Add project</button>
             <p class="empty">Import all from</p>
             {props.projectImports}
+          </Show>
+          <Show when={category() === 'Agent pool'}>
+            <PoolSettings />
           </Show>
           <Show when={category() === 'Appearance'}>
             <label>

@@ -19,17 +19,19 @@ const toc = [
   description="The quota-aware pool is Shepherd's next step: choose the next healthy installed agent when the preferred one is exhausted."
   toc={toc}
 >
-  <Callout tone="note" title="Next, not in the current build">
-    The agent pool is specified and being built. The current app lets you choose an agent for a task
-    and use terminals; it does not choose among quota-limited slots for you yet.
+  <Callout tone="note" title="Pool management is here; task selection is not">
+    Settings → Agent pool can inspect existing slots, reorder them and disable or enable them. New
+    tasks still do not select a pool slot automatically, and limit/reset, cooldown and one-turn force
+    controls are not in the current build.
   </Callout>
 
   <h2 id="status">Status</h2>
   <p>
     <Badge tone="accent" variant="subtle">next</Badge> A pool slot is an installed agent plus one
-    provider/model plus the credential or account it uses. Shepherd will keep the user's priority
-    order, the local usage ledger, reset windows, cooldown state and last-used time. Credentials are
-    referenced, never copied into the pool record or logs.
+    provider/model plus the credential or account it uses. Shepherd keeps the user's priority order,
+    the local usage ledger, reset windows, cooldown state and last-used time. Credentials are
+    referenced, never copied into the pool record or logs. Existing slots can be managed in
+    Settings → Agent pool; automatic task selection is still next.
   </p>
 
   <h2 id="why">Why a pool</h2>
@@ -68,9 +70,11 @@ const toc = [
 
   <h2 id="controls">Your controls</h2>
   <p>
-    The pool UI will let you reorder slots, disable one, edit its limits or reset time, clear a
-    cooldown and force a slot for one turn. Saved limits are a local correction, not a provider
-    guarantee. Provider credentials stay in the agent's own configuration and are never displayed.
+    Settings → Agent pool shows each slot's provider/model, priority, availability, known limit and
+    reset, current task, last error and last-used time. You can move a slot up or down and disable or
+    enable it. The pool UI does not display credentials or invent a quota. Editing limits or reset
+    times, clearing a cooldown and forcing a slot for one turn are planned; saved limits will be a
+    local correction, not a provider guarantee.
   </p>
 
   <h2 id="limits">What it will not do</h2>
@@ -87,9 +91,11 @@ const toc = [
 
   <h2 id="today">Today</h2>
   <p>
-    Use the agent picker per task and keep a terminal open when you need to switch manually. If an
-    agent is missing or its adapter falls back, <a href="/docs/users/troubleshooting#agents">Troubleshooting</a>
-    explains what to check. The <a href="/docs/users/releases">releases page</a> tracks the other
-    next-step items.
+    Use the agent picker per task and keep a terminal open when you need to switch manually. If pool
+    slots already exist, Settings → Agent pool lets you inspect their status, reorder them and
+    disable or enable them. Automatic selection for new tasks is not wired. If an agent is missing or
+    its adapter falls back, <a href="/docs/users/troubleshooting#agents">Troubleshooting</a> explains
+    what to check. The <a href="/docs/users/releases">releases page</a> tracks the other next-step
+    items.
   </p>
 </Docs>

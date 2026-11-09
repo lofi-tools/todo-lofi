@@ -105,6 +105,77 @@ export function agentAvailability(): Promise<Record<Agent, boolean>> {
   return invoke('agent_availability')
 }
 
+export type PoolAvailabilityState = 'available' | 'exhausted' | 'cooling-down' | 'disabled' | 'unhealthy' | 'unknown'
+export type PoolQuotaSource = 'catalog' | 'provider' | 'user'
+
+export interface PoolQuotaEntry {
+  id: string
+  slotId: string
+  observedAt: number
+  source: PoolQuotaSource
+  used: number | null
+  limit: number | null
+  limitUnit: string | null
+  resetAt: number | null
+  cooldownUntil: number | null
+  error: string | null
+}
+
+export interface PoolSlot {
+  id: string
+  agent: Agent
+  providerId: string
+  providerName: string
+  modelId: string
+  modelName: string
+  credentialRef: string | null
+  priority: number
+  enabled: boolean
+  used: number | null
+  limit: number | null
+  limitUnit: string | null
+  resetAt: number | null
+  cooldownUntil: number | null
+  lastUsedAt: number | null
+  lastError: string | null
+  createdAt: number
+  updatedAt: number
+}
+
+export interface PoolSlotStatus {
+  slot: PoolSlot
+  availability: { state: PoolAvailabilityState; reason: string }
+  latestQuota: PoolQuotaEntry | null
+  currentRequest: string | null
+}
+
+export interface PoolStatus {
+  generatedAt: number
+  slots: PoolSlotStatus[]
+}
+
+export interface PoolReorderOutcome {
+  slots: PoolSlot[]
+  reason: string
+}
+
+export interface PoolSlotEnabledOutcome {
+  slot: PoolSlot
+  reason: string
+}
+
+export function poolStatus(): Promise<PoolStatus> {
+  return invoke('pool_status')
+}
+
+export function reorderPoolSlots(slotIds: string[]): Promise<PoolReorderOutcome> {
+  return invoke('pool_reorder_slots', { slotIds })
+}
+
+export function setPoolSlotEnabled(slotId: string, enabled: boolean): Promise<PoolSlotEnabledOutcome> {
+  return invoke('pool_set_slot_enabled', { slotId, enabled })
+}
+
 export interface ProjectSnapshot {
   id: string
   path: string

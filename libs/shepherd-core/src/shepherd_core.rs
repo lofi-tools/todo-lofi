@@ -47,7 +47,10 @@ use crate::git::{GitError, GitService, TurnBaseline};
 use crate::harness::{HarnessFactory, HarnessSession, ProjectApprovals, UnavailableHarnessFactory};
 use crate::session::SessionRecord;
 use crate::snapshots::{SessionRecovery, TaskApproval};
-use crate::store::{MemoryStore, Store, StoreError, WorktreeDeletion};
+use crate::store::{
+    MemoryStore, PoolReorderOutcome, PoolReorderRequest, PoolSlotEnabledOutcome,
+    PoolSlotEnabledRequest, PoolStatus, Store, StoreError, WorktreeDeletion,
+};
 use crate::terminal::{
     InspectorTab, ProcessRecord, TerminalId, TerminalLayout, TerminalList, TerminalRecord,
     TerminalSnapshot,
@@ -894,6 +897,24 @@ impl Core {
 
     pub fn process_store(&self) -> Arc<dyn Store> {
         self.store.clone()
+    }
+
+    pub async fn pool_status(&mut self, now: u64) -> Result<PoolStatus, CoreError> {
+        Ok(self.store.load_pool_status(now).await?)
+    }
+
+    pub async fn reorder_pool_slots(
+        &mut self,
+        request: &PoolReorderRequest,
+    ) -> Result<PoolReorderOutcome, CoreError> {
+        Ok(self.store.reorder_pool_slots(request).await?)
+    }
+
+    pub async fn set_pool_slot_enabled(
+        &mut self,
+        request: &PoolSlotEnabledRequest,
+    ) -> Result<PoolSlotEnabledOutcome, CoreError> {
+        Ok(self.store.set_pool_slot_enabled(request).await?)
     }
 
     pub async fn remove_process(&mut self, id: &str) -> Result<(), CoreError> {
@@ -3940,7 +3961,9 @@ mod tests {
     use agent_harness::{ApprovalId, Decision, Entry};
 
     use super::*;
-    use crate::store::TursoStore;
+    use crate::store::{
+        PoolAvailabilityState, PoolQuotaEntry, PoolQuotaSource, PoolSlot, PoolSlotId, TursoStore,
+    };
     use crate::streaming::LateHarnessFactory;
     use crate::test_support::{
         FakeHarnessFactory, TestCore, TestDatabase, TestDirectory, TestRepository,
@@ -3959,6 +3982,84 @@ mod tests {
             .last()
             .ok_or("the project list should contain the added project")?;
         Ok(ProjectId::new(project.id.clone()))
+    }
+
+    #[tokio::test]
+    async fn pool_controls_delegate_to_the_store_and_repeat_safely()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut core = Core::new();
+        let mut first = PoolSlot::new(Agent::Codex, "acme", "Acme", "first", "First");
+        first.id = PoolSlotId::new("core-first");
+        first.created_at = 100;
+        first.updated_at = 100;
+        let mut second = PoolSlot::new(Agent::Claude, "other", "Other", "second", "Second");
+        second.id = PoolSlotId::new("core-second");
+        second.priority = 1;
+        second.created_at = 200;
+        second.updated_at = 200;
+        for slot in [&first, &second] {
+            core.store.save_pool_slot(slot).await?;
+            let mut entry = PoolQuotaEntry::new(slot.id.clone(), PoolQuotaSource::Provider, 100);
+            entry.used = Some(0);
+            entry.limit = Some(10);
+            entry.limit_unit = Some("requests".into());
+            entry.reset_at = Some(1_000);
+            core.store.append_pool_quota_entry(&entry).await?;
+        }
+
+        let status = core.pool_status(150).await?;
+        assert_eq!(status.slots.len(), 2);
+        assert_eq!(status.slots[0].slot.id, first.id);
+        assert_eq!(
+            status.slots[0].availability.state,
+            PoolAvailabilityState::Available
+        );
+
+        let reorder = PoolReorderRequest {
+            slot_ids: vec![second.id.clone(), first.id.clone()],
+            now: 200,
+        };
+        let outcome = core.reorder_pool_slots(&reorder).await?;
+        assert_eq!(outcome.slots[0].id, second.id);
+        assert_eq!(
+            core.reorder_pool_slots(&reorder).await?.slots[0].id,
+            second.id
+        );
+
+        let disabled = core
+            .set_pool_slot_enabled(&PoolSlotEnabledRequest {
+                slot_id: second.id.clone(),
+                enabled: false,
+                now: 300,
+            })
+            .await?;
+        assert!(!disabled.slot.enabled);
+        assert!(
+            !core
+                .set_pool_slot_enabled(&PoolSlotEnabledRequest {
+                    slot_id: second.id.clone(),
+                    enabled: false,
+                    now: 310,
+                })
+                .await?
+                .slot
+                .enabled
+        );
+        let status = core.pool_status(320).await?;
+        assert_eq!(
+            status.slots[0].availability.state,
+            PoolAvailabilityState::Disabled
+        );
+        assert!(matches!(
+            core.set_pool_slot_enabled(&PoolSlotEnabledRequest {
+                slot_id: PoolSlotId::new("missing"),
+                enabled: true,
+                now: 320,
+            })
+            .await,
+            Err(CoreError::Store(StoreError::PoolSlotNotFound { .. }))
+        ));
+        Ok(())
     }
 
     struct NamedAgentFactory;

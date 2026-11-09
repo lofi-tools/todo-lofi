@@ -640,7 +640,7 @@ export function App() {
   }
   const canQueuePrompt = () => {
     const state = workspace()?.task.state
-    return !!state && LIVE_STATES.includes(state)
+    return !!state && LIVE_STATES.includes(state) && !cancellingTurn()
   }
   const emptyChatMessage = () => {
     if (!projectsLoaded()) return pending() ? 'Loading projects…' : 'Projects are unavailable.'
