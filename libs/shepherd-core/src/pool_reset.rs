@@ -37,6 +37,10 @@ impl PoolResetPolicy {
         self.windows
     }
 
+    pub fn window_by_key(&self, key: &str) -> Option<&'static PoolResetWindow> {
+        self.windows.iter().find(|window| window.key == key)
+    }
+
     /// The provider window a catalog period describes, when the period has a
     /// fixed length the provider also uses.
     pub fn window_for_period(&self, period: &str) -> Option<&'static PoolResetWindow> {

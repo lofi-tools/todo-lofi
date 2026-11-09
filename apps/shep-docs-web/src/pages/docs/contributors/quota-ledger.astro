@@ -36,8 +36,7 @@ const toc = [
     and task-start wiring. Persistence, the ledger, selection, release, status, reordering,
     enable/disable, limit/reset correction, cooldown clearing, the force override, catalog snapshot
     limit seeding and provider reset windows are implemented and tested; Settings → Agent pool
-    exposes all of them. Enforcing both Codex windows together, snapshot refresh and task-start
-    wiring are not checked off. The
+    exposes all of them.    Snapshot refresh and task-start wiring are not checked off. The
     user-facing promise is on the
     <a href="/docs/users/agent-pool">agent pool</a> page; this page is for the implementation.
   </p>
@@ -73,8 +72,11 @@ const toc = [
     states are available, exhausted, cooling down, disabled, unhealthy and unknown. A disabled slot
     wins first; an active cooldown, then a recorded error, then an expired reset window are checked
     before the used/limit comparison. Expired reset periods make a known limit available again;
-    unknown usage or limits stay unknown. Exhausted and cooling-down slots are skipped with a visible reason,
-    and unknown capacity is not treated as available.
+    unknown usage or limits stay unknown. A provider that declares several windows makes each one
+    count: the slot is eligible only when every window has headroom, and a missing window
+    observation leaves the slot unknown unless the slot's single-limit observation covers it.
+    Exhausted and cooling-down slots are skipped with a visible reason, and unknown capacity is not
+    treated as available.
   </p>
 
   <h2 id="selection">Selection</h2>
@@ -154,7 +156,10 @@ const toc = [
     provider window with that derived time and reports an unknown anchor until the slot has been
     used. A catalog record seeds a reset only when the slot has a recorded last use and the record's
     period matches a window of fixed length; a provider or user reset is never replaced, and a month
-    is not approximated. Enforcing both Codex windows at selection is still planned.
+    is not approximated. Selection requires headroom in every declared window, so a Codex slot that
+    is fine on the 5-hour window but exhausted on the weekly window is not chosen, and the skipped
+    reason names the failing window. A correction can target one window, and it is validated against
+    the provider's policy and preserved per window.
   </p>
   <p>
     Settings → Agent pool can import the catalog's published v2 advisory snapshot as a local file;
@@ -183,8 +188,8 @@ const toc = [
     <li>Implemented: limit/reset corrections and cooldown clearing against both stores, including preserved usage/error fields, repeat no-ops, concurrent identical corrections writing once, rejected stale observations and missing slots, plus the Settings form and its rejected-correction feedback.</li>
     <li>Implemented: the one-turn force override, including applying and clearing it, one-turn consumption as the selection override, repeat no-ops, rejected unavailable and missing slots, no stored state after a Turso re-open, and the Settings confirmation, rejection and clear controls.</li>
     <li>Implemented: catalog snapshot seeding against both stores, including preserved local usage, local precedence, stale snapshots, stale and unknown records, missing and ambiguous matches, a repeated timestamp, a rejected contract version and a Turso re-open, plus the Settings import and its skipped-record and error feedback.</li>
-    <li>Implemented: provider reset policies, including the Codex 5-hour and weekly windows rolled from the last observed use, status windows derived from `lastUsedAt`, catalog reset seeding from that anchor, and the unchanged precedence of provider and user resets.</li>
-    <li>Pending: enforcing both Codex windows together, snapshot refresh, task-start wiring, cancellation and restart scheduling.</li>
+    <li>Implemented: provider reset policies, including the Codex 5-hour and weekly windows rolled from the last observed use, per-window ledger observations, status windows with usage and headroom, catalog reset seeding from that anchor, all-window selection, window-scoped corrections, and the unchanged precedence of provider and user resets.</li>
+    <li>Pending: snapshot refresh, task-start wiring, cancellation and restart scheduling.</li>
     <li>Credential redaction in records, logs and diagnostics.</li>
   </ul>
   <p>

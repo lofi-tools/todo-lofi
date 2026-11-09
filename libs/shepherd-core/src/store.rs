@@ -174,52 +174,136 @@ impl PoolSlot {
         if !self.enabled {
             return PoolAvailability::new(PoolAvailabilityState::Disabled, "slot is disabled");
         }
-        let Some(entry) = latest else {
-            return PoolAvailability::new(PoolAvailabilityState::Unknown, "no quota observation");
-        };
-        if let Some(until) = entry.cooldown_until.filter(|until| *until > now) {
-            return PoolAvailability::new(
-                PoolAvailabilityState::CoolingDown,
-                format!("cooling down until {until}"),
-            );
-        }
-        if let Some(error) = entry
-            .error
-            .as_deref()
-            .filter(|error| !error.trim().is_empty())
-        {
-            return PoolAvailability::new(
-                PoolAvailabilityState::Unhealthy,
-                format!("last observation failed: {error}"),
-            );
-        }
-        if entry.reset_at.is_some_and(|reset_at| reset_at <= now) {
-            return match entry.limit {
-                Some(0) => {
-                    PoolAvailability::new(PoolAvailabilityState::Exhausted, "quota limit is zero")
-                }
-                Some(_) => {
-                    PoolAvailability::new(PoolAvailabilityState::Available, "quota window reset")
-                }
-                None => PoolAvailability::new(
-                    PoolAvailabilityState::Unknown,
-                    "quota window reset without a known limit",
-                ),
-            };
-        }
-        let unit = entry.limit_unit.as_deref().unwrap_or("units");
-        match (entry.used, entry.limit) {
-            (Some(used), Some(limit)) if used >= limit => PoolAvailability::new(
-                PoolAvailabilityState::Exhausted,
-                format!("quota exhausted: used {used} of {limit} {unit}"),
-            ),
-            (Some(used), Some(limit)) => PoolAvailability::new(
-                PoolAvailabilityState::Available,
-                format!("quota available: used {used} of {limit} {unit}"),
-            ),
-            _ => PoolAvailability::new(PoolAvailabilityState::Unknown, "usage or limit is unknown"),
+        match latest {
+            Some(entry) => pool_entry_availability(entry, now),
+            None => PoolAvailability::new(PoolAvailabilityState::Unknown, "no quota observation"),
         }
     }
+}
+
+fn latest_pool_quota_entry_for_window<'a>(
+    entries: &'a [PoolQuotaEntry],
+    window_key: Option<&str>,
+) -> Option<&'a PoolQuotaEntry> {
+    entries
+        .iter()
+        .filter(|entry| entry.window_key.as_deref() == window_key)
+        .max_by(|left, right| pool_quota_entry_order(left, right))
+}
+
+fn pool_entry_availability(entry: &PoolQuotaEntry, now: u64) -> PoolAvailability {
+    if let Some(until) = entry.cooldown_until.filter(|until| *until > now) {
+        return PoolAvailability::new(
+            PoolAvailabilityState::CoolingDown,
+            format!("cooling down until {until}"),
+        );
+    }
+    if let Some(error) = entry
+        .error
+        .as_deref()
+        .filter(|error| !error.trim().is_empty())
+    {
+        return PoolAvailability::new(
+            PoolAvailabilityState::Unhealthy,
+            format!("last observation failed: {error}"),
+        );
+    }
+    if entry.reset_at.is_some_and(|reset_at| reset_at <= now) {
+        return match entry.limit {
+            Some(0) => {
+                PoolAvailability::new(PoolAvailabilityState::Exhausted, "quota limit is zero")
+            }
+            Some(_) => {
+                PoolAvailability::new(PoolAvailabilityState::Available, "quota window reset")
+            }
+            None => PoolAvailability::new(
+                PoolAvailabilityState::Unknown,
+                "quota window reset without a known limit",
+            ),
+        };
+    }
+    let unit = entry.limit_unit.as_deref().unwrap_or("units");
+    match (entry.used, entry.limit) {
+        (Some(used), Some(limit)) if used >= limit => PoolAvailability::new(
+            PoolAvailabilityState::Exhausted,
+            format!("quota exhausted: used {used} of {limit} {unit}"),
+        ),
+        (Some(used), Some(limit)) => PoolAvailability::new(
+            PoolAvailabilityState::Available,
+            format!("quota available: used {used} of {limit} {unit}"),
+        ),
+        _ => PoolAvailability::new(PoolAvailabilityState::Unknown, "usage or limit is unknown"),
+    }
+}
+
+/// A slot is available only when every provider window has headroom; a slot
+/// with no published windows keeps the single-limit rule.
+fn pool_slot_availability(
+    slot: &PoolSlot,
+    entries: &[PoolQuotaEntry],
+    now: u64,
+) -> PoolAvailability {
+    if !slot.enabled {
+        return PoolAvailability::new(PoolAvailabilityState::Disabled, "slot is disabled");
+    }
+    let policy = PoolResetPolicy::for_agent(slot.agent);
+    if policy.windows().is_empty() {
+        let Some(entry) = latest_pool_quota_entry_for_window(entries, None) else {
+            return PoolAvailability::new(PoolAvailabilityState::Unknown, "no quota observation");
+        };
+        return pool_entry_availability(entry, now);
+    }
+    let single_limit = latest_pool_quota_entry_for_window(entries, None);
+    let mut available = Vec::new();
+    for window in policy.windows() {
+        let Some(entry) =
+            latest_pool_quota_entry_for_window(entries, Some(window.key)).or(single_limit)
+        else {
+            return PoolAvailability::new(
+                PoolAvailabilityState::Unknown,
+                format!("{} window: no quota observation", window.label),
+            );
+        };
+        let availability = pool_entry_availability(entry, now);
+        if availability.state != PoolAvailabilityState::Available {
+            return PoolAvailability::new(
+                availability.state,
+                format!("{} window: {}", window.label, availability.reason),
+            );
+        }
+        available.push(format!("{} window: {}", window.label, availability.reason));
+    }
+    PoolAvailability::new(PoolAvailabilityState::Available, available.join("; "))
+}
+
+fn pool_reset_window_statuses(
+    slot: &PoolSlot,
+    entries: &[PoolQuotaEntry],
+) -> Vec<PoolResetWindowStatus> {
+    let single_limit = latest_pool_quota_entry_for_window(entries, None);
+    PoolResetPolicy::for_agent(slot.agent)
+        .windows()
+        .iter()
+        .map(|window| {
+            let entry =
+                latest_pool_quota_entry_for_window(entries, Some(window.key)).or(single_limit);
+            PoolResetWindowStatus {
+                key: window.key.to_string(),
+                label: window.label.to_string(),
+                reset_at: entry.and_then(|entry| entry.reset_at).or_else(|| {
+                    slot.last_used_at
+                        .map(|last_used_at| window.reset_at(last_used_at))
+                }),
+                used: entry.and_then(|entry| entry.used),
+                limit: entry.and_then(|entry| entry.limit),
+                limit_unit: entry.and_then(|entry| entry.limit_unit.clone()),
+                remaining: entry.and_then(|entry| match (entry.used, entry.limit) {
+                    (Some(used), Some(limit)) => Some(limit.saturating_sub(used)),
+                    _ => None,
+                }),
+            }
+        })
+        .collect()
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -266,6 +350,10 @@ pub struct PoolQuotaEntry {
     pub reset_at: Option<u64>,
     pub cooldown_until: Option<u64>,
     pub error: Option<String>,
+    /// The provider rate-limit window this observation describes. `None` is
+    /// the single-limit evidence used by providers without published windows.
+    #[serde(default)]
+    pub window_key: Option<String>,
 }
 
 impl PoolQuotaEntry {
@@ -281,6 +369,7 @@ impl PoolQuotaEntry {
             reset_at: None,
             cooldown_until: None,
             error: None,
+            window_key: None,
         }
     }
 }
@@ -436,6 +525,14 @@ pub struct PoolResetWindowStatus {
     pub key: String,
     pub label: String,
     pub reset_at: Option<u64>,
+    #[serde(default)]
+    pub used: Option<u64>,
+    #[serde(default)]
+    pub limit: Option<u64>,
+    #[serde(default)]
+    pub limit_unit: Option<String>,
+    #[serde(default)]
+    pub remaining: Option<u64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -548,6 +645,10 @@ pub struct PoolQuotaCorrectionRequest {
     pub limit_unit: Option<String>,
     pub reset_at: Option<u64>,
     pub now: u64,
+    /// The provider window the correction applies to; `None` corrects the
+    /// slot's single limit.
+    #[serde(default)]
+    pub window_key: Option<String>,
 }
 
 impl PoolQuotaCorrectionRequest {
@@ -558,6 +659,7 @@ impl PoolQuotaCorrectionRequest {
             limit_unit: None,
             reset_at: None,
             now,
+            window_key: None,
         }
     }
 }
@@ -825,6 +927,10 @@ const MIGRATIONS: &[Migration] = &[
     Migration {
         name: "0022_pool_selection_idle.sql",
         sql: include_str!("../toasty/migrations/0022_pool_selection_idle.sql"),
+    },
+    Migration {
+        name: "0023_pool_quota_window.sql",
+        sql: include_str!("../toasty/migrations/0023_pool_quota_window.sql"),
     },
 ];
 
@@ -1944,8 +2050,8 @@ impl Store for TursoStore {
         let inserted = toasty::sql::statement(
             "INSERT INTO pool_quota_ledger (\
                 id, slot_id, observed_at, source, used, quota_limit, limit_unit, \
-                reset_at, cooldown_until, error\
-             ) SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10 \
+                reset_at, cooldown_until, error, window_key\
+             ) SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11 \
              FROM pool_slots WHERE id = ?2",
         )
         .bind(&entry.id)
@@ -1958,6 +2064,7 @@ impl Store for TursoStore {
         .bind(timestamp_or_missing(entry.reset_at)?)
         .bind(timestamp_or_missing(entry.cooldown_until)?)
         .bind(entry.error.as_deref().unwrap_or_default())
+        .bind(entry.window_key.as_deref().unwrap_or_default())
         .exec(&mut *db)
         .await?;
         if inserted != 1 {
@@ -1973,27 +2080,7 @@ impl Store for TursoStore {
         slot_id: &PoolSlotId,
     ) -> Result<Vec<PoolQuotaEntry>, StoreError> {
         let mut db = self.db.lock().await;
-        let rows = toasty::sql::query(
-            "SELECT id, slot_id, observed_at, source, used, quota_limit, limit_unit, \
-                    reset_at, cooldown_until, error \
-             FROM pool_quota_ledger WHERE slot_id = ?1 ORDER BY observed_at, id",
-        )
-        .column_types([
-            Type::String,
-            Type::String,
-            Type::I64,
-            Type::String,
-            Type::I64,
-            Type::I64,
-            Type::String,
-            Type::I64,
-            Type::I64,
-            Type::String,
-        ])
-        .bind(slot_id.as_str())
-        .exec(&mut *db)
-        .await?;
-        rows.into_iter().map(parse_pool_quota_entry).collect()
+        query_pool_quota_entries(&mut db, slot_id).await
     }
 
     async fn latest_pool_quota_entry(
@@ -2028,8 +2115,8 @@ impl Store for TursoStore {
                         .into_iter()
                         .find(|slot| slot.id == slot_id)
                 {
-                    let latest = self.latest_pool_quota_entry(&slot.id).await?;
-                    if slot.availability(latest.as_ref(), request.now).state
+                    let entries = self.load_pool_quota_entries(&slot.id).await?;
+                    if pool_slot_availability(&slot, &entries, request.now).state
                         == PoolAvailabilityState::Available
                     {
                         if record.idle_since.is_some() {
@@ -2060,11 +2147,12 @@ impl Store for TursoStore {
 
             let selections = self.load_pool_selections().await?;
             let slots = self.load_pool_slots().await?;
-            let mut latest = BTreeMap::new();
+            let mut entries: BTreeMap<PoolSlotId, Vec<PoolQuotaEntry>> = BTreeMap::new();
             for slot in &slots {
-                if let Some(entry) = self.latest_pool_quota_entry(&slot.id).await? {
-                    latest.insert(slot.id.clone(), entry);
-                }
+                entries.insert(
+                    slot.id.clone(),
+                    self.load_pool_quota_entries(&slot.id).await?,
+                );
             }
             let reserved = selections
                 .iter()
@@ -2078,7 +2166,7 @@ impl Store for TursoStore {
                         .map(|slot_id| (slot_id, record.request_id.clone()))
                 })
                 .collect();
-            let outcome = choose_pool_slot(request, &slots, &latest, &reserved);
+            let outcome = choose_pool_slot(request, &slots, &entries, &reserved);
             let record = PoolSelectionRecord {
                 request_id: outcome.request_id.clone(),
                 slot_id: outcome.slot.as_ref().map(|slot| slot.id.clone()),
@@ -2258,8 +2346,13 @@ impl Store for TursoStore {
         let selections = self.load_pool_selections().await?;
         let mut statuses = Vec::with_capacity(slots.len());
         for slot in slots {
-            let latest_quota = self.latest_pool_quota_entry(&slot.id).await?;
-            let availability = slot.availability(latest_quota.as_ref(), now);
+            let entries = self.load_pool_quota_entries(&slot.id).await?;
+            let latest_quota = entries
+                .iter()
+                .max_by(|left, right| pool_quota_entry_order(left, right))
+                .cloned();
+            let availability = pool_slot_availability(&slot, &entries, now);
+            let reset_windows = pool_reset_window_statuses(&slot, &entries);
             let current_request = selections
                 .iter()
                 .find(|selection| {
@@ -2271,7 +2364,7 @@ impl Store for TursoStore {
                 availability,
                 latest_quota,
                 current_request,
-                reset_windows: Vec::new(),
+                reset_windows,
             });
         }
         Ok(PoolStatus {
@@ -2381,8 +2474,19 @@ impl Store for TursoStore {
             .ok_or_else(|| StoreError::PoolSlotNotFound {
                 slot_id: request.slot_id.clone(),
             })?;
+        if let Some(window_key) = request.window_key.as_deref()
+            && PoolResetPolicy::for_agent(slot.agent)
+                .window_by_key(window_key)
+                .is_none()
+        {
+            return Err(StoreError::InvalidRow(format!(
+                "unknown provider window: {window_key}"
+            )));
+        }
         let mut db = self.db.lock().await;
-        let latest = query_latest_pool_quota_entry(&mut db, &request.slot_id).await?;
+        let entries = query_pool_quota_entries(&mut db, &request.slot_id).await?;
+        let latest =
+            latest_pool_quota_entry_for_window(&entries, request.window_key.as_deref()).cloned();
         if pool_correction_is_current(latest.as_ref(), request) {
             return Ok(pool_correction_outcome(
                 slot,
@@ -2472,8 +2576,8 @@ impl Store for TursoStore {
         let mut seeds = Vec::with_capacity(slots.len());
         for slot in slots {
             let mut db = self.db.lock().await;
-            let latest = query_latest_pool_quota_entry(&mut db, &slot.id).await?;
-            match pool_catalog_seed_entry(&slot, advisory, latest.as_ref(), now) {
+            let entries = query_pool_quota_entries(&mut db, &slot.id).await?;
+            match pool_catalog_seed_entry(&slot, advisory, &entries, now) {
                 Ok(entry) => {
                     save_pool_quota_correction(&mut db, &entry).await?;
                     seeds.push(PoolCatalogSeed {
@@ -3924,17 +4028,18 @@ impl Store for MemoryStore {
         }
 
         let slots = self.load_pool_slots().await?;
-        let mut latest = BTreeMap::new();
+        let mut entries: BTreeMap<PoolSlotId, Vec<PoolQuotaEntry>> = BTreeMap::new();
         {
             let ledger = self.pool_quota_ledger.read().await;
             for entry in ledger.iter() {
-                let replace = latest.get(&entry.slot_id).is_none_or(|current| {
-                    pool_quota_entry_order(current, entry) != std::cmp::Ordering::Greater
-                });
-                if replace {
-                    latest.insert(entry.slot_id.clone(), entry.clone());
-                }
+                entries
+                    .entry(entry.slot_id.clone())
+                    .or_default()
+                    .push(entry.clone());
             }
+        }
+        for list in entries.values_mut() {
+            list.sort_by(pool_quota_entry_order);
         }
         let selections: Vec<_> = self
             .pool_selections
@@ -3955,7 +4060,7 @@ impl Store for MemoryStore {
                     .map(|slot_id| (slot_id, record.request_id.clone()))
             })
             .collect();
-        let outcome = choose_pool_slot(request, &slots, &latest, &reserved);
+        let outcome = choose_pool_slot(request, &slots, &entries, &reserved);
         let record = PoolSelectionRecord {
             request_id: outcome.request_id.clone(),
             slot_id: outcome.slot.as_ref().map(|slot| slot.id.clone()),
@@ -4076,8 +4181,13 @@ impl Store for MemoryStore {
         let selections = self.load_pool_selections().await?;
         let mut statuses = Vec::with_capacity(slots.len());
         for slot in slots {
-            let latest_quota = self.latest_pool_quota_entry(&slot.id).await?;
-            let availability = slot.availability(latest_quota.as_ref(), now);
+            let entries = self.load_pool_quota_entries(&slot.id).await?;
+            let latest_quota = entries
+                .iter()
+                .max_by(|left, right| pool_quota_entry_order(left, right))
+                .cloned();
+            let availability = pool_slot_availability(&slot, &entries, now);
+            let reset_windows = pool_reset_window_statuses(&slot, &entries);
             let current_request = selections
                 .iter()
                 .find(|selection| {
@@ -4089,7 +4199,7 @@ impl Store for MemoryStore {
                 availability,
                 latest_quota,
                 current_request,
-                reset_windows: Vec::new(),
+                reset_windows,
             });
         }
         Ok(PoolStatus {
@@ -4167,12 +4277,23 @@ impl Store for MemoryStore {
             .ok_or_else(|| StoreError::PoolSlotNotFound {
                 slot_id: request.slot_id.clone(),
             })?;
+        if let Some(window_key) = request.window_key.as_deref()
+            && PoolResetPolicy::for_agent(slot.agent)
+                .window_by_key(window_key)
+                .is_none()
+        {
+            return Err(StoreError::InvalidRow(format!(
+                "unknown provider window: {window_key}"
+            )));
+        }
         let mut ledger = self.pool_quota_ledger.write().await;
-        let latest = ledger
+        let entries: Vec<_> = ledger
             .iter()
             .filter(|entry| entry.slot_id == request.slot_id)
-            .max_by(|left, right| pool_quota_entry_order(left, right))
-            .cloned();
+            .cloned()
+            .collect();
+        let latest =
+            latest_pool_quota_entry_for_window(&entries, request.window_key.as_deref()).cloned();
         if pool_correction_is_current(latest.as_ref(), request) {
             return Ok(pool_correction_outcome(
                 slot.clone(),
@@ -4262,12 +4383,12 @@ impl Store for MemoryStore {
         let mut ledger = self.pool_quota_ledger.write().await;
         let mut seeds = Vec::with_capacity(slots.len());
         for slot in slots.values_mut() {
-            let latest = ledger
+            let entries: Vec<_> = ledger
                 .iter()
                 .filter(|entry| entry.slot_id == slot.id)
-                .max_by(|left, right| pool_quota_entry_order(left, right))
-                .cloned();
-            match pool_catalog_seed_entry(slot, advisory, latest.as_ref(), now) {
+                .cloned()
+                .collect();
+            match pool_catalog_seed_entry(slot, advisory, &entries, now) {
                 Ok(entry) => {
                     seeds.push(PoolCatalogSeed {
                         slot_id: slot.id.clone(),
@@ -4408,9 +4529,38 @@ fn parse_pool_quota_entry(value: Value) -> Result<PoolQuotaEntry, StoreError> {
         reset_at: optional_u64(record.get(7))?,
         cooldown_until: optional_u64(record.get(8))?,
         error: optional_string(record.get(9))?,
+        window_key: optional_string(record.get(10))?,
     };
     validate_pool_quota_entry(&entry)?;
     Ok(entry)
+}
+
+async fn query_pool_quota_entries(
+    db: &mut toasty::db::Db,
+    slot_id: &PoolSlotId,
+) -> Result<Vec<PoolQuotaEntry>, StoreError> {
+    let rows = toasty::sql::query(
+        "SELECT id, slot_id, observed_at, source, used, quota_limit, limit_unit, \
+                reset_at, cooldown_until, error, window_key \
+         FROM pool_quota_ledger WHERE slot_id = ?1 ORDER BY observed_at, id",
+    )
+    .column_types([
+        Type::String,
+        Type::String,
+        Type::I64,
+        Type::String,
+        Type::I64,
+        Type::I64,
+        Type::String,
+        Type::I64,
+        Type::I64,
+        Type::String,
+        Type::String,
+    ])
+    .bind(slot_id.as_str())
+    .exec(&mut *db)
+    .await?;
+    rows.into_iter().map(parse_pool_quota_entry).collect()
 }
 
 async fn query_latest_pool_quota_entry(
@@ -4419,7 +4569,7 @@ async fn query_latest_pool_quota_entry(
 ) -> Result<Option<PoolQuotaEntry>, StoreError> {
     let rows = toasty::sql::query(
         "SELECT id, slot_id, observed_at, source, used, quota_limit, limit_unit, \
-                reset_at, cooldown_until, error \
+                reset_at, cooldown_until, error, window_key \
          FROM pool_quota_ledger WHERE slot_id = ?1 \
          ORDER BY observed_at DESC, id DESC LIMIT 1",
     )
@@ -4433,6 +4583,7 @@ async fn query_latest_pool_quota_entry(
         Type::String,
         Type::I64,
         Type::I64,
+        Type::String,
         Type::String,
     ])
     .bind(slot_id.as_str())
@@ -4514,6 +4665,7 @@ fn pool_quota_correction_entry(
     entry.reset_at = request.reset_at;
     entry.cooldown_until = cooldown_until;
     entry.error = error;
+    entry.window_key = request.window_key.clone();
     entry
 }
 
@@ -4559,6 +4711,7 @@ fn pool_correction_is_current(
             && entry.limit == request.limit
             && entry.limit_unit.as_deref() == request.limit_unit.as_deref()
             && entry.reset_at == request.reset_at
+            && entry.window_key == request.window_key
     })
 }
 
@@ -4608,6 +4761,15 @@ fn validate_pool_quota_correction_request(
     if request.limit.is_none() && request.limit_unit.is_some() {
         return Err(StoreError::InvalidRow(
             "pool correction limit unit requires a limit".to_string(),
+        ));
+    }
+    if request
+        .window_key
+        .as_deref()
+        .is_some_and(|key| key.trim().is_empty())
+    {
+        return Err(StoreError::InvalidRow(
+            "pool correction window key is empty".to_string(),
         ));
     }
     if request
@@ -4675,7 +4837,7 @@ fn validate_pool_catalog_advisory(advisory: &PoolCatalogAdvisory) -> Result<(), 
 fn pool_catalog_seed_entry(
     slot: &PoolSlot,
     advisory: &PoolCatalogAdvisory,
-    latest: Option<&PoolQuotaEntry>,
+    entries: &[PoolQuotaEntry],
     now: u64,
 ) -> Result<PoolQuotaEntry, String> {
     if advisory.stale {
@@ -4711,6 +4873,13 @@ fn pool_catalog_seed_entry(
     let Some(allowance) = record.allowance else {
         return Err("catalog allowance is unknown".to_string());
     };
+    let policy = PoolResetPolicy::for_agent(slot.agent);
+    let window = record
+        .reset_period
+        .as_deref()
+        .and_then(|period| policy.window_for_period(period));
+    let latest = latest_pool_quota_entry_for_window(entries, window.map(|window| window.key))
+        .or_else(|| latest_pool_quota_entry_for_window(entries, None));
     if latest.is_some_and(|entry| entry.source != PoolQuotaSource::Catalog && entry.limit.is_some())
     {
         return Err("local limit wins over the catalog".to_string());
@@ -4732,13 +4901,9 @@ fn pool_catalog_seed_entry(
     // A reset time needs both a window length and a start. The provider's
     // policy supplies the length and the slot's last use supplies the start;
     // a provider or user reset still wins over a derived one.
-    let derived_reset = slot.last_used_at.and_then(|last_used_at| {
-        record
-            .reset_period
-            .as_deref()
-            .and_then(|period| PoolResetPolicy::for_agent(slot.agent).window_for_period(period))
-            .map(|window| window.reset_at(last_used_at))
-    });
+    let derived_reset = slot
+        .last_used_at
+        .and_then(|last_used_at| window.map(|window| window.reset_at(last_used_at)));
     let (local_reset, catalog_reset) = match latest {
         Some(entry) if entry.source == PoolQuotaSource::Catalog => (None, entry.reset_at),
         Some(entry) => (entry.reset_at, None),
@@ -4747,6 +4912,7 @@ fn pool_catalog_seed_entry(
     entry.reset_at = local_reset.or(derived_reset).or(catalog_reset);
     entry.cooldown_until = cooldown_until;
     entry.error = error;
+    entry.window_key = window.map(|window| window.key.to_string());
     Ok(entry)
 }
 
@@ -4966,7 +5132,7 @@ fn is_pool_selection_conflict(error: &StoreError) -> bool {
 pub fn choose_pool_slot(
     request: &PoolSelectionRequest,
     slots: &[PoolSlot],
-    latest: &BTreeMap<PoolSlotId, PoolQuotaEntry>,
+    entries: &BTreeMap<PoolSlotId, Vec<PoolQuotaEntry>>,
     reserved: &BTreeMap<PoolSlotId, String>,
 ) -> PoolSelectionOutcome {
     let mut ordered: Vec<&PoolSlot> = slots.iter().collect();
@@ -4987,7 +5153,7 @@ pub fn choose_pool_slot(
         match ordered.iter().find(|slot| &slot.id == override_slot) {
             Some(slot) => {
                 if let Some(skip) =
-                    pool_slot_skip(slot, latest, reserved, &request.request_id, request.now)
+                    pool_slot_skip(slot, entries, reserved, &request.request_id, request.now)
                 {
                     skipped.push(skip);
                 } else {
@@ -5006,7 +5172,8 @@ pub fn choose_pool_slot(
         if request.override_slot.as_ref() == Some(&slot.id) {
             continue;
         }
-        if let Some(skip) = pool_slot_skip(slot, latest, reserved, &request.request_id, request.now)
+        if let Some(skip) =
+            pool_slot_skip(slot, entries, reserved, &request.request_id, request.now)
         {
             skipped.push(skip);
             continue;
@@ -5026,7 +5193,7 @@ pub fn choose_pool_slot(
 
 fn pool_slot_skip(
     slot: &PoolSlot,
-    latest: &BTreeMap<PoolSlotId, PoolQuotaEntry>,
+    entries: &BTreeMap<PoolSlotId, Vec<PoolQuotaEntry>>,
     reserved: &BTreeMap<PoolSlotId, String>,
     request_id: &str,
     now: u64,
@@ -5040,7 +5207,11 @@ fn pool_slot_skip(
             reason: format!("reserved by request {owner}"),
         });
     }
-    let availability = slot.availability(latest.get(&slot.id), now);
+    let availability = pool_slot_availability(
+        slot,
+        entries.get(&slot.id).map(Vec::as_slice).unwrap_or(&[]),
+        now,
+    );
     (availability.state != PoolAvailabilityState::Available).then(|| PoolSkippedSlot {
         slot_id: slot.id.clone(),
         state: Some(availability.state),
@@ -5869,27 +6040,112 @@ mod tests {
     }
 
     #[test]
+    fn pool_selection_requires_headroom_in_every_provider_window() {
+        fn window_entry(
+            slot_id: &PoolSlotId,
+            window_key: &str,
+            used: u64,
+            limit: u64,
+            observed_at: u64,
+        ) -> PoolQuotaEntry {
+            let mut entry =
+                PoolQuotaEntry::new(slot_id.clone(), PoolQuotaSource::Provider, observed_at);
+            entry.used = Some(used);
+            entry.limit = Some(limit);
+            entry.limit_unit = Some("requests".into());
+            entry.window_key = Some(window_key.into());
+            entry
+        }
+
+        let mut slot = PoolSlot::new(Agent::Codex, "acme", "Acme", "model-a", "Model A");
+        slot.id = PoolSlotId::new("window-slot");
+        slot.created_at = 100;
+        slot.updated_at = 100;
+        let request = PoolSelectionRequest::new("task-windows", 200);
+        let mut entries = BTreeMap::new();
+
+        entries.insert(
+            slot.id.clone(),
+            vec![
+                window_entry(&slot.id, "five-hour", 1, 2, 100),
+                window_entry(&slot.id, "weekly", 10, 10, 110),
+            ],
+        );
+        let exhausted = choose_pool_slot(&request, &[slot.clone()], &entries, &BTreeMap::new());
+        assert!(exhausted.slot.is_none());
+        assert_eq!(exhausted.skipped.len(), 1);
+        assert_eq!(
+            exhausted.skipped[0].state,
+            Some(PoolAvailabilityState::Exhausted)
+        );
+        assert!(exhausted.skipped[0].reason.starts_with("Weekly window:"));
+
+        entries.insert(
+            slot.id.clone(),
+            vec![
+                window_entry(&slot.id, "five-hour", 2, 2, 100),
+                window_entry(&slot.id, "weekly", 1, 10, 110),
+            ],
+        );
+        let exhausted = choose_pool_slot(&request, &[slot.clone()], &entries, &BTreeMap::new());
+        assert!(exhausted.slot.is_none());
+        assert!(exhausted.skipped[0].reason.starts_with("5-hour window:"));
+
+        entries.insert(
+            slot.id.clone(),
+            vec![
+                window_entry(&slot.id, "five-hour", 1, 2, 100),
+                window_entry(&slot.id, "weekly", 1, 10, 110),
+            ],
+        );
+        let selected = choose_pool_slot(&request, &[slot.clone()], &entries, &BTreeMap::new());
+        assert_eq!(selected.slot.as_ref().map(|slot| &slot.id), Some(&slot.id));
+
+        let mut windowless = PoolSlot::new(Agent::Claude, "zed", "Zed", "model-b", "Model B");
+        windowless.id = PoolSlotId::new("single-limit-slot");
+        windowless.created_at = 200;
+        windowless.updated_at = 200;
+        let mut single = BTreeMap::new();
+        single.insert(
+            windowless.id.clone(),
+            vec![state_entry(
+                &windowless.id,
+                Some(0),
+                Some(10),
+                None,
+                None,
+                None,
+            )],
+        );
+        let selected = choose_pool_slot(&request, &[windowless.clone()], &single, &BTreeMap::new());
+        assert_eq!(
+            selected.slot.as_ref().map(|slot| &slot.id),
+            Some(&windowless.id)
+        );
+    }
+
+    #[test]
     fn pool_selection_tie_breaks_deterministically_and_reports_missing_override() {
         let first = pool_slot("slot-a", 0, 100);
         let second = pool_slot("slot-b", 0, 100);
         let slots = vec![second, first];
-        let mut latest = BTreeMap::new();
+        let mut entries = BTreeMap::new();
         for slot in &slots {
-            latest.insert(
+            entries.insert(
                 slot.id.clone(),
-                state_entry(&slot.id, Some(0), Some(10), None, None, None),
+                vec![state_entry(&slot.id, Some(0), Some(10), None, None, None)],
             );
         }
 
         let mut request = PoolSelectionRequest::new("task-tie", 100);
-        let outcome = choose_pool_slot(&request, &slots, &latest, &BTreeMap::new());
+        let outcome = choose_pool_slot(&request, &slots, &entries, &BTreeMap::new());
         assert_eq!(
             outcome.slot.as_ref().map(|slot| slot.id.as_str()),
             Some("slot-a")
         );
 
         request.override_slot = Some(PoolSlotId::new("missing"));
-        let outcome = choose_pool_slot(&request, &slots, &latest, &BTreeMap::new());
+        let outcome = choose_pool_slot(&request, &slots, &entries, &BTreeMap::new());
         assert_eq!(
             outcome.slot.as_ref().map(|slot| slot.id.as_str()),
             Some("slot-a")
@@ -6453,6 +6709,7 @@ mod tests {
                 limit_unit: Some("requests".into()),
                 reset_at: Some(2_000),
                 now: 200,
+                window_key: None,
             };
             let corrected = store.correct_pool_quota(&correction).await?;
             assert!(corrected.applied);
@@ -6627,6 +6884,7 @@ mod tests {
                             limit_unit: Some("requests".into()),
                             reset_at: Some(3_000),
                             now: 200,
+                            window_key: None,
                         })
                         .await
                 }));

@@ -51,8 +51,8 @@ use crate::snapshots::{SessionRecovery, TaskApproval};
 use crate::store::{
     MemoryStore, PoolCatalogAdvisory, PoolCatalogOutcome, PoolCooldownClearRequest,
     PoolQuotaCorrectionOutcome, PoolQuotaCorrectionRequest, PoolReorderOutcome, PoolReorderRequest,
-    PoolResetWindowStatus, PoolSelectionRequest, PoolSlotEnabledOutcome, PoolSlotEnabledRequest,
-    PoolSlotId, PoolStatus, Store, StoreError, WorktreeDeletion,
+    PoolSelectionRequest, PoolSlotEnabledOutcome, PoolSlotEnabledRequest, PoolSlotId, PoolStatus,
+    Store, StoreError, WorktreeDeletion,
 };
 use crate::terminal::{
     InspectorTab, ProcessRecord, TerminalId, TerminalLayout, TerminalList, TerminalRecord,
@@ -923,24 +923,6 @@ impl Core {
 
     pub async fn pool_status(&mut self, now: u64) -> Result<PoolStatus, CoreError> {
         let mut status = self.store.load_pool_status(now).await?;
-        for entry in &mut status.slots {
-            let policy = crate::pool_reset::PoolResetPolicy::for_agent(entry.slot.agent);
-            if policy.windows().is_empty() {
-                continue;
-            }
-            entry.reset_windows = policy
-                .windows()
-                .iter()
-                .map(|window| PoolResetWindowStatus {
-                    key: window.key.to_string(),
-                    label: window.label.to_string(),
-                    reset_at: entry
-                        .slot
-                        .last_used_at
-                        .map(|last_used_at| window.reset_at(last_used_at)),
-                })
-                .collect();
-        }
         let forced_is_known = self
             .forced_pool_slot
             .as_ref()
@@ -4109,7 +4091,7 @@ mod tests {
     use crate::store::{
         POOL_CATALOG_CONTRACT_VERSION, PoolAvailabilityState, PoolCatalogRecord,
         PoolCooldownClearRequest, PoolQuotaCorrectionRequest, PoolQuotaEntry, PoolQuotaSource,
-        PoolResetWindowStatus, PoolSlot, PoolSlotId, TursoStore,
+        PoolSlot, PoolSlotId, TursoStore,
     };
     use crate::streaming::LateHarnessFactory;
     use crate::test_support::{
@@ -4204,6 +4186,7 @@ mod tests {
             limit_unit: Some("requests".into()),
             reset_at: Some(5_000),
             now: 400,
+            window_key: None,
         };
         let corrected = core.correct_pool_quota(&correction).await?;
         assert!(corrected.applied);
@@ -4281,6 +4264,7 @@ mod tests {
                 limit_unit: Some("requests".into()),
                 reset_at: Some(5_000),
                 now: 600,
+                window_key: None,
             })
             .await,
             Err(CoreError::Store(StoreError::InvalidRow(_)))
@@ -4631,20 +4615,16 @@ mod tests {
             .iter()
             .find(|entry| entry.slot.id == codex.id)
             .ok_or("missing codex slot")?;
+        assert_eq!(codex_status.reset_windows.len(), 2);
+        assert_eq!(codex_status.reset_windows[0].key, "five-hour");
         assert_eq!(
-            codex_status.reset_windows,
-            vec![
-                PoolResetWindowStatus {
-                    key: "five-hour".into(),
-                    label: "5-hour".into(),
-                    reset_at: Some(1_000 + 5 * 3_600_000),
-                },
-                PoolResetWindowStatus {
-                    key: "weekly".into(),
-                    label: "Weekly".into(),
-                    reset_at: Some(1_000 + 7 * 86_400_000),
-                },
-            ]
+            codex_status.reset_windows[0].reset_at,
+            Some(1_000 + 5 * 3_600_000)
+        );
+        assert_eq!(codex_status.reset_windows[1].key, "weekly");
+        assert_eq!(
+            codex_status.reset_windows[1].reset_at,
+            Some(1_000 + 7 * 86_400_000)
         );
         let claude_status = status
             .slots

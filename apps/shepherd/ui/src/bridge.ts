@@ -119,6 +119,7 @@ export interface PoolQuotaEntry {
   resetAt: number | null
   cooldownUntil: number | null
   error: string | null
+  windowKey?: string | null
 }
 
 export interface PoolSlot {
@@ -146,6 +147,10 @@ export interface PoolResetWindow {
   key: string
   label: string
   resetAt: number | null
+  used?: number | null
+  limit?: number | null
+  limitUnit?: string | null
+  remaining?: number | null
 }
 
 export interface PoolSlotStatus {
@@ -197,8 +202,9 @@ export function correctPoolQuota(
   limit: number | null,
   limitUnit: string | null,
   resetAt: number | null,
+  windowKey: string | null = null,
 ): Promise<PoolQuotaCorrectionOutcome> {
-  return invoke('pool_correct_quota', { slotId, limit, limitUnit, resetAt })
+  return invoke('pool_correct_quota', { slotId, limit, limitUnit, resetAt, windowKey })
 }
 
 export function clearPoolSlotCooldown(slotId: string): Promise<PoolQuotaCorrectionOutcome> {

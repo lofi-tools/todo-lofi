@@ -153,7 +153,7 @@ test.beforeEach(async ({ context }) => {
       return {
         id: `quota-${slot.id}`, slotId: slot.id, observedAt: 1_760_000_000_000, source,
         used: slot.used, limit: slot.limit, limitUnit: slot.limitUnit, resetAt: slot.resetAt,
-        cooldownUntil: slot.cooldownUntil, error: slot.lastError,
+        cooldownUntil: slot.cooldownUntil, error: slot.lastError, windowKey: null,
       }
     }
     function poolAvailability(slot: typeof poolSlots[number]) {
@@ -167,12 +167,21 @@ test.beforeEach(async ({ context }) => {
       }
       return { state: 'available', reason: `quota available: used ${slot.used} of ${slot.limit} ${slot.limitUnit}` }
     }
+    const poolWindowQuotas = new Map<string, { used: number | null; limit: number | null; limitUnit: string | null; resetAt: number | null }>()
     function poolResetWindows(slot: typeof poolSlots[number]) {
       if (slot.agent !== 'codex') return []
-      return [
-        { key: 'five-hour', label: '5-hour', resetAt: slot.lastUsedAt == null ? null : slot.lastUsedAt + 5 * 3_600_000 },
-        { key: 'weekly', label: 'Weekly', resetAt: slot.lastUsedAt == null ? null : slot.lastUsedAt + 7 * 86_400_000 },
-      ]
+      const window = (key: string, label: string, duration: number) => {
+        const stored = poolWindowQuotas.get(`${slot.id}:${key}`)
+        return {
+          key, label,
+          resetAt: stored?.resetAt ?? (slot.lastUsedAt == null ? null : slot.lastUsedAt + duration),
+          used: stored?.used ?? null,
+          limit: stored?.limit ?? null,
+          limitUnit: stored?.limitUnit ?? null,
+          remaining: stored?.used != null && stored.limit != null ? stored.limit - stored.used : null,
+        }
+      }
+      return [window('five-hour', '5-hour', 5 * 3_600_000), window('weekly', 'Weekly', 7 * 86_400_000)]
     }
     function poolStatus() {
       return {
@@ -530,12 +539,18 @@ test.beforeEach(async ({ context }) => {
             const limit = args.limit as number | null
             const limitUnit = args.limitUnit as string | null
             const resetAt = args.resetAt as number | null
+            const windowKey = args.windowKey as string | null
             const current = poolSlots[index]
-            if (current.limit === limit && current.limitUnit === limitUnit && current.resetAt === resetAt) {
+            if (!windowKey && current.limit === limit && current.limitUnit === limitUnit && current.resetAt === resetAt) {
               return { slot: { ...current }, latestQuota: poolQuota(current, 'user'), availability: poolAvailability(current), applied: false, reason: 'limit correction is already current' }
             }
             poolSlots[index] = { ...current, limit, limitUnit, resetAt, updatedAt: 1_800_000_000_000 }
-            poolOperations.push(`correct:${args.slotId}:${limit}:${limitUnit}:${resetAt}`)
+            if (windowKey) {
+              poolWindowQuotas.set(`${args.slotId}:${windowKey}`, { used: null, limit, limitUnit, resetAt })
+              poolOperations.push(`correct-window:${args.slotId}:${windowKey}:${limit}`)
+            } else {
+              poolOperations.push(`correct:${args.slotId}:${limit}:${limitUnit}:${resetAt}`)
+            }
             return { slot: { ...poolSlots[index] }, latestQuota: poolQuota(poolSlots[index], 'user'), availability: poolAvailability(poolSlots[index]), applied: true, reason: 'limit correction applied by user' }
           }
           case 'pool_clear_cooldown': {
@@ -3333,6 +3348,24 @@ test('loads, reorders and disables agent pool slots from Settings', async ({ pag
   await expect(pool.getByText('slot is disabled')).toBeVisible()
   await expect.poll(() => page.evaluate(() => (window as unknown as { __poolOperations: string[] }).__poolOperations))
     .toEqual(['reorder:slot-zed,slot-acme', 'toggle:slot-acme:false'])
+})
+
+test('corrects a provider window limit separately from the single limit', async ({ page }) => {
+  await page.goto('/')
+  await page.getByRole('button', { name: 'Settings', exact: true }).click()
+  await page.getByRole('navigation', { name: 'Settings categories' }).getByRole('button', { name: 'Agent pool' }).click()
+  const pool = page.getByRole('region', { name: 'Agent pool' })
+  const acme = pool.locator('.pool__slot').filter({ hasText: 'Acme · Model A' })
+
+  await expect(acme.locator('.pool__facts')).toContainText('5-hour:')
+  await acme.getByLabel('Window for Acme · Model A').selectOption('weekly')
+  await acme.getByLabel('Limit for Acme · Model A').fill('4')
+  await acme.getByRole('button', { name: 'Save correction' }).click()
+  await expect(pool.getByRole('status')).toHaveText('limit correction applied by user')
+  await expect(acme.locator('.pool__facts')).toContainText('Weekly: 4 requests limit')
+  await expect(acme.locator('.pool__facts')).toContainText('5-hour: usage unknown')
+  await expect.poll(() => page.evaluate(() => (window as unknown as { __poolOperations: string[] }).__poolOperations))
+    .toEqual(['correct-window:slot-acme:weekly:4'])
 })
 
 test('corrects pool quotas, rejects an invalid correction and clears a cooldown', async ({ page }) => {

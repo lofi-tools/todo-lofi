@@ -2470,7 +2470,24 @@ implemented; no public deployment exists yet.
     providers without a rule. `cargo test -p shepherd-core` passes 206 tests (4
     ignored), clippy and fmt are clean, the app has 128 passing e2e tests, and
     the docs have 31 passing e2e tests.
-  - [ ] Enforce both Codex windows together when selecting a slot.
+  - [x] Enforce both Codex windows together when selecting a slot.
+    Evidence (2026-11-09): quota observations carry a provider window key
+    (migration `0023_pool_quota_window.sql`), and slot availability checks every
+    window its provider declares: the slot is offered only when each window has
+    headroom, a window with no observation makes the slot unknown, and the
+    slot's single-limit observation covers a window that has no window entry of
+    its own. `choose_pool_slot` records the failing window in the skipped reason
+    (for example "Weekly window: quota exhausted: used 10 of 10 requests"). A
+    correction names a window, is validated against the provider's policy, and
+    preserves that window's usage. `pool_status` reports each window's usage,
+    limit, unit, remaining headroom and reset time, and Settings → Agent pool
+    corrects a window separately from the single limit. Providers without
+    published windows (Claude, OpenCode, Pi) keep the single-limit rule. Tests
+    cover exclusion on either Codex window, selection when both have headroom,
+    the unchanged single-limit path and the window-scoped correction.
+    `cargo test -p shepherd-core` passes 207 tests (4 ignored), clippy and fmt
+    are clean, the app has 129 passing e2e tests, and the docs have 31 passing
+    e2e tests.
   - [ ] Refresh the snapshot without a manual import.
 
 ### Packaged releases and downloads

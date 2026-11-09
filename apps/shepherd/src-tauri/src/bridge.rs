@@ -1919,6 +1919,7 @@ impl ShellState {
         limit: Option<u64>,
         limit_unit: Option<String>,
         reset_at: Option<u64>,
+        window_key: Option<String>,
     ) -> Result<PoolQuotaCorrectionOutcome, BridgeError> {
         let request = PoolQuotaCorrectionRequest {
             slot_id: PoolSlotId::new(slot_id),
@@ -1926,6 +1927,7 @@ impl ShellState {
             limit_unit,
             reset_at,
             now: now_millis(),
+            window_key,
         };
         let mut core = self.core.lock().await;
         core.correct_pool_quota(&request)
@@ -3144,10 +3146,11 @@ pub mod commands {
         limit: Option<u64>,
         limit_unit: Option<String>,
         reset_at: Option<u64>,
+        window_key: Option<String>,
     ) -> Result<PoolQuotaCorrectionOutcome, BridgeError> {
         state
             .inner()
-            .correct_pool_quota(slot_id, limit, limit_unit, reset_at)
+            .correct_pool_quota(slot_id, limit, limit_unit, reset_at, window_key)
             .await
     }
 

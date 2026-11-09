@@ -81,7 +81,8 @@ const toc = [
     know; local usage and provider responses win, and a stale or missing record stays unknown. Each
     provider's own rule decides when a limit resets: Codex lists a 5-hour and a weekly window that
     restart from the slot's last observed use, and a provider without a published rule reports no
-    window rather than a guessed one.
+    window rather than a guessed one. When the pool selects a slot, every declared window must have
+    headroom, and each window can be corrected separately.
   </p>
 
   <h2 id="limits">What it will not do</h2>

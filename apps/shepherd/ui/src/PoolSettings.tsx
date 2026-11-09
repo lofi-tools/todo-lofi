@@ -73,7 +73,15 @@ function slotError(slot: PoolSlot, entry: PoolQuotaEntry | null) {
 
 function windowSummary(windows: PoolResetWindow[]) {
   return windows
-    .map((window) => `${window.label}: ${window.resetAt == null ? 'Unknown until the slot is used' : formatMoment(window.resetAt)}`)
+    .map((window) => {
+      const usage = window.used != null && window.limit != null
+        ? `${window.used} of ${window.limit} ${window.limitUnit ?? 'units'} (${window.remaining ?? 0} left)`
+        : window.limit != null
+          ? `${window.limit} ${window.limitUnit ?? 'units'} limit; usage unknown`
+          : 'usage unknown'
+      const reset = window.resetAt == null ? 'reset unknown until the slot is used' : `resets ${formatMoment(window.resetAt)}`
+      return `${window.label}: ${usage}; ${reset}`
+    })
     .join(' · ')
 }
 
@@ -85,23 +93,26 @@ function PoolSlotEditor(props: {
   entry: PoolSlotStatus
   busy: boolean
   forced: boolean
-  onCorrect: (limit: number | null, limitUnit: string | null, resetAt: number | null) => void
+  onCorrect: (limit: number | null, limitUnit: string | null, resetAt: number | null, windowKey: string | null) => void
   onClearCooldown: () => void
   onForce: () => void
 }) {
   const [limit, setLimit] = createSignal('')
   const [limitUnit, setLimitUnit] = createSignal('')
   const [reset, setReset] = createSignal('')
+  const [windowKey, setWindowKey] = createSignal('')
   const [error, setError] = createSignal('')
   const [confirming, setConfirming] = createSignal(false)
   const name = () => slotName(props.entry.slot)
   const cooldown = () => props.entry.latestQuota?.cooldownUntil ?? props.entry.slot.cooldownUntil
+  const selectedWindow = () => props.entry.resetWindows.find((candidate) => candidate.key === windowKey())
 
   createEffect(() => {
+    const selected = selectedWindow()
     const entry = props.entry.latestQuota
-    const currentLimit = entry?.limit ?? props.entry.slot.limit
-    const currentUnit = entry?.limitUnit ?? props.entry.slot.limitUnit
-    const currentReset = entry?.resetAt ?? props.entry.slot.resetAt
+    const currentLimit = selected?.limit ?? entry?.limit ?? props.entry.slot.limit
+    const currentUnit = selected?.limitUnit ?? entry?.limitUnit ?? props.entry.slot.limitUnit
+    const currentReset = selected?.resetAt ?? entry?.resetAt ?? props.entry.slot.resetAt
     setLimit(currentLimit == null ? '' : String(currentLimit))
     setLimitUnit(currentUnit ?? '')
     setReset(localDateTime(currentReset))
@@ -125,7 +136,7 @@ function PoolSlotEditor(props: {
       return
     }
     setError('')
-    props.onCorrect(parsedLimit, unit, parsedReset)
+    props.onCorrect(parsedLimit, unit, parsedReset, windowKey() || null)
   }
 
   return (
@@ -140,6 +151,18 @@ function PoolSlotEditor(props: {
         <input type="text" aria-label={`Unit for ${name()}`} value={limitUnit()}
           disabled={props.busy} placeholder="requests" onInput={(event) => setLimitUnit(event.currentTarget.value)} />
       </label>
+      <Show when={props.entry.resetWindows.length > 0}>
+        <label>
+          Window
+          <select aria-label={`Window for ${name()}`} value={windowKey()} disabled={props.busy}
+            onChange={(event) => setWindowKey(event.currentTarget.value)}>
+            <option value="">Single limit</option>
+            <For each={props.entry.resetWindows}>
+              {(candidate) => <option value={candidate.key}>{candidate.label}</option>}
+            </For>
+          </select>
+        </label>
+      </Show>
       <label>
         Reset
         <input type="datetime-local" step="1" aria-label={`Reset for ${name()}`} value={reset()}
@@ -239,8 +262,8 @@ export function PoolSettings() {
     void mutate('toggle', async () => (await setPoolSlotEnabled(slot.id, !slot.enabled)).reason)
   }
 
-  function correct(slotId: string, limit: number | null, limitUnit: string | null, resetAt: number | null) {
-    void mutate('correct', async () => (await correctPoolQuota(slotId, limit, limitUnit, resetAt)).reason)
+  function correct(slotId: string, limit: number | null, limitUnit: string | null, resetAt: number | null, windowKey: string | null) {
+    void mutate('correct', async () => (await correctPoolQuota(slotId, limit, limitUnit, resetAt, windowKey)).reason)
   }
 
   function clearCooldown(slotId: string) {
@@ -385,7 +408,7 @@ export function PoolSettings() {
               </div>
               <PoolSlotEditor entry={entry} busy={!!busy()}
                 forced={entry.slot.id === forcedSlot()}
-                onCorrect={(limit, limitUnit, resetAt) => correct(entry.slot.id, limit, limitUnit, resetAt)}
+                onCorrect={(limit, limitUnit, resetAt, windowKey) => correct(entry.slot.id, limit, limitUnit, resetAt, windowKey)}
                 onClearCooldown={() => clearCooldown(entry.slot.id)}
                 onForce={() => force(entry.slot.id)} />
             </li>
