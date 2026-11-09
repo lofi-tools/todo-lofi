@@ -142,11 +142,18 @@ export interface PoolSlot {
   updatedAt: number
 }
 
+export interface PoolResetWindow {
+  key: string
+  label: string
+  resetAt: number | null
+}
+
 export interface PoolSlotStatus {
   slot: PoolSlot
   availability: { state: PoolAvailabilityState; reason: string }
   latestQuota: PoolQuotaEntry | null
   currentRequest: string | null
+  resetWindows: PoolResetWindow[]
 }
 
 export interface PoolStatus {

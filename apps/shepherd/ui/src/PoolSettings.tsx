@@ -12,6 +12,7 @@ import {
   setPoolSlotEnabled,
   type PoolCatalogSeed,
   type PoolQuotaEntry,
+  type PoolResetWindow,
   type PoolSlot,
   type PoolSlotStatus,
 } from './bridge'
@@ -68,6 +69,12 @@ function quotaSummary(entry: PoolQuotaEntry | null) {
 
 function slotError(slot: PoolSlot, entry: PoolQuotaEntry | null) {
   return slot.lastError ?? entry?.error ?? 'None'
+}
+
+function windowSummary(windows: PoolResetWindow[]) {
+  return windows
+    .map((window) => `${window.label}: ${window.resetAt == null ? 'Unknown until the slot is used' : formatMoment(window.resetAt)}`)
+    .join(' · ')
 }
 
 function slotName(slot: PoolSlot) {
@@ -355,6 +362,9 @@ export function PoolSettings() {
               <dl class="pool__facts">
                 <div><dt>Quota</dt><dd>{quotaSummary(entry.latestQuota)}</dd></div>
                 <div><dt>Reset</dt><dd>{formatMoment(entry.latestQuota?.resetAt ?? entry.slot.resetAt)}</dd></div>
+                <Show when={entry.resetWindows.length > 0}>
+                  <div><dt>Reset windows</dt><dd>{windowSummary(entry.resetWindows)}</dd></div>
+                </Show>
                 <div><dt>Current task</dt><dd>{entry.currentRequest ?? 'None'}</dd></div>
                 <div><dt>Last error</dt><dd>{slotError(entry.slot, entry.latestQuota)}</dd></div>
                 <div><dt>Last used</dt><dd>{formatMoment(entry.slot.lastUsedAt)}</dd></div>

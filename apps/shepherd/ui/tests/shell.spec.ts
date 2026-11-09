@@ -167,6 +167,13 @@ test.beforeEach(async ({ context }) => {
       }
       return { state: 'available', reason: `quota available: used ${slot.used} of ${slot.limit} ${slot.limitUnit}` }
     }
+    function poolResetWindows(slot: typeof poolSlots[number]) {
+      if (slot.agent !== 'codex') return []
+      return [
+        { key: 'five-hour', label: '5-hour', resetAt: slot.lastUsedAt == null ? null : slot.lastUsedAt + 5 * 3_600_000 },
+        { key: 'weekly', label: 'Weekly', resetAt: slot.lastUsedAt == null ? null : slot.lastUsedAt + 7 * 86_400_000 },
+      ]
+    }
     function poolStatus() {
       return {
         generatedAt: 1_800_000_000_000,
@@ -175,6 +182,7 @@ test.beforeEach(async ({ context }) => {
           availability: poolAvailability(slot),
           latestQuota: poolQuota(slot),
           currentRequest: null,
+          resetWindows: poolResetWindows(slot),
         })),
         forcedSlot: poolForcedSlot,
       }
@@ -3303,8 +3311,13 @@ test('loads, reorders and disables agent pool slots from Settings', async ({ pag
   await page.getByRole('navigation', { name: 'Settings categories' }).getByRole('button', { name: 'Agent pool' }).click()
   const pool = page.getByRole('region', { name: 'Agent pool' })
   const rows = pool.locator('.pool__slot')
+  const acme = pool.locator('.pool__slot').filter({ hasText: 'Acme · Model A' })
+  const zed = pool.locator('.pool__slot').filter({ hasText: 'Zed · Model B' })
   await expect(pool.getByRole('heading', { name: 'Acme · Model A' })).toBeVisible()
   await expect(pool.getByText('3 of 10 requests', { exact: true })).toBeVisible()
+  await expect(acme.locator('.pool__facts')).toContainText('5-hour:')
+  await expect(acme.locator('.pool__facts')).toContainText('Weekly:')
+  await expect(zed.getByText('Reset windows')).toHaveCount(0)
   await expect(rows.first()).toContainText('Acme · Model A')
   await expect(rows.last()).toContainText('Zed · Model B')
 

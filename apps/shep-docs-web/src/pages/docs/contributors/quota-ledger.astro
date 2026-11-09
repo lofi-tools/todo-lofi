@@ -34,9 +34,10 @@ const toc = [
     <Badge tone="warning" variant="subtle">partly implemented</Badge> The pool work is split into
     slot persistence, the quota ledger, priority selection, idle release, core controls, the pool UI
     and task-start wiring. Persistence, the ledger, selection, release, status, reordering,
-    enable/disable, limit/reset correction, cooldown clearing, the force override and catalog
-    snapshot limit seeding are implemented and tested; Settings → Agent pool exposes all of them.
-    Reset-window seeding, snapshot refresh and task-start wiring are not checked off. The
+    enable/disable, limit/reset correction, cooldown clearing, the force override, catalog snapshot
+    limit seeding and provider reset windows are implemented and tested; Settings → Agent pool
+    exposes all of them. Enforcing both Codex windows together, snapshot refresh and task-start
+    wiring are not checked off. The
     user-facing promise is on the
     <a href="/docs/users/agent-pool">agent pool</a> page; this page is for the implementation.
   </p>
@@ -147,6 +148,15 @@ const toc = [
     consumes the marker yet.
   </p>
   <p>
+    Reset windows belong to the provider, not the catalog. Codex publishes a 5-hour and a weekly
+    window, and both restart from the last observed request rather than a calendar boundary, so a
+    slot's reset time is its last local use plus the window length. Settings → Agent pool lists each
+    provider window with that derived time and reports an unknown anchor until the slot has been
+    used. A catalog record seeds a reset only when the slot has a recorded last use and the record's
+    period matches a window of fixed length; a provider or user reset is never replaced, and a month
+    is not approximated. Enforcing both Codex windows at selection is still planned.
+  </p>
+  <p>
     Settings → Agent pool can import the catalog's published v2 advisory snapshot as a local file;
     the pool never fetches a runtime catalog API. Records match by provider and model, and a catalog
     observation is appended only when the snapshot and record are fresh, its capacity is known,
@@ -173,7 +183,8 @@ const toc = [
     <li>Implemented: limit/reset corrections and cooldown clearing against both stores, including preserved usage/error fields, repeat no-ops, concurrent identical corrections writing once, rejected stale observations and missing slots, plus the Settings form and its rejected-correction feedback.</li>
     <li>Implemented: the one-turn force override, including applying and clearing it, one-turn consumption as the selection override, repeat no-ops, rejected unavailable and missing slots, no stored state after a Turso re-open, and the Settings confirmation, rejection and clear controls.</li>
     <li>Implemented: catalog snapshot seeding against both stores, including preserved local usage, local precedence, stale snapshots, stale and unknown records, missing and ambiguous matches, a repeated timestamp, a rejected contract version and a Turso re-open, plus the Settings import and its skipped-record and error feedback.</li>
-    <li>Pending: reset-window seeding, snapshot refresh, task-start wiring, cancellation and restart scheduling.</li>
+    <li>Implemented: provider reset policies, including the Codex 5-hour and weekly windows rolled from the last observed use, status windows derived from `lastUsedAt`, catalog reset seeding from that anchor, and the unchanged precedence of provider and user resets.</li>
+    <li>Pending: enforcing both Codex windows together, snapshot refresh, task-start wiring, cancellation and restart scheduling.</li>
     <li>Credential redaction in records, logs and diagnostics.</li>
   </ul>
   <p>

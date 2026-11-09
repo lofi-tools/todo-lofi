@@ -15,6 +15,7 @@ use toasty::stmt::{Type, Value};
 use toasty_driver_turso::Turso;
 use tokio::sync::{Mutex, RwLock};
 
+use crate::pool_reset::PoolResetPolicy;
 use crate::projects::{Project, ProjectId, now_millis, parse_preview_url};
 use crate::search::{RESULT_LIMIT, SearchHit, SearchQuery, entry_text};
 use crate::session::SessionRecord;
@@ -431,11 +432,22 @@ pub struct PoolIdleReleaseOutcome {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct PoolResetWindowStatus {
+    pub key: String,
+    pub label: String,
+    pub reset_at: Option<u64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PoolSlotStatus {
     pub slot: PoolSlot,
     pub availability: PoolAvailability,
     pub latest_quota: Option<PoolQuotaEntry>,
     pub current_request: Option<String>,
+    /// The provider's reset windows, derived from the slot's last local use.
+    #[serde(default)]
+    pub reset_windows: Vec<PoolResetWindowStatus>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -2259,6 +2271,7 @@ impl Store for TursoStore {
                 availability,
                 latest_quota,
                 current_request,
+                reset_windows: Vec::new(),
             });
         }
         Ok(PoolStatus {
@@ -4076,6 +4089,7 @@ impl Store for MemoryStore {
                 availability,
                 latest_quota,
                 current_request,
+                reset_windows: Vec::new(),
             });
         }
         Ok(PoolStatus {
@@ -4715,9 +4729,22 @@ fn pool_catalog_seed_entry(
         .allowance_unit
         .clone()
         .filter(|unit| !unit.trim().is_empty());
-    // The advisory states a reset period without an anchor, so a reset time
-    // cannot be derived and local state keeps its own.
-    entry.reset_at = latest.and_then(|entry| entry.reset_at);
+    // A reset time needs both a window length and a start. The provider's
+    // policy supplies the length and the slot's last use supplies the start;
+    // a provider or user reset still wins over a derived one.
+    let derived_reset = slot.last_used_at.and_then(|last_used_at| {
+        record
+            .reset_period
+            .as_deref()
+            .and_then(|period| PoolResetPolicy::for_agent(slot.agent).window_for_period(period))
+            .map(|window| window.reset_at(last_used_at))
+    });
+    let (local_reset, catalog_reset) = match latest {
+        Some(entry) if entry.source == PoolQuotaSource::Catalog => (None, entry.reset_at),
+        Some(entry) => (entry.reset_at, None),
+        None => (None, None),
+    };
+    entry.reset_at = local_reset.or(derived_reset).or(catalog_reset);
     entry.cooldown_until = cooldown_until;
     entry.error = error;
     Ok(entry)

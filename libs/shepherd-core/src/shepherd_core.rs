@@ -10,6 +10,7 @@ pub mod files;
 pub mod git;
 pub mod harness;
 pub mod input;
+pub mod pool_reset;
 pub mod project_scan;
 pub mod projects;
 pub mod search;
@@ -50,8 +51,8 @@ use crate::snapshots::{SessionRecovery, TaskApproval};
 use crate::store::{
     MemoryStore, PoolCatalogAdvisory, PoolCatalogOutcome, PoolCooldownClearRequest,
     PoolQuotaCorrectionOutcome, PoolQuotaCorrectionRequest, PoolReorderOutcome, PoolReorderRequest,
-    PoolSelectionRequest, PoolSlotEnabledOutcome, PoolSlotEnabledRequest, PoolSlotId, PoolStatus,
-    Store, StoreError, WorktreeDeletion,
+    PoolResetWindowStatus, PoolSelectionRequest, PoolSlotEnabledOutcome, PoolSlotEnabledRequest,
+    PoolSlotId, PoolStatus, Store, StoreError, WorktreeDeletion,
 };
 use crate::terminal::{
     InspectorTab, ProcessRecord, TerminalId, TerminalLayout, TerminalList, TerminalRecord,
@@ -922,6 +923,24 @@ impl Core {
 
     pub async fn pool_status(&mut self, now: u64) -> Result<PoolStatus, CoreError> {
         let mut status = self.store.load_pool_status(now).await?;
+        for entry in &mut status.slots {
+            let policy = crate::pool_reset::PoolResetPolicy::for_agent(entry.slot.agent);
+            if policy.windows().is_empty() {
+                continue;
+            }
+            entry.reset_windows = policy
+                .windows()
+                .iter()
+                .map(|window| PoolResetWindowStatus {
+                    key: window.key.to_string(),
+                    label: window.label.to_string(),
+                    reset_at: entry
+                        .slot
+                        .last_used_at
+                        .map(|last_used_at| window.reset_at(last_used_at)),
+                })
+                .collect();
+        }
         let forced_is_known = self
             .forced_pool_slot
             .as_ref()
@@ -4090,7 +4109,7 @@ mod tests {
     use crate::store::{
         POOL_CATALOG_CONTRACT_VERSION, PoolAvailabilityState, PoolCatalogRecord,
         PoolCooldownClearRequest, PoolQuotaCorrectionRequest, PoolQuotaEntry, PoolQuotaSource,
-        PoolSlot, PoolSlotId, TursoStore,
+        PoolResetWindowStatus, PoolSlot, PoolSlotId, TursoStore,
     };
     use crate::streaming::LateHarnessFactory;
     use crate::test_support::{
@@ -4578,6 +4597,106 @@ mod tests {
                 .find(|entry| entry.slot.id == unknown.id)
                 .and_then(|entry| entry.slot.limit),
             Some(50)
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn pool_windows_roll_from_the_last_observed_use() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let mut core = Core::new();
+        let mut codex = PoolSlot::new(Agent::Codex, "acme", "Acme", "model-a", "Model A");
+        codex.id = PoolSlotId::new("window-codex");
+        codex.last_used_at = Some(1_000);
+        codex.created_at = 100;
+        codex.updated_at = 100;
+        let mut claude = PoolSlot::new(Agent::Claude, "zed", "Zed", "model-b", "Model B");
+        claude.id = PoolSlotId::new("window-claude");
+        claude.priority = 1;
+        claude.last_used_at = Some(1_000);
+        claude.created_at = 200;
+        claude.updated_at = 200;
+        let mut unused = PoolSlot::new(Agent::Codex, "blank", "Blank", "model-c", "Model C");
+        unused.id = PoolSlotId::new("window-unused");
+        unused.priority = 2;
+        unused.created_at = 300;
+        unused.updated_at = 300;
+        for slot in [&codex, &claude, &unused] {
+            core.store.save_pool_slot(slot).await?;
+        }
+
+        let status = core.pool_status(2_000).await?;
+        let codex_status = status
+            .slots
+            .iter()
+            .find(|entry| entry.slot.id == codex.id)
+            .ok_or("missing codex slot")?;
+        assert_eq!(
+            codex_status.reset_windows,
+            vec![
+                PoolResetWindowStatus {
+                    key: "five-hour".into(),
+                    label: "5-hour".into(),
+                    reset_at: Some(1_000 + 5 * 3_600_000),
+                },
+                PoolResetWindowStatus {
+                    key: "weekly".into(),
+                    label: "Weekly".into(),
+                    reset_at: Some(1_000 + 7 * 86_400_000),
+                },
+            ]
+        );
+        let claude_status = status
+            .slots
+            .iter()
+            .find(|entry| entry.slot.id == claude.id)
+            .ok_or("missing claude slot")?;
+        assert!(claude_status.reset_windows.is_empty());
+
+        let mut weekly = catalog_record("acme", Some("model-a"), 50);
+        weekly.reset_period = Some("week".into());
+        let outcome = core
+            .apply_pool_catalog(&catalog_advisory(vec![weekly]), 2_000)
+            .await?;
+        assert_eq!(outcome.applied, 1);
+        let status = core.pool_status(2_100).await?;
+        let seeded = status
+            .slots
+            .iter()
+            .find(|entry| entry.slot.id == codex.id)
+            .ok_or("missing seeded slot")?;
+        assert_eq!(
+            seeded
+                .latest_quota
+                .as_ref()
+                .and_then(|entry| entry.reset_at),
+            Some(1_000 + 7 * 86_400_000)
+        );
+
+        let mut monthly = catalog_record("blank", Some("model-c"), 60);
+        monthly.reset_period = Some("month".into());
+        let outcome = core
+            .apply_pool_catalog(&catalog_advisory(vec![monthly]), 2_200)
+            .await?;
+        assert_eq!(outcome.applied, 1);
+        let status = core.pool_status(2_300).await?;
+        let unused_status = status
+            .slots
+            .iter()
+            .find(|entry| entry.slot.id == unused.id)
+            .ok_or("missing unused slot")?;
+        assert_eq!(
+            unused_status
+                .latest_quota
+                .as_ref()
+                .and_then(|entry| entry.reset_at),
+            None
+        );
+        assert!(
+            unused_status
+                .reset_windows
+                .iter()
+                .all(|window| window.reset_at.is_none())
         );
         Ok(())
     }

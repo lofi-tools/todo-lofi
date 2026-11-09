@@ -2432,8 +2432,8 @@ implemented; no public deployment exists yet.
   the 10-test e2e suite passes including the new provenance/freshness
   assertions, stale warnings and WCAG 2.1 AA checks.
 - [ ] Connect the catalog to the agent pool without making it authoritative.
-  The pool can seed limits and reset windows from a catalog snapshot, but local
-  usage and provider responses win. A missing or stale catalog entry marks a
+  The pool can seed limits from a catalog snapshot and derive reset windows
+  from each provider's own rule, but local usage and provider responses win. A missing or stale catalog entry marks a
   slot's capacity unknown, not free. No catalog credential or private account
   data is published.
   - [x] Apply a catalog snapshot to seed a limit a slot does not know.
@@ -2454,8 +2454,23 @@ implemented; no public deployment exists yet.
     contract version, memory parity and a Turso re-open. `cargo test -p
     shepherd-core` passes 201 tests (4 ignored), clippy and fmt are clean, the
     app has 128 passing e2e tests, and the docs have 31 passing e2e tests.
-  - [ ] Seed reset windows from the catalog once the contract carries a reset
-    anchor.
+  - [x] Give each built-in provider its own reset-window rule.
+    Evidence (2026-11-09): `PoolResetPolicy` and `PoolResetWindow` in
+    `pool_reset.rs` define a window's length and its reset time from the last
+    observed use. Codex rolls a 5-hour and a weekly window; the other built-ins
+    publish no rule and report no window rather than inventing one. A catalog
+    period matches a window only when it has a fixed length, so a month is
+    never approximated. `Core::pool_status` lists each slot's windows with the
+    reset time derived from `last_used_at`, or an unknown anchor when the slot
+    has not been used, and Settings → Agent pool shows them. A catalog seed
+    derives a reset only when the slot has a recorded last use and the
+    advisory's period matches one of the provider's windows, and it never
+    replaces a provider or user reset. Tests cover the Codex windows, period
+    matching, derived status windows, catalog reset seeding, an unused slot and
+    providers without a rule. `cargo test -p shepherd-core` passes 206 tests (4
+    ignored), clippy and fmt are clean, the app has 128 passing e2e tests, and
+    the docs have 31 passing e2e tests.
+  - [ ] Enforce both Codex windows together when selecting a slot.
   - [ ] Refresh the snapshot without a manual import.
 
 ### Packaged releases and downloads
