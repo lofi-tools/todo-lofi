@@ -487,6 +487,13 @@ test.beforeEach(async ({ context }) => {
           case 'open_project_annotation_wrapper':
             annotationWrapperOpens.push(args.projectId)
             return `http://127.0.0.1:4310/preview/${args.projectId}/`
+          case 'validate_preview_annotations': {
+            const batch = args.batch
+            if (!batch?.projectId || !batch?.taskId || !batch?.pageUrl || !batch.annotations?.length) {
+              throw { message: 'The annotation batch is incomplete.' }
+            }
+            return batch
+          }
           case 'attachment_limit': {
             attachmentLimitRequests.push(args.projectId)
             const settings = readPreferences()

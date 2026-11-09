@@ -409,8 +409,44 @@ export function openProjectPreview(projectId: string): Promise<void> {
   return invoke<void>('open_project_preview', { projectId })
 }
 
-export function openProjectAnnotationWrapper(projectId: string): Promise<string> {
-  return invoke<string>('open_project_annotation_wrapper', { projectId })
+export function openProjectAnnotationWrapper(projectId: string, taskId: string | null): Promise<string> {
+  return invoke<string>('open_project_annotation_wrapper', { projectId, taskId })
+}
+
+export interface PreviewBounds {
+  x: number
+  y: number
+  width: number
+  height: number
+}
+
+export interface PreviewAnnotationSource {
+  framework?: string
+  component?: string
+  file?: string
+  line?: number
+  column?: number
+}
+
+export interface PreviewAnnotationTarget {
+  selector?: string
+  excerpt?: string
+  bounds?: PreviewBounds
+  computedStyles?: Record<string, string>
+  source?: PreviewAnnotationSource
+  screenshot?: PreviewBounds & { path?: string }
+}
+
+export interface PreviewAnnotationBatch {
+  projectId: string
+  taskId: string
+  pageUrl: string
+  framing?: string
+  annotations: Array<{ id: string; note: string; targets: PreviewAnnotationTarget[] }>
+}
+
+export function validatePreviewAnnotations(batch: PreviewAnnotationBatch): Promise<PreviewAnnotationBatch> {
+  return invoke<PreviewAnnotationBatch>('validate_preview_annotations', { batch })
 }
 
 export interface AttachmentLimit {

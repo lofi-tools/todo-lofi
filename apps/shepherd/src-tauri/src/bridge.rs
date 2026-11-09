@@ -41,6 +41,7 @@ use crate::attachments::{self, AttachmentLimit};
 use crate::codex_harness::codex_spawn_spec;
 use crate::file_actions::{self, FileAction};
 use crate::file_watch::{FileWatchUpdate, WatchError, WorkspaceWatch};
+use crate::preview_annotations::{AnnotationBatch, validate_batch};
 use crate::pty_terminal::PtyTerminals;
 use crate::settings::{DEFAULT_ATTACHMENT_BYTES, DEFAULT_SCROLLBACK, SettingKey, Settings};
 use crate::terminal_screen::{Screen, SearchDirection, TerminalAppearance, TerminalFrame};
@@ -1136,7 +1137,21 @@ impl ShellState {
     pub async fn annotation_wrapper_url(
         &self,
         project_id: String,
+        task_id: Option<String>,
     ) -> Result<tauri::Url, BridgeError> {
+        if let Some(task_id) = &task_id {
+            let workspace = self
+                .core
+                .lock()
+                .await
+                .task_workspace(&TaskId::new(task_id.clone()))?;
+            if workspace.task.project_id != project_id {
+                return Err(BridgeError::new(
+                    "preview",
+                    "The selected task does not belong to this project.",
+                ));
+            }
+        }
         let target = self
             .core
             .lock()
@@ -1144,7 +1159,7 @@ impl ShellState {
             .project_preview_url(&ProjectId::new(project_id.clone()))?
             .ok_or_else(|| BridgeError::new("preview", "Set the project preview URL first."))?;
         self.preview_server
-            .open(&project_id, &target)
+            .open(&project_id, task_id.as_deref(), &target)
             .await
             .map_err(|error| BridgeError::new("preview", error.to_string()))
     }
@@ -1152,8 +1167,9 @@ impl ShellState {
     pub async fn open_project_annotation_wrapper(
         &self,
         project_id: String,
+        task_id: Option<String>,
     ) -> Result<String, BridgeError> {
-        let wrapper = self.annotation_wrapper_url(project_id).await?;
+        let wrapper = self.annotation_wrapper_url(project_id, task_id).await?;
         let address = wrapper.clone();
         open_in_browser(wrapper).await.map_err(|error| {
             BridgeError::new(
@@ -1162,6 +1178,36 @@ impl ShellState {
             )
         })?;
         Ok(address.to_string())
+    }
+
+    pub async fn validate_preview_annotations(
+        &self,
+        batch: AnnotationBatch,
+    ) -> Result<AnnotationBatch, BridgeError> {
+        let project_id = batch.project_id.clone();
+        let task_id = batch.task_id.clone();
+        let target = {
+            let core = self.core.lock().await;
+            let workspace = core.task_workspace(&TaskId::new(task_id.clone()))?;
+            if workspace.task.project_id != project_id {
+                return Err(BridgeError::new(
+                    "preview",
+                    "The selected task does not belong to this project.",
+                ));
+            }
+            core.project_preview_url(&ProjectId::new(project_id.clone()))?
+                .ok_or_else(|| BridgeError::new("preview", "Set the project preview URL first."))?
+        };
+        let attachment_root = self.task_attachment_directory(&task_id);
+        let origin = target.origin().ascii_serialization();
+        validate_batch(
+            batch,
+            &project_id,
+            &task_id,
+            &origin,
+            attachment_root.as_deref(),
+        )
+        .map_err(|error| BridgeError::new("preview", error.to_string()))
     }
 
     pub async fn save_preview_screenshot(
@@ -2639,11 +2685,20 @@ pub mod commands {
     pub async fn open_project_annotation_wrapper(
         state: State<'_, ShellState>,
         project_id: String,
+        task_id: Option<String>,
     ) -> Result<String, BridgeError> {
         state
             .inner()
-            .open_project_annotation_wrapper(project_id)
+            .open_project_annotation_wrapper(project_id, task_id)
             .await
+    }
+
+    #[tauri::command]
+    pub async fn validate_preview_annotations(
+        state: State<'_, ShellState>,
+        batch: AnnotationBatch,
+    ) -> Result<AnnotationBatch, BridgeError> {
+        state.inner().validate_preview_annotations(batch).await
     }
 
     #[tauri::command]
@@ -6849,7 +6904,9 @@ mod tests {
         state
             .set_project_preview_url(project.id.clone(), "http://localhost:3000/demo".into())
             .await?;
-        let wrapper = state.annotation_wrapper_url(project.id.clone()).await?;
+        let wrapper = state
+            .annotation_wrapper_url(project.id.clone(), None)
+            .await?;
         assert_eq!(wrapper.host_str(), Some("127.0.0.1"));
         assert!(wrapper.path().starts_with("/preview/"));
         let address = format!(
@@ -6859,14 +6916,18 @@ mod tests {
         );
         assert!(tokio::net::TcpStream::connect(&address).await.is_ok());
         assert_eq!(
-            state.annotation_wrapper_url(project.id.clone()).await?,
+            state
+                .annotation_wrapper_url(project.id.clone(), None)
+                .await?,
             wrapper
         );
         state
             .set_project_preview_url(project.id.clone(), "http://localhost:3001/demo".into())
             .await?;
         assert_ne!(
-            state.annotation_wrapper_url(project.id.clone()).await?,
+            state
+                .annotation_wrapper_url(project.id.clone(), None)
+                .await?,
             wrapper
         );
         state.quit(true).await?;

@@ -115,10 +115,14 @@ current layout and give future changes a point of comparison.
   The preview uses a separate origin from the shell so the project can load its
   own modules and assets. **Open annotation wrapper** opens a token-scoped
   loopback page in the external browser; it embeds the same preview URL and is
-  not a proxy, so element selection remains in the in-app Preview tab.
+  not a proxy, so element selection remains in the in-app Preview tab. The
+  wrapper is bound to the task selected when it opens. It submits the same
+  bounded annotation batch as the in-app composer, and the shared validator
+  rejects another origin, another task, or a replayed annotation ID.
   **Annotate** pauses interaction with the page so a click selects an element.
-  Write a note and queue it in Preview. **Add to prompt** appends the queued
-  annotations as editable text in the active composer and clears the queue.
+  Write a note and queue it in Preview. **Add to prompt** validates the queued
+  annotations, then appends them as editable text in the active composer and
+  clears the queue.
   If element selection is unavailable, show that status and offer a screenshot
   picker. **Screenshot note** also opens the picker directly. Choose an image
   captured in the browser and mark a point, then use the same note queue.

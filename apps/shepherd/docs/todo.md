@@ -2186,7 +2186,7 @@ own acceptance evidence exists.
   rotation, rejected targets, hosts and origins, and shutdown;
   `annotation_wrapper_stops_when_the_shell_quits` covers the shell lifecycle;
   the preview Playwright flow opens the wrapper through the command.
-- [ ] Put the iframe and external wrapper on one annotation API.
+- [x] Put the iframe and external wrapper on one annotation API.
   Both surfaces submit the same bounded payload: project and task IDs, page URL,
   the ordered target elements, selector or screenshot coordinates, optional
   excerpt, bounds, computed styles and component/source metadata, note, and a
@@ -2195,6 +2195,12 @@ own acceptance evidence exists.
   reject oversized or malformed notes, and never accept a task ID from the
   client as authorization. Add transport tests for the iframe port, the external
   HTTP boundary, replayed IDs, wrong tokens and foreign origins.
+  Evidence: `preview_annotations` tests cover bounded payloads, origin and task
+  checks, duplicate IDs, malformed notes and task-owned screenshot paths;
+  `preview_server` posts cover accepted batches, replays, wrong tokens, tasks
+  and origins, malformed JSON, oversized bodies and foreign screenshot paths;
+  the preview Playwright flows submit element and screenshot batches through
+  the shared validation command.
 - [ ] Feed annotations to the agent as actionable front-end change requests.
   A sent batch is not a passive note in a side panel. Each annotation's note is
   the instruction for its target, while the framing chat message describes the

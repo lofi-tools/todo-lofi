@@ -5,6 +5,7 @@ import { reportError } from './diagnostics'
 
 interface PreviewPaneProps {
   projectId: string
+  taskId?: string
   url?: string | null
   shown: boolean
   canAddToPrompt: boolean
@@ -170,7 +171,7 @@ function ProjectPreview(props: PreviewPaneProps & { url: string }) {
   async function openWrapper() {
     setOpeningWrapper(true)
     try {
-      await openProjectAnnotationWrapper(props.projectId)
+      await openProjectAnnotationWrapper(props.projectId, props.taskId ?? null)
     } catch (failure) {
       reportError('open_project_annotation_wrapper', failure)
     } finally {

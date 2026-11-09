@@ -1462,27 +1462,35 @@ export function App() {
   async function addPreviewNote(annotations: PreviewAnnotation[]) {
     const projectId = selectedProjectId()
     if (!projectId || !canAddPreviewNote()) throw new Error('Select a draft or ready task to add annotations.')
-    if (!annotations.some((annotation) => 'screenshot' in annotation)) {
-      appendPreviewAnnotations(annotations)
-      return
+    const pageUrl = annotations[0]?.url
+    if (!pageUrl || annotations.some((annotation) => annotation.url !== pageUrl)) {
+      throw new Error('Add annotations from one preview page at a time.')
     }
 
     const context: unknown[] = []
+    const payloadAnnotations: bridge.PreviewAnnotationBatch['annotations'] = []
     setPending(true)
     try {
       const task = workspace()?.task ?? (await firstDraft(projectId)).task
       for (const annotation of annotations) {
+        const targets: bridge.PreviewAnnotationTarget[] = []
         if ('screenshot' in annotation) {
           const { file, ...coordinates } = annotation.screenshot
           const path = await bridge.savePreviewScreenshot(task.id, file)
           context.push({ url: annotation.url, screenshot: { path, ...coordinates }, note: annotation.note })
+          targets.push({ screenshot: { path, ...coordinates } })
         } else {
           context.push(annotation)
+          targets.push({ selector: annotation.selector, excerpt: annotation.excerpt, bounds: annotation.bounds })
         }
+        payloadAnnotations.push({ id: crypto.randomUUID(), note: annotation.note, targets })
       }
       if (selectedProjectId() !== projectId || selectedTaskId() !== task.id) {
         throw new Error('The selected task changed. Add the annotations again from the intended task.')
       }
+      await bridge.validatePreviewAnnotations({
+        projectId, taskId: task.id, pageUrl, annotations: payloadAnnotations,
+      })
     } finally {
       setPending(false)
     }
@@ -2210,6 +2218,7 @@ export function App() {
             <InspectorPanel id="preview" active={inspectorTab()}>
               <Show when={selectedProjectId()} keyed fallback={<p class="empty">Select a project to preview.</p>}>
                 {(projectId) => <PreviewPane projectId={projectId} url={selectedProject()?.previewUrl}
+                  taskId={workspace()?.task.id}
                   shown={inspectorTab() === 'preview'} canAddToPrompt={canAddPreviewNote()}
                   attachmentLimit={attachmentLimit()}
                   onAddToPrompt={addPreviewNote} onProjectSettings={() => openProjectSettings(projectId)} />}
