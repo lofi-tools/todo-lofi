@@ -1,0 +1,156 @@
+---
+import Base from '../../layouts/Base.astro'
+import EmptyState from '../../components/EmptyState.astro'
+import { harnessesForProvider, loadCatalog, plansForCompany } from '../../lib/catalog'
+import { formatNumber, harnessHref, providerHref } from '../../lib/format'
+
+export async function getStaticPaths() {
+  const catalog = await loadCatalog()
+  return catalog.companies.map((company) => ({
+    params: { company: company.companyId },
+    props: { companyId: company.companyId },
+  }))
+}
+
+interface Props {
+  companyId: string
+}
+
+const { companyId } = Astro.props as Props
+const catalog = await loadCatalog()
+const company = catalog.companies.find((entry) => entry.companyId === companyId)
+if (!company) {
+  throw new Error(`Company not found: ${companyId}`)
+}
+
+const plans = plansForCompany(catalog, company.companyId)
+const providerIds = new Set(
+  plans.flatMap((plan) => (plan.providerId ? [plan.providerId] : [])),
+)
+const providers = catalog.providers.filter((provider) => providerIds.has(provider.providerId))
+const modelEntries = catalog.models.filter((model) => providerIds.has(model.providerId))
+const harnessesByProvider = new Map(
+  providers.map((provider) => [
+    provider.providerId,
+    harnessesForProvider(catalog, provider.providerId),
+  ]),
+)
+---
+
+<Base
+  title={company.name}
+  description={`${company.name}: its plans and the provider entries that serve them.`}
+>
+  <a class="back-link" href="/companies">← All companies</a>
+
+  <header class="page-header">
+    <p class="eyebrow">Provider company</p>
+    <h1>{company.name}</h1>
+    <p class="mono">{company.companyId}</p>
+    <div class="meta-row">
+      <span class="pill">{formatNumber(plans.length)} plans</span>
+      <span class="pill">{formatNumber(providers.length)} provider entries</span>
+      <span class="pill">{formatNumber(modelEntries.length)} model entries</span>
+    </div>
+    <p class="lede">
+      A company is the vendor, a plan is one product of that company, and a harness is the coding
+      agent that consumes the provider entry. A company can share its name with a harness; the plan
+      name identifies the provider entry. Prices, allowances and usage models are not published
+      until a source is recorded.
+    </p>
+    {company.homepageUrl && (
+      <p>
+        <a href={company.homepageUrl} target="_blank" rel="noreferrer">Company homepage</a>
+      </p>
+    )}
+  </header>
+
+  <section class="section">
+    <h2>Plans</h2>
+    {
+      plans.length === 0 ? (
+        <EmptyState title="No plans are recorded for this company">
+          The catalog has no curated plan for this company.
+        </EmptyState>
+      ) : (
+        <div class="table-wrap">
+          <table>
+            <caption class="visually-hidden">Plans from {company.name}</caption>
+            <thead>
+              <tr>
+                <th scope="col">Plan</th>
+                <th scope="col">Provider entry</th>
+                <th scope="col">Source</th>
+              </tr>
+            </thead>
+            <tbody>
+              {plans.map((plan) => (
+                <tr>
+                  <td>{plan.name}</td>
+                  <td>
+                    {plan.providerId ? (
+                      <a href={providerHref(plan.providerId)}>{plan.providerId}</a>
+                    ) : (
+                      'Not in this snapshot'
+                    )}
+                  </td>
+                  <td>
+                    <a href={plan.sourceUrl} target="_blank" rel="noreferrer">Source</a>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )
+    }
+  </section>
+
+  <section class="section">
+    <h2>Provider entries</h2>
+    {
+      providers.length === 0 ? (
+        <EmptyState title="No provider entry serves a plan in this snapshot">
+          The plans are named, but models.dev has no provider entry for them yet.
+        </EmptyState>
+      ) : (
+        <div class="table-wrap">
+          <table>
+            <caption class="visually-hidden">Provider entries from {company.name}</caption>
+            <thead>
+              <tr>
+                <th scope="col">Provider entry</th>
+                <th scope="col">Models</th>
+                <th scope="col">Harnesses</th>
+              </tr>
+            </thead>
+            <tbody>
+              {providers.map((provider) => {
+                const plan = plans.find((entry) => entry.providerId === provider.providerId)
+                const harnesses = harnessesByProvider.get(provider.providerId) ?? []
+                return (
+                  <tr>
+                    <td>
+                      <a href={providerHref(provider.providerId)}>{provider.name}</a>
+                      {plan && <div class="small muted">{plan.name} plan</div>}
+                    </td>
+                    <td>{formatNumber(provider.modelCount)}</td>
+                    <td>
+                      {harnesses.length === 0
+                        ? 'Any'
+                        : harnesses.map((harness) => (
+                            <div>
+                              <a href={harnessHref(harness.harnessId)}>{harness.name}</a>
+                            </div>
+                          ))}
+                    </td>
+                  </tr>
+                )
+              })}
+            </tbody>
+          </table>
+        </div>
+      )
+    }
+  </section>
+</Base>

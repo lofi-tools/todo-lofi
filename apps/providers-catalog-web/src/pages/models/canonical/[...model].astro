@@ -1,0 +1,168 @@
+---
+import Base from '../../../layouts/Base.astro'
+import EmptyState from '../../../components/EmptyState.astro'
+import { benchmarkScoresFor, familyPath, harnessesForProvider, loadCatalog } from '../../../lib/catalog'
+import {
+  familyHref,
+  formatBenchmarkScore,
+  formatContext,
+  formatCost,
+  formatNumber,
+  harnessHref,
+  modelHref,
+  providerHref,
+} from '../../../lib/format'
+
+export async function getStaticPaths() {
+  const catalog = await loadCatalog()
+  return catalog.canonicalModels.map((canonicalModel) => ({
+    params: { model: canonicalModel.canonicalModelId },
+    props: { canonicalModelId: canonicalModel.canonicalModelId },
+  }))
+}
+
+interface Props {
+  canonicalModelId: string
+}
+
+const { canonicalModelId } = Astro.props as Props
+const catalog = await loadCatalog()
+const canonicalModel = catalog.canonicalModels.find(
+  (entry) => entry.canonicalModelId === canonicalModelId,
+)
+if (!canonicalModel) {
+  throw new Error(`Canonical model not found: ${canonicalModelId}`)
+}
+
+const servings = catalog.models.filter(
+  (model) => model.canonicalModelId === canonicalModel.canonicalModelId,
+)
+const family = familyPath(catalog, canonicalModel.familyId).reverse()
+const benchmarkScores = benchmarkScoresFor(catalog, canonicalModel.canonicalModelId)
+---
+
+<Base
+  title={canonicalModel.name}
+  description={`${canonicalModel.name}: every provider serving the same canonical model, with family, harnesses and benchmarks.`}
+>
+  <a class="back-link" href="/models">← Model browser</a>
+
+  <header class="page-header">
+    <p class="eyebrow">Canonical model</p>
+    <h1>{canonicalModel.name}</h1>
+    <p class="mono">{canonicalModel.canonicalModelId}</p>
+    <div class="meta-row">
+      <span class="pill">{formatNumber(servings.length)} providers</span>
+      <span class="pill">Lab {canonicalModel.lab}</span>
+      {family.map((entry) => (
+        <a class="pill" href={familyHref(entry.familyId)}>{entry.name}</a>
+      ))}
+    </div>
+    <p class="lede">
+      Providers that serve the same release keep their own model id and facts. This page is the
+      identity they share, so pricing, limits and harness compatibility stay comparable.
+    </p>
+  </header>
+
+  <section class="section">
+    <h2>Providers serving this model</h2>
+    {
+      servings.length === 0 ? (
+        <EmptyState title="No provider serves this canonical model">The snapshot has no serving row for this canonical model.</EmptyState>
+      ) : (
+        <div class="table-wrap">
+          <table>
+            <caption class="visually-hidden">Providers serving {canonicalModel.name}</caption>
+            <thead>
+              <tr>
+                <th scope="col">Provider</th>
+                <th scope="col">Model id</th>
+                <th scope="col">Harness</th>
+                <th scope="col">Context</th>
+                <th scope="col">Input / 1M</th>
+                <th scope="col">Output / 1M</th>
+              </tr>
+            </thead>
+            <tbody>
+              {servings.map((model) => {
+                const harnesses = harnessesForProvider(catalog, model.providerId)
+                return (
+                  <tr>
+                    <td>
+                      <a href={providerHref(model.providerId)}>{model.providerName}</a>
+                      {model.retained && <div class="small muted">Retained from an earlier snapshot</div>}
+                    </td>
+                    <td>
+                      <a href={modelHref(model.providerId, model.modelId)}>
+                        <code class="mono">{model.modelId}</code>
+                      </a>
+                    </td>
+                    <td>
+                      {harnesses.length > 0 ? (
+                        harnesses.map((harness) => (
+                          <a href={harnessHref(harness.harnessId)}>{harness.name}</a>
+                        ))
+                      ) : (
+                        'Any'
+                      )}
+                    </td>
+                    <td>{formatContext(model.contextLimit)}</td>
+                    <td>{formatCost(model.costInput)}</td>
+                    <td>{formatCost(model.costOutput)}</td>
+                  </tr>
+                )
+              })}
+            </tbody>
+          </table>
+        </div>
+      )
+    }
+  </section>
+
+  <section class="section">
+    <h2>Benchmarks</h2>
+    {
+      benchmarkScores.length === 0 ? (
+        <EmptyState title="No benchmark score published">
+          Benchmark definitions exist in this snapshot, but no score has an enabled source for this
+          canonical model. Scores stay unknown instead of being estimated.
+        </EmptyState>
+      ) : (
+        <div class="table-wrap">
+          <table>
+            <caption class="visually-hidden">Benchmark scores for {canonicalModel.name}</caption>
+            <thead>
+              <tr>
+                <th scope="col">Benchmark</th>
+                <th scope="col">Score</th>
+                <th scope="col">Source</th>
+              </tr>
+            </thead>
+            <tbody>
+              {benchmarkScores.map((entry) => (
+                <tr>
+                  <td>{entry.benchmark.name}</td>
+                  <td>{formatBenchmarkScore(entry.score.score, entry.benchmark.unit)}</td>
+                  <td>
+                    <a href={entry.score.sourceUrl} target="_blank" rel="noreferrer">Source</a>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )
+    }
+  </section>
+
+  <section class="section">
+    <h2>Family</h2>
+    <p class="meta-row">
+      {family.map((entry) => <a class="pill" href={familyHref(entry.familyId)}>{entry.name}</a>)}
+    </p>
+    <p class="small muted">
+      The chain follows each family's parent, so parents of parents are inferred from the tree
+      rather than restated on every model.
+    </p>
+  </section>
+</Base>

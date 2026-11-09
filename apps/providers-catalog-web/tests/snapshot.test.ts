@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { DuckDBInstance } from '@duckdb/node-api'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { BENCHMARKS, FAMILY_TREE, HARNESSES } from '../src/curated'
 import { MODELS_DEV_SOURCE } from '../src/models-dev'
 import { SCHEMA_VERSION } from '../src/schema'
 import {
@@ -16,9 +17,8 @@ import {
 import type { ModelsDevCatalog } from '../src/types'
 import {
   FIXED_CONTENT_SHA256,
+  FIXED_FETCHED_AT,
   FIXED_NOW,
-  FIXED_VERIFIED_AT,
-  fixtureAgent,
   fixtureCatalog,
   fixtureFreeOffer,
   fixtureLocalRuntime,
@@ -36,11 +36,11 @@ afterEach(async () => {
 })
 
 describe('catalog snapshots', () => {
-  it('creates a validated snapshot with provenance and a checksum', async () => {
+  it('creates a validated snapshot with a source record and a checksum', async () => {
     const report = await createSnapshot({
       catalog: fixtureCatalog,
       source: MODELS_DEV_SOURCE,
-      fetchedAt: FIXED_VERIFIED_AT,
+      fetchedAt: FIXED_FETCHED_AT,
       contentSha256: FIXED_CONTENT_SHA256,
       httpStatus: 200,
       etag: null,
@@ -49,14 +49,19 @@ describe('catalog snapshots', () => {
     })
 
     expect(report.snapshotId).toBe('20261109T120000Z-aaaaaaaa')
-    expect(report.counts).toEqual({
+    expect(report.counts).toMatchObject({
+      companies: 1,
+      companyPlans: 3,
       providers: 1,
       models: 1,
-      agents: 0,
+      canonicalModels: 1,
       plans: 0,
       freeOffers: 0,
       localRuntimes: 0,
     })
+    expect(report.counts.families).toBe(FAMILY_TREE.length + 1)
+    expect(report.counts.harnesses).toBe(HARNESSES.length)
+    expect(report.counts.benchmarks).toBe(BENCHMARKS.length)
     expect(existsSync(report.snapshotPath)).toBe(true)
     expect(existsSync(report.checksumPath)).toBe(true)
     expect(report.checksum).toMatch(/^[0-9a-f]{64}$/)
@@ -77,7 +82,7 @@ describe('catalog snapshots', () => {
            FROM catalog_meta`,
         )
       ).getRowObjects()[0]
-      expect(Number(meta.source_fetched_at_ms)).toBe(new Date(FIXED_VERIFIED_AT).getTime())
+      expect(Number(meta.source_fetched_at_ms)).toBe(new Date(FIXED_FETCHED_AT).getTime())
       expect(Number(meta.freshness_deadline_ms)).toBe(
         FIXED_NOW.getTime() + 7 * 24 * 60 * 60 * 1000,
       )
@@ -97,22 +102,68 @@ describe('catalog snapshots', () => {
       expect(source.source_url).toBe(MODELS_DEV_SOURCE.sourceUrl)
       expect(source.license).toBe(MODELS_DEV_SOURCE.license)
       expect(source.attribution).toBe(MODELS_DEV_SOURCE.attribution)
-      expect(Number(source.fetched_at_ms)).toBe(new Date(FIXED_VERIFIED_AT).getTime())
+      expect(Number(source.fetched_at_ms)).toBe(new Date(FIXED_FETCHED_AT).getTime())
       expect(Number(source.http_status)).toBe(200)
       expect(source.content_sha256).toBe(FIXED_CONTENT_SHA256)
       expect(source.status).toBe('ok')
       expect(source.error).toBeNull()
+
+      const canonical = (
+        await connection.runAndReadAll(
+          `SELECT canonical_model_id, name, lab, family_id FROM canonical_models`,
+        )
+      ).getRowObjects()
+      expect(canonical).toEqual([
+        expect.objectContaining({
+          canonical_model_id: 'acme/free-model',
+          lab: 'acme',
+          family_id: 'acme',
+        }),
+      ])
+
+      const plans = (
+        await connection.runAndReadAll(
+          `SELECT plan_id, company_id, name, provider_id
+           FROM company_plans ORDER BY plan_id`,
+        )
+      ).getRowObjects()
+      expect(plans).toEqual([
+        expect.objectContaining({
+          plan_id: 'opencode-go',
+          company_id: 'opencode',
+          name: 'OpenCode Go',
+          provider_id: null,
+        }),
+        expect.objectContaining({
+          plan_id: 'opencode-go-plus',
+          company_id: 'opencode',
+          name: 'OpenCode Go Plus',
+          provider_id: null,
+        }),
+        expect.objectContaining({
+          plan_id: 'opencode-zen',
+          company_id: 'opencode',
+          name: 'OpenCode Zen',
+          provider_id: null,
+        }),
+      ])
+
+      const providerColumns = (
+        await connection.runAndReadAll('DESCRIBE providers')
+      ).getRowObjects()
+      expect(providerColumns.map((row) => row.column_name)).not.toContain('verified_at')
+      expect(providerColumns.map((row) => row.column_name)).not.toContain('confidence')
     } finally {
       connection.closeSync()
       instance.closeSync()
     }
   })
 
-  it('rejects an empty record set instead of publishing a provenance-free catalog', async () => {
+  it('rejects an empty record set instead of publishing an empty catalog', async () => {
     const failure = await createSnapshot({
       catalog: { providers: [], models: [], knownGaps: [] },
       source: MODELS_DEV_SOURCE,
-      fetchedAt: FIXED_VERIFIED_AT,
+      fetchedAt: FIXED_FETCHED_AT,
       contentSha256: FIXED_CONTENT_SHA256,
       httpStatus: 200,
       etag: null,
@@ -123,7 +174,7 @@ describe('catalog snapshots', () => {
     expect(failure).toBeInstanceOf(SnapshotValidationError)
     expect((failure as SnapshotValidationError).report.ok).toBe(false)
     expect((failure as SnapshotValidationError).report.errors).toEqual(
-      expect.arrayContaining(['providers is empty', 'models is empty']),
+      expect.arrayContaining(['providers is empty', 'models is empty', 'canonical_models is empty']),
     )
     expect((await readdir(outputDirectory)).filter((name) => name.endsWith('.duckdb'))).toEqual([])
   })
@@ -132,7 +183,7 @@ describe('catalog snapshots', () => {
     const report = await createSnapshot({
       catalog: fixtureCatalog,
       source: MODELS_DEV_SOURCE,
-      fetchedAt: FIXED_VERIFIED_AT,
+      fetchedAt: FIXED_FETCHED_AT,
       contentSha256: FIXED_CONTENT_SHA256,
       httpStatus: 200,
       etag: null,
@@ -160,7 +211,7 @@ describe('catalog snapshots', () => {
     const report = await createSnapshot({
       catalog: fixtureCatalog,
       source: MODELS_DEV_SOURCE,
-      fetchedAt: FIXED_VERIFIED_AT,
+      fetchedAt: FIXED_FETCHED_AT,
       contentSha256: FIXED_CONTENT_SHA256,
       httpStatus: 200,
       etag: null,
@@ -174,36 +225,23 @@ describe('catalog snapshots', () => {
       await connection.run(
         `INSERT INTO plans (
            plan_id, provider_id, name, usage_model, billing_period, price, currency,
-           included_allowance, allowance_unit, source_id, source_url, source_record,
-           verified_at, last_attempt_at, confidence, scrape_status, last_error
+           included_allowance, allowance_unit, source_id, source_url, source_record
          )
          SELECT 'plan-1', provider_id, 'Plan', 'free', NULL, NULL, NULL, NULL, NULL,
-                source_id, source_url, 'plan-1', verified_at, last_attempt_at,
-                confidence, scrape_status, NULL
+                source_id, source_url, 'plan-1'
          FROM providers LIMIT 1`,
       )
-      await connection.run(
-        `INSERT INTO free_offers (
-           offer_id, provider_id, plan_id, offer_kind, allowance, allowance_unit,
-           reset_period, eligibility, conditions, source_id, source_url, source_record,
-           verified_at, last_attempt_at, confidence, scrape_status, last_error
-         )
-         SELECT 'offer-1', provider_id, 'plan-1', 'recurring', 100, 'requests', 'day',
-                NULL, NULL, source_id, source_url, 'offer-1', verified_at,
-                last_attempt_at, confidence, scrape_status, NULL
-         FROM providers LIMIT 1`,
-      )
-      await connection.run(
-        `INSERT INTO free_offers (
-           offer_id, provider_id, plan_id, offer_kind, allowance, allowance_unit,
-           reset_period, eligibility, conditions, source_id, source_url, source_record,
-           verified_at, last_attempt_at, confidence, scrape_status, last_error
-         )
-         SELECT 'offer-2', provider_id, 'plan-1', 'recurring', 100, 'requests', 'day',
-                NULL, NULL, source_id, source_url, 'offer-2', verified_at,
-                last_attempt_at, confidence, scrape_status, NULL
-         FROM providers LIMIT 1`,
-      )
+      for (const offerId of ['offer-1', 'offer-2']) {
+        await connection.run(
+          `INSERT INTO free_offers (
+             offer_id, provider_id, plan_id, offer_kind, allowance, allowance_unit,
+             reset_period, eligibility, conditions, source_id, source_url, source_record
+           )
+           SELECT '${offerId}', provider_id, 'plan-1', 'recurring', 100, 'requests', 'day',
+                  NULL, NULL, source_id, source_url, '${offerId}'
+           FROM providers LIMIT 1`,
+        )
+      }
     } finally {
       connection.closeSync()
       instance.closeSync()
@@ -216,26 +254,24 @@ describe('catalog snapshots', () => {
     )
   })
 
-  it('writes the S2 fixture snapshot with an agent, plan, recurring offer and local runtime', async () => {
+  it('writes a fixture snapshot with a plan, recurring offer and local runtime', async () => {
     const report = await createSnapshot({
       catalog: { ...fixtureCatalog, knownGaps: [] },
       source: MODELS_DEV_SOURCE,
-      fetchedAt: FIXED_VERIFIED_AT,
+      fetchedAt: FIXED_FETCHED_AT,
       contentSha256: FIXED_CONTENT_SHA256,
       httpStatus: 200,
       etag: null,
       outputDirectory,
       now: FIXED_NOW,
-      agents: [fixtureAgent()],
       plans: [fixturePlan()],
       freeOffers: [fixtureFreeOffer({ planId: 'plan-1' })],
       localRuntimes: [fixtureLocalRuntime()],
     })
 
-    expect(report.counts).toEqual({
+    expect(report.counts).toMatchObject({
       providers: 1,
       models: 1,
-      agents: 1,
       plans: 1,
       freeOffers: 1,
       localRuntimes: 1,
@@ -252,7 +288,7 @@ describe('catalog snapshots', () => {
     const report = await createSnapshot({
       catalog: fixtureCatalog,
       source: MODELS_DEV_SOURCE,
-      fetchedAt: FIXED_VERIFIED_AT,
+      fetchedAt: FIXED_FETCHED_AT,
       contentSha256: FIXED_CONTENT_SHA256,
       httpStatus: 200,
       etag: null,
@@ -279,7 +315,7 @@ describe('catalog snapshots', () => {
     const report = await createSnapshot({
       catalog: fixtureCatalog,
       source: MODELS_DEV_SOURCE,
-      fetchedAt: FIXED_VERIFIED_AT,
+      fetchedAt: FIXED_FETCHED_AT,
       contentSha256: FIXED_CONTENT_SHA256,
       httpStatus: 200,
       etag: null,
@@ -293,12 +329,11 @@ describe('catalog snapshots', () => {
       await connection.run(
         `INSERT INTO free_offers (
            offer_id, provider_id, plan_id, offer_kind, allowance, allowance_unit,
-           reset_period, eligibility, conditions, source_id, source_url, source_record,
-           verified_at, last_attempt_at, confidence, scrape_status, last_error
+           reset_period, eligibility, conditions, source_id, source_url, source_record
          )
          SELECT 'offer-trial', provider_id, NULL, 'recurring', 100, 'requests', 'day',
                 NULL, 'Free for 30 days; limited-time trial.', source_id, source_url,
-                'offer-trial', verified_at, last_attempt_at, confidence, scrape_status, NULL
+                'offer-trial'
          FROM providers LIMIT 1`,
       )
     } finally {
@@ -315,11 +350,11 @@ describe('catalog snapshots', () => {
     ).toBe(true)
   })
 
-  it('retains facts omitted by a later successful scrape and reports them for review', async () => {
+  it('retains facts omitted by a later successful scrape and flags them for review', async () => {
     const first = await createSnapshot({
       catalog: fixtureCatalog,
       source: MODELS_DEV_SOURCE,
-      fetchedAt: FIXED_VERIFIED_AT,
+      fetchedAt: FIXED_FETCHED_AT,
       contentSha256: FIXED_CONTENT_SHA256,
       httpStatus: 200,
       etag: null,
@@ -343,6 +378,7 @@ describe('catalog snapshots', () => {
           modelId: 'new-model',
           canonicalModelId: 'beta/new-model',
           name: 'New Model',
+          familyId: 'beta',
           sourceRecord: 'beta/new-model',
         },
       ],
@@ -373,30 +409,24 @@ describe('catalog snapshots', () => {
     const instance = await DuckDBInstance.create(second.snapshotPath, { access_mode: 'READ_ONLY' })
     const connection = await instance.connect()
     try {
-      const reader = await connection.runAndReadAll(
-        `SELECT provider_id, scrape_status, last_error,
-                epoch_ms(verified_at) AS verified_at_ms,
-                epoch_ms(last_attempt_at) AS last_attempt_at_ms
-         FROM providers ORDER BY provider_id`,
-      )
-      const providers = reader.getRowObjects()
-      const acme = providers.find((row) => row.provider_id === 'acme')
-      const beta = providers.find((row) => row.provider_id === 'beta')
+      const providers = (
+        await connection.runAndReadAll(
+          `SELECT provider_id, retained FROM providers ORDER BY provider_id`,
+        )
+      ).getRowObjects()
+      expect(providers).toEqual([
+        expect.objectContaining({ provider_id: 'acme', retained: true }),
+        expect.objectContaining({ provider_id: 'beta', retained: false }),
+      ])
 
-      expect(acme?.scrape_status).toBe('missing')
-      expect(acme?.last_error).toContain('latest source response')
-      expect(Number(acme?.verified_at_ms)).toBe(new Date(FIXED_VERIFIED_AT).getTime())
-      expect(Number(acme?.last_attempt_at_ms)).toBe(
-        new Date('2026-11-09T12:01:00.000Z').getTime(),
-      )
-      expect(beta?.scrape_status).toBe('ok')
-
-      const modelReader = await connection.runAndReadAll(
-        `SELECT model_id, scrape_status FROM models ORDER BY model_id`,
-      )
-      expect(modelReader.getRowObjects()).toEqual([
-        expect.objectContaining({ model_id: 'free-model', scrape_status: 'missing' }),
-        expect.objectContaining({ model_id: 'new-model', scrape_status: 'ok' }),
+      const models = (
+        await connection.runAndReadAll(
+          `SELECT model_id, retained FROM models ORDER BY model_id`,
+        )
+      ).getRowObjects()
+      expect(models).toEqual([
+        expect.objectContaining({ model_id: 'free-model', retained: true }),
+        expect.objectContaining({ model_id: 'new-model', retained: false }),
       ])
     } finally {
       connection.closeSync()
@@ -404,11 +434,137 @@ describe('catalog snapshots', () => {
     }
   })
 
+  it('keeps curated company plans linked to their provider entries', async () => {
+    const report = await createSnapshot({
+      catalog: {
+        ...fixtureCatalog,
+        providers: [
+          ...fixtureCatalog.providers,
+          {
+            ...fixtureCatalog.providers[0],
+            providerId: 'opencode',
+            name: 'OpenCode',
+            sourceRecord: 'opencode',
+          },
+          {
+            ...fixtureCatalog.providers[0],
+            providerId: 'opencode-go',
+            name: 'OpenCode Go',
+            sourceRecord: 'opencode-go',
+          },
+        ],
+      },
+      source: MODELS_DEV_SOURCE,
+      fetchedAt: FIXED_FETCHED_AT,
+      contentSha256: FIXED_CONTENT_SHA256,
+      httpStatus: 200,
+      etag: null,
+      outputDirectory,
+      now: FIXED_NOW,
+    })
+
+    const instance = await DuckDBInstance.create(report.snapshotPath, { access_mode: 'READ_ONLY' })
+    const connection = await instance.connect()
+    try {
+      const plans = (
+        await connection.runAndReadAll(
+          `SELECT plan_id, provider_id FROM company_plans ORDER BY plan_id`,
+        )
+      ).getRowObjects()
+      expect(plans).toEqual([
+        expect.objectContaining({ plan_id: 'opencode-go', provider_id: 'opencode-go' }),
+        expect.objectContaining({ plan_id: 'opencode-go-plus', provider_id: null }),
+        expect.objectContaining({ plan_id: 'opencode-zen', provider_id: 'opencode' }),
+      ])
+    } finally {
+      connection.closeSync()
+      instance.closeSync()
+    }
+
+    const writable = await DuckDBInstance.create(report.snapshotPath)
+    const writableConnection = await writable.connect()
+    try {
+      await writableConnection.run(
+        `UPDATE company_plans SET provider_id = 'opencode-go' WHERE plan_id = 'opencode-zen'`,
+      )
+    } finally {
+      writableConnection.closeSync()
+      writable.closeSync()
+    }
+
+    const validation = await validateSnapshotFile(report.snapshotPath)
+    expect(validation.ok).toBe(false)
+    expect(
+      validation.errors.some((error) => error.includes('linked to several plans')),
+    ).toBe(true)
+  })
+
+  it('rejects an exclusive provider linked to several harnesses', async () => {
+    const report = await createSnapshot({
+      catalog: fixtureCatalog,
+      source: MODELS_DEV_SOURCE,
+      fetchedAt: FIXED_FETCHED_AT,
+      contentSha256: FIXED_CONTENT_SHA256,
+      httpStatus: 200,
+      etag: null,
+      outputDirectory,
+      now: FIXED_NOW,
+    })
+
+    const instance = await DuckDBInstance.create(report.snapshotPath)
+    const connection = await instance.connect()
+    try {
+      for (const harnessId of ['claude-code', 'codex']) {
+        await connection.run(
+          `INSERT INTO provider_harnesses (provider_id, harness_id, exclusive, source_url)
+           SELECT provider_id, '${harnessId}', TRUE, 'https://example.test/harness'
+           FROM providers LIMIT 1`,
+        )
+      }
+    } finally {
+      connection.closeSync()
+      instance.closeSync()
+    }
+
+    const validation = await validateSnapshotFile(report.snapshotPath)
+    expect(validation.ok).toBe(false)
+    expect(validation.errors.some((error) => error.includes('exclusive providers'))).toBe(true)
+  })
+
+  it('rejects a family tree with a cycle', async () => {
+    const report = await createSnapshot({
+      catalog: fixtureCatalog,
+      source: MODELS_DEV_SOURCE,
+      fetchedAt: FIXED_FETCHED_AT,
+      contentSha256: FIXED_CONTENT_SHA256,
+      httpStatus: 200,
+      etag: null,
+      outputDirectory,
+      now: FIXED_NOW,
+    })
+
+    const instance = await DuckDBInstance.create(report.snapshotPath)
+    const connection = await instance.connect()
+    try {
+      await connection.run(
+        `INSERT INTO model_families (family_id, name, parent_family_id, vendor)
+         VALUES ('cycle-a', 'Cycle A', 'cycle-b', NULL), ('cycle-b', 'Cycle B', 'cycle-a', NULL)`,
+      )
+    } finally {
+      connection.closeSync()
+      instance.closeSync()
+    }
+
+    const validation = await validateSnapshotFile(report.snapshotPath)
+    expect(validation.ok).toBe(false)
+    expect(validation.errors.some((error) => error.includes('cycle'))).toBe(true)
+  })
+
   it('warns after seven days without deleting the snapshot', async () => {
     const report = await createSnapshot({
       catalog: fixtureCatalog,
       source: MODELS_DEV_SOURCE,
-      fetchedAt: FIXED_VERIFIED_AT,
+      fetchedAt: FIXED_FETCHED_AT,
       contentSha256: FIXED_CONTENT_SHA256,
       httpStatus: 200,
       etag: null,
@@ -429,7 +585,7 @@ describe('catalog snapshots', () => {
     const first = await createSnapshot({
       catalog: fixtureCatalog,
       source: MODELS_DEV_SOURCE,
-      fetchedAt: FIXED_VERIFIED_AT,
+      fetchedAt: FIXED_FETCHED_AT,
       contentSha256: FIXED_CONTENT_SHA256,
       httpStatus: 200,
       etag: null,
@@ -446,7 +602,7 @@ describe('catalog snapshots', () => {
       createSnapshot({
         catalog: duplicateModelCatalog,
         source: MODELS_DEV_SOURCE,
-        fetchedAt: FIXED_VERIFIED_AT,
+        fetchedAt: FIXED_FETCHED_AT,
         contentSha256: 'b'.repeat(64),
         httpStatus: 200,
         etag: null,
@@ -466,7 +622,7 @@ describe('catalog snapshots', () => {
     const report = await createSnapshot({
       catalog: fixtureCatalog,
       source: MODELS_DEV_SOURCE,
-      fetchedAt: FIXED_VERIFIED_AT,
+      fetchedAt: FIXED_FETCHED_AT,
       contentSha256: FIXED_CONTENT_SHA256,
       httpStatus: 200,
       etag: null,

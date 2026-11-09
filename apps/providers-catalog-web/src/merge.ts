@@ -1,7 +1,8 @@
 import { existsSync } from 'node:fs'
 import { DuckDBInstance, type DuckDBValue } from '@duckdb/node-api'
+import { familyIdForCanonical } from './curated'
 import { SCHEMA_VERSION } from './schema'
-import type { CatalogModel, CatalogProvider, Confidence, ModelsDevCatalog, ScrapeStatus } from './types'
+import type { CatalogModel, CatalogProvider, ModelsDevCatalog } from './types'
 
 export interface MergeReport {
   previousSnapshotPath: string
@@ -18,8 +19,9 @@ export interface MergeResult {
 
 /**
  * A successful scrape can omit a fact because the source removed it or because
- * the response is incomplete. Keep the last verified row and mark it missing
- * instead of silently deleting it.
+ * the response is incomplete. Keep the previous row and flag it `retained`
+ * instead of silently deleting it. Retention is a display fact, not a
+ * verification claim.
  */
 export async function mergePreviousFacts(
   catalog: ModelsDevCatalog,
@@ -49,9 +51,7 @@ export async function mergePreviousFacts(
       await readRows(
         connection,
         `SELECT provider_id, name, npm, api_url, doc_url, env_keys, logo_path,
-                source_id, source_url, source_record, epoch_ms(verified_at) AS verified_at_ms,
-                epoch_ms(last_attempt_at) AS last_attempt_at_ms, confidence,
-                scrape_status, last_error
+                source_id, source_url, source_record
          FROM providers`,
       )
     ).map(mapProvider)
@@ -72,9 +72,7 @@ export async function mergePreviousFacts(
                 CAST(cost_input_audio AS DOUBLE) AS cost_input_audio,
                 CAST(cost_output_audio AS DOUBLE) AS cost_output_audio,
                 modalities_input, modalities_output, status, source_id, source_url,
-                source_record, epoch_ms(verified_at) AS verified_at_ms,
-                epoch_ms(last_attempt_at) AS last_attempt_at_ms, confidence,
-                scrape_status, last_error
+                source_record
          FROM models`,
       )
     ).map(mapModel)
@@ -84,20 +82,10 @@ export async function mergePreviousFacts(
 
     const retainedProviders: CatalogProvider[] = previousProviders
       .filter((provider) => !currentProviderIds.has(provider.providerId))
-      .map((provider) => ({
-        ...provider,
-        lastAttemptAt: attemptedAt,
-        scrapeStatus: 'missing',
-        lastError: 'Not present in the latest source response',
-      }))
+      .map((provider) => ({ ...provider, retained: true }))
     const retainedModels: CatalogModel[] = previousModels
       .filter((model) => !currentModelKeys.has(modelKey(model.providerId, model.modelId)))
-      .map((model) => ({
-        ...model,
-        lastAttemptAt: attemptedAt,
-        scrapeStatus: 'missing',
-        lastError: 'Not present in the latest source response',
-      }))
+      .map((model) => ({ ...model, retained: true }))
 
     const reviewItems = [
       ...retainedProviders.map((provider) => `provider ${provider.providerId}`),
@@ -137,25 +125,23 @@ function mapProvider(row: Record<string, DuckDBValue>): CatalogProvider {
     docUrl: nullableString(row.doc_url),
     envKeys: jsonStringArray(row.env_keys),
     logoPath: nullableString(row.logo_path),
+    retained: false,
     sourceId: stringValue(row.source_id),
     sourceUrl: stringValue(row.source_url),
     sourceRecord: stringValue(row.source_record),
-    verifiedAt: isoFromMs(row.verified_at_ms),
-    lastAttemptAt: isoFromMs(row.last_attempt_at_ms),
-    confidence: confidenceValue(row.confidence),
-    scrapeStatus: scrapeStatusValue(row.scrape_status),
-    lastError: nullableString(row.last_error),
   }
 }
 
 function mapModel(row: Record<string, DuckDBValue>): CatalogModel {
+  const canonicalModelId = stringValue(row.canonical_model_id)
   return {
     providerId: stringValue(row.provider_id),
     modelId: stringValue(row.model_id),
     modelType: nullableString(row.model_type),
-    canonicalModelId: nullableString(row.canonical_model_id),
+    canonicalModelId,
     name: nullableString(row.name),
     family: nullableString(row.family),
+    familyId: familyIdForCanonical(canonicalModelId) ?? canonicalModelId.split('/')[0],
     description: nullableString(row.description),
     releaseDate: nullableString(row.release_date),
     lastUpdated: nullableString(row.last_updated),
@@ -180,14 +166,10 @@ function mapModel(row: Record<string, DuckDBValue>): CatalogModel {
     modalitiesInput: nullableJsonStringArray(row.modalities_input),
     modalitiesOutput: nullableJsonStringArray(row.modalities_output),
     status: nullableString(row.status),
+    retained: false,
     sourceId: stringValue(row.source_id),
     sourceUrl: stringValue(row.source_url),
     sourceRecord: stringValue(row.source_record),
-    verifiedAt: isoFromMs(row.verified_at_ms),
-    lastAttemptAt: isoFromMs(row.last_attempt_at_ms),
-    confidence: confidenceValue(row.confidence),
-    scrapeStatus: scrapeStatusValue(row.scrape_status),
-    lastError: nullableString(row.last_error),
   }
 }
 
@@ -237,10 +219,6 @@ function nullableBoolean(value: DuckDBValue): boolean | null {
   return typeof value === 'boolean' ? value : null
 }
 
-function isoFromMs(value: DuckDBValue): string {
-  return new Date(numberValue(value)).toISOString()
-}
-
 function jsonStringArray(value: DuckDBValue): string[] {
   return nullableJsonStringArray(value) ?? []
 }
@@ -257,18 +235,4 @@ function nullableJsonStringArray(value: DuckDBValue): string[] | null {
   } catch {
     return null
   }
-}
-
-function confidenceValue(value: DuckDBValue): Confidence {
-  if (value === 'verified' || value === 'community' || value === 'inferred' || value === 'unknown') {
-    return value
-  }
-  return 'unknown'
-}
-
-function scrapeStatusValue(value: DuckDBValue): ScrapeStatus {
-  if (value === 'ok' || value === 'missing' || value === 'failed' || value === 'not_fetched') {
-    return value
-  }
-  return 'not_fetched'
 }

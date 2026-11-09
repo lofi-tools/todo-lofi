@@ -1,0 +1,153 @@
+---
+import Base from '../layouts/Base.astro'
+import EmptyState from '../components/EmptyState.astro'
+import { loadCatalog } from '../lib/catalog'
+import { formatNumber, harnessHref, providerHref } from '../lib/format'
+import { buildHarnessRanking, RANKING_FORMULA } from '../lib/ranking'
+
+const catalog = await loadCatalog()
+const ranking = buildHarnessRanking(catalog)
+const benchmarkNames = new Map(catalog.benchmarks.map((benchmark) => [benchmark.benchmarkId, benchmark.name]))
+---
+
+<Base
+  title="Harness ranking"
+  description="Rank coding-agent harnesses by their providers' monthly free allowance and the coding benchmark scores of the models they can use."
+>
+  <header class="page-header">
+    <p class="eyebrow">Ranking</p>
+    <h1>Harness ranking</h1>
+    <p class="lede">
+      Each harness is scored as {RANKING_FORMULA}. The monthly amount is the sum of the recurring
+      free offers of the providers linked to the harness, normalized from their reset period.
+      Requests and tokens are ranked separately because they are not interchangeable.
+    </p>
+    <p class="small muted">
+      A model's coding score is the mean of its published coding benchmark scores; a harness's
+      average is the mean of those model scores across the canonical models its providers serve.
+      No score is estimated.
+    </p>
+    <div class="meta-row">
+      <span class="pill">{formatNumber(ranking.totalHarnesses)} harnesses</span>
+      <span class="pill">{formatNumber(ranking.totalRecurringOffers)} recurring offers</span>
+      <span class="pill">{formatNumber(ranking.totalBenchmarkScores)} benchmark scores</span>
+    </div>
+  </header>
+
+  {
+    ranking.groups.length === 0 && (
+      <section class="section">
+        <EmptyState title="No harness is rankable yet">
+          The ranking needs two published inputs: a recurring free request or token allowance for a
+          harness's providers, and at least one coding benchmark score for a model those providers
+          serve.          This snapshot does not publish either input, so no harness has a score. Both inputs
+          stay unknown rather than being estimated from model prices.
+        </EmptyState>
+      </section>
+    )
+  }
+
+  {
+    ranking.groups.map((group) => (
+      <section class="section">
+        <h2>
+          Free {group.unit} per month × average coding score
+        </h2>
+        <p class="small muted">
+          Compared within this unit only. A token allowance and a request allowance are not
+          equivalent.
+        </p>
+        <div class="table-wrap">
+          <table>
+            <caption class="visually-hidden">Harnesses ranked by free {group.unit} and coding score</caption>
+            <thead>
+              <tr>
+                <th scope="col">Rank</th>
+                <th scope="col">Harness</th>
+                <th scope="col">Providers</th>
+                <th scope="col">Free {group.unit} / month</th>
+                <th scope="col">Average coding score</th>
+                <th scope="col">Ranking score</th>
+              </tr>
+            </thead>
+            <tbody>
+              {group.entries.map((entry, index) => {
+                const allowance = entry.freeAllowances.find((item) => item.unit === group.unit)
+                return (
+                  <tr>
+                    <td>{index + 1}</td>
+                    <td><a href={harnessHref(entry.harnessId)}>{entry.harnessName}</a></td>
+                    <td>
+                      {entry.providerIds.map((providerId) => (
+                        <div><a href={providerHref(providerId)}>{providerId}</a></div>
+                      ))}
+                    </td>
+                    <td>{formatNumber(allowance?.monthlyAmount ?? 0)}</td>
+                    <td>{entry.averageCodingScore?.toFixed(1) ?? 'Unknown'}</td>
+                    <td>{entry.score?.toFixed(2) ?? 'Unknown'}</td>
+                  </tr>
+                )
+              })}
+            </tbody>
+          </table>
+        </div>
+      </section>
+    ))
+  }
+
+  <section class="section">
+    <h2>Inputs available per harness</h2>
+    <p class="small muted">
+      Benchmark scores come from {ranking.benchmarkIds
+        .map((benchmarkId) => benchmarkNames.get(benchmarkId) ?? benchmarkId)
+        .join(', ')}. The ranking is computed once at build time and published as
+      <a href="/harness-ranking.json">/harness-ranking.json</a>; the browser does not load a database.
+    </p>
+    <div class="table-wrap">
+      <table>
+        <caption class="visually-hidden">Harness ranking inputs</caption>
+        <thead>
+          <tr>
+            <th scope="col">Harness</th>
+            <th scope="col">Linked providers</th>
+            <th scope="col">Recurring offers</th>
+            <th scope="col">Scored models</th>
+            <th scope="col">Average coding score</th>
+          </tr>
+        </thead>
+        <tbody>
+          {catalog.harnesses.map((harness) => {
+            const entry = ranking.entries.find(
+              (candidate) => candidate.harnessId === harness.harnessId,
+            )
+            const providerCount = catalog.providerHarnesses.filter(
+              (link) => link.harnessId === harness.harnessId,
+            ).length
+            const offerCount = catalog.offers.filter((offer) =>
+              catalog.providerHarnesses.some(
+                (link) => link.harnessId === harness.harnessId && link.providerId === offer.providerId,
+              ),
+            ).length
+            const scoredModels = catalog.models
+              .filter((model) =>
+                catalog.providerHarnesses.some(
+                  (link) => link.harnessId === harness.harnessId && link.providerId === model.providerId,
+                ),
+              )
+              .filter((model) => catalog.benchmarkScores.some((score) => score.canonicalModelId === model.canonicalModelId))
+              .length
+            return (
+              <tr>
+                <td><a href={harnessHref(harness.harnessId)}>{harness.name}</a></td>
+                <td>{formatNumber(providerCount)}</td>
+                <td>{formatNumber(offerCount)}</td>
+                <td>{formatNumber(entry?.scoredModels ?? scoredModels)}</td>
+                <td>{entry?.averageCodingScore?.toFixed(1) ?? 'Unknown'}</td>
+              </tr>
+            )
+          })}
+        </tbody>
+      </table>
+    </div>
+  </section>
+</Base>

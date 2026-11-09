@@ -1,0 +1,18 @@
+[package]
+name = "providers-catalog-ingest"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+chrono.workspace = true
+regex.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tokio.workspace = true
+clap = { version = "4", features = ["derive"] }
+duckdb = { version = "1.20000.1", features = ["bundled"] }
+env_logger = "0.11"
+reqwest = { workspace = true, features = ["json", "default-tls"] }
+spider = "2.53.9"

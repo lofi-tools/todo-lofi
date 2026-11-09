@@ -9,7 +9,7 @@ import { planRebuild } from '../scripts/rebuild-from-artifact'
 import {
   FIXED_CONTENT_SHA256,
   FIXED_NOW,
-  FIXED_VERIFIED_AT,
+  FIXED_FETCHED_AT,
   fixtureCatalog,
 } from './fixtures'
 
@@ -36,7 +36,7 @@ describe('rebuild from artifact', () => {
       await createSnapshot({
         catalog: fixtureCatalog,
         source: MODELS_DEV_SOURCE,
-        fetchedAt: FIXED_VERIFIED_AT,
+        fetchedAt: FIXED_FETCHED_AT,
         contentSha256: FIXED_CONTENT_SHA256,
         httpStatus: 200,
         etag: null,
@@ -51,7 +51,7 @@ describe('rebuild from artifact', () => {
         errors: [],
         recoverySteps: [],
       })
-      expect(report.snapshotPath).toMatch(/providers-catalog-1-.*\.duckdb$/)
+      expect(report.snapshotPath).toMatch(/providers-catalog-3-.*\.duckdb$/)
     } finally {
       await rm(directory, { recursive: true, force: true })
     }

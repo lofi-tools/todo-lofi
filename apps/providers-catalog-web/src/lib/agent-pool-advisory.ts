@@ -1,6 +1,6 @@
 import type { CatalogData } from './catalog'
 
-export const AGENT_POOL_ADVISORY_VERSION = 1
+export const AGENT_POOL_ADVISORY_VERSION = 2
 
 export interface AgentPoolAdvisoryRecord {
   providerId: string
@@ -12,9 +12,6 @@ export interface AgentPoolAdvisoryRecord {
   resetPeriod: string
   usageModel: string
   capacity: 'known' | 'unknown'
-  confidence: string
-  verifiedAt: string
-  scrapeStatus: string
   snapshotId: string
   schemaVersion: number
   stale: boolean
@@ -54,9 +51,6 @@ export function buildAgentPoolAdvisory(catalog: CatalogData): AgentPoolAdvisory 
       resetPeriod: offer.resetPeriod,
       usageModel,
       capacity: 'unknown',
-      confidence: offer.confidence,
-      verifiedAt: offer.verifiedAt,
-      scrapeStatus: offer.scrapeStatus,
       snapshotId: catalog.snapshot.snapshotId,
       schemaVersion: catalog.snapshot.schemaVersion,
       stale: catalog.snapshot.stale,
@@ -80,14 +74,9 @@ export function buildAgentPoolAdvisory(catalog: CatalogData): AgentPoolAdvisory 
 }
 
 export function advisoryCapacity(
-  record: Pick<AgentPoolAdvisoryRecord, 'stale' | 'scrapeStatus' | 'allowance' | 'usageModel'>,
+  record: Pick<AgentPoolAdvisoryRecord, 'stale' | 'allowance' | 'usageModel'>,
 ): 'known' | 'unknown' {
-  if (
-    record.stale ||
-    record.scrapeStatus !== 'ok' ||
-    record.allowance === null ||
-    record.usageModel === 'unknown'
-  ) {
+  if (record.stale || record.allowance === null || record.usageModel === 'unknown') {
     return 'unknown'
   }
   return 'known'
@@ -103,7 +92,5 @@ export function applyLocalAllowance(
     allowanceUnit: observation.allowanceUnit,
     resetPeriod: observation.resetPeriod,
     capacity: 'known',
-    confidence: 'verified',
-    verifiedAt: observation.observedAt,
   }
 }

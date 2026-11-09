@@ -1,0 +1,85 @@
+---
+import Base from '../../layouts/Base.astro'
+import EmptyState from '../../components/EmptyState.astro'
+import { companyContextForProvider, loadCatalog } from '../../lib/catalog'
+import { formatNumber, harnessHref, providerHref } from '../../lib/format'
+
+const catalog = await loadCatalog()
+const links = catalog.providerHarnesses
+const providerById = new Map(catalog.providers.map((provider) => [provider.providerId, provider]))
+const providerContexts = new Map(
+  catalog.providers.map((provider) => [
+    provider.providerId,
+    companyContextForProvider(catalog, provider.providerId),
+  ]),
+)
+---
+
+<Base title="Harnesses" description="Coding-agent harnesses and the providers they can use.">
+  <header class="page-header">
+    <p class="eyebrow">Harnesses</p>
+    <h1>Coding-agent harnesses</h1>
+    <p class="lede">
+      A harness is the coding agent that consumes a provider. Some providers are exclusive to one
+      harness: Anthropic-served models are Claude Code only, and OpenAI/GPT-served models are Codex
+      only. A provider with no link is usable by more than one harness or by a harness not tracked
+      here. A company can share a name with a harness; the plan name identifies the provider
+      entry, for example OpenCode Zen and OpenCode Go are plans of the OpenCode company.
+    </p>
+  </header>
+
+  {
+    catalog.harnesses.length === 0 ? (
+      <EmptyState title="No harnesses are defined">The snapshot has no harness rows.</EmptyState>
+    ) : (
+      <div class="grid grid--2">
+        {catalog.harnesses.map((harness) => {
+          const harnessLinks = links.filter((link) => link.harnessId === harness.harnessId)
+          return (
+            <a class="card" href={harnessHref(harness.harnessId)}>
+              <h2>{harness.name}</h2>
+              <p>{formatNumber(harnessLinks.length)} linked providers</p>
+              <p class="small muted">{harness.vendor ?? 'Vendor unknown'}</p>
+              {harnessLinks.some((link) => link.exclusive) && (
+                <p class="small muted">Includes exclusive provider links.</p>
+              )}
+            </a>
+          )
+        })}
+      </div>
+    )
+  }
+
+  <section class="section">
+    <h2>All provider links</h2>
+    <div class="table-wrap">
+      <table>
+        <caption class="visually-hidden">Provider to harness compatibility</caption>
+        <thead>
+          <tr>
+            <th scope="col">Provider</th>
+            <th scope="col">Company plan</th>
+            <th scope="col">Harness</th>
+            <th scope="col">Exclusive</th>
+            <th scope="col">Source</th>
+          </tr>
+        </thead>
+        <tbody>
+          {links.map((link) => {
+            const provider = providerById.get(link.providerId)
+            const context = providerContexts.get(link.providerId)
+            return (
+            <tr>
+              <td><a href={providerHref(link.providerId)}>{provider?.name ?? link.providerId}</a></td>
+              <td>{context ? context.plan.name : '—'}</td>
+              <td><a href={harnessHref(link.harnessId)}>{link.harnessId}</a></td>
+              <td>{link.exclusive ? 'Yes' : 'No'}</td>
+              <td><a href={link.sourceUrl} target="_blank" rel="noreferrer">Source</a></td>
+            </tr>
+            )
+          })}
+        </tbody>
+      </table>
+    </div>
+  </section>
+</Base>

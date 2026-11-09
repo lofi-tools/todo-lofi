@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto'
+import { canonicalModelIdFor, familyIdForCanonical } from './curated'
 import type {
   CatalogModel,
   CatalogProvider,
@@ -16,19 +17,19 @@ export const MODELS_DEV_SOURCE: CatalogSource = {
 }
 
 export const MODELS_DEV_KNOWN_GAPS = [
-  'models.dev does not provide coding-agent identities or compatibility.',
+  'models.dev does not provide coding-agent harness compatibility.',
   'models.dev does not provide subscription plans, prices or usage models.',
   'models.dev does not provide recurring free allowances or reset periods.',
   'models.dev does not provide local runtime or hardware requirements.',
+  'models.dev does not provide benchmark scores.',
 ]
 
-const USER_AGENT = 'providers-catalog-web/0.1 (+https://models.dev)'
+const USER_AGENT = 'providers-catalog-web/0.2 (+https://models.dev)'
 const DEFAULT_TIMEOUT_MS = 60_000
 const FALLBACK_URL = 'https://models.dev/api.json?type=all'
 
 export function parseModelsDevCatalog(
   value: unknown,
-  verifiedAt: string,
   sourceUrl: string = MODELS_DEV_SOURCE.sourceUrl,
 ): ModelsDevCatalog {
   const root = asRecord(value)
@@ -62,14 +63,10 @@ export function parseModelsDevCatalog(
       docUrl: optionalString(provider, 'doc'),
       envKeys: stringArray(provider.env) ?? [],
       logoPath: null,
+      retained: false,
       sourceId: MODELS_DEV_SOURCE.sourceId,
       sourceUrl,
       sourceRecord: providerKey,
-      verifiedAt,
-      lastAttemptAt: verifiedAt,
-      confidence: 'community',
-      scrapeStatus: 'ok',
-      lastError: null,
     })
 
     for (const [modelKey, modelValue] of Object.entries(modelMap)) {
@@ -77,7 +74,7 @@ export function parseModelsDevCatalog(
       if (!model) {
         throw new Error(`models.dev model ${providerKey}/${modelKey} is not an object`)
       }
-      models.push(mapModel(providerId, providerKey, modelKey, model, verifiedAt, sourceUrl))
+      models.push(mapModel(providerId, providerKey, modelKey, model, sourceUrl))
     }
   }
 
@@ -138,7 +135,7 @@ async function fetchOne(
 
   const fetchedAt = new Date().toISOString()
   return {
-    catalog: parseModelsDevCatalog(value, fetchedAt, url),
+    catalog: parseModelsDevCatalog(value, url),
     sourceUrl: url,
     fetchedAt,
     contentSha256: createHash('sha256').update(body).digest('hex'),
@@ -152,20 +149,26 @@ function mapModel(
   providerKey: string,
   modelKey: string,
   model: Record<string, unknown>,
-  verifiedAt: string,
   sourceUrl: string,
 ): CatalogModel {
   const limits = asRecord(model.limit) ?? {}
   const costs = asRecord(model.cost) ?? {}
   const modalities = asRecord(model.modalities) ?? {}
+  const modelId = optionalString(model, 'id') ?? modelKey
+  const canonicalModelId = canonicalModelIdFor(
+    providerId,
+    modelId,
+    optionalString(model, 'canonical_model_id'),
+  )
 
   return {
     providerId,
-    modelId: optionalString(model, 'id') ?? modelKey,
+    modelId,
     modelType: optionalString(model, 'type'),
-    canonicalModelId: optionalString(model, 'canonical_model_id'),
+    canonicalModelId,
     name: optionalString(model, 'name'),
     family: optionalString(model, 'family'),
+    familyId: familyIdForCanonical(canonicalModelId) ?? canonicalModelId.split('/')[0],
     description: optionalString(model, 'description'),
     releaseDate: optionalString(model, 'release_date'),
     lastUpdated: optionalString(model, 'last_updated'),
@@ -190,14 +193,10 @@ function mapModel(
     modalitiesInput: stringArray(modalities.input),
     modalitiesOutput: stringArray(modalities.output),
     status: optionalString(model, 'status'),
+    retained: false,
     sourceId: MODELS_DEV_SOURCE.sourceId,
     sourceUrl,
     sourceRecord: `${providerKey}/${modelKey}`,
-    verifiedAt,
-    lastAttemptAt: verifiedAt,
-    confidence: 'community',
-    scrapeStatus: 'ok',
-    lastError: null,
   }
 }
 

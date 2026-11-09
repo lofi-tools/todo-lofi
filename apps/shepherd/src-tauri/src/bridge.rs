@@ -26,8 +26,8 @@ use shepherd_core::files::{self, DirectoryListing, FileSearchQuery, FileSearchRe
 use shepherd_core::git::GitService;
 use shepherd_core::harness::HarnessFactory;
 use shepherd_core::store::{
-    PoolCatalogAdvisory, PoolCatalogOutcome, PoolCooldownClearRequest,
-    PoolQuotaCorrectionOutcome, PoolQuotaCorrectionRequest, PoolReorderOutcome, PoolReorderRequest,
+    PoolCatalogAdvisory, PoolCatalogOutcome, PoolCooldownClearRequest, PoolQuotaCorrectionOutcome,
+    PoolQuotaCorrectionRequest, PoolReorderOutcome, PoolReorderRequest, PoolSlot,
     PoolSlotEnabledOutcome, PoolSlotEnabledRequest, PoolSlotId, PoolStatus, Store, TursoStore,
 };
 use shepherd_core::terminal::{
@@ -1883,6 +1883,39 @@ impl ShellState {
             .map_err(BridgeError::from)
     }
 
+    pub async fn add_pool_slot(
+        &self,
+        agent: String,
+        provider_id: String,
+        provider_name: String,
+        model_id: String,
+        model_name: String,
+    ) -> Result<PoolSlot, BridgeError> {
+        let agent = Agent::parse(&agent)
+            .ok_or_else(|| BridgeError::new("pool_slot", format!("Unknown agent: {agent}")))?;
+        let mut core = self.core.lock().await;
+        core.add_pool_slot(agent, &provider_id, &provider_name, &model_id, &model_name)
+            .await
+            .map_err(BridgeError::from)
+    }
+
+    pub async fn generated_pool_catalog(&self) -> Result<Option<String>, BridgeError> {
+        let path = std::env::var_os("SHEPHERD_POOL_CATALOG")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| {
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../../.cache/shepherd/pool-catalog-advisory.v2.json")
+            });
+        match std::fs::read_to_string(&path) {
+            Ok(text) => Ok(Some(text)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(BridgeError::new(
+                "pool_catalog",
+                format!("Could not read {}: {error}", path.display()),
+            )),
+        }
+    }
+
     pub async fn reorder_pool_slots(
         &self,
         slot_ids: Vec<String>,
@@ -3133,10 +3166,7 @@ pub mod commands {
         slot_id: String,
         enabled: bool,
     ) -> Result<PoolSlotEnabledOutcome, BridgeError> {
-        state
-            .inner()
-            .set_pool_slot_enabled(slot_id, enabled)
-            .await
+        state.inner().set_pool_slot_enabled(slot_id, enabled).await
     }
 
     #[tauri::command]
@@ -3183,6 +3213,28 @@ pub mod commands {
         snapshot: String,
     ) -> Result<PoolCatalogOutcome, BridgeError> {
         state.inner().apply_pool_catalog(snapshot).await
+    }
+
+    #[tauri::command]
+    pub async fn pool_generated_catalog(
+        state: State<'_, ShellState>,
+    ) -> Result<Option<String>, BridgeError> {
+        state.inner().generated_pool_catalog().await
+    }
+
+    #[tauri::command]
+    pub async fn pool_add_slot(
+        state: State<'_, ShellState>,
+        agent: String,
+        provider_id: String,
+        provider_name: String,
+        model_id: String,
+        model_name: String,
+    ) -> Result<PoolSlot, BridgeError> {
+        state
+            .inner()
+            .add_pool_slot(agent, provider_id, provider_name, model_id, model_name)
+            .await
     }
 
     #[tauri::command]

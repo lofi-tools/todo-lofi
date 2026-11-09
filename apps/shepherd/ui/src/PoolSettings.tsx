@@ -2,11 +2,13 @@ import { For, Show, createEffect, createResource, createSignal } from 'solid-js'
 
 import {
   AGENT_LABELS,
+  addPoolSlot,
   applyPoolCatalog,
   clearPoolForce,
   clearPoolSlotCooldown,
   correctPoolQuota,
   forcePoolSlot,
+  generatedPoolCatalog,
   poolStatus,
   reorderPoolSlots,
   setPoolSlotEnabled,
@@ -15,8 +17,26 @@ import {
   type PoolResetWindow,
   type PoolSlot,
   type PoolSlotStatus,
+  type Agent,
 } from './bridge'
 import { reportError } from './diagnostics'
+
+interface GeneratedPoolCatalog {
+  contractVersion: number
+  stale: boolean
+  harnesses: Array<{
+    harnessId: string
+    agent: Agent
+    name: string
+    providers: Array<{
+      providerId: string
+      providerName: string
+      models: Array<{ modelId: string; name: string }>
+    }>
+  }>
+}
+
+const SUPPORTED_AGENTS = new Set<Agent>(['claude', 'codex', 'opencode'])
 
 const AVAILABILITY_LABELS = {
   available: 'Available',
@@ -213,6 +233,27 @@ export function PoolSettings() {
   const [catalogFile, setCatalogFile] = createSignal<File | null>(null)
   const [catalogError, setCatalogError] = createSignal('')
   const [catalogSkipped, setCatalogSkipped] = createSignal<PoolCatalogSeed[]>([])
+  const [selectedHarness, setSelectedHarness] = createSignal('')
+  const [selectedProvider, setSelectedProvider] = createSignal('')
+  const [selectedModel, setSelectedModel] = createSignal('')
+  const [generatedCatalog] = createResource(async () => {
+    try {
+      const raw = await generatedPoolCatalog()
+      if (!raw) return { raw: null, catalog: null, error: '' }
+      const parsed = JSON.parse(raw) as GeneratedPoolCatalog
+      if (parsed.contractVersion !== 2) {
+        return {
+          raw: null,
+          catalog: null,
+          error: `Unsupported generated catalog contract version ${parsed.contractVersion}.`,
+        }
+      }
+      return { raw, catalog: parsed, error: '' }
+    } catch (error) {
+      reportError('pool_generated_catalog', error)
+      return { raw: null, catalog: null, error: describeError(error) }
+    }
+  })
   const [status, { refetch }] = createResource(async () => {
     try {
       return { value: await poolStatus(), error: '' }
@@ -221,6 +262,19 @@ export function PoolSettings() {
       return { value: undefined, error: describeError(error) }
     }
   })
+
+  const harnessChoices = () =>
+    (generatedCatalog.latest?.catalog?.harnesses ?? []).filter((harness) =>
+      SUPPORTED_AGENTS.has(harness.agent),
+    )
+  const currentHarness = () =>
+    harnessChoices().find((harness) => harness.harnessId === selectedHarness()) ?? harnessChoices()[0]
+  const currentProvider = () =>
+    currentHarness()?.providers.find((provider) => provider.providerId === selectedProvider()) ??
+    currentHarness()?.providers[0]
+  const currentModel = () =>
+    currentProvider()?.models.find((model) => model.modelId === selectedModel()) ??
+    currentProvider()?.models[0]
 
   const slots = () => status.latest?.value?.slots ?? []
   const forcedSlot = () => status.latest?.value?.forcedSlot ?? null
@@ -278,6 +332,35 @@ export function PoolSettings() {
     void mutate('force', async () => (await clearPoolForce()).reason)
   }
 
+  function applyGeneratedCatalog() {
+    const entry = generatedCatalog.latest
+    if (!entry?.raw) return
+    setCatalogError('')
+    setCatalogSkipped([])
+    void mutate('catalog-generated', async () => {
+      const outcome = await applyPoolCatalog(entry.raw!)
+      setCatalogSkipped(outcome.seeds.filter((seed) => !seed.applied))
+      return `Applied ${outcome.applied} of ${outcome.applied + outcome.skipped} catalog records.`
+    })
+  }
+
+  function addSlot() {
+    const harness = currentHarness()
+    const provider = currentProvider()
+    const model = currentModel()
+    if (!harness || !provider || !model) return
+    void mutate('add-slot', async () => {
+      const slot = await addPoolSlot(
+        harness.agent,
+        provider.providerId,
+        provider.providerName,
+        model.modelId,
+        model.name,
+      )
+      return `Added ${slot.providerName} · ${slot.modelName}.`
+    })
+  }
+
   async function applyCatalog(file: File | null) {
     if (!file) {
       setCatalogError('Choose a catalog snapshot file.')
@@ -309,6 +392,91 @@ export function PoolSettings() {
         <button type="button" class="project-action" disabled={status.loading || !!busy()}
           onClick={() => { setActionError(''); void refetch() }}>Refresh pool</button>
       </div>
+
+      <section class="pool__catalog" aria-label="Generated catalog">
+        <p class="pool__hint">
+          Generated from the local catalog. It offers provider and model choices; adding a slot is
+          always an explicit action.
+        </p>
+        <Show when={generatedCatalog.loading}>
+          <p class="pool__hint">Loading the generated catalog…</p>
+        </Show>
+        <Show when={generatedCatalog.latest?.error}>
+          {(error) => <p class="pool__field-error" role="alert">{error()}</p>}
+        </Show>
+        <Show when={!generatedCatalog.loading && generatedCatalog.latest && !generatedCatalog.latest.catalog}>
+          <p class="pool__hint">
+            No generated catalog in <code>.cache/shepherd/</code>. Run
+            <code>pnpm --dir apps/providers-catalog-web run export:pool</code>.
+          </p>
+        </Show>
+        <Show when={generatedCatalog.latest?.catalog}>
+          <fieldset class="pool__add" disabled={!!busy()}>
+            <legend>Add slot</legend>
+            <label>
+              Harness
+              <select
+                aria-label="New slot harness"
+                value={currentHarness()?.harnessId ?? ''}
+                onChange={(event) => {
+                  setSelectedHarness(event.currentTarget.value)
+                  setSelectedProvider('')
+                  setSelectedModel('')
+                }}
+              >
+                <For each={harnessChoices()}>
+                  {(harness) => <option value={harness.harnessId}>{harness.name}</option>}
+                </For>
+              </select>
+            </label>
+            <label>
+              Provider
+              <select
+                aria-label="New slot provider"
+                value={currentProvider()?.providerId ?? ''}
+                onChange={(event) => {
+                  setSelectedProvider(event.currentTarget.value)
+                  setSelectedModel('')
+                }}
+              >
+                <For each={currentHarness()?.providers ?? []}>
+                  {(provider) => (
+                    <option value={provider.providerId}>{provider.providerName}</option>
+                  )}
+                </For>
+              </select>
+            </label>
+            <label>
+              Model
+              <select
+                aria-label="New slot model"
+                value={currentModel()?.modelId ?? ''}
+                onChange={(event) => setSelectedModel(event.currentTarget.value)}
+              >
+                <For each={currentProvider()?.models ?? []}>
+                  {(model) => <option value={model.modelId}>{model.name}</option>}
+                </For>
+              </select>
+            </label>
+            <button
+              type="button"
+              class="project-action"
+              disabled={!!busy() || !currentModel()}
+              onClick={addSlot}
+            >
+              Add slot
+            </button>
+          </fieldset>
+          <button
+            type="button"
+            class="project-action"
+            disabled={!!busy()}
+            onClick={applyGeneratedCatalog}
+          >
+            Apply generated catalog limits
+          </button>
+        </Show>
+      </section>
 
       <form class="pool__catalog" aria-label="Catalog snapshot"
         onSubmit={(event) => { event.preventDefault(); void applyCatalog(catalogFile()) }}>

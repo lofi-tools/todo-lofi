@@ -2,17 +2,19 @@
 import Base from '../../../layouts/Base.astro'
 import EmptyState from '../../../components/EmptyState.astro'
 import Provenance from '../../../components/Provenance.astro'
-import { loadCatalog, type CatalogModel, type CatalogProvider } from '../../../lib/catalog'
+import { benchmarkScoresFor, familyPath, harnessesForProvider, loadCatalog, type CatalogModel, type CatalogProvider } from '../../../lib/catalog'
 import {
-  compareHref,
+  canonicalHref,
+  familyHref,
+  formatBenchmarkScore,
   formatBoolean,
   formatContext,
   formatCost,
   formatDate,
   formatModalities,
   formatNumber,
+  harnessHref,
   modelHref,
-  modelKey,
   providerHref,
 } from '../../../lib/format'
 
@@ -36,9 +38,23 @@ if (!providerRecord || !model) {
 }
 
 const title = model.name ?? model.modelId
+const canonicalModel = catalog.canonicalModels.find(
+  (entry) => entry.canonicalModelId === model.canonicalModelId,
+)
+const siblings = catalog.models.filter(
+  (entry) =>
+    entry.canonicalModelId === model.canonicalModelId &&
+    !(entry.providerId === model.providerId && entry.modelId === model.modelId),
+)
+const family = familyPath(catalog, model.familyId).reverse()
+const harnesses = harnessesForProvider(catalog, model.providerId)
+const benchmarkScores = benchmarkScoresFor(catalog, model.canonicalModelId)
 ---
 
-<Base title={title} description={`${title} from ${providerRecord.name}: limits, modalities, pricing and provenance.`}>
+<Base
+  title={title}
+  description={`${title} from ${providerRecord.name}: limits, modalities, pricing, canonical model, family and source.`}
+>
   <a class="back-link" href={providerHref(providerRecord.providerId)}>
     ← {providerRecord.name}
   </a>
@@ -54,10 +70,9 @@ const title = model.name ?? model.modelId
       <span class="pill">{providerRecord.name}</span>
       <span class="pill">{formatContext(model.contextLimit)} context</span>
       <span class="pill">{model.openWeights === true ? 'Open weights' : 'Hosted weights'}</span>
-      <span class="pill">Verified {formatDate(model.verifiedAt)}</span>
-      <a class="button" href={compareHref([modelKey(model.providerId, model.modelId)])}>
-        Compare this model
-      </a>
+      {harnesses.map((harness) => (
+        <a class="pill" href={harnessHref(harness.harnessId)}>{harness.name}</a>
+      ))}
     </div>
   </header>
 
@@ -107,10 +122,95 @@ const title = model.name ?? model.modelId
   </div>
 
   <section class="section">
+    <h2>Canonical model and family</h2>
+    <div class="detail-grid">
+      <dl class="detail-list">
+        <div>
+          <dt>Canonical id</dt>
+          <dd><a href={canonicalHref(model.canonicalModelId)}><code class="mono">{model.canonicalModelId}</code></a></dd>
+        </div>
+        <div><dt>Canonical name</dt><dd>{canonicalModel?.name ?? 'Unknown'}</dd></div>
+        <div><dt>Lab</dt><dd>{canonicalModel?.lab ?? 'Unknown'}</dd></div>
+        <div><dt>Source family label</dt><dd>{model.family ?? 'Unknown'}</dd></div>
+      </dl>
+      <div>
+        <h2>Family chain</h2>
+        <p class="meta-row">
+          {
+            family.map((entry) => (
+              <a class="pill" href={familyHref(entry.familyId)}>{entry.name}</a>
+            ))
+          }
+        </p>
+        <p class="small muted">
+          A parent family includes every descendant. This model belongs to the leaf family and
+          inherits the tags above it.
+        </p>
+      </div>
+    </div>
+    {
+      siblings.length > 0 && (
+        <div class="card">
+          <h3>Also served by</h3>
+          <ul>
+            {siblings.map((sibling) => (
+              <li>
+                <a href={providerHref(sibling.providerId)}>{sibling.providerName}</a>{' '}
+                <span class="mono subtle">{sibling.modelId}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )
+    }
+  </section>
+
+  <section class="section">
+    <h2>Benchmarks</h2>
+    {
+      benchmarkScores.length === 0 ? (
+        <EmptyState title="No benchmark score published">
+          Benchmark definitions exist in this snapshot, but no score has an enabled source for this
+          canonical model. Scores stay unknown instead of being estimated.
+        </EmptyState>
+      ) : (
+        <div class="table-wrap">
+          <table>
+            <caption class="visually-hidden">Benchmark scores for {canonicalModel?.name ?? model.canonicalModelId}</caption>
+            <thead>
+              <tr>
+                <th scope="col">Benchmark</th>
+                <th scope="col">Score</th>
+                <th scope="col">Source</th>
+              </tr>
+            </thead>
+            <tbody>
+              {benchmarkScores.map((entry) => (
+                <tr>
+                  <td>{entry.benchmark.name}</td>
+                  <td>{formatBenchmarkScore(entry.score.score, entry.benchmark.unit)}</td>
+                  <td>
+                    <a href={entry.score.sourceUrl} target="_blank" rel="noreferrer">
+                      Source
+                    </a>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )
+    }
+    <p class="small muted">
+      Scores are keyed by canonical model, so every provider serving this release shares one score.
+    </p>
+  </section>
+
+  <section class="section">
     <h2>Plans and recurring free offers</h2>
-    <EmptyState title="No verified plan or offer is linked to this model">
+    <EmptyState title="No plan or offer is linked to this model">
       The catalog does not infer a plan or recurring allowance from the model price. Plans and
-      offers need an approved official source, a source URL and a verification time.
+      offers need an approved official source.
     </EmptyState>
   </section>
 
@@ -127,8 +227,7 @@ const title = model.name ?? model.modelId
     <dl class="detail-list">
       <div><dt>Provider</dt><dd><a href={providerHref(model.providerId)}>{providerRecord.name}</a></dd></div>
       <div><dt>Model id</dt><dd><code class="mono">{model.modelId}</code></dd></div>
-      <div><dt>Canonical id</dt><dd><code class="mono">{model.canonicalModelId ?? 'Unknown'}</code></dd></div>
-      <div><dt>Family</dt><dd>{model.family ?? 'Unknown'}</dd></div>
+      <div><dt>Canonical id</dt><dd><code class="mono">{model.canonicalModelId}</code></dd></div>
       <div><dt>Type</dt><dd>{model.modelType ?? 'Unknown'}</dd></div>
       <div><dt>Released</dt><dd>{formatDate(model.releaseDate)}</dd></div>
       <div><dt>Last updated</dt><dd>{formatDate(model.lastUpdated)}</dd></div>
@@ -140,8 +239,5 @@ const title = model.name ?? model.modelId
     sourceId={model.sourceId}
     sourceUrl={model.sourceUrl}
     sourceRecord={model.sourceRecord}
-    verifiedAt={model.verifiedAt}
-    confidence={model.confidence}
-    scrapeStatus={model.scrapeStatus}
   />
 </Base>

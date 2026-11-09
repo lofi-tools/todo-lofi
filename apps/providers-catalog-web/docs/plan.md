@@ -2,6 +2,12 @@
 
 Status: S1 and S3 implemented on 2026-11-09. S2's source-independent merge policy, review summary, free-offer normalization and synthetic fixture gate are implemented; its source adapters remain blocked on approved sources. S4's deploy job and local rebuild/recovery command are implemented but inert until the Pages project and secrets are configured; S4 itself remains blocked on that configuration, manual artifact dispatch and deployed verification. S5's advisory contract is implemented; connecting it to the Shepherd pool remains a separate Shepherd todo.
 
+Schema revisions (2026-11-09): fact-level verification was removed; canonical
+model identity, a model family tree, harness/provider links, benchmark
+definitions, and provider companies with their plans were added. The requested work is tracked in [todo.md](./todo.md).
+The advisory contract is now v2 at `/agent-pool-advisory.v2.json` because its
+record fields changed.
+
 Spec: [spec.md](./spec/spec.md). The spec governs behavior and data semantics;
 this file gives the working order.
 
@@ -74,9 +80,8 @@ catalog site yet.
 - [x] Flatten providers and nested models into typed records.
 - [x] Map all fields listed in spec §5, preserving nulls for unknown optional
   values.
-- [x] Keep `env_keys` as names only. Never read or store environment values.
-- [x] Set `source_url`, `source_record`, `verified_at`, `confidence =
-  'community'` and `scrape_status = 'ok'` for observed facts.
+- [x] Keep `env_keys` as names only. Never read or store environment values.  - [x] Set `source_url` and `source_record` for observed facts. (Superseded by
+  the schema v2 revision, which removed per-fact verification fields.)
 - [x] Do not create plans, agents, free offers or local runtimes from models.dev
   data.
 - [x] Add unit tests for mapping, optional fields, canonical model IDs and a
@@ -146,7 +151,27 @@ verified; root `pnpm typecheck` passed. The artifact is gitignored and the
 workflow YAML parsed successfully. The next slice remains blocked on approved
 agent, plan and recurring-free-offer sources.
 
-## Slice S2 — plans, agents and recurring offers
+## Schema revisions
+
+Implemented in one revision, in the order recorded in [todo.md](./todo.md):
+
+- removed `verified_at`, `last_attempt_at`, `confidence`, `scrape_status`,
+  `last_error`, `fact_sources` and every verification filter, pill and check;
+- added `canonical_models` and correlated every provider serving the same
+  release, including harness-specific providers;
+- added `model_families` as a parent column tree and infer ancestor chains by
+  following each parent family's own parent;
+- replaced the empty `agents` tables with `harnesses` and `provider_harnesses`,
+  including exclusive links;
+- added `benchmarks` and `model_benchmarks`, keyed by canonical model;
+- added `companies` and `company_plans`, so a provider entry can be a company's
+  plan: OpenCode is the company, OpenCode Zen and OpenCode Go are mapped plans,
+  and OpenCode Go Plus is named without a provider entry.
+
+Snapshots from an older schema are rejected by the build and skipped by the
+merge path; regenerate the snapshot before building.
+
+## Slice S2 — plans and recurring offers
 
 **Outcome:** approved sources populate the remaining tables without weakening
 provenance or inventing offers.
@@ -194,7 +219,7 @@ comparison and provenance.
 - [x] Add the build-time DuckDB reader; validate the singleton metadata row,
   supported schema version and required provenance before rendering.
 - [x] Add routes `/`, `/agents/[agent]`, `/providers/[provider]`,
-  `/models/[provider]/[model]`, `/compare` and `/about`. The model route is a
+  `/models/[provider]/[model]`, `/ranking` and `/about`. The model route is a
   catch-all because some source model ids contain `/`.
 - [x] Add the static model data and client-side filters for offer status,
   provider, model, context, modality, local/self-hosted and last verified. Agent

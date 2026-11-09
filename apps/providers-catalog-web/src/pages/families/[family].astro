@@ -1,0 +1,126 @@
+---
+import Base from '../../layouts/Base.astro'
+import EmptyState from '../../components/EmptyState.astro'
+import { descendantFamilyIds, familyPath, loadCatalog } from '../../lib/catalog'
+import { canonicalHref, familyHref, formatNumber } from '../../lib/format'
+
+export async function getStaticPaths() {
+  const catalog = await loadCatalog()
+  return catalog.families.map((family) => ({
+    params: { family: family.familyId },
+    props: { familyId: family.familyId },
+  }))
+}
+
+interface Props {
+  familyId: string
+}
+
+const { familyId } = Astro.props as Props
+const catalog = await loadCatalog()
+const family = catalog.families.find((entry) => entry.familyId === familyId)
+if (!family) {
+  throw new Error(`Family not found: ${familyId}`)
+}
+
+const chain = familyPath(catalog, family.familyId).reverse()
+const children = catalog.families
+  .filter((entry) => entry.parentFamilyId === family.familyId)
+  .sort((left, right) => left.name.localeCompare(right.name))
+const familyIds = new Set(descendantFamilyIds(catalog, family.familyId))
+const canonicalModels = catalog.canonicalModels.filter((model) => familyIds.has(model.familyId))
+const servings = catalog.models.filter((model) => familyIds.has(model.familyId))
+const providerCount = new Set(servings.map((model) => model.providerId)).size
+---
+
+<Base
+  title={family.name}
+  description={`${family.name}: family chain, descendants and canonical models in this family.`}
+>
+  <a class="back-link" href="/families">← All families</a>
+
+  <header class="page-header">
+    <p class="eyebrow">Family</p>
+    <h1>{family.name}</h1>
+    <p class="mono">{family.familyId}</p>
+    <div class="meta-row">
+      <span class="pill">{formatNumber(canonicalModels.length)} canonical models</span>
+      <span class="pill">{formatNumber(servings.length)} provider model entries</span>
+      <span class="pill">{formatNumber(providerCount)} providers</span>
+    </div>
+    <p class="lede">
+      Family tags are nested. This page includes every descendant family, so the count for a parent
+      covers its whole subtree.
+    </p>
+  </header>
+
+  <section class="section">
+    <h2>Family chain</h2>
+    <p class="meta-row">
+      {chain.map((entry) => <a class="pill" href={familyHref(entry.familyId)}>{entry.name}</a>)}
+    </p>
+    <p class="small muted">
+      The chain is inferred by following each parent family's own parent from {family.name} to the
+      root.
+    </p>
+  </section>
+
+  {
+    children.length > 0 && (
+      <section class="section">
+        <h2>Child families</h2>
+        <div class="grid grid--2">
+          {children.map((child) => (
+            <a class="card" href={familyHref(child.familyId)}>
+              <h3>{child.name}</h3>
+              <p class="mono">{child.familyId}</p>
+              <p>{formatNumber(catalog.canonicalModels.filter((model) => model.familyId === child.familyId).length)} direct canonical models</p>
+            </a>
+          ))}
+        </div>
+      </section>
+    )
+  }
+
+  <section class="section">
+    <h2>Canonical models in this family</h2>
+    {
+      canonicalModels.length === 0 ? (
+        <EmptyState title="No canonical model in this family">
+          The family tree defines this family, but no canonical model resolves to it or its
+          descendants in this snapshot.
+        </EmptyState>
+      ) : (
+        <div class="table-wrap">
+          <table>
+            <caption class="visually-hidden">Canonical models in {family.name}</caption>
+            <thead>
+              <tr>
+                <th scope="col">Canonical model</th>
+                <th scope="col">Lab</th>
+                <th scope="col">Leaf family</th>
+                <th scope="col">Providers</th>
+              </tr>
+            </thead>
+            <tbody>
+              {canonicalModels.slice(0, 250).map((model) => (
+                <tr>
+                  <td>
+                    <a href={canonicalHref(model.canonicalModelId)}>{model.name}</a>
+                    <div class="mono subtle">{model.canonicalModelId}</div>
+                  </td>
+                  <td>{model.lab}</td>
+                  <td><a href={familyHref(model.familyId)}>{catalog.families.find((entry) => entry.familyId === model.familyId)?.name ?? model.familyId}</a></td>
+                  <td>{formatNumber(servings.filter((serving) => serving.canonicalModelId === model.canonicalModelId).length)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )
+    }
+    {canonicalModels.length > 250 && (
+      <p class="small muted">Showing the first 250 of {formatNumber(canonicalModels.length)} canonical models.</p>
+    )}
+  </section>
+</Base>

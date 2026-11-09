@@ -2,13 +2,23 @@
 
 Status: S1 (snapshot/schema) and S3 (static catalog site) implemented on
 2026-11-09. The S2 merge policy, review summary, free-offer normalization and
-synthetic fixture gate are implemented; S2 sources for plans/offers/agents/local
+synthetic fixture gate are implemented; S2 sources for plans/offers/local
 runtimes remain blocked. The S5 advisory JSON contract is published at
-`/agent-pool-advisory.v1.json`; pool wiring remains separate. S4 has an inert
+`/agent-pool-advisory.v2.json`; pool wiring remains separate. S4 has an inert
 deploy job gated on `CLOUDFLARE_PAGES_ENABLED` and a zero-exit configuration
 guard, plus a local rebuild/recovery command that never deploys; S4 is blocked on
 Pages project/secret setup, GitHub artifact dispatch and deployed verification.
 No deployment exists yet.
+
+Schema v3 (2026-11-09) supersedes the per-fact verification requirements below.
+A snapshot no longer stores `verified_at`, `last_attempt_at`, `confidence`,
+`scrape_status`, `last_error` or `fact_sources`; every fact keeps its source URL
+and source record, and snapshot age is the only freshness signal. The same
+revision adds canonical models, a model family tree, harness/provider links,
+benchmark definitions, and `companies`/`company_plans`. A provider company is
+the vendor and a provider entry can be one of its plans: OpenCode is the company
+and also a harness name, while OpenCode Zen, OpenCode Go and OpenCode Go Plus are
+its plans. The working checklist is [todo.md](../todo.md).
 
 This is a separate public site from Shepherd. It compares coding-agent
 providers, plans, models and recurring free offers. It is informational only:
@@ -76,10 +86,13 @@ serialized into pages and a client-side search index.
 | Route | Purpose |
 | --- | --- |
 | `/` | Catalog entry point: search, filters, counts and the freshness banner. |
-| `/agents/[agent]` | One coding agent, its compatible providers, plans and models, with provenance. |
+| `/families` and `/families/[family]` | The model family tree and one family with its ancestor chain, descendants and canonical models. |
+| `/harnesses` and `/harnesses/[harness]` | Harness identities, their provider links, exclusivity and usable models. |
+| `/companies` and `/companies/[company]` | Provider companies, their plans and the provider entries that serve each plan. |
+| `/models/canonical/[...model]` | One canonical model: every provider serving it, its family and benchmark scores. |
 | `/providers/[provider]` | One provider, its models, plans and free offers. |
 | `/models/[provider]/[model]` | One model as served by a provider, including canonical model identity, limits, pricing, modalities and capabilities. |
-| `/compare` | Side-by-side comparison of selected agents, plans, offers or models. Selection is encoded in the URL where practical. |
+| `/ranking` | Harnesses ranked by monthly free requests or tokens times the mean coding-benchmark score of the models they can use. The ranking is precomputed at build and published as `/harness-ranking.json`; the browser does not run DuckDB. |
 | `/about` | Data sources, license/attribution, snapshot version, verification policy, known gaps and freshness policy. |
 
 There is no runtime route that queries DuckDB. Dynamic-looking routes are
@@ -96,7 +109,9 @@ Filters cover at least:
 - context window;
 - input/output modality;
 - local/self-hosted;
-- last verified date;
+- family, where a parent family includes its descendant families;
+- harness, which matches only providers linked to that harness;
+- canonical model;
 - plan usage model.
 
 Filters must be keyboard-accessible, work with JavaScript disabled for the
@@ -109,7 +124,8 @@ private data; it is built from public facts only.
 Comparison shows the selected entries side by side with:
 
 - the source link for each fact;
-- verification time and confidence;
+- the canonical model and family chain;
+- harness compatibility and benchmark scores with their sources;
 - the plan usage model and conditions;
 - the recurring allowance and reset period for free offers;
 - local runtime and approximate hardware for local models, or an explicit
@@ -188,11 +204,9 @@ Every fact-bearing table carries the same provenance columns:
 | `source_id` | Foreign key to `sources`. |
 | `source_url` | The public URL the fact was read from, or the API URL when the source is a dataset. |
 | `source_record` | The record path within that source, for example `provider/model`. |
-| `verified_at` | UTC timestamp of the last successful observation of this fact. |
-| `last_attempt_at` | UTC timestamp of the most recent scrape attempt for this fact. |
-| `confidence` | `verified`, `community`, `inferred` or `unknown`. `models.dev` facts start as `community` until independently checked. |
-| `scrape_status` | `ok`, `missing`, `failed` or `not_fetched`. |
-| `last_error` | Nullable failure detail. Never contains credentials. |
+
+A row retained from an earlier snapshot because a later response omitted it is
+flagged `retained`; that is a display fact, not a verification claim.
 
 ### Core tables
 
@@ -201,21 +215,24 @@ Every fact-bearing table carries the same provenance columns:
 | `sources` | `source_id` | Source URL, license, attribution, fetch time, HTTP status, ETag and content hash. |
 | `scrape_runs` | `run_id` | One scheduled or manual run: start/end, status, source, error, artifact version. |
 | `catalog_meta` | singleton | Snapshot ID, schema version, generated time, source times, known gaps and freshness deadline. |
-| `agents` | `agent_id` | Coding-agent identity and links. May be empty in the first snapshot. |
+| `harnesses` | `harness_id` | Coding-agent harness identity: Claude Code, Codex, Gemini CLI, OpenCode, Copilot. |
+| `companies` | `company_id` | Provider company, its homepage and the curated identity source. |
+| `company_plans` | `plan_id` | A company's plan name and the provider entry that serves it, when one exists. |
+| `model_families` | `family_id` | The family tree; `parent_family_id` defines nesting. |
+| `canonical_models` | `canonical_model_id` | One release independent of provider, with its lab and leaf family. |
+| `benchmarks` | `benchmark_id` | Benchmark definition, unit, direction and source URL. |
 | `providers` | `provider_id` | Provider name, npm package, API endpoint, docs URL, environment-variable names and logo reference. |
 | `models` | `(provider_id, model_id)` | One model as served by one provider, including canonical identity and provider-specific fields. |
 | `plans` | `plan_id` | A paid or free subscription/token plan. May be empty in the first snapshot. |
 | `free_offers` | `offer_id` | One recurring free allowance claim. May be empty in the first snapshot. |
-| `agent_provider_links` | `(agent_id, provider_id)` | Agent-to-provider compatibility. |
-| `agent_plan_links` | `(agent_id, plan_id)` | Agent-to-plan compatibility. |
-| `agent_model_links` | `(agent_id, provider_id, model_id)` | Agent-to-model compatibility. |
+| `provider_harnesses` | `(provider_id, harness_id)` | Harness compatibility, with an `exclusive` flag. |
+| `model_benchmarks` | `(canonical_model_id, benchmark_id)` | One score per canonical model and benchmark, with its source URL. |
 | `local_runtimes` | `(provider_id, model_id, runtime)` | Runtime, quantization and approximate hardware for local use. |
-| `fact_sources` | `(fact_type, fact_id, source_id)` | Additional sources for a fact, with per-source verification and confidence. |
 
-`agents`, `plans`, `free_offers` and `local_runtimes` are separate tables joined
-through link tables. A quota claim is stored once in `free_offers`; it is not
-copied into `agents`, `plans` or `models`. A plan can serve many models and an
-agent can link to many plans and models without duplicating allowance text.
+`plans`, `free_offers` and `local_runtimes` are separate tables joined through
+link tables. A quota claim is stored once in `free_offers`; it is not copied
+into `plans` or `models`. Benchmark scores attach to canonical models, not to
+each provider serving them.
 
 ### Key fields
 
@@ -273,11 +290,10 @@ zero token cost does not create a free offer.
   display text alone.
 - `(provider_id, model_id)` is unique; `(agent_id, plan_id)` is unique;
   `(agent_id, provider_id, model_id)` is unique.
-- Every fact row has non-null `source_url`, `verified_at`, `confidence` and
-  `scrape_status`.
-- Every `free_offers` row has an allowance, a unit, a reset period, an official
-  source URL and a verification time. Rows that cannot meet this are excluded or
-  marked incomplete and not published as offers.
+- Every fact row has non-null `source_id`, `source_url` and `source_record`.
+- Every `free_offers` row has an allowance, a unit, a reset period and an
+  official source URL. Rows that cannot meet this are excluded or marked
+  incomplete and not published as offers.
 - Every paid plan has a usage model and a source link.
 - Duplicate offer rows for the same provider, plan, allowance and reset period
   are rejected or merged deterministically.
@@ -303,9 +319,9 @@ does not parse HTML.
 - No credentials are sent. Requests use a descriptive user agent and a bounded
   timeout.
 
-The adapter treats the source as community-maintained. `confidence` is
-`community` for models.dev facts. A fact becomes `verified` only after a
-separate official-source check; that check is not part of the first slice.
+The adapter records the source URL and source record for every fact. It does not
+assign a per-fact verification status; the snapshot's generated time and
+freshness deadline are the age signal.
 
 ### Mapping
 
@@ -407,8 +423,8 @@ from memory.
 ### Freshness
 
 - Freshness is measured from `catalog_meta.generated_at`.
-- Older than 7 days: show a warning on every route; keep the last verified
-  values; do not block the build.
+- Older than 7 days: show a warning on every route; keep the observed values;
+  do not block the build.
 - Missing snapshot or unsupported schema version: fail the build.
 - A source page change or scrape failure creates a review item (at minimum a
   failed workflow with a named source and error). It never creates an invented
@@ -458,14 +474,13 @@ from memory.
 
 The catalog can seed the future pool, but it is never authoritative.
 
-The published advisory contract is version 1 at `/agent-pool-advisory.v1.json`.
+The published advisory contract is version 2 at `/agent-pool-advisory.v2.json`.
 Its records are keyed by provider/model/plan/offer and include:
 
 - `provider_id`, `model_id` (null until a plan/model link exists), `plan_id`,
   `offer_id`;
 - `allowance`, `allowance_unit`, `reset_period`;
-- `usage_model`, `capacity` (`known` or `unknown`), `confidence`, `verified_at`,
-  `scrape_status`;
+- `usage_model`, `capacity` (`known` or `unknown`);
 - `snapshot_id`, `schema_version`, `stale` (derived from the 7-day threshold);
 - source URL and conditions.
 
@@ -501,8 +516,10 @@ Required coverage:
   schema version;
 - source mapping: provider/model flattening, canonical IDs, null optional fields
   and unknown values;
-- duplicate detection: duplicate models, duplicate offers and duplicate
-  agent links;
+- duplicate detection: duplicate models, duplicate offers, duplicate
+  canonical/benchmark scores and duplicate harness links;
+- identity: canonical models exist for every model, family parents resolve,
+  family cycles are rejected and exclusive providers have one harness link;
 - free-offer policy: one-time credits, expiring trials and zero-cost models are
   not published as recurring offers;
 - freshness: a snapshot older than 7 days warns but builds; a missing snapshot
@@ -522,12 +539,14 @@ Required coverage:
 
 These do not block the scraper/schema slice, but they block a complete catalog:
 
-- **Agents:** no approved source or initial registry for coding-agent identity
-  and compatibility.
+- **Harness links:** curated in the catalog package; no provider-published
+  compatibility dataset is used.
 - **Plans and pricing:** no approved source for subscription names, prices,
   usage models and included allowances.
 - **Recurring free offers:** no approved source; models.dev zero prices are not a
   substitute.
+- **Benchmark scores:** definitions are curated, but no score source is enabled;
+  scores stay unknown until one is.
 - **Local runtimes/hardware:** no approved source for runtime, quantization and
   approximate hardware.
 - **Cloudflare Pages:** project name, account and API token are not configured.

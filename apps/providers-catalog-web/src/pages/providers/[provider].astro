@@ -1,13 +1,23 @@
 ---
 import Base from '../../layouts/Base.astro'
 import EmptyState from '../../components/EmptyState.astro'
+import PlanOffers from '../../components/PlanOffers.astro'
 import Provenance from '../../components/Provenance.astro'
-import { loadCatalog, type CatalogProvider } from '../../lib/catalog'
 import {
+  companyContextForProvider,
+  familyPath,
+  harnessesForProvider,
+  loadCatalog,
+  type CatalogProvider,
+} from '../../lib/catalog'
+import {
+  canonicalHref,
+  companyHref,
+  familyHref,
   formatContext,
-  formatDate,
   formatModalities,
   formatNumber,
+  harnessHref,
   modelHref,
   providerHref,
 } from '../../lib/format'
@@ -39,28 +49,74 @@ const offers = catalog.offers.filter((offer) => offer.providerId === provider.pr
 const localRuntimes = catalog.localRuntimes.filter(
   (runtime) => runtime.providerId === provider.providerId,
 )
+const harnesses = harnessesForProvider(catalog, provider.providerId)
+const companyContext = companyContextForProvider(catalog, provider.providerId)
+const familyNames = new Map(catalog.families.map((family) => [family.familyId, family.name]))
+const canonicalCount = new Set(models.map((model) => model.canonicalModelId)).size
 ---
 
 <Base
   title={provider.name}
-  description={`Models and provenance for ${provider.name} in the providers catalog.`}
+  description={`Models, harnesses, canonical models and source for ${provider.name} in the providers catalog.`}
 >
   <a class="back-link" href="/">← All providers</a>
 
   <header class="page-header">
-    <p class="eyebrow">Provider</p>
+    <p class="eyebrow">{companyContext ? 'Provider plan' : 'Provider company'}</p>
     <h1>{provider.name}</h1>
     <p class="mono">{provider.providerId}</p>
+    {
+      companyContext && (
+        <p class="small muted">
+          {companyContext.plan.name} plan of{' '}
+          <a href={companyHref(companyContext.company.companyId)}>{companyContext.company.name}</a>.
+          A company owns plans; a harness is the coding agent that consumes a provider.
+        </p>
+      )
+    }
     <div class="meta-row">
       <span class="pill">{formatNumber(provider.modelCount)} models</span>
+      <span class="pill">{formatNumber(canonicalCount)} canonical models</span>
       <span class="pill">{formatNumber(provider.openWeightCount)} open-weight</span>
-      <span class="pill">Verified {formatDate(provider.verifiedAt)}</span>
+      {provider.retained && <span class="pill">Retained from an earlier snapshot</span>}
     </div>
     <p class="lede">
-      Provider and model facts are sourced from models.dev. Plan and recurring-offer data is not
-      published until an approved official source is recorded.
+      Provider and model facts are sourced from models.dev. Company and plan identity, harness
+      compatibility, canonical model identity and the family tree come from the catalog's curated
+      data. Prices, allowances and usage models are not published until a source is recorded.
     </p>
   </header>
+
+  <section class="section">
+    <h2>Harnesses</h2>
+    <p class="small muted">
+      A harness is the coding agent that consumes this provider. It is not the provider company,
+      even when a company and a harness share a name such as OpenCode.
+    </p>
+    {
+      harnesses.length === 0 ? (
+        <EmptyState title="No harness restriction is recorded">
+          This provider is not linked to a specific harness. That means any harness using an
+          OpenAI-compatible endpoint may work; it is not a compatibility claim.
+        </EmptyState>
+      ) : (
+        <div class="grid grid--2">
+          {harnesses.map((harness) => {
+            const link = catalog.providerHarnesses.find(
+              (entry) => entry.providerId === provider.providerId && entry.harnessId === harness.harnessId,
+            )
+            return (
+              <a class="card" href={harnessHref(harness.harnessId)}>
+                <h3>{harness.name}</h3>
+                <p>{link?.exclusive ? 'Exclusive provider for this harness' : 'Linked to this harness'}</p>
+                <p class="small muted">{harness.vendor ?? 'Vendor unknown'}</p>
+              </a>
+            )
+          })}
+        </div>
+      )
+    }
+  </section>
 
   <section class="section">
     <div class="section__head">
@@ -79,27 +135,48 @@ const localRuntimes = catalog.localRuntimes.filter(
             <thead>
               <tr>
                 <th scope="col">Model</th>
+                <th scope="col">Canonical model</th>
+                <th scope="col">Family</th>
                 <th scope="col">Context</th>
                 <th scope="col">Input</th>
                 <th scope="col">Open weights</th>
-                <th scope="col">Verified</th>
               </tr>
             </thead>
             <tbody>
-              {models.map((model) => (
-                <tr>
-                  <td>
-                    <a href={modelHref(model.providerId, model.modelId)}>
-                      {model.name ?? model.modelId}
-                    </a>
-                    <div class="mono subtle">{model.modelId}</div>
-                  </td>
-                  <td>{formatContext(model.contextLimit)}</td>
-                  <td>{formatModalities(model.modalitiesInput)}</td>
-                  <td>{model.openWeights === null ? 'Unknown' : model.openWeights ? 'Yes' : 'No'}</td>
-                  <td>{formatDate(model.verifiedAt)}</td>
-                </tr>
-              ))}
+              {models.map((model) => {
+                const family = familyPath(catalog, model.familyId)
+                return (
+                  <tr>
+                    <td>
+                      <a href={modelHref(model.providerId, model.modelId)}>
+                        {model.name ?? model.modelId}
+                      </a>
+                      <div class="mono subtle">{model.modelId}</div>
+                    </td>
+                    <td>
+                      <a href={canonicalHref(model.canonicalModelId)}>{model.canonicalModelName}</a>
+                      <div class="mono subtle">{model.canonicalModelId}</div>
+                    </td>
+                    <td>
+                      <a href={familyHref(model.familyId)}>
+                        {familyNames.get(model.familyId) ?? model.familyId}
+                      </a>
+                      {family.length > 1 && (
+                        <div class="small muted">
+                          {family
+                            .slice(1)
+                            .reverse()
+                            .map((entry) => entry.name)
+                            .join(' › ')}
+                        </div>
+                      )}
+                    </td>
+                    <td>{formatContext(model.contextLimit)}</td>
+                    <td>{formatModalities(model.modalitiesInput)}</td>
+                    <td>{model.openWeights === null ? 'Unknown' : model.openWeights ? 'Yes' : 'No'}</td>
+                  </tr>
+                )
+              })}
             </tbody>
           </table>
         </div>
@@ -111,13 +188,13 @@ const localRuntimes = catalog.localRuntimes.filter(
     <h2>Plans and recurring free offers</h2>
     {
       plans.length === 0 && offers.length === 0 ? (
-        <EmptyState title="No verified plans or offers yet">
+        <EmptyState title="No plans or offers published yet">
           This catalog does not publish a plan, price, usage model or recurring free allowance for
           {provider.name}. A zero model token price is not a free offer. Those claims need an
-          approved official source and a verification date.
+          approved official source.
         </EmptyState>
       ) : (
-        <p class="muted">Verified plans and offers are listed in the snapshot.</p>
+        <PlanOffers title={provider.name} plans={plans} offers={offers} />
       )
     }
   </section>
@@ -144,6 +221,20 @@ const localRuntimes = catalog.localRuntimes.filter(
         <div><dt>API endpoint</dt><dd><code class="mono">{provider.apiUrl ?? 'Unknown'}</code></dd></div>
         <div><dt>Environment names</dt><dd><code class="mono">{provider.envKeys.join(', ') || 'Unknown'}</code></dd></div>
         <div><dt>Provider id</dt><dd><code class="mono">{provider.providerId}</code></dd></div>
+        <div>
+          <dt>Provider company</dt>
+          <dd>
+            {companyContext ? (
+              <a href={companyHref(companyContext.company.companyId)}>{companyContext.company.name}</a>
+            ) : (
+              'This provider entry is the company-level endpoint'
+            )}
+          </dd>
+        </div>
+        <div>
+          <dt>Plan</dt>
+          <dd>{companyContext ? companyContext.plan.name : 'No separate plan is recorded'}</dd>
+        </div>
       </dl>
       <dl class="detail-list">
         <div><dt>Documentation</dt><dd>{provider.docUrl ? <a href={provider.docUrl} target="_blank" rel="noreferrer">Provider docs</a> : 'Unknown'}</dd></div>
@@ -158,8 +249,5 @@ const localRuntimes = catalog.localRuntimes.filter(
     sourceId={provider.sourceId}
     sourceUrl={provider.sourceUrl}
     sourceRecord={provider.sourceRecord}
-    verifiedAt={provider.verifiedAt}
-    confidence={provider.confidence}
-    scrapeStatus={provider.scrapeStatus}
   />
 </Base>

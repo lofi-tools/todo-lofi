@@ -1,5 +1,4 @@
 import type {
-  CatalogAgent,
   CatalogFreeOffer,
   CatalogLocalRuntime,
   CatalogPlan,
@@ -7,7 +6,7 @@ import type {
 } from '../src/types'
 
 export const FIXED_NOW = new Date('2026-11-09T12:00:00.000Z')
-export const FIXED_VERIFIED_AT = '2026-11-09T12:00:00.000Z'
+export const FIXED_FETCHED_AT = '2026-11-09T12:00:00.000Z'
 export const FIXED_CONTENT_SHA256 = 'a'.repeat(64)
 
 export const fixtureCatalog: ModelsDevCatalog = {
@@ -20,14 +19,10 @@ export const fixtureCatalog: ModelsDevCatalog = {
       docUrl: 'https://acme.example/docs',
       envKeys: ['ACME_API_KEY'],
       logoPath: null,
+      retained: false,
       sourceId: 'models-dev',
       sourceUrl: 'https://models.dev/catalog.json?type=all',
       sourceRecord: 'acme',
-      verifiedAt: FIXED_VERIFIED_AT,
-      lastAttemptAt: FIXED_VERIFIED_AT,
-      confidence: 'community',
-      scrapeStatus: 'ok',
-      lastError: null,
     },
   ],
   models: [
@@ -38,6 +33,7 @@ export const fixtureCatalog: ModelsDevCatalog = {
       canonicalModelId: 'acme/free-model',
       name: 'Free Model',
       family: 'acme',
+      familyId: 'acme',
       description: 'A zero-priced model that is not a free offer.',
       releaseDate: '2026-01-01',
       lastUpdated: '2026-01-01',
@@ -62,35 +58,13 @@ export const fixtureCatalog: ModelsDevCatalog = {
       modalitiesInput: ['text'],
       modalitiesOutput: ['text'],
       status: null,
+      retained: false,
       sourceId: 'models-dev',
       sourceUrl: 'https://models.dev/catalog.json?type=all',
       sourceRecord: 'acme/free-model',
-      verifiedAt: FIXED_VERIFIED_AT,
-      lastAttemptAt: FIXED_VERIFIED_AT,
-      confidence: 'community',
-      scrapeStatus: 'ok',
-      lastError: null,
     },
   ],
   knownGaps: ['No plans or recurring free offers are present in this fixture.'],
-}
-
-export function fixtureAgent(overrides: Partial<CatalogAgent> = {}): CatalogAgent {
-  return {
-    agentId: 'acme-agent',
-    name: 'Acme Agent',
-    vendor: 'Acme',
-    homepageUrl: 'https://acme.example/agent',
-    sourceId: 'models-dev',
-    sourceUrl: 'https://models.dev/catalog.json?type=all',
-    sourceRecord: 'acme-agent',
-    verifiedAt: FIXED_VERIFIED_AT,
-    lastAttemptAt: FIXED_VERIFIED_AT,
-    confidence: 'community',
-    scrapeStatus: 'ok',
-    lastError: null,
-    ...overrides,
-  }
 }
 
 export function fixturePlan(overrides: Partial<CatalogPlan> = {}): CatalogPlan {
@@ -107,11 +81,6 @@ export function fixturePlan(overrides: Partial<CatalogPlan> = {}): CatalogPlan {
     sourceId: 'models-dev',
     sourceUrl: 'https://models.dev/catalog.json?type=all',
     sourceRecord: 'acme/plan-1',
-    verifiedAt: FIXED_VERIFIED_AT,
-    lastAttemptAt: FIXED_VERIFIED_AT,
-    confidence: 'community',
-    scrapeStatus: 'ok',
-    lastError: null,
     ...overrides,
   }
 }
@@ -129,11 +98,6 @@ export function fixtureLocalRuntime(
     sourceId: 'models-dev',
     sourceUrl: 'https://models.dev/catalog.json?type=all',
     sourceRecord: 'acme/free-model/llama.cpp',
-    verifiedAt: FIXED_VERIFIED_AT,
-    lastAttemptAt: FIXED_VERIFIED_AT,
-    confidence: 'community',
-    scrapeStatus: 'ok',
-    lastError: null,
     ...overrides,
   }
 }
@@ -154,11 +118,6 @@ export function fixtureFreeOffer(
     sourceId: 'models-dev',
     sourceUrl: 'https://models.dev/catalog.json?type=all',
     sourceRecord: 'acme/offer-1',
-    verifiedAt: FIXED_VERIFIED_AT,
-    lastAttemptAt: FIXED_VERIFIED_AT,
-    confidence: 'community',
-    scrapeStatus: 'ok',
-    lastError: null,
     ...overrides,
   }
 }

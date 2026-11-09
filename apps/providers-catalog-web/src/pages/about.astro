@@ -9,7 +9,7 @@ const { snapshot } = catalog
 
 <Base
   title="About and sources"
-  description="Catalog data sources, freshness policy, free-offer rules and known gaps."
+  description="Catalog data sources, freshness policy, curated identity data, free-offer rules and known gaps."
 >
   <header class="page-header">
     <p class="eyebrow">About this catalog</p>
@@ -35,7 +35,7 @@ const { snapshot } = catalog
           <dd>
             {
               snapshot.stale
-                ? 'Yes — last verified values retained'
+                ? 'Yes — values may have changed since the snapshot'
                 : 'No — inside the seven-day window'
             }
           </dd>
@@ -95,9 +95,39 @@ const { snapshot } = catalog
     <h2>What is in this snapshot</h2>
     <div class="stats">
       <div class="stat"><span class="stat__value">{formatNumber(catalog.providers.length)}</span><span class="stat__label">providers</span></div>
-      <div class="stat"><span class="stat__value">{formatNumber(catalog.models.length)}</span><span class="stat__label">models</span></div>
+      <div class="stat"><span class="stat__value">{formatNumber(catalog.models.length)}</span><span class="stat__label">model entries</span></div>
+      <div class="stat"><span class="stat__value">{formatNumber(catalog.canonicalModels.length)}</span><span class="stat__label">canonical models</span></div>
+      <div class="stat"><span class="stat__value">{formatNumber(catalog.families.length)}</span><span class="stat__label">families</span></div>
+      <div class="stat"><span class="stat__value">{formatNumber(catalog.harnesses.length)}</span><span class="stat__label">harnesses</span></div>
+      <div class="stat"><span class="stat__value">{formatNumber(catalog.benchmarks.length)}</span><span class="stat__label">benchmark definitions</span></div>
       <div class="stat"><span class="stat__value">{formatNumber(catalog.plans.length)}</span><span class="stat__label">plans</span></div>
       <div class="stat"><span class="stat__value">{formatNumber(catalog.offers.length)}</span><span class="stat__label">recurring offers</span></div>
+    </div>
+  </section>
+
+  <section class="section">
+    <h2>Facts, identity and sources</h2>
+    <div class="card">
+      <p>
+        Provider and model facts come from the public models.dev catalog, and every row keeps the
+        source URL and source record it was read from. The catalog does not publish a per-fact
+        verification status: a snapshot is the observation, and its age is shown above.
+      </p>
+      <p>
+        Canonical model identity correlates the same release across providers. models.dev supplies
+        a canonical id for most rows; the rest are derived from the wire id, and a canonical model
+        is the join point for benchmark scores.
+      </p>
+      <p>
+        Harness links, the family tree and benchmark definitions are curated in the catalog
+        package. They are reviewed data, sourced where a public source exists, not inferred from a
+        model name alone.
+      </p>
+      <p>
+        Benchmark scores are keyed by canonical model, so one score covers every provider serving
+        that release. No score is published until a benchmark source is enabled; an unknown score
+        stays unknown.
+      </p>
     </div>
   </section>
 
@@ -123,9 +153,9 @@ const { snapshot } = catalog
         {snapshot.knownGaps.map((gap) => <li>{gap}</li>)}
       </ul>
       <p>
-        The catalog also does not yet have an approved source for coding-agent identities,
-        subscription plans, recurring free allowances or local runtime hardware. Those tables are
-        intentionally empty rather than guessed.
+        The catalog also does not yet have an approved source for subscription plans, recurring
+        free allowances or local runtime hardware. Those tables are intentionally empty rather
+        than guessed.
       </p>
     </div>
   </section>
@@ -137,12 +167,12 @@ const { snapshot } = catalog
         This snapshot was generated {formatDateTime(snapshot.generatedAt)} from source data fetched
         {formatDateTime(snapshot.sourceFetchedAt)}. It is treated as stale after
         {formatDateTime(snapshot.freshnessDeadline)}; from then on a warning banner appears, but the
-        last verified values remain visible instead of disappearing or being guessed.
+        values remain visible instead of disappearing or being guessed.
       </p>
       <p>
         A failed scrape does not overwrite the previous snapshot. It leaves a failure record, and
-        the last verified snapshot stays buildable. A provider page change keeps the previous row
-        with a missing-scrape marker and a review item rather than an invented value.
+        the previous snapshot stays buildable. If a provider or model disappears from a later
+        response it is retained and flagged as retained for review rather than deleted.
       </p>
       <p>
         This site is generated from a DuckDB snapshot at build time. There is no public query API,

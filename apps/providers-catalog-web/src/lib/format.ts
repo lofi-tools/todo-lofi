@@ -1,3 +1,5 @@
+import type { BenchmarkUnit } from '../types'
+
 export const UNKNOWN = 'Unknown'
 
 const dateFormatter = new Intl.DateTimeFormat('en-US', {
@@ -62,6 +64,10 @@ export function formatBoolean(value: boolean | null): string {
   return value === null ? UNKNOWN : value ? 'Yes' : 'No'
 }
 
+export function formatBenchmarkScore(score: number, unit: BenchmarkUnit): string {
+  return unit === 'percent' ? `${score.toFixed(1)}%` : score.toFixed(1)
+}
+
 export function modelKey(providerId: string, modelId: string): string {
   return `${providerId}/${modelId}`
 }
@@ -70,13 +76,28 @@ export function providerHref(providerId: string): string {
   return `/providers/${encodeURIComponent(providerId)}`
 }
 
+function encodePath(value: string): string {
+  return value.split('/').map((segment) => encodeURIComponent(segment)).join('/')
+}
+
 export function modelHref(providerId: string, modelId: string): string {
   // Some model ids contain a slash (for example `deepseek-ai/DeepSeek-R1`).
   // Keep those slashes as path separators so the catch-all model route sees them.
-  const encodedId = modelId.split('/').map((segment) => encodeURIComponent(segment)).join('/')
-  return `/models/${encodeURIComponent(providerId)}/${encodedId}`
+  return `/models/${encodeURIComponent(providerId)}/${encodePath(modelId)}`
 }
 
-export function compareHref(keys: string[]): string {
-  return `/compare?models=${encodeURIComponent(keys.join(','))}`
+export function canonicalHref(canonicalModelId: string): string {
+  return `/models/canonical/${encodePath(canonicalModelId)}`
+}
+
+export function harnessHref(harnessId: string): string {
+  return `/harnesses/${encodeURIComponent(harnessId)}`
+}
+
+export function familyHref(familyId: string): string {
+  return `/families/${encodeURIComponent(familyId)}`
+}
+
+export function companyHref(companyId: string): string {
+  return `/companies/${encodeURIComponent(companyId)}`
 }

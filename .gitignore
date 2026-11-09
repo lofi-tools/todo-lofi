@@ -25,5 +25,6 @@ apps/providers-catalog-web/*.duckdb.wal
 
 # Local reference repository checkouts
 /.cache/checkout/
+/.cache/shepherd/
 /.cache/shepherd-live/
 /.cache/test-db/

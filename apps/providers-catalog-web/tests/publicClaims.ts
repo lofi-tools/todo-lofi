@@ -22,18 +22,24 @@ export async function expectCatalogPublicClaims(page: Page, path: string): Promi
   expect(bodyText, `${path} names an internal project`).not.toMatch(internalNames)
 
   for (const claim of forbiddenClaims) {
-    expect(mainText, `${path} makes an unverified availability claim`).not.toMatch(claim)
+    expect(mainText, `${path} makes an unsupported availability claim`).not.toMatch(claim)
   }
 
   // The catalog may explain the free-offer policy, but no catalog entry may
-  // render a bare "Free" marker while no offer has provenance.
+  // render a bare "Free" marker while no offer has a source.
   await expect(
     main.locator('.pill').filter({ hasText: /^free$/i }),
-    `${path} renders an unverified Free pill`,
+    `${path} renders an unsupported Free pill`,
   ).toHaveCount(0)
 
-  expect(
-    mainText,
-    `${path} must state the plan/offer gap rather than imply offers exist`,
-  ).toMatch(/no verified|not published|not yet|does not publish|empty/i)
+  // Family names such as "Alibaba Token Plan" are not offer claims, so look
+  // for the actual plan/offer vocabulary the catalog uses.
+  const discussesOffers =
+    /recurring free|free offer|plan usage model|subscription plan|\ballowance\b/i.test(mainText)
+  if (discussesOffers) {
+    expect(
+      mainText,
+      `${path} must state the plan/offer gap rather than imply offers exist`,
+    ).toMatch(/not published|published yet|not yet|does not publish|empty|no plans|no .*source/i)
+  }
 }

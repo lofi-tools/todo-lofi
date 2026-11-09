@@ -1,6 +1,12 @@
 import path from 'node:path'
 import { fetchModelsDevCatalog, MODELS_DEV_SOURCE } from '../src/models-dev'
-import { createSnapshot, findLatestSnapshot, recordSnapshotFailure } from '../src/snapshot'
+import { SCHEMA_VERSION } from '../src/schema'
+import {
+  createSnapshot,
+  findLatestSnapshot,
+  readSnapshotSchemaVersion,
+  recordSnapshotFailure,
+} from '../src/snapshot'
 
 const outputDirectory = path.resolve(
   process.env.CATALOG_ARTIFACT_DIR ?? path.join(process.cwd(), 'artifacts'),
@@ -8,7 +14,19 @@ const outputDirectory = path.resolve(
 
 try {
   const fetched = await fetchModelsDevCatalog()
-  const previousSnapshotPath = await findLatestSnapshot(outputDirectory)
+  const latestSnapshotPath = await findLatestSnapshot(outputDirectory)
+  let previousSnapshotPath: string | undefined
+  if (latestSnapshotPath) {
+    const previousSchema = await readSnapshotSchemaVersion(latestSnapshotPath)
+    if (previousSchema === SCHEMA_VERSION) {
+      previousSnapshotPath = latestSnapshotPath
+    } else {
+      console.warn(
+        `Skipping merge: ${latestSnapshotPath} has schema ${previousSchema}, and schema ${SCHEMA_VERSION} starts a new baseline.`,
+      )
+    }
+  }
+
   const report = await createSnapshot({
     catalog: fetched.catalog,
     source: { ...MODELS_DEV_SOURCE, sourceUrl: fetched.sourceUrl },
@@ -17,7 +35,7 @@ try {
     httpStatus: fetched.httpStatus,
     etag: fetched.etag,
     outputDirectory,
-    previousSnapshotPath: previousSnapshotPath ?? undefined,
+    previousSnapshotPath,
   })
 
   if (report.merge && report.merge.reviewItems.length > 0) {

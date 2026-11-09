@@ -1,18 +1,14 @@
 ---
 import { loadCatalog, type CatalogSource } from '../lib/catalog'
-import type { Confidence, ScrapeStatus } from '../types'
 import { formatDateTime } from '../lib/format'
 
 interface Props {
   sourceId: string
   sourceUrl: string
   sourceRecord: string
-  verifiedAt: string
-  confidence: Confidence
-  scrapeStatus: ScrapeStatus
 }
 
-const { sourceId, sourceUrl, sourceRecord, verifiedAt, confidence, scrapeStatus } = Astro.props
+const { sourceId, sourceUrl, sourceRecord } = Astro.props
 const catalog = await loadCatalog()
 const source: CatalogSource | undefined = catalog.snapshot.sources.find(
   (entry) => entry.sourceId === sourceId,
@@ -20,10 +16,10 @@ const source: CatalogSource | undefined = catalog.snapshot.sources.find(
 ---
 
 <section class="provenance" aria-label="Provenance">
-  <h2>Provenance</h2>
+  <h2>Source</h2>
   <dl>
     <div>
-      <dt>Source</dt>
+      <dt>Record source</dt>
       <dd>
         {
           source ? (
@@ -53,14 +49,6 @@ const source: CatalogSource | undefined = catalog.snapshot.sources.find(
     <div>
       <dt>Source fetched</dt>
       <dd>{source ? formatDateTime(source.fetchedAt) : 'Unknown'}</dd>
-    </div>
-    <div>
-      <dt>Last verified</dt>
-      <dd>{formatDateTime(verifiedAt)}</dd>
-    </div>
-    <div>
-      <dt>Confidence / status</dt>
-      <dd>{confidence} / {scrapeStatus}</dd>
     </div>
   </dl>
 </section>

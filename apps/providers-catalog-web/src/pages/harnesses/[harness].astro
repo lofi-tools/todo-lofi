@@ -1,0 +1,181 @@
+---
+import Base from '../../layouts/Base.astro'
+import EmptyState from '../../components/EmptyState.astro'
+import { companyContextForProvider, familyPath, loadCatalog } from '../../lib/catalog'
+import {
+  canonicalHref,
+  familyHref,
+  formatContext,
+  formatNumber,
+  harnessHref,
+  modelHref,
+  providerHref,
+} from '../../lib/format'
+
+export async function getStaticPaths() {
+  const catalog = await loadCatalog()
+  return catalog.harnesses.map((harness) => ({
+    params: { harness: harness.harnessId },
+    props: { harnessId: harness.harnessId },
+  }))
+}
+
+interface Props {
+  harnessId: string
+}
+
+const { harnessId } = Astro.props as Props
+const catalog = await loadCatalog()
+const harness = catalog.harnesses.find((entry) => entry.harnessId === harnessId)
+if (!harness) {
+  throw new Error(`Harness not found: ${harnessId}`)
+}
+
+const links = catalog.providerHarnesses.filter((link) => link.harnessId === harness.harnessId)
+const providerIds = new Set(links.map((link) => link.providerId))
+const providers = catalog.providers.filter((provider) => providerIds.has(provider.providerId))
+const models = catalog.models.filter((model) => providerIds.has(model.providerId))
+const familyNames = new Map(catalog.families.map((family) => [family.familyId, family.name]))
+const providerContexts = new Map(
+  providers.map((provider) => [
+    provider.providerId,
+    companyContextForProvider(catalog, provider.providerId),
+  ]),
+)
+---
+
+<Base
+  title={harness.name}
+  description={`${harness.name}: linked providers, exclusivity and the models they can use.`}
+>
+  <a class="back-link" href="/harnesses">← All harnesses</a>
+
+  <header class="page-header">
+    <p class="eyebrow">Harness</p>
+    <h1>{harness.name}</h1>
+    <p>{harness.vendor ?? 'Vendor unknown'}</p>
+    <div class="meta-row">
+      <span class="pill">{formatNumber(providers.length)} providers</span>
+      <span class="pill">{formatNumber(models.length)} model entries</span>
+    </div>
+    {harness.homepageUrl && (
+      <p><a href={harness.homepageUrl} target="_blank" rel="noreferrer">Harness homepage</a></p>
+    )}
+  </header>
+
+  <section class="section">
+    <h2>Linked providers</h2>
+    <p class="small muted">
+      Providers are listed by company and plan. A plan can share its company's name with this
+      harness, so the plan name is what identifies the provider entry.
+    </p>
+    {
+      providers.length === 0 ? (
+        <EmptyState title="No providers are linked to this harness">
+          The catalog has no compatibility link for this harness yet.
+        </EmptyState>
+      ) : (
+        <div class="table-wrap">
+          <table>
+            <caption class="visually-hidden">Providers linked to {harness.name}</caption>
+            <thead>
+              <tr>
+                <th scope="col">Provider</th>
+                <th scope="col">Plan</th>
+                <th scope="col">Company</th>
+                <th scope="col">Exclusive</th>
+                <th scope="col">Models</th>
+                <th scope="col">Source</th>
+              </tr>
+            </thead>
+            <tbody>
+              {providers.map((provider) => {
+                const link = links.find((entry) => entry.providerId === provider.providerId)
+                const context = providerContexts.get(provider.providerId)
+                return (
+                  <tr>
+                    <td><a href={providerHref(provider.providerId)}>{provider.name}</a></td>
+                    <td>{context ? context.plan.name : '—'}</td>
+                    <td>{context ? context.company.name : '—'}</td>
+                    <td>{link?.exclusive ? 'Yes — only this harness' : 'No'}</td>
+                    <td>{formatNumber(provider.modelCount)}</td>
+                    <td><a href={link?.sourceUrl ?? harness.homepageUrl ?? '/harnesses'} target="_blank" rel="noreferrer">Source</a></td>
+                  </tr>
+                )
+              })}
+            </tbody>
+          </table>
+        </div>
+      )
+    }
+  </section>
+
+  <section class="section">
+    <h2>Models available through this harness</h2>
+    <p class="small muted">
+      Compatibility is recorded per provider, so every model a linked provider serves is usable
+      through this harness. Providers without a link are not claimed to work here.
+    </p>
+    {
+      models.length === 0 ? (
+        <EmptyState title="No models for this harness">No linked provider serves a model in this snapshot.</EmptyState>
+      ) : (
+        <div class="table-wrap">
+          <table>
+            <caption class="visually-hidden">Models usable through {harness.name}</caption>
+            <thead>
+              <tr>
+                <th scope="col">Model</th>
+                <th scope="col">Provider</th>
+                <th scope="col">Canonical model</th>
+                <th scope="col">Family</th>
+                <th scope="col">Context</th>
+              </tr>
+            </thead>
+            <tbody>
+              {models.slice(0, 200).map((model) => {
+                const family = familyPath(catalog, model.familyId)
+                return (
+                  <tr>
+                    <td>
+                      <a href={modelHref(model.providerId, model.modelId)}>{model.name ?? model.modelId}</a>
+                    </td>
+                    <td>
+                      <a href={providerHref(model.providerId)}>{model.providerName}</a>
+                      {providerContexts.get(model.providerId) && (
+                        <div class="small muted">
+                          {providerContexts.get(model.providerId)?.plan.name} plan of{' '}
+                          {providerContexts.get(model.providerId)?.company.name}
+                        </div>
+                      )}
+                    </td>
+                    <td>
+                      <a href={canonicalHref(model.canonicalModelId)}><code class="mono">{model.canonicalModelId}</code></a>
+                    </td>
+                    <td>
+                      <a href={familyHref(model.familyId)}>{familyNames.get(model.familyId) ?? model.familyId}</a>
+                      {family.length > 1 && (
+                        <div class="small muted">
+                          {family.slice(1).reverse().map((entry) => entry.name).join(' › ')}
+                        </div>
+                      )}
+                    </td>
+                    <td>{formatContext(model.contextLimit)}</td>
+                  </tr>
+                )
+              })}
+            </tbody>
+          </table>
+        </div>
+      )
+    }
+    {models.length > 200 && (
+      <p class="small muted">Showing the first 200 of {formatNumber(models.length)} model entries.</p>
+    )}
+    <p class="small muted">
+      <a href={`/models?harness=${encodeURIComponent(harness.harnessId)}`}>Filter the model browser by this harness</a>
+      {' '}·{' '}
+      <a href={harnessHref(harness.harnessId)}>This harness</a>
+    </p>
+  </section>
+</Base>

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
+import { familyChain } from '../src/curated'
 import { parseModelsDevCatalog } from '../src/models-dev'
-import { FIXED_VERIFIED_AT } from './fixtures'
 
 const source = {
   providers: {
@@ -38,7 +38,7 @@ const source = {
 
 describe('parseModelsDevCatalog', () => {
   it('maps providers and models while preserving a zero token cost as a model fact', () => {
-    const catalog = parseModelsDevCatalog(source, FIXED_VERIFIED_AT)
+    const catalog = parseModelsDevCatalog(source)
 
     expect(catalog.providers).toHaveLength(1)
     expect(catalog.providers[0]).toMatchObject({
@@ -46,14 +46,15 @@ describe('parseModelsDevCatalog', () => {
       name: 'Acme',
       envKeys: ['ACME_API_KEY'],
       sourceRecord: 'acme',
-      confidence: 'community',
-      scrapeStatus: 'ok',
+      retained: false,
     })
+    expect(catalog.providers[0]).not.toHaveProperty('verifiedAt')
     expect(catalog.models).toHaveLength(1)
     expect(catalog.models[0]).toMatchObject({
       providerId: 'acme',
       modelId: 'free-model',
       canonicalModelId: 'acme/free-model',
+      familyId: 'acme',
       costInput: 0,
       costOutput: 0,
       costCacheRead: 0.1,
@@ -67,10 +68,7 @@ describe('parseModelsDevCatalog', () => {
   })
 
   it('keeps a provider with no models', () => {
-    const catalog = parseModelsDevCatalog(
-      { providers: { empty: { id: 'empty', name: 'Empty' } } },
-      FIXED_VERIFIED_AT,
-    )
+    const catalog = parseModelsDevCatalog({ providers: { empty: { id: 'empty', name: 'Empty' } } })
 
     expect(catalog.providers).toHaveLength(1)
     expect(catalog.models).toHaveLength(0)
@@ -79,7 +77,6 @@ describe('parseModelsDevCatalog', () => {
   it('accepts the provider-map fallback shape', () => {
     const catalog = parseModelsDevCatalog(
       { acme: { id: 'acme', name: 'Acme', models: {} } },
-      FIXED_VERIFIED_AT,
       'https://models.dev/api.json?type=all',
     )
 
@@ -87,8 +84,56 @@ describe('parseModelsDevCatalog', () => {
   })
 
   it('rejects a response that is not a provider map', () => {
-    expect(() => parseModelsDevCatalog({ providers: [] }, FIXED_VERIFIED_AT)).toThrow(
-      'not an object',
-    )
+    expect(() => parseModelsDevCatalog({ providers: [] })).toThrow('not an object')
+  })
+
+  it('correlates the same release served by several providers on one canonical model', () => {
+    const catalog = parseModelsDevCatalog({
+      providers: {
+        deepseek: {
+          id: 'deepseek',
+          name: 'DeepSeek',
+          models: {
+            'deepseek-v4.1-0731': {
+              id: 'deepseek-v4.1-0731',
+              name: 'DeepSeek V4.1 0731',
+              canonical_model_id: 'deepseek/deepseek-v4.1-0731',
+            },
+          },
+        },
+        gateway: {
+          id: 'gateway',
+          name: 'Gateway',
+          models: {
+            'deepseek-ai/DeepSeek-V4.1-0731': {
+              id: 'deepseek-ai/DeepSeek-V4.1-0731',
+              name: 'DeepSeek V4.1',
+              canonical_model_id: 'deepseek/deepseek-v4.1-0731',
+            },
+          },
+        },
+      },
+    })
+
+    expect(catalog.models.map((model) => model.canonicalModelId)).toEqual([
+      'deepseek/deepseek-v4-1-0731',
+      'deepseek/deepseek-v4-1-0731',
+    ])
+    expect(catalog.models[0]?.familyId).toBe('deepseek-v4-1-0731')
+  })
+
+  it('infers parents of parents from the family tree', () => {
+    expect(familyChain('opus-5-5').map((family) => family.name)).toEqual([
+      'Opus 5.5',
+      'Opus 5',
+      'Opus',
+      'Claude',
+    ])
+    expect(familyChain('deepseek-v4-1-0731').map((family) => family.familyId)).toEqual([
+      'deepseek-v4-1-0731',
+      'deepseek-v4-1',
+      'deepseek-v4',
+      'deepseek',
+    ])
   })
 })

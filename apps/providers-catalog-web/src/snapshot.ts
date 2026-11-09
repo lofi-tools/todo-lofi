@@ -3,6 +3,7 @@ import { existsSync } from 'node:fs'
 import { mkdir, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { DuckDBInstance, type DuckDBConnection, type DuckDBValue } from '@duckdb/node-api'
+import { enrichCatalog } from './curated'
 import {
   freeOfferPolicyViolation,
   normalizeFreeOffers,
@@ -11,12 +12,19 @@ import {
 import { mergePreviousFacts, type MergeReport } from './merge'
 import { loadSchemaSql, SCHEMA_VERSION } from './schema'
 import type {
-  CatalogAgent,
+  CatalogBenchmark,
+  CatalogBenchmarkScore,
+  CatalogCanonicalModel,
+  CatalogCompany,
+  CatalogCompanyPlan,
+  CatalogFamily,
   CatalogFreeOffer,
+  CatalogHarness,
   CatalogLocalRuntime,
   CatalogModel,
   CatalogPlan,
   CatalogProvider,
+  CatalogProviderHarness,
   CatalogSource,
   ModelsDevCatalog,
   SnapshotCounts,
@@ -24,18 +32,7 @@ import type {
 
 const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000
 
-const PROVENANCE_TABLES = [
-  'agents',
-  'providers',
-  'models',
-  'plans',
-  'free_offers',
-  'agent_provider_links',
-  'agent_plan_links',
-  'agent_model_links',
-  'local_runtimes',
-  'fact_sources',
-] as const
+const SOURCE_TABLES = ['providers', 'models', 'plans', 'free_offers', 'local_runtimes'] as const
 
 export interface CreateSnapshotOptions {
   catalog: ModelsDevCatalog
@@ -47,7 +44,6 @@ export interface CreateSnapshotOptions {
   outputDirectory?: string
   now?: Date
   previousSnapshotPath?: string
-  agents?: CatalogAgent[]
   plans?: CatalogPlan[]
   freeOffers?: CatalogFreeOffer[]
   localRuntimes?: CatalogLocalRuntime[]
@@ -107,7 +103,8 @@ export async function createSnapshot(options: CreateSnapshotOptions): Promise<Sn
   const merged = options.previousSnapshotPath
     ? await mergePreviousFacts(options.catalog, options.previousSnapshotPath, options.fetchedAt)
     : null
-  const catalog = merged?.catalog ?? options.catalog
+  const baseCatalog = merged?.catalog ?? options.catalog
+  const enrichment = enrichCatalog(baseCatalog.providers, baseCatalog.models)
   const normalizedFreeOffers = normalizeFreeOffers(options.freeOffers ?? [])
 
   await mkdir(outputDirectory, { recursive: true })
@@ -123,9 +120,16 @@ export async function createSnapshot(options: CreateSnapshotOptions): Promise<Sn
 
     try {
       await insertSource(connection, options, snapshotId, generatedAt)
-      await insertProviders(connection, catalog.providers)
-      await insertModels(connection, catalog.models)
-      await insertAgents(connection, options.agents ?? [])
+      await insertProviders(connection, baseCatalog.providers)
+      await insertCompanies(connection, enrichment.companies)
+      await insertCompanyPlans(connection, enrichment.companyPlans)
+      await insertFamilies(connection, enrichment.families)
+      await insertCanonicalModels(connection, enrichment.canonicalModels)
+      await insertModels(connection, enrichment.models)
+      await insertHarnesses(connection, enrichment.harnesses)
+      await insertProviderHarnesses(connection, enrichment.providerHarnesses)
+      await insertBenchmarks(connection, enrichment.benchmarks)
+      await insertBenchmarkScores(connection, enrichment.benchmarkScores)
       await insertPlans(connection, options.plans ?? [])
       await insertFreeOffers(connection, normalizedFreeOffers.offers)
       await insertLocalRuntimes(connection, options.localRuntimes ?? [])
@@ -220,6 +224,9 @@ export async function validateSnapshotFile(
     if (counts.models === 0) {
       errors.push('models is empty')
     }
+    if (counts.canonicalModels === 0) {
+      errors.push('canonical_models is empty')
+    }
     if ((await readCount(connection, 'SELECT COUNT(*) AS count FROM sources')) === 0) {
       errors.push('sources is empty')
     }
@@ -227,17 +234,16 @@ export async function validateSnapshotFile(
       errors.push('scrape_runs is empty')
     }
 
-    for (const table of PROVENANCE_TABLES) {
+    for (const table of SOURCE_TABLES) {
       const missing = await readCount(
         connection,
         `SELECT COUNT(*) AS count FROM ${table}
-         WHERE source_url IS NULL
-            OR verified_at IS NULL
-            OR confidence IS NULL
-            OR scrape_status IS NULL`,
+         WHERE source_id IS NULL
+            OR source_url IS NULL
+            OR source_record IS NULL`,
       )
       if (missing > 0) {
-        errors.push(`${table} has ${missing} rows missing provenance`)
+        errors.push(`${table} has ${missing} rows without a source record`)
       }
     }
 
@@ -252,17 +258,6 @@ export async function validateSnapshotFile(
       errors.push(`models has ${duplicateModels} duplicate provider/model keys`)
     }
 
-    const duplicateAgentPlans = await readCount(
-      connection,
-      `SELECT COUNT(*) AS count FROM (
-         SELECT agent_id, plan_id FROM agent_plan_links
-         GROUP BY agent_id, plan_id HAVING COUNT(*) > 1
-       ) duplicate_agent_plans`,
-    )
-    if (duplicateAgentPlans > 0) {
-      errors.push(`agent_plan_links has ${duplicateAgentPlans} duplicate links`)
-    }
-
     const duplicateOffers = await readCount(
       connection,
       `SELECT COUNT(*) AS count FROM (
@@ -275,6 +270,32 @@ export async function validateSnapshotFile(
     if (duplicateOffers > 0) {
       errors.push(`free_offers has ${duplicateOffers} duplicate allowance claims`)
     }
+
+    const orphanCanonicalModels = await readCount(
+      connection,
+      `SELECT COUNT(*) AS count FROM models m
+       LEFT JOIN canonical_models c ON c.canonical_model_id = m.canonical_model_id
+       WHERE m.canonical_model_id IS NULL OR c.canonical_model_id IS NULL`,
+    )
+    if (orphanCanonicalModels > 0) {
+      errors.push(`models has ${orphanCanonicalModels} rows without a canonical model`)
+    }
+
+    const orphanFamilyReferences = await readCount(
+      connection,
+      `SELECT COUNT(*) AS count FROM canonical_models c
+       LEFT JOIN model_families f ON f.family_id = c.family_id
+       WHERE c.family_id IS NULL OR f.family_id IS NULL`,
+    )
+    if (orphanFamilyReferences > 0) {
+      errors.push(`canonical_models has ${orphanFamilyReferences} rows without a family`)
+    }
+
+    const familyRows = await readRows(
+      connection,
+      'SELECT family_id, parent_family_id FROM model_families',
+    )
+    errors.push(...familyTreeErrors(familyRows))
 
     const orphanPlans = await readCount(
       connection,
@@ -296,39 +317,6 @@ export async function validateSnapshotFile(
       errors.push(`free_offers has ${orphanOffers} rows without a plan`)
     }
 
-    const orphanAgentProviders = await readCount(
-      connection,
-      `SELECT COUNT(*) AS count FROM agent_provider_links l
-       LEFT JOIN agents a ON a.agent_id = l.agent_id
-       LEFT JOIN providers p ON p.provider_id = l.provider_id
-       WHERE a.agent_id IS NULL OR p.provider_id IS NULL`,
-    )
-    if (orphanAgentProviders > 0) {
-      errors.push(`agent_provider_links has ${orphanAgentProviders} orphaned links`)
-    }
-
-    const orphanAgentPlans = await readCount(
-      connection,
-      `SELECT COUNT(*) AS count FROM agent_plan_links l
-       LEFT JOIN agents a ON a.agent_id = l.agent_id
-       LEFT JOIN plans p ON p.plan_id = l.plan_id
-       WHERE a.agent_id IS NULL OR p.plan_id IS NULL`,
-    )
-    if (orphanAgentPlans > 0) {
-      errors.push(`agent_plan_links has ${orphanAgentPlans} orphaned links`)
-    }
-
-    const orphanAgentModels = await readCount(
-      connection,
-      `SELECT COUNT(*) AS count FROM agent_model_links l
-       LEFT JOIN agents a ON a.agent_id = l.agent_id
-       LEFT JOIN models m ON m.provider_id = l.provider_id AND m.model_id = l.model_id
-       WHERE a.agent_id IS NULL OR m.model_id IS NULL`,
-    )
-    if (orphanAgentModels > 0) {
-      errors.push(`agent_model_links has ${orphanAgentModels} orphaned links`)
-    }
-
     const orphanLocalRuntimes = await readCount(
       connection,
       `SELECT COUNT(*) AS count FROM local_runtimes r
@@ -346,8 +334,7 @@ export async function validateSnapshotFile(
           OR allowance IS NULL
           OR allowance_unit IS NULL
           OR reset_period IS NULL
-          OR source_url IS NULL
-          OR verified_at IS NULL`,
+          OR source_url IS NULL`,
     )
     if (invalidOffers > 0) {
       errors.push(`free_offers has ${invalidOffers} rows that are not complete recurring claims`)
@@ -388,6 +375,112 @@ export async function validateSnapshotFile(
       errors.push(`plans has ${invalidPlans} rows without a usage model or source`)
     }
 
+    const orphanCompanyPlans = await readCount(
+      connection,
+      `SELECT COUNT(*) AS count FROM company_plans cp
+       LEFT JOIN companies c ON c.company_id = cp.company_id
+       WHERE c.company_id IS NULL`,
+    )
+    if (orphanCompanyPlans > 0) {
+      errors.push(`company_plans has ${orphanCompanyPlans} plans without a company`)
+    }
+
+    const orphanPlanProviders = await readCount(
+      connection,
+      `SELECT COUNT(*) AS count FROM company_plans cp
+       LEFT JOIN providers p ON p.provider_id = cp.provider_id
+       WHERE cp.provider_id IS NOT NULL AND p.provider_id IS NULL`,
+    )
+    if (orphanPlanProviders > 0) {
+      errors.push(`company_plans has ${orphanPlanProviders} provider entries that do not exist`)
+    }
+
+    const duplicatePlanProviders = await readCount(
+      connection,
+      `SELECT COUNT(*) AS count FROM (
+         SELECT provider_id FROM company_plans
+         WHERE provider_id IS NOT NULL
+         GROUP BY provider_id HAVING COUNT(*) > 1
+       ) duplicate_plan_providers`,
+    )
+    if (duplicatePlanProviders > 0) {
+      errors.push(
+        `company_plans has ${duplicatePlanProviders} provider entries linked to several plans`,
+      )
+    }
+
+    const invalidCompanies = await readCount(
+      connection,
+      `SELECT COUNT(*) AS count FROM companies WHERE name IS NULL OR source_url IS NULL`,
+    )
+    if (invalidCompanies > 0) {
+      errors.push(`companies has ${invalidCompanies} rows without a name or source`)
+    }
+
+    const orphanHarnessLinks = await readCount(
+      connection,
+      `SELECT COUNT(*) AS count FROM provider_harnesses l
+       LEFT JOIN providers p ON p.provider_id = l.provider_id
+       LEFT JOIN harnesses h ON h.harness_id = l.harness_id
+       WHERE p.provider_id IS NULL OR h.harness_id IS NULL`,
+    )
+    if (orphanHarnessLinks > 0) {
+      errors.push(`provider_harnesses has ${orphanHarnessLinks} links with a missing endpoint`)
+    }
+
+    const exclusiveConflicts = await readCount(
+      connection,
+      `SELECT COUNT(*) AS count FROM (
+         SELECT provider_id FROM provider_harnesses
+         WHERE exclusive
+         GROUP BY provider_id HAVING COUNT(*) > 1
+       ) exclusive_conflicts`,
+    )
+    if (exclusiveConflicts > 0) {
+      errors.push(
+        `provider_harnesses has ${exclusiveConflicts} exclusive providers linked to several harnesses`,
+      )
+    }
+
+    const invalidBenchmarks = await readCount(
+      connection,
+      `SELECT COUNT(*) AS count FROM benchmarks
+       WHERE unit NOT IN ('percent', 'score') OR source_url IS NULL`,
+    )
+    if (invalidBenchmarks > 0) {
+      errors.push(`benchmarks has ${invalidBenchmarks} definitions without a known unit or source`)
+    }
+
+    const duplicateScores = await readCount(
+      connection,
+      `SELECT COUNT(*) AS count FROM (
+         SELECT canonical_model_id, benchmark_id FROM model_benchmarks
+         GROUP BY canonical_model_id, benchmark_id HAVING COUNT(*) > 1
+       ) duplicate_scores`,
+    )
+    if (duplicateScores > 0) {
+      errors.push(`model_benchmarks has ${duplicateScores} duplicate canonical/benchmark scores`)
+    }
+
+    const orphanScores = await readCount(
+      connection,
+      `SELECT COUNT(*) AS count FROM model_benchmarks b
+       LEFT JOIN canonical_models c ON c.canonical_model_id = b.canonical_model_id
+       LEFT JOIN benchmarks d ON d.benchmark_id = b.benchmark_id
+       WHERE c.canonical_model_id IS NULL OR d.benchmark_id IS NULL`,
+    )
+    if (orphanScores > 0) {
+      errors.push(`model_benchmarks has ${orphanScores} scores without a model or benchmark`)
+    }
+
+    const invalidScores = await readCount(
+      connection,
+      `SELECT COUNT(*) AS count FROM model_benchmarks WHERE score < 0`,
+    )
+    if (invalidScores > 0) {
+      errors.push(`model_benchmarks has ${invalidScores} negative scores`)
+    }
+
     if (!knownGaps) {
       errors.push('catalog_meta.known_gaps is not a JSON string array')
     }
@@ -396,9 +489,7 @@ export async function validateSnapshotFile(
     }
 
     if (freshness.stale) {
-      warnings.push(
-        `Snapshot is ${freshness.ageDays.toFixed(1)} days old; showing last verified values.`,
-      )
+      warnings.push(`Snapshot is ${freshness.ageDays.toFixed(1)} days old; values may have changed.`)
     }
 
     return {
@@ -419,6 +510,39 @@ export async function validateSnapshotFile(
   }
 }
 
+function familyTreeErrors(rows: Record<string, DuckDBValue>[]): string[] {
+  const parentOf = new Map<string, string | null>()
+  for (const row of rows) {
+    parentOf.set(stringValue(row.family_id), nullableString(row.parent_family_id))
+  }
+
+  const errors: string[] = []
+  const missingParents = [...parentOf.entries()]
+    .filter(([, parent]) => parent !== null && !parentOf.has(parent))
+    .map(([familyId, parent]) => `${familyId} -> ${parent}`)
+  if (missingParents.length > 0) {
+    errors.push(`model_families has ${missingParents.length} missing parents: ${missingParents.join(', ')}`)
+  }
+
+  const cyclic = new Set<string>()
+  for (const familyId of parentOf.keys()) {
+    const seen = new Set<string>()
+    let current: string | null | undefined = familyId
+    while (current) {
+      if (seen.has(current)) {
+        cyclic.add(current)
+        break
+      }
+      seen.add(current)
+      current = parentOf.get(current)
+    }
+  }
+  if (cyclic.size > 0) {
+    errors.push(`model_families contains a cycle at ${[...cyclic].sort().join(', ')}`)
+  }
+  return errors
+}
+
 export function freshnessFor(generatedAt: string, now: Date = new Date()): Freshness {
   const generated = new Date(generatedAt)
   if (Number.isNaN(generated.getTime())) {
@@ -430,6 +554,21 @@ export function freshnessFor(generatedAt: string, now: Date = new Date()): Fresh
     stale: ageDays > 7,
     ageDays,
     deadline: new Date(generated.getTime() + SEVEN_DAYS_MS).toISOString(),
+  }
+}
+
+export async function readSnapshotSchemaVersion(snapshotPath: string): Promise<number> {
+  const instance = await DuckDBInstance.create(snapshotPath, { access_mode: 'READ_ONLY' })
+  const connection = await instance.connect()
+  try {
+    const rows = await readRows(connection, 'SELECT schema_version FROM catalog_meta')
+    if (rows.length !== 1) {
+      throw new Error(`catalog_meta must contain exactly one row, found ${rows.length}`)
+    }
+    return numberValue(rows[0].schema_version)
+  } finally {
+    connection.closeSync()
+    instance.closeSync()
   }
 }
 
@@ -552,13 +691,11 @@ async function insertProviders(
   providers: CatalogProvider[],
 ): Promise<void> {
   const statement = `INSERT INTO providers (
-    provider_id, name, npm, api_url, doc_url, env_keys, logo_path,
-    source_id, source_url, source_record, verified_at, last_attempt_at,
-    confidence, scrape_status, last_error
+    provider_id, name, npm, api_url, doc_url, env_keys, logo_path, retained,
+    source_id, source_url, source_record
   ) VALUES (
-    $provider_id, $name, $npm, $api_url, $doc_url, $env_keys, $logo_path,
-    $source_id, $source_url, $source_record, $verified_at, $last_attempt_at,
-    $confidence, $scrape_status, $last_error
+    $provider_id, $name, $npm, $api_url, $doc_url, $env_keys, $logo_path, $retained,
+    $source_id, $source_url, $source_record
   )`
 
   for (const provider of providers) {
@@ -570,14 +707,83 @@ async function insertProviders(
       doc_url: provider.docUrl,
       env_keys: JSON.stringify(provider.envKeys),
       logo_path: provider.logoPath,
+      retained: provider.retained,
       source_id: provider.sourceId,
       source_url: provider.sourceUrl,
       source_record: provider.sourceRecord,
-      verified_at: provider.verifiedAt,
-      last_attempt_at: provider.lastAttemptAt,
-      confidence: provider.confidence,
-      scrape_status: provider.scrapeStatus,
-      last_error: provider.lastError,
+    })
+  }
+}
+
+async function insertCompanies(
+  connection: DuckDBConnection,
+  companies: CatalogCompany[],
+): Promise<void> {
+  const statement = `INSERT INTO companies (
+    company_id, name, homepage_url, source_url
+  ) VALUES ($company_id, $name, $homepage_url, $source_url)`
+
+  for (const company of companies) {
+    await connection.run(statement, {
+      company_id: company.companyId,
+      name: company.name,
+      homepage_url: company.homepageUrl,
+      source_url: company.sourceUrl,
+    })
+  }
+}
+
+async function insertCompanyPlans(
+  connection: DuckDBConnection,
+  plans: CatalogCompanyPlan[],
+): Promise<void> {
+  const statement = `INSERT INTO company_plans (
+    plan_id, company_id, name, provider_id, source_url
+  ) VALUES ($plan_id, $company_id, $name, $provider_id, $source_url)`
+
+  for (const plan of plans) {
+    await connection.run(statement, {
+      plan_id: plan.planId,
+      company_id: plan.companyId,
+      name: plan.name,
+      provider_id: plan.providerId,
+      source_url: plan.sourceUrl,
+    })
+  }
+}
+
+async function insertFamilies(
+  connection: DuckDBConnection,
+  families: CatalogFamily[],
+): Promise<void> {
+  const statement = `INSERT INTO model_families (
+    family_id, name, parent_family_id, vendor
+  ) VALUES ($family_id, $name, $parent_family_id, $vendor)`
+
+  for (const family of families) {
+    await connection.run(statement, {
+      family_id: family.familyId,
+      name: family.name,
+      parent_family_id: family.parentFamilyId,
+      vendor: family.vendor,
+    })
+  }
+}
+
+async function insertCanonicalModels(
+  connection: DuckDBConnection,
+  canonicalModels: CatalogCanonicalModel[],
+): Promise<void> {
+  const statement = `INSERT INTO canonical_models (
+    canonical_model_id, name, lab, family_id
+  ) VALUES ($canonical_model_id, $name, $lab, $family_id)`
+
+  for (const canonicalModel of canonicalModels) {
+    await connection.run(statement, {
+      canonical_model_id: canonicalModel.canonicalModelId,
+      name: canonicalModel.name,
+      lab: canonicalModel.lab,
+      family_id: canonicalModel.familyId,
     })
   }
 }
@@ -592,16 +798,14 @@ async function insertModels(
     tool_call, structured_output, temperature, interleaved, context_limit, input_limit,
     output_limit, cost_input, cost_output, cost_reasoning, cost_cache_read, cost_cache_write,
     cost_input_audio, cost_output_audio, modalities_input, modalities_output, status,
-    source_id, source_url, source_record, verified_at, last_attempt_at, confidence,
-    scrape_status, last_error
+    retained, source_id, source_url, source_record
   ) VALUES (
     $provider_id, $model_id, $model_type, $canonical_model_id, $name, $family, $description,
     $release_date, $last_updated, $knowledge_date, $open_weights, $attachment, $reasoning,
     $tool_call, $structured_output, $temperature, $interleaved, $context_limit, $input_limit,
     $output_limit, $cost_input, $cost_output, $cost_reasoning, $cost_cache_read, $cost_cache_write,
     $cost_input_audio, $cost_output_audio, $modalities_input, $modalities_output, $status,
-    $source_id, $source_url, $source_record, $verified_at, $last_attempt_at, $confidence,
-    $scrape_status, $last_error
+    $retained, $source_id, $source_url, $source_record
   )`
 
   for (const model of models) {
@@ -636,44 +840,84 @@ async function insertModels(
       modalities_input: model.modalitiesInput === null ? null : JSON.stringify(model.modalitiesInput),
       modalities_output: model.modalitiesOutput === null ? null : JSON.stringify(model.modalitiesOutput),
       status: model.status,
+      retained: model.retained,
       source_id: model.sourceId,
       source_url: model.sourceUrl,
       source_record: model.sourceRecord,
-      verified_at: model.verifiedAt,
-      last_attempt_at: model.lastAttemptAt,
-      confidence: model.confidence,
-      scrape_status: model.scrapeStatus,
-      last_error: model.lastError,
     })
   }
 }
 
-async function insertAgents(
+async function insertHarnesses(
   connection: DuckDBConnection,
-  agents: CatalogAgent[],
+  harnesses: CatalogHarness[],
 ): Promise<void> {
-  const statement = `INSERT INTO agents (
-    agent_id, name, vendor, homepage_url, source_id, source_url, source_record,
-    verified_at, last_attempt_at, confidence, scrape_status, last_error
-  ) VALUES (
-    $agent_id, $name, $vendor, $homepage_url, $source_id, $source_url, $source_record,
-    $verified_at, $last_attempt_at, $confidence, $scrape_status, $last_error
-  )`
+  const statement = `INSERT INTO harnesses (
+    harness_id, name, vendor, homepage_url
+  ) VALUES ($harness_id, $name, $vendor, $homepage_url)`
 
-  for (const agent of agents) {
+  for (const harness of harnesses) {
     await connection.run(statement, {
-      agent_id: agent.agentId,
-      name: agent.name,
-      vendor: agent.vendor,
-      homepage_url: agent.homepageUrl,
-      source_id: agent.sourceId,
-      source_url: agent.sourceUrl,
-      source_record: agent.sourceRecord,
-      verified_at: agent.verifiedAt,
-      last_attempt_at: agent.lastAttemptAt,
-      confidence: agent.confidence,
-      scrape_status: agent.scrapeStatus,
-      last_error: agent.lastError,
+      harness_id: harness.harnessId,
+      name: harness.name,
+      vendor: harness.vendor,
+      homepage_url: harness.homepageUrl,
+    })
+  }
+}
+
+async function insertProviderHarnesses(
+  connection: DuckDBConnection,
+  links: CatalogProviderHarness[],
+): Promise<void> {
+  const statement = `INSERT INTO provider_harnesses (
+    provider_id, harness_id, exclusive, source_url
+  ) VALUES ($provider_id, $harness_id, $exclusive, $source_url)`
+
+  for (const link of links) {
+    await connection.run(statement, {
+      provider_id: link.providerId,
+      harness_id: link.harnessId,
+      exclusive: link.exclusive,
+      source_url: link.sourceUrl,
+    })
+  }
+}
+
+async function insertBenchmarks(
+  connection: DuckDBConnection,
+  benchmarks: CatalogBenchmark[],
+): Promise<void> {
+  const statement = `INSERT INTO benchmarks (
+    benchmark_id, name, description, unit, higher_is_better, source_url
+  ) VALUES ($benchmark_id, $name, $description, $unit, $higher_is_better, $source_url)`
+
+  for (const benchmark of benchmarks) {
+    await connection.run(statement, {
+      benchmark_id: benchmark.benchmarkId,
+      name: benchmark.name,
+      description: benchmark.description,
+      unit: benchmark.unit,
+      higher_is_better: benchmark.higherIsBetter,
+      source_url: benchmark.sourceUrl,
+    })
+  }
+}
+
+async function insertBenchmarkScores(
+  connection: DuckDBConnection,
+  scores: CatalogBenchmarkScore[],
+): Promise<void> {
+  const statement = `INSERT INTO model_benchmarks (
+    canonical_model_id, benchmark_id, score, source_url
+  ) VALUES ($canonical_model_id, $benchmark_id, $score, $source_url)`
+
+  for (const score of scores) {
+    await connection.run(statement, {
+      canonical_model_id: score.canonicalModelId,
+      benchmark_id: score.benchmarkId,
+      score: score.score,
+      source_url: score.sourceUrl,
     })
   }
 }
@@ -684,12 +928,10 @@ async function insertPlans(
 ): Promise<void> {
   const statement = `INSERT INTO plans (
     plan_id, provider_id, name, usage_model, billing_period, price, currency,
-    included_allowance, allowance_unit, source_id, source_url, source_record,
-    verified_at, last_attempt_at, confidence, scrape_status, last_error
+    included_allowance, allowance_unit, source_id, source_url, source_record
   ) VALUES (
     $plan_id, $provider_id, $name, $usage_model, $billing_period, $price, $currency,
-    $included_allowance, $allowance_unit, $source_id, $source_url, $source_record,
-    $verified_at, $last_attempt_at, $confidence, $scrape_status, $last_error
+    $included_allowance, $allowance_unit, $source_id, $source_url, $source_record
   )`
 
   for (const plan of plans) {
@@ -706,11 +948,6 @@ async function insertPlans(
       source_id: plan.sourceId,
       source_url: plan.sourceUrl,
       source_record: plan.sourceRecord,
-      verified_at: plan.verifiedAt,
-      last_attempt_at: plan.lastAttemptAt,
-      confidence: plan.confidence,
-      scrape_status: plan.scrapeStatus,
-      last_error: plan.lastError,
     })
   }
 }
@@ -721,12 +958,10 @@ async function insertLocalRuntimes(
 ): Promise<void> {
   const statement = `INSERT INTO local_runtimes (
     provider_id, model_id, runtime, quantization, approximate_hardware, setup_notes,
-    source_id, source_url, source_record, verified_at, last_attempt_at, confidence,
-    scrape_status, last_error
+    source_id, source_url, source_record
   ) VALUES (
     $provider_id, $model_id, $runtime, $quantization, $approximate_hardware, $setup_notes,
-    $source_id, $source_url, $source_record, $verified_at, $last_attempt_at, $confidence,
-    $scrape_status, $last_error
+    $source_id, $source_url, $source_record
   )`
 
   for (const runtime of runtimes) {
@@ -740,11 +975,6 @@ async function insertLocalRuntimes(
       source_id: runtime.sourceId,
       source_url: runtime.sourceUrl,
       source_record: runtime.sourceRecord,
-      verified_at: runtime.verifiedAt,
-      last_attempt_at: runtime.lastAttemptAt,
-      confidence: runtime.confidence,
-      scrape_status: runtime.scrapeStatus,
-      last_error: runtime.lastError,
     })
   }
 }
@@ -755,12 +985,10 @@ async function insertFreeOffers(
 ): Promise<void> {
   const statement = `INSERT INTO free_offers (
     offer_id, provider_id, plan_id, offer_kind, allowance, allowance_unit,
-    reset_period, eligibility, conditions, source_id, source_url, source_record,
-    verified_at, last_attempt_at, confidence, scrape_status, last_error
+    reset_period, eligibility, conditions, source_id, source_url, source_record
   ) VALUES (
     $offer_id, $provider_id, $plan_id, $offer_kind, $allowance, $allowance_unit,
-    $reset_period, $eligibility, $conditions, $source_id, $source_url, $source_record,
-    $verified_at, $last_attempt_at, $confidence, $scrape_status, $last_error
+    $reset_period, $eligibility, $conditions, $source_id, $source_url, $source_record
   )`
 
   for (const offer of offers) {
@@ -777,11 +1005,6 @@ async function insertFreeOffers(
       source_id: offer.sourceId,
       source_url: offer.sourceUrl,
       source_record: offer.sourceRecord,
-      verified_at: offer.verifiedAt,
-      last_attempt_at: offer.lastAttemptAt,
-      confidence: offer.confidence,
-      scrape_status: offer.scrapeStatus,
-      last_error: offer.lastError,
     })
   }
 }
@@ -807,9 +1030,14 @@ async function readCounts(connection: DuckDBConnection): Promise<SnapshotCounts>
   const rows = await readRows(
     connection,
     `SELECT
+       (SELECT COUNT(*) FROM companies) AS companies,
+       (SELECT COUNT(*) FROM company_plans) AS company_plans,
        (SELECT COUNT(*) FROM providers) AS providers,
        (SELECT COUNT(*) FROM models) AS models,
-       (SELECT COUNT(*) FROM agents) AS agents,
+       (SELECT COUNT(*) FROM canonical_models) AS canonical_models,
+       (SELECT COUNT(*) FROM model_families) AS families,
+       (SELECT COUNT(*) FROM harnesses) AS harnesses,
+       (SELECT COUNT(*) FROM benchmarks) AS benchmarks,
        (SELECT COUNT(*) FROM plans) AS plans,
        (SELECT COUNT(*) FROM free_offers) AS free_offers,
        (SELECT COUNT(*) FROM local_runtimes) AS local_runtimes`,
@@ -819,9 +1047,14 @@ async function readCounts(connection: DuckDBConnection): Promise<SnapshotCounts>
     throw new Error('Could not read snapshot counts')
   }
   return {
+    companies: numberValue(row.companies),
+    companyPlans: numberValue(row.company_plans),
     providers: numberValue(row.providers),
     models: numberValue(row.models),
-    agents: numberValue(row.agents),
+    canonicalModels: numberValue(row.canonical_models),
+    families: numberValue(row.families),
+    harnesses: numberValue(row.harnesses),
+    benchmarks: numberValue(row.benchmarks),
     plans: numberValue(row.plans),
     freeOffers: numberValue(row.free_offers),
     localRuntimes: numberValue(row.local_runtimes),

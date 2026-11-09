@@ -1,15 +1,7 @@
-export type Confidence = 'verified' | 'community' | 'inferred' | 'unknown'
-export type ScrapeStatus = 'ok' | 'missing' | 'failed' | 'not_fetched'
-
 export interface Provenance {
   sourceId: string
   sourceUrl: string
   sourceRecord: string
-  verifiedAt: string
-  lastAttemptAt: string
-  confidence: Confidence
-  scrapeStatus: ScrapeStatus
-  lastError: string | null
 }
 
 export interface CatalogSource {
@@ -28,15 +20,46 @@ export interface CatalogProvider extends Provenance {
   docUrl: string | null
   envKeys: string[]
   logoPath: string | null
+  retained: boolean
+}
+
+export interface CatalogCompany {
+  companyId: string
+  name: string
+  homepageUrl: string | null
+  sourceUrl: string
+}
+
+export interface CatalogCompanyPlan {
+  planId: string
+  companyId: string
+  name: string
+  providerId: string | null
+  sourceUrl: string
+}
+
+export interface CatalogFamily {
+  familyId: string
+  name: string
+  parentFamilyId: string | null
+  vendor: string | null
+}
+
+export interface CatalogCanonicalModel {
+  canonicalModelId: string
+  name: string
+  lab: string
+  familyId: string
 }
 
 export interface CatalogModel extends Provenance {
   providerId: string
   modelId: string
   modelType: string | null
-  canonicalModelId: string | null
+  canonicalModelId: string
   name: string | null
   family: string | null
+  familyId: string
   description: string | null
   releaseDate: string | null
   lastUpdated: string | null
@@ -61,13 +84,39 @@ export interface CatalogModel extends Provenance {
   modalitiesInput: string[] | null
   modalitiesOutput: string[] | null
   status: string | null
+  retained: boolean
 }
 
-export interface CatalogAgent extends Provenance {
-  agentId: string
+export interface CatalogHarness {
+  harnessId: string
   name: string
   vendor: string | null
   homepageUrl: string | null
+}
+
+export interface CatalogProviderHarness {
+  providerId: string
+  harnessId: string
+  exclusive: boolean
+  sourceUrl: string
+}
+
+export type BenchmarkUnit = 'percent' | 'score'
+
+export interface CatalogBenchmark {
+  benchmarkId: string
+  name: string
+  description: string | null
+  unit: BenchmarkUnit
+  higherIsBetter: boolean
+  sourceUrl: string
+}
+
+export interface CatalogBenchmarkScore {
+  canonicalModelId: string
+  benchmarkId: string
+  score: number
+  sourceUrl: string
 }
 
 export type PlanUsageModel =
@@ -126,9 +175,14 @@ export interface ModelsDevFetchResult {
 }
 
 export interface SnapshotCounts {
+  companies: number
+  companyPlans: number
   providers: number
   models: number
-  agents: number
+  canonicalModels: number
+  families: number
+  harnesses: number
+  benchmarks: number
   plans: number
   freeOffers: number
   localRuntimes: number

@@ -588,6 +588,54 @@ test.beforeEach(async ({ context }) => {
             poolOperations.push(`unforce:${cleared}`)
             return { forcedSlot: null, applied: true, reason: `force for ${cleared} cleared` }
           }
+          case 'pool_generated_catalog':
+            return JSON.stringify({
+              contractVersion: 2,
+              stale: false,
+              records: [],
+              harnesses: [
+                {
+                  harnessId: 'claude-code',
+                  agent: 'claude',
+                  name: 'Claude Code',
+                  providers: [
+                    {
+                      providerId: 'anthropic',
+                      providerName: 'Anthropic',
+                      models: [
+                        { modelId: 'claude-opus', name: 'Claude Opus' },
+                        { modelId: 'claude-sonnet', name: 'Claude Sonnet' },
+                      ],
+                    },
+                  ],
+                },
+              ],
+            })
+          case 'pool_add_slot': {
+            const slot = {
+              id: 'slot-added',
+              agent: args.agent as 'codex' | 'opencode' | 'pi' | 'claude',
+              providerId: args.providerId as string,
+              providerName: args.providerName as string,
+              modelId: args.modelId as string,
+              modelName: args.modelName as string,
+              credentialRef: null,
+              priority: poolSlots.length,
+              enabled: true,
+              used: null,
+              limit: null,
+              limitUnit: null,
+              resetAt: null,
+              cooldownUntil: null,
+              lastUsedAt: null,
+              lastError: null,
+              createdAt: 1_800_000_000_000,
+              updatedAt: 1_800_000_000_000,
+            }
+            poolSlots.push(slot)
+            poolOperations.push(`add:${slot.agent}:${slot.providerId}:${slot.modelId}`)
+            return slot
+          }
           case 'pool_apply_catalog': {
             let advisory: {
               contractVersion?: number
@@ -3351,6 +3399,24 @@ test('loads, reorders and disables agent pool slots from Settings', async ({ pag
   await expect(pool.getByText('slot is disabled')).toBeVisible()
   await expect.poll(() => page.evaluate(() => (window as unknown as { __poolOperations: string[] }).__poolOperations))
     .toEqual(['reorder:slot-zed,slot-acme', 'toggle:slot-acme:false'])
+})
+
+test('adds a pool slot from the generated catalog without creating one automatically', async ({ page }) => {
+  await page.goto('/')
+  await page.getByRole('button', { name: 'Settings', exact: true }).click()
+  await page.getByRole('navigation', { name: 'Settings categories' }).getByRole('button', { name: 'Agent pool' }).click()
+  const pool = page.getByRole('region', { name: 'Agent pool' })
+  const add = pool.getByRole('group', { name: 'Add slot' })
+
+  await expect(add.getByLabel('New slot harness')).toHaveValue('claude-code')
+  await expect(add.getByLabel('New slot provider')).toHaveValue('anthropic')
+  await add.getByLabel('New slot model').selectOption('claude-sonnet')
+  await add.getByRole('button', { name: 'Add slot' }).click()
+
+  await expect(pool.getByRole('status')).toHaveText('Added Anthropic · Claude Sonnet.')
+  await expect(pool.getByRole('heading', { name: 'Anthropic · Claude Sonnet' })).toBeVisible()
+  await expect.poll(() => page.evaluate(() => (window as unknown as { __poolOperations: string[] }).__poolOperations))
+    .toEqual(['add:claude:anthropic:claude-sonnet'])
 })
 
 test('corrects a provider window limit separately from the single limit', async ({ page }) => {

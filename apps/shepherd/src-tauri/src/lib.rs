@@ -278,6 +278,8 @@ pub fn run() -> Result<(), tauri::Error> {
             bridge::commands::pool_force_slot,
             bridge::commands::pool_clear_force,
             bridge::commands::pool_apply_catalog,
+            bridge::commands::pool_generated_catalog,
+            bridge::commands::pool_add_slot,
             bridge::commands::task_workspace,
             bridge::commands::reserve_task_search,
             bridge::commands::search_tasks,

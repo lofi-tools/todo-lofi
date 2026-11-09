@@ -2436,6 +2436,23 @@ implemented; no public deployment exists yet.
   from each provider's own rule, but local usage and provider responses win. A missing or stale catalog entry marks a
   slot's capacity unknown, not free. No catalog credential or private account
   data is published.
+  Evidence (2026-11-09): `pnpm --dir apps/providers-catalog-web run
+  export:pool` writes the uncommitted
+  `.cache/shepherd/pool-catalog-advisory.v2.json`. The export is filtered to the
+  three harnesses Shepherd implements (Claude Code, Codex, OpenCode) and carries
+  provider/model choices plus model-expanded limit records; Pi and the other
+  catalog harnesses are excluded. The current snapshot has six provider choices
+  for those harnesses and no recurring offer for their providers, so it exports
+  zero limit records rather than inventing one. Shepherd reads the file through
+  `pool_generated_catalog` (never DuckDB), Settings → Agent pool offers the
+  harness/provider/model choices, and `Core::add_pool_slot` creates a slot only
+  on an explicit Add slot action; applying the advisory is also an explicit
+  action. A missing file or an unsupported contract version is shown as a
+  message and leaves the pool unchanged. Catalog typecheck reports 0 errors,
+  44 Vitest tests pass and 13 e2e tests pass; `cargo test -p shepherd-core`
+  passes 211 tests (4 ignored), with fmt, clippy and `cargo check -p shepherd`
+  clean; the app typechecks, builds and passes 130 e2e tests. The only remaining
+  part of this item is the snapshot refresh below.
   - [x] Apply a catalog snapshot to seed a limit a slot does not know.
     Evidence (2026-11-09): `PoolCatalogAdvisory`, `PoolCatalogRecord`,
     `PoolCatalogSeed` and `PoolCatalogOutcome` implement the published v2
@@ -2506,9 +2523,11 @@ implemented; no public deployment exists yet.
     passes 208 tests (4 ignored), clippy and fmt are clean, the app has 129
     passing e2e tests, and the docs have 31 passing e2e tests.
   - [ ] Refresh the snapshot without a manual import.
-    Deferred (2026-11-09): the catalog publishes snapshots only as gitignored CI
-    artifacts and has no public deployment, so there is no source to refresh
-    from. The built-in harness windows are hardcoded above until one exists.
+    Deferred on the scrape: the refresh needs the free-tier and local-model
+    scrape above, which requires approved scraped sources and network access,
+    and the catalog has no public deployment. Shepherd therefore reads only the
+    locally generated export; the built-in harness windows stay hardcoded until
+    a refresh source exists.
 
 ### Packaged releases and downloads
 

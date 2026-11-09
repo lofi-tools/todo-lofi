@@ -147,12 +147,7 @@ function offerKey(offer: CatalogFreeOffer): string {
 }
 
 function preferredOffer(left: CatalogFreeOffer, right: CatalogFreeOffer): number {
-  const leftVerifiedAt = Date.parse(left.verifiedAt)
-  const rightVerifiedAt = Date.parse(right.verifiedAt)
-  if (Number.isNaN(leftVerifiedAt) || Number.isNaN(rightVerifiedAt)) {
-    throw new FreeOfferPolicyError('Free offers must have a valid verified_at timestamp')
-  }
-
-  const recency = rightVerifiedAt - leftVerifiedAt
-  return recency === 0 ? left.offerId.localeCompare(right.offerId) : recency
+  // No verification timestamp exists to pick a fresher claim, so the tie-break
+  // is the offer id; conflicting duplicates still fail closed.
+  return left.offerId.localeCompare(right.offerId)
 }

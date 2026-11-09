@@ -1,0 +1,98 @@
+---
+import Base from '../../layouts/Base.astro'
+import { familyPath, loadCatalog } from '../../lib/catalog'
+import { familyHref, formatNumber } from '../../lib/format'
+
+const catalog = await loadCatalog()
+const canonicalCount = new Map<string, number>()
+for (const canonicalModel of catalog.canonicalModels) {
+  canonicalCount.set(canonicalModel.familyId, (canonicalCount.get(canonicalModel.familyId) ?? 0) + 1)
+}
+
+const roots = catalog.families.filter((family) => family.parentFamilyId === null)
+const childrenOf = (familyId: string) =>
+  catalog.families.filter((family) => family.parentFamilyId === familyId)
+
+interface TreeRow {
+  familyId: string
+  name: string
+  depth: number
+  directCanonicalCount: number
+  totalCanonicalCount: number
+}
+
+const rows: TreeRow[] = []
+function walk(familyId: string, depth: number) {
+  const family = catalog.families.find((entry) => entry.familyId === familyId)
+  if (!family) {
+    return
+  }
+  const descendantIds = catalog.families
+    .filter((candidate) => familyPath(catalog, candidate.familyId).some((entry) => entry.familyId === familyId))
+    .map((candidate) => candidate.familyId)
+  rows.push({
+    familyId,
+    name: family.name,
+    depth,
+    directCanonicalCount: canonicalCount.get(familyId) ?? 0,
+    totalCanonicalCount: descendantIds.reduce(
+      (total, id) => total + (canonicalCount.get(id) ?? 0),
+      0,
+    ),
+  })
+  for (const child of childrenOf(familyId).sort((left, right) => left.name.localeCompare(right.name))) {
+    walk(child.familyId, depth + 1)
+  }
+}
+for (const root of [...roots].sort((left, right) => left.name.localeCompare(right.name))) {
+  walk(root.familyId, 0)
+}
+---
+
+<Base
+  title="Model families"
+  description="The model family tree: parents include their descendants, and each family follows its parent column."
+>
+  <header class="page-header">
+    <p class="eyebrow">Families</p>
+    <h1>Model family tree</h1>
+    <p class="lede">
+      Families are nested tags. Each row names its parent and a model belongs to a leaf family; the
+      ancestor chain follows parent rows, so parents of parents are inferred rather than repeated.
+      A parent family's count includes every descendant family.
+    </p>
+    <div class="meta-row">
+      <span class="pill">{formatNumber(catalog.families.length)} families</span>
+      <span class="pill">{formatNumber(catalog.canonicalModels.length)} canonical models</span>
+    </div>
+  </header>
+
+  <div class="table-wrap">
+    <table>
+      <caption class="visually-hidden">Model family tree</caption>
+      <thead>
+        <tr>
+          <th scope="col">Family</th>
+          <th scope="col">Vendor</th>
+          <th scope="col">Direct canonical models</th>
+          <th scope="col">Including descendants</th>
+        </tr>
+      </thead>
+      <tbody>
+        {
+          rows.map((row) => (
+            <tr>
+              <td style={`padding-left: ${1 + row.depth * 1.5}rem`}>
+                <a href={familyHref(row.familyId)}>{row.name}</a>
+                <div class="mono subtle">{row.familyId}</div>
+              </td>
+              <td>{catalog.families.find((family) => family.familyId === row.familyId)?.vendor ?? 'Unknown'}</td>
+              <td>{formatNumber(row.directCanonicalCount)}</td>
+              <td>{formatNumber(row.totalCanonicalCount)}</td>
+            </tr>
+          ))
+        }
+      </tbody>
+    </table>
+  </div>
+</Base>

@@ -242,6 +242,20 @@ export function applyPoolCatalog(snapshot: string): Promise<PoolCatalogOutcome> 
   return invoke('pool_apply_catalog', { snapshot })
 }
 
+export function generatedPoolCatalog(): Promise<string | null> {
+  return invoke('pool_generated_catalog')
+}
+
+export function addPoolSlot(
+  agent: Agent,
+  providerId: string,
+  providerName: string,
+  modelId: string,
+  modelName: string,
+): Promise<PoolSlot> {
+  return invoke('pool_add_slot', { agent, providerId, providerName, modelId, modelName })
+}
+
 export interface ProjectSnapshot {
   id: string
   path: string

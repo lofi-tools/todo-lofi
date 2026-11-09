@@ -46,8 +46,8 @@ const { snapshot } = catalog
         <div class="banner" role="status">
           <div class="banner__inner">
             This snapshot is {snapshot.ageDays.toFixed(1)} days old; it was due for refresh
-            on {formatDateTime(snapshot.freshnessDeadline)}. Values are the last verified
-            observation and may have changed.
+            on {formatDateTime(snapshot.freshnessDeadline)}. Values may have changed since
+            the source was fetched.
           </div>
         </div>
       )

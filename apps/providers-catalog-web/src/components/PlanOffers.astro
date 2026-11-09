@@ -1,0 +1,92 @@
+---
+import type { CatalogOffer, CatalogPlan } from '../lib/catalog'
+import { formatNumber } from '../lib/format'
+
+interface Props {
+  title: string
+  plans: CatalogPlan[]
+  offers: CatalogOffer[]
+}
+
+const { title, plans, offers } = Astro.props as Props
+const planNameById = new Map(plans.map((plan) => [plan.planId, plan.name]))
+const formatPrice = (plan: CatalogPlan) =>
+  plan.price === null
+    ? 'Not published'
+    : `${plan.currency ? `${plan.currency} ` : ''}${formatNumber(plan.price)}${plan.billingPeriod ? ` / ${plan.billingPeriod}` : ''}`
+const formatAllowance = (value: number | null, unit: string | null) =>
+  value === null ? 'Not published' : `${formatNumber(value)}${unit ? ` ${unit}` : ''}`
+const resetLabel = (period: string) =>
+  period === 'day' ? 'Daily' : period === 'month' ? 'Monthly' : period
+---
+
+{
+  plans.length > 0 && (
+    <div class="table-wrap">
+      <table>
+        <caption class="visually-hidden">Plans for {title}</caption>
+        <thead>
+          <tr>
+            <th scope="col">Plan</th>
+            <th scope="col">Price</th>
+            <th scope="col">Included allowance</th>
+            <th scope="col">Usage model</th>
+            <th scope="col">Source</th>
+          </tr>
+        </thead>
+        <tbody>
+          {plans.map((plan) => (
+            <tr>
+              <td>
+                {plan.name}
+                <div class="mono subtle">{plan.planId}</div>
+              </td>
+              <td>{formatPrice(plan)}</td>
+              <td>{formatAllowance(plan.includedAllowance, plan.allowanceUnit)}</td>
+              <td>{plan.usageModel}</td>
+              <td>
+                <a href={plan.sourceUrl} target="_blank" rel="noreferrer">
+                  Source
+                </a>
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  )
+}
+
+{
+  offers.length > 0 && (
+    <div class="table-wrap">
+      <table>
+        <caption class="visually-hidden">Recurring free offers for {title}</caption>
+        <thead>
+          <tr>
+            <th scope="col">Plan</th>
+            <th scope="col">Free allowance</th>
+            <th scope="col">Reset</th>
+            <th scope="col">Conditions</th>
+            <th scope="col">Source</th>
+          </tr>
+        </thead>
+        <tbody>
+          {offers.map((offer) => (
+            <tr>
+              <td>{offer.planId ? (planNameById.get(offer.planId) ?? offer.planId) : 'All plans'}</td>
+              <td>{formatAllowance(offer.allowance, offer.allowanceUnit)}</td>
+              <td>{resetLabel(offer.resetPeriod)}</td>
+              <td>{offer.conditions ?? offer.eligibility ?? 'None published'}</td>
+              <td>
+                <a href={offer.sourceUrl} target="_blank" rel="noreferrer">
+                  Source
+                </a>
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  )
+}

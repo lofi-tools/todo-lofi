@@ -13,6 +13,7 @@
     "preview": "astro preview --port 4326",
     "typecheck": "pnpm run codegen && astro check",
     "scrape": "tsx scripts/snapshot.ts",
+    "export:pool": "tsx scripts/export-pool-advisory.ts",
     "snapshot": "tsx scripts/snapshot.ts",
     "validate": "tsx scripts/validate.ts",
     "rebuild": "tsx scripts/rebuild-from-artifact.ts",

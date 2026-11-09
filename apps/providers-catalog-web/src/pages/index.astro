@@ -1,24 +1,37 @@
 ---
 import { Badge } from 'web-design-system/components'
 import Base from '../layouts/Base.astro'
-import { loadCatalog } from '../lib/catalog'
-import { formatDate, formatNumber, providerHref } from '../lib/format'
+import { companyContextForProvider, loadCatalog } from '../lib/catalog'
+import {
+  familyHref,
+  formatDate,
+  formatNumber,
+  harnessHref,
+  providerHref,
+} from '../lib/format'
 
 const catalog = await loadCatalog()
 const openWeightModels = catalog.models.filter((model) => model.openWeights === true).length
-const localModels = catalog.models.filter((model) => model.openWeights === true).length
+const rootFamilies = catalog.families.filter((family) => family.parentFamilyId === null)
+const providersByHarness = (harnessId: string) =>
+  new Set(
+    catalog.providerHarnesses
+      .filter((link) => link.harnessId === harnessId)
+      .map((link) => link.providerId),
+  )
 ---
 
 <Base
   title="Provider and model catalog"
-  description="Compare coding-agent providers and models from models.dev, with source links and verification dates."
+  description="Compare coding-agent providers and models, their families, the harnesses they serve and benchmark definitions."
 >
   <section class="hero">
     <p class="eyebrow">Provider and model catalog</p>
     <h1 class="h1">Know what you can run, and where it came from.</h1>
     <p class="lede">
-      Browse coding-agent providers and the models they serve. Every entry links back to its
-      public source, records when it was last verified, and marks unknown values as unknown.
+      Browse coding-agent providers, the models they serve and the harnesses that can use them.
+      One canonical model correlates every provider serving the same release, and model families
+      are a tree rather than a flat label.
     </p>
     <div class="meta-row">
       <Badge tone="accent" variant="subtle">models.dev data</Badge>
@@ -34,15 +47,15 @@ const localModels = catalog.models.filter((model) => model.openWeights === true)
     </div>
     <div class="stat">
       <span class="stat__value">{formatNumber(catalog.models.length)}</span>
-      <span class="stat__label">models</span>
+      <span class="stat__label">provider model entries</span>
     </div>
     <div class="stat">
-      <span class="stat__value">{formatNumber(openWeightModels)}</span>
-      <span class="stat__label">open-weight models</span>
+      <span class="stat__value">{formatNumber(catalog.canonicalModels.length)}</span>
+      <span class="stat__label">canonical models</span>
     </div>
     <div class="stat">
-      <span class="stat__value">{formatNumber(catalog.offers.length)}</span>
-      <span class="stat__label">verified recurring offers</span>
+      <span class="stat__value">{formatNumber(catalog.families.length)}</span>
+      <span class="stat__label">model families</span>
     </div>
   </div>
 
@@ -50,7 +63,11 @@ const localModels = catalog.models.filter((model) => model.openWeights === true)
     <div class="section__head">
       <div>
         <h2>Browse by provider</h2>
-        <p>{formatNumber(catalog.providers.length)} providers in this snapshot.</p>
+        <p>
+          {formatNumber(catalog.providers.length)} provider entries in this snapshot. A provider entry
+          can be a company-level endpoint or one plan of a company.
+          <a href="/companies">Browse companies and plans →</a>
+        </p>
       </div>
       <label class="filter-field">
         <span>Search providers</span>
@@ -60,50 +77,108 @@ const localModels = catalog.models.filter((model) => model.openWeights === true)
 
     <div class="grid provider-grid">
       {
-        catalog.providers.map((provider) => (
+        catalog.providers.map((provider) => {
+          const companyContext = companyContextForProvider(catalog, provider.providerId)
+          return (
           <a
             class="card"
             href={providerHref(provider.providerId)}
             data-provider-card
-            data-name={`${provider.name} ${provider.providerId}`.toLowerCase()}
+            data-name={`${provider.name} ${provider.providerId} ${companyContext?.plan.name ?? ''} ${companyContext?.company.name ?? ''}`.toLowerCase()}
           >
             <h3>{provider.name}</h3>
             <p class="mono">{provider.providerId}</p>
+            {companyContext && (
+              <p class="small muted">
+                {companyContext.plan.name} plan of {companyContext.company.name}
+              </p>
+            )}
             <p>
               {formatNumber(provider.modelCount)} models · {formatNumber(provider.openWeightCount)} open-weight
             </p>
             <div class="card__meta">
-              <span class="pill">Verified {formatDate(provider.verifiedAt)}</span>
+              {provider.retained && <span class="pill">Retained from an earlier snapshot</span>}
               {provider.planCount === 0 && <span class="pill">Plans not published</span>}
             </div>
           </a>
-        ))
+          )
+        })
       }
     </div>
     <p class="empty" data-provider-empty hidden>No providers match that search.</p>
   </section>
 
+  <section class="section" aria-label="Model families">
+    <div class="section__head">
+      <div>
+        <h2>Model families</h2>
+        <p>
+          Families are a tree: a parent family's models include every descendant family.
+          {formatNumber(catalog.families.length)} families are defined in this snapshot.
+        </p>
+      </div>
+      <p><a href="/families">Browse all families →</a></p>
+    </div>
+    <div class="grid grid--2">
+      {
+        rootFamilies.slice(0, 8).map((family) => (
+          <a class="card" href={familyHref(family.familyId)}>
+            <h3>{family.name}</h3>
+            <p class="mono">{family.familyId}</p>
+            <p>{family.vendor ?? 'Vendor unknown'}</p>
+          </a>
+        ))
+      }
+    </div>
+  </section>
+
+  <section class="section" aria-label="Harnesses">
+    <div class="section__head">
+      <div>
+        <h2>Harnesses</h2>
+        <p>
+          A harness is the coding agent a provider serves. Some providers are exclusive to one
+          harness; for example Anthropic-served models are Claude Code only and OpenAI/GPT-served
+          models are Codex only.
+        </p>
+      </div>
+      <p><a href="/harnesses">Browse harnesses →</a></p>
+    </div>
+    <div class="grid grid--2">
+      {
+        catalog.harnesses.map((harness) => (
+          <a class="card" href={harnessHref(harness.harnessId)}>
+            <h3>{harness.name}</h3>
+            <p>{formatNumber(providersByHarness(harness.harnessId).size)} linked providers</p>
+            <p class="small muted">{harness.vendor ?? 'Vendor unknown'}</p>
+          </a>
+        ))
+      }
+    </div>
+  </section>
+
   <section class="section grid grid--2" aria-label="Catalog scope">
     <div class="card">
-      <h2>What is verified</h2>
+      <h2>What is in this snapshot</h2>
       <p>
         Provider names, API metadata, model limits, capabilities, modalities, pricing and
-        open-weight status come from the public models.dev catalog. Each provider and model page
-        shows its source record and verification time.
+        open-weight status come from the public models.dev catalog. Canonical model ids correlate
+        the same release across providers; harness links, the family tree and benchmark
+        definitions are curated in the catalog package.
       </p>
       <p>
-        {formatNumber(localModels)} models are marked open-weight. That is a model property, not
+        {formatNumber(openWeightModels)} models are marked open-weight. That is a model property, not
         a claim that a particular local runtime or machine can run it.
       </p>
     </div>
     <div class="card">
       <h2>What is deliberately empty</h2>
       <p>
-        No coding-agent registry, subscription plan, recurring free allowance or local hardware
-        requirement is published yet. Those facts need an approved official source; this site
-        does not infer them from a zero token price or a community claim.
+        No subscription plan, recurring free allowance, local hardware requirement or benchmark
+        score is published yet. Those facts need an approved source; this site does not infer them
+        from a zero token price or a community claim.
       </p>
-      <p><a href="/about">Read the data and freshness policy →</a></p>
+      <p><a href="/about">Read the data policy →</a></p>
     </div>
   </section>
 

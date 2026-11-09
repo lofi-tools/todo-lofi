@@ -1063,6 +1063,48 @@ impl Core {
             .await?)
     }
 
+    /// Adds a slot the user chose. The catalog can offer provider/model
+    /// choices, but only this explicit call creates a slot.
+    pub async fn add_pool_slot(
+        &mut self,
+        agent: Agent,
+        provider_id: &str,
+        provider_name: &str,
+        model_id: &str,
+        model_name: &str,
+    ) -> Result<PoolSlot, CoreError> {
+        let provider_id = provider_id.trim();
+        let model_id = model_id.trim();
+        if provider_id.is_empty() || model_id.is_empty() {
+            return Err(CoreError::Store(StoreError::InvalidRow(
+                "pool slot provider and model ids must not be empty".to_string(),
+            )));
+        }
+        let slots = self.store.load_pool_slots().await?;
+        if slots.iter().any(|slot| {
+            slot.agent == agent && slot.provider_id == provider_id && slot.model_id == model_id
+        }) {
+            return Err(CoreError::Store(StoreError::InvalidRow(
+                "pool slot already exists".to_string(),
+            )));
+        }
+        let priority = slots
+            .iter()
+            .map(|slot| slot.priority)
+            .max()
+            .map_or(0, |priority| priority + 1);
+        let mut slot = PoolSlot::new(
+            agent,
+            provider_id,
+            provider_name.trim(),
+            model_id,
+            model_name.trim(),
+        );
+        slot.priority = priority;
+        self.store.save_pool_slot(&slot).await?;
+        Ok(slot)
+    }
+
     pub async fn remove_process(&mut self, id: &str) -> Result<(), CoreError> {
         self.store.remove_process(id).await?;
         Ok(())
@@ -4137,7 +4179,7 @@ mod tests {
 
     use super::*;
     use crate::store::{
-        POOL_CATALOG_CONTRACT_VERSION, PoolAvailabilityState, PoolCatalogRecord,
+        MemoryStore, POOL_CATALOG_CONTRACT_VERSION, PoolAvailabilityState, PoolCatalogRecord,
         PoolCooldownClearRequest, PoolQuotaCorrectionRequest, PoolQuotaEntry, PoolQuotaSource,
         PoolSlot, PoolSlotId, TursoStore,
     };
@@ -4442,6 +4484,47 @@ mod tests {
         assert!(cleared.applied);
         assert_eq!(cleared.forced_slot, None);
         assert!(!core.clear_pool_force().applied);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn adding_a_pool_slot_appends_it_and_rejects_a_duplicate()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut core = Core::with_services(
+            Box::new(MemoryStore::new()),
+            Box::new(UnavailableHarnessFactory),
+        );
+        let first = core
+            .add_pool_slot(
+                Agent::Claude,
+                "anthropic",
+                "Anthropic",
+                "claude-opus",
+                "Claude Opus",
+            )
+            .await?;
+        assert_eq!(first.priority, 0);
+        assert_eq!(first.agent, Agent::Claude);
+
+        let second = core
+            .add_pool_slot(Agent::Codex, "openai", "OpenAI", "gpt-codex", "GPT Codex")
+            .await?;
+        assert_eq!(second.priority, 1);
+        assert_eq!(core.pool_status(100).await?.slots.len(), 2);
+
+        let duplicate = core
+            .add_pool_slot(
+                Agent::Claude,
+                "anthropic",
+                "Anthropic",
+                "claude-opus",
+                "Claude Opus",
+            )
+            .await;
+        assert!(matches!(
+            duplicate,
+            Err(CoreError::Store(StoreError::InvalidRow(_)))
+        ));
         Ok(())
     }
 

@@ -2,7 +2,17 @@ import path from 'node:path'
 import { DuckDBInstance, type DuckDBConnection, type DuckDBValue } from '@duckdb/node-api'
 import { SCHEMA_VERSION } from '../schema'
 import { findLatestSnapshot, freshnessFor } from '../snapshot'
-import type { Confidence, ScrapeStatus } from '../types'
+import type {
+  BenchmarkUnit,
+  CatalogBenchmark,
+  CatalogBenchmarkScore,
+  CatalogCanonicalModel,
+  CatalogCompany,
+  CatalogCompanyPlan,
+  CatalogFamily,
+  CatalogHarness,
+  CatalogProviderHarness,
+} from '../types'
 
 export interface CatalogSource {
   sourceId: string
@@ -40,12 +50,10 @@ export interface CatalogProvider {
   apiUrl: string | null
   docUrl: string | null
   envKeys: string[]
+  retained: boolean
   sourceId: string
   sourceUrl: string
   sourceRecord: string
-  verifiedAt: string
-  confidence: Confidence
-  scrapeStatus: ScrapeStatus
   modelCount: number
   openWeightCount: number
   planCount: number
@@ -58,7 +66,9 @@ export interface CatalogModel {
   providerName: string
   modelId: string
   modelType: string | null
-  canonicalModelId: string | null
+  canonicalModelId: string
+  canonicalModelName: string
+  familyId: string
   name: string | null
   family: string | null
   description: string | null
@@ -85,12 +95,10 @@ export interface CatalogModel {
   modalitiesInput: string[] | null
   modalitiesOutput: string[] | null
   status: string | null
+  retained: boolean
   sourceId: string
   sourceUrl: string
   sourceRecord: string
-  verifiedAt: string
-  confidence: Confidence
-  scrapeStatus: ScrapeStatus
 }
 
 export interface CatalogPlan {
@@ -107,9 +115,6 @@ export interface CatalogPlan {
   sourceId: string
   sourceUrl: string
   sourceRecord: string
-  verifiedAt: string
-  confidence: Confidence
-  scrapeStatus: ScrapeStatus
 }
 
 export interface CatalogOffer {
@@ -126,22 +131,6 @@ export interface CatalogOffer {
   sourceId: string
   sourceUrl: string
   sourceRecord: string
-  verifiedAt: string
-  confidence: Confidence
-  scrapeStatus: ScrapeStatus
-}
-
-export interface CatalogAgent {
-  agentId: string
-  name: string
-  vendor: string | null
-  homepageUrl: string | null
-  sourceId: string
-  sourceUrl: string
-  sourceRecord: string
-  verifiedAt: string
-  confidence: Confidence
-  scrapeStatus: ScrapeStatus
 }
 
 export interface CatalogLocalRuntime {
@@ -154,9 +143,6 @@ export interface CatalogLocalRuntime {
   sourceId: string
   sourceUrl: string
   sourceRecord: string
-  verifiedAt: string
-  confidence: Confidence
-  scrapeStatus: ScrapeStatus
 }
 
 export interface CatalogData {
@@ -164,9 +150,16 @@ export interface CatalogData {
   snapshot: CatalogSnapshot
   providers: CatalogProvider[]
   models: CatalogModel[]
+  canonicalModels: CatalogCanonicalModel[]
+  families: CatalogFamily[]
+  companies: CatalogCompany[]
+  companyPlans: CatalogCompanyPlan[]
+  harnesses: CatalogHarness[]
+  providerHarnesses: CatalogProviderHarness[]
+  benchmarks: CatalogBenchmark[]
+  benchmarkScores: CatalogBenchmarkScore[]
   plans: CatalogPlan[]
   offers: CatalogOffer[]
-  agents: CatalogAgent[]
   localRuntimes: CatalogLocalRuntime[]
 }
 
@@ -228,11 +221,76 @@ async function readCatalog(): Promise<CatalogData> {
       throw new Error('The snapshot has no sources rows, so it cannot publish provenance.')
     }
 
+    const canonicalModels = (
+      await readRows(
+        connection,
+        `SELECT canonical_model_id, name, lab, family_id
+         FROM canonical_models ORDER BY canonical_model_id`,
+      )
+    ).map(mapCanonicalModel)
+
+    const families = (
+      await readRows(
+        connection,
+        `SELECT family_id, name, parent_family_id, vendor
+         FROM model_families ORDER BY family_id`,
+      )
+    ).map(mapFamily)
+
+    const companies = (
+      await readRows(
+        connection,
+        `SELECT company_id, name, homepage_url, source_url
+         FROM companies ORDER BY lower(name), company_id`,
+      )
+    ).map(mapCompany)
+
+    const companyPlans = (
+      await readRows(
+        connection,
+        `SELECT plan_id, company_id, name, provider_id, source_url
+         FROM company_plans ORDER BY lower(name), plan_id`,
+      )
+    ).map(mapCompanyPlan)
+
+    const harnesses = (
+      await readRows(
+        connection,
+        `SELECT harness_id, name, vendor, homepage_url
+         FROM harnesses ORDER BY name`,
+      )
+    ).map(mapHarness)
+
+    const providerHarnesses = (
+      await readRows(
+        connection,
+        `SELECT provider_id, harness_id, exclusive, source_url
+         FROM provider_harnesses ORDER BY provider_id, harness_id`,
+      )
+    ).map(mapProviderHarness)
+
+    const benchmarks = (
+      await readRows(
+        connection,
+        `SELECT benchmark_id, name, description, unit, higher_is_better, source_url
+         FROM benchmarks ORDER BY name`,
+      )
+    ).map(mapBenchmark)
+
+    const benchmarkScores = (
+      await readRows(
+        connection,
+        `SELECT canonical_model_id, benchmark_id, CAST(score AS DOUBLE) AS score, source_url
+         FROM model_benchmarks ORDER BY canonical_model_id, benchmark_id`,
+      )
+    ).map(mapBenchmarkScore)
+
     const models = (
       await readRows(
         connection,
         `SELECT m.provider_id, p.name AS provider_name, m.model_id, m.model_type,
-                m.canonical_model_id, m.name, m.family, m.description, m.release_date,
+                m.canonical_model_id, c.name AS canonical_model_name,
+                c.family_id, m.name, m.family, m.description, m.release_date,
                 m.last_updated, m.knowledge_date, m.open_weights, m.attachment,
                 m.reasoning, m.tool_call, m.structured_output, m.temperature,
                 m.interleaved, CAST(m.context_limit AS DOUBLE) AS context_limit,
@@ -245,12 +303,11 @@ async function readCatalog(): Promise<CatalogData> {
                 CAST(m.cost_cache_write AS DOUBLE) AS cost_cache_write,
                 CAST(m.cost_input_audio AS DOUBLE) AS cost_input_audio,
                 CAST(m.cost_output_audio AS DOUBLE) AS cost_output_audio,
-                m.modalities_input, m.modalities_output, m.status,
-                m.source_id, m.source_url, m.source_record,
-                epoch_ms(m.verified_at) AS verified_at_ms,
-                m.confidence, m.scrape_status
+                m.modalities_input, m.modalities_output, m.status, m.retained,
+                m.source_id, m.source_url, m.source_record
          FROM models m
          JOIN providers p ON p.provider_id = m.provider_id
+         JOIN canonical_models c ON c.canonical_model_id = m.canonical_model_id
          ORDER BY lower(p.name), lower(coalesce(m.name, m.model_id)), m.model_id`,
       )
     ).map(mapModel)
@@ -261,8 +318,7 @@ async function readCatalog(): Promise<CatalogData> {
         `SELECT pl.plan_id, pl.provider_id, pr.name AS provider_name, pl.name,
                 pl.usage_model, pl.billing_period, CAST(pl.price AS DOUBLE) AS price,
                 pl.currency, CAST(pl.included_allowance AS DOUBLE) AS included_allowance,
-                pl.allowance_unit, pl.source_id, pl.source_url, pl.source_record,
-                epoch_ms(pl.verified_at) AS verified_at_ms, pl.confidence, pl.scrape_status
+                pl.allowance_unit, pl.source_id, pl.source_url, pl.source_record
          FROM plans pl
          JOIN providers pr ON pr.provider_id = pl.provider_id
          ORDER BY lower(pr.name), lower(pl.name)`,
@@ -275,29 +331,18 @@ async function readCatalog(): Promise<CatalogData> {
         `SELECT o.offer_id, o.provider_id, pr.name AS provider_name, o.plan_id,
                 o.offer_kind, CAST(o.allowance AS DOUBLE) AS allowance, o.allowance_unit,
                 o.reset_period, o.eligibility, o.conditions, o.source_id, o.source_url,
-                o.source_record,
-                epoch_ms(o.verified_at) AS verified_at_ms, o.confidence, o.scrape_status
+                o.source_record
          FROM free_offers o
          JOIN providers pr ON pr.provider_id = o.provider_id
          ORDER BY lower(pr.name), lower(o.offer_id)`,
       )
     ).map(mapOffer)
 
-    const agents = (
-      await readRows(
-        connection,
-        `SELECT agent_id, name, vendor, homepage_url, source_id, source_url, source_record,
-                epoch_ms(verified_at) AS verified_at_ms, confidence, scrape_status
-         FROM agents ORDER BY lower(name)`,
-      )
-    ).map(mapAgent)
-
     const localRuntimes = (
       await readRows(
         connection,
         `SELECT provider_id, model_id, runtime, quantization, approximate_hardware,
-                setup_notes, source_id, source_url, source_record,
-                epoch_ms(verified_at) AS verified_at_ms, confidence, scrape_status
+                setup_notes, source_id, source_url, source_record
          FROM local_runtimes ORDER BY provider_id, model_id, runtime`,
       )
     ).map(mapLocalRuntime)
@@ -305,8 +350,8 @@ async function readCatalog(): Promise<CatalogData> {
     const providers = (
       await readRows(
         connection,
-        `SELECT provider_id, name, npm, api_url, doc_url, env_keys, source_id, source_url,
-                source_record, epoch_ms(verified_at) AS verified_at_ms, confidence, scrape_status
+        `SELECT provider_id, name, npm, api_url, doc_url, env_keys, retained,
+                source_id, source_url, source_record
          FROM providers ORDER BY lower(name), provider_id`,
       )
     ).map((row) => mapProvider(row, models, plans, offers, localRuntimes))
@@ -329,15 +374,91 @@ async function readCatalog(): Promise<CatalogData> {
       },
       providers,
       models,
+      canonicalModels,
+      families,
+      companies,
+      companyPlans,
+      harnesses,
+      providerHarnesses,
+      benchmarks,
+      benchmarkScores,
       plans,
       offers,
-      agents,
       localRuntimes,
     }
   } finally {
     connection.closeSync()
     instance.closeSync()
   }
+}
+
+export function familyPath(catalog: CatalogData, familyId: string): CatalogFamily[] {
+  const byId = new Map(catalog.families.map((family) => [family.familyId, family]))
+  const path: CatalogFamily[] = []
+  const seen = new Set<string>()
+  let current = byId.get(familyId)
+  while (current) {
+    if (seen.has(current.familyId)) {
+      break
+    }
+    seen.add(current.familyId)
+    path.push(current)
+    current = current.parentFamilyId ? byId.get(current.parentFamilyId) : undefined
+  }
+  return path
+}
+
+export function descendantFamilyIds(catalog: CatalogData, familyId: string): string[] {
+  return catalog.families
+    .filter((family) => familyPath(catalog, family.familyId).some((entry) => entry.familyId === familyId))
+    .map((family) => family.familyId)
+}
+
+export interface ProviderCompanyContext {
+  company: CatalogCompany
+  plan: CatalogCompanyPlan
+}
+
+/** The curated company plan that serves this provider entry, when one exists. */
+export function companyContextForProvider(
+  catalog: CatalogData,
+  providerId: string,
+): ProviderCompanyContext | null {
+  const plan = catalog.companyPlans.find((entry) => entry.providerId === providerId)
+  if (!plan) {
+    return null
+  }
+  const company = catalog.companies.find((entry) => entry.companyId === plan.companyId)
+  return company ? { company, plan } : null
+}
+
+export function plansForCompany(catalog: CatalogData, companyId: string): CatalogCompanyPlan[] {
+  return catalog.companyPlans.filter((plan) => plan.companyId === companyId)
+}
+
+export function harnessesForProvider(
+  catalog: CatalogData,
+  providerId: string,
+): CatalogHarness[] {
+  const harnessIds = new Set(
+    catalog.providerHarnesses
+      .filter((link) => link.providerId === providerId)
+      .map((link) => link.harnessId),
+  )
+  return catalog.harnesses.filter((harness) => harnessIds.has(harness.harnessId))
+}
+
+export function benchmarkScoresFor(
+  catalog: CatalogData,
+  canonicalModelId: string,
+): { benchmark: CatalogBenchmark; score: CatalogBenchmarkScore }[] {
+  const benchmarks = new Map(catalog.benchmarks.map((benchmark) => [benchmark.benchmarkId, benchmark]))
+  return catalog.benchmarkScores
+    .filter((score) => score.canonicalModelId === canonicalModelId)
+    .flatMap((score) => {
+      const benchmark = benchmarks.get(score.benchmarkId)
+      return benchmark ? [{ benchmark, score }] : []
+    })
 }
 
 function mapProvider(
@@ -356,12 +477,10 @@ function mapProvider(
     apiUrl: nullableString(row.api_url),
     docUrl: nullableString(row.doc_url),
     envKeys: jsonStringArray(row.env_keys),
+    retained: booleanValue(row.retained),
     sourceId: stringValue(row.source_id),
     sourceUrl: stringValue(row.source_url),
     sourceRecord: stringValue(row.source_record),
-    verifiedAt: isoFromMs(row.verified_at_ms),
-    confidence: confidenceValue(row.confidence),
-    scrapeStatus: scrapeStatusValue(row.scrape_status),
     modelCount: providerModels.length,
     openWeightCount: providerModels.filter((model) => model.openWeights === true).length,
     planCount: plans.filter((plan) => plan.providerId === providerId).length,
@@ -376,7 +495,9 @@ function mapModel(row: Record<string, DuckDBValue>): CatalogModel {
     providerName: stringValue(row.provider_name),
     modelId: stringValue(row.model_id),
     modelType: nullableString(row.model_type),
-    canonicalModelId: nullableString(row.canonical_model_id),
+    canonicalModelId: stringValue(row.canonical_model_id),
+    canonicalModelName: stringValue(row.canonical_model_name),
+    familyId: stringValue(row.family_id),
     name: nullableString(row.name),
     family: nullableString(row.family),
     description: nullableString(row.description),
@@ -403,12 +524,85 @@ function mapModel(row: Record<string, DuckDBValue>): CatalogModel {
     modalitiesInput: nullableJsonStringArray(row.modalities_input),
     modalitiesOutput: nullableJsonStringArray(row.modalities_output),
     status: nullableString(row.status),
+    retained: booleanValue(row.retained),
     sourceId: stringValue(row.source_id),
     sourceUrl: stringValue(row.source_url),
     sourceRecord: stringValue(row.source_record),
-    verifiedAt: isoFromMs(row.verified_at_ms),
-    confidence: confidenceValue(row.confidence),
-    scrapeStatus: scrapeStatusValue(row.scrape_status),
+  }
+}
+
+function mapCanonicalModel(row: Record<string, DuckDBValue>): CatalogCanonicalModel {
+  return {
+    canonicalModelId: stringValue(row.canonical_model_id),
+    name: stringValue(row.name),
+    lab: stringValue(row.lab),
+    familyId: stringValue(row.family_id),
+  }
+}
+
+function mapCompany(row: Record<string, DuckDBValue>): CatalogCompany {
+  return {
+    companyId: stringValue(row.company_id),
+    name: stringValue(row.name),
+    homepageUrl: nullableString(row.homepage_url),
+    sourceUrl: stringValue(row.source_url),
+  }
+}
+
+function mapCompanyPlan(row: Record<string, DuckDBValue>): CatalogCompanyPlan {
+  return {
+    planId: stringValue(row.plan_id),
+    companyId: stringValue(row.company_id),
+    name: stringValue(row.name),
+    providerId: nullableString(row.provider_id),
+    sourceUrl: stringValue(row.source_url),
+  }
+}
+
+function mapFamily(row: Record<string, DuckDBValue>): CatalogFamily {
+  return {
+    familyId: stringValue(row.family_id),
+    name: stringValue(row.name),
+    parentFamilyId: nullableString(row.parent_family_id),
+    vendor: nullableString(row.vendor),
+  }
+}
+
+function mapHarness(row: Record<string, DuckDBValue>): CatalogHarness {
+  return {
+    harnessId: stringValue(row.harness_id),
+    name: stringValue(row.name),
+    vendor: nullableString(row.vendor),
+    homepageUrl: nullableString(row.homepage_url),
+  }
+}
+
+function mapProviderHarness(row: Record<string, DuckDBValue>): CatalogProviderHarness {
+  return {
+    providerId: stringValue(row.provider_id),
+    harnessId: stringValue(row.harness_id),
+    exclusive: booleanValue(row.exclusive),
+    sourceUrl: stringValue(row.source_url),
+  }
+}
+
+function mapBenchmark(row: Record<string, DuckDBValue>): CatalogBenchmark {
+  return {
+    benchmarkId: stringValue(row.benchmark_id),
+    name: stringValue(row.name),
+    description: nullableString(row.description),
+    unit: benchmarkUnit(row.unit),
+    higherIsBetter: booleanValue(row.higher_is_better),
+    sourceUrl: stringValue(row.source_url),
+  }
+}
+
+function mapBenchmarkScore(row: Record<string, DuckDBValue>): CatalogBenchmarkScore {
+  return {
+    canonicalModelId: stringValue(row.canonical_model_id),
+    benchmarkId: stringValue(row.benchmark_id),
+    score: numberValue(row.score),
+    sourceUrl: stringValue(row.source_url),
   }
 }
 
@@ -443,9 +637,6 @@ function mapPlan(row: Record<string, DuckDBValue>): CatalogPlan {
     sourceId: stringValue(row.source_id),
     sourceUrl: stringValue(row.source_url),
     sourceRecord: stringValue(row.source_record),
-    verifiedAt: isoFromMs(row.verified_at_ms),
-    confidence: confidenceValue(row.confidence),
-    scrapeStatus: scrapeStatusValue(row.scrape_status),
   }
 }
 
@@ -464,24 +655,6 @@ function mapOffer(row: Record<string, DuckDBValue>): CatalogOffer {
     sourceId: stringValue(row.source_id),
     sourceUrl: stringValue(row.source_url),
     sourceRecord: stringValue(row.source_record),
-    verifiedAt: isoFromMs(row.verified_at_ms),
-    confidence: confidenceValue(row.confidence),
-    scrapeStatus: scrapeStatusValue(row.scrape_status),
-  }
-}
-
-function mapAgent(row: Record<string, DuckDBValue>): CatalogAgent {
-  return {
-    agentId: stringValue(row.agent_id),
-    name: stringValue(row.name),
-    vendor: nullableString(row.vendor),
-    homepageUrl: nullableString(row.homepage_url),
-    sourceId: stringValue(row.source_id),
-    sourceUrl: stringValue(row.source_url),
-    sourceRecord: stringValue(row.source_record),
-    verifiedAt: isoFromMs(row.verified_at_ms),
-    confidence: confidenceValue(row.confidence),
-    scrapeStatus: scrapeStatusValue(row.scrape_status),
   }
 }
 
@@ -496,9 +669,6 @@ function mapLocalRuntime(row: Record<string, DuckDBValue>): CatalogLocalRuntime 
     sourceId: stringValue(row.source_id),
     sourceUrl: stringValue(row.source_url),
     sourceRecord: stringValue(row.source_record),
-    verifiedAt: isoFromMs(row.verified_at_ms),
-    confidence: confidenceValue(row.confidence),
-    scrapeStatus: scrapeStatusValue(row.scrape_status),
   }
 }
 
@@ -519,6 +689,13 @@ function stringValue(value: DuckDBValue): string {
 
 function nullableString(value: DuckDBValue): string | null {
   return typeof value === 'string' ? value : null
+}
+
+function booleanValue(value: DuckDBValue): boolean {
+  if (typeof value === 'boolean') {
+    return value
+  }
+  throw new Error(`Expected a boolean, got ${String(value)}`)
 }
 
 function numberValue(value: DuckDBValue): number {
@@ -550,6 +727,13 @@ function nullableNumber(value: DuckDBValue): number | null {
 
 function nullableBoolean(value: DuckDBValue): boolean | null {
   return typeof value === 'boolean' ? value : null
+}
+
+function benchmarkUnit(value: DuckDBValue): BenchmarkUnit {
+  if (value === 'percent' || value === 'score') {
+    return value
+  }
+  throw new Error(`Unknown benchmark unit: ${String(value)}`)
 }
 
 function isoFromMs(value: DuckDBValue): string {
@@ -599,18 +783,4 @@ function jsonObject(value: DuckDBValue): Record<string, string> {
   } catch {
     return {}
   }
-}
-
-function confidenceValue(value: DuckDBValue): Confidence {
-  if (value === 'verified' || value === 'community' || value === 'inferred' || value === 'unknown') {
-    return value
-  }
-  return 'unknown'
-}
-
-function scrapeStatusValue(value: DuckDBValue): ScrapeStatus {
-  if (value === 'ok' || value === 'missing' || value === 'failed' || value === 'not_fetched') {
-    return value
-  }
-  return 'not_fetched'
 }

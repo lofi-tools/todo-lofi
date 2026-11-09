@@ -1,0 +1,118 @@
+---
+import Base from '../../layouts/Base.astro'
+import EmptyState from '../../components/EmptyState.astro'
+import { loadCatalog } from '../../lib/catalog'
+import { companyHref, formatNumber, providerHref } from '../../lib/format'
+
+const catalog = await loadCatalog()
+const plansByCompany = new Map(
+  catalog.companies.map((company) => [
+    company.companyId,
+    catalog.companyPlans.filter((plan) => plan.companyId === company.companyId),
+  ]),
+)
+const providerIdsByCompany = new Map<string, Set<string>>()
+for (const plan of catalog.companyPlans) {
+  if (!plan.providerId) continue
+  const providerIds = providerIdsByCompany.get(plan.companyId) ?? new Set<string>()
+  providerIds.add(plan.providerId)
+  providerIdsByCompany.set(plan.companyId, providerIds)
+}
+---
+
+<Base
+  title="Provider companies"
+  description="Provider companies, their plans and the provider entries that serve each plan."
+>
+  <header class="page-header">
+    <p class="eyebrow">Companies</p>
+    <h1>Provider companies</h1>
+    <p class="lede">
+      A provider company is the vendor. A provider entry can be one plan of that company, and a
+      harness is the coding agent that consumes the provider entry. OpenCode is all three names in
+      different roles: the company is OpenCode, its plans are OpenCode Zen, OpenCode Go and OpenCode
+      Go Plus, and OpenCode is also a harness. Only the OpenCode Zen and OpenCode Go plans have a
+      provider entry in this snapshot.
+    </p>
+    <div class="meta-row">
+      <span class="pill">{formatNumber(catalog.companies.length)} companies</span>
+      <span class="pill">{formatNumber(catalog.companyPlans.length)} curated plans</span>
+      <span class="pill">Prices and allowances not published</span>
+    </div>
+  </header>
+
+  <section class="section">
+    <h2>Companies</h2>
+    {
+      catalog.companies.length === 0 ? (
+        <EmptyState title="No provider companies are recorded">
+          The snapshot has no curated company rows.
+        </EmptyState>
+      ) : (
+        <div class="grid grid--2">
+          {catalog.companies.map((company) => {
+            const plans = plansByCompany.get(company.companyId) ?? []
+            const providerCount = providerIdsByCompany.get(company.companyId)?.size ?? 0
+            return (
+              <a class="card" href={companyHref(company.companyId)}>
+                <h3>{company.name}</h3>
+                <p class="mono">{company.companyId}</p>
+                <p>
+                  {formatNumber(plans.length)} plans · {formatNumber(providerCount)} provider entries
+                </p>
+                {company.homepageUrl && (
+                  <p class="small muted">{company.homepageUrl}</p>
+                )}
+              </a>
+            )
+          })}
+        </div>
+      )
+    }
+  </section>
+
+  <section class="section">
+    <h2>All plans</h2>
+    <p class="small muted">
+      Plan names are curated identity facts. A plan's price, allowance and usage model are not
+      published until a source is recorded, and a missing provider entry means the plan is named but
+      not catalogued.
+    </p>
+    <div class="table-wrap">
+      <table>
+        <caption class="visually-hidden">Provider company plans</caption>
+        <thead>
+          <tr>
+            <th scope="col">Plan</th>
+            <th scope="col">Company</th>
+            <th scope="col">Provider entry</th>
+            <th scope="col">Source</th>
+          </tr>
+        </thead>
+        <tbody>
+          {catalog.companyPlans.map((plan) => (
+            <tr>
+              <td>{plan.name}</td>
+              <td>
+                <a href={companyHref(plan.companyId)}>
+                  {catalog.companies.find((company) => company.companyId === plan.companyId)?.name ??
+                    plan.companyId}
+                </a>
+              </td>
+              <td>
+                {plan.providerId ? (
+                  <a href={providerHref(plan.providerId)}>{plan.providerId}</a>
+                ) : (
+                  'Not in this snapshot'
+                )}
+              </td>
+              <td>
+                <a href={plan.sourceUrl} target="_blank" rel="noreferrer">Source</a>
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  </section>
+</Base>
