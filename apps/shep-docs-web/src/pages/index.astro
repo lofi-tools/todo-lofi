@@ -1,0 +1,277 @@
+---
+import { css } from 'styled-system/css'
+import Base from '../layouts/Base.astro'
+import SiteHeader from '../components/blocks/SiteHeader.astro'
+import DocsFooter from '../components/blocks/DocsFooter.astro'
+import Hero from 'web-design-system/astro/marketing/Hero.astro'
+import FeatureSection from 'web-design-system/astro/marketing/FeatureSection.astro'
+import SectionHeading from 'web-design-system/astro/marketing/SectionHeading.astro'
+import CTASection from 'web-design-system/astro/marketing/CTASection.astro'
+import { Badge } from 'web-design-system/components'
+import { Check, Circle, Clock, Command, GitPullRequest, Lock, Sparkles, Users } from 'web-design-system/icons'
+import HomepageSection from '../components/sections/HomepageSection.astro'
+import { blueprintGrid, blueprintRules, card, cardBody, cardTitle, glyph, grid, item, itemHeading, itemSubtitle, reasonsGrid } from '../components/sections/homeStyles'
+import ShepherdWorkspace from '../components/illustrations/ShepherdWorkspace.astro'
+import AgentPool from '../components/illustrations/AgentPool.astro'
+import PreviewAnnotation from '../components/illustrations/PreviewAnnotation.astro'
+import IllustrationStage from '../components/illustrations/IllustrationStage.astro'
+import { availability, reasonCards, reviewCards, REPO_URL } from '../../data/shepherd'
+
+const reasonIcons = {
+  parallel: Users,
+  local: Lock,
+  review: GitPullRequest,
+} as const
+
+const reviewIcons = {
+  worktrees: GitPullRequest,
+  approvals: Check,
+  preview: Sparkles,
+  terminals: Command,
+} as const
+
+const availabilityIcons = {
+  success: Check,
+  accent: Clock,
+  warning: Circle,
+} as const
+
+const heroIllustration = css({
+  w: 'full',
+  maxW: '1104px',
+  mx: 'auto',
+  px: { base: '5', md: '8' },
+  pb: { base: '4', md: '8' },
+})
+
+const reasonGrid = css({ mt: { base: '8', md: '12' } })
+
+const cardGrid = css({
+  display: 'grid',
+  gridTemplateColumns: { base: '1fr', md: 'repeat(2, minmax(0, 1fr))' },
+  gap: '4',
+  mt: { base: '8', md: '12' },
+})
+
+const cardHead = css({ display: 'flex', alignItems: 'center', gap: '3', flexWrap: 'wrap' })
+const cardIcon = css({ display: 'inline-flex', color: 'accent.text', flexShrink: '0' })
+const cardBadge = css({ ml: 'auto' })
+
+const availabilityGrid = css({
+  display: 'grid',
+  gridTemplateColumns: { base: '1fr', lg: 'repeat(3, minmax(0, 1fr))' },
+  gap: '4',
+  mt: { base: '8', md: '12' },
+  alignItems: 'stretch',
+})
+
+const availabilityCard = css({
+  display: 'flex',
+  flexDirection: 'column',
+  gap: '4',
+  p: { base: '5', md: '6' },
+  borderRadius: 'lg',
+  borderWidth: 'hairline',
+  borderStyle: 'solid',
+  borderColor: 'border',
+  bg: 'surface.subtle',
+})
+
+const availabilityList = css({
+  display: 'flex',
+  flexDirection: 'column',
+  gap: '2.5',
+  listStyle: 'none',
+  m: '0',
+  p: '0',
+})
+
+const availabilityItem = css({
+  display: 'flex',
+  alignItems: 'flex-start',
+  gap: '2.5',
+  fontSize: 'sm',
+  color: 'fg.muted',
+  lineHeight: 'relaxed',
+})
+
+const availabilityMark = css({ color: 'accent.text', mt: '0.5', flexShrink: '0' })
+
+const honestyNote = css({
+  mt: { base: '6', md: '8' },
+  fontSize: 'sm',
+  color: 'fg.muted',
+  lineHeight: 'relaxed',
+  maxW: '68ch',
+})
+---
+
+<Base
+  title="Shepherd"
+  suffix="several coding agents, one workspace"
+  description="Shepherd is a local-first desktop workspace for several coding agents: real Git worktrees, approvals, terminals, preview annotations and review in one window."
+  icon="/shepherd-logo.svg"
+>
+  <SiteHeader blueprint />
+
+  <main id="content" class={blueprintGrid}>
+    <HomepageSection bare index={1} label="shepherd">
+      <Hero
+        title="Several coding agents. One workspace."
+        subtitle="Shepherd runs your agents on the projects you already have, so you can keep work moving without babysitting rate limits or switching tools."
+        note="Available now · the local workspace. Next · the quota-aware agent pool."
+        primaryCta={{ label: 'See what works today', href: '#available' }}
+        secondaryCta={{ label: 'What is next', href: '#next' }}
+      >
+        <div class={heroIllustration}>
+          <ShepherdWorkspace />
+        </div>
+      </Hero>
+    </HomepageSection>
+
+    <HomepageSection id="product" index={2} label="why shepherd">
+      <SectionHeading
+        eyebrow="The individual developer"
+        title="Stop being the scheduler between your agents"
+        description="Shepherd gives every task a real workspace and keeps the agents, terminals and review in the same window. You decide what ships; the app keeps the state."
+        align="left"
+      />
+
+      <div class={`${reasonsGrid} ${reasonGrid}`}>
+        {
+          reasonCards.map((reason) => {
+            const Icon = reasonIcons[reason.icon]
+            return (
+              <div class={item}>
+                <span class={glyph}>
+                  <Icon size={22} />
+                </span>
+                <h3 class={itemHeading}>{reason.title}</h3>
+                <p class={itemSubtitle}>Available now</p>
+                <p class={cardBody}>{reason.body}</p>
+              </div>
+            )
+          })
+        }
+      </div>
+    </HomepageSection>
+
+    <HomepageSection id="next" bare index={3} label="agent pool">
+      <FeatureSection
+        eyebrow="Next · agent pool"
+        title="Let the next healthy agent take the work"
+        description="Shepherd will keep a priority-ordered pool of installed agents, their provider or model, and their known quota. When the preferred slot is exhausted or cooling down, the next healthy one gets the task, and the task names the slot that ran and every slot it skipped. The pool is not in the current build; the workspace that will host it is."
+        href="#available"
+        linkLabel="See what runs today"
+      >
+        <IllustrationStage
+          fade="none"
+          tone="indigo"
+          note="Planned: the pool turns a set of installed agents into one capacity-aware queue. Unknown capacity is shown as unknown, never as free."
+        >
+          <AgentPool />
+        </IllustrationStage>
+      </FeatureSection>
+    </HomepageSection>
+
+    <HomepageSection id="preview" bare index={4} label="preview">
+      <FeatureSection
+        eyebrow="Available now · preview and annotation"
+        title="Point at the interface, not just the screenshot"
+        description="Open the project in Shepherd's inspector, choose the element that is wrong, and write the change. The annotation carries the page, selector, bounds and computed context into the agent's next prompt; pages that block injection fall back to screenshot coordinates."
+        href="#available"
+        linkLabel="See the current feature set"
+        reverse
+      >
+        <IllustrationStage fade="none" tone="violet" note="The annotation is a front-end change request, not a note in a side panel.">
+          <PreviewAnnotation />
+        </IllustrationStage>
+      </FeatureSection>
+    </HomepageSection>
+
+    <HomepageSection index={5} label="review loop">
+      <SectionHeading
+        eyebrow="One local workspace"
+        title="The loop stays visible from prompt to merge"
+        description="Parallel agents only help if their work stays reviewable. Shepherd keeps the branch, the diff, the approval and the terminal attached to the task that produced them."
+        align="left"
+      />
+
+      <div class={`${grid} ${cardGrid}`}>
+        {
+          reviewCards.map((entry) => {
+            const Icon = reviewIcons[entry.icon]
+            return (
+              <div class={card}>
+                <div class={cardTitle}>
+                  <span class={cardIcon}>
+                    <Icon size={18} />
+                  </span>
+                  <h3 class={itemHeading}>{entry.title}</h3>
+                  <Badge tone="success" variant="subtle" class={cardBadge}>available</Badge>
+                </div>
+                <p class={cardBody}>{entry.body}</p>
+              </div>
+            )
+          })
+        }
+      </div>
+    </HomepageSection>
+
+    <HomepageSection id="available" index={6} label="availability">
+      <SectionHeading
+        eyebrow="Availability"
+        title="What works today, and what is next"
+        description="No roadmap theater: this page separates the build in this repository from work that is still being designed. The labels are deliberately blunt."
+        align="left"
+      />
+
+      <div class={availabilityGrid}>
+        {
+          availability.map((group) => {
+            const Icon = availabilityIcons[group.tone]
+            return (
+              <section class={availabilityCard}>
+                <div class={cardHead}>
+                  <h3 class={itemHeading}>{group.heading}</h3>
+                  <Badge tone={group.tone} variant="subtle" class={cardBadge}>
+                    {group.badge}
+                  </Badge>
+                </div>
+                <p class={cardBody}>{group.summary}</p>
+                <ul class={availabilityList}>
+                  {group.items.map((entry) => (
+                    <li class={availabilityItem}>
+                      <span class={availabilityMark}>
+                        <Icon size={14} />
+                      </span>
+                      {entry}
+                    </li>
+                  ))}
+                </ul>
+              </section>
+            )
+          })
+        }
+      </div>
+
+      <p class={honestyNote}>
+        The agent pool, signed installers, download page and Windows support are not available yet. When this page and the app disagree, believe the app.
+      </p>
+    </HomepageSection>
+
+    <HomepageSection id="run" bare index={7} label="run it">
+      <CTASection
+        title="Bring your own agents. Keep the workspace local."
+        primaryCta={{ label: 'See what works today', href: '#available' }}
+        secondaryCta={{ label: 'Run from source', href: `${REPO_URL}/blob/main/apps/shepherd/README.md` }}
+      />
+    </HomepageSection>
+  </main>
+
+  <!-- Vertical blueprint rules: one fixed overlay so the lines run unbroken
+       from the header to the footer. -->
+  <div class={blueprintRules} aria-hidden="true"></div>
+
+  <DocsFooter blueprint />
+</Base>

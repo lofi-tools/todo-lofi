@@ -283,7 +283,7 @@ barely covers.
 
 ### 6.1 Route and layout
 
-- New page: `apps/docs-web/src/pages/roadmap.astro`.
+- New page: `apps/ts-docs-web/src/pages/roadmap.astro`.
 - Top-level, like `/downloads`: `Base` + `SiteHeader` + `DocsFooter`, with an
   `h1` page header in the `/downloads` style (eyebrow → `h1` → description).
 - **Linked from the site header nav**, next to `Docs` and `Download`
@@ -323,7 +323,7 @@ barely covers.
 
 ## 7. Data and content changes
 
-### 7.1 `apps/docs-web/data/landing.ts`
+### 7.1 `apps/ts-docs-web/data/landing.ts`
 
 - Add **two personal-flavoured rows** to `taskRows` so the one-list section
   demonstrates the positioning (e.g. a dog/household errand and a family
@@ -333,21 +333,21 @@ barely covers.
 - `agentThread`, `repeatRows`, `codingColumns`, and the automation records are
   unchanged unless a section needs a different excerpt (§11.4).
 
-### 7.2 `apps/docs-web/src/pages/docs/contributor/architecture.astro`
+### 7.2 `apps/ts-docs-web/src/pages/docs/contributor/architecture.astro`
 
 - Add a **"Tech stack"** section: GPUI, Rust, SQLite, MCP/ACP, and the web
   stack (Astro, Panda CSS, Ark UI) — what each is *for*, and where it lives.
   Absorbs the retired homepage `LogoCloud` (§3.4 #16, §3.6 #29).
 - Add the section to that page's `toc`.
 
-### 7.3 `apps/docs-web/data/docs.ts`
+### 7.3 `apps/ts-docs-web/data/docs.ts`
 
 - Re-export/keep `REPO_URL` as-is.
 - Update the module comment if it still claims every docs route is linked from
   the landing page's guide block.
 - Adjust the "Feature status" nav entry per §11.5.
 
-### 7.4 `apps/docs-web/README.md`
+### 7.4 `apps/ts-docs-web/README.md`
 
 - Route table: add `/roadmap`; rewrite the Landing row (no download section, no
   two-guide block); note `/docs/status` is a stub.
@@ -386,7 +386,7 @@ layout, prefer `FeatureSection` repeats over a new component.
 
 ---
 
-## 9. Tests (`apps/docs-web/tests/docs.spec.ts`)
+## 9. Tests (`apps/ts-docs-web/tests/docs.spec.ts`)
 
 Existing assertions that the change can break, and what to do:
 
@@ -420,9 +420,9 @@ assertions that can only exist to protect removed blocks.
 Verification commands:
 
 ```sh
-pnpm --dir apps/docs-web run typecheck
-pnpm --dir apps/docs-web run build          # must still succeed; expect one more page
-pnpm --dir apps/docs-web exec playwright test --workers=1
+pnpm --dir apps/ts-docs-web run typecheck
+pnpm --dir apps/ts-docs-web run build          # must still succeed; expect one more page
+pnpm --dir apps/ts-docs-web exec playwright test --workers=1
 ```
 
 ---

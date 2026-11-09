@@ -1,0 +1,161 @@
+---
+import { css } from 'styled-system/css'
+import { Badge } from 'web-design-system/components'
+import { Sparkles } from 'web-design-system/icons'
+import { dot, windowBar, windowSurface } from './styles'
+
+const root = css({ display: 'flex', flexDirection: 'column', gap: '0' })
+
+const window = css({
+  display: 'flex',
+  flexDirection: 'column',
+  borderRadius: 'lg',
+  borderWidth: 'hairline',
+  borderStyle: 'solid',
+  overflow: 'hidden',
+})
+
+const bar = `${windowBar} ${css({ gap: '1.5' })}`
+const url = css({
+  ml: '1.5',
+  px: '2',
+  py: '0.5',
+  borderRadius: 'xs',
+  borderWidth: 'hairline',
+  borderStyle: 'solid',
+  borderColor: 'border.subtle',
+  fontFamily: 'mono',
+  fontSize: '2xs',
+  color: 'fg.subtle',
+})
+
+const page = css({ display: 'flex', flexDirection: 'column', gap: '4', p: { base: '4', sm: '5' } })
+
+const siteNav = css({
+  display: 'flex',
+  alignItems: 'center',
+  justifyContent: 'space-between',
+  gap: '3',
+  pb: '3',
+  borderBottomWidth: 'hairline',
+  borderBottomStyle: 'solid',
+  borderBottomColor: 'border.subtle',
+})
+const wordmark = css({ fontSize: 'sm', fontWeight: 'semibold', color: 'fg.default' })
+const navLinks = css({ display: 'flex', gap: '3', fontFamily: 'mono', fontSize: '2xs', color: 'fg.subtle' })
+
+const hero = css({ display: 'flex', flexDirection: 'column', gap: '2', maxW: '28rem' })
+const kicker = css({ fontFamily: 'mono', fontSize: '2xs', letterSpacing: 'wide', textTransform: 'uppercase', color: 'accent.text' })
+const headline = css({ fontSize: 'xl', fontWeight: 'semibold', lineHeight: 'snug', color: 'fg.default' })
+const body = css({ fontSize: 'xs', color: 'fg.muted', lineHeight: 'relaxed' })
+
+const target = css({
+  position: 'relative',
+  alignSelf: 'flex-start',
+  px: '3',
+  py: '2',
+  borderRadius: 'sm',
+  bg: 'accent',
+  color: 'fg.onAccent',
+  fontSize: 'xs',
+  fontWeight: 'medium',
+})
+const marker = css({
+  position: 'absolute',
+  top: '-8px',
+  left: '-8px',
+  display: 'grid',
+  placeItems: 'center',
+  w: '4',
+  h: '4',
+  borderRadius: 'full',
+  bg: 'accent.text',
+  color: 'fg.onAccent',
+  fontSize: '2xs',
+  fontWeight: 'semibold',
+})
+
+const note = css({
+  display: 'flex',
+  flexDirection: 'column',
+  gap: '2.5',
+  p: '3',
+  borderRadius: 'md',
+  borderWidth: 'hairline',
+  borderStyle: 'solid',
+  borderColor: 'accent',
+  bg: 'accent.subtle',
+})
+const noteHead = css({ display: 'flex', alignItems: 'center', gap: '2', flexWrap: 'wrap' })
+const noteTitle = css({ fontSize: 'xs', fontWeight: 'semibold', color: 'fg.default' })
+const noteBody = css({ fontSize: 'xs', color: 'fg.muted', lineHeight: 'relaxed' })
+const fields = css({ display: 'flex', gap: '2', flexWrap: 'wrap' })
+const field = css({
+  px: '1.5',
+  py: '0.5',
+  borderRadius: 'xs',
+  borderWidth: 'hairline',
+  borderStyle: 'solid',
+  borderColor: 'border',
+  fontFamily: 'mono',
+  fontSize: '2xs',
+  color: 'fg.muted',
+})
+const add = css({
+  display: 'inline-flex',
+  alignItems: 'center',
+  gap: '1.5',
+  alignSelf: 'flex-start',
+  px: '2',
+  py: '1',
+  borderRadius: 'sm',
+  bg: 'accent',
+  color: 'fg.onAccent',
+  fontSize: '2xs',
+  fontWeight: 'medium',
+})
+---
+
+<div class={root} role="img" aria-label="A local preview with an annotated primary button. The annotation names the selector, viewport and note, and offers to add the change request to the agent prompt.">
+  <div class={`${window} ${windowSurface}`}>
+    <div class={bar}>
+      <span class={dot} />
+      <span class={dot} />
+      <span class={url}>localhost:4321</span>
+    </div>
+
+    <div class={page}>
+      <div class={siteNav}>
+        <span class={wordmark}>Northwind</span>
+        <span class={navLinks}>
+          <span>Product</span>
+          <span>Pricing</span>
+          <span>Docs</span>
+        </span>
+      </div>
+
+      <div class={hero}>
+        <span class={kicker}>Annotate in place</span>
+        <span class={headline}>Ship the interface you meant, not a description of it.</span>
+        <span class={body}>Select an element, write the change, and send it to the agent working in the same task.</span>
+        <span class={target}>
+          <span class={marker}>1</span>
+          Start free trial
+        </span>
+      </div>
+
+      <div class={note}>
+        <div class={noteHead}>
+          <Badge tone="accent" variant="subtle">annotation</Badge>
+          <span class={noteTitle}>Make this the primary action</span>
+        </div>
+        <span class={noteBody}>Use the accent fill and move it above the feature grid on small screens.</span>
+        <div class={fields}>
+          <span class={field}>button.primary</span>
+          <span class={field}>375 × 812</span>
+        </div>
+        <span class={add}><Sparkles size={12} /> Add to prompt</span>
+      </div>
+    </div>
+  </div>
+</div>

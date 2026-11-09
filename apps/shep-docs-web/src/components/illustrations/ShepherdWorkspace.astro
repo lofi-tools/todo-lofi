@@ -1,0 +1,271 @@
+---
+import { css } from 'styled-system/css'
+import { Badge } from 'web-design-system/components'
+import ChatThread from 'web-design-system/astro/product/ChatThread.astro'
+import { workspaceThread } from '../../../data/shepherd'
+import { dot, paneLabel, windowBar, windowSurface } from './styles'
+
+/**
+ * The current Shepherd workspace as a design-system replica: projects and
+ * tasks, a live agent turn, and the review inspector. It is an illustration,
+ * so its controls are spans rather than buttons.
+ */
+
+const root = css({ w: 'full', maxW: '1104px', mx: 'auto', minW: '0' })
+
+const window = css({
+  display: 'flex',
+  flexDirection: 'column',
+  borderRadius: 'lg',
+  borderWidth: 'hairline',
+  borderStyle: 'solid',
+  overflow: 'hidden',
+})
+
+const bar = `${windowBar} ${css({ gap: '1.5' })}`
+const barTitle = css({ ml: '1.5', fontFamily: 'mono', fontSize: '2xs', color: 'fg.muted' })
+const barStatus = css({ ml: 'auto', fontFamily: 'mono', fontSize: '2xs', color: 'success' })
+
+const body = css({
+  display: 'grid',
+  gridTemplateColumns: { base: 'minmax(0, 1fr)', md: '112px minmax(0, 1fr) 236px' },
+  minH: { base: '20rem', md: '24rem' },
+})
+
+const sidebar = css({
+  display: { base: 'none', md: 'flex' },
+  flexDirection: 'column',
+  gap: '1',
+  minW: '0',
+  p: '2',
+  borderRightWidth: 'hairline',
+  borderRightStyle: 'solid',
+  borderRightColor: 'border.subtle',
+})
+
+const projectRow = css({
+  display: 'flex',
+  alignItems: 'center',
+  gap: '1.5',
+  px: '1.5',
+  py: '1',
+  borderRadius: 'sm',
+  fontFamily: 'mono',
+  fontSize: '2xs',
+  color: 'fg.muted',
+  whiteSpace: 'nowrap',
+})
+
+const activeRow = css({ bg: 'surface.hover', color: 'fg.default' })
+
+const taskRow = css({
+  display: 'flex',
+  alignItems: 'center',
+  gap: '1.5',
+  px: '1.5',
+  py: '1',
+  borderRadius: 'sm',
+  fontSize: '2xs',
+  color: 'fg.muted',
+  lineHeight: 'snug',
+})
+
+const workingDot = css({ w: '1.5', h: '1.5', borderRadius: 'full', bg: 'accent', flexShrink: '0' })
+const reviewDot = css({ w: '1.5', h: '1.5', borderRadius: 'full', bg: 'warning', flexShrink: '0' })
+
+const chat = css({
+  display: 'flex',
+  flexDirection: 'column',
+  minW: '0',
+  borderRightWidth: { base: '0', md: 'hairline' },
+  borderRightStyle: 'solid',
+  borderRightColor: 'border.subtle',
+})
+
+const chatHead = css({
+  display: 'flex',
+  alignItems: 'center',
+  gap: '2',
+  flexWrap: 'wrap',
+  p: '3',
+  borderBottomWidth: 'hairline',
+  borderBottomStyle: 'solid',
+  borderBottomColor: 'border.subtle',
+})
+
+const chatTitle = css({ fontSize: 'sm', fontWeight: 'semibold', color: 'fg.default' })
+const chatMeta = css({ fontFamily: 'mono', fontSize: '2xs', color: 'fg.subtle' })
+
+const chatBody = css({ flex: '1', minH: '0', overflow: 'hidden', p: '3' })
+
+const composer = css({
+  m: '3',
+  mt: '0',
+  p: '2.5',
+  borderRadius: 'md',
+  borderWidth: 'hairline',
+  borderStyle: 'solid',
+  borderColor: 'border',
+  bg: 'canvas',
+  fontSize: '2xs',
+  color: 'fg.subtle',
+})
+
+const composerKey = css({ float: 'right', fontFamily: 'mono', color: 'fg.subtle' })
+
+const inspector = css({
+  display: { base: 'none', md: 'flex' },
+  flexDirection: 'column',
+  gap: '3',
+  minW: '0',
+  p: '3',
+})
+
+const tabs = css({ display: 'flex', alignItems: 'center', gap: '3', fontFamily: 'mono', fontSize: '2xs' })
+const tab = css({ color: 'fg.subtle', whiteSpace: 'nowrap' })
+const activeTab = css({ color: 'fg.default', borderBottomWidth: 'hairline', borderBottomStyle: 'solid', borderBottomColor: 'accent' })
+
+const branch = css({ fontFamily: 'mono', fontSize: '2xs', color: 'fg.muted', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' })
+
+const fileList = css({ display: 'flex', flexDirection: 'column', gap: '1' })
+const file = css({
+  display: 'flex',
+  alignItems: 'center',
+  justifyContent: 'space-between',
+  gap: '2',
+  px: '2',
+  py: '1.5',
+  borderRadius: 'sm',
+  borderWidth: 'hairline',
+  borderStyle: 'solid',
+  borderColor: 'border.subtle',
+  fontSize: '2xs',
+  color: 'fg.muted',
+})
+const fileStat = css({ fontFamily: 'mono', color: 'success', whiteSpace: 'nowrap' })
+
+const diff = css({
+  m: '0',
+  p: '2',
+  borderRadius: 'sm',
+  borderWidth: 'hairline',
+  borderStyle: 'solid',
+  borderColor: 'border.subtle',
+  bg: 'canvas',
+  fontFamily: 'mono',
+  fontSize: '2xs',
+  lineHeight: 'relaxed',
+  color: 'fg.muted',
+  overflow: 'hidden',
+})
+const added = css({ display: 'block', color: 'success' })
+const removed = css({ display: 'block', color: 'danger' })
+
+const approval = css({
+  display: 'flex',
+  flexDirection: 'column',
+  gap: '2',
+  p: '2.5',
+  borderRadius: 'md',
+  borderWidth: 'hairline',
+  borderStyle: 'solid',
+  borderColor: 'warning',
+  bg: 'warning.subtle',
+})
+const approvalTitle = css({ fontSize: '2xs', fontWeight: 'semibold', color: 'fg.default' })
+const approvalText = css({ fontSize: '2xs', color: 'fg.muted', lineHeight: 'relaxed' })
+const approvalActions = css({ display: 'flex', gap: '1.5', flexWrap: 'wrap' })
+const primaryAction = css({
+  px: '2',
+  py: '1',
+  borderRadius: 'sm',
+  bg: 'accent',
+  color: 'fg.onAccent',
+  fontSize: '2xs',
+  fontWeight: 'medium',
+})
+const quietAction = css({
+  px: '2',
+  py: '1',
+  borderRadius: 'sm',
+  borderWidth: 'hairline',
+  borderStyle: 'solid',
+  borderColor: 'border',
+  color: 'fg.default',
+  fontSize: '2xs',
+})
+---
+
+<div class={root} role="img" aria-label="Shepherd's workspace: projects and tasks on the left, an agent working on an OAuth task in the chat, and a review inspector showing the branch diff and an approval request.">
+  <div class={`${window} ${windowSurface}`}>
+    <div class={bar}>
+      <span class={dot} />
+      <span class={dot} />
+      <span class={barTitle}>shepherd · api</span>
+      <span class={barStatus}>2 running</span>
+    </div>
+
+    <div class={body}>
+      <aside class={sidebar}>
+        <span class={paneLabel}>projects</span>
+        <span class={`${projectRow} ${activeRow}`}>api</span>
+        <span class={projectRow}>website</span>
+        <span class={projectRow}>docs</span>
+        <span class={paneLabel} style={{ marginTop: '0.5rem' }}>tasks</span>
+        <span class={`${taskRow} ${activeRow}`}><span class={workingDot} />Add OAuth login</span>
+        <span class={taskRow}><span class={reviewDot} />Review empty state</span>
+        <span class={taskRow}>Map quota resets</span>
+      </aside>
+
+      <div class={chat}>
+        <div class={chatHead}>
+          <span class={chatTitle}>Add OAuth login</span>
+          <Badge tone="accent" variant="subtle">working</Badge>
+          <span class={chatMeta}>Codex · terra</span>
+        </div>
+        <div class={chatBody}>
+          <ChatThread messages={workspaceThread} bare alternate />
+        </div>
+        <span class={composer}>
+          Queue a follow-up while this turn runs…
+          <span class={composerKey}>⌘↵</span>
+        </span>
+      </div>
+
+      <aside class={inspector}>
+        <div class={tabs}>
+          <span class={activeTab}>Review</span>
+          <span class={tab}>Terminals</span>
+          <span class={tab}>Preview</span>
+        </div>
+        <span class={branch}>feature/42-add-oauth</span>
+
+        <div class={fileList}>
+          <span class={file}>
+            <span>auth/oauth.ts</span>
+            <span class={fileStat}>+38 −4</span>
+          </span>
+          <span class={file}>
+            <span>auth/oauth.test.ts</span>
+            <span class={fileStat}>+22</span>
+          </span>
+        </div>
+
+        <code class={diff}>
+          <span class={removed}>- const callback = '/auth'</span>
+          <span class={added}>+ const callback = '/auth/callback'</span>
+          <span class={added}>+ verifyState(request)</span>
+        </code>
+
+        <div class={approval}>
+          <span class={approvalTitle}>Approval requested</span>
+          <span class={approvalText}>Run the callback test in the task worktree?</span>
+          <span class={approvalActions}>
+            <span class={primaryAction}>Allow once</span>
+            <span class={quietAction}>Allow for session</span>
+          </span>
+        </div>
+      </aside>
+    </div>
+  </div>
+</div>

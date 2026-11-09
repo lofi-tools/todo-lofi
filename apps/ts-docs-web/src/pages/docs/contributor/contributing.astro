@@ -103,14 +103,14 @@ const checks = [
 
   <h2 id="web-conventions">Web conventions</h2>
   <p>
-    Everything under <code>libs/web-design-system</code>, <code>demos/design-system-showcase</code>, and
-    <code>apps/docs-web</code> follows <code>DESIGN.md</code>:
+    Everything under <code>libs/web-design-system</code>, <code>demos/design-system-showcase</code>,
+    <code>apps/ts-docs-web</code>, and <code>apps/shep-docs-web</code> follows <code>DESIGN.md</code>:
   </p>
   <ul>
     <li>Components consume semantic tokens (<code>accent.text</code>, <code>surface.subtle</code>, <code>fg.muted</code>), never raw palette values, so a theme stays a token swap.</li>
     <li>One component per file, PascalCase, with props extended from the underlying DOM props and split with <code>splitProps</code>.</li>
     <li>Hydration is opt-in and documented per wrapper: <code>client:only="solid"</code> for Ark-based overlays, <code>client:visible</code> for simple stateful wrappers, pure <code>.astro</code> for static sections.</li>
-    <li>Keep <code>hash</code>, <code>separator</code>, and <code>prefix</code> identical across all three <code>panda.config.ts</code> files, and make each app's <code>include</code> globs cover the design system's source.</li>
+    <li>Keep <code>hash</code>, <code>separator</code>, and <code>prefix</code> identical across all four <code>panda.config.ts</code> files, and make each app's <code>include</code> globs cover the design system's source.</li>
     <li>WCAG 2.1 AA is the floor: visible focus, labeled icon-only controls, keyboard-focusable scroll regions, and motion that collapses under <code>prefers-reduced-motion</code>.</li>
   </ul>
 

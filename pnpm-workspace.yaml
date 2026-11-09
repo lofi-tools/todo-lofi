@@ -1,7 +1,8 @@
 packages:
   - libs/web-design-system
   - demos/design-system-showcase
-  - apps/docs-web
+  - apps/ts-docs-web
+  - apps/shep-docs-web
   - apps/taskstream-web
   - apps/shepherd
   - apps/shepherd/ui

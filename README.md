@@ -59,12 +59,14 @@ these checkouts by name.
 #### Testing
 - `ccheck` — cargo check all workspace packages (taskstream-desktop, storage, report_proc, agent-cli)
 - `testdbg` — run storage tests with debug logging (`cargo test -p storage -- --nocapture --show-output`)
-#### Docs website
-- `pnpm dev` — run the documentation site (`apps/docs-web`) with auto-rebuilds
-- `pnpm build:docs` — Panda codegen + static build of the docs site
-- `pnpm test:e2e:docs` — Playwright smoke, theming, layout, and WCAG 2.1 AA checks for the docs site
-- `web` — install the JS workspace, stop any dev server a previous session left running, then start the docs site
-- `dev-stop` — stop the dev and preview servers the web packages left running (`astro dev stop` / `astro preview stop`, in `apps/docs-web` and the showcase)
+#### Documentation websites
+- `pnpm dev` — run both docs sites: Taskstream on `4321` and Shepherd on `4323`, after codegen
+- `pnpm dev:docs` — run only the Taskstream docs (`apps/ts-docs-web`)
+- `pnpm dev:shep-docs` — run only the Shepherd docs (`apps/shep-docs-web`)
+- `pnpm build:docs` / `pnpm build:shep-docs` — Panda codegen + static build of either site
+- `pnpm test:e2e:docs` / `pnpm test:e2e:shep-docs` — Playwright smoke, theming, layout, and WCAG 2.1 AA checks for either site
+- `web` — install the JS workspace, stop any dev server a previous session left running, then start both docs sites
+- `dev-stop` — stop the dev and preview servers the web packages left running (`astro dev stop` / `astro preview stop`, in `apps/ts-docs-web`, `apps/shep-docs-web`, and the showcase)
 - `astro <args>` — the workspace's pinned Astro CLI, e.g. `astro dev status` or `astro check`
 
 Astro refuses to start a second dev server for the same project, and the e2e
@@ -72,9 +74,9 @@ suites reuse a preview server that is already listening — so reach for `dev-st
 (or `web`) instead of killing the process by hand, or a test run will quietly
 exercise the previous build.
 
-See `apps/docs-web/README.md`.
+See `apps/ts-docs-web/README.md` and `apps/shep-docs-web/README.md`.
 #### Web design system
-- `pnpm install` — install the pnpm workspace (`libs/web-design-system`, `demos/design-system-showcase`, `apps/docs-web`)
+- `pnpm install` — install the pnpm workspace (`libs/web-design-system`, `demos/design-system-showcase`, `apps/ts-docs-web`, `apps/shep-docs-web`)
 - `pnpm dev:ds` — run the design-system showcase with auto-rebuilds
 - `pnpm build` — Panda codegen + static build of the showcase
 - `pnpm typecheck` / `pnpm test` — typecheck all JS packages / run the Vitest suite
@@ -82,7 +84,7 @@ See `apps/docs-web/README.md`.
 
 See `docs/spec/web-design-system-spec.md` and `libs/web-design-system/DESIGN.md`.
 
-The documentation site consumes the same preset and docs components; the
+The documentation sites consume the same preset and docs components; the
 showcase is where the components themselves are documented.
 #### Contributions
 - `mig <args>` — run a storage migration (`cargo run --bin migrate -- migration ...`)
@@ -95,7 +97,8 @@ taskstream/
 ├── apps/
 │   ├── taskstream-desktop/        # Desktop GPUI application
 │   ├── agent-cli/     # Terminal AI agent + ACP server
-│   └── docs-web/      # Documentation website (Astro + web design system)
+│   ├── ts-docs-web/   # Taskstream documentation website (Astro + web design system)
+│   └── shep-docs-web/ # Shepherd documentation website (Astro + web design system)
 
 ├── libs/
 │   ├── storage/          # SQLite-backed persistence layer
@@ -113,16 +116,19 @@ taskstream/
 
 ## Contributing
 
-### Docs website: `apps/docs-web`
+### Documentation websites
 
-What the app does, how to run it, how the workspace is put together, and the
-integrations it talks to — built with the in-repo web design system. Run it with
-`pnpm dev`: `/` is the landing page, and every page of documentation lives under
-`/docs`, split into a user guide (`/docs`) and a contributor guide
-(`/docs/contributor`). Read the
+`apps/ts-docs-web` is the Taskstream site: what the app does, how to run it, how
+the workspace is put together, and the integrations it talks to. `/` is the
+landing page, and every page of documentation lives under `/docs`, split into a
+user guide (`/docs`) and a contributor guide (`/docs/contributor`). Read the
 [documentation online](https://get-taskstream.netlify.app/docs). The
 [deepwiki mirror](https://deepwiki.com/lofi-tools/taskstream) remains available as
 a temporary fallback.
+
+`apps/shep-docs-web` is Shepherd's separate landing site. Both are built with the
+in-repo web design system. `pnpm dev` runs both; use `pnpm dev:docs` or
+`pnpm dev:shep-docs` for one at a time.
 
 Contributions welcome. Please open an issue first to discuss any non-trivial change.
 

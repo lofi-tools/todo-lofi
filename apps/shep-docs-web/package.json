@@ -1,16 +1,16 @@
 {
-  "name": "docs-web",
+  "name": "shep-docs-web",
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "The taskstream documentation website, built with the web design system.",
+  "description": "Shepherd's documentation website, built with the web design system.",
   "scripts": {
     "codegen": "pnpm --filter web-design-system run codegen && panda codegen && panda cssgen --outfile styled-system/styles.css",
     "predev": "pnpm run codegen",
     "dev": "astro dev",
     "prebuild": "pnpm run codegen",
     "build": "astro build",
-    "preview": "astro preview",
+    "preview": "astro preview --port 4324",
     "typecheck": "pnpm run codegen && astro check",
     "test:e2e": "playwright test"
   },

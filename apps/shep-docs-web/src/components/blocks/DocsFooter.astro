@@ -1,0 +1,156 @@
+---
+import { css } from 'styled-system/css'
+import { REPO_URL } from '../../../data/shepherd'
+
+interface Props {
+  /** Align the footer to the homepage blueprint's content column. */
+  blueprint?: boolean
+}
+
+const { blueprint = false } = Astro.props
+
+const columns = [
+  {
+    heading: 'Product',
+    links: [
+      { label: 'What works today', href: '/#available' },
+      { label: 'What is next', href: '/#next' },
+      { label: 'Preview and annotation', href: '/#preview' },
+    ],
+  },
+  {
+    heading: 'Project',
+    links: [
+      { label: 'Source', href: REPO_URL },
+      { label: 'Issues', href: `${REPO_URL}/issues` },
+      { label: 'Specs', href: `${REPO_URL}/tree/main/apps/shepherd/docs/spec` },
+      { label: 'AGPL-3.0 license', href: `${REPO_URL}/blob/main/LICENSE` },
+    ],
+  },
+]
+
+const footerGrid = { base: '1fr', sm: 'repeat(2, 1fr)', md: '2fr repeat(2, 1fr)' }
+
+const headingStyle = css({
+  fontSize: '2xs',
+  fontWeight: 'semibold',
+  letterSpacing: 'wider',
+  textTransform: 'uppercase',
+  color: 'fg.subtle',
+  mb: '3',
+})
+
+const linkStyle = css({
+  display: 'inline-flex',
+  py: '1',
+  fontSize: 'sm',
+  color: 'fg.muted',
+  transitionProperty: 'color',
+  transitionDuration: 'fast',
+  _hover: { color: 'fg.default' },
+  _focusVisible: { outline: 'none', boxShadow: 'focus' },
+})
+
+// The sub-footer rule sits on a full-width wrapper so it spans the page like
+// the section dividers, instead of stopping at the content column.
+const subFooterRule = css({
+  w: '100%',
+  borderTopWidth: 'hairline',
+  // The other sides default to `medium` (3px) once the style is set.
+  borderBottomWidth: '0',
+  borderStyle: 'solid',
+  borderColor: 'border.subtle',
+})
+
+const subFooterInner = css({
+  display: 'flex',
+  flexWrap: 'wrap',
+  alignItems: 'center',
+  justifyContent: 'space-between',
+  gap: '3',
+  w: '100%',
+  maxW: blueprint ? '1104px' : '1280px',
+  mx: 'auto',
+  px: { base: '5', md: '8' },
+  py: '5',
+  fontSize: 'xs',
+  color: 'fg.subtle',
+})
+---
+
+<footer
+  class={css({
+    borderTopWidth: 'hairline',
+    // The other sides default to `medium` (3px) once the style is set.
+    borderBottomWidth: '0',
+    borderStyle: 'solid',
+    borderColor: 'border.subtle',
+    // The homepage blueprint ends on the last section's edge, so the footer's
+    // own top margin would leave a bare band that breaks the CTA gradient.
+    mt: blueprint ? '0' : '20',
+  })}
+>
+  <div
+    class={css({
+      display: 'grid',
+      gridTemplateColumns: footerGrid,
+      gap: '10',
+      w: '100%',
+      maxW: blueprint ? '1104px' : '1280px',
+      mx: 'auto',
+      px: { base: '5', md: '8' },
+      py: '12',
+    })}
+  >
+    <div>
+      <div class={css({ display: 'inline-flex', alignItems: 'center', gap: '2', fontWeight: 'semibold', color: 'fg.default', mb: '3' })}>
+        <img
+          src="/shepherd-logo.svg"
+          alt=""
+          width="20"
+          height="20"
+          class={css({
+            borderRadius: 'xs',
+            boxShadow: '0 0 0 0.25px rgba(255, 255, 255, 0.65)',
+            _light: { boxShadow: '0 0 0 0.25px rgba(0, 0, 0, 0.35)' },
+          })}
+        />
+        <span>Shepherd</span>
+      </div>
+      <p class={css({ fontSize: 'sm', color: 'fg.subtle', maxW: '280px', lineHeight: 'relaxed' })}>
+        A local-first workspace for several coding agents, their worktrees, terminals and reviews.
+      </p>
+    </div>
+
+    {
+      columns.map((column) => (
+        <div>
+          <h2 class={headingStyle}>{column.heading}</h2>
+          <ul class={css({ listStyle: 'none', m: '0', p: '0', display: 'flex', flexDirection: 'column' })}>
+            {column.links.map((link) => (
+              <li>
+                <a
+                  class={linkStyle}
+                  href={link.href}
+                  target={link.href.startsWith('http') ? '_blank' : undefined}
+                  rel={link.href.startsWith('http') ? 'noreferrer' : undefined}
+                >
+                  {link.label}
+                </a>
+              </li>
+            ))}
+          </ul>
+        </div>
+      ))
+    }
+  </div>
+
+  <div class={subFooterRule}>
+    <div class={subFooterInner}>
+      <span>© 2026 Shepherd contributors. Licensed AGPL-3.0.</span>
+      <span>
+        This site is built with <code class={css({ fontFamily: 'mono', fontSize: 'xs' })}>libs/web-design-system</code>.
+      </span>
+    </div>
+  </div>
+</footer>

@@ -4,13 +4,14 @@ resolver = "2"
 package = { version = "0.1.0", edition = "2024" }
 metadata.crane.name = "my-workspace"
 members = ["apps/*", "apps/shepherd/src-tauri", "libs/*", "demos/*"]
-# The web design system, its showcase, and the docs website are pnpm/Astro
+# The web design system, its showcase, and the two docs websites are pnpm/Astro
 # packages. Excluded explicitly so `cargo check --workspace` never
 # walks their trees.
 exclude = [
     "libs/web-design-system",
     "demos/design-system-showcase",
-    "apps/docs-web",
+    "apps/ts-docs-web",
+    "apps/shep-docs-web",
     "apps/taskstream-web",
     # The Shepherd shell crate lives in apps/shepherd/src-tauri, which is listed
     # as its own member below; the app directory itself is not a Cargo package.

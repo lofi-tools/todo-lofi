@@ -233,7 +233,7 @@
             # which is a different tool (uber/astro) entirely. Used for
             # `astro dev stop|status|logs`, `astro check`, and so on.
             astro = with bash; ''set -e
-              for dir in "$PWD" "${wd}/apps/docs-web" "${wd}/demos/design-system-showcase"; do
+              for dir in "$PWD" "${wd}/apps/ts-docs-web" "${wd}/apps/shep-docs-web" "${wd}/demos/design-system-showcase"; do
                 bin="$dir/node_modules/.bin/astro"
                 if [ -x "$bin" ]; then exec "$bin" "$@"; fi
               done
@@ -247,7 +247,7 @@
             # A stale preview server is the nastier case: the Playwright suites
             # reuse it and quietly test the previous build.
             dev-stop = with bash; ''set -e
-              for dir in apps/docs-web demos/design-system-showcase; do
+              for dir in apps/ts-docs-web apps/shep-docs-web demos/design-system-showcase; do
                 [ -d "${wd}/$dir" ] || continue
                 for cmd in dev preview; do
                   (cd "${wd}/$dir" && astro "$cmd" stop) || true
@@ -255,8 +255,8 @@
               done
             '';
 
-            # Docs site by default (`pnpm dev`); the design-system showcase is
-            # `pnpm dev:ds`.
+            # Both docs sites by default (`pnpm dev`); the design-system
+            # showcase is `pnpm dev:ds`.
             web = ''set -e; pnpm install; dev-stop; pnpm dev'';
 
             # Taskstream web app (`pnpm dev:web` -> Vite in apps/taskstream-web).
@@ -348,7 +348,8 @@
             # nixpkgs' version.
             managePackageManagerVersions = true;
             apps = {
-              docs-web = { dir = "apps/docs-web"; port = 4321; };
+              ts-docs-web = { dir = "apps/ts-docs-web"; port = 4321; };
+              shep-docs-web = { dir = "apps/shep-docs-web"; port = 4323; };
               showcase = { dir = "demos/design-system-showcase"; port = 4321; };
               taskstream-web = { dir = "apps/taskstream-web"; port = 5180; };
               shepherd = { dir = "apps/shepherd"; port = 1420; };

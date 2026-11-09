@@ -1,7 +1,9 @@
-# docs-web
+# ts-docs-web
 
-The documentation website for taskstream: what the app does, how to run it, how the
+The Taskstream documentation website: what the app does, how to run it, how the
 workspace is put together, and what contributing looks like.
+
+Shepherd's separate landing site lives in `apps/shep-docs-web`.
 
 It is a plain Astro site built with the repository's own design system
 (`libs/web-design-system`) — the same Panda preset, tokens, marketing docs
@@ -62,7 +64,8 @@ From the repository root:
 
 ```sh
 pnpm install
-pnpm dev           # astro dev, regenerates Panda CSS first
+pnpm dev:docs      # this site on http://localhost:4321
+pnpm dev           # both docs sites (Taskstream on 4321, Shepherd on 4323)
 pnpm build:docs    # codegen + static build
 pnpm preview:docs  # serve the built site
 pnpm typecheck     # includes this package
@@ -79,7 +82,8 @@ pnpm test:e2e   # Playwright smoke, theming, layout, and axe AA checks
 ```
 
 The e2e suite expects the locally installed Chrome and starts its own preview
-server on port 4322 (the showcase suite uses 4321, so both can run at once).
+server on port 4322 (the showcase uses 4321 and Shepherd docs use 4324, so all
+can run at once).
 
 ## Downloads
 

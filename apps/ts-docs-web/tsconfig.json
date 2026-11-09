@@ -1,0 +1,22 @@
+{
+  "extends": "astro/tsconfigs/strict",
+  "compilerOptions": {
+    "jsx": "preserve",
+    "jsxImportSource": "solid-js",
+    "baseUrl": ".",
+    "paths": {
+      "styled-system/*": ["./styled-system/*"]
+    },
+    "types": ["astro/client"]
+  },
+  "include": [
+    ".astro/types.d.ts",
+    "src",
+    "data",
+    "tests",
+    "styled-system",
+    "panda.config.ts",
+    "playwright.config.ts"
+  ],
+  "exclude": ["dist"]
+}

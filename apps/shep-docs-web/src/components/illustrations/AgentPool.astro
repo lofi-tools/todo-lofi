@@ -1,0 +1,106 @@
+---
+import { css } from 'styled-system/css'
+import { Badge } from 'web-design-system/components'
+import { windowBar, windowSurface } from './styles'
+
+const root = css({ display: 'flex', flexDirection: 'column', gap: '3' })
+
+const window = css({
+  display: 'flex',
+  flexDirection: 'column',
+  borderRadius: 'lg',
+  borderWidth: 'hairline',
+  borderStyle: 'solid',
+  overflow: 'hidden',
+})
+
+const bar = `${windowBar} ${css({ justifyContent: 'space-between' })}`
+const barTitle = css({ ml: '1.5', fontFamily: 'mono', fontSize: '2xs', color: 'fg.muted' })
+
+const rows = css({ display: 'flex', flexDirection: 'column' })
+const row = css({
+  display: 'grid',
+  gridTemplateColumns: 'auto minmax(0, 1fr) auto',
+  alignItems: 'center',
+  gap: '3',
+  px: { base: '3', sm: '4' },
+  py: '3',
+  borderBottomWidth: 'hairline',
+  borderBottomStyle: 'solid',
+  borderBottomColor: 'border.subtle',
+  _last: { borderBottomWidth: '0' },
+})
+const priority = css({ fontFamily: 'mono', fontSize: '2xs', color: 'fg.subtle' })
+const stack = css({ display: 'flex', flexDirection: 'column', gap: '0.5', minW: '0' })
+const name = css({ fontSize: 'sm', fontWeight: 'medium', color: 'fg.default' })
+const meta = css({ fontFamily: 'mono', fontSize: '2xs', color: 'fg.subtle' })
+
+const footer = css({
+  display: 'flex',
+  flexDirection: { base: 'column', sm: 'row' },
+  alignItems: { base: 'flex-start', sm: 'center' },
+  justifyContent: 'space-between',
+  gap: '2',
+  p: '3',
+  borderTopWidth: 'hairline',
+  borderTopStyle: 'solid',
+  borderTopColor: 'border.subtle',
+  fontFamily: 'mono',
+  fontSize: '2xs',
+  color: 'fg.muted',
+})
+
+const skipped = css({ color: 'warning' })
+---
+
+<div class={root} role="img" aria-label="A planned Shepherd agent pool. Four slots are ordered by priority: a ready Codex slot, an OpenCode slot in use, a Claude Code slot cooling down, and a custom ACP slot with unknown capacity. The selector tries the preferred healthy slot and names every skipped slot.">
+  <div class={`${window} ${windowSurface}`}>
+    <div class={bar}>
+      <span class={barTitle}>agent pool</span>
+      <Badge tone="accent" variant="subtle">next</Badge>
+    </div>
+
+    <div class={rows}>
+      <div class={row}>
+        <span class={priority}>01</span>
+        <span class={stack}>
+          <span class={name}>Codex · GPT-6.1 Terra</span>
+          <span class={meta}>primary account · 2h 10m left</span>
+        </span>
+        <Badge tone="success" variant="subtle">ready</Badge>
+      </div>
+
+      <div class={row}>
+        <span class={priority}>02</span>
+        <span class={stack}>
+          <span class={name}>OpenCode · local model</span>
+          <span class={meta}>working on “Add OAuth login”</span>
+        </span>
+        <Badge tone="accent" variant="subtle">in use</Badge>
+      </div>
+
+      <div class={row}>
+        <span class={priority}>03</span>
+        <span class={stack}>
+          <span class={name}>Claude Code · ACP</span>
+          <span class={meta}>limit reached · resets 14:30</span>
+        </span>
+        <Badge tone="warning" variant="subtle">cooling down</Badge>
+      </div>
+
+      <div class={row}>
+        <span class={priority}>04</span>
+        <span class={stack}>
+          <span class={name}>Custom ACP · staging</span>
+          <span class={meta}>capacity unknown</span>
+        </span>
+        <Badge tone="neutral" variant="outline">unknown</Badge>
+      </div>
+    </div>
+
+    <div class={footer}>
+      <span>preferred healthy slot → next available</span>
+      <span class={skipped}>03 skipped · reset window</span>
+    </div>
+  </div>
+</div>

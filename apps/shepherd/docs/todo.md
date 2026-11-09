@@ -2276,12 +2276,32 @@ own acceptance evidence exists.
 
 ### Shepherd site and documentation
 
-- [ ] Build Shepherd's landing page at `/` on the existing Astro design system.
+- [x] Build Shepherd's landing page at `/` on the existing Astro design system.
   Lead with the individual-developer promise: use several coding agents without
   babysitting rate limits or switching tools. Support it with the agent pool,
   one local workspace, preview/annotation, worktrees, approvals and terminals.
   Do not lead with the tech stack. The page must state what is available now
   versus planned, and must not name the internal reference projects.
+  Evidence: `/` is a complete Shepherd landing page in `apps/shep-docs-web`, a
+  separate Astro/Panda package from the Taskstream docs in `apps/ts-docs-web`.
+  It is built from `libs/web-design-system` marketing blocks, tokens and the
+  existing blueprint layout, with design-system workspace, agent-pool and
+  preview illustrations. The Shepherd package has a Shepherd-only shell and
+  section anchors; `/docs`, `/downloads` and `/roadmap` remain in the Taskstream
+  package. The `Shepherd landing page` Playwright tests
+  (`renders the promise and marks available versus planned work`, `the hero CTA
+  and header links move between availability sections`, `the mobile drawer
+  exposes the same section links`, `the source CTA and in-page anchors resolve`)
+  assert the hero promise, agent-pool/workspace/preview/worktree/approval/
+  terminal claims, the Available now / Next / Planned split, the absence of
+  Taskstream copy and internal reference-project names, CTA and header anchors,
+  the mobile drawer and the source link. The Shepherd suite passed 7 tests and
+  the Taskstream suite passed 36 tests, including axe WCAG 2.1 AA and
+  375/768/1440 px overflow checks for `/`. `pnpm --dir apps/shep-docs-web run
+  typecheck`, `pnpm --dir apps/ts-docs-web run typecheck`, both static builds,
+  `pnpm --dir apps/shepherd/ui typecheck`, the two focused Shepherd preview
+  tests, `cargo fmt --check`, both clippy runs, and `cargo test -p
+  shepherd-core --lib` (178 passed, 4 ignored) also passed.
 - [ ] Split documentation by audience under `/docs/users` and
   `/docs/contributors`.
   User pages cover installation, configuration, the mental model, preview and

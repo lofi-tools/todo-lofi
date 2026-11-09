@@ -150,7 +150,7 @@ export function pageSourceUrl(pathname: string): string {
   // A guide's landing page is the index of its directory.
   const isLanding = docGuides.some((guide) => guide.href === current)
   const file = isLanding ? `${current}/index` : current
-  return `${REPO_URL}/blob/main/apps/docs-web/src/pages${file}.astro`
+  return `${REPO_URL}/blob/main/apps/ts-docs-web/src/pages${file}.astro`
 }
 
 function currentPath(pathname: string): string {

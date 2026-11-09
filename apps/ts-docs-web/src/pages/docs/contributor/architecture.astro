@@ -29,7 +29,8 @@ const tree = `taskstream/
 │   └── ...                    # CRDT experiments (dson, op_crdt)
 ├── demos/
 │   └── design-system-showcase # component gallery + page replicas
-├── apps/docs-web/             # this documentation site
+├── apps/ts-docs-web/          # Taskstream documentation site
+├── apps/shep-docs-web/        # Shepherd documentation site
 ├── patched/                   # vendored upstream forks
 ├── docs/                      # specs, agent skills, images
 └── flake.nix                  # devShell: Rust, cargo-watch, Node, pnpm`
@@ -231,7 +232,7 @@ const specs = [
 
   <h2 id="web-surfaces">Web surfaces</h2>
   <p>
-    Two web apps share one design system, and none of them touch the Rust workspace:
+    The web packages share one design system, and none of them touch the Rust workspace:
   </p>
   <ul>
     <li>
@@ -243,8 +244,12 @@ const specs = [
       system is built from.
     </li>
     <li>
-      <code>apps/docs-web</code> — this site. It consumes the design system's preset and the marketing
+      <code>apps/ts-docs-web</code> — this site. It consumes the design system's preset and the marketing
       docs components rather than restyling them.
+    </li>
+    <li>
+      <code>apps/shep-docs-web</code> — Shepherd's landing site, with its own Astro, Panda and
+      Playwright setup against the same design system.
     </li>
   </ul>
   <p>
