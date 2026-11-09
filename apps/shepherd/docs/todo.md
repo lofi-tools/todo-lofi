@@ -22,12 +22,14 @@ that does not count as passing the S4 gate. Live adapter checks and the clean
 machine release checklist also remain open. Use the dated evidence in each
 slice rather than treating an older test count or platform result as current.
 
-The remaining unchecked entries are blocked: the release checklist and
+The pre-existing unchecked entries are blocked: the release checklist and
 packaged-artifact verification need clean macOS 13+ and Ubuntu 24.04 machines
 with installed agents, signing needs Developer ID and Authenticode credentials,
 and the scrape and snapshot refresh need approved sources, network access and a
 published catalog. The catalog/agent-pool parent is otherwise implemented; its
-only unchecked part is the deferred snapshot refresh.
+only unchecked part is the deferred snapshot refresh. The agent model picker
+and login-diagnostic items are actionable and do not depend on those
+prerequisites.
 
 ## Next feature
 
@@ -2178,8 +2180,10 @@ developer machine.
 
 These are product tasks after the v1 gates above. They do not start v2/GPUI work
 and do not weaken the v1 release gate. An entry is checked only when its own
-acceptance evidence exists; the remaining unchecked entries need clean machines,
-signing credentials, packaged artifacts or an approved scrape source.
+acceptance evidence exists. The pre-existing unchecked entries need clean
+machines, signing credentials, packaged artifacts or an approved scrape source;
+the agent model selection and login diagnostics section is actionable without
+those prerequisites.
 
 ### Shared preview annotation relay
 
@@ -2773,6 +2777,38 @@ implemented; no public deployment exists yet.
     `cargo test -p shepherd-core` passes 199 tests (4 ignored), clippy and fmt
     are clean, the app has 126 passing e2e tests, and the docs have 31 passing
     e2e tests. Task-start selection remains later work.
+
+### Agent model selection and login diagnostics
+
+- [ ] Implement the generic ACP model picker.
+  Read the `model` session config option returned by `session/new` and
+  `session/load`: its current value, display names and choices. Expose a model
+  capability only when that option exists, render the picker beside Send, and
+  apply a choice with `session/set_config_option` before the next prompt. Keep
+  the selection scoped to its task or session, show the negotiated default, and
+  refresh it after reconnect or resume. Hide the control when the agent
+  advertises no model option, and keep the selected value when a change is
+  rejected. Cover an agent with a model option, including OpenCode 2.0.14's
+  provider/model choices, an agent without one, a rejected change and a
+  session reload.
+- [ ] Implement the same model picker for OpenCode's native HTTP adapter.
+  Discover the server's models and default through its model endpoint, expose
+  them through the bridge, and send the selected provider/model with the next
+  prompt. A draft must accept a choice before the session exists; a live task
+  must keep its choice across turns and reconnects. Match the ACP picker's
+  labels, default handling and unavailable state, and hide the picker when the
+  server does not advertise models. Cover discovery, the selected model reaching
+  the prompt, a missing or unsupported endpoint, and selection isolation between
+  tasks.
+- [ ] Classify Turso login failures and show actionable detail.
+  When the app reports a Turso failure to log in, use the received error text to
+  say whether it is a Turso/database failure or a model-provider sign-in failure.
+  Name the provider and model only when the message identifies them; do not
+  guess from unrelated text. Keep the short explanation in the failure row and
+  put the full received message behind an expandable disclosure. Preserve the
+  existing redaction of launch environment values and credentials. Cover a
+  provider-specific message, a database-specific message, an ambiguous message,
+  and an expanded diagnostic.
 
 ---
 
