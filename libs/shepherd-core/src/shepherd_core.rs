@@ -22,7 +22,7 @@ pub mod terminal;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -188,6 +188,7 @@ pub struct Core {
     detached_transcripts: BTreeMap<TaskId, Transcript>,
     turn_baselines: BTreeMap<TaskId, TurnBaseline>,
     review_notes: BTreeMap<TaskId, QueuedReviewNote>,
+    queued_prompts: BTreeMap<TaskId, VecDeque<PromptInput>>,
     /// The newest durable session per task, kept across restarts so resume can
     /// ask the adapter for the thread the previous process opened.
     session_records: BTreeMap<TaskId, SessionRecord>,
@@ -303,6 +304,7 @@ impl Core {
             detached_transcripts: BTreeMap::new(),
             turn_baselines: BTreeMap::new(),
             review_notes: BTreeMap::new(),
+            queued_prompts: BTreeMap::new(),
             session_records: BTreeMap::new(),
             terminal_layouts: BTreeMap::new(),
             terminals: BTreeMap::new(),
@@ -1083,6 +1085,7 @@ impl Core {
             changed = true;
         }
         if self.shutdown == ShutdownState::Running {
+            changed |= self.drain_queued_prompts().await?;
             let ready_notes: Vec<TaskId> = self
                 .review_notes
                 .iter()
@@ -1716,6 +1719,7 @@ impl Core {
         self.session_records.remove(task_id);
         self.turn_baselines.remove(task_id);
         self.review_notes.remove(task_id);
+        self.queued_prompts.remove(task_id);
         self.terminals
             .retain(|id, _| !terminal_ids.contains(id.as_str()));
         if !terminal_ids.is_empty() {
@@ -1828,6 +1832,7 @@ impl Core {
         let mut task_ids = Vec::new();
         for task in archived {
             self.review_notes.remove(&task.id);
+            self.queued_prompts.remove(&task.id);
             projects.insert(task.project_id.clone());
             task_ids.push(task.id.clone());
             self.tasks.insert(task.id.clone(), task);
@@ -1869,6 +1874,41 @@ impl Core {
         outcome
     }
 
+    /// A live turn owns the session. Keep later prompts in per-task order until
+    /// the turn settles, then start exactly one new turn per pump.
+    async fn drain_queued_prompts(&mut self) -> Result<bool, CoreError> {
+        let mut changed = false;
+        while let Some((task_id, input)) = self.queued_prompts.iter().find_map(|(id, prompts)| {
+            let task = self.tasks.get(id)?;
+            if !matches!(task.state, TaskState::Ready | TaskState::Review) {
+                return None;
+            }
+            prompts.front().cloned().map(|input| (id.clone(), input))
+        }) {
+            if let Some(prompts) = self.queued_prompts.get_mut(&task_id) {
+                prompts.pop_front();
+                if prompts.is_empty() {
+                    self.queued_prompts.remove(&task_id);
+                }
+            }
+            match self.send_prompt(&task_id, input.clone()).await {
+                Ok(_) => changed = true,
+                Err(error) => {
+                    self.queued_prompts
+                        .entry(task_id.clone())
+                        .or_default()
+                        .push_front(input);
+                    self.emit(Event::Error {
+                        task_id: Some(task_id.to_string()),
+                        message: format!("Could not send a queued prompt: {error}"),
+                    });
+                    break;
+                }
+            }
+        }
+        Ok(changed)
+    }
+
     async fn send_review_note(
         &mut self,
         task_id: &TaskId,
@@ -1905,7 +1945,25 @@ impl Core {
             return Err(CoreError::CodexOptionsForOtherAgent);
         }
 
-        match self.task(task_id)?.state {
+        let state = self.task(task_id)?.state;
+        if state.is_live() {
+            if self
+                .sessions
+                .get(task_id)
+                .is_some_and(HarnessSession::is_cancelling)
+            {
+                return Err(CoreError::TaskNotReady {
+                    id: task_id.as_str().to_string(),
+                    state: state.as_str(),
+                });
+            }
+            self.queued_prompts
+                .entry(task_id.clone())
+                .or_default()
+                .push_back(input);
+            return Ok(CommandResult::TaskWorkspace(self.publish_task(task_id)?));
+        }
+        match state {
             TaskState::Draft => self.create_worktree(task_id).await?,
             TaskState::Ready | TaskState::Review => self.repair_worktree(task_id).await?,
             state => {
@@ -3279,9 +3337,9 @@ mod streaming {
         TaskState,
     };
 
-    struct LateHarnessFactory {
-        receiver: Mutex<Option<mpsc::UnboundedReceiver<HarnessEvent>>>,
-        prompts: mpsc::UnboundedSender<(Option<String>, PromptInput)>,
+    pub(crate) struct LateHarnessFactory {
+        pub(crate) receiver: Mutex<Option<mpsc::UnboundedReceiver<HarnessEvent>>>,
+        pub(crate) prompts: mpsc::UnboundedSender<(Option<String>, PromptInput)>,
     }
 
     impl HarnessFactory for LateHarnessFactory {
@@ -3858,12 +3916,14 @@ async fn pause_worktree_deletion_fixture(phase: &str, task_id: &TaskId) -> Resul
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
+    use std::sync::Mutex;
 
     use agent_harness::fake_harness::{FakeStep, FakeTurn};
     use agent_harness::{ApprovalId, Decision, Entry};
 
     use super::*;
     use crate::store::TursoStore;
+    use crate::streaming::LateHarnessFactory;
     use crate::test_support::{
         FakeHarnessFactory, TestCore, TestDatabase, TestDirectory, TestRepository,
     };
@@ -8346,6 +8406,80 @@ mod tests {
                 .capabilities
                 .is_some_and(|capabilities| capabilities.cancel && !capabilities.resume)
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn prompts_queue_in_order_until_the_live_turn_finishes()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let repository = TestRepository::new()?;
+        let database = TestDatabase::new()?;
+        let (sender, receiver) = mpsc::unbounded_channel();
+        let (prompts, mut sent) = mpsc::unbounded_channel();
+        let mut core = Core::with_services(
+            Box::new(TursoStore::open(&database.uri()).await?),
+            Box::new(LateHarnessFactory {
+                receiver: Mutex::new(Some(receiver)),
+                prompts,
+            }),
+        );
+        let project = add_project(&mut core, repository.path().to_path_buf()).await?;
+        let draft = workspace_of(
+            core.execute(Command::CreateDraft {
+                agent: Agent::Codex,
+                project_id: project,
+                title: "Queue prompts".to_string(),
+            })
+            .await?,
+        );
+        let task_id = TaskId::new(draft.task.id);
+
+        core.execute(Command::SendPrompt {
+            task_id: task_id.clone(),
+            input: PromptInput::text("First turn"),
+        })
+        .await?;
+        assert_eq!(sent.try_recv()?.1.text, "First turn");
+        let first_batch = "Preview annotations\n\nAnnotation 1\nInstruction: Increase contrast.";
+        let second_batch =
+            "Preview annotations\n\nAnnotation 1\nInstruction: Quiet the cancel action.";
+        for text in [first_batch, second_batch] {
+            let queued = workspace_of(
+                core.execute(Command::SendPrompt {
+                    task_id: task_id.clone(),
+                    input: PromptInput::text(text),
+                })
+                .await?,
+            );
+            assert_eq!(queued.task.state, TaskState::Working);
+            assert_eq!(summaries(&queued), ["you: First turn"]);
+        }
+        assert!(sent.try_recv().is_err());
+
+        sender.send(HarnessEvent::TurnFinished {
+            reason: TurnFinishReason::Completed,
+        })?;
+        assert!(core.pump().await?);
+        assert_eq!(sent.try_recv()?.1.text, first_batch);
+        assert_eq!(
+            core.task_workspace(&task_id)?.task.state,
+            TaskState::Working
+        );
+
+        sender.send(HarnessEvent::TurnFinished {
+            reason: TurnFinishReason::Completed,
+        })?;
+        assert!(core.pump().await?);
+        assert_eq!(sent.try_recv()?.1.text, second_batch);
+        assert_eq!(
+            summaries(&core.task_workspace(&task_id)?),
+            [
+                "you: First turn".to_string(),
+                format!("you: {first_batch}"),
+                format!("you: {second_batch}"),
+            ]
+        );
+        assert!(sent.try_recv().is_err());
         Ok(())
     }
 }

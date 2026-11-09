@@ -2223,7 +2223,7 @@ own acceptance evidence exists.
   screenshot flow asserts its visual fallback fields. The prompt names each
   instruction, preserves framing, treats annotations as independent changes and
   tells the agent to edit and verify.
-- [ ] Send annotation batches as explicit user messages, queued behind a busy
+- [x] Send annotation batches as explicit user messages, queued behind a busy
   turn.
   The user reviews the batch and presses Send. Allow an annotation with no note
   only when the framing message carries the instruction; otherwise require the
@@ -2233,6 +2233,14 @@ own acceptance evidence exists.
   text and start or resume the turn only after the user confirms. Tests cover
   idle send, busy queueing, cancellation, task switching, missing intent,
   duplicate submission, and a failed send that leaves the batch retryable.
+  Evidence: `prompts_queue_in_order_until_the_live_turn_finishes` sends two
+  annotation-shaped batches while the first turn is working, asserts neither
+  reaches the harness early, and delivers each exact batch as its own user
+  message after successive turn completions. The core queue is per task, drains
+  only `Ready` and `Review`, preserves order, and reinserts a batch whose send
+  fails; cancellation still rejects input. The composer and preview annotation
+  controls accept a live task, and the existing preview Playwright flow still
+  asserts the exact actionable annotation prompt and send.
 - [ ] Recover queued annotations and preview-server state after a reload.
   Persist pending batches with the project/task, do not resurrect a batch into a
   different task, and show a recoverable notice when the preview server or

@@ -638,6 +638,10 @@ export function App() {
     return state === 'draft' || state === 'ready' || canStartTask()
       || (!selectedTaskId() && firstDrafts.has(selectedProjectId() ?? ''))
   }
+  const canQueuePrompt = () => {
+    const state = workspace()?.task.state
+    return !!state && LIVE_STATES.includes(state)
+  }
   const emptyChatMessage = () => {
     if (!projectsLoaded()) return pending() ? 'Loading projects…' : 'Projects are unavailable.'
     const project = selectedProject()
@@ -647,7 +651,7 @@ export function App() {
     if (loadedTasksFor() !== project.id) return pending() ? 'Loading project tasks…' : 'Project tasks are unavailable.'
     return 'Choose a task from Projects or use Compose to start a new one.'
   }
-  const canAddPreviewNote = () => canCompose() && !pending() && !settingsOpen() && !freebuffProjectId()
+  const canAddPreviewNote = () => (canCompose() || canQueuePrompt()) && !pending() && !settingsOpen() && !freebuffProjectId()
   const canCancel = () => {
     const current = workspace()
     return !!current?.capabilities?.cancel && LIVE_STATES.includes(current.task.state)
@@ -679,7 +683,7 @@ export function App() {
   }
   const bindingsById = createMemo(() => new Map(commandRegistry()?.commands.map((binding) => [binding.id, binding])))
   const chordFor = (id: string) => bindingsById().get(id)?.chord ?? undefined
-  const canSend = () => canCompose() && !pending() && (!!prompt().trim() || !!promptFiles().length)
+  const canSend = () => (canCompose() || canQueuePrompt()) && !pending() && (!!prompt().trim() || !!promptFiles().length)
   const canUseGit = () => {
     const task = workspace()?.task
     return !!task?.worktreePath && task.state !== 'done' && !LIVE_STATES.includes(task.state)
@@ -1586,7 +1590,7 @@ export function App() {
     const files = promptFiles()
     const codex = currentAgent() === 'codex' ? codexOptions() : undefined
     const mode = pendingMode()
-    if (!projectId || (!text && !files.length) || !canCompose() || pending()) return
+    if (!projectId || (!text && !files.length) || (!canCompose() && !canQueuePrompt()) || pending()) return
     void run(async () => {
       const task = current?.task ?? (await firstDraft(projectId)).task
       const attachmentIds: string[] = []
@@ -2205,9 +2209,9 @@ export function App() {
               inputRef={(element) => { promptInput = element }}
               projectId={selectedProjectId()}
               taskId={workspace()?.task.worktreePath ? selectedTaskId() : null}
-              placeholder={canCompose() ? 'Send a prompt' : 'Select a draft or ready task'}
+              placeholder={canCompose() || canQueuePrompt() ? 'Send a prompt' : 'Select a draft or ready task'}
               value={prompt()}
-              disabled={!canCompose() || pending()}
+              disabled={pending() || (!canCompose() && !canQueuePrompt())}
               onInput={(text, composing) => {
                 if (composing) setPrompt(text)
                 else updatePrompt(text)
@@ -2216,7 +2220,7 @@ export function App() {
             />
             <div class="composer__actions">
               <ComposerPickers agent={currentAgent()} agentName={currentAgentName()} agents={agentOptions()} onAgentChange={chooseAgent}
-                showShellApprovals={showShellApprovals()} canAttach={canCompose() && !pending() && !!attachmentLimit()}
+                showShellApprovals={showShellApprovals()} canAttach={(canCompose() || canQueuePrompt()) && !pending() && !!attachmentLimit()}
                 onAttach={() => fileInput?.click()} />
               <div class="composer__send-actions">
                 <Show when={composerModes()}>
@@ -2237,7 +2241,7 @@ export function App() {
                   aria-keyshortcuts={chordFor('sendPrompt')}
                   title="Send"
                   onClick={sendPrompt}
-                  disabled={!canCompose() || pending() || (!prompt().trim() && !promptFiles().length)}
+                  disabled={!canSend()}
                 >
                   <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                     <path d="M3 4.5 21 12 3 19.5l3.6-7.5L3 4.5Z M6.6 12H14" />

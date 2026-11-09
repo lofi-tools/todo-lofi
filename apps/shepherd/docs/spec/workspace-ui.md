@@ -126,6 +126,9 @@ current layout and give future changes a point of comparison.
   its instruction and includes the page, selector or screenshot, excerpt,
   bounds, computed styles and any source metadata. It tells the agent to locate
   and edit the front end and verify the result rather than only describe a plan.
+  If the task is live, Send queues the block behind the current turn and the
+  core delivers it as a separate user message once the turn settles; it is
+  never injected into the active turn.
   If element selection is unavailable, show that status and offer a screenshot
   picker. **Screenshot note** also opens the picker directly. Choose an image
   captured in the browser and mark a point, then use the same note queue.
