@@ -244,3 +244,9 @@ macOS smoke only when the current change affects the behavior that check
 exercises or the user requests it. Keep test windows at the
 normal desktop level. The [Shepherd README](apps/shepherd/README.md) lists
 the flags for window, visibility and IME checks.
+
+<!-- my-nix:agents-fragment:start commit-messages -->
+## Commit messages
+
+Use the `commit-messages` skill to write commit messages: a `<short affected area>: <extremely terse description>` subject, with any needed rationale in the body.
+<!-- my-nix:agents-fragment:end commit-messages -->

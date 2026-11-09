@@ -17,6 +17,7 @@
       imports = lib.flatten [
         (attrValues inputs.my-nix.flakeModuleGroups.essentials)
         inputs.my-nix.flakeModules.rust
+        inputs.my-nix.flakeModules.web
         (inputs.my-nix.lib.findFlakePartFilesRec ./.)
       ];
       perSystem = { pkgs, config, lib, ... }:
@@ -336,6 +337,24 @@
           # });
           myDevShell.env = env;
           myDevShell.overrides.stdenv = pkgs.stdenvNoCC;
+          # The generic JS/TS operations (install, codegen, typecheck, build,
+          # dev, ports) come from my-nix's web module. The repo's own dev,
+          # dev:web, dev:ds and astro scripts keep their names and their
+          # project-specific ordering. Ports are pinned to the numbers the vite
+          # config, the tauri devUrl and the Playwright suites already use.
+          web = {
+            nodePackage = pkgs.nodejs_22;
+            # Keep the pnpm 11.25.0 pinned by package.json rather than taking
+            # nixpkgs' version.
+            managePackageManagerVersions = true;
+            apps = {
+              docs-web = { dir = "apps/docs-web"; port = 4321; };
+              showcase = { dir = "demos/design-system-showcase"; port = 4321; };
+              taskstream-web = { dir = "apps/taskstream-web"; port = 5180; };
+              shepherd = { dir = "apps/shepherd"; port = 1420; };
+              shepherd-ui = { dir = "apps/shepherd/ui"; port = 1435; };
+            };
+          };
           myDevShell.buildInputs = buildDeps ++ devDeps ++ (attrValues scripts);
           myDevShell.shellHooks = { };
           myDevShell.cleanups.icons.script = ''rm -f target/debug/taskstream.app/Contents/Resources/taskstream.icns'';
