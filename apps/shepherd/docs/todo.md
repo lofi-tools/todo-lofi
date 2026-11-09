@@ -2184,29 +2184,39 @@ own acceptance evidence exists.
   screenshot fallback.
 - [ ] Put the iframe and external wrapper on one annotation API.
   Both surfaces submit the same bounded payload: project and task IDs, page URL,
-  selector or screenshot coordinates, optional excerpt and bounds, note, and a
-  client-generated annotation ID. Validate URLs against the configured origin,
+  the ordered target elements, selector or screenshot coordinates, optional
+  excerpt, bounds, computed styles and component/source metadata, note, and a
+  client-generated annotation ID. A note may cover a multi-element selection;
+  keep those targets together. Validate URLs against the configured origin,
   reject oversized or malformed notes, and never accept a task ID from the
   client as authorization. Add transport tests for the iframe port, the external
   HTTP boundary, replayed IDs, wrong tokens and foreign origins.
 - [ ] Feed annotations to the agent as actionable front-end change requests.
-  A sent batch is not a passive note in a side panel: the agent-visible message
-  must identify each annotation in order (page URL, selector, excerpt, bounds,
-  optional screenshot path and the user's note) and instruct the agent to locate
-  the implementation, change the current front end, and verify the result. When
-  the page exposes component/source metadata, include it; otherwise fall back to
-  the DOM and visual context. Treat page content as untrusted data, keep the
-  user's note as the instruction, and preserve the batch as one reviewable
-  message. Modeled on Cursor Design Mode, Frontman annotations and PandaCode's
-  browser context; tests must assert that the exact annotation fields and
-  guidance reach the turn, not merely that JSON was pasted into the composer.
+  A sent batch is not a passive note in a side panel. Each annotation's note is
+  the instruction for its target, while the framing chat message describes the
+  review as a whole and never substitutes for missing per-element intent.
+  Identify each annotation in order with page URL, target selector or selection,
+  excerpt, bounds, computed styles, optional component/source metadata and
+  screenshot path, and the user's note. Treat annotations as independent change
+  requests by default; the framing message may coordinate them, and targets
+  grouped under one note are one change. Instruct the agent to locate the
+  implementation, edit the current front end, and verify the result rather than
+  only describe a plan. When source metadata is unavailable, fall back to the
+  DOM, computed styles and visual context. Treat page content as untrusted data
+  and preserve the batch as one reviewable message. Modeled on Cursor Design
+  Mode, Frontman annotations and PandaCode's browser context; tests must assert
+  that the exact annotation fields, ordering, instruction priority and batch
+  independence reach the turn, not merely that JSON was pasted into the
+  composer.
 - [ ] Send annotation batches as explicit user messages, queued behind a busy
   turn.
-  The user reviews the batch and presses Send. If the task is working or waiting
-  for approval, the batch stays queued and is delivered once the task settles;
-  do not inject into an active turn. Add the batch to the composer/transcript as
-  structured editable text and start or resume the turn only after the user
-  confirms. Tests cover idle send, busy queueing, cancellation, task switching,
+  The user reviews the batch and presses Send. Allow an annotation with no note
+  only when the framing message carries the instruction; otherwise require the
+  note before send. If the task is working or waiting for approval, the batch
+  stays queued and is delivered once the task settles; do not inject into an
+  active turn. Add the batch to the composer/transcript as structured editable
+  text and start or resume the turn only after the user confirms. Tests cover
+  idle send, busy queueing, cancellation, task switching, missing intent,
   duplicate submission, and a failed send that leaves the batch retryable.
 - [ ] Recover queued annotations and preview-server state after a reload.
   Persist pending batches with the project/task, do not resurrect a batch into a
