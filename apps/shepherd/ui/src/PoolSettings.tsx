@@ -79,7 +79,7 @@ function windowSummary(windows: PoolResetWindow[]) {
         : window.limit != null
           ? `${window.limit} ${window.limitUnit ?? 'units'} limit; usage unknown`
           : 'usage unknown'
-      const reset = window.resetAt == null ? 'reset unknown until the slot is used' : `resets ${formatMoment(window.resetAt)}`
+      const reset = window.resetAt == null ? 'reset unknown' : `resets ${formatMoment(window.resetAt)}`
       return `${window.label}: ${usage}; ${reset}`
     })
     .join(' · ')

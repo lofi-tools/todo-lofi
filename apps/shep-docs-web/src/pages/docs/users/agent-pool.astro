@@ -80,9 +80,11 @@ const toc = [
     can also import the catalog's agent-pool advisory snapshot to fill in a limit the app does not
     know; local usage and provider responses win, and a stale or missing record stays unknown. Each
     provider's own rule decides when a limit resets: Codex lists a 5-hour and a weekly window that
-    restart from the slot's last observed use, and a provider without a published rule reports no
-    window rather than a guessed one. When the pool selects a slot, every declared window must have
-    headroom, and each window can be corrected separately.
+    restart from the slot's last observed use, and Claude lists the same two windows but reports the
+    reset time itself, so the pool shows that reset instead of deriving one. A provider without a
+    published rule reports no window rather than a guessed one, and no provider gets a hardcoded
+    message count. When the pool selects a slot, every declared window must have headroom, and each
+    window can be corrected separately.
   </p>
 
   <h2 id="limits">What it will not do</h2>

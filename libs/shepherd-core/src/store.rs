@@ -292,7 +292,7 @@ fn pool_reset_window_statuses(
                 label: window.label.to_string(),
                 reset_at: entry.and_then(|entry| entry.reset_at).or_else(|| {
                     slot.last_used_at
-                        .map(|last_used_at| window.reset_at(last_used_at))
+                        .and_then(|last_used_at| window.reset_at(last_used_at))
                 }),
                 used: entry.and_then(|entry| entry.used),
                 limit: entry.and_then(|entry| entry.limit),
@@ -4903,7 +4903,7 @@ fn pool_catalog_seed_entry(
     // a provider or user reset still wins over a derived one.
     let derived_reset = slot
         .last_used_at
-        .and_then(|last_used_at| window.map(|window| window.reset_at(last_used_at)));
+        .and_then(|last_used_at| window.and_then(|window| window.reset_at(last_used_at)));
     let (local_reset, catalog_reset) = match latest {
         Some(entry) if entry.source == PoolQuotaSource::Catalog => (None, entry.reset_at),
         Some(entry) => (entry.reset_at, None),

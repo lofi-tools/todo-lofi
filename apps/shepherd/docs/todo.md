@@ -2457,8 +2457,10 @@ implemented; no public deployment exists yet.
   - [x] Give each built-in provider its own reset-window rule.
     Evidence (2026-11-09): `PoolResetPolicy` and `PoolResetWindow` in
     `pool_reset.rs` define a window's length and its reset time from the last
-    observed use. Codex rolls a 5-hour and a weekly window; the other built-ins
-    publish no rule and report no window rather than inventing one. A catalog
+    observed use. Codex rolls a 5-hour and a weekly window; at that point the
+    other built-ins published no rule and reported no window rather than
+    inventing one (Claude's rule arrives in the hardcoded-windows item below).
+    A catalog
     period matches a window only when it has a fixed length, so a month is
     never approximated. `Core::pool_status` lists each slot's windows with the
     reset time derived from `last_used_at`, or an unknown anchor when the slot
@@ -2488,7 +2490,25 @@ implemented; no public deployment exists yet.
     `cargo test -p shepherd-core` passes 207 tests (4 ignored), clippy and fmt
     are clean, the app has 129 passing e2e tests, and the docs have 31 passing
     e2e tests.
+  - [x] Hardcode the built-in harness windows instead of refreshing the catalog.
+    Evidence (2026-11-09): `PoolResetPolicy` now declares Claude's 5-hour and
+    weekly windows alongside Codex's, and each `PoolResetWindow` carries a
+    `PoolResetAnchor`. Codex windows restart from the last observed use;
+    Claude's windows are `ProviderReported`, so `PoolResetWindow::reset_at`
+    returns no derived time and the pool waits for the reset that Claude's own
+    usage view reports (entered as a correction) instead of guessing an anchor.
+    OpenCode and Pi still declare no window. No message counts are hardcoded:
+    Claude publishes no fixed count, so a limit stays unknown until it is
+    observed or corrected. The app fixture reports Claude windows, and Settings
+    shows them with an unknown reset. Tests cover the Codex reset arithmetic,
+    Claude's provider-reported anchor, harnesses without a rule, period
+    matching and the status and catalog paths. `cargo test -p shepherd-core`
+    passes 208 tests (4 ignored), clippy and fmt are clean, the app has 129
+    passing e2e tests, and the docs have 31 passing e2e tests.
   - [ ] Refresh the snapshot without a manual import.
+    Deferred (2026-11-09): the catalog publishes snapshots only as gitignored CI
+    artifacts and has no public deployment, so there is no source to refresh
+    from. The built-in harness windows are hardcoded above until one exists.
 
 ### Packaged releases and downloads
 

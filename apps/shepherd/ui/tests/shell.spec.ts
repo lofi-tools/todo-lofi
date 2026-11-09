@@ -169,12 +169,13 @@ test.beforeEach(async ({ context }) => {
     }
     const poolWindowQuotas = new Map<string, { used: number | null; limit: number | null; limitUnit: string | null; resetAt: number | null }>()
     function poolResetWindows(slot: typeof poolSlots[number]) {
-      if (slot.agent !== 'codex') return []
+      const anchor = slot.agent === 'codex' ? 'last-use' : slot.agent === 'claude' ? 'provider' : null
+      if (anchor == null) return []
       const window = (key: string, label: string, duration: number) => {
         const stored = poolWindowQuotas.get(`${slot.id}:${key}`)
         return {
           key, label,
-          resetAt: stored?.resetAt ?? (slot.lastUsedAt == null ? null : slot.lastUsedAt + duration),
+          resetAt: stored?.resetAt ?? (anchor === 'last-use' && slot.lastUsedAt != null ? slot.lastUsedAt + duration : null),
           used: stored?.used ?? null,
           limit: stored?.limit ?? null,
           limitUnit: stored?.limitUnit ?? null,
@@ -3332,7 +3333,9 @@ test('loads, reorders and disables agent pool slots from Settings', async ({ pag
   await expect(pool.getByText('3 of 10 requests', { exact: true })).toBeVisible()
   await expect(acme.locator('.pool__facts')).toContainText('5-hour:')
   await expect(acme.locator('.pool__facts')).toContainText('Weekly:')
-  await expect(zed.getByText('Reset windows')).toHaveCount(0)
+  await expect(zed.locator('.pool__facts')).toContainText('5-hour:')
+  await expect(zed.locator('.pool__facts')).toContainText('Weekly:')
+  await expect(zed.locator('.pool__facts')).toContainText('reset unknown')
   await expect(rows.first()).toContainText('Acme · Model A')
   await expect(rows.last()).toContainText('Zed · Model B')
 

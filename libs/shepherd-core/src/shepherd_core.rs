@@ -4631,7 +4631,13 @@ mod tests {
             .iter()
             .find(|entry| entry.slot.id == claude.id)
             .ok_or("missing claude slot")?;
-        assert!(claude_status.reset_windows.is_empty());
+        assert_eq!(claude_status.reset_windows.len(), 2);
+        assert!(
+            claude_status
+                .reset_windows
+                .iter()
+                .all(|window| window.reset_at.is_none())
+        );
 
         let mut weekly = catalog_record("acme", Some("model-a"), 50);
         weekly.reset_period = Some("week".into());

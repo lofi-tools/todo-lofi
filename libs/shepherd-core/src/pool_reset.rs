@@ -1,19 +1,35 @@
 use crate::tasks::Agent;
 
+/// How a provider's window gets its start.
+///
+/// Codex rolls its windows forward from the last observed request. Claude
+/// reports the reset time itself (a five-hour session and a fixed weekly
+/// reset), so the pool never derives one from local usage.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PoolResetAnchor {
+    LastObservedUse,
+    ProviderReported,
+}
+
 /// One quota window as the provider defines it.
 ///
-/// A limit says how much a window allows but not when it started. Providers
-/// such as Codex roll the window forward from the last observed request, so a
-/// window's reset time is the last local use plus its length.
+/// A limit says how much a window allows but not when it started. The window's
+/// anchor decides whether the pool can derive a reset time locally.
 pub struct PoolResetWindow {
     pub key: &'static str,
     pub label: &'static str,
     pub duration_ms: u64,
+    pub anchor: PoolResetAnchor,
 }
 
 impl PoolResetWindow {
-    pub fn reset_at(&self, last_used_at: u64) -> u64 {
-        last_used_at.saturating_add(self.duration_ms)
+    /// The reset derived from local evidence, or `None` when only the provider
+    /// knows the window's start.
+    pub fn reset_at(&self, last_used_at: u64) -> Option<u64> {
+        match self.anchor {
+            PoolResetAnchor::LastObservedUse => Some(last_used_at.saturating_add(self.duration_ms)),
+            PoolResetAnchor::ProviderReported => None,
+        }
     }
 }
 
@@ -26,9 +42,10 @@ impl PoolResetPolicy {
     pub fn for_agent(agent: Agent) -> Self {
         let windows = match agent {
             Agent::Codex => CODEX_WINDOWS,
-            // No rolling-window rule is published for the other built-ins, so
-            // the pool reports no window rather than inventing one.
-            Agent::Claude | Agent::OpenCode | Agent::Pi => &[],
+            Agent::Claude => CLAUDE_WINDOWS,
+            // OpenCode and Pi borrow another provider's quota, so no window
+            // belongs to the harness itself.
+            Agent::OpenCode | Agent::Pi => &[],
         };
         Self { windows }
     }
@@ -71,11 +88,28 @@ const CODEX_WINDOWS: &[PoolResetWindow] = &[
         key: "five-hour",
         label: "5-hour",
         duration_ms: 5 * 3_600_000,
+        anchor: PoolResetAnchor::LastObservedUse,
     },
     PoolResetWindow {
         key: "weekly",
         label: "Weekly",
         duration_ms: 7 * 86_400_000,
+        anchor: PoolResetAnchor::LastObservedUse,
+    },
+];
+
+const CLAUDE_WINDOWS: &[PoolResetWindow] = &[
+    PoolResetWindow {
+        key: "five-hour",
+        label: "5-hour",
+        duration_ms: 5 * 3_600_000,
+        anchor: PoolResetAnchor::ProviderReported,
+    },
+    PoolResetWindow {
+        key: "weekly",
+        label: "Weekly",
+        duration_ms: 7 * 86_400_000,
+        anchor: PoolResetAnchor::ProviderReported,
     },
 ];
 
@@ -89,9 +123,27 @@ mod tests {
         let windows = policy.windows();
         assert_eq!(windows.len(), 2);
         assert_eq!(windows[0].key, "five-hour");
-        assert_eq!(windows[0].reset_at(1_000), 1_000 + 5 * 3_600_000);
+        assert_eq!(windows[0].reset_at(1_000), Some(1_000 + 5 * 3_600_000));
         assert_eq!(windows[1].key, "weekly");
-        assert_eq!(windows[1].reset_at(1_000), 1_000 + 7 * 86_400_000);
+        assert_eq!(windows[1].reset_at(1_000), Some(1_000 + 7 * 86_400_000));
+    }
+
+    #[test]
+    fn claude_windows_take_their_reset_from_the_provider() {
+        let policy = PoolResetPolicy::for_agent(Agent::Claude);
+        let windows = policy.windows();
+        assert_eq!(windows.len(), 2);
+        assert!(windows.iter().all(|window| window.duration_ms > 0));
+        assert!(
+            windows
+                .iter()
+                .all(|window| window.anchor == PoolResetAnchor::ProviderReported)
+        );
+        assert!(
+            windows
+                .iter()
+                .all(|window| window.reset_at(1_000).is_none())
+        );
     }
 
     #[test]
@@ -110,8 +162,8 @@ mod tests {
     }
 
     #[test]
-    fn providers_without_a_published_rule_report_no_windows() {
-        for agent in [Agent::Claude, Agent::OpenCode, Agent::Pi] {
+    fn harnesses_without_their_own_quota_report_no_windows() {
+        for agent in [Agent::OpenCode, Agent::Pi] {
             assert!(PoolResetPolicy::for_agent(agent).windows().is_empty());
         }
     }

@@ -150,13 +150,17 @@ const toc = [
     consumes the marker yet.
   </p>
   <p>
-    Reset windows belong to the provider, not the catalog. Codex publishes a 5-hour and a weekly
+    Reset windows belong to the provider, not the catalog. Codex declares a 5-hour and a weekly
     window, and both restart from the last observed request rather than a calendar boundary, so a
-    slot's reset time is its last local use plus the window length. Settings → Agent pool lists each
-    provider window with that derived time and reports an unknown anchor until the slot has been
-    used. A catalog record seeds a reset only when the slot has a recorded last use and the record's
-    period matches a window of fixed length; a provider or user reset is never replaced, and a month
-    is not approximated. Selection requires headroom in every declared window, so a Codex slot that
+    slot's reset time is its last local use plus the window length. Claude declares the same two
+    windows, but Claude reports its own reset times (a five-hour session and a fixed weekly reset),
+    so the pool never derives one from local use and waits for the provider or user correction.
+    Settings → Agent pool lists each declared window with its reset time, and says the reset is
+    unknown when none is recorded. A catalog record seeds a reset only when the window derives one,
+    the slot has a recorded last use and the record's period matches a window of fixed length; a
+    provider or user reset is never replaced, and a month is not approximated. No message counts are
+    hardcoded: where a provider publishes no fixed count, the limit stays unknown until it is
+    observed or corrected. Selection requires headroom in every declared window, so a Codex slot that
     is fine on the 5-hour window but exhausted on the weekly window is not chosen, and the skipped
     reason names the failing window. A correction can target one window, and it is validated against
     the provider's policy and preserved per window.
