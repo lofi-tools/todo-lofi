@@ -25,6 +25,11 @@ try {
       `Preserved ${report.merge.reviewItems.length} missing facts for review: ${report.merge.reviewItems.join(', ')}`,
     )
   }
+  if (report.offerMerge && report.offerMerge.mergedOfferIds.length > 0) {
+    console.warn(
+      `Merged ${report.offerMerge.mergedOfferIds.length} duplicate free offers: ${report.offerMerge.mergedOfferIds.join(', ')}`,
+    )
+  }
 
   console.log(
     JSON.stringify(

@@ -1,4 +1,4 @@
-import type { ModelsDevCatalog } from '../src/types'
+import type { CatalogFreeOffer, ModelsDevCatalog } from '../src/types'
 
 export const FIXED_NOW = new Date('2026-11-09T12:00:00.000Z')
 export const FIXED_VERIFIED_AT = '2026-11-09T12:00:00.000Z'
@@ -67,4 +67,29 @@ export const fixtureCatalog: ModelsDevCatalog = {
     },
   ],
   knownGaps: ['No plans or recurring free offers are present in this fixture.'],
+}
+
+export function fixtureFreeOffer(
+  overrides: Partial<CatalogFreeOffer> = {},
+): CatalogFreeOffer {
+  return {
+    offerId: 'offer-1',
+    providerId: 'acme',
+    planId: null,
+    offerKind: 'recurring',
+    allowance: 100,
+    allowanceUnit: 'requests',
+    resetPeriod: 'day',
+    eligibility: null,
+    conditions: null,
+    sourceId: 'models-dev',
+    sourceUrl: 'https://models.dev/catalog.json?type=all',
+    sourceRecord: 'acme/offer-1',
+    verifiedAt: FIXED_VERIFIED_AT,
+    lastAttemptAt: FIXED_VERIFIED_AT,
+    confidence: 'community',
+    scrapeStatus: 'ok',
+    lastError: null,
+    ...overrides,
+  }
 }

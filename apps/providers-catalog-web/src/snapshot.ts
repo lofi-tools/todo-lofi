@@ -3,9 +3,15 @@ import { existsSync } from 'node:fs'
 import { mkdir, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { DuckDBInstance, type DuckDBConnection, type DuckDBValue } from '@duckdb/node-api'
+import {
+  freeOfferPolicyViolation,
+  normalizeFreeOffers,
+  type FreeOfferMergeReport,
+} from './free-offers'
 import { mergePreviousFacts, type MergeReport } from './merge'
 import { loadSchemaSql, SCHEMA_VERSION } from './schema'
 import type {
+  CatalogFreeOffer,
   CatalogModel,
   CatalogProvider,
   CatalogSource,
@@ -38,6 +44,7 @@ export interface CreateSnapshotOptions {
   outputDirectory?: string
   now?: Date
   previousSnapshotPath?: string
+  freeOffers?: CatalogFreeOffer[]
 }
 
 export interface SnapshotReport {
@@ -49,6 +56,7 @@ export interface SnapshotReport {
   generatedAt: string
   counts: SnapshotCounts
   merge: MergeReport | null
+  offerMerge: FreeOfferMergeReport | null
 }
 
 export interface ValidationReport {
@@ -94,6 +102,7 @@ export async function createSnapshot(options: CreateSnapshotOptions): Promise<Sn
     ? await mergePreviousFacts(options.catalog, options.previousSnapshotPath, options.fetchedAt)
     : null
   const catalog = merged?.catalog ?? options.catalog
+  const normalizedFreeOffers = normalizeFreeOffers(options.freeOffers ?? [])
 
   await mkdir(outputDirectory, { recursive: true })
 
@@ -110,6 +119,7 @@ export async function createSnapshot(options: CreateSnapshotOptions): Promise<Sn
       await insertSource(connection, options, snapshotId, generatedAt)
       await insertProviders(connection, catalog.providers)
       await insertModels(connection, catalog.models)
+      await insertFreeOffers(connection, normalizedFreeOffers.offers)
       await connection.run('COMMIT')
     } catch (error) {
       try {
@@ -152,6 +162,8 @@ export async function createSnapshot(options: CreateSnapshotOptions): Promise<Sn
       generatedAt,
       counts: validation.counts,
       merge: merged?.report ?? null,
+      offerMerge:
+        normalizedFreeOffers.report.input === 0 ? null : normalizedFreeOffers.report,
     }
   } catch (error) {
     connection?.closeSync()
@@ -330,6 +342,32 @@ export async function validateSnapshotFile(
     )
     if (invalidOffers > 0) {
       errors.push(`free_offers has ${invalidOffers} rows that are not complete recurring claims`)
+    }
+
+    const excludedOfferIds: string[] = []
+    const offerRows = await readRows(
+      connection,
+      `SELECT offer_id, offer_kind, allowance_unit, reset_period,
+              eligibility, conditions
+       FROM free_offers`,
+    )
+    for (const row of offerRows) {
+      const violation = freeOfferPolicyViolation({
+        offerId: stringValue(row.offer_id),
+        offerKind: stringValue(row.offer_kind),
+        allowanceUnit: stringValue(row.allowance_unit),
+        resetPeriod: stringValue(row.reset_period),
+        eligibility: nullableString(row.eligibility),
+        conditions: nullableString(row.conditions),
+      })
+      if (violation) {
+        excludedOfferIds.push(`${stringValue(row.offer_id)} (${violation})`)
+      }
+    }
+    if (excludedOfferIds.length > 0) {
+      errors.push(
+        `free_offers has ${excludedOfferIds.length} policy-excluded claims: ${excludedOfferIds.join(', ')}`,
+      )
     }
 
     const invalidPlans = await readCount(
@@ -601,6 +639,43 @@ async function insertModels(
   }
 }
 
+async function insertFreeOffers(
+  connection: DuckDBConnection,
+  offers: CatalogFreeOffer[],
+): Promise<void> {
+  const statement = `INSERT INTO free_offers (
+    offer_id, provider_id, plan_id, offer_kind, allowance, allowance_unit,
+    reset_period, eligibility, conditions, source_id, source_url, source_record,
+    verified_at, last_attempt_at, confidence, scrape_status, last_error
+  ) VALUES (
+    $offer_id, $provider_id, $plan_id, $offer_kind, $allowance, $allowance_unit,
+    $reset_period, $eligibility, $conditions, $source_id, $source_url, $source_record,
+    $verified_at, $last_attempt_at, $confidence, $scrape_status, $last_error
+  )`
+
+  for (const offer of offers) {
+    await connection.run(statement, {
+      offer_id: offer.offerId,
+      provider_id: offer.providerId,
+      plan_id: offer.planId,
+      offer_kind: offer.offerKind,
+      allowance: offer.allowance,
+      allowance_unit: offer.allowanceUnit,
+      reset_period: offer.resetPeriod,
+      eligibility: offer.eligibility,
+      conditions: offer.conditions,
+      source_id: offer.sourceId,
+      source_url: offer.sourceUrl,
+      source_record: offer.sourceRecord,
+      verified_at: offer.verifiedAt,
+      last_attempt_at: offer.lastAttemptAt,
+      confidence: offer.confidence,
+      scrape_status: offer.scrapeStatus,
+      last_error: offer.lastError,
+    })
+  }
+}
+
 async function readRows(
   connection: DuckDBConnection,
   sql: string,
@@ -664,6 +739,10 @@ function stringValue(value: DuckDBValue): string {
     return value
   }
   throw new Error(`Expected a string value, got ${String(value)}`)
+}
+
+function nullableString(value: DuckDBValue): string | null {
+  return typeof value === 'string' ? value : null
 }
 
 function isJson(value: DuckDBValue): boolean {

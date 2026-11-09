@@ -17,6 +17,7 @@ import {
   FIXED_NOW,
   FIXED_VERIFIED_AT,
   fixtureCatalog,
+  fixtureFreeOffer,
 } from './fixtures'
 
 let outputDirectory: string
@@ -120,6 +121,73 @@ describe('catalog snapshots', () => {
     expect(validation.errors.some((error) => error.includes('duplicate allowance claims'))).toBe(
       true,
     )
+  })
+
+  it('merges duplicate recurring offers before writing and reports the merged ids', async () => {
+    const report = await createSnapshot({
+      catalog: fixtureCatalog,
+      source: MODELS_DEV_SOURCE,
+      fetchedAt: FIXED_VERIFIED_AT,
+      contentSha256: FIXED_CONTENT_SHA256,
+      httpStatus: 200,
+      etag: null,
+      outputDirectory,
+      now: FIXED_NOW,
+      freeOffers: [
+        fixtureFreeOffer(),
+        fixtureFreeOffer({ offerId: 'offer-2', sourceRecord: 'acme/offer-2' }),
+      ],
+    })
+
+    expect(report.counts.freeOffers).toBe(1)
+    expect(report.offerMerge).toEqual({
+      input: 2,
+      written: 1,
+      mergedOfferIds: ['offer-2'],
+    })
+
+    const validation = await validateSnapshotFile(report.snapshotPath)
+    expect(validation.ok).toBe(true)
+  })
+
+  it('rejects one-time and expiring trial wording during validation', async () => {
+    const report = await createSnapshot({
+      catalog: fixtureCatalog,
+      source: MODELS_DEV_SOURCE,
+      fetchedAt: FIXED_VERIFIED_AT,
+      contentSha256: FIXED_CONTENT_SHA256,
+      httpStatus: 200,
+      etag: null,
+      outputDirectory,
+      now: FIXED_NOW,
+    })
+
+    const instance = await DuckDBInstance.create(report.snapshotPath)
+    const connection = await instance.connect()
+    try {
+      await connection.run(
+        `INSERT INTO free_offers (
+           offer_id, provider_id, plan_id, offer_kind, allowance, allowance_unit,
+           reset_period, eligibility, conditions, source_id, source_url, source_record,
+           verified_at, last_attempt_at, confidence, scrape_status, last_error
+         )
+         SELECT 'offer-trial', provider_id, NULL, 'recurring', 100, 'requests', 'day',
+                NULL, 'Free for 30 days; limited-time trial.', source_id, source_url,
+                'offer-trial', verified_at, last_attempt_at, confidence, scrape_status, NULL
+         FROM providers LIMIT 1`,
+      )
+    } finally {
+      connection.closeSync()
+      instance.closeSync()
+    }
+
+    const validation = await validateSnapshotFile(report.snapshotPath)
+    expect(validation.ok).toBe(false)
+    expect(
+      validation.errors.some(
+        (error) => error.includes('policy-excluded claims') && error.includes('offer-trial'),
+      ),
+    ).toBe(true)
   })
 
   it('retains facts omitted by a later successful scrape and reports them for review', async () => {

@@ -1,6 +1,6 @@
 # Providers catalog — implementation plan
 
-Status: S1 and S3 implemented on 2026-11-09. S2's source-independent merge policy and review summary are implemented; its source adapters remain blocked on approved sources. S4 is blocked on Cloudflare credentials; S5 waits on the Shepherd agent pool.
+Status: S1 and S3 implemented on 2026-11-09. S2's source-independent merge policy, review summary and free-offer normalization are implemented; its source adapters remain blocked on approved sources. S4 is blocked on Cloudflare credentials; S5 waits on the Shepherd agent pool.
 
 Spec: [spec.md](./spec/spec.md). The spec governs behavior and data semantics;
 this file gives the working order.
@@ -163,8 +163,9 @@ provenance or inventing offers.
   model when a new fetch omits it, marks `scrape_status = 'missing'`, and
   updates only `last_attempt_at`. Plan/offer/agent/runtime retention is deferred
   until their adapters exist.
-- [ ] Implement duplicate-offer merging and the one-time/expiring-trial exclusion
-  in validation, not just in the adapter.
+- [x] Implement duplicate-offer merging and the one-time/expiring-trial exclusion
+  in normalization and validation, not just in the adapter. Conflicting
+  duplicates fail closed; a merged snapshot reports the dropped ids.
 - [x] Add a review summary when a provider or model source record disappears;
   the snapshot report lists retained records and their review items.
 - [ ] Gate: snapshot validation, unit tests and a fixture snapshot with at least
@@ -174,8 +175,11 @@ S2 evidence (2026-11-09): a fixture test creates a second snapshot from a
 catalog that omits the first provider/model and passes the first snapshot as the
 previous artifact. The new snapshot retains both rows, preserves their
 `verified_at`, sets `last_attempt_at` to the new fetch, marks them `missing`, and
-reports `provider acme` and `model acme/free-model` as review items. Source
-adapters and the full fixture snapshot remain blocked on approved sources.
+reports `provider acme` and `model acme/free-model` as review items. A second
+fixture writes two identical recurring offers, receives one row plus
+`mergedOfferIds: ['offer-2']`, and validation rejects a direct insert whose
+conditions say `Free for 30 days; limited-time trial.` Source adapters and the
+full fixture snapshot remain blocked on approved sources.
 
 ## Slice S3 — static catalog site
 

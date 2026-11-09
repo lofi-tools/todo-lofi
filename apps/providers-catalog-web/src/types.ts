@@ -63,6 +63,18 @@ export interface CatalogModel extends Provenance {
   status: string | null
 }
 
+export interface CatalogFreeOffer extends Provenance {
+  offerId: string
+  providerId: string
+  planId: string | null
+  offerKind: 'recurring'
+  allowance: number
+  allowanceUnit: string
+  resetPeriod: string
+  eligibility: string | null
+  conditions: string | null
+}
+
 export interface ModelsDevCatalog {
   providers: CatalogProvider[]
   models: CatalogModel[]
