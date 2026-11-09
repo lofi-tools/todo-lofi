@@ -16,6 +16,7 @@ mod file_actions;
 mod file_watch;
 mod keybindings;
 mod orphan_process;
+mod preview_server;
 mod pty_terminal;
 mod settings;
 mod terminal_screen;
@@ -240,6 +241,7 @@ pub fn run() -> Result<(), tauri::Error> {
             bridge::commands::add_project,
             bridge::commands::set_project_preview_url,
             bridge::commands::open_project_preview,
+            bridge::commands::open_project_annotation_wrapper,
             bridge::commands::attachment_limit,
             bridge::commands::save_preview_screenshot,
             bridge::commands::save_prompt_file,

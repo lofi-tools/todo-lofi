@@ -111,8 +111,11 @@ current layout and give future changes a point of comparison.
 - In Preview, offer **Project settings** when the selected project has no
   preview URL. **Settings → Projects** saves or clears that project's loopback
   URL. When it is configured, show the address, **Reload**, **Open in browser**,
-  and **Project settings** above the sandboxed page. The preview uses a separate
-  origin from the shell so the project can load its own modules and assets.
+  **Open annotation wrapper**, and **Project settings** above the sandboxed page.
+  The preview uses a separate origin from the shell so the project can load its
+  own modules and assets. **Open annotation wrapper** opens a token-scoped
+  loopback page in the external browser; it embeds the same preview URL and is
+  not a proxy, so element selection remains in the in-app Preview tab.
   **Annotate** pauses interaction with the page so a click selects an element.
   Write a note and queue it in Preview. **Add to prompt** appends the queued
   annotations as editable text in the active composer and clears the queue.

@@ -738,6 +738,7 @@ pub struct ShellState {
     terminal_lifecycle: Mutex<()>,
     pending_quit: Mutex<Option<QuitSummary>>,
     terminals: TerminalHost,
+    preview_server: Arc<crate::preview_server::PreviewServer>,
     previous_processes: Mutex<Vec<ProcessRecord>>,
     scan: Arc<Mutex<ProjectScanCache>>,
     file_searches: Mutex<BTreeMap<String, FileSearch>>,
@@ -902,6 +903,7 @@ impl ShellState {
             terminal_lifecycle: Mutex::new(()),
             pending_quit: Mutex::new(None),
             terminals,
+            preview_server: Arc::new(crate::preview_server::PreviewServer::default()),
             previous_processes: Mutex::new(Vec::new()),
             scan: Arc::new(Mutex::new(ProjectScanCache::default())),
             file_searches: Mutex::new(BTreeMap::new()),
@@ -1102,16 +1104,18 @@ impl ShellState {
         project_id: String,
         url: String,
     ) -> Result<ProjectList, BridgeError> {
-        match self
+        let projects = match self
             .execute(Command::SetProjectPreviewUrl {
-                project_id: ProjectId::new(project_id),
+                project_id: ProjectId::new(project_id.clone()),
                 url,
             })
             .await?
         {
-            CommandResult::ProjectList(projects) => Ok(projects),
-            other => Err(unexpected(&other)),
-        }
+            CommandResult::ProjectList(projects) => projects,
+            other => return Err(unexpected(&other)),
+        };
+        self.preview_server.forget_project(&project_id).await;
+        Ok(projects)
     }
 
     pub async fn open_project_preview(&self, project_id: String) -> Result<(), BridgeError> {
@@ -1127,6 +1131,37 @@ impl ShellState {
                 format!("Could not open the preview in a browser. {error}"),
             )
         })
+    }
+
+    pub async fn annotation_wrapper_url(
+        &self,
+        project_id: String,
+    ) -> Result<tauri::Url, BridgeError> {
+        let target = self
+            .core
+            .lock()
+            .await
+            .project_preview_url(&ProjectId::new(project_id.clone()))?
+            .ok_or_else(|| BridgeError::new("preview", "Set the project preview URL first."))?;
+        self.preview_server
+            .open(&project_id, &target)
+            .await
+            .map_err(|error| BridgeError::new("preview", error.to_string()))
+    }
+
+    pub async fn open_project_annotation_wrapper(
+        &self,
+        project_id: String,
+    ) -> Result<String, BridgeError> {
+        let wrapper = self.annotation_wrapper_url(project_id).await?;
+        let address = wrapper.clone();
+        open_in_browser(wrapper).await.map_err(|error| {
+            BridgeError::new(
+                "preview",
+                format!("Could not open the annotation wrapper in a browser. {error}"),
+            )
+        })?;
+        Ok(address.to_string())
     }
 
     pub async fn save_preview_screenshot(
@@ -1605,7 +1640,12 @@ impl ShellState {
 
     pub async fn quit(&self, force: bool) -> Result<QuitSummary, BridgeError> {
         let engine = self.terminals.engine.clone();
+        let preview_server = self.preview_server.clone();
         self.quit_with_cleanup(force, || async move {
+            preview_server
+                .stop()
+                .await
+                .map_err(|error| BridgeError::new("preview", error.to_string()))?;
             tokio::task::spawn_blocking(move || engine.blocking_lock().terminate_all())
                 .await
                 .map_err(|error| {
@@ -2593,6 +2633,17 @@ pub mod commands {
         project_id: String,
     ) -> Result<(), BridgeError> {
         state.inner().open_project_preview(project_id).await
+    }
+
+    #[tauri::command]
+    pub async fn open_project_annotation_wrapper(
+        state: State<'_, ShellState>,
+        project_id: String,
+    ) -> Result<String, BridgeError> {
+        state
+            .inner()
+            .open_project_annotation_wrapper(project_id)
+            .await
     }
 
     #[tauri::command]
@@ -6783,6 +6834,43 @@ mod tests {
             None
         );
         assert!(reopened.open_project_preview(project_id).await.is_err());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn annotation_wrapper_stops_when_the_shell_quits()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = TestDirectory::new()?;
+        let state = ShellState::new(Core::new());
+        let projects = state
+            .add_project(directory.path().display().to_string())
+            .await?;
+        let project = projects.projects.first().ok_or("missing project")?;
+        state
+            .set_project_preview_url(project.id.clone(), "http://localhost:3000/demo".into())
+            .await?;
+        let wrapper = state.annotation_wrapper_url(project.id.clone()).await?;
+        assert_eq!(wrapper.host_str(), Some("127.0.0.1"));
+        assert!(wrapper.path().starts_with("/preview/"));
+        let address = format!(
+            "{}:{}",
+            wrapper.host_str().ok_or("missing host")?,
+            wrapper.port().ok_or("missing port")?
+        );
+        assert!(tokio::net::TcpStream::connect(&address).await.is_ok());
+        assert_eq!(
+            state.annotation_wrapper_url(project.id.clone()).await?,
+            wrapper
+        );
+        state
+            .set_project_preview_url(project.id.clone(), "http://localhost:3001/demo".into())
+            .await?;
+        assert_ne!(
+            state.annotation_wrapper_url(project.id.clone()).await?,
+            wrapper
+        );
+        state.quit(true).await?;
+        assert!(tokio::net::TcpStream::connect(address).await.is_err());
         Ok(())
     }
 }

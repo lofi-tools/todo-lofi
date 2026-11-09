@@ -2175,13 +2175,17 @@ own acceptance evidence exists.
 
 ### Shared preview annotation relay
 
-- [ ] Serve a loopback preview wrapper with a per-session token.
+- [x] Serve a loopback preview wrapper with a per-session token.
   Shepherd serves one wrapper URL per selected project that embeds the project's
   configured preview URL and adds the annotation toolbar. Bind only to loopback
   and require an unguessable session token; the server is not a general proxy and
   must reject origins, projects or target URLs it was not configured for. Stop
   the server on quit. The existing in-app preview keeps its sandboxed frame and
   screenshot fallback.
+  Evidence: `preview_server` tests cover loopback binding, token scoping and
+  rotation, rejected targets, hosts and origins, and shutdown;
+  `annotation_wrapper_stops_when_the_shell_quits` covers the shell lifecycle;
+  the preview Playwright flow opens the wrapper through the command.
 - [ ] Put the iframe and external wrapper on one annotation API.
   Both surfaces submit the same bounded payload: project and task IDs, page URL,
   the ordered target elements, selector or screenshot coordinates, optional

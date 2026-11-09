@@ -409,6 +409,10 @@ export function openProjectPreview(projectId: string): Promise<void> {
   return invoke<void>('open_project_preview', { projectId })
 }
 
+export function openProjectAnnotationWrapper(projectId: string): Promise<string> {
+  return invoke<string>('open_project_annotation_wrapper', { projectId })
+}
+
 export interface AttachmentLimit {
   bytes: number
   label: string

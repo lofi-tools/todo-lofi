@@ -1,6 +1,6 @@
 import { For, Show, createEffect, createSignal, onCleanup } from 'solid-js'
 
-import { openProjectPreview, type AttachmentLimit } from './bridge'
+import { openProjectAnnotationWrapper, openProjectPreview, type AttachmentLimit } from './bridge'
 import { reportError } from './diagnostics'
 
 interface PreviewPaneProps {
@@ -69,6 +69,7 @@ function readSelection(data: unknown, origin: string): ElementSelection | undefi
 function ProjectPreview(props: PreviewPaneProps & { url: string }) {
   const [revision, setRevision] = createSignal(1)
   const [opening, setOpening] = createSignal(false)
+  const [openingWrapper, setOpeningWrapper] = createSignal(false)
   const [annotationError, setAnnotationError] = createSignal('')
   const [selecting, setSelecting] = createSignal<'waiting' | 'ready'>()
   const [selection, setSelection] = createSignal<PreviewSelection>()
@@ -166,6 +167,17 @@ function ProjectPreview(props: PreviewPaneProps & { url: string }) {
     }
   }
 
+  async function openWrapper() {
+    setOpeningWrapper(true)
+    try {
+      await openProjectAnnotationWrapper(props.projectId)
+    } catch (failure) {
+      reportError('open_project_annotation_wrapper', failure)
+    } finally {
+      setOpeningWrapper(false)
+    }
+  }
+
   return (
     <section class="preview-pane" aria-label="Project preview">
       <div class="terminal-pane__bar preview-pane__bar">
@@ -177,6 +189,7 @@ function ProjectPreview(props: PreviewPaneProps & { url: string }) {
           setRevision((value) => value + 1)
         }}>Reload</button>
         <button type="button" onClick={open} disabled={opening()}>Open in browser</button>
+        <button type="button" onClick={openWrapper} disabled={openingWrapper()}>Open annotation wrapper</button>
         <button type="button" onClick={props.onProjectSettings}>Project settings</button>
         <Show when={selecting()} fallback={
           <button type="button" disabled={!canFrame || !!selection() || screenshotMode()} onClick={selectElement}>Annotate</button>

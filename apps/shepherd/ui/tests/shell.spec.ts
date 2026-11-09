@@ -25,6 +25,7 @@ test.beforeEach(async ({ context }) => {
     let cancelRequests = 0
     let screenshotSaves = 0
     const notifications: string[] = []
+    const annotationWrapperOpens: string[] = []
     const dockCounts: Array<number | undefined> = []
     const windowTitles: string[] = []
     const terminalAppearances: Array<{ light: boolean; moreContrast: boolean }> = []
@@ -483,6 +484,9 @@ test.beforeEach(async ({ context }) => {
           }
           case 'open_project_preview':
             throw { message: `Could not open the preview in a browser. ${args.projectId}` }
+          case 'open_project_annotation_wrapper':
+            annotationWrapperOpens.push(args.projectId)
+            return `http://127.0.0.1:4310/preview/${args.projectId}/`
           case 'attachment_limit': {
             attachmentLimitRequests.push(args.projectId)
             const settings = readPreferences()
@@ -1053,6 +1057,7 @@ test.beforeEach(async ({ context }) => {
     window.__cancelRequests = () => cancelRequests
     window.__terminalLayout = () => terminalLayout
     window.__notifications = notifications
+    window.__annotationWrapperOpens = annotationWrapperOpens
     window.__terminalAppearances = terminalAppearances
     window.__dockCounts = dockCounts
     Object.assign(window, { __windowTitles: windowTitles })
@@ -1583,6 +1588,8 @@ test('saves a project preview URL and loads and reloads a sandboxed page', async
   await page.getByRole('button', { name: 'Open in browser' }).click()
   await expect(page.locator('.error-toast')).toContainText('Could not open the preview in a browser. project-1')
   await expect(page.getByRole('region', { name: 'Project preview' }).getByRole('alert')).toHaveCount(0)
+  await page.getByRole('button', { name: 'Open annotation wrapper' }).click()
+  await expect.poll(() => page.evaluate(() => window.__annotationWrapperOpens)).toEqual(['project-1'])
   const deniedFrame = page.waitForEvent('requestfailed', (request) => request.url() === shellUrl && request.isNavigationRequest())
   await setting.fill('http://localhost:1431/preview-redirect')
   await save.click()
