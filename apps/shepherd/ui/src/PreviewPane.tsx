@@ -39,6 +39,7 @@ interface ElementSelection {
   selector: string
   excerpt: string
   bounds: { x: number; y: number; width: number; height: number }
+  computedStyles?: Record<string, string>
 }
 
 interface ScreenshotSelection {
@@ -56,7 +57,7 @@ function selectionLabel(selection: PreviewSelection) {
 
 function readSelection(data: unknown, origin: string): ElementSelection | undefined {
   if (typeof data !== 'object' || data === null) return
-  const { url, selector, excerpt, bounds } = data as Partial<ElementSelection>
+  const { url, selector, excerpt, bounds, computedStyles } = data as Partial<ElementSelection>
   if (typeof url !== 'string' || url.length > 8192 || typeof selector !== 'string' || !selector || selector.length > 2048
     || typeof excerpt !== 'string' || excerpt.length > 160 || !bounds || typeof bounds !== 'object') return
   let address: URL
@@ -64,7 +65,11 @@ function readSelection(data: unknown, origin: string): ElementSelection | undefi
   if (address.origin !== origin || address.username || address.password) return
   const { x, y, width, height } = bounds
   if (![x, y, width, height].every(Number.isFinite) || width < 0 || height < 0) return
-  return { url: address.href, selector, excerpt, bounds: { x, y, width, height } }
+  if (computedStyles !== undefined && (typeof computedStyles !== 'object' || computedStyles === null
+    || Array.isArray(computedStyles) || Object.keys(computedStyles).length > 32
+    || Object.entries(computedStyles).some(([name, value]) => !name || name.length > 64
+      || typeof value !== 'string' || value.length > 256))) return
+  return { url: address.href, selector, excerpt, bounds: { x, y, width, height }, computedStyles }
 }
 
 function ProjectPreview(props: PreviewPaneProps & { url: string }) {

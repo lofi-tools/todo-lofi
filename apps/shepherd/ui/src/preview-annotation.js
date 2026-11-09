@@ -5,6 +5,12 @@
 
   let cancelSelection
 
+  const styleProperties = {
+    backgroundColor: 'background-color', border: 'border', borderRadius: 'border-radius',
+    color: 'color', display: 'display', fontSize: 'font-size', fontWeight: 'font-weight',
+    margin: 'margin', padding: 'padding',
+  }
+
   function selectorFor(element) {
     const parts = []
     for (let node = element; node && parts.length < 40; node = node.parentElement) {
@@ -81,7 +87,10 @@
       }
       const { x, y, width, height } = element.getBoundingClientRect()
       const excerpt = (element.innerText ?? element.textContent ?? '').replace(/\s+/g, ' ').trim().slice(0, 160)
-      finish({ type: 'selected', url: location.href, selector, excerpt, bounds: { x, y, width, height } })
+      const computed = getComputedStyle(element)
+      const computedStyles = Object.fromEntries(Object.entries(styleProperties)
+        .map(([name, property]) => [name, computed.getPropertyValue(property)]))
+      finish({ type: 'selected', url: location.href, selector, excerpt, bounds: { x, y, width, height }, computedStyles })
     })
     port.postMessage({ type: 'ready' })
   }

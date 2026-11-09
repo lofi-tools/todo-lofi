@@ -2201,7 +2201,7 @@ own acceptance evidence exists.
   and origins, malformed JSON, oversized bodies and foreign screenshot paths;
   the preview Playwright flows submit element and screenshot batches through
   the shared validation command.
-- [ ] Feed annotations to the agent as actionable front-end change requests.
+- [x] Feed annotations to the agent as actionable front-end change requests.
   A sent batch is not a passive note in a side panel. Each annotation's note is
   the instruction for its target, while the framing chat message describes the
   review as a whole and never substitutes for missing per-element intent.
@@ -2218,6 +2218,11 @@ own acceptance evidence exists.
   that the exact annotation fields, ordering, instruction priority and batch
   independence reach the turn, not merely that JSON was pasted into the
   composer.
+  Evidence: the preview Playwright flow queues two annotations, asserts the
+  exact ordered prompt fields and sends that text as the user turn; the
+  screenshot flow asserts its visual fallback fields. The prompt names each
+  instruction, preserves framing, treats annotations as independent changes and
+  tells the agent to edit and verify.
 - [ ] Send annotation batches as explicit user messages, queued behind a busy
   turn.
   The user reviews the batch and presses Send. Allow an annotation with no note

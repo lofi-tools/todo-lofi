@@ -121,8 +121,11 @@ current layout and give future changes a point of comparison.
   rejects another origin, another task, or a replayed annotation ID.
   **Annotate** pauses interaction with the page so a click selects an element.
   Write a note and queue it in Preview. **Add to prompt** validates the queued
-  annotations, then appends them as editable text in the active composer and
-  clears the queue.
+  annotations, then appends them as one ordered review block in the active
+  composer and clears the queue. The block repeats each annotation's note as
+  its instruction and includes the page, selector or screenshot, excerpt,
+  bounds, computed styles and any source metadata. It tells the agent to locate
+  and edit the front end and verify the result rather than only describe a plan.
   If element selection is unavailable, show that status and offer a screenshot
   picker. **Screenshot note** also opens the picker directly. Choose an image
   captured in the browser and mark a point, then use the same note queue.
