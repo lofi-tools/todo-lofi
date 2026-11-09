@@ -5,7 +5,9 @@ import path from 'node:path'
 import { DuckDBInstance } from '@duckdb/node-api'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { MODELS_DEV_SOURCE } from '../src/models-dev'
+import { SCHEMA_VERSION } from '../src/schema'
 import {
+  SnapshotValidationError,
   createSnapshot,
   findLatestSnapshot,
   recordSnapshotFailure,
@@ -64,6 +66,94 @@ describe('catalog snapshots', () => {
     expect(validation.errors).toEqual([])
     expect(validation.counts.freeOffers).toBe(0)
     expect(validation.knownGaps).toEqual(fixtureCatalog.knownGaps)
+
+    const instance = await DuckDBInstance.create(report.snapshotPath, { access_mode: 'READ_ONLY' })
+    const connection = await instance.connect()
+    try {
+      const meta = (
+        await connection.runAndReadAll(
+          `SELECT epoch_ms(source_fetched_at) AS source_fetched_at_ms,
+                  epoch_ms(freshness_deadline) AS freshness_deadline_ms
+           FROM catalog_meta`,
+        )
+      ).getRowObjects()[0]
+      expect(Number(meta.source_fetched_at_ms)).toBe(new Date(FIXED_VERIFIED_AT).getTime())
+      expect(Number(meta.freshness_deadline_ms)).toBe(
+        FIXED_NOW.getTime() + 7 * 24 * 60 * 60 * 1000,
+      )
+
+      const sources = (
+        await connection.runAndReadAll(
+          `SELECT source_id, name, source_url, license, attribution,
+                  epoch_ms(fetched_at) AS fetched_at_ms, http_status, content_sha256,
+                  status, error
+           FROM sources`,
+        )
+      ).getRowObjects()
+      expect(sources).toHaveLength(1)
+      const source = sources[0]
+      expect(source.source_id).toBe(MODELS_DEV_SOURCE.sourceId)
+      expect(source.name).toBe(MODELS_DEV_SOURCE.name)
+      expect(source.source_url).toBe(MODELS_DEV_SOURCE.sourceUrl)
+      expect(source.license).toBe(MODELS_DEV_SOURCE.license)
+      expect(source.attribution).toBe(MODELS_DEV_SOURCE.attribution)
+      expect(Number(source.fetched_at_ms)).toBe(new Date(FIXED_VERIFIED_AT).getTime())
+      expect(Number(source.http_status)).toBe(200)
+      expect(source.content_sha256).toBe(FIXED_CONTENT_SHA256)
+      expect(source.status).toBe('ok')
+      expect(source.error).toBeNull()
+    } finally {
+      connection.closeSync()
+      instance.closeSync()
+    }
+  })
+
+  it('rejects an empty record set instead of publishing a provenance-free catalog', async () => {
+    const failure = await createSnapshot({
+      catalog: { providers: [], models: [], knownGaps: [] },
+      source: MODELS_DEV_SOURCE,
+      fetchedAt: FIXED_VERIFIED_AT,
+      contentSha256: FIXED_CONTENT_SHA256,
+      httpStatus: 200,
+      etag: null,
+      outputDirectory,
+      now: FIXED_NOW,
+    }).catch((error: unknown) => error)
+
+    expect(failure).toBeInstanceOf(SnapshotValidationError)
+    expect((failure as SnapshotValidationError).report.ok).toBe(false)
+    expect((failure as SnapshotValidationError).report.errors).toEqual(
+      expect.arrayContaining(['providers is empty', 'models is empty']),
+    )
+    expect((await readdir(outputDirectory)).filter((name) => name.endsWith('.duckdb'))).toEqual([])
+  })
+
+  it('reports an unsupported schema version instead of building it', async () => {
+    const report = await createSnapshot({
+      catalog: fixtureCatalog,
+      source: MODELS_DEV_SOURCE,
+      fetchedAt: FIXED_VERIFIED_AT,
+      contentSha256: FIXED_CONTENT_SHA256,
+      httpStatus: 200,
+      etag: null,
+      outputDirectory,
+      now: FIXED_NOW,
+    })
+
+    const instance = await DuckDBInstance.create(report.snapshotPath)
+    const connection = await instance.connect()
+    try {
+      await connection.run('UPDATE catalog_meta SET schema_version = 99')
+    } finally {
+      connection.closeSync()
+      instance.closeSync()
+    }
+
+    const validation = await validateSnapshotFile(report.snapshotPath)
+    expect(validation.ok).toBe(false)
+    expect(validation.errors).toContain(
+      `catalog_meta.schema_version is 99, expected ${SCHEMA_VERSION}`,
+    )
   })
 
   it('detects duplicate recurring offers', async () => {

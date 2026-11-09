@@ -2398,12 +2398,26 @@ implemented; no public deployment exists yet.
   implying a guaranteed quota. Every paid subscription shows its usage model and
   source link. Local model entries state the runtime and approximate hardware
   requirement.
-- [ ] Publish catalog provenance and freshness.
+- [x] Publish catalog provenance and freshness.
   Each release of the catalog includes a generated data snapshot, source URLs,
   scrape timestamps, schema version and known gaps. A provider page change or
   scraper failure creates a review item rather than an invented value. Add
   tests for schema validation, stale-data warnings, duplicate offers and a
-  failed scrape that leaves the previous snapshot buildable.
+  failed scrape that leaves the previous snapshot buildable. Evidence
+  (2026-11-09): the build reads the snapshot's real `sources` rows and
+  `catalog_meta` deadlines, so `/about` publishes the models.dev name, URL, MIT
+  license, attribution, fetch time, HTTP status and content checksum, plus the
+  snapshot generation time, source refresh time, stale-after deadline, age,
+  schema and known gaps. Provider, model and agent pages show the same source
+  name, license, attribution and fetch time per record. A fixture snapshot
+  generated 39.6 days earlier builds successfully with the stale banner
+  ("due for refresh on Oct 8, 2026") and keeps the last verified values. A
+  schema-only DuckDB fails `validate` and `build` with "catalog_meta must
+  contain exactly one row", and a schema-99 snapshot fails with "Unsupported
+  catalog schema version 99"; neither produces a catalog. Package typecheck
+  reports 0 errors, 30 unit tests pass, the real build emits 9,240 pages, and
+  the 10-test e2e suite passes including the new provenance/freshness
+  assertions, stale warnings and WCAG 2.1 AA checks.
 - [ ] Connect the catalog to the agent pool without making it authoritative.
   The pool can seed limits and reset windows from a catalog snapshot, but local
   usage and provider responses win. A missing or stale catalog entry marks a

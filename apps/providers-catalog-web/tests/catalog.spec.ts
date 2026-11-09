@@ -99,12 +99,33 @@ test.describe('Providers catalog', () => {
       'href',
       `/compare?models=${MODEL_QUERY}`,
     )
-    await expect(page.getByRole('link', { name: 'models.dev public data' })).toHaveAttribute(
+    const provenance = page.getByRole('region', { name: 'Provenance' })
+    await expect(provenance.getByRole('link', { name: 'models.dev' })).toHaveAttribute(
       'href',
       /^https:\/\/models\.dev\//,
     )
+    await expect(provenance).toContainText('MIT')
+    await expect(provenance).toContainText('Source fetched')
     await expect(page.locator('main')).toContainText('No verified plan or offer')
     await expect(page.locator('main')).toContainText('No local runtime data yet')
+  })
+
+  test('about publishes the real source and freshness deadline', async ({ page, request }) => {
+    const advisoryResponse = await request.get('/agent-pool-advisory.v1.json')
+    const advisory = (await advisoryResponse.json()) as { snapshotId: string }
+
+    await page.goto('/about')
+    const main = page.locator('main')
+
+    await expect(main.getByRole('link', { name: 'models.dev' })).toHaveAttribute(
+      'href',
+      'https://models.dev/catalog.json?type=all',
+    )
+    await expect(main).toContainText('MIT')
+    await expect(main).toContainText('copyright 2025 models.dev')
+    await expect(main).toContainText('Source refreshed')
+    await expect(main).toContainText('Stale after')
+    await expect(main).toContainText(advisory.snapshotId)
   })
 
   test('agent pool advisory is a versioned public JSON contract', async ({ request }) => {

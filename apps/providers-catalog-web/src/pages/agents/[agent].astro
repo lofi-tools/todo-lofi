@@ -32,6 +32,7 @@ if (!agent) {
     {agent.homepageUrl && <p><a href={agent.homepageUrl} target="_blank" rel="noreferrer">Agent homepage</a></p>}
   </header>
   <Provenance
+    sourceId={agent.sourceId}
     sourceUrl={agent.sourceUrl}
     sourceRecord={agent.sourceRecord}
     verifiedAt={agent.verifiedAt}

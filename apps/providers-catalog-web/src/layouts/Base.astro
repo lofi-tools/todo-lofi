@@ -5,6 +5,7 @@ import '../styles/catalog.css'
 import SiteHeader from '../components/SiteHeader.astro'
 import SiteFooter from '../components/SiteFooter.astro'
 import { loadCatalog } from '../lib/catalog'
+import { formatDateTime } from '../lib/format'
 
 interface Props {
   title: string
@@ -44,8 +45,9 @@ const { snapshot } = catalog
       snapshot.stale && (
         <div class="banner" role="status">
           <div class="banner__inner">
-            This snapshot is {snapshot.ageDays.toFixed(1)} days old. Values are the last
-            verified observation and may have changed.
+            This snapshot is {snapshot.ageDays.toFixed(1)} days old; it was due for refresh
+            on {formatDateTime(snapshot.freshnessDeadline)}. Values are the last verified
+            observation and may have changed.
           </div>
         </div>
       )

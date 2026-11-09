@@ -7,7 +7,6 @@ interface Props {
 }
 
 const { snapshot } = Astro.props
-const sources = Object.values(snapshot.sourceUrls)
 ---
 
 <footer class="site-footer">
@@ -21,10 +20,18 @@ const sources = Object.values(snapshot.sourceUrls)
       </div>
       <p>
         Data is informational and may change. No recurring allowance or price is guaranteed.
-        Snapshot <span class="mono">{snapshot.snapshotId}</span> generated {formatDateTime(snapshot.generatedAt)}.
+        Snapshot <span class="mono">{snapshot.snapshotId}</span> generated {formatDateTime(snapshot.generatedAt)};
+        source data fetched {formatDateTime(snapshot.sourceFetchedAt)}; stale after
+        {formatDateTime(snapshot.freshnessDeadline)}.
       </p>
       <p>
-        Source: {snapshot.attribution}. {sources.length > 0 && <a href={sources[0]}>Source data</a>}
+        Sources: {snapshot.sources.map((source) => (
+          <span>
+            <a href={source.sourceUrl} target="_blank" rel="noreferrer">{source.name}</a>
+            {' '}({source.license}){' '}
+          </span>
+        ))}
+        {snapshot.attribution}
       </p>
     </div>
     <p>Not affiliated with any provider or model vendor.</p>

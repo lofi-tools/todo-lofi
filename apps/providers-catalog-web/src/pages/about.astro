@@ -5,7 +5,6 @@ import { formatDateTime, formatNumber } from '../lib/format'
 
 const catalog = await loadCatalog()
 const { snapshot } = catalog
-const sourceUrls = Object.entries(snapshot.sourceUrls)
 ---
 
 <Base
@@ -28,20 +27,67 @@ const sourceUrls = Object.entries(snapshot.sourceUrls)
         <div><dt>Snapshot id</dt><dd><code class="mono">{snapshot.snapshotId}</code></dd></div>
         <div><dt>Schema</dt><dd>v{snapshot.schemaVersion}</dd></div>
         <div><dt>Generated</dt><dd>{formatDateTime(snapshot.generatedAt)}</dd></div>
+        <div><dt>Source refreshed</dt><dd>{formatDateTime(snapshot.sourceFetchedAt)}</dd></div>
+        <div><dt>Stale after</dt><dd>{formatDateTime(snapshot.freshnessDeadline)}</dd></div>
         <div><dt>Age</dt><dd>{snapshot.ageDays.toFixed(1)} days</dd></div>
-        <div><dt>Stale</dt><dd>{snapshot.stale ? 'Yes — last verified values retained' : 'No'}</dd></div>
+        <div>
+          <dt>Stale</dt>
+          <dd>
+            {
+              snapshot.stale
+                ? 'Yes — last verified values retained'
+                : 'No — inside the seven-day window'
+            }
+          </dd>
+        </div>
       </dl>
     </section>
 
     <section class="card">
-      <h2>Source and license</h2>
-      <p>{snapshot.attribution}</p>
-      <dl class="detail-list">
-        <div><dt>License</dt><dd>{snapshot.license}</dd></div>
-        {sourceUrls.map(([id, url]) => (
-          <div><dt>{id}</dt><dd><a href={url} target="_blank" rel="noreferrer">Public data</a></dd></div>
-        ))}
-      </dl>
+      <h2>Sources and license</h2>
+      {
+        snapshot.sources.length === 0 ? (
+          <p>No source row is recorded in this snapshot.</p>
+        ) : (
+          <div class="table-wrap">
+            <table>
+              <caption class="visually-hidden">Data sources recorded in this snapshot</caption>
+              <thead>
+                <tr>
+                  <th scope="col">Source</th>
+                  <th scope="col">License</th>
+                  <th scope="col">Fetched</th>
+                  <th scope="col">Response</th>
+                  <th scope="col">Checksum</th>
+                </tr>
+              </thead>
+              <tbody>
+                {snapshot.sources.map((source) => (
+                  <tr>
+                    <td>
+                      <a href={source.sourceUrl} target="_blank" rel="noreferrer">
+                        {source.name}
+                      </a>
+                      <div class="small muted">{source.attribution}</div>
+                    </td>
+                    <td>{source.license}</td>
+                    <td>{formatDateTime(source.fetchedAt)}</td>
+                    <td>
+                      HTTP {source.httpStatus ?? 'unknown'} · {source.status}
+                      {source.error && <div class="small muted">{source.error}</div>}
+                    </td>
+                    <td>
+                      <code class="mono" title={source.contentSha256}>
+                        {source.contentSha256.slice(0, 12)}…
+                      </code>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )
+      }
     </section>
   </div>
 
@@ -88,9 +134,15 @@ const sourceUrls = Object.entries(snapshot.sourceUrls)
     <h2>Freshness and failure</h2>
     <div class="card">
       <p>
-        A snapshot older than seven days shows a warning, but the last verified values remain
-        visible. A failed scrape does not overwrite the previous snapshot and does not turn a known
-        value into free, zero or unknown.
+        This snapshot was generated {formatDateTime(snapshot.generatedAt)} from source data fetched
+        {formatDateTime(snapshot.sourceFetchedAt)}. It is treated as stale after
+        {formatDateTime(snapshot.freshnessDeadline)}; from then on a warning banner appears, but the
+        last verified values remain visible instead of disappearing or being guessed.
+      </p>
+      <p>
+        A failed scrape does not overwrite the previous snapshot. It leaves a failure record, and
+        the last verified snapshot stays buildable. A provider page change keeps the previous row
+        with a missing-scrape marker and a review item rather than an invented value.
       </p>
       <p>
         This site is generated from a DuckDB snapshot at build time. There is no public query API,

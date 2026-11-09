@@ -1,8 +1,10 @@
 ---
+import { loadCatalog, type CatalogSource } from '../lib/catalog'
 import type { Confidence, ScrapeStatus } from '../types'
 import { formatDateTime } from '../lib/format'
 
 interface Props {
+  sourceId: string
   sourceUrl: string
   sourceRecord: string
   verifiedAt: string
@@ -10,7 +12,11 @@ interface Props {
   scrapeStatus: ScrapeStatus
 }
 
-const { sourceUrl, sourceRecord, verifiedAt, confidence, scrapeStatus } = Astro.props
+const { sourceId, sourceUrl, sourceRecord, verifiedAt, confidence, scrapeStatus } = Astro.props
+const catalog = await loadCatalog()
+const source: CatalogSource | undefined = catalog.snapshot.sources.find(
+  (entry) => entry.sourceId === sourceId,
+)
 ---
 
 <section class="provenance" aria-label="Provenance">
@@ -18,11 +24,35 @@ const { sourceUrl, sourceRecord, verifiedAt, confidence, scrapeStatus } = Astro.
   <dl>
     <div>
       <dt>Source</dt>
-      <dd><a href={sourceUrl} target="_blank" rel="noreferrer">models.dev public data</a></dd>
+      <dd>
+        {
+          source ? (
+            <a href={source.sourceUrl} target="_blank" rel="noreferrer">
+              {source.name}
+            </a>
+          ) : (
+            <a href={sourceUrl} target="_blank" rel="noreferrer">
+              {sourceUrl}
+            </a>
+          )
+        }
+      </dd>
     </div>
     <div>
-      <dt>Record</dt>
+      <dt>Source record</dt>
       <dd><code class="mono">{sourceRecord}</code></dd>
+    </div>
+    <div>
+      <dt>License</dt>
+      <dd>{source?.license ?? 'Unknown'}</dd>
+    </div>
+    <div>
+      <dt>Attribution</dt>
+      <dd>{source?.attribution ?? 'Unknown'}</dd>
+    </div>
+    <div>
+      <dt>Source fetched</dt>
+      <dd>{source ? formatDateTime(source.fetchedAt) : 'Unknown'}</dd>
     </div>
     <div>
       <dt>Last verified</dt>

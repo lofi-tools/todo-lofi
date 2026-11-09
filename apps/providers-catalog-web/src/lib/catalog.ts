@@ -4,15 +4,32 @@ import { SCHEMA_VERSION } from '../schema'
 import { findLatestSnapshot, freshnessFor } from '../snapshot'
 import type { Confidence, ScrapeStatus } from '../types'
 
+export interface CatalogSource {
+  sourceId: string
+  name: string
+  sourceUrl: string
+  license: string
+  attribution: string
+  fetchedAt: string
+  httpStatus: number | null
+  etag: string | null
+  contentSha256: string
+  status: string
+  error: string | null
+}
+
 export interface CatalogSnapshot {
   snapshotId: string
   schemaVersion: number
   generatedAt: string
+  sourceFetchedAt: string
+  freshnessDeadline: string
   stale: boolean
   ageDays: number
   license: string
   attribution: string
   sourceUrls: Record<string, string>
+  sources: CatalogSource[]
   knownGaps: string[]
 }
 
@@ -23,6 +40,7 @@ export interface CatalogProvider {
   apiUrl: string | null
   docUrl: string | null
   envKeys: string[]
+  sourceId: string
   sourceUrl: string
   sourceRecord: string
   verifiedAt: string
@@ -67,6 +85,7 @@ export interface CatalogModel {
   modalitiesInput: string[] | null
   modalitiesOutput: string[] | null
   status: string | null
+  sourceId: string
   sourceUrl: string
   sourceRecord: string
   verifiedAt: string
@@ -115,6 +134,7 @@ export interface CatalogAgent {
   name: string
   vendor: string | null
   homepageUrl: string | null
+  sourceId: string
   sourceUrl: string
   sourceRecord: string
   verifiedAt: string
@@ -173,6 +193,8 @@ async function readCatalog(): Promise<CatalogData> {
     const metaRows = await readRows(
       connection,
       `SELECT snapshot_id, schema_version, epoch_ms(generated_at) AS generated_at_ms,
+              epoch_ms(source_fetched_at) AS source_fetched_at_ms,
+              epoch_ms(freshness_deadline) AS freshness_deadline_ms,
               license, attribution, source_urls, known_gaps
        FROM catalog_meta`,
     )
@@ -188,6 +210,21 @@ async function readCatalog(): Promise<CatalogData> {
     }
     const generatedAt = new Date(numberValue(meta.generated_at_ms)).toISOString()
     const freshness = freshnessFor(generatedAt)
+    const freshnessDeadline = new Date(numberValue(meta.freshness_deadline_ms)).toISOString()
+
+    const sources = (
+      await readRows(
+        connection,
+        `SELECT source_id, name, source_url, license, attribution,
+                epoch_ms(fetched_at) AS fetched_at_ms, http_status, etag,
+                content_sha256, status, error
+         FROM sources ORDER BY source_id`,
+      )
+    ).map(mapSource)
+    if (sources.length === 0) {
+      throw new Error('The snapshot has no sources rows, so it cannot publish provenance.')
+    }
+
     const models = (
       await readRows(
         connection,
@@ -206,7 +243,8 @@ async function readCatalog(): Promise<CatalogData> {
                 CAST(m.cost_input_audio AS DOUBLE) AS cost_input_audio,
                 CAST(m.cost_output_audio AS DOUBLE) AS cost_output_audio,
                 m.modalities_input, m.modalities_output, m.status,
-                m.source_url, m.source_record, epoch_ms(m.verified_at) AS verified_at_ms,
+                m.source_id, m.source_url, m.source_record,
+                epoch_ms(m.verified_at) AS verified_at_ms,
                 m.confidence, m.scrape_status
          FROM models m
          JOIN providers p ON p.provider_id = m.provider_id
@@ -244,7 +282,7 @@ async function readCatalog(): Promise<CatalogData> {
     const agents = (
       await readRows(
         connection,
-        `SELECT agent_id, name, vendor, homepage_url, source_url, source_record,
+        `SELECT agent_id, name, vendor, homepage_url, source_id, source_url, source_record,
                 epoch_ms(verified_at) AS verified_at_ms, confidence, scrape_status
          FROM agents ORDER BY lower(name)`,
       )
@@ -263,7 +301,7 @@ async function readCatalog(): Promise<CatalogData> {
     const providers = (
       await readRows(
         connection,
-        `SELECT provider_id, name, npm, api_url, doc_url, env_keys, source_url,
+        `SELECT provider_id, name, npm, api_url, doc_url, env_keys, source_id, source_url,
                 source_record, epoch_ms(verified_at) AS verified_at_ms, confidence, scrape_status
          FROM providers ORDER BY lower(name), provider_id`,
       )
@@ -275,11 +313,14 @@ async function readCatalog(): Promise<CatalogData> {
         snapshotId: stringValue(meta.snapshot_id),
         schemaVersion,
         generatedAt,
+        sourceFetchedAt: isoFromMs(meta.source_fetched_at_ms),
+        freshnessDeadline,
         stale: freshness.stale,
         ageDays: freshness.ageDays,
         license: stringValue(meta.license),
         attribution: stringValue(meta.attribution),
         sourceUrls: jsonObject(meta.source_urls),
+        sources,
         knownGaps: jsonStringArray(meta.known_gaps),
       },
       providers,
@@ -311,6 +352,7 @@ function mapProvider(
     apiUrl: nullableString(row.api_url),
     docUrl: nullableString(row.doc_url),
     envKeys: jsonStringArray(row.env_keys),
+    sourceId: stringValue(row.source_id),
     sourceUrl: stringValue(row.source_url),
     sourceRecord: stringValue(row.source_record),
     verifiedAt: isoFromMs(row.verified_at_ms),
@@ -357,11 +399,28 @@ function mapModel(row: Record<string, DuckDBValue>): CatalogModel {
     modalitiesInput: nullableJsonStringArray(row.modalities_input),
     modalitiesOutput: nullableJsonStringArray(row.modalities_output),
     status: nullableString(row.status),
+    sourceId: stringValue(row.source_id),
     sourceUrl: stringValue(row.source_url),
     sourceRecord: stringValue(row.source_record),
     verifiedAt: isoFromMs(row.verified_at_ms),
     confidence: confidenceValue(row.confidence),
     scrapeStatus: scrapeStatusValue(row.scrape_status),
+  }
+}
+
+function mapSource(row: Record<string, DuckDBValue>): CatalogSource {
+  return {
+    sourceId: stringValue(row.source_id),
+    name: stringValue(row.name),
+    sourceUrl: stringValue(row.source_url),
+    license: stringValue(row.license),
+    attribution: stringValue(row.attribution),
+    fetchedAt: isoFromMs(row.fetched_at_ms),
+    httpStatus: nullableNumber(row.http_status),
+    etag: nullableString(row.etag),
+    contentSha256: stringValue(row.content_sha256),
+    status: stringValue(row.status),
+    error: nullableString(row.error),
   }
 }
 
@@ -411,6 +470,7 @@ function mapAgent(row: Record<string, DuckDBValue>): CatalogAgent {
     name: stringValue(row.name),
     vendor: nullableString(row.vendor),
     homepageUrl: nullableString(row.homepage_url),
+    sourceId: stringValue(row.source_id),
     sourceUrl: stringValue(row.source_url),
     sourceRecord: stringValue(row.source_record),
     verifiedAt: isoFromMs(row.verified_at_ms),
