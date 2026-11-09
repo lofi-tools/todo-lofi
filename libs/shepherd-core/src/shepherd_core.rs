@@ -48,9 +48,10 @@ use crate::harness::{HarnessFactory, HarnessSession, ProjectApprovals, Unavailab
 use crate::session::SessionRecord;
 use crate::snapshots::{SessionRecovery, TaskApproval};
 use crate::store::{
-    MemoryStore, PoolCooldownClearRequest, PoolQuotaCorrectionOutcome, PoolQuotaCorrectionRequest,
-    PoolReorderOutcome, PoolReorderRequest, PoolSelectionRequest, PoolSlotEnabledOutcome,
-    PoolSlotEnabledRequest, PoolSlotId, PoolStatus, Store, StoreError, WorktreeDeletion,
+    MemoryStore, PoolCatalogAdvisory, PoolCatalogOutcome, PoolCooldownClearRequest,
+    PoolQuotaCorrectionOutcome, PoolQuotaCorrectionRequest, PoolReorderOutcome, PoolReorderRequest,
+    PoolSelectionRequest, PoolSlotEnabledOutcome, PoolSlotEnabledRequest, PoolSlotId, PoolStatus,
+    Store, StoreError, WorktreeDeletion,
 };
 use crate::terminal::{
     InspectorTab, ProcessRecord, TerminalId, TerminalLayout, TerminalList, TerminalRecord,
@@ -1029,6 +1030,17 @@ impl Core {
         request: &PoolCooldownClearRequest,
     ) -> Result<PoolQuotaCorrectionOutcome, CoreError> {
         Ok(self.store.clear_pool_slot_cooldown(request).await?)
+    }
+
+    pub async fn apply_pool_catalog(
+        &mut self,
+        advisory: &PoolCatalogAdvisory,
+        now: u64,
+    ) -> Result<PoolCatalogOutcome, CoreError> {
+        Ok(self
+            .store
+            .apply_pool_catalog_advisory(advisory, now)
+            .await?)
     }
 
     pub async fn remove_process(&mut self, id: &str) -> Result<(), CoreError> {
@@ -4076,8 +4088,9 @@ mod tests {
 
     use super::*;
     use crate::store::{
-        PoolAvailabilityState, PoolCooldownClearRequest, PoolQuotaCorrectionRequest,
-        PoolQuotaEntry, PoolQuotaSource, PoolSlot, PoolSlotId, TursoStore,
+        POOL_CATALOG_CONTRACT_VERSION, PoolAvailabilityState, PoolCatalogRecord,
+        PoolCooldownClearRequest, PoolQuotaCorrectionRequest, PoolQuotaEntry, PoolQuotaSource,
+        PoolSlot, PoolSlotId, TursoStore,
     };
     use crate::streaming::LateHarnessFactory;
     use crate::test_support::{
@@ -4378,6 +4391,238 @@ mod tests {
         assert!(cleared.applied);
         assert_eq!(cleared.forced_slot, None);
         assert!(!core.clear_pool_force().applied);
+        Ok(())
+    }
+
+    fn catalog_record(provider: &str, model: Option<&str>, allowance: u64) -> PoolCatalogRecord {
+        PoolCatalogRecord {
+            provider_id: provider.to_string(),
+            model_id: model.map(str::to_string),
+            plan_id: Some("plan-1".to_string()),
+            offer_id: format!("offer-{provider}"),
+            allowance: Some(allowance),
+            allowance_unit: Some("requests".to_string()),
+            reset_period: Some("monthly".to_string()),
+            usage_model: "subscription".to_string(),
+            capacity: "known".to_string(),
+            snapshot_id: "snap-1".to_string(),
+            schema_version: 3,
+            stale: false,
+            source_url: "https://example.test/offer".to_string(),
+            conditions: None,
+        }
+    }
+
+    fn catalog_advisory(records: Vec<PoolCatalogRecord>) -> PoolCatalogAdvisory {
+        PoolCatalogAdvisory {
+            contract_version: POOL_CATALOG_CONTRACT_VERSION,
+            snapshot_id: "snap-1".to_string(),
+            schema_version: 3,
+            generated_at: "2026-11-01T00:00:00Z".to_string(),
+            stale: false,
+            records,
+        }
+    }
+
+    #[tokio::test]
+    async fn pool_catalog_seeds_unknown_limits_without_overriding_local_state()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database = TestDatabase::new()?;
+        let uri = database.uri();
+        let mut core = Core::with_services(
+            Box::new(TursoStore::open(&uri).await?),
+            Box::new(UnavailableHarnessFactory),
+        );
+        let mut unknown = PoolSlot::new(Agent::Codex, "acme", "Acme", "model-a", "Model A");
+        unknown.id = PoolSlotId::new("catalog-unknown");
+        unknown.created_at = 100;
+        unknown.updated_at = 100;
+        let mut local = PoolSlot::new(Agent::Claude, "acme", "Acme", "model-b", "Model B");
+        local.id = PoolSlotId::new("catalog-local");
+        local.priority = 1;
+        local.created_at = 200;
+        local.updated_at = 200;
+        let mut missing = PoolSlot::new(Agent::Codex, "other", "Other", "model-c", "Model C");
+        missing.id = PoolSlotId::new("catalog-missing");
+        missing.priority = 2;
+        missing.created_at = 300;
+        missing.updated_at = 300;
+        for slot in [&unknown, &local, &missing] {
+            core.store.save_pool_slot(slot).await?;
+        }
+        let mut used = PoolQuotaEntry::new(unknown.id.clone(), PoolQuotaSource::Provider, 100);
+        used.used = Some(3);
+        core.store.append_pool_quota_entry(&used).await?;
+        let mut local_limit = PoolQuotaEntry::new(local.id.clone(), PoolQuotaSource::Provider, 100);
+        local_limit.used = Some(2);
+        local_limit.limit = Some(5);
+        local_limit.limit_unit = Some("requests".into());
+        core.store.append_pool_quota_entry(&local_limit).await?;
+
+        let outcome = core
+            .apply_pool_catalog(
+                &catalog_advisory(vec![
+                    catalog_record("acme", Some("model-a"), 50),
+                    catalog_record("acme", Some("model-b"), 80),
+                ]),
+                200,
+            )
+            .await?;
+        assert_eq!(outcome.snapshot_id, "snap-1");
+        assert_eq!((outcome.applied, outcome.skipped), (1, 2));
+        let seeded = outcome
+            .seeds
+            .iter()
+            .find(|seed| seed.slot_id == unknown.id)
+            .ok_or("missing seeded slot result")?;
+        assert!(seeded.applied);
+        assert_eq!(seeded.reason, "catalog seeded 50 requests");
+        assert!(
+            !outcome
+                .seeds
+                .iter()
+                .find(|seed| seed.slot_id == local.id)
+                .ok_or("missing local slot result")?
+                .applied
+        );
+        assert_eq!(
+            outcome
+                .seeds
+                .iter()
+                .find(|seed| seed.slot_id == local.id)
+                .map(|seed| seed.reason.clone()),
+            Some("local limit wins over the catalog".to_string())
+        );
+
+        let status = core.pool_status(210).await?;
+        let seeded_slot = status
+            .slots
+            .iter()
+            .find(|entry| entry.slot.id == unknown.id)
+            .ok_or("missing seeded status")?;
+        assert_eq!(seeded_slot.slot.limit, Some(50));
+        assert_eq!(seeded_slot.slot.used, Some(3));
+        assert_eq!(
+            seeded_slot.latest_quota.as_ref().map(|entry| entry.source),
+            Some(PoolQuotaSource::Catalog)
+        );
+        let local_slot = status
+            .slots
+            .iter()
+            .find(|entry| entry.slot.id == local.id)
+            .ok_or("missing local status")?;
+        assert_eq!(
+            local_slot
+                .latest_quota
+                .as_ref()
+                .and_then(|entry| entry.limit),
+            Some(5)
+        );
+
+        let repeated = core
+            .apply_pool_catalog(
+                &catalog_advisory(vec![catalog_record("acme", Some("model-a"), 50)]),
+                220,
+            )
+            .await?;
+        assert_eq!(
+            repeated
+                .seeds
+                .iter()
+                .find(|seed| seed.slot_id == unknown.id)
+                .map(|seed| seed.reason.clone()),
+            Some("catalog seeded 50 requests".to_string())
+        );
+        let same_time = core
+            .apply_pool_catalog(
+                &catalog_advisory(vec![catalog_record("acme", Some("model-a"), 60)]),
+                220,
+            )
+            .await?;
+        assert_eq!(
+            same_time
+                .seeds
+                .iter()
+                .find(|seed| seed.slot_id == unknown.id)
+                .map(|seed| seed.reason.clone()),
+            Some("catalog snapshot is not newer than the latest observation".to_string())
+        );
+
+        let mut stale = catalog_advisory(vec![catalog_record("acme", Some("model-a"), 70)]);
+        stale.stale = true;
+        let stale_outcome = core.apply_pool_catalog(&stale, 240).await?;
+        assert_eq!(stale_outcome.applied, 0);
+        assert!(
+            stale_outcome
+                .seeds
+                .iter()
+                .all(|seed| seed.reason == "catalog snapshot is stale")
+        );
+
+        let mut wrong = catalog_advisory(Vec::new());
+        wrong.contract_version = 1;
+        assert!(matches!(
+            core.apply_pool_catalog(&wrong, 250).await,
+            Err(CoreError::Store(StoreError::InvalidRow(_)))
+        ));
+
+        let mut reopened = Core::with_services(
+            Box::new(TursoStore::open(&uri).await?),
+            Box::new(UnavailableHarnessFactory),
+        );
+        let status = reopened.pool_status(260).await?;
+        assert_eq!(
+            status
+                .slots
+                .iter()
+                .find(|entry| entry.slot.id == unknown.id)
+                .and_then(|entry| entry.slot.limit),
+            Some(50)
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn pool_catalog_seeds_the_in_memory_store_and_skips_ambiguous_records()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut core = Core::new();
+        let mut slot = PoolSlot::new(Agent::Codex, "acme", "Acme", "model-a", "Model A");
+        slot.id = PoolSlotId::new("memory-catalog");
+        slot.created_at = 100;
+        slot.updated_at = 100;
+        core.store.save_pool_slot(&slot).await?;
+
+        let ambiguous = core
+            .apply_pool_catalog(
+                &catalog_advisory(vec![
+                    catalog_record("acme", None, 10),
+                    catalog_record("acme", Some("model-a"), 20),
+                ]),
+                200,
+            )
+            .await?;
+        assert_eq!(ambiguous.applied, 0);
+        assert_eq!(
+            ambiguous.seeds.first().map(|seed| seed.reason.clone()),
+            Some("catalog has 2 records for this slot; no single advisory".to_string())
+        );
+
+        let outcome = core
+            .apply_pool_catalog(
+                &catalog_advisory(vec![catalog_record("acme", Some("model-a"), 20)]),
+                210,
+            )
+            .await?;
+        assert_eq!(outcome.applied, 1);
+        let status = core.pool_status(220).await?;
+        assert_eq!(status.slots[0].slot.limit, Some(20));
+        assert_eq!(
+            status.slots[0]
+                .latest_quota
+                .as_ref()
+                .map(|entry| entry.source),
+            Some(PoolQuotaSource::Catalog)
+        );
         Ok(())
     }
 

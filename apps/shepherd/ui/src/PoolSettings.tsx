@@ -2,6 +2,7 @@ import { For, Show, createEffect, createResource, createSignal } from 'solid-js'
 
 import {
   AGENT_LABELS,
+  applyPoolCatalog,
   clearPoolForce,
   clearPoolSlotCooldown,
   correctPoolQuota,
@@ -9,6 +10,7 @@ import {
   poolStatus,
   reorderPoolSlots,
   setPoolSlotEnabled,
+  type PoolCatalogSeed,
   type PoolQuotaEntry,
   type PoolSlot,
   type PoolSlotStatus,
@@ -178,6 +180,9 @@ export function PoolSettings() {
   const [busy, setBusy] = createSignal<string>()
   const [notice, setNotice] = createSignal('')
   const [actionError, setActionError] = createSignal('')
+  const [catalogFile, setCatalogFile] = createSignal<File | null>(null)
+  const [catalogError, setCatalogError] = createSignal('')
+  const [catalogSkipped, setCatalogSkipped] = createSignal<PoolCatalogSeed[]>([])
   const [status, { refetch }] = createResource(async () => {
     try {
       return { value: await poolStatus(), error: '' }
@@ -190,6 +195,10 @@ export function PoolSettings() {
   const slots = () => status.latest?.value?.slots ?? []
   const forcedSlot = () => status.latest?.value?.forcedSlot ?? null
   const forcedEntry = () => slots().find((entry) => entry.slot.id === forcedSlot())
+  const catalogSlotName = (id: string) => {
+    const entry = slots().find((candidate) => candidate.slot.id === id)
+    return entry ? slotName(entry.slot) : id
+  }
   const loadError = () => status.latest?.error ?? ''
   const visibleError = () => actionError() || loadError()
 
@@ -239,6 +248,27 @@ export function PoolSettings() {
     void mutate('force', async () => (await clearPoolForce()).reason)
   }
 
+  async function applyCatalog(file: File | null) {
+    if (!file) {
+      setCatalogError('Choose a catalog snapshot file.')
+      return
+    }
+    let snapshot: string
+    try {
+      snapshot = await file.text()
+    } catch (error) {
+      setCatalogError(describeError(error))
+      return
+    }
+    setCatalogError('')
+    setCatalogSkipped([])
+    void mutate('catalog', async () => {
+      const outcome = await applyPoolCatalog(snapshot)
+      setCatalogSkipped(outcome.seeds.filter((seed) => !seed.applied))
+      return `Applied ${outcome.applied} of ${outcome.applied + outcome.skipped} catalog records.`
+    })
+  }
+
   return (
     <section class="pool" aria-label="Agent pool" aria-busy={status.loading || !!busy()}>
       <div class="pool__intro">
@@ -249,6 +279,36 @@ export function PoolSettings() {
         <button type="button" class="project-action" disabled={status.loading || !!busy()}
           onClick={() => { setActionError(''); void refetch() }}>Refresh pool</button>
       </div>
+
+      <form class="pool__catalog" aria-label="Catalog snapshot"
+        onSubmit={(event) => { event.preventDefault(); void applyCatalog(catalogFile()) }}>
+        <label>
+          Catalog snapshot
+          <input type="file" accept="application/json,.json" aria-label="Catalog snapshot file"
+            disabled={!!busy()}
+            onChange={(event) => {
+              setCatalogFile(event.currentTarget.files?.[0] ?? null)
+              setCatalogError('')
+            }} />
+        </label>
+        <button type="submit" class="project-action" disabled={!!busy() || !catalogFile()}>
+          Apply catalog snapshot
+        </button>
+        <p class="pool__hint">
+          The catalog only fills in a limit the slot does not know; local usage and provider
+          responses win, and a stale or missing record stays unknown.
+        </p>
+        <Show when={catalogError()}>
+          <p class="pool__field-error" role="alert">{catalogError()}</p>
+        </Show>
+        <Show when={catalogSkipped().length > 0}>
+          <ul class="pool__catalog-skipped" aria-label="Skipped catalog records">
+            <For each={catalogSkipped()}>
+              {(seed) => <li>{catalogSlotName(seed.slotId)}: {seed.reason}</li>}
+            </For>
+          </ul>
+        </Show>
+      </form>
 
       <Show when={forcedEntry()}>
         {(entry) => (

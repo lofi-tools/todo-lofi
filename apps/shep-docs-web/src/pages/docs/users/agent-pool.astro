@@ -76,7 +76,9 @@ const toc = [
     enable it, correct its limit, unit and reset time, and clear its cooldown. The pool UI does not
     display credentials or invent a quota. A saved limit is a local correction, not a provider
     guarantee. One available slot can be forced for the next turn: the marker is session state, shown
-    at the top of the panel with a clear action, and it is never written to the pool database.
+    at the top of the panel with a clear action, and it is never written to the pool database. You
+    can also import the catalog's agent-pool advisory snapshot to fill in a limit the app does not
+    know; local usage and provider responses win, and a stale or missing record stays unknown.
   </p>
 
   <h2 id="limits">What it will not do</h2>
@@ -95,9 +97,9 @@ const toc = [
   <p>
     Use the agent picker per task and keep a terminal open when you need to switch manually. If pool
     slots already exist, Settings → Agent pool lets you inspect their status, reorder them, disable
-    or enable them, correct their limits and reset times, clear a cooldown, and force a slot for the
-    next turn. Automatic selection for new tasks is not wired, so the forced slot is not consumed
-    yet. If an agent is missing or
+    or enable them, correct their limits and reset times, clear a cooldown, force a slot for the next
+    turn, and import a catalog advisory snapshot to seed an unknown limit. Automatic selection for
+    new tasks is not wired, so the forced slot is not consumed yet. If an agent is missing or
     its adapter falls back, <a href="/docs/users/troubleshooting#agents">Troubleshooting</a> explains
     what to check. The <a href="/docs/users/releases">releases page</a> tracks the other next-step
     items.

@@ -24,9 +24,9 @@ const toc = [
     The pool slot record, the append-only quota ledger, the six availability states, durable
     priority selection, idle release and pool controls now exist. Settings → Agent pool reads the
     status snapshot and supports reordering, enable/disable, limit/reset corrections, cooldown
-    clearing, the one-turn force override and status refreshes for existing slots. Task-start
-    selection is still planned, so tasks do not choose a pool slot yet. This page records the agreed
-    contract so the implementation, tests and user guide cannot drift.
+    clearing, the one-turn force override, catalog snapshot limit seeding and status refreshes for
+    existing slots. Task-start selection is still planned, so tasks do not choose a pool slot yet.
+    This page records the agreed contract so the implementation, tests and user guide cannot drift.
   </Callout>
 
   <h2 id="status">Status</h2>
@@ -34,8 +34,9 @@ const toc = [
     <Badge tone="warning" variant="subtle">partly implemented</Badge> The pool work is split into
     slot persistence, the quota ledger, priority selection, idle release, core controls, the pool UI
     and task-start wiring. Persistence, the ledger, selection, release, status, reordering,
-    enable/disable, limit/reset correction, cooldown clearing and the force override are implemented
-    and tested; Settings → Agent pool exposes all of them. Task-start wiring is not checked off. The
+    enable/disable, limit/reset correction, cooldown clearing, the force override and catalog
+    snapshot limit seeding are implemented and tested; Settings → Agent pool exposes all of them.
+    Reset-window seeding, snapshot refresh and task-start wiring are not checked off. The
     user-facing promise is on the
     <a href="/docs/users/agent-pool">agent pool</a> page; this page is for the implementation.
   </p>
@@ -146,6 +147,16 @@ const toc = [
     consumes the marker yet.
   </p>
   <p>
+    Settings → Agent pool can import the catalog's published v2 advisory snapshot as a local file;
+    the pool never fetches a runtime catalog API. Records match by provider and model, and a catalog
+    observation is appended only when the snapshot and record are fresh, its capacity is known,
+    exactly one record matches, the snapshot advances the latest observation and the slot has no
+    local limit. The observation preserves local usage, cooldown, error and reset time, so provider
+    and user observations keep precedence. The advisory states a reset period without an anchor, so
+    no reset time is derived. A stale snapshot, a stale or unknown record, a missing or ambiguous
+    record, an unsupported contract version and an unreadable file are reported instead of guessed.
+  </p>
+  <p>
     The catalog is advisory. A local ledger and the user's correction are authoritative for local
     selection; a stale catalog snapshot must not silently overwrite them.
   </p>
@@ -161,7 +172,8 @@ const toc = [
     <li>Implemented: the Settings pool UI loads the status snapshot, reorders slots, toggles enable/disable, surfaces outcome reasons and errors, and retries a failed status read.</li>
     <li>Implemented: limit/reset corrections and cooldown clearing against both stores, including preserved usage/error fields, repeat no-ops, concurrent identical corrections writing once, rejected stale observations and missing slots, plus the Settings form and its rejected-correction feedback.</li>
     <li>Implemented: the one-turn force override, including applying and clearing it, one-turn consumption as the selection override, repeat no-ops, rejected unavailable and missing slots, no stored state after a Turso re-open, and the Settings confirmation, rejection and clear controls.</li>
-    <li>Pending: task-start wiring, cancellation and restart scheduling.</li>
+    <li>Implemented: catalog snapshot seeding against both stores, including preserved local usage, local precedence, stale snapshots, stale and unknown records, missing and ambiguous matches, a repeated timestamp, a rejected contract version and a Turso re-open, plus the Settings import and its skipped-record and error feedback.</li>
+    <li>Pending: reset-window seeding, snapshot refresh, task-start wiring, cancellation and restart scheduling.</li>
     <li>Credential redaction in records, logs and diagnostics.</li>
   </ul>
   <p>

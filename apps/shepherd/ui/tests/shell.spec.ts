@@ -146,6 +146,9 @@ test.beforeEach(async ({ context }) => {
         cooldownUntil: 1_900_000_000_000, lastUsedAt: null, lastError: 'provider unavailable', createdAt: 1_760_000_001_000, updatedAt: 1_760_000_001_000,
       },
     ]
+    if (options.has('pool-unknown-limit')) {
+      poolSlots[0] = { ...poolSlots[0], used: null, limit: null, limitUnit: null }
+    }
     function poolQuota(slot: typeof poolSlots[number], source = 'provider') {
       return {
         id: `quota-${slot.id}`, slotId: slot.id, observedAt: 1_760_000_000_000, source,
@@ -560,6 +563,45 @@ test.beforeEach(async ({ context }) => {
             poolForcedSlot = null
             poolOperations.push(`unforce:${cleared}`)
             return { forcedSlot: null, applied: true, reason: `force for ${cleared} cleared` }
+          }
+          case 'pool_apply_catalog': {
+            let advisory: {
+              contractVersion?: number
+              snapshotId?: string
+              stale?: boolean
+              records?: Array<{ providerId: string, allowance: number | null, allowanceUnit: string | null, capacity: string }>
+            }
+            try {
+              advisory = JSON.parse(args.snapshot)
+            } catch {
+              throw { message: 'Could not read the catalog snapshot. invalid JSON' }
+            }
+            if (advisory.contractVersion !== 2) {
+              throw { message: `Unsupported catalog advisory contract version ${advisory.contractVersion}.` }
+            }
+            const records = advisory.records ?? []
+            const seeds = poolSlots.map((slot) => {
+              const record = records.find((candidate) => candidate.providerId === slot.providerId)
+              if (!record) return { slotId: slot.id, applied: false, reason: 'catalog has no record for this slot' }
+              if (advisory.stale) return { slotId: slot.id, applied: false, reason: 'catalog snapshot is stale' }
+              if (record.capacity !== 'known' || record.allowance == null) {
+                return { slotId: slot.id, applied: false, reason: 'catalog capacity is unknown' }
+              }
+              if (slot.limit != null) return { slotId: slot.id, applied: false, reason: 'local limit wins over the catalog' }
+              return { slotId: slot.id, applied: true, reason: `catalog seeded ${record.allowance} ${record.allowanceUnit}` }
+            })
+            poolSlots = poolSlots.map((slot) => {
+              const seed = seeds.find((candidate) => candidate.slotId === slot.id)
+              const record = records.find((candidate) => candidate.providerId === slot.providerId)
+              return seed?.applied && record ? { ...slot, limit: record.allowance, limitUnit: record.allowanceUnit } : slot
+            })
+            poolOperations.push(`catalog:${advisory.snapshotId}`)
+            return {
+              snapshotId: advisory.snapshotId,
+              seeds,
+              applied: seeds.filter((seed) => seed.applied).length,
+              skipped: seeds.filter((seed) => !seed.applied).length,
+            }
           }
           case 'subscribe':
             eventChannel = args.channel.id
@@ -3350,6 +3392,43 @@ test('surfaces a rejected pool force without marking the slot', async ({ page })
   await expect(pool.getByRole('status')).toHaveText('cannot force an exhausted slot: quota exhausted: used 10 of 10 requests')
   await expect(pool.getByRole('group', { name: 'Forced slot' })).toHaveCount(0)
   await expect(acme.getByRole('button', { name: 'Force Acme · Model A for the next turn' })).toBeVisible()
+})
+
+test('imports a catalog snapshot to seed an unknown limit and lists skipped slots', async ({ page }) => {
+  await page.goto('/?pool-unknown-limit')
+  await page.getByRole('button', { name: 'Settings', exact: true }).click()
+  await page.getByRole('navigation', { name: 'Settings categories' }).getByRole('button', { name: 'Agent pool' }).click()
+  const pool = page.getByRole('region', { name: 'Agent pool' })
+  const snapshot = {
+    contractVersion: 2, snapshotId: 'snap-1', schemaVersion: 3,
+    generatedAt: '2026-11-01T00:00:00Z', stale: false,
+    records: [{ providerId: 'acme', modelId: null, allowance: 50, allowanceUnit: 'requests', capacity: 'known' }],
+  }
+
+  await pool.getByLabel('Catalog snapshot file').setInputFiles({
+    name: 'agent-pool-advisory.v2.json', mimeType: 'application/json', buffer: Buffer.from(JSON.stringify(snapshot)),
+  })
+  await pool.getByRole('button', { name: 'Apply catalog snapshot' }).click()
+  await expect(pool.getByRole('status')).toHaveText('Applied 1 of 2 catalog records.')
+  await expect(pool.getByText('50 requests limit; usage unknown')).toBeVisible()
+  await expect(pool.getByRole('list', { name: 'Skipped catalog records' }))
+    .toContainText('Zed · Model B: catalog has no record for this slot')
+  await expect.poll(() => page.evaluate(() => (window as unknown as { __poolOperations: string[] }).__poolOperations))
+    .toEqual(['catalog:snap-1'])
+})
+
+test('rejects a catalog snapshot with an unsupported contract', async ({ page }) => {
+  await page.goto('/')
+  await page.getByRole('button', { name: 'Settings', exact: true }).click()
+  await page.getByRole('navigation', { name: 'Settings categories' }).getByRole('button', { name: 'Agent pool' }).click()
+  const pool = page.getByRole('region', { name: 'Agent pool' })
+  const snapshot = { contractVersion: 1, snapshotId: 'snap-old', schemaVersion: 3, generatedAt: '2026-01-01T00:00:00Z', stale: false, records: [] }
+
+  await pool.getByLabel('Catalog snapshot file').setInputFiles({
+    name: 'agent-pool-advisory.v1.json', mimeType: 'application/json', buffer: Buffer.from(JSON.stringify(snapshot)),
+  })
+  await pool.getByRole('button', { name: 'Apply catalog snapshot' }).click()
+  await expect(pool.getByRole('alert')).toContainText('Unsupported catalog advisory contract version 1.')
 })
 
 test('surfaces a pool status failure and retries it', async ({ page }) => {

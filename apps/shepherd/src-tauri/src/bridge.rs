@@ -26,9 +26,9 @@ use shepherd_core::files::{self, DirectoryListing, FileSearchQuery, FileSearchRe
 use shepherd_core::git::GitService;
 use shepherd_core::harness::HarnessFactory;
 use shepherd_core::store::{
-    PoolCooldownClearRequest, PoolQuotaCorrectionOutcome, PoolQuotaCorrectionRequest,
-    PoolReorderOutcome, PoolReorderRequest, PoolSlotEnabledOutcome, PoolSlotEnabledRequest,
-    PoolSlotId, PoolStatus, Store, TursoStore,
+    PoolCatalogAdvisory, PoolCatalogOutcome, PoolCooldownClearRequest,
+    PoolQuotaCorrectionOutcome, PoolQuotaCorrectionRequest, PoolReorderOutcome, PoolReorderRequest,
+    PoolSlotEnabledOutcome, PoolSlotEnabledRequest, PoolSlotId, PoolStatus, Store, TursoStore,
 };
 use shepherd_core::terminal::{
     InspectorTab, ProcessRecord, TerminalEvent, TerminalId, TerminalList, TerminalRecord,
@@ -1867,6 +1867,22 @@ impl ShellState {
         Ok(core.clear_pool_force())
     }
 
+    pub async fn apply_pool_catalog(
+        &self,
+        snapshot: String,
+    ) -> Result<PoolCatalogOutcome, BridgeError> {
+        let advisory: PoolCatalogAdvisory = serde_json::from_str(&snapshot).map_err(|error| {
+            BridgeError::new(
+                "pool_catalog",
+                format!("Could not read the catalog snapshot. {error}"),
+            )
+        })?;
+        let mut core = self.core.lock().await;
+        core.apply_pool_catalog(&advisory, now_millis())
+            .await
+            .map_err(BridgeError::from)
+    }
+
     pub async fn reorder_pool_slots(
         &self,
         slot_ids: Vec<String>,
@@ -3156,6 +3172,14 @@ pub mod commands {
         state: State<'_, ShellState>,
     ) -> Result<PoolForceOutcome, BridgeError> {
         state.inner().clear_pool_force().await
+    }
+
+    #[tauri::command]
+    pub async fn pool_apply_catalog(
+        state: State<'_, ShellState>,
+        snapshot: String,
+    ) -> Result<PoolCatalogOutcome, BridgeError> {
+        state.inner().apply_pool_catalog(snapshot).await
     }
 
     #[tauri::command]

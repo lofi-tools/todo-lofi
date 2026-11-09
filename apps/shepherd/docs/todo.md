@@ -2436,6 +2436,27 @@ implemented; no public deployment exists yet.
   usage and provider responses win. A missing or stale catalog entry marks a
   slot's capacity unknown, not free. No catalog credential or private account
   data is published.
+  - [x] Apply a catalog snapshot to seed a limit a slot does not know.
+    Evidence (2026-11-09): `PoolCatalogAdvisory`, `PoolCatalogRecord`,
+    `PoolCatalogSeed` and `PoolCatalogOutcome` implement the published v2
+    advisory contract, and `apply_pool_catalog_advisory` lives in `TursoStore`
+    and `MemoryStore`. Records match by provider and model. A catalog
+    observation is appended only when the snapshot and record are fresh, its
+    capacity is known, exactly one record matches, the snapshot advances the
+    latest observation and the slot has no local limit; it preserves local
+    usage, cooldown, error and reset time, so provider and user observations
+    keep precedence. The advisory's reset period has no anchor, so no reset
+    time is invented. Settings → Agent pool imports a local snapshot file,
+    reports how many records applied, lists skipped slots with their reasons,
+    and shows an unreadable snapshot or unsupported contract version as an
+    error. Tests cover seeding, preserved usage, local precedence, stale
+    snapshots, missing and ambiguous records, a repeated timestamp, a rejected
+    contract version, memory parity and a Turso re-open. `cargo test -p
+    shepherd-core` passes 201 tests (4 ignored), clippy and fmt are clean, the
+    app has 128 passing e2e tests, and the docs have 31 passing e2e tests.
+  - [ ] Seed reset windows from the catalog once the contract carries a reset
+    anchor.
+  - [ ] Refresh the snapshot without a manual import.
 
 ### Packaged releases and downloads
 
@@ -2549,11 +2570,14 @@ implemented; no public deployment exists yet.
   passes 192 tests (4
   ignored), and `cargo clippy -p shepherd-core --all-targets -- -D warnings` and
   `cargo fmt -p shepherd-core` pass.
-- [ ] Add the pool UI and operating limits.
+- [x] Add the pool UI and operating limits.
   Show each slot's provider/model, priority, availability, known limit/reset,
   current task, last error and last-used time. Users can reorder, disable, edit
   limits, clear a cooldown and force a slot for one turn. The UI must not expose
   credentials or claim a provider quota it cannot observe.
+  Evidence (2026-11-09): the four sub-items below are implemented and tested.
+  The panel never reads the stored credential reference and reports only
+  observed, seeded or user-corrected quotas.
   - [x] Expose pool status, priority ordering and enable/disable controls in
     the core.
     Evidence (2026-11-09): `PoolSlotStatus`, `PoolStatus`, `PoolReorderRequest`,

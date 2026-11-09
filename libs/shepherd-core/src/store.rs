@@ -449,6 +449,56 @@ pub struct PoolStatus {
     pub forced_slot: Option<PoolSlotId>,
 }
 
+/// The catalog's published agent-pool advisory contract.
+pub const POOL_CATALOG_CONTRACT_VERSION: u32 = 2;
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PoolCatalogAdvisory {
+    pub contract_version: u32,
+    pub snapshot_id: String,
+    pub schema_version: u32,
+    pub generated_at: String,
+    pub stale: bool,
+    pub records: Vec<PoolCatalogRecord>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PoolCatalogRecord {
+    pub provider_id: String,
+    pub model_id: Option<String>,
+    pub plan_id: Option<String>,
+    pub offer_id: String,
+    pub allowance: Option<u64>,
+    pub allowance_unit: Option<String>,
+    pub reset_period: Option<String>,
+    pub usage_model: String,
+    pub capacity: String,
+    pub snapshot_id: String,
+    pub schema_version: u32,
+    pub stale: bool,
+    pub source_url: String,
+    pub conditions: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PoolCatalogSeed {
+    pub slot_id: PoolSlotId,
+    pub applied: bool,
+    pub reason: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PoolCatalogOutcome {
+    pub snapshot_id: String,
+    pub seeds: Vec<PoolCatalogSeed>,
+    pub applied: usize,
+    pub skipped: usize,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PoolReorderRequest {
@@ -657,6 +707,11 @@ pub trait Store: Send + Sync {
         &self,
         request: &PoolCooldownClearRequest,
     ) -> Result<PoolQuotaCorrectionOutcome, StoreError>;
+    async fn apply_pool_catalog_advisory(
+        &self,
+        advisory: &PoolCatalogAdvisory,
+        now: u64,
+    ) -> Result<PoolCatalogOutcome, StoreError>;
 }
 
 struct Migration {
@@ -2391,6 +2446,37 @@ impl Store for TursoStore {
             true,
             "cooldown cleared by user",
         ))
+    }
+
+    async fn apply_pool_catalog_advisory(
+        &self,
+        advisory: &PoolCatalogAdvisory,
+        now: u64,
+    ) -> Result<PoolCatalogOutcome, StoreError> {
+        validate_pool_catalog_advisory(advisory)?;
+        timestamp(now)?;
+        let slots = self.load_pool_slots().await?;
+        let mut seeds = Vec::with_capacity(slots.len());
+        for slot in slots {
+            let mut db = self.db.lock().await;
+            let latest = query_latest_pool_quota_entry(&mut db, &slot.id).await?;
+            match pool_catalog_seed_entry(&slot, advisory, latest.as_ref(), now) {
+                Ok(entry) => {
+                    save_pool_quota_correction(&mut db, &entry).await?;
+                    seeds.push(PoolCatalogSeed {
+                        slot_id: slot.id,
+                        applied: true,
+                        reason: catalog_seed_reason(&entry),
+                    });
+                }
+                Err(reason) => seeds.push(PoolCatalogSeed {
+                    slot_id: slot.id,
+                    applied: false,
+                    reason,
+                }),
+            }
+        }
+        Ok(pool_catalog_outcome(advisory, seeds))
     }
 
     async fn load_projects(&self) -> Result<Vec<Project>, StoreError> {
@@ -4150,6 +4236,42 @@ impl Store for MemoryStore {
             "cooldown cleared by user",
         ))
     }
+
+    async fn apply_pool_catalog_advisory(
+        &self,
+        advisory: &PoolCatalogAdvisory,
+        now: u64,
+    ) -> Result<PoolCatalogOutcome, StoreError> {
+        validate_pool_catalog_advisory(advisory)?;
+        timestamp(now)?;
+        let mut slots = self.pool_slots.write().await;
+        let mut ledger = self.pool_quota_ledger.write().await;
+        let mut seeds = Vec::with_capacity(slots.len());
+        for slot in slots.values_mut() {
+            let latest = ledger
+                .iter()
+                .filter(|entry| entry.slot_id == slot.id)
+                .max_by(|left, right| pool_quota_entry_order(left, right))
+                .cloned();
+            match pool_catalog_seed_entry(slot, advisory, latest.as_ref(), now) {
+                Ok(entry) => {
+                    seeds.push(PoolCatalogSeed {
+                        slot_id: slot.id.clone(),
+                        applied: true,
+                        reason: catalog_seed_reason(&entry),
+                    });
+                    apply_pool_quota_entry_to_slot(slot, &entry, now);
+                    ledger.push(entry);
+                }
+                Err(reason) => seeds.push(PoolCatalogSeed {
+                    slot_id: slot.id.clone(),
+                    applied: false,
+                    reason,
+                }),
+            }
+        }
+        Ok(pool_catalog_outcome(advisory, seeds))
+    }
 }
 
 fn parse_pool_slot(value: Value) -> Result<PoolSlot, StoreError> {
@@ -4519,6 +4641,107 @@ fn validate_pool_quota_entry(entry: &PoolQuotaEntry) -> Result<(), StoreError> {
         ));
     }
     Ok(())
+}
+
+fn validate_pool_catalog_advisory(advisory: &PoolCatalogAdvisory) -> Result<(), StoreError> {
+    if advisory.contract_version != POOL_CATALOG_CONTRACT_VERSION {
+        return Err(StoreError::InvalidRow(format!(
+            "unsupported catalog advisory contract version {} (expected {})",
+            advisory.contract_version, POOL_CATALOG_CONTRACT_VERSION
+        )));
+    }
+    if advisory.snapshot_id.trim().is_empty() {
+        return Err(StoreError::InvalidRow(
+            "catalog snapshot id is empty".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn pool_catalog_seed_entry(
+    slot: &PoolSlot,
+    advisory: &PoolCatalogAdvisory,
+    latest: Option<&PoolQuotaEntry>,
+    now: u64,
+) -> Result<PoolQuotaEntry, String> {
+    if advisory.stale {
+        return Err("catalog snapshot is stale".to_string());
+    }
+    let matches: Vec<&PoolCatalogRecord> = advisory
+        .records
+        .iter()
+        .filter(|record| {
+            record.provider_id == slot.provider_id
+                && record
+                    .model_id
+                    .as_deref()
+                    .is_none_or(|model| model == slot.model_id)
+        })
+        .collect();
+    let record = match matches.as_slice() {
+        [] => return Err("catalog has no record for this slot".to_string()),
+        [record] => *record,
+        many => {
+            return Err(format!(
+                "catalog has {} records for this slot; no single advisory",
+                many.len()
+            ));
+        }
+    };
+    if record.stale {
+        return Err("catalog record is stale".to_string());
+    }
+    if record.capacity != "known" {
+        return Err("catalog capacity is unknown".to_string());
+    }
+    let Some(allowance) = record.allowance else {
+        return Err("catalog allowance is unknown".to_string());
+    };
+    if latest.is_some_and(|entry| entry.source != PoolQuotaSource::Catalog && entry.limit.is_some())
+    {
+        return Err("local limit wins over the catalog".to_string());
+    }
+    if latest.is_some_and(|entry| now <= entry.observed_at) {
+        return Err("catalog snapshot is not newer than the latest observation".to_string());
+    }
+    let (used, cooldown_until, error) = latest.map_or(
+        (slot.used, slot.cooldown_until, slot.last_error.clone()),
+        |entry| (entry.used, entry.cooldown_until, entry.error.clone()),
+    );
+    let mut entry = PoolQuotaEntry::new(slot.id.clone(), PoolQuotaSource::Catalog, now);
+    entry.used = used;
+    entry.limit = Some(allowance);
+    entry.limit_unit = record
+        .allowance_unit
+        .clone()
+        .filter(|unit| !unit.trim().is_empty());
+    // The advisory states a reset period without an anchor, so a reset time
+    // cannot be derived and local state keeps its own.
+    entry.reset_at = latest.and_then(|entry| entry.reset_at);
+    entry.cooldown_until = cooldown_until;
+    entry.error = error;
+    Ok(entry)
+}
+
+fn catalog_seed_reason(entry: &PoolQuotaEntry) -> String {
+    format!(
+        "catalog seeded {} {}",
+        entry.limit.unwrap_or_default(),
+        entry.limit_unit.as_deref().unwrap_or("units")
+    )
+}
+
+fn pool_catalog_outcome(
+    advisory: &PoolCatalogAdvisory,
+    seeds: Vec<PoolCatalogSeed>,
+) -> PoolCatalogOutcome {
+    let applied = seeds.iter().filter(|seed| seed.applied).count();
+    PoolCatalogOutcome {
+        snapshot_id: advisory.snapshot_id.clone(),
+        skipped: seeds.len() - applied,
+        seeds,
+        applied,
+    }
 }
 
 fn pool_quota_entry_order(left: &PoolQuotaEntry, right: &PoolQuotaEntry) -> std::cmp::Ordering {

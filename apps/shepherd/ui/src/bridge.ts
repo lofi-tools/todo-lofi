@@ -212,6 +212,23 @@ export function clearPoolForce(): Promise<PoolForceOutcome> {
   return invoke('pool_clear_force')
 }
 
+export interface PoolCatalogSeed {
+  slotId: string
+  applied: boolean
+  reason: string
+}
+
+export interface PoolCatalogOutcome {
+  snapshotId: string
+  seeds: PoolCatalogSeed[]
+  applied: number
+  skipped: number
+}
+
+export function applyPoolCatalog(snapshot: string): Promise<PoolCatalogOutcome> {
+  return invoke('pool_apply_catalog', { snapshot })
+}
+
 export interface ProjectSnapshot {
   id: string
   path: string
