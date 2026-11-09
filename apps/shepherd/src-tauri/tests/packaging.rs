@@ -152,10 +152,7 @@ fn release_matrix_builds_every_target_and_verifies_before_publishing()
         );
     }
     for arch in ["arch: arm64", "arch: x86_64"] {
-        assert!(
-            workflow.contains(arch),
-            "the matrix is missing {arch}"
-        );
+        assert!(workflow.contains(arch), "the matrix is missing {arch}");
     }
     assert!(
         workflow.contains("needs: [test, build]"),
@@ -189,10 +186,8 @@ fn release_metadata_records_checksums_and_rejects_a_missing_bundle()
 
     let root = repo_root();
     let script = root.join("scripts/shepherd-release-metadata.sh");
-    let base = std::env::temp_dir().join(format!(
-        "shepherd-release-metadata-{}",
-        std::process::id()
-    ));
+    let base =
+        std::env::temp_dir().join(format!("shepherd-release-metadata-{}", std::process::id()));
     let _ = fs::remove_dir_all(&base);
     let dist = base.join("dist");
     fs::create_dir_all(&dist)?;
