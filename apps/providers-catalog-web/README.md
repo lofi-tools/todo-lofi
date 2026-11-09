@@ -21,6 +21,17 @@ pnpm --dir apps/providers-catalog-web run test
 ```
 
 Snapshots are gitignored. A failed scrape never replaces the previous artifact.
+
+To rebuild locally from a retained artifact without deploying:
+
+```sh
+pnpm --dir apps/providers-catalog-web run rebuild
+pnpm --dir apps/providers-catalog-web run rebuild -- --snapshot artifacts --build
+```
+
+If the artifact is missing or expired, `rebuild` prints recovery steps and exits
+zero; it never deploys. Downloading a retained GitHub Actions artifact is a
+separate, credentials-dependent manual-dispatch step.
 When the newest artifact is present in `artifacts/`, the writer retains any
 provider or model omitted by the new response, preserves its `verified_at`, marks
 it `missing`, and includes it in the snapshot report's review items. Recurring

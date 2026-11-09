@@ -18,6 +18,7 @@
     "build:providers-catalog": "pnpm run codegen && pnpm --dir apps/providers-catalog-web run build",
     "catalog:snapshot": "pnpm --dir apps/providers-catalog-web run snapshot",
     "catalog:validate": "pnpm --dir apps/providers-catalog-web run validate",
+    "catalog:rebuild": "pnpm --dir apps/providers-catalog-web run rebuild",
     "preview:docs": "pnpm --dir apps/ts-docs-web run preview",
     "preview:shep-docs": "pnpm --dir apps/shep-docs-web run preview",
     "preview:providers-catalog": "pnpm --dir apps/providers-catalog-web run preview",

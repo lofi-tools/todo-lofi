@@ -6,7 +6,8 @@ synthetic fixture gate are implemented; S2 sources for plans/offers/agents/local
 runtimes remain blocked. The S5 advisory JSON contract is published at
 `/agent-pool-advisory.v1.json`; pool wiring remains separate. S4 has an inert
 deploy job gated on `CLOUDFLARE_PAGES_ENABLED` and a zero-exit configuration
-guard; it is blocked on Pages project/secret setup and deployed verification.
+guard, plus a local rebuild/recovery command that never deploys; S4 is blocked on
+Pages project/secret setup, GitHub artifact dispatch and deployed verification.
 No deployment exists yet.
 
 This is a separate public site from Shepherd. It compares coding-agent
@@ -418,6 +419,10 @@ from memory.
 ### Build
 
 - `CATALOG_DUCKDB_PATH` points at the snapshot.
+- `pnpm --dir apps/providers-catalog-web run rebuild` selects a snapshot file or
+  directory, validates it, and can run the static build with `--build`. It never
+  deploys. A missing or expired artifact produces recovery steps and exits zero;
+  downloading a retained GitHub Actions artifact remains a manual-dispatch step.
 - The Astro build opens the DuckDB file read-only, validates
   `catalog_meta.schema_version`, and emits static pages plus a JSON search index.
 - The build fails on missing data, duplicate primary keys, missing provenance on

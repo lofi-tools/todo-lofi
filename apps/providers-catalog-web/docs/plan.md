@@ -1,6 +1,6 @@
 # Providers catalog — implementation plan
 
-Status: S1 and S3 implemented on 2026-11-09. S2's source-independent merge policy, review summary, free-offer normalization and synthetic fixture gate are implemented; its source adapters remain blocked on approved sources. S4's deploy job is implemented but inert until the Pages project and secrets are configured; S4 itself remains blocked on that configuration and deployed verification. S5's advisory contract is implemented; connecting it to the Shepherd pool remains a separate Shepherd todo.
+Status: S1 and S3 implemented on 2026-11-09. S2's source-independent merge policy, review summary, free-offer normalization and synthetic fixture gate are implemented; its source adapters remain blocked on approved sources. S4's deploy job and local rebuild/recovery command are implemented but inert until the Pages project and secrets are configured; S4 itself remains blocked on that configuration, manual artifact dispatch and deployed verification. S5's advisory contract is implemented; connecting it to the Shepherd pool remains a separate Shepherd todo.
 
 Spec: [spec.md](./spec/spec.md). The spec governs behavior and data semantics;
 this file gives the working order.
@@ -237,8 +237,12 @@ Pages deployment remains S4 and was not attempted.
   `CLOUDFLARE_ACCOUNT_ID` and the Pages project name. Do not commit them.
 - [ ] Deploy only when the snapshot validates. A stale but valid snapshot may
   deploy with the warning; a failed scrape must not.
-- [ ] Add a manual dispatch path that can rebuild from a retained artifact, and a
-  documented recovery path when the artifact has expired.
+- [ ] Add a manual dispatch path that can rebuild from a retained artifact.
+  This needs GitHub Actions artifact access and is not locally verifiable.
+- [x] Add a local rebuild/recovery command that selects a snapshot file or
+  directory, validates it, optionally rebuilds with `--build`, documents the
+  expired-artifact recovery path, exits zero when no usable artifact exists, and
+  never deploys.
 - [ ] Verify the Pages URL, generated pages, search assets, content types and
   the freshness/provenance pages. No custom domain.
 - [ ] Gate: package typecheck, static build, package e2e, full Shepherd e2e,
@@ -247,8 +251,10 @@ Pages deployment remains S4 and was not attempted.
 
 S4 partial evidence (2026-11-09): the deploy job is committed but has not run.
 The guard unit/CLI test proves missing configuration exits zero with
-`enabled=false`; no deployment was attempted. Pages project configuration,
-secret setup, manual recovery and URL/content-type verification remain blocked.
+`enabled=false`; no deployment was attempted. The local `rebuild` command
+validates the real artifact and prints recovery steps for a deliberately missing
+artifact while exiting zero. Pages project configuration, secret setup, GitHub
+artifact dispatch and URL/content-type verification remain blocked.
 
 ## Slice S5 — agent pool advisory integration
 

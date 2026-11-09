@@ -15,6 +15,7 @@
     "scrape": "tsx scripts/snapshot.ts",
     "snapshot": "tsx scripts/snapshot.ts",
     "validate": "tsx scripts/validate.ts",
+    "rebuild": "tsx scripts/rebuild-from-artifact.ts",
     "test": "vitest run",
     "e2e:cleanup": "astro preview stop || true",
     "e2e:server": "astro preview --port 4326",
