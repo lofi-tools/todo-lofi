@@ -638,6 +638,8 @@ export function App() {
     return state === 'draft' || state === 'ready' || canStartTask()
       || (!selectedTaskId() && firstDrafts.has(selectedProjectId() ?? ''))
   }
+  const showsChatTitle = () =>
+    !(workspace()?.task.state === 'draft' && visibleTasks().length <= 1)
   const canQueuePrompt = () => {
     const state = workspace()?.task.state
     return !!state && LIVE_STATES.includes(state) && !cancellingTurn()
@@ -2026,8 +2028,10 @@ export function App() {
           <Show when={workspace()}>
             {(current) => (
               <header class="pane-header">
-                <span class="chat__title"><SearchMark text={current().task.title}
-                  match={searchJump()?.taskId === current().task.id && searchJump()?.snippet.field === 'task' ? searchJump()?.snippet.matched : undefined} /></span>
+                <Show when={showsChatTitle()}>
+                  <span class="chat__title"><SearchMark text={current().task.title}
+                    match={searchJump()?.taskId === current().task.id && searchJump()?.snippet.field === 'task' ? searchJump()?.snippet.matched : undefined} /></span>
+                </Show>
                 <Show when={current().adapterTier}>
                   {(tier) => <span class="chat__adapter">{TIER_LABELS[tier()]}{current().diagnostics?.fallbackReason && ' · fallback'}</span>}
                 </Show>

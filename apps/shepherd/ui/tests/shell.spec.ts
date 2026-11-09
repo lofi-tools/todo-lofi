@@ -3234,6 +3234,13 @@ test('opens the project picker, filters, and adds a project', async ({ page }) =
   const remoteBounds = await remote.boundingBox()
   if (!iconBounds || !remoteBounds) throw new Error('The remote icon and label should be visible')
   expect(iconBounds.y + iconBounds.height / 2).toBeCloseTo(remoteBounds.y + remoteBounds.height / 2, 0)
+
+  // A project with no tasks gets a sole draft; its default title is not repeated
+  // above the conversation.
+  await page.getByLabel('Prompt').fill('start')
+  const chat = page.getByRole('region', { name: 'Task chat' })
+  await expect(chat.locator('.draft')).toBeVisible()
+  await expect(chat.locator('.chat__title')).toHaveCount(0)
 })
 
 test('shows a Hugging Face icon beside its project remote', async ({ page }) => {
