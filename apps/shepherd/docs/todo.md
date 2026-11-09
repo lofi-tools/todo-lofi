@@ -11,9 +11,9 @@ shell.
 
 ## Current progress
 
-The desktop shell, durable core, Codex task flow, worktree review and terminal
-interface are implemented and have scripted coverage. The later slices have
-partial implementations and remaining unchecked work; their individual proof
+The desktop shell, durable core, Codex task flow, worktree review, terminal
+interface, preview relay, site, catalog, release matrix, downloads page and
+agent pool are implemented and have scripted coverage. Their individual proof
 and gate sections describe what is and is not verified.
 
 The S4 normal-workday trial and macOS candidate-input check remain open. The
@@ -21,6 +21,13 @@ user asked to skip those blocked checks for now and continue with later tasks;
 that does not count as passing the S4 gate. Live adapter checks and the clean
 machine release checklist also remain open. Use the dated evidence in each
 slice rather than treating an older test count or platform result as current.
+
+The remaining unchecked entries are blocked: the release checklist and
+packaged-artifact verification need clean macOS 13+ and Ubuntu 24.04 machines
+with installed agents, signing needs Developer ID and Authenticode credentials,
+and the scrape and snapshot refresh need approved sources, network access and a
+published catalog. The catalog/agent-pool parent is otherwise implemented; its
+only unchecked part is the deferred snapshot refresh.
 
 ## Next feature
 
@@ -2170,8 +2177,9 @@ developer machine.
 ## After v1 — preview relay, site, catalog, releases and agent pool
 
 These are product tasks after the v1 gates above. They do not start v2/GPUI work
-and do not weaken the v1 release gate. All entries are unchecked until their
-own acceptance evidence exists.
+and do not weaken the v1 release gate. An entry is checked only when its own
+acceptance evidence exists; the remaining unchecked entries need clean machines,
+signing credentials, packaged artifacts or an approved scrape source.
 
 ### Shared preview annotation relay
 
