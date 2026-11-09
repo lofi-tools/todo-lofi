@@ -1,12 +1,15 @@
-import { For, Show, createResource, createSignal } from 'solid-js'
+import { For, Show, createEffect, createResource, createSignal } from 'solid-js'
 
 import {
   AGENT_LABELS,
+  clearPoolSlotCooldown,
+  correctPoolQuota,
   poolStatus,
   reorderPoolSlots,
   setPoolSlotEnabled,
   type PoolQuotaEntry,
   type PoolSlot,
+  type PoolSlotStatus,
 } from './bridge'
 import { reportError } from './diagnostics'
 
@@ -29,6 +32,28 @@ function formatMoment(value: number | null | undefined) {
   return new Date(value).toISOString()
 }
 
+function localDateTime(value: number | null | undefined) {
+  if (value == null) return ''
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return ''
+  const pad = (part: number) => String(part).padStart(2, '0')
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`
+}
+
+function parseLocalDateTime(value: string) {
+  if (!value.trim()) return null
+  const parsed = Date.parse(value)
+  return Number.isFinite(parsed) ? parsed : undefined
+}
+
+function parseLimit(value: string) {
+  const trimmed = value.trim()
+  if (!trimmed) return null
+  if (!/^\d+$/.test(trimmed)) return undefined
+  const parsed = Number(trimmed)
+  return Number.isSafeInteger(parsed) ? parsed : undefined
+}
+
 function quotaSummary(entry: PoolQuotaEntry | null) {
   if (!entry) return 'Unknown'
   const unit = entry.limitUnit ?? 'units'
@@ -43,6 +68,82 @@ function slotError(slot: PoolSlot, entry: PoolQuotaEntry | null) {
 
 function slotName(slot: PoolSlot) {
   return `${slot.providerName} · ${slot.modelName}`
+}
+
+function PoolSlotEditor(props: {
+  entry: PoolSlotStatus
+  busy: boolean
+  onCorrect: (limit: number | null, limitUnit: string | null, resetAt: number | null) => void
+  onClearCooldown: () => void
+}) {
+  const [limit, setLimit] = createSignal('')
+  const [limitUnit, setLimitUnit] = createSignal('')
+  const [reset, setReset] = createSignal('')
+  const [error, setError] = createSignal('')
+  const name = () => slotName(props.entry.slot)
+  const cooldown = () => props.entry.latestQuota?.cooldownUntil ?? props.entry.slot.cooldownUntil
+
+  createEffect(() => {
+    const entry = props.entry.latestQuota
+    const currentLimit = entry?.limit ?? props.entry.slot.limit
+    const currentUnit = entry?.limitUnit ?? props.entry.slot.limitUnit
+    const currentReset = entry?.resetAt ?? props.entry.slot.resetAt
+    setLimit(currentLimit == null ? '' : String(currentLimit))
+    setLimitUnit(currentUnit ?? '')
+    setReset(localDateTime(currentReset))
+  })
+
+  function submit(event: SubmitEvent) {
+    event.preventDefault()
+    const parsedLimit = parseLimit(limit())
+    if (parsedLimit === undefined) {
+      setError('Limit must be a non-negative whole number.')
+      return
+    }
+    const unit = limitUnit().trim() || null
+    if (parsedLimit == null && unit) {
+      setError('Enter a limit before setting a unit.')
+      return
+    }
+    const parsedReset = parseLocalDateTime(reset())
+    if (parsedReset === undefined) {
+      setError('Reset must be a valid date and time.')
+      return
+    }
+    setError('')
+    props.onCorrect(parsedLimit, unit, parsedReset)
+  }
+
+  return (
+    <form class="pool__correction" aria-label={`Correct ${name()}`} onSubmit={submit}>
+      <label>
+        Limit
+        <input type="text" inputmode="numeric" aria-label={`Limit for ${name()}`} value={limit()}
+          disabled={props.busy} placeholder="Unknown" onInput={(event) => setLimit(event.currentTarget.value)} />
+      </label>
+      <label>
+        Unit
+        <input type="text" aria-label={`Unit for ${name()}`} value={limitUnit()}
+          disabled={props.busy} placeholder="requests" onInput={(event) => setLimitUnit(event.currentTarget.value)} />
+      </label>
+      <label>
+        Reset
+        <input type="datetime-local" step="1" aria-label={`Reset for ${name()}`} value={reset()}
+          disabled={props.busy} onInput={(event) => setReset(event.currentTarget.value)} />
+      </label>
+      <div class="pool__correction-actions">
+        <button type="submit" class="project-action" disabled={props.busy}>Save correction</button>
+        <Show when={cooldown() != null}>
+          <button type="button" class="project-action" disabled={props.busy}
+            aria-label={`Clear cooldown for ${name()}`}
+            onClick={() => { setError(''); props.onClearCooldown() }}>Clear cooldown</button>
+        </Show>
+      </div>
+      <Show when={error()}>
+        <p class="pool__field-error" role="alert">{error()}</p>
+      </Show>
+    </form>
+  )
 }
 
 export function PoolSettings() {
@@ -90,6 +191,14 @@ export function PoolSettings() {
 
   function toggle(slot: PoolSlot) {
     void mutate('toggle', async () => (await setPoolSlotEnabled(slot.id, !slot.enabled)).reason)
+  }
+
+  function correct(slotId: string, limit: number | null, limitUnit: string | null, resetAt: number | null) {
+    void mutate('correct', async () => (await correctPoolQuota(slotId, limit, limitUnit, resetAt)).reason)
+  }
+
+  function clearCooldown(slotId: string) {
+    void mutate('cooldown', async () => (await clearPoolSlotCooldown(slotId)).reason)
   }
 
   return (
@@ -156,6 +265,9 @@ export function PoolSettings() {
                   disabled={!!busy()}
                   onClick={() => toggle(entry.slot)}>{entry.slot.enabled ? 'Disable' : 'Enable'}</button>
               </div>
+              <PoolSlotEditor entry={entry} busy={!!busy()}
+                onCorrect={(limit, limitUnit, resetAt) => correct(entry.slot.id, limit, limitUnit, resetAt)}
+                onClearCooldown={() => clearCooldown(entry.slot.id)} />
             </li>
           )}
         </For>

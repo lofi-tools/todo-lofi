@@ -20,9 +20,9 @@ const toc = [
   toc={toc}
 >
   <Callout tone="note" title="Pool management is here; task selection is not">
-    Settings → Agent pool can inspect existing slots, reorder them and disable or enable them. New
-    tasks still do not select a pool slot automatically, and limit/reset, cooldown and one-turn force
-    controls are not in the current build.
+    Settings → Agent pool can inspect existing slots, reorder them, disable or enable them, correct a
+    slot's limit and reset time, and clear its cooldown. New tasks still do not select a pool slot
+    automatically, and the one-turn force control is not in the current build.
   </Callout>
 
   <h2 id="status">Status</h2>
@@ -71,10 +71,10 @@ const toc = [
   <h2 id="controls">Your controls</h2>
   <p>
     Settings → Agent pool shows each slot's provider/model, priority, availability, known limit and
-    reset, current task, last error and last-used time. You can move a slot up or down and disable or
-    enable it. The pool UI does not display credentials or invent a quota. Editing limits or reset
-    times, clearing a cooldown and forcing a slot for one turn are planned; saved limits will be a
-    local correction, not a provider guarantee.
+    reset, current task, last error and last-used time. You can move a slot up or down, disable or
+    enable it, correct its limit, unit and reset time, and clear its cooldown. The pool UI does not
+    display credentials or invent a quota. A saved limit is a local correction, not a provider
+    guarantee. Forcing a slot for one turn is still planned.
   </p>
 
   <h2 id="limits">What it will not do</h2>
@@ -92,8 +92,9 @@ const toc = [
   <h2 id="today">Today</h2>
   <p>
     Use the agent picker per task and keep a terminal open when you need to switch manually. If pool
-    slots already exist, Settings → Agent pool lets you inspect their status, reorder them and
-    disable or enable them. Automatic selection for new tasks is not wired. If an agent is missing or
+    slots already exist, Settings → Agent pool lets you inspect their status, reorder them, disable
+    or enable them, correct their limits and reset times, and clear a cooldown. Automatic selection
+    for new tasks is not wired. If an agent is missing or
     its adapter falls back, <a href="/docs/users/troubleshooting#agents">Troubleshooting</a> explains
     what to check. The <a href="/docs/users/releases">releases page</a> tracks the other next-step
     items.

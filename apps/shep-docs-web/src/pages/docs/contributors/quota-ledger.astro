@@ -20,23 +20,23 @@ const toc = [
   description="The local record behind the quota-aware agent pool, its persisted ledger and availability states."
   toc={toc}
 >
-  <Callout tone="note" title="Slot persistence, the ledger, selection, release and pool management are implemented">
+  <Callout tone="note" title="Slot persistence, the ledger, selection, release and pool controls are implemented">
     The pool slot record, the append-only quota ledger, the six availability states, durable
-    priority selection, idle release and pool management now exist. Settings → Agent pool reads the
-    status snapshot and supports reordering, enable/disable and status refreshes for existing slots.
-    Task-start selection, limit/reset corrections, cooldown clearing and the one-turn force override
-    are still planned, so tasks do not choose a pool slot yet. This page records the agreed contract
-    so the implementation, tests and user guide cannot drift.
+    priority selection, idle release and pool controls now exist. Settings → Agent pool reads the
+    status snapshot and supports reordering, enable/disable, limit/reset corrections, cooldown
+    clearing and status refreshes for existing slots. Task-start selection and the one-turn force
+    override are still planned, so tasks do not choose a pool slot yet. This page records the agreed
+    contract so the implementation, tests and user guide cannot drift.
   </Callout>
 
   <h2 id="status">Status</h2>
   <p>
     <Badge tone="warning" variant="subtle">partly implemented</Badge> The pool work is split into
     slot persistence, the quota ledger, priority selection, idle release, core controls, the pool UI
-    and task-start wiring. Persistence, the ledger, selection, release, status, reordering and
-    enable/disable are implemented and tested in the core; Settings → Agent pool exposes status,
-    reordering and enable/disable. Task-start wiring, limit/reset correction, cooldown clearing and
-    force-slot controls are not checked off. The user-facing promise is on the
+    and task-start wiring. Persistence, the ledger, selection, release, status, reordering,
+    enable/disable, limit/reset correction and cooldown clearing are implemented and tested;
+    Settings → Agent pool exposes all of them. Task-start wiring and the force-slot control are not
+    checked off. The user-facing promise is on the
     <a href="/docs/users/agent-pool">agent pool</a> page; this page is for the implementation.
   </p>
 
@@ -108,8 +108,8 @@ const toc = [
     a later selection for the same request clears its idle marker so active work is not released.
     The stored adapter session handle remains available for a resume; if the adapter cannot resume,
     the task says so and the next turn selects another slot. This slice exposes the core release API;
-    the task runner that marks settled requests and supplies the active set, and the pool UI, are
-    later work.
+    the task runner that marks settled requests and supplies the active set is later work. The
+    Settings pool panel manages existing slots but does not start tasks from the pool.
   </p>
 
   <h2 id="privacy">Corrections and privacy</h2>
@@ -124,9 +124,18 @@ const toc = [
     page with a retry.
   </p>
   <p>
-    The ledger already accepts user-source entries for limit/reset corrections and cooldown clearing,
-    and a forced slot already uses the selection request's one-turn override. Those controls are not
-    wired into the UI yet. The pending work is to expose them, not to add another selection path.
+    A limit correction appends a user-source observation with the submitted limit, unit and reset
+    time. It preserves the current usage, cooldown and error, mirrors the corrected values onto the
+    slot, and refuses to run without advancing past the latest observation. Repeating the same
+    correction returns the existing observation with <code>applied: false</code> and an explanatory
+    reason. Clearing a cooldown appends a user observation with the cooldown removed while preserving
+    usage, limit, reset and error; repeating it is also a no-op. A missing slot, an empty id, a unit
+    without a limit, a blank unit or a timestamp that does not advance the ledger is rejected with a
+    visible error.
+  </p>
+  <p>
+    A forced slot still uses the selection request's one-turn override. That control is not wired
+    into the UI yet. The pending work is to expose it, not to add another selection path.
   </p>
   <p>
     The catalog is advisory. A local ledger and the user's correction are authoritative for local
@@ -142,12 +151,13 @@ const toc = [
     <li>Implemented: idle release against both stores, including the timeout boundary, repeat release, active and unsettled reservations, session resumability and slot reuse; a Turso re-open covers durability.</li>
     <li>Implemented: pool status, reordering and enable/disable against both stores, including latest quota/availability/active request, disabled selection fallback, repeat calls and rejected duplicate, missing or unknown orders.</li>
     <li>Implemented: the Settings pool UI loads the status snapshot, reorders slots, toggles enable/disable, surfaces outcome reasons and errors, and retries a failed status read.</li>
-    <li>Pending: task-start wiring, limit/reset and cooldown controls in the UI, the one-turn force control, cancellation and restart scheduling.</li>
+    <li>Implemented: limit/reset corrections and cooldown clearing against both stores, including preserved usage/error fields, repeat no-ops, concurrent identical corrections writing once, rejected stale observations and missing slots, plus the Settings form and its rejected-correction feedback.</li>
+    <li>Pending: task-start wiring, the one-turn force control, cancellation and restart scheduling.</li>
     <li>Credential redaction in records, logs and diagnostics.</li>
   </ul>
   <p>
-    The core release and control APIs and the Settings pool UI are tested; task-start wiring,
-    cancellation and the remaining pool controls remain next-step items. See the
+    The core release and control APIs, corrections and the Settings pool UI are tested; task-start
+    wiring, cancellation and the one-turn force control remain next-step items. See the
     <a href="/docs/contributors/test-fixtures">test fixtures</a> page for the fixture rules that
     apply when the work lands.
   </p>

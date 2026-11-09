@@ -26,6 +26,7 @@ use shepherd_core::files::{self, DirectoryListing, FileSearchQuery, FileSearchRe
 use shepherd_core::git::GitService;
 use shepherd_core::harness::HarnessFactory;
 use shepherd_core::store::{
+    PoolCooldownClearRequest, PoolQuotaCorrectionOutcome, PoolQuotaCorrectionRequest,
     PoolReorderOutcome, PoolReorderRequest, PoolSlotEnabledOutcome, PoolSlotEnabledRequest,
     PoolSlotId, PoolStatus, Store, TursoStore,
 };
@@ -1879,6 +1880,40 @@ impl ShellState {
             .map_err(BridgeError::from)
     }
 
+    pub async fn correct_pool_quota(
+        &self,
+        slot_id: String,
+        limit: Option<u64>,
+        limit_unit: Option<String>,
+        reset_at: Option<u64>,
+    ) -> Result<PoolQuotaCorrectionOutcome, BridgeError> {
+        let request = PoolQuotaCorrectionRequest {
+            slot_id: PoolSlotId::new(slot_id),
+            limit,
+            limit_unit,
+            reset_at,
+            now: now_millis(),
+        };
+        let mut core = self.core.lock().await;
+        core.correct_pool_quota(&request)
+            .await
+            .map_err(BridgeError::from)
+    }
+
+    pub async fn clear_pool_slot_cooldown(
+        &self,
+        slot_id: String,
+    ) -> Result<PoolQuotaCorrectionOutcome, BridgeError> {
+        let request = PoolCooldownClearRequest {
+            slot_id: PoolSlotId::new(slot_id),
+            now: now_millis(),
+        };
+        let mut core = self.core.lock().await;
+        core.clear_pool_slot_cooldown(&request)
+            .await
+            .map_err(BridgeError::from)
+    }
+
     pub async fn task_workspace(&self, task_id: String) -> Result<TaskWorkspace, BridgeError> {
         let task_id = TaskId::new(task_id);
         Ok(self.core.lock().await.open_task_workspace(&task_id).await?)
@@ -3067,6 +3102,28 @@ pub mod commands {
             .inner()
             .set_pool_slot_enabled(slot_id, enabled)
             .await
+    }
+
+    #[tauri::command]
+    pub async fn pool_correct_quota(
+        state: State<'_, ShellState>,
+        slot_id: String,
+        limit: Option<u64>,
+        limit_unit: Option<String>,
+        reset_at: Option<u64>,
+    ) -> Result<PoolQuotaCorrectionOutcome, BridgeError> {
+        state
+            .inner()
+            .correct_pool_quota(slot_id, limit, limit_unit, reset_at)
+            .await
+    }
+
+    #[tauri::command]
+    pub async fn pool_clear_cooldown(
+        state: State<'_, ShellState>,
+        slot_id: String,
+    ) -> Result<PoolQuotaCorrectionOutcome, BridgeError> {
+        state.inner().clear_pool_slot_cooldown(slot_id).await
     }
 
     #[tauri::command]

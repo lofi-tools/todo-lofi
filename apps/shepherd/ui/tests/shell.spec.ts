@@ -142,23 +142,34 @@ test.beforeEach(async ({ context }) => {
       {
         id: 'slot-zed', agent: 'claude', providerId: 'zed', providerName: 'Zed', modelId: 'model-b', modelName: 'Model B',
         credentialRef: null, priority: 1, enabled: true, used: 10, limit: 10, limitUnit: 'requests', resetAt: 1_800_000_000_000,
-        cooldownUntil: null, lastUsedAt: null, lastError: 'provider unavailable', createdAt: 1_760_000_001_000, updatedAt: 1_760_000_001_000,
+        cooldownUntil: 1_900_000_000_000, lastUsedAt: null, lastError: 'provider unavailable', createdAt: 1_760_000_001_000, updatedAt: 1_760_000_001_000,
       },
     ]
+    function poolQuota(slot: typeof poolSlots[number], source = 'provider') {
+      return {
+        id: `quota-${slot.id}`, slotId: slot.id, observedAt: 1_760_000_000_000, source,
+        used: slot.used, limit: slot.limit, limitUnit: slot.limitUnit, resetAt: slot.resetAt,
+        cooldownUntil: slot.cooldownUntil, error: slot.lastError,
+      }
+    }
+    function poolAvailability(slot: typeof poolSlots[number]) {
+      if (!slot.enabled) return { state: 'disabled', reason: 'slot is disabled' }
+      if (slot.cooldownUntil != null && slot.cooldownUntil > 1_800_000_000_000) {
+        return { state: 'cooling-down', reason: `cooling down until ${slot.cooldownUntil}` }
+      }
+      if (slot.lastError) return { state: 'unhealthy', reason: `last observation failed: ${slot.lastError}` }
+      if (slot.used != null && slot.limit != null && slot.used >= slot.limit) {
+        return { state: 'exhausted', reason: `quota exhausted: used ${slot.used} of ${slot.limit} ${slot.limitUnit}` }
+      }
+      return { state: 'available', reason: `quota available: used ${slot.used} of ${slot.limit} ${slot.limitUnit}` }
+    }
     function poolStatus() {
       return {
         generatedAt: 1_800_000_000_000,
         slots: poolSlots.map((slot) => ({
           slot: { ...slot },
-          availability: !slot.enabled
-            ? { state: 'disabled', reason: 'slot is disabled' }
-            : slot.used != null && slot.limit != null && slot.used >= slot.limit
-              ? { state: 'exhausted', reason: `quota exhausted: used ${slot.used} of ${slot.limit} ${slot.limitUnit}` }
-              : { state: 'available', reason: `quota available: used ${slot.used} of ${slot.limit} ${slot.limitUnit}` },
-          latestQuota: {
-            id: `quota-${slot.id}`, slotId: slot.id, observedAt: 1_760_000_000_000, source: 'provider', used: slot.used,
-            limit: slot.limit, limitUnit: slot.limitUnit, resetAt: slot.resetAt, cooldownUntil: slot.cooldownUntil, error: slot.lastError,
-          },
+          availability: poolAvailability(slot),
+          latestQuota: poolQuota(slot),
           currentRequest: null,
         })),
       }
@@ -498,6 +509,32 @@ test.beforeEach(async ({ context }) => {
             poolSlots[index] = { ...poolSlots[index], enabled: args.enabled, updatedAt: 1_800_000_000_000 }
             poolOperations.push(`toggle:${args.slotId}:${args.enabled}`)
             return { slot: { ...poolSlots[index] }, reason: args.enabled ? 'slot enabled by user' : 'slot disabled by user' }
+          }
+          case 'pool_correct_quota': {
+            if (args.limit === 13) throw { message: 'Pool correction rejected by fixture.' }
+            const index = poolSlots.findIndex((slot) => slot.id === args.slotId)
+            if (index < 0) throw { message: `Pool slot ${args.slotId} was not found.` }
+            const limit = args.limit as number | null
+            const limitUnit = args.limitUnit as string | null
+            const resetAt = args.resetAt as number | null
+            const current = poolSlots[index]
+            if (current.limit === limit && current.limitUnit === limitUnit && current.resetAt === resetAt) {
+              return { slot: { ...current }, latestQuota: poolQuota(current, 'user'), availability: poolAvailability(current), applied: false, reason: 'limit correction is already current' }
+            }
+            poolSlots[index] = { ...current, limit, limitUnit, resetAt, updatedAt: 1_800_000_000_000 }
+            poolOperations.push(`correct:${args.slotId}:${limit}:${limitUnit}:${resetAt}`)
+            return { slot: { ...poolSlots[index] }, latestQuota: poolQuota(poolSlots[index], 'user'), availability: poolAvailability(poolSlots[index]), applied: true, reason: 'limit correction applied by user' }
+          }
+          case 'pool_clear_cooldown': {
+            const index = poolSlots.findIndex((slot) => slot.id === args.slotId)
+            if (index < 0) throw { message: `Pool slot ${args.slotId} was not found.` }
+            const current = poolSlots[index]
+            if (current.cooldownUntil == null) {
+              return { slot: { ...current }, latestQuota: poolQuota(current, 'user'), availability: poolAvailability(current), applied: false, reason: 'cooldown is already clear' }
+            }
+            poolSlots[index] = { ...current, cooldownUntil: null, updatedAt: 1_800_000_000_000 }
+            poolOperations.push(`cooldown:${args.slotId}`)
+            return { slot: { ...poolSlots[index] }, latestQuota: poolQuota(poolSlots[index], 'user'), availability: poolAvailability(poolSlots[index]), applied: true, reason: 'cooldown cleared by user' }
           }
           case 'subscribe':
             eventChannel = args.channel.id
@@ -3216,6 +3253,34 @@ test('loads, reorders and disables agent pool slots from Settings', async ({ pag
   await expect(pool.getByText('slot is disabled')).toBeVisible()
   await expect.poll(() => page.evaluate(() => (window as unknown as { __poolOperations: string[] }).__poolOperations))
     .toEqual(['reorder:slot-zed,slot-acme', 'toggle:slot-acme:false'])
+})
+
+test('corrects pool quotas, rejects an invalid correction and clears a cooldown', async ({ page }) => {
+  await page.goto('/')
+  await page.getByRole('button', { name: 'Settings', exact: true }).click()
+  await page.getByRole('navigation', { name: 'Settings categories' }).getByRole('button', { name: 'Agent pool' }).click()
+  const pool = page.getByRole('region', { name: 'Agent pool' })
+  const acme = pool.locator('.pool__slot').filter({ hasText: 'Acme · Model A' })
+  const zed = pool.locator('.pool__slot').filter({ hasText: 'Zed · Model B' })
+
+  await acme.getByLabel('Limit for Acme · Model A').fill('20')
+  await acme.getByRole('button', { name: 'Save correction' }).click()
+  await expect(pool.getByRole('status')).toHaveText('limit correction applied by user')
+  await expect(acme).toContainText('3 of 20 requests')
+
+  await acme.getByRole('button', { name: 'Save correction' }).click()
+  await expect(pool.getByRole('status')).toHaveText('limit correction is already current')
+
+  await acme.getByLabel('Limit for Acme · Model A').fill('13')
+  await acme.getByRole('button', { name: 'Save correction' }).click()
+  await expect(pool.getByRole('alert')).toContainText('Pool correction rejected by fixture.')
+
+  await zed.getByRole('button', { name: 'Clear cooldown for Zed · Model B' }).click()
+  await expect(pool.getByRole('status')).toHaveText('cooldown cleared by user')
+  await expect(zed.getByText('Cooling down')).toHaveCount(0)
+  await expect(zed.getByRole('button', { name: 'Clear cooldown for Zed · Model B' })).toHaveCount(0)
+  await expect.poll(() => page.evaluate(() => (window as unknown as { __poolOperations: string[] }).__poolOperations))
+    .toEqual(['correct:slot-acme:20:requests:1800000000000', 'cooldown:slot-zed'])
 })
 
 test('surfaces a pool status failure and retries it', async ({ page }) => {

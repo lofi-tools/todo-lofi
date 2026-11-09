@@ -48,8 +48,9 @@ use crate::harness::{HarnessFactory, HarnessSession, ProjectApprovals, Unavailab
 use crate::session::SessionRecord;
 use crate::snapshots::{SessionRecovery, TaskApproval};
 use crate::store::{
-    MemoryStore, PoolReorderOutcome, PoolReorderRequest, PoolSlotEnabledOutcome,
-    PoolSlotEnabledRequest, PoolStatus, Store, StoreError, WorktreeDeletion,
+    MemoryStore, PoolCooldownClearRequest, PoolQuotaCorrectionOutcome, PoolQuotaCorrectionRequest,
+    PoolReorderOutcome, PoolReorderRequest, PoolSlotEnabledOutcome, PoolSlotEnabledRequest,
+    PoolStatus, Store, StoreError, WorktreeDeletion,
 };
 use crate::terminal::{
     InspectorTab, ProcessRecord, TerminalId, TerminalLayout, TerminalList, TerminalRecord,
@@ -915,6 +916,20 @@ impl Core {
         request: &PoolSlotEnabledRequest,
     ) -> Result<PoolSlotEnabledOutcome, CoreError> {
         Ok(self.store.set_pool_slot_enabled(request).await?)
+    }
+
+    pub async fn correct_pool_quota(
+        &mut self,
+        request: &PoolQuotaCorrectionRequest,
+    ) -> Result<PoolQuotaCorrectionOutcome, CoreError> {
+        Ok(self.store.correct_pool_quota(request).await?)
+    }
+
+    pub async fn clear_pool_slot_cooldown(
+        &mut self,
+        request: &PoolCooldownClearRequest,
+    ) -> Result<PoolQuotaCorrectionOutcome, CoreError> {
+        Ok(self.store.clear_pool_slot_cooldown(request).await?)
     }
 
     pub async fn remove_process(&mut self, id: &str) -> Result<(), CoreError> {
@@ -3962,7 +3977,8 @@ mod tests {
 
     use super::*;
     use crate::store::{
-        PoolAvailabilityState, PoolQuotaEntry, PoolQuotaSource, PoolSlot, PoolSlotId, TursoStore,
+        PoolAvailabilityState, PoolCooldownClearRequest, PoolQuotaCorrectionRequest,
+        PoolQuotaEntry, PoolQuotaSource, PoolSlot, PoolSlotId, TursoStore,
     };
     use crate::streaming::LateHarnessFactory;
     use crate::test_support::{
@@ -4050,6 +4066,110 @@ mod tests {
             status.slots[0].availability.state,
             PoolAvailabilityState::Disabled
         );
+
+        let correction = PoolQuotaCorrectionRequest {
+            slot_id: first.id.clone(),
+            limit: Some(20),
+            limit_unit: Some("requests".into()),
+            reset_at: Some(5_000),
+            now: 400,
+        };
+        let corrected = core.correct_pool_quota(&correction).await?;
+        assert!(corrected.applied);
+        assert_eq!(
+            corrected.latest_quota.as_ref().and_then(|entry| entry.used),
+            Some(0)
+        );
+        assert_eq!(
+            corrected.latest_quota.as_ref().map(|entry| entry.source),
+            Some(PoolQuotaSource::User)
+        );
+        assert_eq!(
+            corrected.availability.state,
+            PoolAvailabilityState::Available
+        );
+        let repeated = core
+            .correct_pool_quota(&PoolQuotaCorrectionRequest {
+                now: 410,
+                ..correction.clone()
+            })
+            .await?;
+        assert!(!repeated.applied);
+        assert_eq!(
+            repeated
+                .latest_quota
+                .as_ref()
+                .map(|entry| entry.id.as_str()),
+            corrected
+                .latest_quota
+                .as_ref()
+                .map(|entry| entry.id.as_str())
+        );
+
+        let mut cooling = PoolQuotaEntry::new(first.id.clone(), PoolQuotaSource::Provider, 500);
+        cooling.used = Some(5);
+        cooling.limit = Some(20);
+        cooling.limit_unit = Some("requests".into());
+        cooling.reset_at = Some(5_000);
+        cooling.cooldown_until = Some(2_000);
+        core.store.append_pool_quota_entry(&cooling).await?;
+        let status = core.pool_status(600).await?;
+        let first_status = status
+            .slots
+            .iter()
+            .find(|status| status.slot.id == first.id)
+            .ok_or("corrected slot status missing")?;
+        assert_eq!(
+            first_status.availability.state,
+            PoolAvailabilityState::CoolingDown
+        );
+
+        let cleared = core
+            .clear_pool_slot_cooldown(&PoolCooldownClearRequest::new(first.id.clone(), 600))
+            .await?;
+        assert!(cleared.applied);
+        assert_eq!(
+            cleared
+                .latest_quota
+                .as_ref()
+                .and_then(|entry| entry.cooldown_until),
+            None
+        );
+        assert_eq!(cleared.availability.state, PoolAvailabilityState::Available);
+        assert!(
+            !core
+                .clear_pool_slot_cooldown(&PoolCooldownClearRequest::new(first.id.clone(), 610))
+                .await?
+                .applied
+        );
+
+        assert!(matches!(
+            core.correct_pool_quota(&PoolQuotaCorrectionRequest {
+                slot_id: first.id.clone(),
+                limit: Some(30),
+                limit_unit: Some("requests".into()),
+                reset_at: Some(5_000),
+                now: 600,
+            })
+            .await,
+            Err(CoreError::Store(StoreError::InvalidRow(_)))
+        ));
+        assert!(matches!(
+            core.correct_pool_quota(&PoolQuotaCorrectionRequest::new(
+                PoolSlotId::new("missing"),
+                700
+            ))
+            .await,
+            Err(CoreError::Store(StoreError::PoolSlotNotFound { .. }))
+        ));
+        assert!(matches!(
+            core.clear_pool_slot_cooldown(&PoolCooldownClearRequest::new(
+                PoolSlotId::new("missing"),
+                700
+            ))
+            .await,
+            Err(CoreError::Store(StoreError::PoolSlotNotFound { .. }))
+        ));
         assert!(matches!(
             core.set_pool_slot_enabled(&PoolSlotEnabledRequest {
                 slot_id: PoolSlotId::new("missing"),

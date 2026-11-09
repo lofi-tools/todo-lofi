@@ -164,6 +164,14 @@ export interface PoolSlotEnabledOutcome {
   reason: string
 }
 
+export interface PoolQuotaCorrectionOutcome {
+  slot: PoolSlot
+  latestQuota: PoolQuotaEntry | null
+  availability: { state: PoolAvailabilityState; reason: string }
+  applied: boolean
+  reason: string
+}
+
 export function poolStatus(): Promise<PoolStatus> {
   return invoke('pool_status')
 }
@@ -174,6 +182,19 @@ export function reorderPoolSlots(slotIds: string[]): Promise<PoolReorderOutcome>
 
 export function setPoolSlotEnabled(slotId: string, enabled: boolean): Promise<PoolSlotEnabledOutcome> {
   return invoke('pool_set_slot_enabled', { slotId, enabled })
+}
+
+export function correctPoolQuota(
+  slotId: string,
+  limit: number | null,
+  limitUnit: string | null,
+  resetAt: number | null,
+): Promise<PoolQuotaCorrectionOutcome> {
+  return invoke('pool_correct_quota', { slotId, limit, limitUnit, resetAt })
+}
+
+export function clearPoolSlotCooldown(slotId: string): Promise<PoolQuotaCorrectionOutcome> {
+  return invoke('pool_clear_cooldown', { slotId })
 }
 
 export interface ProjectSnapshot {

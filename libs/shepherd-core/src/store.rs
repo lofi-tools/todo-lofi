@@ -474,6 +474,51 @@ pub struct PoolSlotEnabledOutcome {
     pub reason: String,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PoolQuotaCorrectionRequest {
+    pub slot_id: PoolSlotId,
+    pub limit: Option<u64>,
+    pub limit_unit: Option<String>,
+    pub reset_at: Option<u64>,
+    pub now: u64,
+}
+
+impl PoolQuotaCorrectionRequest {
+    pub fn new(slot_id: PoolSlotId, now: u64) -> Self {
+        Self {
+            slot_id,
+            limit: None,
+            limit_unit: None,
+            reset_at: None,
+            now,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PoolCooldownClearRequest {
+    pub slot_id: PoolSlotId,
+    pub now: u64,
+}
+
+impl PoolCooldownClearRequest {
+    pub fn new(slot_id: PoolSlotId, now: u64) -> Self {
+        Self { slot_id, now }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PoolQuotaCorrectionOutcome {
+    pub slot: PoolSlot,
+    pub latest_quota: Option<PoolQuotaEntry>,
+    pub availability: PoolAvailability,
+    pub applied: bool,
+    pub reason: String,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WorktreeDeletion {
     pub task_id: TaskId,
@@ -600,6 +645,14 @@ pub trait Store: Send + Sync {
         &self,
         request: &PoolSlotEnabledRequest,
     ) -> Result<PoolSlotEnabledOutcome, StoreError>;
+    async fn correct_pool_quota(
+        &self,
+        request: &PoolQuotaCorrectionRequest,
+    ) -> Result<PoolQuotaCorrectionOutcome, StoreError>;
+    async fn clear_pool_slot_cooldown(
+        &self,
+        request: &PoolCooldownClearRequest,
+    ) -> Result<PoolQuotaCorrectionOutcome, StoreError>;
 }
 
 struct Migration {
@@ -1877,31 +1930,7 @@ impl Store for TursoStore {
         slot_id: &PoolSlotId,
     ) -> Result<Option<PoolQuotaEntry>, StoreError> {
         let mut db = self.db.lock().await;
-        let rows = toasty::sql::query(
-            "SELECT id, slot_id, observed_at, source, used, quota_limit, limit_unit, \
-                    reset_at, cooldown_until, error \
-             FROM pool_quota_ledger WHERE slot_id = ?1 \
-             ORDER BY observed_at DESC, id DESC LIMIT 1",
-        )
-        .column_types([
-            Type::String,
-            Type::String,
-            Type::I64,
-            Type::String,
-            Type::I64,
-            Type::I64,
-            Type::String,
-            Type::I64,
-            Type::I64,
-            Type::String,
-        ])
-        .bind(slot_id.as_str())
-        .exec(&mut *db)
-        .await?;
-        rows.into_iter()
-            .next()
-            .map(parse_pool_quota_entry)
-            .transpose()
+        query_latest_pool_quota_entry(&mut db, slot_id).await
     }
 
     async fn select_pool_slot(
@@ -2264,6 +2293,99 @@ impl Store for TursoStore {
                 "slot disabled by user".to_string()
             },
         })
+    }
+
+    async fn correct_pool_quota(
+        &self,
+        request: &PoolQuotaCorrectionRequest,
+    ) -> Result<PoolQuotaCorrectionOutcome, StoreError> {
+        validate_pool_quota_correction_request(request)?;
+        let mut slot = self
+            .load_pool_slots()
+            .await?
+            .into_iter()
+            .find(|slot| slot.id == request.slot_id)
+            .ok_or_else(|| StoreError::PoolSlotNotFound {
+                slot_id: request.slot_id.clone(),
+            })?;
+        let mut db = self.db.lock().await;
+        let latest = query_latest_pool_quota_entry(&mut db, &request.slot_id).await?;
+        if pool_correction_is_current(latest.as_ref(), request) {
+            return Ok(pool_correction_outcome(
+                slot,
+                latest,
+                request.now,
+                false,
+                "limit correction is already current",
+            ));
+        }
+        if latest
+            .as_ref()
+            .is_some_and(|entry| request.now <= entry.observed_at)
+        {
+            return Err(StoreError::InvalidRow(
+                "pool correction must advance the latest quota observation".to_string(),
+            ));
+        }
+        let entry = pool_quota_correction_entry(&slot, latest.as_ref(), request);
+        save_pool_quota_correction(&mut db, &entry).await?;
+        drop(db);
+        apply_pool_quota_entry_to_slot(&mut slot, &entry, request.now);
+        Ok(pool_correction_outcome(
+            slot,
+            Some(entry),
+            request.now,
+            true,
+            "limit correction applied by user",
+        ))
+    }
+
+    async fn clear_pool_slot_cooldown(
+        &self,
+        request: &PoolCooldownClearRequest,
+    ) -> Result<PoolQuotaCorrectionOutcome, StoreError> {
+        validate_pool_cooldown_clear_request(request)?;
+        let mut slot = self
+            .load_pool_slots()
+            .await?
+            .into_iter()
+            .find(|slot| slot.id == request.slot_id)
+            .ok_or_else(|| StoreError::PoolSlotNotFound {
+                slot_id: request.slot_id.clone(),
+            })?;
+        let mut db = self.db.lock().await;
+        let latest = query_latest_pool_quota_entry(&mut db, &request.slot_id).await?;
+        let cooldown = latest
+            .as_ref()
+            .map_or(slot.cooldown_until, |entry| entry.cooldown_until);
+        if cooldown.is_none() {
+            return Ok(pool_correction_outcome(
+                slot,
+                latest,
+                request.now,
+                false,
+                "cooldown is already clear",
+            ));
+        }
+        if latest
+            .as_ref()
+            .is_some_and(|entry| request.now <= entry.observed_at)
+        {
+            return Err(StoreError::InvalidRow(
+                "cooldown clear must advance the latest quota observation".to_string(),
+            ));
+        }
+        let entry = pool_cooldown_clear_entry(&slot, latest.as_ref(), request.now);
+        save_pool_quota_correction(&mut db, &entry).await?;
+        drop(db);
+        apply_pool_quota_entry_to_slot(&mut slot, &entry, request.now);
+        Ok(pool_correction_outcome(
+            slot,
+            Some(entry),
+            request.now,
+            true,
+            "cooldown cleared by user",
+        ))
     }
 
     async fn load_projects(&self) -> Result<Vec<Project>, StoreError> {
@@ -3927,6 +4049,101 @@ impl Store for MemoryStore {
             },
         })
     }
+
+    async fn correct_pool_quota(
+        &self,
+        request: &PoolQuotaCorrectionRequest,
+    ) -> Result<PoolQuotaCorrectionOutcome, StoreError> {
+        validate_pool_quota_correction_request(request)?;
+        let mut slots = self.pool_slots.write().await;
+        let slot = slots
+            .get_mut(&request.slot_id)
+            .ok_or_else(|| StoreError::PoolSlotNotFound {
+                slot_id: request.slot_id.clone(),
+            })?;
+        let mut ledger = self.pool_quota_ledger.write().await;
+        let latest = ledger
+            .iter()
+            .filter(|entry| entry.slot_id == request.slot_id)
+            .max_by(|left, right| pool_quota_entry_order(left, right))
+            .cloned();
+        if pool_correction_is_current(latest.as_ref(), request) {
+            return Ok(pool_correction_outcome(
+                slot.clone(),
+                latest,
+                request.now,
+                false,
+                "limit correction is already current",
+            ));
+        }
+        if latest
+            .as_ref()
+            .is_some_and(|entry| request.now <= entry.observed_at)
+        {
+            return Err(StoreError::InvalidRow(
+                "pool correction must advance the latest quota observation".to_string(),
+            ));
+        }
+        let entry = pool_quota_correction_entry(slot, latest.as_ref(), request);
+        ledger.push(entry.clone());
+        apply_pool_quota_entry_to_slot(slot, &entry, request.now);
+        Ok(pool_correction_outcome(
+            slot.clone(),
+            Some(entry),
+            request.now,
+            true,
+            "limit correction applied by user",
+        ))
+    }
+
+    async fn clear_pool_slot_cooldown(
+        &self,
+        request: &PoolCooldownClearRequest,
+    ) -> Result<PoolQuotaCorrectionOutcome, StoreError> {
+        validate_pool_cooldown_clear_request(request)?;
+        let mut slots = self.pool_slots.write().await;
+        let slot = slots
+            .get_mut(&request.slot_id)
+            .ok_or_else(|| StoreError::PoolSlotNotFound {
+                slot_id: request.slot_id.clone(),
+            })?;
+        let mut ledger = self.pool_quota_ledger.write().await;
+        let latest = ledger
+            .iter()
+            .filter(|entry| entry.slot_id == request.slot_id)
+            .max_by(|left, right| pool_quota_entry_order(left, right))
+            .cloned();
+        let cooldown = latest
+            .as_ref()
+            .map_or(slot.cooldown_until, |entry| entry.cooldown_until);
+        if cooldown.is_none() {
+            return Ok(pool_correction_outcome(
+                slot.clone(),
+                latest,
+                request.now,
+                false,
+                "cooldown is already clear",
+            ));
+        }
+        if latest
+            .as_ref()
+            .is_some_and(|entry| request.now <= entry.observed_at)
+        {
+            return Err(StoreError::InvalidRow(
+                "cooldown clear must advance the latest quota observation".to_string(),
+            ));
+        }
+        let entry = pool_cooldown_clear_entry(slot, latest.as_ref(), request.now);
+        ledger.push(entry.clone());
+        apply_pool_quota_entry_to_slot(slot, &entry, request.now);
+        Ok(pool_correction_outcome(
+            slot.clone(),
+            Some(entry),
+            request.now,
+            true,
+            "cooldown cleared by user",
+        ))
+    }
 }
 
 fn parse_pool_slot(value: Value) -> Result<PoolSlot, StoreError> {
@@ -4052,6 +4269,227 @@ fn parse_pool_quota_entry(value: Value) -> Result<PoolQuotaEntry, StoreError> {
     };
     validate_pool_quota_entry(&entry)?;
     Ok(entry)
+}
+
+async fn query_latest_pool_quota_entry(
+    db: &mut toasty::db::Db,
+    slot_id: &PoolSlotId,
+) -> Result<Option<PoolQuotaEntry>, StoreError> {
+    let rows = toasty::sql::query(
+        "SELECT id, slot_id, observed_at, source, used, quota_limit, limit_unit, \
+                reset_at, cooldown_until, error \
+         FROM pool_quota_ledger WHERE slot_id = ?1 \
+         ORDER BY observed_at DESC, id DESC LIMIT 1",
+    )
+    .column_types([
+        Type::String,
+        Type::String,
+        Type::I64,
+        Type::String,
+        Type::I64,
+        Type::I64,
+        Type::String,
+        Type::I64,
+        Type::I64,
+        Type::String,
+    ])
+    .bind(slot_id.as_str())
+    .exec(&mut *db)
+    .await?;
+    rows.into_iter()
+        .next()
+        .map(parse_pool_quota_entry)
+        .transpose()
+}
+
+async fn save_pool_quota_correction(
+    db: &mut toasty::db::Db,
+    entry: &PoolQuotaEntry,
+) -> Result<(), StoreError> {
+    validate_pool_quota_entry(entry)?;
+    let mut transaction = db.transaction().await?;
+    let inserted = toasty::sql::statement(
+        "INSERT INTO pool_quota_ledger (\
+            id, slot_id, observed_at, source, used, quota_limit, limit_unit, \
+            reset_at, cooldown_until, error\
+         ) SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10 \
+         FROM pool_slots WHERE id = ?2",
+    )
+    .bind(&entry.id)
+    .bind(entry.slot_id.as_str())
+    .bind(timestamp(entry.observed_at)?)
+    .bind(entry.source.as_str())
+    .bind(timestamp_or_missing(entry.used)?)
+    .bind(timestamp_or_missing(entry.limit)?)
+    .bind(entry.limit_unit.as_deref().unwrap_or_default())
+    .bind(timestamp_or_missing(entry.reset_at)?)
+    .bind(timestamp_or_missing(entry.cooldown_until)?)
+    .bind(entry.error.as_deref().unwrap_or_default())
+    .exec(&mut transaction)
+    .await?;
+    if inserted != 1 {
+        return Err(StoreError::QuotaLedgerOwnerMissing {
+            slot_id: entry.slot_id.clone(),
+        });
+    }
+    let updated = toasty::sql::statement(
+        "UPDATE pool_slots SET used = ?2, quota_limit = ?3, limit_unit = ?4, \
+         reset_at = ?5, cooldown_until = ?6, last_error = ?7, updated_at = ?8 \
+         WHERE id = ?1",
+    )
+    .bind(entry.slot_id.as_str())
+    .bind(timestamp_or_missing(entry.used)?)
+    .bind(timestamp_or_missing(entry.limit)?)
+    .bind(entry.limit_unit.as_deref().unwrap_or_default())
+    .bind(timestamp_or_missing(entry.reset_at)?)
+    .bind(timestamp_or_missing(entry.cooldown_until)?)
+    .bind(entry.error.as_deref().unwrap_or_default())
+    .bind(timestamp(entry.observed_at)?)
+    .exec(&mut transaction)
+    .await?;
+    if updated != 1 {
+        return Err(StoreError::PoolSlotNotFound {
+            slot_id: entry.slot_id.clone(),
+        });
+    }
+    transaction.commit().await?;
+    Ok(())
+}
+
+fn pool_quota_correction_entry(
+    slot: &PoolSlot,
+    latest: Option<&PoolQuotaEntry>,
+    request: &PoolQuotaCorrectionRequest,
+) -> PoolQuotaEntry {
+    let (used, cooldown_until, error) = latest.map_or(
+        (slot.used, slot.cooldown_until, slot.last_error.clone()),
+        |entry| (entry.used, entry.cooldown_until, entry.error.clone()),
+    );
+    let mut entry = PoolQuotaEntry::new(slot.id.clone(), PoolQuotaSource::User, request.now);
+    entry.used = used;
+    entry.limit = request.limit;
+    entry.limit_unit = request.limit_unit.clone();
+    entry.reset_at = request.reset_at;
+    entry.cooldown_until = cooldown_until;
+    entry.error = error;
+    entry
+}
+
+fn pool_cooldown_clear_entry(
+    slot: &PoolSlot,
+    latest: Option<&PoolQuotaEntry>,
+    now: u64,
+) -> PoolQuotaEntry {
+    let (used, limit, limit_unit, reset_at, error) = latest.map_or(
+        (
+            slot.used,
+            slot.limit,
+            slot.limit_unit.clone(),
+            slot.reset_at,
+            slot.last_error.clone(),
+        ),
+        |entry| {
+            (
+                entry.used,
+                entry.limit,
+                entry.limit_unit.clone(),
+                entry.reset_at,
+                entry.error.clone(),
+            )
+        },
+    );
+    let mut entry = PoolQuotaEntry::new(slot.id.clone(), PoolQuotaSource::User, now);
+    entry.used = used;
+    entry.limit = limit;
+    entry.limit_unit = limit_unit;
+    entry.reset_at = reset_at;
+    entry.cooldown_until = None;
+    entry.error = error;
+    entry
+}
+
+fn pool_correction_is_current(
+    latest: Option<&PoolQuotaEntry>,
+    request: &PoolQuotaCorrectionRequest,
+) -> bool {
+    latest.is_some_and(|entry| {
+        entry.source == PoolQuotaSource::User
+            && entry.limit == request.limit
+            && entry.limit_unit.as_deref() == request.limit_unit.as_deref()
+            && entry.reset_at == request.reset_at
+    })
+}
+
+fn pool_correction_outcome(
+    slot: PoolSlot,
+    latest: Option<PoolQuotaEntry>,
+    now: u64,
+    applied: bool,
+    reason: impl Into<String>,
+) -> PoolQuotaCorrectionOutcome {
+    let availability = slot.availability(latest.as_ref(), now);
+    PoolQuotaCorrectionOutcome {
+        slot,
+        latest_quota: latest,
+        availability,
+        applied,
+        reason: reason.into(),
+    }
+}
+
+fn apply_pool_quota_entry_to_slot(slot: &mut PoolSlot, entry: &PoolQuotaEntry, now: u64) {
+    slot.used = entry.used;
+    slot.limit = entry.limit;
+    slot.limit_unit = entry.limit_unit.clone();
+    slot.reset_at = entry.reset_at;
+    slot.cooldown_until = entry.cooldown_until;
+    slot.last_error = entry.error.clone();
+    slot.updated_at = now;
+}
+
+fn validate_pool_quota_correction_request(
+    request: &PoolQuotaCorrectionRequest,
+) -> Result<(), StoreError> {
+    timestamp(request.now)?;
+    if request.slot_id.as_str().trim().is_empty() {
+        return Err(StoreError::InvalidRow("pool slot id is empty".to_string()));
+    }
+    if request
+        .limit_unit
+        .as_deref()
+        .is_some_and(|unit| unit.trim().is_empty())
+    {
+        return Err(StoreError::InvalidRow(
+            "pool correction limit unit is empty".to_string(),
+        ));
+    }
+    if request.limit.is_none() && request.limit_unit.is_some() {
+        return Err(StoreError::InvalidRow(
+            "pool correction limit unit requires a limit".to_string(),
+        ));
+    }
+    if request
+        .limit
+        .is_some_and(|limit| i64::try_from(limit).is_err())
+    {
+        return Err(StoreError::InvalidRow(
+            "pool correction limit exceeds the database range".to_string(),
+        ));
+    }
+    if let Some(reset_at) = request.reset_at {
+        timestamp(reset_at)?;
+    }
+    Ok(())
+}
+
+fn validate_pool_cooldown_clear_request(
+    request: &PoolCooldownClearRequest,
+) -> Result<(), StoreError> {
+    timestamp(request.now)?;
+    if request.slot_id.as_str().trim().is_empty() {
+        return Err(StoreError::InvalidRow("pool slot id is empty".to_string()));
+    }
+    Ok(())
 }
 
 fn validate_pool_quota_entry(entry: &PoolQuotaEntry) -> Result<(), StoreError> {
@@ -5745,6 +6183,218 @@ mod tests {
         verify(&MemoryStore::new()).await?;
         let directory = TestDirectory::new()?;
         verify(&TursoStore::open_at(&directory.join("pool-toggle.db")).await?).await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn pool_corrections_apply_once_and_clear_cooldowns()
+    -> Result<(), Box<dyn std::error::Error>> {
+        async fn verify(store: &dyn Store) -> Result<PoolSlot, Box<dyn std::error::Error>> {
+            let slot = save_available_slot(store, "slot-correction", 0, 100).await?;
+            let correction = PoolQuotaCorrectionRequest {
+                slot_id: slot.id.clone(),
+                limit: Some(20),
+                limit_unit: Some("requests".into()),
+                reset_at: Some(2_000),
+                now: 200,
+            };
+            let corrected = store.correct_pool_quota(&correction).await?;
+            assert!(corrected.applied);
+            let corrected_entry = corrected
+                .latest_quota
+                .as_ref()
+                .ok_or("corrected quota entry missing")?;
+            assert_eq!(corrected_entry.source, PoolQuotaSource::User);
+            assert_eq!(corrected_entry.used, Some(0));
+            assert_eq!(corrected_entry.limit, Some(20));
+            assert_eq!(corrected_entry.limit_unit.as_deref(), Some("requests"));
+            assert_eq!(corrected_entry.reset_at, Some(2_000));
+            assert_eq!(
+                corrected.availability.state,
+                PoolAvailabilityState::Available
+            );
+
+            let repeated = store
+                .correct_pool_quota(&PoolQuotaCorrectionRequest {
+                    now: 210,
+                    ..correction.clone()
+                })
+                .await?;
+            assert!(!repeated.applied);
+            assert_eq!(repeated.reason, "limit correction is already current");
+            assert_eq!(
+                repeated
+                    .latest_quota
+                    .as_ref()
+                    .map(|entry| entry.id.as_str()),
+                Some(corrected_entry.id.as_str())
+            );
+            let status = store.load_pool_status(220).await?;
+            let status = status
+                .slots
+                .first()
+                .ok_or("corrected slot status missing")?;
+            assert_eq!(status.availability.state, PoolAvailabilityState::Available);
+            assert_eq!(
+                status.latest_quota.as_ref().and_then(|entry| entry.limit),
+                Some(20)
+            );
+
+            assert!(matches!(
+                store
+                    .correct_pool_quota(&PoolQuotaCorrectionRequest {
+                        limit: Some(30),
+                        now: 200,
+                        ..correction.clone()
+                    })
+                    .await,
+                Err(StoreError::InvalidRow(_))
+            ));
+            assert!(matches!(
+                store
+                    .correct_pool_quota(&PoolQuotaCorrectionRequest {
+                        limit: None,
+                        limit_unit: Some("requests".into()),
+                        now: 220,
+                        ..correction.clone()
+                    })
+                    .await,
+                Err(StoreError::InvalidRow(_))
+            ));
+            assert!(matches!(
+                store
+                    .correct_pool_quota(&PoolQuotaCorrectionRequest {
+                        limit_unit: Some(" ".into()),
+                        now: 220,
+                        ..correction.clone()
+                    })
+                    .await,
+                Err(StoreError::InvalidRow(_))
+            ));
+            assert!(matches!(
+                store
+                    .correct_pool_quota(&PoolQuotaCorrectionRequest::new(
+                        PoolSlotId::new("missing"),
+                        220
+                    ))
+                    .await,
+                Err(StoreError::PoolSlotNotFound { .. })
+            ));
+
+            let mut cooling =
+                state_entry(&slot.id, Some(5), Some(20), Some(2_000), Some(1_000), None);
+            cooling.observed_at = 300;
+            store.append_pool_quota_entry(&cooling).await?;
+            let cooling_status = store.load_pool_status(400).await?;
+            assert_eq!(
+                cooling_status.slots[0].availability.state,
+                PoolAvailabilityState::CoolingDown
+            );
+            assert!(matches!(
+                store
+                    .clear_pool_slot_cooldown(&PoolCooldownClearRequest::new(slot.id.clone(), 300))
+                    .await,
+                Err(StoreError::InvalidRow(_))
+            ));
+
+            let cleared = store
+                .clear_pool_slot_cooldown(&PoolCooldownClearRequest::new(slot.id.clone(), 400))
+                .await?;
+            assert!(cleared.applied);
+            let cleared_entry = cleared
+                .latest_quota
+                .as_ref()
+                .ok_or("cleared quota entry missing")?;
+            assert_eq!(cleared_entry.source, PoolQuotaSource::User);
+            assert_eq!(cleared_entry.cooldown_until, None);
+            assert_eq!(cleared_entry.used, Some(5));
+            assert_eq!(cleared_entry.limit, Some(20));
+            assert_eq!(cleared.availability.state, PoolAvailabilityState::Available);
+
+            let repeated = store
+                .clear_pool_slot_cooldown(&PoolCooldownClearRequest::new(slot.id.clone(), 410))
+                .await?;
+            assert!(!repeated.applied);
+            assert_eq!(repeated.reason, "cooldown is already clear");
+            assert_eq!(
+                repeated
+                    .latest_quota
+                    .as_ref()
+                    .map(|entry| entry.id.as_str()),
+                Some(cleared_entry.id.as_str())
+            );
+            assert!(matches!(
+                store
+                    .clear_pool_slot_cooldown(&PoolCooldownClearRequest::new(
+                        PoolSlotId::new("missing"),
+                        410
+                    ))
+                    .await,
+                Err(StoreError::PoolSlotNotFound { .. })
+            ));
+            Ok(slot)
+        }
+
+        verify(&MemoryStore::new()).await?;
+        let directory = TestDirectory::new()?;
+        let path = directory.join("pool-corrections.db");
+        let slot = {
+            let store = TursoStore::open_at(&path).await?;
+            verify(&store).await?
+        };
+        let reopened = TursoStore::open_at(&path).await?;
+        let latest = reopened
+            .latest_pool_quota_entry(&slot.id)
+            .await?
+            .ok_or("reopened correction entry missing")?;
+        assert_eq!(latest.source, PoolQuotaSource::User);
+        assert_eq!(latest.cooldown_until, None);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn concurrent_pool_corrections_write_once() -> Result<(), Box<dyn std::error::Error>> {
+        async fn verify<T>(store: std::sync::Arc<T>) -> Result<(), Box<dyn std::error::Error>>
+        where
+            T: Store + Send + Sync + 'static,
+        {
+            let slot = save_available_slot(store.as_ref(), "slot-concurrent", 0, 100).await?;
+            let mut handles = Vec::new();
+            for _ in 0..4 {
+                let store = std::sync::Arc::clone(&store);
+                let slot_id = slot.id.clone();
+                handles.push(tokio::spawn(async move {
+                    store
+                        .correct_pool_quota(&PoolQuotaCorrectionRequest {
+                            slot_id,
+                            limit: Some(25),
+                            limit_unit: Some("requests".into()),
+                            reset_at: Some(3_000),
+                            now: 200,
+                        })
+                        .await
+                }));
+            }
+            let mut applied = 0;
+            for handle in handles {
+                if handle.await??.applied {
+                    applied += 1;
+                }
+            }
+            assert_eq!(applied, 1);
+            let entries = store.load_pool_quota_entries(&slot.id).await?;
+            assert_eq!(entries.len(), 2);
+            assert_eq!(entries[1].source, PoolQuotaSource::User);
+            assert_eq!(entries[1].limit, Some(25));
+            Ok(())
+        }
+
+        verify(std::sync::Arc::new(MemoryStore::new())).await?;
+        let directory = TestDirectory::new()?;
+        verify(std::sync::Arc::new(
+            TursoStore::open_at(&directory.join("pool-correction-concurrent.db")).await?,
+        ))
+        .await?;
         Ok(())
     }
 

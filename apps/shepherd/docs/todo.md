@@ -2584,8 +2584,24 @@ implemented; no public deployment exists yet.
     docs build with 31 passing e2e tests. Limit/reset correction, cooldown
     clearing, the one-turn force control and task-start selection remain later
     work.
-  - [ ] Wire limit/reset correction, cooldown clearing and the existing
-    one-turn force override into the pool UI.
+  - [x] Wire limit/reset correction and cooldown clearing into the pool UI.
+    Evidence (2026-11-09): `PoolQuotaCorrectionRequest`,
+    `PoolCooldownClearRequest` and `PoolQuotaCorrectionOutcome` are implemented
+    with `correct_pool_quota` and `clear_pool_slot_cooldown` in `TursoStore` and
+    `MemoryStore`. A correction appends a user-source observation, preserves the
+    current usage/cooldown/error, updates limit/unit/reset on the slot mirror and
+    refuses timestamps that do not advance the latest observation. A cooldown
+    clear preserves usage/limit/reset/error and removes only the cooldown.
+    Repeating either action returns `applied: false` with the existing entry and
+    an explanatory reason; missing slots and invalid correction fields are
+    rejected. Tests cover both stores, preserved fields, repeat calls, concurrent
+    identical corrections, stale timestamps, missing/empty ids and a Turso
+    re-open. Settings → Agent pool now has a per-slot limit/unit/reset form, a
+    clear-cooldown action, local field validation and visible applied/rejected
+    reasons. No migration was needed. The core suite passes 198 tests (4
+    ignored); clippy and fmt are clean, the app has 124 passing e2e tests, and
+    the docs have 31 passing e2e tests.
+  - [ ] Wire the existing one-turn force override into the pool UI.
 
 ---
 

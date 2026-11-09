@@ -273,6 +273,8 @@ pub fn run() -> Result<(), tauri::Error> {
             bridge::commands::pool_status,
             bridge::commands::pool_reorder_slots,
             bridge::commands::pool_set_slot_enabled,
+            bridge::commands::pool_correct_quota,
+            bridge::commands::pool_clear_cooldown,
             bridge::commands::task_workspace,
             bridge::commands::reserve_task_search,
             bridge::commands::search_tasks,
