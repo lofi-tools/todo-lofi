@@ -2324,12 +2324,20 @@ own acceptance evidence exists.
   copy, 375/768/1440 overflow and axe WCAG 2.1 AA. `pnpm --dir
   apps/shep-docs-web run typecheck` reported 0 errors; the static build emitted
   15 pages; `pnpm --dir apps/shep-docs-web run test:e2e` passed 28 tests.
-- [ ] Produce a content map before writing the pages.
+- [x] Produce a content map before writing the pages.
   Audit `docs/references/by-feature` and the shipped Shepherd features, then
   classify each capability as a landing-page argument, a user-guide page, or a
   contributor-only implementation note. Record why an item is not
   landing-worthy. The reference projects are research inputs only; no public
   comparison table or competing-app names.
+  Evidence: `apps/shepherd/docs/content-map.md` classifies the nine reference
+  feature areas plus the preview, agent-pool, release and fixture surfaces into
+  landing, user-guide, contributor-only and not-public buckets, with a reason
+  for every non-landing item. It records the public-reference rule and the
+  landing page's available/next/planned boundary. The map was produced after
+  the initial docs split, so it is the audit baseline for those committed pages
+  and the gate for the roadmap page and later copy changes; no public page
+  names a reference project.
 - [ ] Add a Shepherd roadmap page generated from one maintained data file.
   Use Now / Next / Later / Exploring, define what each label means, link every
   item to its user or contributor page when one exists, and keep it consistent
