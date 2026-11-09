@@ -2502,12 +2502,29 @@ implemented; no public deployment exists yet.
   `cargo test -p shepherd-core` passes 183 tests (4 ignored), and `cargo clippy
   -p shepherd-core --all-targets -- -D warnings` and `cargo fmt -p shepherd-core`
   pass.
-- [ ] Select a slot by user priority with quota-aware fallback.
+- [x] Select a slot by user priority with quota-aware fallback.
   A new task or conversation tries the user's preferred healthy slot, then the
   next one that can accept work; an explicit task override wins. Selection is
   atomic across concurrent tasks, and the transcript or task header names the
   chosen slot and any skipped higher-priority slots. Tests cover simultaneous
   starts, exhaustion, cooldown, provider failure and manual override.
+  Evidence (2026-11-09): `PoolSelectionRequest`, `PoolSelectionOutcome`,
+  `PoolSkippedSlot`, `PoolSelectionRecord` and `choose_pool_slot` live in
+  `shepherd-core`. Selection orders by priority, creation time and id; an
+  override is tried first and falls back when it is missing or unavailable;
+  reserved, disabled, exhausted, cooling-down, unhealthy and unknown slots are
+  skipped with their state and reason; a request with no eligible slot reports
+  `no eligible pool slot` with every candidate. Migration
+  `0021_pool_selections.sql` creates `pool_selections` plus a partial unique
+  index for one active reservation per slot. `TursoStore` and `MemoryStore`
+  implement select, release and load; a request reuses its own active available
+  reservation and releases it when the slot is unavailable. Tests against both
+  stores cover priority order, every unavailable state, precedence, an expired
+  reset period, override fallback, reservation reuse, deterministic ties,
+  concurrent requests, re-open durability, malformed rows and invalid input.
+  `cargo test -p shepherd-core` passes 188 tests (4 ignored), and `cargo clippy
+  -p shepherd-core --all-targets -- -D warnings` and `cargo fmt -p shepherd-core`
+  pass.
 - [ ] Release idle reservations without losing resumable sessions.
   After the turn settles plus a configurable idle timeout (default 15 minutes),
   release the slot for other tasks. Never release during a running turn or a

@@ -20,18 +20,18 @@ const toc = [
   description="The local record behind the quota-aware agent pool, its persisted ledger and availability states."
   toc={toc}
 >
-  <Callout tone="note" title="Slot persistence and the ledger are implemented">
-    The pool slot record, its local database table and the append-only quota ledger now exist,
-    together with the six availability states. Priority selection, idle release and the pool UI are
-    still planned, so the agent pool is not available in the current build. This page records the
-    agreed contract so the implementation, tests and user guide cannot drift.
+  <Callout tone="note" title="Slot persistence, the ledger and priority selection are implemented">
+    The pool slot record, the append-only quota ledger, the six availability states and durable
+    priority selection now exist. Idle release and the pool UI are still planned, so the agent pool
+    is not available in the current build. This page records the agreed contract so the
+    implementation, tests and user guide cannot drift.
   </Callout>
 
   <h2 id="status">Status</h2>
   <p>
-    <Badge tone="warning" variant="subtle">planned</Badge> The pool work is split into slot
-    persistence, the quota ledger, priority selection, idle release and the pool UI. Slot
-    persistence and the quota ledger are implemented and tested; priority selection, idle release
+    <Badge tone="warning" variant="subtle">partly implemented</Badge> The pool work is split into
+    slot persistence, the quota ledger, priority selection, idle release and the pool UI. Slot
+    persistence, the quota ledger and priority selection are implemented and tested; idle release
     and the pool UI are not checked off. The user-facing promise is on the
     <a href="/docs/users/agent-pool">agent pool</a> page; this page is for the implementation.
   </p>
@@ -72,16 +72,22 @@ const toc = [
   </p>
 
   <h2 id="selection">Selection</h2>
-  <ol>
-    <li>Try the user's preferred healthy slot.</li>
-    <li>If it cannot accept work, try the next slot in priority order.</li>
-    <li>An explicit task override wins over the order.</li>
-    <li>Record the chosen slot and every skipped higher-priority slot with its reason.</li>
-  </ol>
   <p>
-    Selection must be atomic across concurrent tasks. The transcript or task header names the chosen
-    slot, so a fallback is never silent. A slot that is exhausted for one provider/model must not
-    block an unrelated slot.
+    Selection sorts slots by the user's priority, then creation time and id, and returns the first
+    slot whose derived availability is available. A disabled, exhausted, cooling-down, unhealthy or
+    unknown slot is skipped with its state and reason, and selection continues to the next
+    candidate; if no slot is eligible the outcome says so. An explicit task override is tried
+    first; a missing or unavailable override is recorded and selection falls back to priority
+    order.
+  </p>
+  <p>
+    A selection is a durable reservation. The chosen slot, skipped candidates and reason are written
+    with the request, and a partial unique index allows only one active reservation per slot, so a
+    concurrent task gets the next slot instead of sharing one. A later request reuses its own active
+    reservation only while the slot is still available; an expired or unavailable slot is released
+    and selected again. Releasing a selection makes the slot available without deleting the audit
+    row. The selection outcome names the chosen slot and every skipped slot, so a fallback is
+    observable. A slot that is exhausted for one provider/model does not block an unrelated slot.
   </p>
 
   <h2 id="release">Idle release</h2>
@@ -110,13 +116,15 @@ const toc = [
   <h2 id="tests">Tests</h2>
   <ul>
     <li>Implemented: ledger round-trips both stores, ordering, re-open durability, owner checks and rejected invalid input.</li>
-    <li>Implemented: a deterministic clock covers reset windows, cooldowns, provider errors, clock changes, user corrections and every availability state.</li>
-    <li>Pending: simultaneous starts, manual override, idle release, a slot claimed meanwhile, cancellation and restart recovery.</li>
+    <li>Implemented: a deterministic clock covers reset periods, cooldowns, provider errors, clock changes, user corrections and every availability state.</li>
+    <li>Implemented: priority selection and fallback against both stores, including every unavailable state, precedence, an expired reset period, overrides, reservations, concurrent requests, deterministic tie-breaking and re-open durability.</li>
+    <li>Implemented: malformed selection rows and invalid requests or timestamps are rejected.</li>
+    <li>Pending: idle release, a slot claimed meanwhile, cancellation and restart recovery.</li>
     <li>Credential redaction in records, logs and diagnostics.</li>
   </ul>
   <p>
-    The selection and release tests arrive with those slices, so the agent pool remains a next-step
-    item. See the <a href="/docs/contributors/test-fixtures">test fixtures</a> page for the fixture
-    rules that apply when the work lands.
+    Release tests arrive with that slice, so the pool UI and idle release remain next-step items.
+    See the <a href="/docs/contributors/test-fixtures">test fixtures</a> page for the fixture rules
+    that apply when the work lands.
   </p>
 </Docs>

@@ -322,6 +322,54 @@ impl PoolAvailability {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PoolSelectionRequest {
+    pub request_id: String,
+    pub override_slot: Option<PoolSlotId>,
+    pub now: u64,
+}
+
+impl PoolSelectionRequest {
+    pub fn new(request_id: impl Into<String>, now: u64) -> Self {
+        Self {
+            request_id: request_id.into(),
+            override_slot: None,
+            now,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PoolSkippedSlot {
+    pub slot_id: PoolSlotId,
+    pub state: Option<PoolAvailabilityState>,
+    pub reason: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PoolSelectionOutcome {
+    pub request_id: String,
+    pub slot: Option<PoolSlot>,
+    pub selected_at: u64,
+    pub reason: String,
+    pub skipped: Vec<PoolSkippedSlot>,
+    pub reused: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PoolSelectionRecord {
+    pub request_id: String,
+    pub slot_id: Option<PoolSlotId>,
+    pub selected_at: u64,
+    pub released_at: Option<u64>,
+    pub reason: String,
+    pub skipped: Vec<PoolSkippedSlot>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WorktreeDeletion {
     pub task_id: TaskId,
@@ -420,6 +468,16 @@ pub trait Store: Send + Sync {
         &self,
         slot_id: &PoolSlotId,
     ) -> Result<Option<PoolQuotaEntry>, StoreError>;
+    async fn select_pool_slot(
+        &self,
+        request: &PoolSelectionRequest,
+    ) -> Result<PoolSelectionOutcome, StoreError>;
+    async fn release_pool_selection(
+        &self,
+        request_id: &str,
+        released_at: u64,
+    ) -> Result<(), StoreError>;
+    async fn load_pool_selections(&self) -> Result<Vec<PoolSelectionRecord>, StoreError>;
 }
 
 struct Migration {
@@ -513,6 +571,10 @@ const MIGRATIONS: &[Migration] = &[
     Migration {
         name: "0020_pool_quota_ledger.sql",
         sql: include_str!("../toasty/migrations/0020_pool_quota_ledger.sql"),
+    },
+    Migration {
+        name: "0021_pool_selections.sql",
+        sql: include_str!("../toasty/migrations/0021_pool_selections.sql"),
     },
 ];
 
@@ -1607,6 +1669,13 @@ impl Store for TursoStore {
     async fn remove_pool_slot(&self, slot_id: &PoolSlotId) -> Result<(), StoreError> {
         let mut db = self.db.lock().await;
         let mut transaction = db.transaction().await?;
+        toasty::sql::statement(
+            "UPDATE pool_selections SET slot_id = NULL, \
+             released_at = COALESCE(released_at, selected_at) WHERE slot_id = ?1",
+        )
+        .bind(slot_id.as_str())
+        .exec(&mut transaction)
+        .await?;
         toasty::sql::statement("DELETE FROM pool_quota_ledger WHERE slot_id = ?1")
             .bind(slot_id.as_str())
             .exec(&mut transaction)
@@ -1707,6 +1776,132 @@ impl Store for TursoStore {
             .next()
             .map(parse_pool_quota_entry)
             .transpose()
+    }
+
+    async fn select_pool_slot(
+        &self,
+        request: &PoolSelectionRequest,
+    ) -> Result<PoolSelectionOutcome, StoreError> {
+        validate_pool_selection_request(request)?;
+        for _ in 0..3 {
+            let selections = self.load_pool_selections().await?;
+            if let Some(record) = selections
+                .iter()
+                .find(|record| record.request_id == request.request_id)
+                && record.released_at.is_none()
+            {
+                let override_matches = request
+                    .override_slot
+                    .as_ref()
+                    .is_none_or(|slot| Some(slot) == record.slot_id.as_ref());
+                if override_matches
+                    && let Some(slot_id) = record.slot_id.clone()
+                    && let Some(slot) = self
+                        .load_pool_slots()
+                        .await?
+                        .into_iter()
+                        .find(|slot| slot.id == slot_id)
+                {
+                    let latest = self.latest_pool_quota_entry(&slot.id).await?;
+                    if slot.availability(latest.as_ref(), request.now).state
+                        == PoolAvailabilityState::Available
+                    {
+                        return Ok(PoolSelectionOutcome {
+                            request_id: request.request_id.clone(),
+                            slot: Some(slot),
+                            selected_at: record.selected_at,
+                            reason: "reused reservation".into(),
+                            skipped: record.skipped.clone(),
+                            reused: true,
+                        });
+                    }
+                }
+                if record.slot_id.is_some() {
+                    self.release_pool_selection(&request.request_id, request.now)
+                        .await?;
+                }
+            }
+
+            let selections = self.load_pool_selections().await?;
+            let slots = self.load_pool_slots().await?;
+            let mut latest = BTreeMap::new();
+            for slot in &slots {
+                if let Some(entry) = self.latest_pool_quota_entry(&slot.id).await? {
+                    latest.insert(slot.id.clone(), entry);
+                }
+            }
+            let reserved = selections
+                .iter()
+                .filter(|record| {
+                    record.released_at.is_none() && record.request_id != request.request_id
+                })
+                .filter_map(|record| {
+                    record
+                        .slot_id
+                        .clone()
+                        .map(|slot_id| (slot_id, record.request_id.clone()))
+                })
+                .collect();
+            let outcome = choose_pool_slot(request, &slots, &latest, &reserved);
+            let record = PoolSelectionRecord {
+                request_id: outcome.request_id.clone(),
+                slot_id: outcome.slot.as_ref().map(|slot| slot.id.clone()),
+                selected_at: outcome.selected_at,
+                released_at: None,
+                reason: outcome.reason.clone(),
+                skipped: outcome.skipped.clone(),
+            };
+            match self.write_pool_selection(&record).await {
+                Ok(()) => return Ok(outcome),
+                Err(error) if is_pool_selection_conflict(&error) => continue,
+                Err(error) => return Err(error),
+            }
+        }
+        Err(StoreError::Backend(
+            "pool slot selection conflicted repeatedly".into(),
+        ))
+    }
+
+    async fn release_pool_selection(
+        &self,
+        request_id: &str,
+        released_at: u64,
+    ) -> Result<(), StoreError> {
+        if request_id.trim().is_empty() {
+            return Err(StoreError::InvalidRow(
+                "pool selection request id is empty".to_string(),
+            ));
+        }
+        timestamp(released_at)?;
+        let mut db = self.db.lock().await;
+        toasty::sql::statement(
+            "UPDATE pool_selections SET released_at = ?2 \
+             WHERE request_id = ?1 AND released_at IS NULL",
+        )
+        .bind(request_id)
+        .bind(timestamp(released_at)?)
+        .exec(&mut *db)
+        .await?;
+        Ok(())
+    }
+
+    async fn load_pool_selections(&self) -> Result<Vec<PoolSelectionRecord>, StoreError> {
+        let mut db = self.db.lock().await;
+        let rows = toasty::sql::query(
+            "SELECT request_id, slot_id, selected_at, released_at, reason, skipped_json \
+             FROM pool_selections ORDER BY selected_at, request_id",
+        )
+        .column_types([
+            Type::String,
+            Type::String,
+            Type::I64,
+            Type::I64,
+            Type::String,
+            Type::String,
+        ])
+        .exec(&mut *db)
+        .await?;
+        rows.into_iter().map(parse_pool_selection).collect()
     }
 
     async fn load_projects(&self) -> Result<Vec<Project>, StoreError> {
@@ -2559,6 +2754,8 @@ pub struct MemoryStore {
     project_approvals: RwLock<BTreeMap<ProjectId, BTreeMap<String, ProjectApproval>>>,
     pool_slots: RwLock<BTreeMap<PoolSlotId, PoolSlot>>,
     pool_quota_ledger: RwLock<Vec<PoolQuotaEntry>>,
+    pool_selections: RwLock<BTreeMap<String, PoolSelectionRecord>>,
+    pool_selection_lock: Mutex<()>,
 }
 
 impl MemoryStore {
@@ -3014,6 +3211,18 @@ impl Store for MemoryStore {
     }
 
     async fn remove_pool_slot(&self, slot_id: &PoolSlotId) -> Result<(), StoreError> {
+        let _guard = self.pool_selection_lock.lock().await;
+        for record in self.pool_selections.write().await.values_mut() {
+            if record
+                .slot_id
+                .as_ref()
+                .is_some_and(|slot| slot.as_str() == slot_id.as_str())
+            {
+                let selected_at = record.selected_at;
+                record.slot_id = None;
+                record.released_at.get_or_insert(selected_at);
+            }
+        }
         self.pool_quota_ledger
             .write()
             .await
@@ -3067,6 +3276,138 @@ impl Store for MemoryStore {
             .filter(|entry| entry.slot_id.as_str() == slot_id.as_str())
             .max_by(|left, right| pool_quota_entry_order(left, right))
             .cloned())
+    }
+
+    async fn select_pool_slot(
+        &self,
+        request: &PoolSelectionRequest,
+    ) -> Result<PoolSelectionOutcome, StoreError> {
+        validate_pool_selection_request(request)?;
+        let _guard = self.pool_selection_lock.lock().await;
+        let existing = self
+            .pool_selections
+            .read()
+            .await
+            .get(&request.request_id)
+            .cloned();
+        if let Some(record) = existing
+            && record.released_at.is_none()
+        {
+            let override_matches = request
+                .override_slot
+                .as_ref()
+                .is_none_or(|slot| Some(slot) == record.slot_id.as_ref());
+            if override_matches
+                && let Some(slot_id) = record.slot_id.clone()
+                && let Some(slot) = self.pool_slots.read().await.get(&slot_id).cloned()
+            {
+                let latest = self.latest_pool_quota_entry(&slot.id).await?;
+                if slot.availability(latest.as_ref(), request.now).state
+                    == PoolAvailabilityState::Available
+                {
+                    return Ok(PoolSelectionOutcome {
+                        request_id: request.request_id.clone(),
+                        slot: Some(slot),
+                        selected_at: record.selected_at,
+                        reason: "reused reservation".into(),
+                        skipped: record.skipped,
+                        reused: true,
+                    });
+                }
+            }
+            if let Some(stored) = self
+                .pool_selections
+                .write()
+                .await
+                .get_mut(&request.request_id)
+                && stored.released_at.is_none()
+            {
+                stored.released_at = Some(request.now);
+            }
+        }
+
+        let slots = self.load_pool_slots().await?;
+        let mut latest = BTreeMap::new();
+        {
+            let ledger = self.pool_quota_ledger.read().await;
+            for entry in ledger.iter() {
+                let replace = latest.get(&entry.slot_id).is_none_or(|current| {
+                    pool_quota_entry_order(current, entry) != std::cmp::Ordering::Greater
+                });
+                if replace {
+                    latest.insert(entry.slot_id.clone(), entry.clone());
+                }
+            }
+        }
+        let selections: Vec<_> = self
+            .pool_selections
+            .read()
+            .await
+            .values()
+            .cloned()
+            .collect();
+        let reserved = selections
+            .iter()
+            .filter(|record| {
+                record.released_at.is_none() && record.request_id != request.request_id
+            })
+            .filter_map(|record| {
+                record
+                    .slot_id
+                    .clone()
+                    .map(|slot_id| (slot_id, record.request_id.clone()))
+            })
+            .collect();
+        let outcome = choose_pool_slot(request, &slots, &latest, &reserved);
+        let record = PoolSelectionRecord {
+            request_id: outcome.request_id.clone(),
+            slot_id: outcome.slot.as_ref().map(|slot| slot.id.clone()),
+            selected_at: outcome.selected_at,
+            released_at: None,
+            reason: outcome.reason.clone(),
+            skipped: outcome.skipped.clone(),
+        };
+        self.pool_selections
+            .write()
+            .await
+            .insert(request.request_id.clone(), record);
+        Ok(outcome)
+    }
+
+    async fn release_pool_selection(
+        &self,
+        request_id: &str,
+        released_at: u64,
+    ) -> Result<(), StoreError> {
+        if request_id.trim().is_empty() {
+            return Err(StoreError::InvalidRow(
+                "pool selection request id is empty".to_string(),
+            ));
+        }
+        timestamp(released_at)?;
+        let _guard = self.pool_selection_lock.lock().await;
+        if let Some(record) = self.pool_selections.write().await.get_mut(request_id)
+            && record.released_at.is_none()
+        {
+            record.released_at = Some(released_at);
+        }
+        Ok(())
+    }
+
+    async fn load_pool_selections(&self) -> Result<Vec<PoolSelectionRecord>, StoreError> {
+        let mut selections: Vec<_> = self
+            .pool_selections
+            .read()
+            .await
+            .values()
+            .cloned()
+            .collect();
+        selections.sort_by(|left, right| {
+            left.selected_at
+                .cmp(&right.selected_at)
+                .then(left.request_id.cmp(&right.request_id))
+        });
+        Ok(selections)
     }
 }
 
@@ -3222,6 +3563,223 @@ fn pool_quota_entry_order(left: &PoolQuotaEntry, right: &PoolQuotaEntry) -> std:
     left.observed_at
         .cmp(&right.observed_at)
         .then(left.id.cmp(&right.id))
+}
+
+fn validate_pool_selection_request(request: &PoolSelectionRequest) -> Result<(), StoreError> {
+    if request.request_id.trim().is_empty() {
+        return Err(StoreError::InvalidRow(
+            "pool selection request id is empty".to_string(),
+        ));
+    }
+    if request
+        .override_slot
+        .as_ref()
+        .is_some_and(|slot| slot.as_str().trim().is_empty())
+    {
+        return Err(StoreError::InvalidRow(
+            "pool selection override slot id is empty".to_string(),
+        ));
+    }
+    timestamp(request.now)?;
+    Ok(())
+}
+
+fn validate_pool_selection_record(record: &PoolSelectionRecord) -> Result<(), StoreError> {
+    if record.request_id.trim().is_empty() {
+        return Err(StoreError::InvalidRow(
+            "pool selection request id is empty".to_string(),
+        ));
+    }
+    if record.reason.trim().is_empty() {
+        return Err(StoreError::InvalidRow(
+            "pool selection reason is empty".to_string(),
+        ));
+    }
+    if let Some(slot_id) = &record.slot_id
+        && slot_id.as_str().trim().is_empty()
+    {
+        return Err(StoreError::InvalidRow(
+            "pool selection slot id is empty".to_string(),
+        ));
+    }
+    for skipped in &record.skipped {
+        if skipped.slot_id.as_str().trim().is_empty() {
+            return Err(StoreError::InvalidRow(
+                "pool selection skipped slot id is empty".to_string(),
+            ));
+        }
+        if skipped.reason.trim().is_empty() {
+            return Err(StoreError::InvalidRow(
+                "pool selection skipped reason is empty".to_string(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn parse_pool_selection(value: Value) -> Result<PoolSelectionRecord, StoreError> {
+    let Value::Record(record) = value else {
+        return Err(StoreError::InvalidRow(
+            "expected a pool selection record".to_string(),
+        ));
+    };
+    let skipped_json = required_string(record.get(5))?;
+    let skipped = serde_json::from_str(&skipped_json).map_err(|error| {
+        StoreError::InvalidRow(format!("invalid pool selection skipped list: {error}"))
+    })?;
+    let selection = PoolSelectionRecord {
+        request_id: required_string(record.first())?,
+        slot_id: optional_string(record.get(1))?.map(PoolSlotId::new),
+        selected_at: required_u64(record.get(2))?,
+        released_at: optional_u64(record.get(3))?,
+        reason: required_string(record.get(4))?,
+        skipped,
+    };
+    validate_pool_selection_record(&selection)?;
+    Ok(selection)
+}
+
+impl TursoStore {
+    async fn write_pool_selection(
+        &self,
+        selection: &PoolSelectionRecord,
+    ) -> Result<(), StoreError> {
+        validate_pool_selection_record(selection)?;
+        let skipped = serde_json::to_string(&selection.skipped).map_err(|error| {
+            StoreError::InvalidRow(format!("could not encode pool selection: {error}"))
+        })?;
+        let mut db = self.db.lock().await;
+        toasty::sql::statement(
+            "INSERT INTO pool_selections (request_id, slot_id, selected_at, released_at, reason, skipped_json) \
+             VALUES (?1, NULLIF(?2, ''), ?3, NULLIF(?4, -1), ?5, ?6) \
+             ON CONFLICT (request_id) DO UPDATE SET slot_id = excluded.slot_id, \
+             selected_at = excluded.selected_at, released_at = excluded.released_at, \
+             reason = excluded.reason, skipped_json = excluded.skipped_json",
+        )
+        .bind(&selection.request_id)
+        .bind(
+            selection
+                .slot_id
+                .as_ref()
+                .map(PoolSlotId::as_str)
+                .unwrap_or_default(),
+        )
+        .bind(timestamp(selection.selected_at)?)
+        .bind(timestamp_or_missing(selection.released_at)?)
+        .bind(&selection.reason)
+        .bind(skipped)
+        .exec(&mut *db)
+        .await?;
+        Ok(())
+    }
+}
+
+fn is_pool_selection_conflict(error: &StoreError) -> bool {
+    matches!(
+        error,
+        StoreError::Database(error) if error.to_string().to_lowercase().contains("unique")
+    )
+}
+
+pub fn choose_pool_slot(
+    request: &PoolSelectionRequest,
+    slots: &[PoolSlot],
+    latest: &BTreeMap<PoolSlotId, PoolQuotaEntry>,
+    reserved: &BTreeMap<PoolSlotId, String>,
+) -> PoolSelectionOutcome {
+    let mut ordered: Vec<&PoolSlot> = slots.iter().collect();
+    ordered.sort_by(|left, right| pool_slot_order(left, right));
+    let mut skipped = Vec::new();
+    if ordered.is_empty() {
+        return PoolSelectionOutcome {
+            request_id: request.request_id.clone(),
+            slot: None,
+            selected_at: request.now,
+            reason: "no pool slots".into(),
+            skipped,
+            reused: false,
+        };
+    }
+
+    if let Some(override_slot) = request.override_slot.as_ref() {
+        match ordered.iter().find(|slot| &slot.id == override_slot) {
+            Some(slot) => {
+                if let Some(skip) =
+                    pool_slot_skip(slot, latest, reserved, &request.request_id, request.now)
+                {
+                    skipped.push(skip);
+                } else {
+                    return pool_selection_chosen(request, slot, "task override", skipped);
+                }
+            }
+            None => skipped.push(PoolSkippedSlot {
+                slot_id: override_slot.clone(),
+                state: None,
+                reason: "override slot is not in the pool".into(),
+            }),
+        }
+    }
+
+    for slot in ordered {
+        if request.override_slot.as_ref() == Some(&slot.id) {
+            continue;
+        }
+        if let Some(skip) = pool_slot_skip(slot, latest, reserved, &request.request_id, request.now)
+        {
+            skipped.push(skip);
+            continue;
+        }
+        return pool_selection_chosen(request, slot, "first available by priority", skipped);
+    }
+
+    PoolSelectionOutcome {
+        request_id: request.request_id.clone(),
+        slot: None,
+        selected_at: request.now,
+        reason: "no eligible pool slot".into(),
+        skipped,
+        reused: false,
+    }
+}
+
+fn pool_slot_skip(
+    slot: &PoolSlot,
+    latest: &BTreeMap<PoolSlotId, PoolQuotaEntry>,
+    reserved: &BTreeMap<PoolSlotId, String>,
+    request_id: &str,
+    now: u64,
+) -> Option<PoolSkippedSlot> {
+    if let Some(owner) = reserved.get(&slot.id)
+        && owner != request_id
+    {
+        return Some(PoolSkippedSlot {
+            slot_id: slot.id.clone(),
+            state: None,
+            reason: format!("reserved by request {owner}"),
+        });
+    }
+    let availability = slot.availability(latest.get(&slot.id), now);
+    (availability.state != PoolAvailabilityState::Available).then(|| PoolSkippedSlot {
+        slot_id: slot.id.clone(),
+        state: Some(availability.state),
+        reason: availability.reason,
+    })
+}
+
+fn pool_selection_chosen(
+    request: &PoolSelectionRequest,
+    slot: &PoolSlot,
+    reason: &str,
+    skipped: Vec<PoolSkippedSlot>,
+) -> PoolSelectionOutcome {
+    PoolSelectionOutcome {
+        request_id: request.request_id.clone(),
+        slot: Some(slot.clone()),
+        selected_at: request.now,
+        reason: reason.into(),
+        skipped,
+        reused: false,
+    }
 }
 
 #[cfg(test)]
@@ -3750,6 +4308,362 @@ mod tests {
             slot.availability(Some(&entry), 100).state,
             PoolAvailabilityState::Disabled
         );
+    }
+
+    fn pool_slot(id: &str, priority: i64, created_at: u64) -> PoolSlot {
+        let mut slot = PoolSlot::new(
+            Agent::Codex,
+            "acme",
+            "Acme",
+            format!("model-{id}"),
+            format!("Model {id}"),
+        );
+        slot.id = PoolSlotId::new(id);
+        slot.priority = priority;
+        slot.created_at = created_at;
+        slot.updated_at = created_at;
+        slot
+    }
+
+    fn state_entry(
+        slot_id: &PoolSlotId,
+        used: Option<u64>,
+        limit: Option<u64>,
+        reset_at: Option<u64>,
+        cooldown_until: Option<u64>,
+        error: Option<&str>,
+    ) -> PoolQuotaEntry {
+        let mut entry = PoolQuotaEntry::new(slot_id.clone(), PoolQuotaSource::Provider, 100);
+        entry.used = used;
+        entry.limit = limit;
+        entry.limit_unit = Some("requests".into());
+        entry.reset_at = reset_at;
+        entry.cooldown_until = cooldown_until;
+        entry.error = error.map(str::to_owned);
+        entry
+    }
+
+    async fn save_available_slot(
+        store: &dyn Store,
+        id: &str,
+        priority: i64,
+        created_at: u64,
+    ) -> Result<PoolSlot, Box<dyn std::error::Error>> {
+        let slot = pool_slot(id, priority, created_at);
+        store.save_pool_slot(&slot).await?;
+        store
+            .append_pool_quota_entry(&state_entry(
+                &slot.id,
+                Some(0),
+                Some(10),
+                Some(1_000),
+                None,
+                None,
+            ))
+            .await?;
+        Ok(slot)
+    }
+
+    #[tokio::test]
+    async fn pool_selection_falls_back_in_priority_order_and_recovers_after_reset()
+    -> Result<(), Box<dyn std::error::Error>> {
+        async fn verify(store: &dyn Store) -> Result<(), Box<dyn std::error::Error>> {
+            let available = save_available_slot(store, "slot-available", 5, 500).await?;
+
+            let unhealthy = pool_slot("slot-unhealthy", 4, 400);
+            store.save_pool_slot(&unhealthy).await?;
+            store
+                .append_pool_quota_entry(&state_entry(
+                    &unhealthy.id,
+                    Some(10),
+                    Some(10),
+                    Some(1_000),
+                    None,
+                    Some("provider down"),
+                ))
+                .await?;
+
+            let unknown = pool_slot("slot-unknown", 3, 300);
+            store.save_pool_slot(&unknown).await?;
+
+            let mut disabled = pool_slot("slot-disabled", 2, 200);
+            disabled.enabled = false;
+            store.save_pool_slot(&disabled).await?;
+            store
+                .append_pool_quota_entry(&state_entry(
+                    &disabled.id,
+                    Some(10),
+                    Some(10),
+                    Some(1_000),
+                    Some(500),
+                    Some("provider down"),
+                ))
+                .await?;
+
+            let cooling = pool_slot("slot-cooling", 1, 100);
+            store.save_pool_slot(&cooling).await?;
+            store
+                .append_pool_quota_entry(&state_entry(
+                    &cooling.id,
+                    Some(10),
+                    Some(10),
+                    Some(1_000),
+                    Some(500),
+                    Some("provider down"),
+                ))
+                .await?;
+
+            let exhausted = pool_slot("slot-exhausted", 0, 50);
+            store.save_pool_slot(&exhausted).await?;
+            store
+                .append_pool_quota_entry(&state_entry(
+                    &exhausted.id,
+                    Some(10),
+                    Some(10),
+                    Some(1_000),
+                    None,
+                    None,
+                ))
+                .await?;
+
+            let outcome = store
+                .select_pool_slot(&PoolSelectionRequest::new("task-1", 100))
+                .await?;
+            assert_eq!(
+                outcome.slot.as_ref().map(|slot| slot.id.as_str()),
+                Some("slot-available")
+            );
+            assert_eq!(outcome.reason, "first available by priority");
+            assert!(!outcome.reused);
+            let expected = [
+                ("slot-exhausted", PoolAvailabilityState::Exhausted),
+                ("slot-cooling", PoolAvailabilityState::CoolingDown),
+                ("slot-disabled", PoolAvailabilityState::Disabled),
+                ("slot-unknown", PoolAvailabilityState::Unknown),
+                ("slot-unhealthy", PoolAvailabilityState::Unhealthy),
+            ];
+            assert_eq!(outcome.skipped.len(), expected.len());
+            for (skip, (id, state)) in outcome.skipped.iter().zip(expected.iter()) {
+                assert_eq!(skip.slot_id.as_str(), *id);
+                assert_eq!(skip.state, Some(*state));
+                assert!(!skip.reason.is_empty());
+            }
+
+            let records = store.load_pool_selections().await?;
+            let record = records
+                .iter()
+                .find(|record| record.request_id == "task-1")
+                .ok_or("selection record missing")?;
+            assert_eq!(
+                record.slot_id.as_ref().map(PoolSlotId::as_str),
+                Some("slot-available")
+            );
+            assert!(record.released_at.is_none());
+            assert_eq!(record.reason, "first available by priority");
+            assert_eq!(record.skipped.len(), expected.len());
+
+            let reused = store
+                .select_pool_slot(&PoolSelectionRequest::new("task-1", 110))
+                .await?;
+            assert!(reused.reused);
+            assert_eq!(
+                reused.slot.as_ref().map(|slot| slot.id.as_str()),
+                Some("slot-available")
+            );
+
+            store.release_pool_selection("task-1", 150).await?;
+            let recovered = store
+                .select_pool_slot(&PoolSelectionRequest::new("task-1", 1_000))
+                .await?;
+            assert!(!recovered.reused);
+            assert_eq!(
+                recovered.slot.as_ref().map(|slot| slot.id.as_str()),
+                Some("slot-exhausted")
+            );
+            assert!(recovered.skipped.is_empty());
+            assert_eq!(available.id.as_str(), "slot-available");
+            Ok(())
+        }
+
+        verify(&MemoryStore::new()).await?;
+        let directory = TestDirectory::new()?;
+        let path = directory.join("pool-selection.db");
+        let store = TursoStore::open_at(&path).await?;
+        verify(&store).await?;
+        drop(store);
+
+        let reopened = TursoStore::open_at(&path).await?;
+        let records = reopened.load_pool_selections().await?;
+        assert_eq!(records.len(), 1);
+        assert_eq!(
+            records[0].slot_id.as_ref().map(PoolSlotId::as_str),
+            Some("slot-exhausted")
+        );
+        assert!(records[0].released_at.is_none());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn pool_selection_honors_override_and_active_reservations()
+    -> Result<(), Box<dyn std::error::Error>> {
+        async fn verify(store: &dyn Store) -> Result<(), Box<dyn std::error::Error>> {
+            let first = save_available_slot(store, "slot-a", 1, 100).await?;
+            let second = save_available_slot(store, "slot-b", 0, 200).await?;
+            let mut request = PoolSelectionRequest::new("task-override", 100);
+            request.override_slot = Some(second.id.clone());
+
+            let outcome = store.select_pool_slot(&request).await?;
+            assert_eq!(
+                outcome.slot.as_ref().map(|slot| slot.id.as_str()),
+                Some("slot-b")
+            );
+            assert_eq!(outcome.reason, "task override");
+
+            let reused = store.select_pool_slot(&request).await?;
+            assert!(reused.reused);
+            assert_eq!(
+                reused.slot.as_ref().map(|slot| slot.id.as_str()),
+                Some("slot-b")
+            );
+
+            let outcome = store
+                .select_pool_slot(&PoolSelectionRequest::new("task-2", 100))
+                .await?;
+            assert_eq!(
+                outcome.slot.as_ref().map(|slot| slot.id.as_str()),
+                Some("slot-a")
+            );
+            assert_eq!(outcome.skipped.len(), 1);
+            assert_eq!(outcome.skipped[0].slot_id.as_str(), "slot-b");
+            assert!(
+                outcome.skipped[0]
+                    .reason
+                    .contains("reserved by request task-override")
+            );
+
+            let outcome = store
+                .select_pool_slot(&PoolSelectionRequest::new("task-3", 100))
+                .await?;
+            assert!(outcome.slot.is_none());
+            assert_eq!(outcome.reason, "no eligible pool slot");
+            assert_eq!(outcome.skipped.len(), 2);
+
+            store.release_pool_selection("task-2", 150).await?;
+            let mut request = PoolSelectionRequest::new("task-4", 150);
+            request.override_slot = Some(PoolSlotId::new("missing-slot"));
+            let outcome = store.select_pool_slot(&request).await?;
+            assert_eq!(
+                outcome.slot.as_ref().map(|slot| slot.id.as_str()),
+                Some("slot-a")
+            );
+            assert!(outcome.skipped.iter().any(|skip| {
+                skip.slot_id.as_str() == "missing-slot" && skip.reason.contains("not in the pool")
+            }));
+            assert_eq!(first.id.as_str(), "slot-a");
+
+            assert!(matches!(
+                store
+                    .select_pool_slot(&PoolSelectionRequest::new("", 150))
+                    .await,
+                Err(StoreError::InvalidRow(_))
+            ));
+            assert!(matches!(
+                store.release_pool_selection("task-2", u64::MAX).await,
+                Err(StoreError::InvalidRow(_))
+            ));
+            let bad = pool_slot("slot-bad", -1, 100);
+            assert!(matches!(
+                store.save_pool_slot(&bad).await,
+                Err(StoreError::InvalidRow(_))
+            ));
+            Ok(())
+        }
+
+        verify(&MemoryStore::new()).await?;
+        let directory = TestDirectory::new()?;
+        let store = TursoStore::open_at(&directory.join("pool-selection-override.db")).await?;
+        verify(&store).await?;
+        Ok(())
+    }
+
+    #[test]
+    fn pool_selection_tie_breaks_deterministically_and_reports_missing_override() {
+        let first = pool_slot("slot-a", 0, 100);
+        let second = pool_slot("slot-b", 0, 100);
+        let slots = vec![second, first];
+        let mut latest = BTreeMap::new();
+        for slot in &slots {
+            latest.insert(
+                slot.id.clone(),
+                state_entry(&slot.id, Some(0), Some(10), None, None, None),
+            );
+        }
+
+        let mut request = PoolSelectionRequest::new("task-tie", 100);
+        let outcome = choose_pool_slot(&request, &slots, &latest, &BTreeMap::new());
+        assert_eq!(
+            outcome.slot.as_ref().map(|slot| slot.id.as_str()),
+            Some("slot-a")
+        );
+
+        request.override_slot = Some(PoolSlotId::new("missing"));
+        let outcome = choose_pool_slot(&request, &slots, &latest, &BTreeMap::new());
+        assert_eq!(
+            outcome.slot.as_ref().map(|slot| slot.id.as_str()),
+            Some("slot-a")
+        );
+        assert_eq!(outcome.skipped.len(), 1);
+        assert_eq!(outcome.skipped[0].slot_id.as_str(), "missing");
+        assert!(outcome.skipped[0].reason.contains("not in the pool"));
+    }
+
+    #[tokio::test]
+    async fn pool_selection_reserves_distinct_slots_for_concurrent_requests()
+    -> Result<(), Box<dyn std::error::Error>> {
+        async fn verify(store: &dyn Store) -> Result<(), Box<dyn std::error::Error>> {
+            save_available_slot(store, "slot-one", 0, 100).await?;
+            save_available_slot(store, "slot-two", 1, 200).await?;
+            let first_request = PoolSelectionRequest::new("task-one", 100);
+            let second_request = PoolSelectionRequest::new("task-two", 100);
+            let (first, second) = tokio::join!(
+                store.select_pool_slot(&first_request),
+                store.select_pool_slot(&second_request)
+            );
+            let first = first?.slot.ok_or("first request did not select a slot")?.id;
+            let second = second?
+                .slot
+                .ok_or("second request did not select a slot")?
+                .id;
+            assert_ne!(first, second);
+            Ok(())
+        }
+
+        verify(&MemoryStore::new()).await?;
+        let directory = TestDirectory::new()?;
+        let store = TursoStore::open_at(&directory.join("pool-selection-concurrent.db")).await?;
+        verify(&store).await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn pool_selection_rejects_malformed_persisted_rows()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = TestDirectory::new()?;
+        let store = TursoStore::open_at(&directory.join("pool-selection-malformed.db")).await?;
+        {
+            let mut db = store.db.lock().await;
+            toasty::sql::statement(
+                "INSERT INTO pool_selections (request_id, slot_id, selected_at, released_at, reason, skipped_json) \
+                 VALUES ('bad-row', NULL, 100, NULL, 'reason', 'not json')",
+            )
+            .exec(&mut *db)
+            .await?;
+        }
+        assert!(matches!(
+            store.load_pool_selections().await,
+            Err(StoreError::InvalidRow(_))
+        ));
+        Ok(())
     }
 
     #[test]
