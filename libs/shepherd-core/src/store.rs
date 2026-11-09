@@ -419,6 +419,9 @@ impl PoolAvailability {
 pub struct PoolSelectionRequest {
     pub request_id: String,
     pub override_slot: Option<PoolSlotId>,
+    /// A turn can only use a slot that launches the task's own agent.
+    #[serde(default)]
+    pub agent: Option<crate::tasks::Agent>,
     pub now: u64,
 }
 
@@ -427,6 +430,7 @@ impl PoolSelectionRequest {
         Self {
             request_id: request_id.into(),
             override_slot: None,
+            agent: None,
             now,
         }
     }
@@ -5152,9 +5156,14 @@ pub fn choose_pool_slot(
     if let Some(override_slot) = request.override_slot.as_ref() {
         match ordered.iter().find(|slot| &slot.id == override_slot) {
             Some(slot) => {
-                if let Some(skip) =
-                    pool_slot_skip(slot, entries, reserved, &request.request_id, request.now)
-                {
+                if let Some(skip) = pool_slot_skip(
+                    slot,
+                    entries,
+                    reserved,
+                    request.agent,
+                    &request.request_id,
+                    request.now,
+                ) {
                     skipped.push(skip);
                 } else {
                     return pool_selection_chosen(request, slot, "task override", skipped);
@@ -5172,9 +5181,14 @@ pub fn choose_pool_slot(
         if request.override_slot.as_ref() == Some(&slot.id) {
             continue;
         }
-        if let Some(skip) =
-            pool_slot_skip(slot, entries, reserved, &request.request_id, request.now)
-        {
+        if let Some(skip) = pool_slot_skip(
+            slot,
+            entries,
+            reserved,
+            request.agent,
+            &request.request_id,
+            request.now,
+        ) {
             skipped.push(skip);
             continue;
         }
@@ -5195,9 +5209,19 @@ fn pool_slot_skip(
     slot: &PoolSlot,
     entries: &BTreeMap<PoolSlotId, Vec<PoolQuotaEntry>>,
     reserved: &BTreeMap<PoolSlotId, String>,
+    agent: Option<crate::tasks::Agent>,
     request_id: &str,
     now: u64,
 ) -> Option<PoolSkippedSlot> {
+    if let Some(agent) = agent
+        && slot.agent != agent
+    {
+        return Some(PoolSkippedSlot {
+            slot_id: slot.id.clone(),
+            state: None,
+            reason: format!("slot runs the {} agent", slot.agent.as_str()),
+        });
+    }
     if let Some(owner) = reserved.get(&slot.id)
         && owner != request_id
     {

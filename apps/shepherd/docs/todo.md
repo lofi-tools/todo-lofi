@@ -2598,6 +2598,24 @@ implemented; no public deployment exists yet.
   `cargo test -p shepherd-core` passes 188 tests (4 ignored), and `cargo clippy
   -p shepherd-core --all-targets -- -D warnings` and `cargo fmt -p shepherd-core`
   pass.
+- [x] Select a pool slot when a turn starts.
+  A new task or conversation tries the user's preferred healthy slot, then the
+  next one that can accept work; an explicit task override wins. The transcript
+  names the chosen slot and any skipped higher-priority slots.
+  Evidence (2026-11-09): `Core::send_prompt` builds the selection request with
+  the task id and its agent, consumes a forced slot once, and calls the existing
+  `select_pool_slot`. The request carries the agent, so `choose_pool_slot` skips
+  a slot that launches another harness and a turn never runs on the wrong agent.
+  A successful selection is recorded in the transcript ("pool: Acme · Model A
+  (codex); skipped ...") and as a durable `pool_selections` row keyed by the
+  task id. With no configured slots the turn proceeds exactly as before; when
+  slots exist but none can serve the task the turn stops with
+  `PoolUnavailable` naming the skipped slots, leaves the task ready and opens no
+  session. Tests cover the chosen slot, the transcript note, the stored
+  selection, a disabled slot plus an agent mismatch, and the unchanged no-pool
+  path. `cargo test -p shepherd-core` passes 210 tests (4 ignored), clippy and
+  fmt are clean, the app has 129 passing e2e tests, and the docs have 31 passing
+  e2e tests.
 - [x] Release idle reservations without losing resumable sessions.
   After the turn settles plus a configurable idle timeout (default 15 minutes),
   release the slot for other tasks. Never release during a running turn or a

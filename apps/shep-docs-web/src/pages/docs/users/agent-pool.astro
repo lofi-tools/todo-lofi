@@ -6,7 +6,7 @@ import { Badge } from 'web-design-system/components'
 const toc = [
   { label: 'Status', href: '#status' },
   { label: 'Why a pool', href: '#why' },
-  { label: 'How selection will work', href: '#selection' },
+  { label: 'How selection works', href: '#selection' },
   { label: 'What a task will show', href: '#visibility' },
   { label: 'Your controls', href: '#controls' },
   { label: 'What it will not do', href: '#limits' },
@@ -19,11 +19,12 @@ const toc = [
   description="The quota-aware pool is Shepherd's next step: choose the next healthy installed agent when the preferred one is exhausted."
   toc={toc}
 >
-  <Callout tone="note" title="Pool management is here; task selection is not">
+  <Callout tone="note" title="Pool management and task-start selection are here">
     Settings → Agent pool can inspect existing slots, reorder them, disable or enable them, correct a
-    slot's limit and reset time, clear its cooldown, and force one slot for the next turn. New tasks
-    still do not select a pool slot automatically: automatic selection is
-    not in the current build, so a forced slot is recorded but not used yet.
+    slot's limit and reset time, clear its cooldown, and force one slot for the next turn. A turn now
+    asks the pool for a slot before it starts: the chosen slot and any skipped higher-priority slots
+    are recorded in the transcript, and a configured pool that cannot serve the task stops the turn
+    with its reasons instead of starting anyway.
   </Callout>
 
   <h2 id="status">Status</h2>
@@ -32,7 +33,7 @@ const toc = [
     provider/model plus the credential or account it uses. Shepherd keeps the user's priority order,
     the local usage ledger, reset windows, cooldown state and last-used time. Credentials are
     referenced, never copied into the pool record or logs. Existing slots can be managed in
-    Settings → Agent pool; automatic task selection is still next.
+    Settings → Agent pool; a turn selects a slot for its agent before it starts.
   </p>
 
   <h2 id="why">Why a pool</h2>
@@ -43,10 +44,10 @@ const toc = [
     higher-priority slots it skipped, so the choice is visible rather than mysterious.
   </p>
 
-  <h2 id="selection">How selection will work</h2>
+  <h2 id="selection">How selection works</h2>
   <ol>
     <li>A new task or conversation tries the user's preferred healthy slot.</li>
-    <li>If that slot is exhausted, cooling down or otherwise unavailable, the next slot that can accept work gets the task.</li>
+    <li>If that slot is exhausted, cooling down or otherwise unavailable, the next slot that can accept work takes the turn.</li>
     <li>An explicit task override wins over the priority order.</li>
     <li>After the turn settles plus an idle timeout (15 minutes by default), an idle reservation is released without losing a resumable session.</li>
     <li>A slot is never released during a running turn or a pending approval.</li>
@@ -105,8 +106,9 @@ const toc = [
     slots already exist, Settings → Agent pool lets you inspect their status, reorder them, disable
     or enable them, correct their limits and reset times, clear a cooldown, force a slot for the next
     turn, see when each provider window reopens, and import a catalog advisory snapshot to seed an
-    unknown limit. Automatic selection for new tasks is not wired, so the forced slot is not
-    consumed yet. If an agent is missing or
+    unknown limit. A turn now asks the pool for a slot, consumes a forced slot once, and records the
+    chosen slot and skipped reasons in the transcript; when configured slots cannot take the turn it
+    stops with those reasons. If an agent is missing or
     its adapter falls back, <a href="/docs/users/troubleshooting#agents">Troubleshooting</a> explains
     what to check. The <a href="/docs/users/releases">releases page</a> tracks the other next-step
     items.

@@ -51,8 +51,8 @@ use crate::snapshots::{SessionRecovery, TaskApproval};
 use crate::store::{
     MemoryStore, PoolCatalogAdvisory, PoolCatalogOutcome, PoolCooldownClearRequest,
     PoolQuotaCorrectionOutcome, PoolQuotaCorrectionRequest, PoolReorderOutcome, PoolReorderRequest,
-    PoolSelectionRequest, PoolSlotEnabledOutcome, PoolSlotEnabledRequest, PoolSlotId, PoolStatus,
-    Store, StoreError, WorktreeDeletion,
+    PoolSelectionOutcome, PoolSelectionRequest, PoolSlot, PoolSlotEnabledOutcome,
+    PoolSlotEnabledRequest, PoolSlotId, PoolStatus, Store, StoreError, WorktreeDeletion,
 };
 use crate::terminal::{
     InspectorTab, ProcessRecord, TerminalId, TerminalLayout, TerminalList, TerminalRecord,
@@ -143,6 +143,8 @@ pub enum CoreError {
         live_tasks: usize,
         live_terminals: usize,
     },
+    #[error("{reason}")]
+    PoolUnavailable { reason: String },
     #[error("the core is not running; shutdown state is {state:?}")]
     NotRunning { state: ShutdownState },
     #[error("the core was built without an agent harness")]
@@ -297,6 +299,23 @@ impl Default for Core {
     fn default() -> Self {
         Self::new()
     }
+}
+
+fn pool_selection_note(slot: &PoolSlot, outcome: &PoolSelectionOutcome) -> String {
+    let mut note = format!(
+        "pool: {} · {} ({})",
+        slot.provider_name,
+        slot.model_name,
+        slot.agent.as_str()
+    );
+    for skip in &outcome.skipped {
+        note.push_str(&format!(
+            "; skipped {}: {}",
+            skip.slot_id.as_str(),
+            skip.reason
+        ));
+    }
+    note
 }
 
 fn archived_worktree_cutoff() -> u64 {
@@ -2161,6 +2180,29 @@ impl Core {
             let baseline = GitService.turn_baseline(path)?;
             self.turn_baselines.insert(task_id.clone(), baseline);
         }
+        let mut selection_request =
+            self.pool_selection_request(task_id.as_str(), projects::now_millis());
+        selection_request.agent = Some(self.task(task_id)?.agent);
+        let pool_selection = self.store.select_pool_slot(&selection_request).await?;
+        let pool_note = match &pool_selection.slot {
+            Some(slot) => Some(pool_selection_note(slot, &pool_selection)),
+            None if pool_selection.reason == "no pool slots" => None,
+            None => {
+                let skipped = pool_selection
+                    .skipped
+                    .iter()
+                    .map(|skip| format!("{}: {}", skip.slot_id.as_str(), skip.reason))
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                let reason = if skipped.is_empty() {
+                    pool_selection.reason.clone()
+                } else {
+                    format!("{} ({skipped})", pool_selection.reason)
+                };
+                return Err(CoreError::PoolUnavailable { reason });
+            }
+        };
+
         self.set_task_state(task_id, TaskState::Working)?;
         if let Some(task) = self.tasks.get_mut(task_id) {
             task.error = None;
@@ -2192,6 +2234,12 @@ impl Core {
             self.save_task(task_id).await?;
             self.publish_task(task_id)?;
             return Err(error);
+        }
+
+        if let Some(note) = pool_note
+            && let Some(session) = self.sessions.get_mut(task_id)
+        {
+            session.note(note, false);
         }
 
         let outcome = {
@@ -4728,6 +4776,105 @@ mod tests {
                 .map(|entry| entry.source),
             Some(PoolQuotaSource::Catalog)
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_turn_selects_a_pool_slot_and_records_it() -> Result<(), Box<dyn std::error::Error>> {
+        let repository = TestRepository::new()?;
+        let mut core = Core::with_services(
+            Box::new(MemoryStore::new()),
+            Box::new(FakeHarnessFactory::new(vec![vec![FakeTurn::new(vec![
+                FakeStep::Message("done".into()),
+            ])]])),
+        );
+        let project_id = add_project(&mut core, repository.path().to_path_buf()).await?;
+        let draft = workspace_of(
+            core.execute(Command::CreateDraft {
+                project_id,
+                title: "Pool turn".into(),
+                agent: Agent::Codex,
+            })
+            .await?,
+        );
+        let task_id = TaskId::new(draft.task.id.clone());
+        let mut slot = PoolSlot::new(Agent::Codex, "acme", "Acme", "model-a", "Model A");
+        slot.id = PoolSlotId::new("turn-slot");
+        core.store.save_pool_slot(&slot).await?;
+        let mut entry = PoolQuotaEntry::new(slot.id.clone(), PoolQuotaSource::Provider, 100);
+        entry.used = Some(0);
+        entry.limit = Some(10);
+        entry.limit_unit = Some("requests".into());
+        core.store.append_pool_quota_entry(&entry).await?;
+
+        let workspace = workspace_of(
+            core.execute(Command::SendPrompt {
+                task_id: task_id.clone(),
+                input: PromptInput::text("start"),
+            })
+            .await?,
+        );
+        let rows = summaries(&workspace);
+        assert!(
+            rows.iter()
+                .any(|row| row.contains("pool: Acme · Model A (codex)")),
+            "rows: {rows:?}"
+        );
+        let selections = core.store.load_pool_selections().await?;
+        let selection = selections
+            .iter()
+            .find(|selection| selection.request_id == task_id.as_str())
+            .ok_or("missing pool selection")?;
+        assert_eq!(selection.slot_id.as_ref(), Some(&slot.id));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_turn_refuses_to_start_when_no_slot_can_serve_it()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let repository = TestRepository::new()?;
+        let mut core = Core::with_services(
+            Box::new(MemoryStore::new()),
+            Box::new(FakeHarnessFactory::new(Vec::new())),
+        );
+        let project_id = add_project(&mut core, repository.path().to_path_buf()).await?;
+        let draft = workspace_of(
+            core.execute(Command::CreateDraft {
+                project_id,
+                title: "Blocked turn".into(),
+                agent: Agent::Codex,
+            })
+            .await?,
+        );
+        let task_id = TaskId::new(draft.task.id.clone());
+        let mut disabled = PoolSlot::new(Agent::Codex, "acme", "Acme", "model-a", "Model A");
+        disabled.id = PoolSlotId::new("disabled-slot");
+        disabled.enabled = false;
+        core.store.save_pool_slot(&disabled).await?;
+        let mut other = PoolSlot::new(Agent::Claude, "other", "Other", "model-b", "Model B");
+        other.id = PoolSlotId::new("other-slot");
+        other.priority = 1;
+        core.store.save_pool_slot(&other).await?;
+
+        let error = core
+            .execute(Command::SendPrompt {
+                task_id: task_id.clone(),
+                input: PromptInput::text("start"),
+            })
+            .await
+            .err()
+            .ok_or("the turn must not start")?;
+        let CoreError::PoolUnavailable { reason } = error else {
+            return Err(format!("unexpected error: {error}").into());
+        };
+        assert!(reason.contains("no eligible pool slot"), "reason: {reason}");
+        assert!(reason.contains("disabled"), "reason: {reason}");
+        assert!(reason.contains("claude"), "reason: {reason}");
+        assert_eq!(
+            core.tasks.get(&task_id).map(|task| task.state),
+            Some(TaskState::Ready)
+        );
+        assert!(!core.sessions.contains_key(&task_id));
         Ok(())
     }
 

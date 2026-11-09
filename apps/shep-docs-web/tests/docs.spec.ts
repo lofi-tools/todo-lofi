@@ -98,7 +98,8 @@ test.describe('Shepherd docs routes', () => {
 
   test('the agent pool, roadmap and releases are described honestly', async ({ page }) => {
     await page.goto('/docs/users/agent-pool')
-    await expect(page.locator('main')).toContainText(/not in the current build/i)
+    await expect(page.locator('main')).toContainText(/asks the pool for a slot/i)
+    await expect(page.locator('main')).toContainText(/next step/i)
     await expect(page.locator('main')).not.toContainText(/available now/i)
 
     await page.goto('/docs/users/roadmap')
