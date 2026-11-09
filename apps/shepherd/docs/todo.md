@@ -2295,9 +2295,10 @@ own acceptance evidence exists.
   assert the hero promise, agent-pool/workspace/preview/worktree/approval/
   terminal claims, the Available now / Next / Planned split, the absence of
   Taskstream copy and internal reference-project names, CTA and header anchors,
-  the mobile drawer and the source link. The Shepherd suite passed 7 tests and
-  the Taskstream suite passed 36 tests, including axe WCAG 2.1 AA and
-  375/768/1440 px overflow checks for `/`. `pnpm --dir apps/shep-docs-web run
+  the mobile drawer and the source link. Each package's committed `test:e2e`
+  script passed from a clean tree: the Shepherd suite passed 7 tests and the
+  Taskstream suite passed 36 tests, including axe WCAG 2.1 AA and 375/768/1440
+  px overflow checks for `/`. `pnpm --dir apps/shep-docs-web run
   typecheck`, `pnpm --dir apps/ts-docs-web run typecheck`, both static builds,
   `pnpm --dir apps/shepherd/ui typecheck`, the two focused Shepherd preview
   tests, `cargo fmt --check`, both clippy runs, and `cargo test -p

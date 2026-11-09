@@ -81,9 +81,10 @@ pnpm typecheck  # astro check
 pnpm test:e2e   # Playwright smoke, theming, layout, and axe AA checks
 ```
 
-The e2e suite expects the locally installed Chrome and starts its own preview
-server on port 4322 (the showcase uses 4321 and Shepherd docs use 4324, so all
-can run at once).
+The e2e suite expects the locally installed Chrome and uses two workers. Its
+committed `test:e2e` script stops a preview left by an earlier run, builds,
+serves on port 4322, and stops the preview again when the run ends. The showcase
+uses 4321 and Shepherd docs use 4324, so all can run at once.
 
 ## Downloads
 

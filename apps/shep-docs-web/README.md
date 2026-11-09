@@ -32,8 +32,9 @@ pnpm test:e2e:shep-docs
 ```
 
 `pnpm dev` starts both this package (port 4323) and the Taskstream docs package
-(port 4321). The Playwright suite builds and previews on port 4324, so it can
-run alongside both dev servers.
+(port 4321). The committed `test:e2e` script stops a preview left by an earlier
+run, builds, serves on port 4324 with two workers, and stops the preview again
+when the run ends. It can run alongside both dev servers.
 
 From this directory:
 
