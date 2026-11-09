@@ -5,6 +5,7 @@
 //! feature because a cross-origin iframe cannot be inspected from here.
 
 use std::borrow::Cow;
+use std::fmt;
 use std::io;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
@@ -23,6 +24,7 @@ use crate::preview_annotations::{
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_REQUEST_BYTES: usize = 16 * 1024;
 const MAX_ANNOTATION_BODY: usize = 256 * 1024;
+const CLAIM_COOKIE: &str = "shepherd_preview_claim";
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum PreviewServerError {
@@ -60,6 +62,30 @@ struct Binding {
     project_id: String,
     task_id: Option<String>,
     target: Url,
+    claim: Option<String>,
+}
+
+impl fmt::Debug for Session {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Session")
+            .field("token", &"[redacted]")
+            .field("target", &self.target)
+            .field("task_id", &self.task_id)
+            .finish()
+    }
+}
+
+impl fmt::Debug for Binding {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Binding")
+            .field("project_id", &self.project_id)
+            .field("task_id", &self.task_id)
+            .field("target", &self.target)
+            .field("claim", &self.claim.as_ref().map(|_| "[redacted]"))
+            .finish()
+    }
 }
 
 struct Running {
@@ -89,7 +115,11 @@ impl PreviewServer {
         let mut sessions = self.sessions.lock().await;
         let token = match sessions.by_project.get(project_id) {
             Some(session) if session.target == *target && session.task_id.as_deref() == task_id => {
-                session.token.clone()
+                let token = session.token.clone();
+                if let Some(binding) = sessions.by_token.get_mut(&token) {
+                    binding.claim = None;
+                }
+                token
             }
             _ => {
                 let token = new_token();
@@ -111,6 +141,7 @@ impl PreviewServer {
                         project_id: project_id.to_owned(),
                         task_id,
                         target: target.clone(),
+                        claim: None,
                     },
                 );
                 token
@@ -250,21 +281,32 @@ async fn handle_connection(
             if request.method != "GET" {
                 return respond(&mut stream, Response::method_not_allowed("GET")).await;
             }
+            let new_claim = {
+                let mut sessions = sessions.lock().await;
+                let Some(binding) = sessions.by_token.get_mut(&token) else {
+                    return respond(&mut stream, Response::not_found()).await;
+                };
+                if binding.claim.is_none() {
+                    let claim = new_token();
+                    binding.claim = Some(claim.clone());
+                    Some(claim)
+                } else {
+                    None
+                }
+            };
             let (body, csp) = wrapper_html(&binding.target, &request.path);
-            respond(&mut stream, Response::html(body, csp)).await
+            let response = Response::html(body, csp);
+            let response = match new_claim {
+                Some(claim) => response.with_claim_cookie(&token, &claim),
+                None => response,
+            };
+            respond(&mut stream, response).await
         }
         Route::Annotations => {
             if request.method != "POST" {
                 return respond(&mut stream, Response::method_not_allowed("POST")).await;
             }
-            let Some(task_id) = binding.task_id.as_deref() else {
-                return respond(
-                    &mut stream,
-                    Response::conflict("Select a task before submitting annotations."),
-                )
-                .await;
-            };
-            let content_type = request.content_type.unwrap_or_default();
+            let content_type = request.content_type.as_deref().unwrap_or_default();
             if !content_type
                 .split(';')
                 .next()
@@ -281,6 +323,19 @@ async fn handle_connection(
             let body = match read_body(&mut stream, length).await {
                 Ok(body) => body,
                 Err(response) => return respond(&mut stream, response).await,
+            };
+            let Some(claim) = binding.claim.as_deref() else {
+                return respond(&mut stream, Response::forbidden()).await;
+            };
+            if !claim_cookie_matches(request.cookie.as_deref(), claim) {
+                return respond(&mut stream, Response::forbidden()).await;
+            }
+            let Some(task_id) = binding.task_id.as_deref() else {
+                return respond(
+                    &mut stream,
+                    Response::conflict("Select a task before submitting annotations."),
+                )
+                .await;
             };
             let batch: AnnotationBatch = match serde_json::from_slice(&body) {
                 Ok(batch) => batch,
@@ -344,6 +399,7 @@ struct Request {
     path: String,
     content_type: Option<String>,
     content_length: Option<usize>,
+    cookie: Option<String>,
 }
 
 fn parse_request(head: &str, address: SocketAddr) -> Result<Request, Response> {
@@ -364,8 +420,10 @@ fn parse_request(head: &str, address: SocketAddr) -> Result<Request, Response> {
     let mut origin = None;
     let mut destination = None;
     let mut mode = None;
+    let mut fetch_site = None;
     let mut content_type = None;
     let mut content_length = None;
+    let mut cookie = None;
     for line in lines {
         if line.is_empty() {
             continue;
@@ -377,11 +435,24 @@ fn parse_request(head: &str, address: SocketAddr) -> Result<Request, Response> {
             }
             host = Some(value.trim().to_owned());
         } else if name.eq_ignore_ascii_case("origin") {
+            if origin.is_some() {
+                return Err(Response::bad_request());
+            }
             origin = Some(value.trim().to_owned());
         } else if name.eq_ignore_ascii_case("sec-fetch-dest") {
             destination = Some(value.trim().to_owned());
         } else if name.eq_ignore_ascii_case("sec-fetch-mode") {
             mode = Some(value.trim().to_owned());
+        } else if name.eq_ignore_ascii_case("sec-fetch-site") {
+            if fetch_site.is_some() {
+                return Err(Response::bad_request());
+            }
+            fetch_site = Some(value.trim().to_owned());
+        } else if name.eq_ignore_ascii_case("cookie") {
+            if cookie.is_some() {
+                return Err(Response::bad_request());
+            }
+            cookie = Some(value.trim().to_owned());
         } else if name.eq_ignore_ascii_case("content-type") {
             if content_type.is_some() {
                 return Err(Response::bad_request());
@@ -398,7 +469,10 @@ fn parse_request(head: &str, address: SocketAddr) -> Result<Request, Response> {
     if !host_matches(&host, address) {
         return Err(Response::forbidden());
     }
-    if origin.is_some_and(|origin| origin != format!("http://{host}")) {
+    if origin
+        .as_deref()
+        .is_some_and(|origin| origin != format!("http://{host}"))
+    {
         return Err(Response::forbidden());
     }
     if method == "GET" {
@@ -409,6 +483,13 @@ fn parse_request(head: &str, address: SocketAddr) -> Result<Request, Response> {
             return Err(Response::forbidden());
         }
     } else {
+        if origin.is_none()
+            || !fetch_site
+                .as_deref()
+                .is_some_and(|site| site.eq_ignore_ascii_case("same-origin"))
+        {
+            return Err(Response::forbidden());
+        }
         if destination.is_some_and(|destination| !destination.eq_ignore_ascii_case("empty")) {
             return Err(Response::forbidden());
         }
@@ -423,6 +504,7 @@ fn parse_request(head: &str, address: SocketAddr) -> Result<Request, Response> {
         path: path.to_owned(),
         content_type,
         content_length,
+        cookie,
     })
 }
 
@@ -458,6 +540,7 @@ struct Response {
     content_type: &'static str,
     csp: Option<String>,
     allow: Option<&'static str>,
+    set_cookie: Option<String>,
 }
 
 impl Response {
@@ -468,6 +551,7 @@ impl Response {
             content_type: "text/plain; charset=utf-8",
             csp: None,
             allow: None,
+            set_cookie: None,
         }
     }
 
@@ -478,6 +562,7 @@ impl Response {
             content_type: "text/html; charset=utf-8",
             csp: Some(csp),
             allow: None,
+            set_cookie: None,
         }
     }
 
@@ -488,7 +573,7 @@ impl Response {
     fn forbidden() -> Self {
         Self::text(
             "403 Forbidden",
-            "The wrapper only serves its configured origin.",
+            "The wrapper only accepts its configured browser and origin.",
         )
     }
 
@@ -541,6 +626,7 @@ impl Response {
             content_type: "application/json; charset=utf-8",
             csp: None,
             allow: None,
+            set_cookie: None,
         }
     }
 
@@ -551,7 +637,15 @@ impl Response {
             content_type: "text/plain; charset=utf-8",
             csp: None,
             allow: None,
+            set_cookie: None,
         }
+    }
+
+    fn with_claim_cookie(mut self, token: &str, claim: &str) -> Self {
+        self.set_cookie = Some(format!(
+            "{CLAIM_COOKIE}={claim}; HttpOnly; SameSite=Strict; Path=/preview/{token}/"
+        ));
+        self
     }
 
     fn timeout() -> Self {
@@ -584,6 +678,7 @@ async fn respond(stream: &mut TcpStream, response: Response) -> io::Result<()> {
         content_type,
         csp,
         allow,
+        set_cookie,
     } = response;
     let allow = allow
         .map(|methods| format!("Allow: {methods}\r\n"))
@@ -591,17 +686,29 @@ async fn respond(stream: &mut TcpStream, response: Response) -> io::Result<()> {
     let csp = csp
         .map(|policy| format!("Content-Security-Policy: {policy}\r\n"))
         .unwrap_or_default();
+    let set_cookie = set_cookie
+        .map(|cookie| format!("Set-Cookie: {cookie}\r\n"))
+        .unwrap_or_default();
     let head = format!(
         "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\n\
          Cache-Control: no-store\r\nPragma: no-cache\r\n\
          X-Content-Type-Options: nosniff\r\nX-Frame-Options: DENY\r\n\
          Referrer-Policy: no-referrer\r\nCross-Origin-Resource-Policy: same-origin\r\n\
-         Connection: close\r\n{allow}{csp}\r\n",
+         Connection: close\r\n{allow}{set_cookie}{csp}\r\n",
         body.len()
     );
     stream.write_all(head.as_bytes()).await?;
     stream.write_all(body.as_bytes()).await?;
     stream.shutdown().await
+}
+
+fn claim_cookie_matches(cookie: Option<&str>, expected: &str) -> bool {
+    cookie.is_some_and(|cookie| {
+        cookie
+            .split(';')
+            .filter_map(|part| part.split_once('='))
+            .any(|(name, value)| name.trim() == CLAIM_COOKIE && value.trim() == expected)
+    })
 }
 
 fn wrapper_html(target: &Url, path: &str) -> (String, String) {
@@ -737,6 +844,7 @@ mod tests {
     async fn post(
         url: &Url,
         body: &str,
+        cookie: Option<&str>,
         extra_headers: &str,
     ) -> Result<(u16, String, String), Box<dyn Error>> {
         let authority = format!(
@@ -744,8 +852,19 @@ mod tests {
             url.host_str().ok_or("missing host")?,
             url.port().ok_or("missing port")?
         );
+        let cookie = cookie
+            .map(|cookie| format!("Cookie: {cookie}\r\n"))
+            .unwrap_or_default();
+        let origin = if extra_headers
+            .lines()
+            .any(|line| line.to_ascii_lowercase().starts_with("origin:"))
+        {
+            String::new()
+        } else {
+            format!("Origin: http://{authority}\r\n")
+        };
         let request = format!(
-            "POST {} HTTP/1.1\r\nHost: {authority}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nSec-Fetch-Dest: empty\r\nSec-Fetch-Mode: cors\r\nConnection: close\r\n{extra_headers}\r\n{body}",
+            "POST {} HTTP/1.1\r\nHost: {authority}\r\n{origin}Content-Type: application/json\r\nContent-Length: {}\r\nSec-Fetch-Site: same-origin\r\nSec-Fetch-Dest: empty\r\nSec-Fetch-Mode: cors\r\nConnection: close\r\n{cookie}{extra_headers}\r\n{body}",
             url.path(),
             body.len()
         );
@@ -755,17 +874,30 @@ mod tests {
     async fn post_declared_length(
         url: &Url,
         length: usize,
+        cookie: Option<&str>,
     ) -> Result<(u16, String, String), Box<dyn Error>> {
         let authority = format!(
             "{}:{}",
             url.host_str().ok_or("missing host")?,
             url.port().ok_or("missing port")?
         );
+        let cookie = cookie
+            .map(|cookie| format!("Cookie: {cookie}\r\n"))
+            .unwrap_or_default();
         let request = format!(
-            "POST {} HTTP/1.1\r\nHost: {authority}\r\nContent-Type: application/json\r\nContent-Length: {length}\r\nSec-Fetch-Dest: empty\r\nSec-Fetch-Mode: cors\r\nConnection: close\r\n\r\n",
+            "POST {} HTTP/1.1\r\nHost: {authority}\r\nOrigin: http://{authority}\r\nContent-Type: application/json\r\nContent-Length: {length}\r\nSec-Fetch-Site: same-origin\r\nSec-Fetch-Dest: empty\r\nSec-Fetch-Mode: cors\r\nConnection: close\r\n{cookie}\r\n",
             url.path()
         );
         exchange(url, &request).await
+    }
+
+    fn claim_cookie(headers: &str) -> Option<String> {
+        headers
+            .lines()
+            .find_map(|line| line.strip_prefix("set-cookie:"))
+            .and_then(|value| value.split(';').next())
+            .map(str::trim)
+            .map(str::to_owned)
     }
 
     #[tokio::test]
@@ -777,21 +909,42 @@ mod tests {
         endpoint.set_path(&format!("{}annotations", wrapper.path()));
         let payload = r##"{"projectId":"project-1","taskId":"task-1","pageUrl":"http://localhost:3000/app","annotations":[{"id":"note-1","note":"Increase contrast.","targets":[{"selector":"#buy","excerpt":"Buy","bounds":{"x":1,"y":2,"width":100,"height":30}}]}]}"##;
 
-        let (status, headers, body) = post(&endpoint, payload, "").await?;
+        let (_, wrapper_headers, _) = request(&wrapper, None, "").await?;
+        let cookie = claim_cookie(&wrapper_headers).ok_or("missing claim cookie")?;
+        assert!(wrapper_headers.contains("httponly"));
+        assert!(wrapper_headers.contains("samesite=strict"));
+        assert!(wrapper_headers.contains("path=/preview/"));
+        assert!(wrapper_headers.contains("referrer-policy: no-referrer"));
+
+        assert_eq!(post(&endpoint, payload, None, "").await?.0, 403);
+        let wrong_cookie = format!("{CLAIM_COOKIE}=wrong");
+        assert_eq!(
+            post(&endpoint, payload, Some(&wrong_cookie), "").await?.0,
+            403
+        );
+        let (status, headers, body) = post(&endpoint, payload, Some(&cookie), "").await?;
         assert_eq!(status, 202);
         assert!(headers.contains("content-type: application/json"));
+        assert!(headers.contains("referrer-policy: no-referrer"));
+        assert!(headers.contains("x-frame-options: deny"));
         assert!(body.contains("\"accepted\":1"));
-        assert_eq!(post(&endpoint, payload, "").await?.0, 409);
+        assert_eq!(post(&endpoint, payload, Some(&cookie), "").await?.0, 409);
 
         let wrong_task = payload.replace("\"taskId\":\"task-1\"", "\"taskId\":\"task-2\"");
-        assert_eq!(post(&endpoint, &wrong_task, "").await?.0, 403);
-        let foreign_origin = format!("Origin: {}\r\n", "http://evil.example");
-        assert_eq!(post(&endpoint, "", &foreign_origin).await?.0, 403);
-        let screenshot = r##"{"projectId":"project-1","taskId":"task-1","pageUrl":"http://localhost:3000/app","annotations":[{"id":"note-2","note":"Crop it.","targets":[{"screenshot":{"path":"/tmp/not-shepherd.png","x":1,"y":2,"width":100,"height":30}}]}]}"##;
-        assert_eq!(post(&endpoint, screenshot, "").await?.0, 400);
-        assert_eq!(post(&endpoint, "{", "").await?.0, 400);
         assert_eq!(
-            post_declared_length(&endpoint, MAX_ANNOTATION_BODY + 1)
+            post(&endpoint, &wrong_task, Some(&cookie), "").await?.0,
+            403
+        );
+        let foreign_origin = format!("Origin: {}\r\n", "http://evil.example");
+        assert_eq!(
+            post(&endpoint, "", Some(&cookie), &foreign_origin).await?.0,
+            403
+        );
+        let screenshot = r##"{"projectId":"project-1","taskId":"task-1","pageUrl":"http://localhost:3000/app","annotations":[{"id":"note-2","note":"Crop it.","targets":[{"screenshot":{"path":"/tmp/not-shepherd.png","x":1,"y":2,"width":100,"height":30}}]}]}"##;
+        assert_eq!(post(&endpoint, screenshot, Some(&cookie), "").await?.0, 400);
+        assert_eq!(post(&endpoint, "{", Some(&cookie), "").await?.0, 400);
+        assert_eq!(
+            post_declared_length(&endpoint, MAX_ANNOTATION_BODY + 1, Some(&cookie))
                 .await?
                 .0,
             413
@@ -799,12 +952,20 @@ mod tests {
 
         let mut wrong_token = endpoint.clone();
         wrong_token.set_path(&format!("/preview/{}/annotations", "0".repeat(64)));
-        assert_eq!(post(&wrong_token, "", "").await?.0, 404);
+        assert_eq!(post(&wrong_token, "", None, "").await?.0, 404);
 
         let unbound = server.open("project-2", None, &target).await?;
         let mut unbound_endpoint = unbound.clone();
         unbound_endpoint.set_path(&format!("{}annotations", unbound.path()));
-        assert_eq!(post(&unbound_endpoint, "", "").await?.0, 409);
+        let (_, unbound_headers, _) = request(&unbound, None, "").await?;
+        let unbound_cookie = claim_cookie(&unbound_headers).ok_or("missing unbound cookie")?;
+        assert_eq!(post(&unbound_endpoint, payload, None, "").await?.0, 403);
+        assert_eq!(
+            post(&unbound_endpoint, payload, Some(&unbound_cookie), "")
+                .await?
+                .0,
+            409
+        );
 
         server.stop().await?;
         Ok(())
@@ -827,6 +988,11 @@ mod tests {
         assert!(headers.contains("frame-src http://localhost:3000"));
         assert!(headers.contains("cache-control: no-store"));
         assert!(headers.contains("x-frame-options: deny"));
+        assert!(headers.contains("referrer-policy: no-referrer"));
+        assert!(headers.contains("cross-origin-resource-policy: same-origin"));
+        assert!(body.contains("<meta name=\"referrer\" content=\"no-referrer\">"));
+        assert!(body.contains("rel=\"noreferrer\""));
+        assert!(body.contains("referrerpolicy=\"no-referrer\""));
 
         let (status, _, _) = request(&wrapper, Some("evil.example:3000"), "").await?;
         assert_eq!(status, 403);
@@ -867,10 +1033,15 @@ mod tests {
         let first = server
             .open("project-1", Some("task-1"), &first_target)
             .await?;
+        let (_, headers, _) = request(&first, None, "").await?;
+        let first_claim = claim_cookie(&headers).ok_or("missing first claim cookie")?;
         let same = server
             .open("project-1", Some("task-1"), &first_target)
             .await?;
         assert_eq!(first, same);
+        let (_, headers, _) = request(&same, None, "").await?;
+        let second_claim = claim_cookie(&headers).ok_or("missing second claim cookie")?;
+        assert_ne!(first_claim, second_claim);
         let rotated = server
             .open("project-1", Some("task-1"), &second_target)
             .await?;
@@ -880,6 +1051,61 @@ mod tests {
         assert_eq!(status, 200);
         assert!(body.contains("http://127.0.0.1:3001/second"));
         server.stop().await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn copied_wrapper_url_cannot_submit_without_the_claim_cookie()
+    -> Result<(), Box<dyn Error>> {
+        let server = PreviewServer::default();
+        let target = Url::parse("http://localhost:3000/app")?;
+        let wrapper = server.open("project-1", Some("task-1"), &target).await?;
+        let mut endpoint = wrapper.clone();
+        endpoint.set_path(&format!("{}annotations", wrapper.path()));
+        let payload = r##"{"projectId":"project-1","taskId":"task-1","pageUrl":"http://localhost:3000/app","annotations":[{"id":"note-1","note":"Increase contrast.","targets":[{"selector":"#buy","excerpt":"Buy","bounds":{"x":1,"y":2,"width":100,"height":30}}]}]}"##;
+
+        let (_, first_headers, _) = request(&wrapper, None, "").await?;
+        let cookie = claim_cookie(&first_headers).ok_or("missing claim cookie")?;
+        let (status, copied_headers, _) = request(&wrapper, None, "").await?;
+        assert_eq!(status, 200);
+        assert!(claim_cookie(&copied_headers).is_none());
+        assert_eq!(post(&endpoint, payload, None, "").await?.0, 403);
+
+        let authority = format!(
+            "{}:{}",
+            wrapper.host_str().ok_or("missing host")?,
+            wrapper.port().ok_or("missing port")?
+        );
+        let without_origin = format!(
+            "POST {} HTTP/1.1\r\nHost: {authority}\r\nContent-Type: application/json\r\nContent-Length: 0\r\nCookie: {cookie}\r\nSec-Fetch-Site: same-origin\r\nSec-Fetch-Dest: empty\r\nSec-Fetch-Mode: cors\r\nConnection: close\r\n\r\n",
+            endpoint.path(),
+        );
+        assert_eq!(exchange(&endpoint, &without_origin).await?.0, 403);
+        let (status, headers, _) = post(&endpoint, payload, Some(&cookie), "").await?;
+        assert_eq!(status, 202);
+        assert!(headers.contains("referrer-policy: no-referrer"));
+        server.stop().await?;
+        Ok(())
+    }
+
+    #[test]
+    fn wrapper_tokens_are_redacted_in_debug_output() -> Result<(), Box<dyn Error>> {
+        let token = new_token();
+        let target = Url::parse("http://localhost:3000/app")?;
+        let session = Session {
+            token: token.clone(),
+            target: target.clone(),
+            task_id: Some("task-1".into()),
+        };
+        let binding = Binding {
+            project_id: "project-1".into(),
+            task_id: Some("task-1".into()),
+            target,
+            claim: Some(token.clone()),
+        };
+        let output = format!("{session:?} {binding:?}");
+        assert!(!output.contains(&token));
+        assert!(output.contains("[redacted]"));
         Ok(())
     }
 

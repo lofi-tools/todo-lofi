@@ -119,6 +119,9 @@ current layout and give future changes a point of comparison.
   wrapper is bound to the task selected when it opens. It submits the same
   bounded annotation batch as the in-app composer, and the shared validator
   rejects another origin, another task, or a replayed annotation ID.
+  Annotation POSTs also require the wrapper's same-origin, `HttpOnly` claim
+  cookie, so a copied wrapper URL cannot submit from another browser profile.
+  Treat the wrapper URL as a local capability, not a shareable link.
   **Annotate** pauses interaction with the page so a click selects an element.
   Write a note and queue it in Preview. **Add to prompt** validates the queued
   annotations, then appends them as one ordered review block in the active

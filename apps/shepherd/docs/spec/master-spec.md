@@ -27,7 +27,7 @@ These were chosen explicitly and override the pre-interview draft.
 | Terminals | **One Terminals tab per task workspace**, containing a project-saved arrangement of terminal panes. Slots are project-shared or task-specific; there is no global terminal list. |
 | Preview | **Browser preview with element annotation**: select an element, attach a note, and add the annotation to the composer. Pages that block injection fall back to screenshot notes. |
 | Density | Dense shell chrome; readable transcript measure and line height. |
-| Process model | **One application, no daemon**: the Rust core owns agents, terminals and task state; shells are renderers over its command/event API. No socket, no attach protocol, no listening port. |
+| Process model | **One application, no daemon**: the Rust core owns agents, terminals and task state; shells are renderers over its command/event API. No attach protocol; the only listener is the token-scoped loopback preview wrapper. |
 | Quit | Quitting the window ends agents and PTYs, after a confirmation when a task is working or waiting. Tasks are marked interrupted and offer resume next launch; terminals come back as ended. |
 | Windows | **One window only**, ever. It lists every project and is already the multiplexer. |
 | Agent integration order | **Native adapter first**, then ACP, then a terminal wrapper, then a plain pane. First native adapters: **Codex**, then **OpenCode**, then **Pi**. |
@@ -266,11 +266,12 @@ shell (v1: Tauri webview + SolidJS; v2: GPUI window)
 └── draws transcripts, panes, diffs and terminal frames
 ```
 
-No daemon, no socket, no second binary. The core is a library linked into the
-shell; the v1 webview is the operating system's component, not a second Shepherd
-process. Closing the window is quitting the app; §2.5 defines the shutdown
-sequence. A crash leaves at most orphaned agent processes, which the next launch
-detects and offers to stop.
+No daemon, no attach socket, no second binary. The only listener is the
+token-scoped loopback preview wrapper in §8.1. The core is a library linked into
+the shell; the v1 webview is the operating system's component, not a second
+Shepherd process. Closing the window is quitting the app; §2.5 defines the
+shutdown sequence. A crash leaves at most orphaned agent processes, which the
+next launch detects and offers to stop.
 
 ### 3.2 Crates and modules
 
@@ -875,6 +876,27 @@ uses the desktop notification service.
   dimensions, page URL, and note as editable text.
 - Reload and open-in-browser are explicit; the preview never navigates the app
   shell.
+- The external annotation wrapper listens only on `127.0.0.1`; it is the app's
+  only listener and not an attach protocol. It rejects non-loopback targets,
+  mismatched `Host` or `Origin` headers, non-document wrapper navigation, and
+  cross-site annotation POSTs. Tokens are 64 hex characters, scoped to one
+  project, task and target, and are reused only while that tuple is unchanged.
+  They rotate when the tuple changes, the project is forgotten, or the app
+  quits. Opening the wrapper resets its browser claim; the first load sets an
+  `HttpOnly`, `SameSite=Strict` claim cookie, and annotation POSTs require that
+  cookie plus the exact wrapper `Origin` and `Sec-Fetch-Site: same-origin`. A
+  copied wrapper URL can view the page but cannot submit annotations from
+  another browser profile after the owning browser has claimed it. Wrapper
+  failures log only the failure kind, never the token or claim. Responses set
+  `Referrer-Policy: no-referrer`, a matching meta tag and `noreferrer` links so
+  the token is not sent as a referrer or through clipboard links.
+- The external wrapper is not an annotation injector. Element selection stays
+  in the app's Preview frame. If the target refuses framing, blocks injection,
+  navigates away from the configured origin, or is not HTML, the in-app tab
+  reports that element selection is unavailable and offers the screenshot
+  picker. The external wrapper simply embeds the target in an iframe; a page
+  that refuses framing stays blank there and the in-app screenshot fallback is
+  the recovery path.
 
 ## 9. Git view and commit
 

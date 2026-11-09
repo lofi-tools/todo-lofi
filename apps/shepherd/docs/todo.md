@@ -2255,11 +2255,24 @@ own acceptance evidence exists.
   task deletion and archiving for both stores. The preview URL remains durable
   on the project; wrapper sessions are intentionally not resurrected and the
   preview server is recreated on demand after reload.
-- [ ] Secure and document the preview wrapper.
+- [x] Secure and document the preview wrapper.
   Document the loopback-only boundary, token lifetime, configured-origin rule,
   screenshot fallback, and what happens when framing or injection is blocked.
   Cover token leakage through logs, referrer headers, clipboard links, and a
   second local user; none may submit an annotation.
+  Evidence: `preview_server` binds only to `127.0.0.1`, rejects non-loopback
+  targets, and scopes each token to one project/task/target. The first wrapper
+  load claims the session with an `HttpOnly`, `SameSite=Strict` cookie. The
+  `copied_wrapper_url_cannot_submit_without_the_claim_cookie` test proves a
+  copied URL gets no second claim, missing or wrong cookies are rejected even
+  when the token is known, a valid claimed POST still succeeds, and a POST
+  without `Origin` is rejected. `serves_only_the_configured_token_and_never_proxies`
+  asserts the no-referrer header, meta tag, `noreferrer` links, framing denial,
+  CORP header and origin/host checks; `reuses_a_project_token_and_rotates_it_with_the_target`
+  covers token reuse, rotation and claim reset. `wrapper_tokens_are_redacted_in_debug_output`
+  keeps tokens and claims out of diagnostic formatting. The master spec and
+  workspace UI decisions document loopback, lifetime, origin, referrer,
+  clipboard and blocked-framing/screenshot behavior.
 
 ### Shepherd site and documentation
 
