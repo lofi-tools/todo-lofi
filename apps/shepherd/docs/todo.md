@@ -2464,11 +2464,23 @@ implemented; no public deployment exists yet.
 
 ### Agent pool
 
-- [ ] Define a pool slot and persist it.
+- [x] Define a pool slot and persist it.
   A slot is an installed agent plus one provider/model plus the credential or
   account it uses. Store the user's priority order, provider/model metadata,
   local usage ledger, reset window, cooldown state and last-used timestamp.
   Credentials are referenced, never copied into the pool record or logs.
+  Evidence (2026-11-09): `PoolSlot` and `PoolSlotId` in `shepherd-core` store the
+  agent, provider and model ids/names, an opaque `credential_ref` (never a
+  secret), priority, enabled state, last observed usage, limit and unit, reset
+  time, cooldown, last-used time, last error and created/updated timestamps.
+  Migration `0019_pool_slots.sql` creates the `pool_slots` table and a priority
+  index. `TursoStore` and `MemoryStore` implement load, save and remove, ordered
+  by priority, creation time and id; an update preserves `created_at`. Saves
+  reject an empty provider or model id, a negative priority and an empty limit
+  unit. Tests round-trip both stores, verify ordering, updates, removal,
+  validation and re-open durability. `cargo test -p shepherd-core` passes 180
+  tests (4 ignored), and `cargo clippy -p shepherd-core --all-targets -- -D
+  warnings` and `cargo fmt -p shepherd-core` pass.
 - [ ] Implement the quota ledger and availability states.
   Seed limits from a catalog snapshot when available, update from provider
   rate-limit/quota responses, and let the user correct limits or reset times.

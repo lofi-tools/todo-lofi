@@ -4,6 +4,7 @@
 //! applies the embedded schema, then stores projects and tasks as typed values.
 
 use std::collections::BTreeMap;
+use std::fmt;
 use std::path::{Path, PathBuf};
 
 use agent_harness::{AttachmentMetadata, Entry, EntryKind, PromptInput};
@@ -14,7 +15,7 @@ use toasty::stmt::{Type, Value};
 use toasty_driver_turso::Turso;
 use tokio::sync::{Mutex, RwLock};
 
-use crate::projects::{Project, ProjectId, parse_preview_url};
+use crate::projects::{Project, ProjectId, now_millis, parse_preview_url};
 use crate::search::{RESULT_LIMIT, SearchHit, SearchQuery, entry_text};
 use crate::session::SessionRecord;
 use crate::snapshots::WorkspaceLayout;
@@ -82,6 +83,87 @@ pub struct ProjectApproval {
     pub title: String,
     pub arguments: serde_json::Value,
     pub paths: Vec<PathBuf>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct PoolSlotId(String);
+
+impl PoolSlotId {
+    pub fn new(value: impl Into<String>) -> Self {
+        Self(value.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for PoolSlotId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+/// One provider/model slot in the local agent pool.
+///
+/// `credential_ref` is an opaque pointer into the agent's own credential store;
+/// the secret itself never belongs in this record, its serialization or logs.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PoolSlot {
+    pub id: PoolSlotId,
+    pub agent: Agent,
+    pub provider_id: String,
+    pub provider_name: String,
+    pub model_id: String,
+    pub model_name: String,
+    pub credential_ref: Option<String>,
+    pub priority: i64,
+    pub enabled: bool,
+    /// The last locally observed usage for the current reset window; the
+    /// observation history belongs to the quota ledger.
+    pub used: Option<u64>,
+    pub limit: Option<u64>,
+    pub limit_unit: Option<String>,
+    pub reset_at: Option<u64>,
+    pub cooldown_until: Option<u64>,
+    pub last_used_at: Option<u64>,
+    pub last_error: Option<String>,
+    pub created_at: u64,
+    pub updated_at: u64,
+}
+
+impl PoolSlot {
+    pub fn new(
+        agent: Agent,
+        provider_id: impl Into<String>,
+        provider_name: impl Into<String>,
+        model_id: impl Into<String>,
+        model_name: impl Into<String>,
+    ) -> Self {
+        let now = now_millis();
+        Self {
+            id: PoolSlotId::new(uuid::Uuid::new_v4().to_string()),
+            agent,
+            provider_id: provider_id.into(),
+            provider_name: provider_name.into(),
+            model_id: model_id.into(),
+            model_name: model_name.into(),
+            credential_ref: None,
+            priority: 0,
+            enabled: true,
+            used: None,
+            limit: None,
+            limit_unit: None,
+            reset_at: None,
+            cooldown_until: None,
+            last_used_at: None,
+            last_error: None,
+            created_at: now,
+            updated_at: now,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -170,6 +252,9 @@ pub trait Store: Send + Sync {
     ) -> Result<(), StoreError>;
     async fn reset_project_approval(&self, project: &ProjectId, id: &str)
     -> Result<(), StoreError>;
+    async fn load_pool_slots(&self) -> Result<Vec<PoolSlot>, StoreError>;
+    async fn save_pool_slot(&self, slot: &PoolSlot) -> Result<(), StoreError>;
+    async fn remove_pool_slot(&self, slot_id: &PoolSlotId) -> Result<(), StoreError>;
 }
 
 struct Migration {
@@ -255,6 +340,10 @@ const MIGRATIONS: &[Migration] = &[
     Migration {
         name: "0018_prompt_queues.sql",
         sql: include_str!("../toasty/migrations/0018_prompt_queues.sql"),
+    },
+    Migration {
+        name: "0019_pool_slots.sql",
+        sql: include_str!("../toasty/migrations/0019_pool_slots.sql"),
     },
 ];
 
@@ -1271,6 +1360,90 @@ impl Store for TursoStore {
         Ok(())
     }
 
+    async fn load_pool_slots(&self) -> Result<Vec<PoolSlot>, StoreError> {
+        let mut db = self.db.lock().await;
+        let rows = toasty::sql::query(
+            "SELECT id, agent, provider_id, provider_name, model_id, model_name, \
+                    credential_ref, priority, enabled, used, quota_limit, limit_unit, \
+                    reset_at, cooldown_until, last_used_at, last_error, created_at, updated_at \
+             FROM pool_slots ORDER BY priority, created_at, id",
+        )
+        .column_types([
+            Type::String,
+            Type::String,
+            Type::String,
+            Type::String,
+            Type::String,
+            Type::String,
+            Type::String,
+            Type::I64,
+            Type::I64,
+            Type::I64,
+            Type::I64,
+            Type::String,
+            Type::I64,
+            Type::I64,
+            Type::I64,
+            Type::String,
+            Type::I64,
+            Type::I64,
+        ])
+        .exec(&mut *db)
+        .await?;
+        rows.into_iter().map(parse_pool_slot).collect()
+    }
+
+    async fn save_pool_slot(&self, slot: &PoolSlot) -> Result<(), StoreError> {
+        validate_pool_slot(slot)?;
+        let mut db = self.db.lock().await;
+        toasty::sql::statement(
+            "INSERT INTO pool_slots (\
+                id, agent, provider_id, provider_name, model_id, model_name, \
+                credential_ref, priority, enabled, used, quota_limit, limit_unit, \
+                reset_at, cooldown_until, last_used_at, last_error, created_at, updated_at\
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18) \
+             ON CONFLICT (id) DO UPDATE SET \
+                agent = excluded.agent, provider_id = excluded.provider_id, \
+                provider_name = excluded.provider_name, model_id = excluded.model_id, \
+                model_name = excluded.model_name, credential_ref = excluded.credential_ref, \
+                priority = excluded.priority, enabled = excluded.enabled, used = excluded.used, \
+                quota_limit = excluded.quota_limit, limit_unit = excluded.limit_unit, \
+                reset_at = excluded.reset_at, cooldown_until = excluded.cooldown_until, \
+                last_used_at = excluded.last_used_at, last_error = excluded.last_error, \
+                updated_at = excluded.updated_at",
+        )
+        .bind(slot.id.as_str())
+        .bind(slot.agent.as_str())
+        .bind(&slot.provider_id)
+        .bind(&slot.provider_name)
+        .bind(&slot.model_id)
+        .bind(&slot.model_name)
+        .bind(slot.credential_ref.as_deref().unwrap_or_default())
+        .bind(slot.priority)
+        .bind(i64::from(slot.enabled))
+        .bind(timestamp_or_missing(slot.used)?)
+        .bind(timestamp_or_missing(slot.limit)?)
+        .bind(slot.limit_unit.as_deref().unwrap_or_default())
+        .bind(timestamp_or_missing(slot.reset_at)?)
+        .bind(timestamp_or_missing(slot.cooldown_until)?)
+        .bind(timestamp_or_missing(slot.last_used_at)?)
+        .bind(slot.last_error.as_deref().unwrap_or_default())
+        .bind(timestamp(slot.created_at)?)
+        .bind(timestamp(slot.updated_at)?)
+        .exec(&mut *db)
+        .await?;
+        Ok(())
+    }
+
+    async fn remove_pool_slot(&self, slot_id: &PoolSlotId) -> Result<(), StoreError> {
+        let mut db = self.db.lock().await;
+        toasty::sql::statement("DELETE FROM pool_slots WHERE id = ?1")
+            .bind(slot_id.as_str())
+            .exec(&mut *db)
+            .await?;
+        Ok(())
+    }
+
     async fn load_projects(&self) -> Result<Vec<Project>, StoreError> {
         let mut db = self.db.lock().await;
         let rows = toasty::sql::query(
@@ -2119,6 +2292,7 @@ pub struct MemoryStore {
     sessions: RwLock<Vec<SessionRecord>>,
     transcripts: RwLock<BTreeMap<TaskId, BTreeMap<u64, Entry>>>,
     project_approvals: RwLock<BTreeMap<ProjectId, BTreeMap<String, ProjectApproval>>>,
+    pool_slots: RwLock<BTreeMap<PoolSlotId, PoolSlot>>,
 }
 
 impl MemoryStore {
@@ -2557,6 +2731,125 @@ impl Store for MemoryStore {
         sessions.push(session.clone());
         Ok(())
     }
+
+    async fn load_pool_slots(&self) -> Result<Vec<PoolSlot>, StoreError> {
+        let mut slots: Vec<_> = self.pool_slots.read().await.values().cloned().collect();
+        slots.sort_by(pool_slot_order);
+        Ok(slots)
+    }
+
+    async fn save_pool_slot(&self, slot: &PoolSlot) -> Result<(), StoreError> {
+        validate_pool_slot(slot)?;
+        self.pool_slots
+            .write()
+            .await
+            .insert(slot.id.clone(), slot.clone());
+        Ok(())
+    }
+
+    async fn remove_pool_slot(&self, slot_id: &PoolSlotId) -> Result<(), StoreError> {
+        self.pool_slots.write().await.remove(slot_id);
+        Ok(())
+    }
+}
+
+fn parse_pool_slot(value: Value) -> Result<PoolSlot, StoreError> {
+    let Value::Record(record) = value else {
+        return Err(StoreError::InvalidRow(
+            "expected a pool slot record".to_string(),
+        ));
+    };
+    let agent_name = required_string(record.get(1))?;
+    let agent = Agent::parse(&agent_name)
+        .ok_or_else(|| StoreError::InvalidRow(format!("unknown pool slot agent: {agent_name}")))?;
+    let slot = PoolSlot {
+        id: PoolSlotId::new(required_string(record.first())?),
+        agent,
+        provider_id: required_string(record.get(2))?,
+        provider_name: required_string(record.get(3))?,
+        model_id: required_string(record.get(4))?,
+        model_name: required_string(record.get(5))?,
+        credential_ref: optional_string(record.get(6))?,
+        priority: required_i64(record.get(7))?,
+        enabled: required_missing(record.get(8))?,
+        used: optional_u64(record.get(9))?,
+        limit: optional_u64(record.get(10))?,
+        limit_unit: optional_string(record.get(11))?,
+        reset_at: optional_u64(record.get(12))?,
+        cooldown_until: optional_u64(record.get(13))?,
+        last_used_at: optional_u64(record.get(14))?,
+        last_error: optional_string(record.get(15))?,
+        created_at: required_u64(record.get(16))?,
+        updated_at: required_u64(record.get(17))?,
+    };
+    validate_pool_slot(&slot)?;
+    Ok(slot)
+}
+
+fn validate_pool_slot(slot: &PoolSlot) -> Result<(), StoreError> {
+    if slot.provider_id.trim().is_empty() {
+        return Err(StoreError::InvalidRow(
+            "pool slot provider id is empty".to_string(),
+        ));
+    }
+    if slot.model_id.trim().is_empty() {
+        return Err(StoreError::InvalidRow(
+            "pool slot model id is empty".to_string(),
+        ));
+    }
+    if slot.priority < 0 {
+        return Err(StoreError::InvalidRow(
+            "pool slot priority is negative".to_string(),
+        ));
+    }
+    if slot
+        .limit_unit
+        .as_deref()
+        .is_some_and(|unit| unit.trim().is_empty())
+    {
+        return Err(StoreError::InvalidRow(
+            "pool slot limit unit is empty".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn required_i64(value: Option<&Value>) -> Result<i64, StoreError> {
+    match value {
+        Some(Value::I64(value)) => Ok(*value),
+        _ => Err(StoreError::InvalidRow(
+            "expected an integer column".to_string(),
+        )),
+    }
+}
+
+fn optional_u64(value: Option<&Value>) -> Result<Option<u64>, StoreError> {
+    optional_i64(value)?
+        .map(|value| {
+            u64::try_from(value)
+                .map_err(|_| StoreError::InvalidRow("negative integer column".to_string()))
+        })
+        .transpose()
+}
+
+fn timestamp(value: u64) -> Result<i64, StoreError> {
+    i64::try_from(value).map_err(|_| {
+        StoreError::InvalidRow("pool slot timestamp exceeds the database range".to_string())
+    })
+}
+
+fn timestamp_or_missing(value: Option<u64>) -> Result<i64, StoreError> {
+    value
+        .map(timestamp)
+        .transpose()
+        .map(|timestamp| timestamp.unwrap_or(-1))
+}
+
+fn pool_slot_order(left: &PoolSlot, right: &PoolSlot) -> std::cmp::Ordering {
+    left.priority
+        .cmp(&right.priority)
+        .then(left.created_at.cmp(&right.created_at))
+        .then(left.id.cmp(&right.id))
 }
 
 #[cfg(test)]
@@ -2771,6 +3064,103 @@ mod tests {
             directory.path(),
         )
         .await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn pool_slots_persist_priority_and_quota_state() -> Result<(), Box<dyn std::error::Error>>
+    {
+        async fn verify(store: &dyn Store) -> Result<PoolSlot, Box<dyn std::error::Error>> {
+            let mut first = PoolSlot::new(Agent::Codex, "acme", "Acme", "model-1", "Model One");
+            first.id = PoolSlotId::new("slot-first");
+            first.credential_ref = Some("keychain:acme".into());
+            first.priority = 1;
+            first.created_at = 100;
+            first.updated_at = 100;
+
+            let mut second =
+                PoolSlot::new(Agent::Claude, "globex", "Globex", "model-2", "Model Two");
+            second.id = PoolSlotId::new("slot-second");
+            second.priority = 0;
+            second.created_at = 200;
+            second.updated_at = 200;
+
+            store.save_pool_slot(&first).await?;
+            store.save_pool_slot(&second).await?;
+            let ids = |slots: &[PoolSlot]| {
+                slots
+                    .iter()
+                    .map(|slot| slot.id.as_str().to_string())
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(
+                ids(&store.load_pool_slots().await?),
+                vec!["slot-second".to_string(), "slot-first".to_string()]
+            );
+
+            let mut updated = first.clone();
+            updated.priority = 0;
+            updated.enabled = false;
+            updated.used = Some(7);
+            updated.limit = Some(10);
+            updated.limit_unit = Some("requests".into());
+            updated.reset_at = Some(9_000);
+            updated.cooldown_until = Some(8_000);
+            updated.last_used_at = Some(7_000);
+            updated.last_error = Some("rate limited".into());
+            updated.updated_at = 300;
+            store.save_pool_slot(&updated).await?;
+
+            let slots = store.load_pool_slots().await?;
+            assert_eq!(
+                ids(&slots),
+                vec!["slot-first".to_string(), "slot-second".to_string()]
+            );
+            let stored = slots.first().ok_or("missing updated pool slot")?;
+            assert_eq!(stored, &updated);
+            assert_eq!(stored.created_at, 100);
+
+            store.remove_pool_slot(&second.id).await?;
+            assert_eq!(store.load_pool_slots().await?, vec![updated.clone()]);
+            Ok(updated)
+        }
+
+        let expected = verify(&MemoryStore::new()).await?;
+        let directory = TestDirectory::new()?;
+        let path = directory.join("pool-slots.db");
+        let store = TursoStore::open_at(&path).await?;
+        assert_eq!(verify(&store).await?, expected);
+        drop(store);
+        assert_eq!(
+            TursoStore::open_at(&path).await?.load_pool_slots().await?,
+            vec![expected]
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn pool_slots_require_provider_and_model_identity()
+    -> Result<(), Box<dyn std::error::Error>> {
+        async fn verify(store: &dyn Store) -> Result<(), Box<dyn std::error::Error>> {
+            let mut slot = PoolSlot::new(Agent::Codex, "", "Acme", "model-1", "Model One");
+            assert!(matches!(
+                store.save_pool_slot(&slot).await,
+                Err(StoreError::InvalidRow(_))
+            ));
+            slot.provider_id = "acme".into();
+            slot.model_id.clear();
+            assert!(matches!(
+                store.save_pool_slot(&slot).await,
+                Err(StoreError::InvalidRow(_))
+            ));
+            slot.model_id = "model-1".into();
+            store.save_pool_slot(&slot).await?;
+            assert_eq!(store.load_pool_slots().await?.len(), 1);
+            Ok(())
+        }
+        verify(&MemoryStore::new()).await?;
+        let directory = TestDirectory::new()?;
+        verify(&TursoStore::open_at(&directory.join("pool-validation.db")).await?).await?;
         Ok(())
     }
 

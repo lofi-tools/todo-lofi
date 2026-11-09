@@ -17,21 +17,23 @@ const toc = [
 
 <Docs
   title="Quota ledger"
-  description="The planned local record behind the quota-aware agent pool. This is a design contract, not implemented behavior."
+  description="The local record behind the quota-aware agent pool, its persistence, and the remaining design contract."
   toc={toc}
 >
-  <Callout tone="warning" title="Not implemented">
-    There is no pool code, ledger table or quota UI in the current build. This page records the
-    agreed contract so the implementation, tests and user guide cannot drift. Do not present it as a
-    shipped capability.
+  <Callout tone="note" title="Slot persistence is implemented">
+    The pool slot record and its local database table now exist. The quota ledger, priority
+    selection, idle release and pool UI are still planned, so the agent pool is not available in
+    the current build. This page records the agreed contract so the implementation, tests and user
+    guide cannot drift.
   </Callout>
 
   <h2 id="status">Status</h2>
   <p>
     <Badge tone="warning" variant="subtle">planned</Badge> The pool work is split into slot
-    persistence, the quota ledger, priority selection, idle release and the pool UI. None of those
-    items is checked off. The user-facing promise is on the
-    <a href="/docs/users/agent-pool">agent pool</a> page; this page is for the implementation.
+    persistence, the quota ledger, priority selection, idle release and the pool UI. Slot
+    persistence is implemented and tested; the other four items are not checked off. The
+    user-facing promise is on the <a href="/docs/users/agent-pool">agent pool</a> page; this page is
+    for the implementation.
   </p>
 
   <h2 id="slot">The slot record</h2>
