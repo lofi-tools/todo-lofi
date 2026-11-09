@@ -2525,13 +2525,30 @@ implemented; no public deployment exists yet.
   `cargo test -p shepherd-core` passes 188 tests (4 ignored), and `cargo clippy
   -p shepherd-core --all-targets -- -D warnings` and `cargo fmt -p shepherd-core`
   pass.
-- [ ] Release idle reservations without losing resumable sessions.
+- [x] Release idle reservations without losing resumable sessions.
   After the turn settles plus a configurable idle timeout (default 15 minutes),
   release the slot for other tasks. Never release during a running turn or a
   pending approval. Keep the agent session resumable when the adapter supports
   it; if it cannot resume, say so and select another slot for the next turn.
   Tests cover idle release, a follow-up after release, a slot claimed meanwhile,
   cancellation and restart recovery.
+  Evidence (2026-11-09): `PoolSelectionRecord.idle_since` and migration
+  `0022_pool_selection_idle.sql` persist when a reservation became idle.
+  `PoolIdleReleaseRequest`, `PoolIdleReleaseOutcome`, the 15-minute
+  `DEFAULT_POOL_IDLE_TIMEOUT_MS`, `mark_pool_selection_idle` and
+  `release_idle_pool_selections` are implemented in `TursoStore` and
+  `MemoryStore`. Only a settled reservation is eligible; active request ids and
+  unsettled rows are kept with reasons, the timeout boundary is enforced, and a
+  repeated release is a no-op. Release updates only `pool_selections`, keeps
+  the slot/audit row and never ends or clears the `SessionRecord`; tests verify
+  the adapter resume handle survives and the freed slot is selected again.
+  Reusing a reservation clears its idle marker so active work is not released.
+  Tests cover both stores for timeout/early release, active and unsettled
+  reservations, repeat release, session resumability, slot reuse and invalid
+  input; a Turso re-open verifies durability. `cargo test -p shepherd-core`
+  passes 192 tests (4
+  ignored), and `cargo clippy -p shepherd-core --all-targets -- -D warnings` and
+  `cargo fmt -p shepherd-core` pass.
 - [ ] Add the pool UI and operating limits.
   Show each slot's provider/model, priority, availability, known limit/reset,
   current task, last error and last-used time. Users can reorder, disable, edit

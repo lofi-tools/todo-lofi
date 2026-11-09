@@ -3,7 +3,7 @@
 //! The trait keeps the core free of a database-specific API. `TursoStore`
 //! applies the embedded schema, then stores projects and tasks as typed values.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::path::{Path, PathBuf};
 
@@ -359,6 +359,8 @@ pub struct PoolSelectionOutcome {
     pub reused: bool,
 }
 
+pub const DEFAULT_POOL_IDLE_TIMEOUT_MS: u64 = 15 * 60 * 1_000;
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PoolSelectionRecord {
@@ -366,8 +368,63 @@ pub struct PoolSelectionRecord {
     pub slot_id: Option<PoolSlotId>,
     pub selected_at: u64,
     pub released_at: Option<u64>,
+    pub idle_since: Option<u64>,
     pub reason: String,
     pub skipped: Vec<PoolSkippedSlot>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PoolIdleReleaseRequest {
+    pub now: u64,
+    pub idle_timeout_ms: u64,
+    pub active_requests: BTreeSet<String>,
+}
+
+impl PoolIdleReleaseRequest {
+    pub fn new(now: u64, idle_timeout_ms: u64) -> Self {
+        Self {
+            now,
+            idle_timeout_ms,
+            active_requests: BTreeSet::new(),
+        }
+    }
+
+    pub fn default_at(now: u64) -> Self {
+        Self::new(now, DEFAULT_POOL_IDLE_TIMEOUT_MS)
+    }
+
+    pub fn with_active_requests(
+        mut self,
+        active_requests: impl IntoIterator<Item = String>,
+    ) -> Self {
+        self.active_requests = active_requests.into_iter().collect();
+        self
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PoolIdleReleased {
+    pub request_id: String,
+    pub slot_id: PoolSlotId,
+    pub released_at: u64,
+    pub reason: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PoolIdleKept {
+    pub request_id: String,
+    pub slot_id: PoolSlotId,
+    pub reason: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PoolIdleReleaseOutcome {
+    pub released: Vec<PoolIdleReleased>,
+    pub kept: Vec<PoolIdleKept>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -478,6 +535,15 @@ pub trait Store: Send + Sync {
         released_at: u64,
     ) -> Result<(), StoreError>;
     async fn load_pool_selections(&self) -> Result<Vec<PoolSelectionRecord>, StoreError>;
+    async fn mark_pool_selection_idle(
+        &self,
+        request_id: &str,
+        idle_since: u64,
+    ) -> Result<Option<PoolSelectionRecord>, StoreError>;
+    async fn release_idle_pool_selections(
+        &self,
+        request: &PoolIdleReleaseRequest,
+    ) -> Result<PoolIdleReleaseOutcome, StoreError>;
 }
 
 struct Migration {
@@ -575,6 +641,10 @@ const MIGRATIONS: &[Migration] = &[
     Migration {
         name: "0021_pool_selections.sql",
         sql: include_str!("../toasty/migrations/0021_pool_selections.sql"),
+    },
+    Migration {
+        name: "0022_pool_selection_idle.sql",
+        sql: include_str!("../toasty/migrations/0022_pool_selection_idle.sql"),
     },
 ];
 
@@ -1806,6 +1876,16 @@ impl Store for TursoStore {
                     if slot.availability(latest.as_ref(), request.now).state
                         == PoolAvailabilityState::Available
                     {
+                        if record.idle_since.is_some() {
+                            let mut db = self.db.lock().await;
+                            toasty::sql::statement(
+                                "UPDATE pool_selections SET idle_since = NULL \
+                                 WHERE request_id = ?1 AND released_at IS NULL",
+                            )
+                            .bind(&request.request_id)
+                            .exec(&mut *db)
+                            .await?;
+                        }
                         return Ok(PoolSelectionOutcome {
                             request_id: request.request_id.clone(),
                             slot: Some(slot),
@@ -1848,6 +1928,7 @@ impl Store for TursoStore {
                 slot_id: outcome.slot.as_ref().map(|slot| slot.id.clone()),
                 selected_at: outcome.selected_at,
                 released_at: None,
+                idle_since: None,
                 reason: outcome.reason.clone(),
                 skipped: outcome.skipped.clone(),
             };
@@ -1888,7 +1969,7 @@ impl Store for TursoStore {
     async fn load_pool_selections(&self) -> Result<Vec<PoolSelectionRecord>, StoreError> {
         let mut db = self.db.lock().await;
         let rows = toasty::sql::query(
-            "SELECT request_id, slot_id, selected_at, released_at, reason, skipped_json \
+            "SELECT request_id, slot_id, selected_at, released_at, reason, skipped_json, idle_since \
              FROM pool_selections ORDER BY selected_at, request_id",
         )
         .column_types([
@@ -1898,10 +1979,121 @@ impl Store for TursoStore {
             Type::I64,
             Type::String,
             Type::String,
+            Type::I64,
         ])
         .exec(&mut *db)
         .await?;
         rows.into_iter().map(parse_pool_selection).collect()
+    }
+
+    async fn mark_pool_selection_idle(
+        &self,
+        request_id: &str,
+        idle_since: u64,
+    ) -> Result<Option<PoolSelectionRecord>, StoreError> {
+        if request_id.trim().is_empty() {
+            return Err(StoreError::InvalidRow(
+                "pool selection request id is empty".to_string(),
+            ));
+        }
+        timestamp(idle_since)?;
+        let Some(record) = self
+            .load_pool_selections()
+            .await?
+            .into_iter()
+            .find(|record| record.request_id == request_id)
+        else {
+            return Ok(None);
+        };
+        if idle_since < record.selected_at {
+            return Err(StoreError::InvalidRow(
+                "pool selection idle timestamp predates selection".to_string(),
+            ));
+        }
+        if record.released_at.is_none() && record.idle_since.is_none() {
+            let mut db = self.db.lock().await;
+            toasty::sql::statement(
+                "UPDATE pool_selections SET idle_since = ?2 \
+                 WHERE request_id = ?1 AND released_at IS NULL \
+                 AND idle_since IS NULL AND selected_at = ?3",
+            )
+            .bind(request_id)
+            .bind(timestamp(idle_since)?)
+            .bind(timestamp(record.selected_at)?)
+            .exec(&mut *db)
+            .await?;
+        }
+        Ok(self
+            .load_pool_selections()
+            .await?
+            .into_iter()
+            .find(|record| record.request_id == request_id))
+    }
+
+    async fn release_idle_pool_selections(
+        &self,
+        request: &PoolIdleReleaseRequest,
+    ) -> Result<PoolIdleReleaseOutcome, StoreError> {
+        validate_pool_idle_release_request(request)?;
+        let mut released = Vec::new();
+        let mut kept = Vec::new();
+        for record in self.load_pool_selections().await? {
+            if record.released_at.is_some() {
+                continue;
+            }
+            let Some(slot_id) = record.slot_id.clone() else {
+                continue;
+            };
+            if let Some(reason) = idle_release_block_reason(&record, request) {
+                kept.push(PoolIdleKept {
+                    request_id: record.request_id,
+                    slot_id,
+                    reason: reason.into(),
+                });
+                continue;
+            }
+            let request_id = record.request_id.clone();
+            let Some(idle_since) = record.idle_since else {
+                continue;
+            };
+            let updated = {
+                let mut db = self.db.lock().await;
+                toasty::sql::statement(
+                    "UPDATE pool_selections SET released_at = ?2 \
+                     WHERE request_id = ?1 AND released_at IS NULL AND idle_since = ?3 \
+                     AND selected_at = ?4 AND slot_id = ?5",
+                )
+                .bind(&request_id)
+                .bind(timestamp(request.now)?)
+                .bind(timestamp(idle_since)?)
+                .bind(timestamp(record.selected_at)?)
+                .bind(slot_id.as_str())
+                .exec(&mut *db)
+                .await?
+            };
+            if updated == 1 {
+                released.push(PoolIdleReleased {
+                    request_id,
+                    slot_id,
+                    released_at: request.now,
+                    reason: "idle timeout elapsed".into(),
+                });
+            } else if let Some(current) = self
+                .load_pool_selections()
+                .await?
+                .into_iter()
+                .find(|current| current.request_id == request_id)
+                && current.released_at.is_none()
+                && let Some(current_slot_id) = current.slot_id
+            {
+                kept.push(PoolIdleKept {
+                    request_id: current.request_id,
+                    slot_id: current_slot_id,
+                    reason: "reservation changed".into(),
+                });
+            }
+        }
+        Ok(PoolIdleReleaseOutcome { released, kept })
     }
 
     async fn load_projects(&self) -> Result<Vec<Project>, StoreError> {
@@ -3305,6 +3497,15 @@ impl Store for MemoryStore {
                 if slot.availability(latest.as_ref(), request.now).state
                     == PoolAvailabilityState::Available
                 {
+                    if let Some(stored) = self
+                        .pool_selections
+                        .write()
+                        .await
+                        .get_mut(&request.request_id)
+                        && stored.released_at.is_none()
+                    {
+                        stored.idle_since = None;
+                    }
                     return Ok(PoolSelectionOutcome {
                         request_id: request.request_id.clone(),
                         slot: Some(slot),
@@ -3364,6 +3565,7 @@ impl Store for MemoryStore {
             slot_id: outcome.slot.as_ref().map(|slot| slot.id.clone()),
             selected_at: outcome.selected_at,
             released_at: None,
+            idle_since: None,
             reason: outcome.reason.clone(),
             skipped: outcome.skipped.clone(),
         };
@@ -3408,6 +3610,68 @@ impl Store for MemoryStore {
                 .then(left.request_id.cmp(&right.request_id))
         });
         Ok(selections)
+    }
+
+    async fn mark_pool_selection_idle(
+        &self,
+        request_id: &str,
+        idle_since: u64,
+    ) -> Result<Option<PoolSelectionRecord>, StoreError> {
+        if request_id.trim().is_empty() {
+            return Err(StoreError::InvalidRow(
+                "pool selection request id is empty".to_string(),
+            ));
+        }
+        timestamp(idle_since)?;
+        let _guard = self.pool_selection_lock.lock().await;
+        let mut selections = self.pool_selections.write().await;
+        let Some(record) = selections.get_mut(request_id) else {
+            return Ok(None);
+        };
+        if idle_since < record.selected_at {
+            return Err(StoreError::InvalidRow(
+                "pool selection idle timestamp predates selection".to_string(),
+            ));
+        }
+        if record.released_at.is_none() && record.idle_since.is_none() {
+            record.idle_since = Some(idle_since);
+        }
+        Ok(Some(record.clone()))
+    }
+
+    async fn release_idle_pool_selections(
+        &self,
+        request: &PoolIdleReleaseRequest,
+    ) -> Result<PoolIdleReleaseOutcome, StoreError> {
+        validate_pool_idle_release_request(request)?;
+        let _guard = self.pool_selection_lock.lock().await;
+        let mut selections = self.pool_selections.write().await;
+        let mut released = Vec::new();
+        let mut kept = Vec::new();
+        for record in selections.values_mut() {
+            if record.released_at.is_some() {
+                continue;
+            }
+            let Some(slot_id) = record.slot_id.clone() else {
+                continue;
+            };
+            if let Some(reason) = idle_release_block_reason(record, request) {
+                kept.push(PoolIdleKept {
+                    request_id: record.request_id.clone(),
+                    slot_id,
+                    reason: reason.into(),
+                });
+                continue;
+            }
+            record.released_at = Some(request.now);
+            released.push(PoolIdleReleased {
+                request_id: record.request_id.clone(),
+                slot_id,
+                released_at: request.now,
+                reason: "idle timeout elapsed".into(),
+            });
+        }
+        Ok(PoolIdleReleaseOutcome { released, kept })
     }
 }
 
@@ -3565,6 +3829,44 @@ fn pool_quota_entry_order(left: &PoolQuotaEntry, right: &PoolQuotaEntry) -> std:
         .then(left.id.cmp(&right.id))
 }
 
+fn validate_pool_idle_release_request(request: &PoolIdleReleaseRequest) -> Result<(), StoreError> {
+    timestamp(request.now)?;
+    if request.idle_timeout_ms == 0 {
+        return Err(StoreError::InvalidRow(
+            "pool idle timeout must be positive".to_string(),
+        ));
+    }
+    if request
+        .active_requests
+        .iter()
+        .any(|request_id| request_id.trim().is_empty())
+    {
+        return Err(StoreError::InvalidRow(
+            "pool active request id is empty".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn idle_release_block_reason(
+    record: &PoolSelectionRecord,
+    request: &PoolIdleReleaseRequest,
+) -> Option<&'static str> {
+    if request.active_requests.contains(&record.request_id) {
+        return Some("request is active");
+    }
+    let Some(idle_since) = record.idle_since else {
+        return Some("turn has not settled");
+    };
+    if idle_since > request.now {
+        return Some("idle timestamp is in the future");
+    }
+    if request.now - idle_since < request.idle_timeout_ms {
+        return Some("idle timeout not reached");
+    }
+    None
+}
+
 fn validate_pool_selection_request(request: &PoolSelectionRequest) -> Result<(), StoreError> {
     if request.request_id.trim().is_empty() {
         return Err(StoreError::InvalidRow(
@@ -3593,6 +3895,14 @@ fn validate_pool_selection_record(record: &PoolSelectionRecord) -> Result<(), St
     if record.reason.trim().is_empty() {
         return Err(StoreError::InvalidRow(
             "pool selection reason is empty".to_string(),
+        ));
+    }
+    if record
+        .idle_since
+        .is_some_and(|idle_since| idle_since < record.selected_at)
+    {
+        return Err(StoreError::InvalidRow(
+            "pool selection idle timestamp predates selection".to_string(),
         ));
     }
     if let Some(slot_id) = &record.slot_id
@@ -3632,6 +3942,7 @@ fn parse_pool_selection(value: Value) -> Result<PoolSelectionRecord, StoreError>
         slot_id: optional_string(record.get(1))?.map(PoolSlotId::new),
         selected_at: required_u64(record.get(2))?,
         released_at: optional_u64(record.get(3))?,
+        idle_since: optional_u64(record.get(6))?,
         reason: required_string(record.get(4))?,
         skipped,
     };
@@ -3650,11 +3961,12 @@ impl TursoStore {
         })?;
         let mut db = self.db.lock().await;
         toasty::sql::statement(
-            "INSERT INTO pool_selections (request_id, slot_id, selected_at, released_at, reason, skipped_json) \
-             VALUES (?1, NULLIF(?2, ''), ?3, NULLIF(?4, -1), ?5, ?6) \
+            "INSERT INTO pool_selections (request_id, slot_id, selected_at, released_at, reason, skipped_json, idle_since) \
+             VALUES (?1, NULLIF(?2, ''), ?3, NULLIF(?4, -1), ?5, ?6, NULLIF(?7, -1)) \
              ON CONFLICT (request_id) DO UPDATE SET slot_id = excluded.slot_id, \
              selected_at = excluded.selected_at, released_at = excluded.released_at, \
-             reason = excluded.reason, skipped_json = excluded.skipped_json",
+             reason = excluded.reason, skipped_json = excluded.skipped_json, \
+             idle_since = excluded.idle_since",
         )
         .bind(&selection.request_id)
         .bind(
@@ -3668,6 +3980,7 @@ impl TursoStore {
         .bind(timestamp_or_missing(selection.released_at)?)
         .bind(&selection.reason)
         .bind(skipped)
+        .bind(timestamp_or_missing(selection.idle_since)?)
         .exec(&mut *db)
         .await?;
         Ok(())
@@ -4663,6 +4976,295 @@ mod tests {
             store.load_pool_selections().await,
             Err(StoreError::InvalidRow(_))
         ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn idle_release_frees_the_slot_and_keeps_the_session_resumable()
+    -> Result<(), Box<dyn std::error::Error>> {
+        async fn verify(store: &dyn Store, root: &Path) -> Result<(), Box<dyn std::error::Error>> {
+            let slot = save_available_slot(store, "slot-idle", 0, 100).await?;
+            let project = Project::new(root.to_path_buf());
+            let task = Task::draft(project.id.clone(), "Idle release", root);
+            store.save_project(&project).await?;
+            store.save_task(&task).await?;
+            let session = SessionRecord::started(task.id.clone(), "codex", Some("thread-1".into()));
+            store.save_session(&session).await?;
+            let request_id = task.id.as_str().to_string();
+
+            let selected = store
+                .select_pool_slot(&PoolSelectionRequest::new(request_id.clone(), 100))
+                .await?;
+            assert_eq!(
+                selected.slot.as_ref().map(|slot| slot.id.as_str()),
+                Some("slot-idle")
+            );
+            let marked = store
+                .mark_pool_selection_idle(&request_id, 100)
+                .await?
+                .ok_or("selection missing")?;
+            assert_eq!(marked.idle_since, Some(100));
+
+            let early = store
+                .release_idle_pool_selections(&PoolIdleReleaseRequest::new(199, 100))
+                .await?;
+            assert!(early.released.is_empty());
+            assert_eq!(early.kept.len(), 1);
+            assert_eq!(early.kept[0].reason, "idle timeout not reached");
+            let sessions = store.load_sessions().await?;
+            let stored = sessions.first().ok_or("session missing")?;
+            assert_eq!(stored.resume_handle(), Some("thread-1"));
+            assert!(!stored.is_ended());
+
+            let released = store
+                .release_idle_pool_selections(&PoolIdleReleaseRequest::new(200, 100))
+                .await?;
+            assert_eq!(released.released.len(), 1);
+            assert_eq!(released.released[0].request_id, request_id);
+            assert_eq!(released.released[0].slot_id, slot.id);
+            assert_eq!(released.released[0].released_at, 200);
+            assert_eq!(released.released[0].reason, "idle timeout elapsed");
+            assert!(released.kept.is_empty());
+
+            let records = store.load_pool_selections().await?;
+            let record = records
+                .iter()
+                .find(|record| record.request_id == request_id)
+                .ok_or("selection record missing")?;
+            assert_eq!(record.idle_since, Some(100));
+            assert_eq!(record.released_at, Some(200));
+            assert_eq!(record.slot_id.as_ref(), Some(&slot.id));
+
+            let sessions = store.load_sessions().await?;
+            let stored = sessions.first().ok_or("session missing after release")?;
+            assert_eq!(stored.resume_handle(), Some("thread-1"));
+            assert!(!stored.is_ended());
+
+            let again = store
+                .release_idle_pool_selections(&PoolIdleReleaseRequest::new(300, 100))
+                .await?;
+            assert!(again.released.is_empty());
+            assert!(again.kept.is_empty());
+            let records = store.load_pool_selections().await?;
+            assert_eq!(
+                records
+                    .iter()
+                    .find(|record| record.request_id == request_id)
+                    .and_then(|record| record.released_at),
+                Some(200)
+            );
+
+            let reselected = store
+                .select_pool_slot(&PoolSelectionRequest::new(request_id.clone(), 300))
+                .await?;
+            assert!(!reselected.reused);
+            assert_eq!(
+                reselected.slot.as_ref().map(|slot| slot.id.as_str()),
+                Some("slot-idle")
+            );
+            let records = store.load_pool_selections().await?;
+            let record = records
+                .iter()
+                .find(|record| record.request_id == request_id)
+                .ok_or("reselected record missing")?;
+            assert_eq!(record.idle_since, None);
+            assert_eq!(record.released_at, None);
+
+            let second_slot = save_available_slot(store, "slot-idle-2", 1, 200).await?;
+            let other = store
+                .select_pool_slot(&PoolSelectionRequest::new("other-task", 300))
+                .await?;
+            assert_eq!(
+                other.slot.as_ref().map(|slot| slot.id.as_str()),
+                Some("slot-idle-2")
+            );
+            assert_eq!(second_slot.id.as_str(), "slot-idle-2");
+            Ok(())
+        }
+
+        let directory = TestDirectory::new()?;
+        verify(&MemoryStore::new(), directory.path()).await?;
+        let store = TursoStore::open_at(&directory.join("pool-idle-release.db")).await?;
+        verify(&store, directory.path()).await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn idle_release_keeps_unsettled_active_and_reused_reservations()
+    -> Result<(), Box<dyn std::error::Error>> {
+        async fn verify(store: &dyn Store) -> Result<(), Box<dyn std::error::Error>> {
+            let slot = save_available_slot(store, "slot-active", 0, 100).await?;
+            let request = PoolSelectionRequest::new("task-active", 100);
+            store.select_pool_slot(&request).await?;
+
+            let not_settled = store
+                .release_idle_pool_selections(&PoolIdleReleaseRequest::new(10_000, 100))
+                .await?;
+            assert!(not_settled.released.is_empty());
+            assert_eq!(not_settled.kept[0].reason, "turn has not settled");
+
+            store
+                .mark_pool_selection_idle("task-active", 200)
+                .await?
+                .ok_or("selection missing")?;
+            let later_mark = store
+                .mark_pool_selection_idle("task-active", 250)
+                .await?
+                .ok_or("selection missing")?;
+            assert_eq!(later_mark.idle_since, Some(200));
+
+            let active = store
+                .release_idle_pool_selections(
+                    &PoolIdleReleaseRequest::new(300, 100)
+                        .with_active_requests(["task-active".to_string()]),
+                )
+                .await?;
+            assert!(active.released.is_empty());
+            assert_eq!(active.kept[0].reason, "request is active");
+
+            let reused = store
+                .select_pool_slot(&PoolSelectionRequest::new("task-active", 301))
+                .await?;
+            assert!(reused.reused);
+            let records = store.load_pool_selections().await?;
+            let record = records
+                .iter()
+                .find(|record| record.request_id == "task-active")
+                .ok_or("selection missing")?;
+            assert_eq!(record.idle_since, None);
+            let after_reuse = store
+                .release_idle_pool_selections(&PoolIdleReleaseRequest::new(1_000, 100))
+                .await?;
+            assert!(after_reuse.released.is_empty());
+            assert_eq!(after_reuse.kept[0].reason, "turn has not settled");
+
+            store
+                .mark_pool_selection_idle("task-active", 1_000)
+                .await?
+                .ok_or("selection missing")?;
+            let released = store
+                .release_idle_pool_selections(&PoolIdleReleaseRequest::new(1_100, 100))
+                .await?;
+            assert_eq!(released.released.len(), 1);
+            assert_eq!(released.released[0].slot_id, slot.id);
+
+            let other = store
+                .select_pool_slot(&PoolSelectionRequest::new("task-other", 1_101))
+                .await?;
+            assert_eq!(
+                other.slot.as_ref().map(|slot| slot.id.as_str()),
+                Some("slot-active")
+            );
+            let kept = store
+                .release_idle_pool_selections(&PoolIdleReleaseRequest::new(2_000, 100))
+                .await?;
+            assert!(kept.released.is_empty());
+            assert_eq!(kept.kept[0].request_id, "task-other");
+            assert_eq!(kept.kept[0].reason, "turn has not settled");
+            Ok(())
+        }
+
+        verify(&MemoryStore::new()).await?;
+        let directory = TestDirectory::new()?;
+        let store = TursoStore::open_at(&directory.join("pool-idle-active.db")).await?;
+        verify(&store).await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn idle_release_rejects_invalid_input_and_missing_selection()
+    -> Result<(), Box<dyn std::error::Error>> {
+        async fn verify(store: &dyn Store) -> Result<(), Box<dyn std::error::Error>> {
+            save_available_slot(store, "slot-validation", 0, 100).await?;
+            store
+                .select_pool_slot(&PoolSelectionRequest::new("task-validation", 100))
+                .await?;
+            assert!(matches!(
+                store
+                    .release_idle_pool_selections(&PoolIdleReleaseRequest::new(200, 0))
+                    .await,
+                Err(StoreError::InvalidRow(_))
+            ));
+            assert!(matches!(
+                store
+                    .release_idle_pool_selections(&PoolIdleReleaseRequest::new(u64::MAX, 100))
+                    .await,
+                Err(StoreError::InvalidRow(_))
+            ));
+            assert!(matches!(
+                store
+                    .release_idle_pool_selections(
+                        &PoolIdleReleaseRequest::new(200, 100)
+                            .with_active_requests([String::new()])
+                    )
+                    .await,
+                Err(StoreError::InvalidRow(_))
+            ));
+            assert!(matches!(
+                store.mark_pool_selection_idle("task-validation", 99).await,
+                Err(StoreError::InvalidRow(_))
+            ));
+            assert!(
+                store
+                    .mark_pool_selection_idle("missing", 100)
+                    .await?
+                    .is_none()
+            );
+            assert_eq!(
+                PoolIdleReleaseRequest::default_at(100).idle_timeout_ms,
+                DEFAULT_POOL_IDLE_TIMEOUT_MS
+            );
+            Ok(())
+        }
+
+        verify(&MemoryStore::new()).await?;
+        let directory = TestDirectory::new()?;
+        verify(&TursoStore::open_at(&directory.join("pool-idle-validation.db")).await?).await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn idle_release_survives_reopen_and_frees_the_slot()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = TestDirectory::new()?;
+        let path = directory.join("pool-idle-reopen.db");
+        let slot = {
+            let store = TursoStore::open_at(&path).await?;
+            let slot = save_available_slot(&store, "slot-reopen", 0, 100).await?;
+            store
+                .select_pool_slot(&PoolSelectionRequest::new("task-reopen", 100))
+                .await?;
+            let marked = store
+                .mark_pool_selection_idle("task-reopen", 100)
+                .await?
+                .ok_or("selection missing")?;
+            assert_eq!(marked.idle_since, Some(100));
+            let released = store
+                .release_idle_pool_selections(&PoolIdleReleaseRequest::new(200, 100))
+                .await?;
+            assert_eq!(released.released.len(), 1);
+            slot
+        };
+
+        let reopened = TursoStore::open_at(&path).await?;
+        let record = reopened
+            .load_pool_selections()
+            .await?
+            .into_iter()
+            .find(|record| record.request_id == "task-reopen")
+            .ok_or("selection record missing")?;
+        assert_eq!(record.idle_since, Some(100));
+        assert_eq!(record.released_at, Some(200));
+        assert_eq!(record.slot_id.as_ref(), Some(&slot.id));
+
+        let reselected = reopened
+            .select_pool_slot(&PoolSelectionRequest::new("task-reopen", 300))
+            .await?;
+        assert!(!reselected.reused);
+        assert_eq!(
+            reselected.slot.as_ref().map(|slot| slot.id.as_str()),
+            Some("slot-reopen")
+        );
         Ok(())
     }
 

@@ -20,19 +20,19 @@ const toc = [
   description="The local record behind the quota-aware agent pool, its persisted ledger and availability states."
   toc={toc}
 >
-  <Callout tone="note" title="Slot persistence, the ledger and priority selection are implemented">
-    The pool slot record, the append-only quota ledger, the six availability states and durable
-    priority selection now exist. Idle release and the pool UI are still planned, so the agent pool
-    is not available in the current build. This page records the agreed contract so the
-    implementation, tests and user guide cannot drift.
+  <Callout tone="note" title="Slot persistence, the ledger, selection and idle release are implemented">
+    The pool slot record, the append-only quota ledger, the six availability states, durable
+    priority selection and idle release now exist in the core. Task-start wiring and the pool UI are
+    still planned, so the agent pool is not available in the current build. This page records the
+    agreed contract so the implementation, tests and user guide cannot drift.
   </Callout>
 
   <h2 id="status">Status</h2>
   <p>
     <Badge tone="warning" variant="subtle">partly implemented</Badge> The pool work is split into
     slot persistence, the quota ledger, priority selection, idle release and the pool UI. Slot
-    persistence, the quota ledger and priority selection are implemented and tested; idle release
-    and the pool UI are not checked off. The user-facing promise is on the
+    persistence, the quota ledger, priority selection and idle release are implemented and tested in
+    the core; task-start wiring and the pool UI are not checked off. The user-facing promise is on the
     <a href="/docs/users/agent-pool">agent pool</a> page; this page is for the implementation.
   </p>
 
@@ -92,14 +92,20 @@ const toc = [
 
   <h2 id="release">Idle release</h2>
   <p>
-    After a turn settles, keep the slot reserved for a configurable idle timeout (default 15
-    minutes). Release it after that timeout so another task can use it. Never release during a
-    running turn or a pending approval.
+    Once a turn settles, the owner marks the reservation idle with the settle time. Only a settled
+    reservation is eligible. The release call applies a configurable idle timeout (default 15
+    minutes) and an active-request set; a running turn or pending approval stays reserved even if a
+    stale idle marker exists. A reservation without an idle marker is kept with the reason
+    <code>turn has not settled</code>.
   </p>
   <p>
-    Releasing a reservation must not destroy a resumable agent session. If the adapter cannot resume,
-    the task says so and selects another slot for the next turn. Tests need a follow-up after release,
-    a slot claimed in the meantime, cancellation and restart recovery.
+    Releasing sets only the selection's release time. It keeps the audit row, the chosen slot and the
+    reasons, and it never ends or clears the session record. The slot becomes selectable again, and
+    a later selection for the same request clears its idle marker so active work is not released.
+    The stored adapter session handle remains available for a resume; if the adapter cannot resume,
+    the task says so and the next turn selects another slot. This slice exposes the core release API;
+    the task runner that marks settled requests and supplies the active set, and the pool UI, are
+    later work.
   </p>
 
   <h2 id="privacy">Corrections and privacy</h2>
@@ -119,12 +125,13 @@ const toc = [
     <li>Implemented: a deterministic clock covers reset periods, cooldowns, provider errors, clock changes, user corrections and every availability state.</li>
     <li>Implemented: priority selection and fallback against both stores, including every unavailable state, precedence, an expired reset period, overrides, reservations, concurrent requests, deterministic tie-breaking and re-open durability.</li>
     <li>Implemented: malformed selection rows and invalid requests or timestamps are rejected.</li>
-    <li>Pending: idle release, a slot claimed meanwhile, cancellation and restart recovery.</li>
+    <li>Implemented: idle release against both stores, including the timeout boundary, repeat release, active and unsettled reservations, session resumability and slot reuse; a Turso re-open covers durability.</li>
+    <li>Pending: task-start wiring, the pool UI, cancellation and restart scheduling.</li>
     <li>Credential redaction in records, logs and diagnostics.</li>
   </ul>
   <p>
-    Release tests arrive with that slice, so the pool UI and idle release remain next-step items.
-    See the <a href="/docs/contributors/test-fixtures">test fixtures</a> page for the fixture rules
-    that apply when the work lands.
+    The core release API is tested; task-start wiring, cancellation and the pool UI remain next-step
+    items. See the <a href="/docs/contributors/test-fixtures">test fixtures</a> page for the fixture
+    rules that apply when the work lands.
   </p>
 </Docs>
