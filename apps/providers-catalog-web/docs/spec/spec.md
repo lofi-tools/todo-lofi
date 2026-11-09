@@ -1,8 +1,8 @@
 # Providers catalog — specification
 
 Status: S1 (snapshot/schema) and S3 (static catalog site) implemented on
-2026-11-09. The S2 merge policy, review summary and free-offer normalization are
-implemented for providers and models; S2 sources for plans/offers/agents/local
+2026-11-09. The S2 merge policy, review summary, free-offer normalization and
+synthetic fixture gate are implemented; S2 sources for plans/offers/agents/local
 runtimes remain blocked. S4
 is blocked on Cloudflare Pages credentials. No deployment exists yet.
 

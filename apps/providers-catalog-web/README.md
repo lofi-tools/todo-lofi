@@ -26,6 +26,8 @@ provider or model omitted by the new response, preserves its `verified_at`, mark
 it `missing`, and includes it in the snapshot report's review items. Recurring
 offer rows are normalized before writing: exact duplicates merge deterministically,
 conflicting duplicates fail, and one-time or expiring-trial wording is rejected.
+Unit tests also write a synthetic agent, plan, recurring offer and local runtime;
+that fixture does not enable an unapproved source.
 
 ## Static site
 

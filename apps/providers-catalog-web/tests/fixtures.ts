@@ -1,4 +1,10 @@
-import type { CatalogFreeOffer, ModelsDevCatalog } from '../src/types'
+import type {
+  CatalogAgent,
+  CatalogFreeOffer,
+  CatalogLocalRuntime,
+  CatalogPlan,
+  ModelsDevCatalog,
+} from '../src/types'
 
 export const FIXED_NOW = new Date('2026-11-09T12:00:00.000Z')
 export const FIXED_VERIFIED_AT = '2026-11-09T12:00:00.000Z'
@@ -67,6 +73,69 @@ export const fixtureCatalog: ModelsDevCatalog = {
     },
   ],
   knownGaps: ['No plans or recurring free offers are present in this fixture.'],
+}
+
+export function fixtureAgent(overrides: Partial<CatalogAgent> = {}): CatalogAgent {
+  return {
+    agentId: 'acme-agent',
+    name: 'Acme Agent',
+    vendor: 'Acme',
+    homepageUrl: 'https://acme.example/agent',
+    sourceId: 'models-dev',
+    sourceUrl: 'https://models.dev/catalog.json?type=all',
+    sourceRecord: 'acme-agent',
+    verifiedAt: FIXED_VERIFIED_AT,
+    lastAttemptAt: FIXED_VERIFIED_AT,
+    confidence: 'community',
+    scrapeStatus: 'ok',
+    lastError: null,
+    ...overrides,
+  }
+}
+
+export function fixturePlan(overrides: Partial<CatalogPlan> = {}): CatalogPlan {
+  return {
+    planId: 'plan-1',
+    providerId: 'acme',
+    name: 'Acme Free',
+    usageModel: 'free',
+    billingPeriod: 'month',
+    price: 0,
+    currency: 'USD',
+    includedAllowance: 100,
+    allowanceUnit: 'requests',
+    sourceId: 'models-dev',
+    sourceUrl: 'https://models.dev/catalog.json?type=all',
+    sourceRecord: 'acme/plan-1',
+    verifiedAt: FIXED_VERIFIED_AT,
+    lastAttemptAt: FIXED_VERIFIED_AT,
+    confidence: 'community',
+    scrapeStatus: 'ok',
+    lastError: null,
+    ...overrides,
+  }
+}
+
+export function fixtureLocalRuntime(
+  overrides: Partial<CatalogLocalRuntime> = {},
+): CatalogLocalRuntime {
+  return {
+    providerId: 'acme',
+    modelId: 'free-model',
+    runtime: 'llama.cpp',
+    quantization: 'Q4_K_M',
+    approximateHardware: '16 GB RAM',
+    setupNotes: null,
+    sourceId: 'models-dev',
+    sourceUrl: 'https://models.dev/catalog.json?type=all',
+    sourceRecord: 'acme/free-model/llama.cpp',
+    verifiedAt: FIXED_VERIFIED_AT,
+    lastAttemptAt: FIXED_VERIFIED_AT,
+    confidence: 'community',
+    scrapeStatus: 'ok',
+    lastError: null,
+    ...overrides,
+  }
 }
 
 export function fixtureFreeOffer(

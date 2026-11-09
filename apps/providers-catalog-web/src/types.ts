@@ -63,6 +63,41 @@ export interface CatalogModel extends Provenance {
   status: string | null
 }
 
+export interface CatalogAgent extends Provenance {
+  agentId: string
+  name: string
+  vendor: string | null
+  homepageUrl: string | null
+}
+
+export type PlanUsageModel =
+  | 'subscription'
+  | 'token_pack'
+  | 'pay_as_you_go'
+  | 'free'
+  | 'unknown'
+
+export interface CatalogPlan extends Provenance {
+  planId: string
+  providerId: string
+  name: string
+  usageModel: PlanUsageModel
+  billingPeriod: string | null
+  price: number | null
+  currency: string | null
+  includedAllowance: number | null
+  allowanceUnit: string | null
+}
+
+export interface CatalogLocalRuntime extends Provenance {
+  providerId: string
+  modelId: string
+  runtime: string
+  quantization: string | null
+  approximateHardware: string | null
+  setupNotes: string | null
+}
+
 export interface CatalogFreeOffer extends Provenance {
   offerId: string
   providerId: string

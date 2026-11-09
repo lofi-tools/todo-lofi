@@ -16,8 +16,11 @@ import {
   FIXED_CONTENT_SHA256,
   FIXED_NOW,
   FIXED_VERIFIED_AT,
+  fixtureAgent,
   fixtureCatalog,
   fixtureFreeOffer,
+  fixtureLocalRuntime,
+  fixturePlan,
 } from './fixtures'
 
 let outputDirectory: string
@@ -121,6 +124,38 @@ describe('catalog snapshots', () => {
     expect(validation.errors.some((error) => error.includes('duplicate allowance claims'))).toBe(
       true,
     )
+  })
+
+  it('writes the S2 fixture snapshot with an agent, plan, recurring offer and local runtime', async () => {
+    const report = await createSnapshot({
+      catalog: { ...fixtureCatalog, knownGaps: [] },
+      source: MODELS_DEV_SOURCE,
+      fetchedAt: FIXED_VERIFIED_AT,
+      contentSha256: FIXED_CONTENT_SHA256,
+      httpStatus: 200,
+      etag: null,
+      outputDirectory,
+      now: FIXED_NOW,
+      agents: [fixtureAgent()],
+      plans: [fixturePlan()],
+      freeOffers: [fixtureFreeOffer({ planId: 'plan-1' })],
+      localRuntimes: [fixtureLocalRuntime()],
+    })
+
+    expect(report.counts).toEqual({
+      providers: 1,
+      models: 1,
+      agents: 1,
+      plans: 1,
+      freeOffers: 1,
+      localRuntimes: 1,
+    })
+    expect(report.offerMerge).toEqual({ input: 1, written: 1, mergedOfferIds: [] })
+
+    const validation = await validateSnapshotFile(report.snapshotPath)
+    expect(validation.ok).toBe(true)
+    expect(validation.errors).toEqual([])
+    expect(validation.knownGaps).toEqual([])
   })
 
   it('merges duplicate recurring offers before writing and reports the merged ids', async () => {

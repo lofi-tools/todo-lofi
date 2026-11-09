@@ -11,8 +11,11 @@ import {
 import { mergePreviousFacts, type MergeReport } from './merge'
 import { loadSchemaSql, SCHEMA_VERSION } from './schema'
 import type {
+  CatalogAgent,
   CatalogFreeOffer,
+  CatalogLocalRuntime,
   CatalogModel,
+  CatalogPlan,
   CatalogProvider,
   CatalogSource,
   ModelsDevCatalog,
@@ -44,7 +47,10 @@ export interface CreateSnapshotOptions {
   outputDirectory?: string
   now?: Date
   previousSnapshotPath?: string
+  agents?: CatalogAgent[]
+  plans?: CatalogPlan[]
   freeOffers?: CatalogFreeOffer[]
+  localRuntimes?: CatalogLocalRuntime[]
 }
 
 export interface SnapshotReport {
@@ -119,7 +125,10 @@ export async function createSnapshot(options: CreateSnapshotOptions): Promise<Sn
       await insertSource(connection, options, snapshotId, generatedAt)
       await insertProviders(connection, catalog.providers)
       await insertModels(connection, catalog.models)
+      await insertAgents(connection, options.agents ?? [])
+      await insertPlans(connection, options.plans ?? [])
       await insertFreeOffers(connection, normalizedFreeOffers.offers)
+      await insertLocalRuntimes(connection, options.localRuntimes ?? [])
       await connection.run('COMMIT')
     } catch (error) {
       try {
@@ -635,6 +644,107 @@ async function insertModels(
       confidence: model.confidence,
       scrape_status: model.scrapeStatus,
       last_error: model.lastError,
+    })
+  }
+}
+
+async function insertAgents(
+  connection: DuckDBConnection,
+  agents: CatalogAgent[],
+): Promise<void> {
+  const statement = `INSERT INTO agents (
+    agent_id, name, vendor, homepage_url, source_id, source_url, source_record,
+    verified_at, last_attempt_at, confidence, scrape_status, last_error
+  ) VALUES (
+    $agent_id, $name, $vendor, $homepage_url, $source_id, $source_url, $source_record,
+    $verified_at, $last_attempt_at, $confidence, $scrape_status, $last_error
+  )`
+
+  for (const agent of agents) {
+    await connection.run(statement, {
+      agent_id: agent.agentId,
+      name: agent.name,
+      vendor: agent.vendor,
+      homepage_url: agent.homepageUrl,
+      source_id: agent.sourceId,
+      source_url: agent.sourceUrl,
+      source_record: agent.sourceRecord,
+      verified_at: agent.verifiedAt,
+      last_attempt_at: agent.lastAttemptAt,
+      confidence: agent.confidence,
+      scrape_status: agent.scrapeStatus,
+      last_error: agent.lastError,
+    })
+  }
+}
+
+async function insertPlans(
+  connection: DuckDBConnection,
+  plans: CatalogPlan[],
+): Promise<void> {
+  const statement = `INSERT INTO plans (
+    plan_id, provider_id, name, usage_model, billing_period, price, currency,
+    included_allowance, allowance_unit, source_id, source_url, source_record,
+    verified_at, last_attempt_at, confidence, scrape_status, last_error
+  ) VALUES (
+    $plan_id, $provider_id, $name, $usage_model, $billing_period, $price, $currency,
+    $included_allowance, $allowance_unit, $source_id, $source_url, $source_record,
+    $verified_at, $last_attempt_at, $confidence, $scrape_status, $last_error
+  )`
+
+  for (const plan of plans) {
+    await connection.run(statement, {
+      plan_id: plan.planId,
+      provider_id: plan.providerId,
+      name: plan.name,
+      usage_model: plan.usageModel,
+      billing_period: plan.billingPeriod,
+      price: plan.price,
+      currency: plan.currency,
+      included_allowance: plan.includedAllowance,
+      allowance_unit: plan.allowanceUnit,
+      source_id: plan.sourceId,
+      source_url: plan.sourceUrl,
+      source_record: plan.sourceRecord,
+      verified_at: plan.verifiedAt,
+      last_attempt_at: plan.lastAttemptAt,
+      confidence: plan.confidence,
+      scrape_status: plan.scrapeStatus,
+      last_error: plan.lastError,
+    })
+  }
+}
+
+async function insertLocalRuntimes(
+  connection: DuckDBConnection,
+  runtimes: CatalogLocalRuntime[],
+): Promise<void> {
+  const statement = `INSERT INTO local_runtimes (
+    provider_id, model_id, runtime, quantization, approximate_hardware, setup_notes,
+    source_id, source_url, source_record, verified_at, last_attempt_at, confidence,
+    scrape_status, last_error
+  ) VALUES (
+    $provider_id, $model_id, $runtime, $quantization, $approximate_hardware, $setup_notes,
+    $source_id, $source_url, $source_record, $verified_at, $last_attempt_at, $confidence,
+    $scrape_status, $last_error
+  )`
+
+  for (const runtime of runtimes) {
+    await connection.run(statement, {
+      provider_id: runtime.providerId,
+      model_id: runtime.modelId,
+      runtime: runtime.runtime,
+      quantization: runtime.quantization,
+      approximate_hardware: runtime.approximateHardware,
+      setup_notes: runtime.setupNotes,
+      source_id: runtime.sourceId,
+      source_url: runtime.sourceUrl,
+      source_record: runtime.sourceRecord,
+      verified_at: runtime.verifiedAt,
+      last_attempt_at: runtime.lastAttemptAt,
+      confidence: runtime.confidence,
+      scrape_status: runtime.scrapeStatus,
+      last_error: runtime.lastError,
     })
   }
 }
