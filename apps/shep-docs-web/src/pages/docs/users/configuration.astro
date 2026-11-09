@@ -1,0 +1,162 @@
+---
+import Docs from '../../../layouts/Docs.astro'
+import Callout from 'web-design-system/astro/marketing/Callout.astro'
+import CodeBlock from 'web-design-system/astro/product/CodeBlock.astro'
+import TableScroll from '../../../components/atoms/TableScroll.astro'
+
+const toc = [
+  { label: 'Settings files', href: '#files' },
+  { label: 'Agent executables', href: '#agents' },
+  { label: 'Launch environment', href: '#environment' },
+  { label: 'Workspace limits', href: '#limits' },
+  { label: 'Preview URL', href: '#preview' },
+  { label: 'Appearance and keys', href: '#appearance' },
+  { label: 'Data and logs', href: '#data' },
+]
+
+const settingsExample = `{
+  "version": 1,
+  "app": {
+    "theme": "dark",
+    "notifications.enabled": true,
+    "terminal.scrollback_lines": 10000,
+    "attachments.max_file_bytes": 50000000,
+    "agents.opencode.executable": "/etc/profiles/per-user/me/bin/opencode",
+    "agents.opencode.config_file": "/Users/me/.config/opencode/opencode.json"
+  },
+  "projects": {
+    "/Users/me/src/example": {
+      "terminal.scrollback_lines": 20000,
+      "attachments.max_file_bytes": 20000000
+    }
+  }
+}`
+
+const envExample = `{
+  "version": 1,
+  "app": {
+    "agents.codex.environment": {
+      "EXAMPLE_TOKEN": "!cat .local-token"
+    }
+  }
+}`
+
+const paths = [
+  { platform: 'macOS', path: '~/Library/Application Support/dev.shepherd.shell/settings.json' },
+  { platform: 'Linux', path: '$XDG_CONFIG_HOME/dev.shepherd.shell/settings.json (default ~/.config/...)' },
+]
+---
+
+<Docs
+  title="Configuration"
+  description="Where Shepherd's settings live, how project overrides resolve, and how to point it at installed agents."
+  toc={toc}
+>
+  <Callout tone="note" title="Nothing here is required to open a project">
+    Agent executables and authentication come from the CLIs you already use. Shepherd stores no
+    provider keys or secret values.
+  </Callout>
+
+  <h2 id="files">Settings files</h2>
+  <p>
+    <code>settings.json</code> and <code>keybindings.json</code> live in the app config directory and
+    are the only source of truth for user settings. They are versioned JSON, written atomically with
+    owner-only permissions; a newer version refuses edits instead of downgrading.
+  </p>
+  <TableScroll label="Settings file locations">
+    <table>
+      <thead><tr><th>Platform</th><th>Path</th></tr></thead>
+      <tbody>
+        {paths.map((entry) => <tr><td>{entry.platform}</td><td><code>{entry.path}</code></td></tr>)}
+      </tbody>
+    </table>
+  </TableScroll>
+  <p>
+    The file has an <code>app</code> scope and a <code>projects</code> scope keyed by absolute path.
+    Resolution is per key: project, then app, then the built-in default. Values are replaced whole;
+    there is no deep merge. A moved project loses its overrides.
+  </p>
+  <CodeBlock filename="settings.json" code={settingsExample} />
+  <p>
+    Unknown keys are preserved. A missing file means defaults; a malformed file is copied to
+    <code>.bak</code>, defaults load, and a banner names the path.
+  </p>
+
+  <h2 id="agents">Agent executables</h2>
+  <p>
+    Shepherd discovers installed agents, but you can pin an existing executable by absolute path.
+    A stable profile symlink is fine. OpenCode can also take an explicit configuration file, passed
+    through as <code>OPENCODE_CONFIG</code> for native, ACP and project-mode discovery.
+  </p>
+  <ul>
+    <li><code>agents.opencode.executable</code> — absolute path to an existing OpenCode executable.</li>
+    <li><code>agents.opencode.config_file</code> — optional absolute path to its configuration file.</li>
+    <li><code>agents.claude.executable</code> — absolute path to a Claude Code ACP executable.</li>
+    <li><code>agents.claude.args</code> — optional array of arguments passed in order.</li>
+  </ul>
+  <p>
+    Restart Shepherd after changing these. The task keeps its agent after the first prompt; the
+    conversation header shows the selected tier, and diagnostics show the command, protocol and
+    recent stderr.
+  </p>
+
+  <h2 id="environment">Launch environment</h2>
+  <p>
+    Agent launches accept <code>agents.codex.environment</code>,
+    <code>agents.opencode.environment</code> and <code>agents.claude.environment</code> maps. A
+    project entry can replace the whole map for that agent.
+  </p>
+  <CodeBlock filename="settings.json" code={envExample} />
+  <p>
+    A value beginning with <code>!</code> runs as a shell command from the project root when a
+    session starts; its trimmed output is passed to the agent and never saved. Commands time out
+    after five seconds. The failure category remains visible, but adapter stderr and detailed launch
+    errors are hidden because an agent may print a secret there.
+  </p>
+
+  <h2 id="limits">Workspace limits</h2>
+  <ul>
+    <li><code>attachments.max_file_bytes</code> — default 50,000,000 bytes per file. Applies to composer files and preview screenshots; a project can override it.</li>
+    <li><code>terminal.scrollback_lines</code> — 0 to 100,000, default 10,000. Read when a terminal starts or restarts.</li>
+    <li><code>notifications.enabled</code> — opt-in system notifications for waits outside the focused task.</li>
+  </ul>
+  <p>
+    Settings → Workspace edits the defaults; Settings → Projects edits the selected project's
+    overrides and resets them. Reload settings re-reads a file edited outside the app.
+  </p>
+
+  <h2 id="preview">Preview URL</h2>
+  <p>
+    Save a loopback HTTP(S) address in Settings → Projects. Leaving the field empty clears it. The
+    Preview tab loads that address in an isolated surface, and the annotation wrapper embeds it
+    without proxying it. Only loopback targets are accepted.
+  </p>
+  <p>
+    Pages that refuse framing, block script injection, navigate off the configured origin or are not
+    HTML fall back to screenshot annotations. See <a href="/docs/users/preview">Preview and annotation</a>.
+  </p>
+
+  <h2 id="appearance">Appearance and keys</h2>
+  <p>
+    Settings → Appearance offers System, Light and Dark, compact or comfortable density, and the
+    Send accent. Settings → Keyboard shortcuts records one chord per command, rejects conflicts and
+    can reset to the platform default. Bindings are app-scoped and live in
+    <code>keybindings.json</code>.
+  </p>
+  <p>
+    If the keybindings file cannot be read, Shepherd keeps the default registry and reports the path;
+    repair the file and use Reload configuration. A newer file version stays intact.
+  </p>
+
+  <h2 id="data">Data and logs</h2>
+  <p>
+    Development runs use <code>.cache/test-db</code>; <code>SHEPHERD_DEV_DATA_DIR</code> overrides
+    it. Structured errors are appended to <code>logs/errors.jsonl</code> in the active data directory
+    (normally <code>.cache/test-db/logs/errors.jsonl</code>). Error history in the status bar shows
+    the same records with their operation and timestamp.
+  </p>
+  <p>
+    Projects, tasks, transcripts, worktrees and settings stay on the machine. There is no account,
+    telemetry or crash-report upload.
+  </p>
+</Docs>

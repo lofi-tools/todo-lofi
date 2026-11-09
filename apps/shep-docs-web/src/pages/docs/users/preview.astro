@@ -1,0 +1,115 @@
+---
+import Docs from '../../../layouts/Docs.astro'
+import Callout from 'web-design-system/astro/marketing/Callout.astro'
+import CodeBlock from 'web-design-system/astro/product/CodeBlock.astro'
+
+const toc = [
+  { label: 'Configure the preview', href: '#configure' },
+  { label: 'Annotate an element', href: '#annotate' },
+  { label: 'Add it to the prompt', href: '#prompt' },
+  { label: 'The external wrapper', href: '#wrapper' },
+  { label: 'Screenshot fallback', href: '#screenshot' },
+  { label: 'Limits and privacy', href: '#limits' },
+]
+
+const promptBlock = `Page: http://localhost:3000/pricing
+Target: #buy-button (button, 180 × 44)
+Note: Make this the primary action and increase its contrast.
+Bounds: x=812 y=440 width=180 height=44
+Computed styles: background-color, color, font-size, padding
+Source: src/components/PricingCard.tsx:42
+
+Locate the front end, make the change, and verify the result.`
+---
+
+<Docs
+  title="Preview and annotation"
+  description="Load the project in the inspector, select an element, and send the annotation to an agent as structured context."
+  toc={toc}
+>
+  <p>
+    The Preview tab is a browser surface beside the transcript, not a separate design tool. It loads
+    the project's configured loopback URL, lets you point at the element that is wrong, and turns
+    that selection into a change request the agent can act on.
+  </p>
+
+  <h2 id="configure">Configure the preview</h2>
+  <p>
+    Open <strong>Settings → Projects</strong> and save the project's loopback HTTP(S) address. An
+    empty field clears it. The preview uses a separate origin from the app shell, so the project can
+    load its own modules and assets without taking over the window.
+  </p>
+  <p>
+    The Preview tab shows the address, Reload, Open in browser, Open annotation wrapper and Project
+    settings. If no URL is configured, the tab offers Project settings instead of a blank frame.
+  </p>
+
+  <h2 id="annotate">Annotate an element</h2>
+  <ol>
+    <li>Choose <strong>Annotate</strong>. Interaction with the page pauses so a click selects an element instead of activating it.</li>
+    <li>Write the change you want. The annotation captures the page URL, selector, a short text excerpt, the bounding box, computed context and source metadata when the page exposes it.</li>
+    <li>The note waits in the Preview tab's queue. Add more notes before sending if they belong to the same request.</li>
+  </ol>
+  <p>
+    The annotation is attached to the task that was selected when it was created. It is not a
+    floating comment: it is context for the next agent prompt.
+  </p>
+
+  <h2 id="prompt">Add it to the prompt</h2>
+  <p>
+    <strong>Add to prompt</strong> validates the queue and appends it to the active composer as one
+    ordered review block. Each note is repeated as an instruction, followed by the page, selector or
+    screenshot, excerpt, bounds, computed styles and any source metadata. The block tells the agent
+    to locate and edit the front end and verify the result, not just describe a plan.
+  </p>
+  <CodeBlock filename="prompt block" code={promptBlock} showLineNumbers={false} />
+  <p>
+    If the task is live, Send queues the block behind the current turn. The core delivers it as a
+    separate user message once the turn settles; it is never injected into the active turn.
+  </p>
+
+  <h2 id="wrapper">The external wrapper</h2>
+  <p>
+    <strong>Open annotation wrapper</strong> opens a token-scoped loopback page in your browser. It
+    embeds the same preview URL in an iframe; it is not a proxy, and element selection stays in the
+    in-app Preview tab. The wrapper submits the same bounded annotation batch as the app.
+  </p>
+  <ul>
+    <li>It listens only on <code>127.0.0.1</code>. It is the app's only listener, not an attach protocol.</li>
+    <li>The token is 64 hex characters and is scoped to one project, task and target. It is reused only while that tuple is unchanged and rotates when the tuple changes, the project is forgotten, or the app quits.</li>
+    <li>The first load claims the wrapper in that browser profile with an <code>HttpOnly</code>, <code>SameSite=Strict</code> cookie. Annotation POSTs require that cookie, the exact wrapper origin and <code>Sec-Fetch-Site: same-origin</code>.</li>
+    <li>Mismatched Host or Origin headers, non-document navigation, cross-site POSTs and replayed annotation IDs are rejected.</li>
+    <li>Responses use <code>no-referrer</code> and a restrictive content-security policy. Wrapper failures log only the failure kind, never the token or claim.</li>
+  </ul>
+  <Callout tone="warning" title="The wrapper URL is a local capability">
+    Do not paste it into chat or share it. A copied URL can view the page, but it cannot submit
+    annotations from another browser profile after the owning browser has claimed it.
+  </Callout>
+
+  <h2 id="screenshot">Screenshot fallback</h2>
+  <p>
+    Element selection needs script injection. If the preview navigates away from its configured
+    origin, refuses framing, blocks injection or is not HTML, the tab reports that selection is
+    unavailable and offers a screenshot picker. Choose a PNG or JPEG captured in the browser, mark a
+    point, and write the note. Add to prompt saves the image in the task's attachment directory and
+    inserts its local path, pixel coordinates, dimensions, page URL and note as editable text.
+  </p>
+  <p>
+    A page that refuses framing stays blank in the external wrapper; the in-app screenshot fallback
+    is the recovery path.
+  </p>
+
+  <h2 id="limits">Limits and privacy</h2>
+  <ul>
+    <li>A batch accepts 1–50 annotations, each with at most 20 targets.</li>
+    <li>A note can be up to 4,000 bytes; a selector up to 2,048 bytes; the page URL up to 8,192 bytes.</li>
+    <li>The annotation body is capped at 256 KB and the queue at 100 batches.</li>
+    <li>Screenshots follow the project's attachment limit, 50 MB by default.</li>
+    <li>Page content is untrusted data. The preview does not navigate the app shell, and annotations are normalized and bounded before they reach the prompt.</li>
+  </ul>
+  <p>
+    If the preview cannot load or the wrapper cannot submit, see
+    <a href="/docs/users/troubleshooting#preview">Troubleshooting</a>. The protocol-level details are
+    in the <a href="/docs/contributors/annotation-api">annotation API</a>.
+  </p>
+</Docs>

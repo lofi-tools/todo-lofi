@@ -1,0 +1,144 @@
+---
+import { css } from 'styled-system/css'
+import Docs from '../../../layouts/Docs.astro'
+import Callout from 'web-design-system/astro/marketing/Callout.astro'
+import { Badge } from 'web-design-system/components'
+
+const toc = [
+  { label: 'What Shepherd is', href: '#what-shepherd-is' },
+  { label: 'The mental model', href: '#mental-model' },
+  { label: 'What works today', href: '#available' },
+  { label: 'What is next', href: '#next' },
+  { label: 'Where to start', href: '#where-to-start' },
+]
+
+const starts = [
+  {
+    title: 'Install and run',
+    href: '/docs/users/install',
+    body: 'The supported platforms, the development shell, and how to open your first project.',
+  },
+  {
+    title: 'Mental model',
+    href: '/docs/users/mental-model',
+    body: 'What a project, task, worktree, terminal and review mean before you start clicking.',
+  },
+  {
+    title: 'Preview and annotation',
+    href: '/docs/users/preview',
+    body: 'Point at an element, write the change, and send the annotation as structured context.',
+  },
+  {
+    title: 'Troubleshooting',
+    href: '/docs/users/troubleshooting',
+    body: 'Agent discovery, authentication, stale terminals, worktree errors and local logs.',
+  },
+]
+---
+
+<Docs
+  title="Overview"
+  description="Shepherd is a local-first desktop workspace for several coding agents, their Git worktrees, terminals and reviews."
+  toc={toc}
+>
+  <p>
+    <strong>Shepherd</strong> runs the coding agents you already installed in your own repositories.
+    It keeps several tasks visible at once, gives each one a real Git worktree, and puts the
+    transcript, approvals, terminals, diff and preview in the same window. There is no account, no
+    hosted sandbox and no Shepherd-owned model.
+  </p>
+  <p>
+    The app is deliberately local. A Rust core owns every agent process, PTY and database write; the
+    window is a renderer over that core. Quitting the window ends the work, and the next launch says
+    which tasks were interrupted instead of pretending they kept running.
+  </p>
+
+  <h2 id="mental-model">The mental model</h2>
+  <p>
+    Most of Shepherd follows from four objects. The <a href="/docs/users/mental-model">mental model
+    page</a> covers them in detail, including what happens on quit.
+  </p>
+  <ul>
+    <li><strong>Project</strong> — a local directory you added, usually a Git repository.</li>
+    <li><strong>Task</strong> — one conversation with one agent, in its own worktree, with state, transcript and review data.</li>
+    <li><strong>Worktree</strong> — the isolated checkout an agent edits, so parallel tasks do not share a working tree.</li>
+    <li><strong>Inspector</strong> — the always-on right region with Terminals, Preview, Review, Git and Files.</li>
+  </ul>
+
+  <h2 id="available">What works today</h2>
+  <div class={css({ display: 'grid', gridTemplateColumns: { base: '1fr', md: 'repeat(2, 1fr)' }, gap: '4' })}>
+    <section class={css({ p: '5', borderRadius: 'lg', borderWidth: 'hairline', borderStyle: 'solid', borderColor: 'border', bg: 'surface.subtle' })}>
+      <Badge tone="success" variant="subtle">available</Badge>
+      <h3 class={css({ mt: '3' })}>The local workspace</h3>
+      <ul>
+        <li>Several agents and projects in one window, with parallel tasks.</li>
+        <li>Codex, OpenCode, Claude Code through ACP, and custom ACP agents.</li>
+        <li>One Git worktree and branch per task, review, commit and squash-merge.</li>
+        <li>Project-shared and task-specific terminals with splits and scrollback.</li>
+        <li>Preview with element annotation and a screenshot fallback.</li>
+        <li>Prompt queues, attachments, task search, notifications, themes and rebindable keys.</li>
+      </ul>
+    </section>
+    <section class={css({ p: '5', borderRadius: 'lg', borderWidth: 'hairline', borderStyle: 'solid', borderColor: 'border', bg: 'surface.subtle' })}>
+      <Badge tone="accent" variant="subtle">next</Badge>
+      <h3 class={css({ mt: '3' })}>The agent pool and installers</h3>
+      <ul>
+        <li>A quota-aware pool that chooses the next healthy installed agent.</li>
+        <li>Signed macOS and Linux release artifacts.</li>
+        <li>A download path that resolves the newest release.</li>
+      </ul>
+      <p class={css({ fontSize: 'sm', color: 'fg.muted' })}>
+        These are specified and being built, but they are not in the current build.
+      </p>
+    </section>
+  </div>
+
+  <Callout tone="warning" title="The app is the source of truth">
+    The <a href="/docs/users/agent-pool">agent pool</a> is not available yet. Windows support is
+    planned with no date. If this site and the app disagree about what works, believe the app.
+  </Callout>
+
+  <h2 id="next">What is not Shepherd</h2>
+  <p>
+    Shepherd is not an agent and does not bundle one. It does not host a sandbox, run a daemon, sync
+    your projects to an account, or replace your editor, Git client or deploy pipeline. It also has
+    no telemetry: the only network requests are the ones your agents make, plus the loopback preview
+    wrapper while the Preview tab is using it.
+  </p>
+
+  <h2 id="where-to-start">Where to start</h2>
+  <div class={css({ display: 'grid', gridTemplateColumns: { base: '1fr', sm: 'repeat(2, 1fr)' }, gap: '4' })}>
+    {
+      starts.map((entry) => (
+        <a
+          href={entry.href}
+          class={css({
+            display: 'block',
+            p: '5',
+            borderRadius: 'lg',
+            borderWidth: 'hairline',
+            borderStyle: 'solid',
+            borderColor: 'border',
+            bg: 'surface.subtle',
+            transitionProperty: 'border-color, background-color',
+            transitionDuration: 'fast',
+            _hover: { borderColor: 'border.strong', bg: 'surface.elevated' },
+            _focusVisible: { outline: 'none', boxShadow: 'focus' },
+          })}
+        >
+          <span class={css({ display: 'block', fontWeight: 'semibold', color: 'fg.default', mb: '1' })}>
+            {entry.title}
+          </span>
+          <span class={css({ display: 'block', fontSize: 'sm', color: 'fg.muted', lineHeight: 'relaxed' })}>
+            {entry.body}
+          </span>
+        </a>
+      ))
+    }
+  </div>
+
+  <Callout tone="note" title="Working on the code?">
+    The <a href="/docs/contributors">contributor guide</a> covers the Rust core, adapter contracts,
+    the annotation API, the quota-ledger design and the release pipeline.
+  </Callout>
+</Docs>

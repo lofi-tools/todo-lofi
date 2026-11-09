@@ -126,8 +126,9 @@ user guide (`/docs`) and a contributor guide (`/docs/contributor`). Read the
 [deepwiki mirror](https://deepwiki.com/lofi-tools/taskstream) remains available as
 a temporary fallback.
 
-`apps/shep-docs-web` is Shepherd's separate landing site. Both are built with the
-in-repo web design system. `pnpm dev` runs both; use `pnpm dev:docs` or
+`apps/shep-docs-web` is Shepherd's separate landing and documentation site,
+with guides at `/docs/users` and `/docs/contributors`. Both sites are built with
+the in-repo web design system. `pnpm dev` runs both; use `pnpm dev:docs` or
 `pnpm dev:shep-docs` for one at a time.
 
 Contributions welcome. Please open an issue first to discuss any non-trivial change.

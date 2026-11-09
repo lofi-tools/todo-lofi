@@ -1,0 +1,140 @@
+---
+import Docs from '../../../layouts/Docs.astro'
+import Callout from 'web-design-system/astro/marketing/Callout.astro'
+import CodeBlock from 'web-design-system/astro/product/CodeBlock.astro'
+import TableScroll from '../../../components/atoms/TableScroll.astro'
+
+const toc = [
+  { label: 'Two entry points', href: '#entry' },
+  { label: 'Payload', href: '#payload' },
+  { label: 'Validation', href: '#validation' },
+  { label: 'Wrapper security', href: '#security' },
+  { label: 'Prompt assembly', href: '#prompt' },
+  { label: 'Tests', href: '#tests' },
+]
+
+const payload = `{
+  "projectId": "project-1",
+  "taskId": "task-1",
+  "pageUrl": "http://localhost:3000/pricing",
+  "framing": "optional batch-level instruction",
+  "annotations": [
+    {
+      "id": "note-1",
+      "note": "Make this the primary action.",
+      "targets": [
+        {
+          "selector": "#buy-button",
+          "excerpt": "Buy now",
+          "bounds": { "x": 812, "y": 440, "width": 180, "height": 44 },
+          "computedStyles": { "background-color": "rgb(20, 20, 20)" },
+          "source": { "framework": "solid", "file": "src/Pricing.tsx", "line": 42 }
+        }
+      ]
+    }
+  ]
+}`
+
+const limits = [
+  { field: 'Annotations per batch', bound: '1–50' },
+  { field: 'Targets per annotation', bound: '1–20' },
+  { field: 'Note', bound: '4,000 bytes' },
+  { field: 'Selector', bound: '2,048 bytes' },
+  { field: 'Excerpt', bound: '160 bytes' },
+  { field: 'Page URL', bound: '8,192 bytes' },
+  { field: 'Request body', bound: '256 KB' },
+  { field: 'Queued batches', bound: '100' },
+]
+---
+
+<Docs
+  title="Annotation API"
+  description="The bounded payload shared by the in-app preview and the external wrapper, and the security rules around it."
+  toc={toc}
+>
+  <Callout tone="warning" title="Page content is untrusted">
+    The preview injects a selector, but everything read from the page — text, selectors, computed
+    styles and source hints — is untrusted input. Normalize and bound it before it reaches the
+    composer.
+  </Callout>
+
+  <h2 id="entry">Two entry points</h2>
+  <p>
+    The in-app Preview tab and the external annotation wrapper share
+    <code>apps/shepherd/src-tauri/src/preview_annotations.rs</code>. Both produce an
+    <code>AnnotationBatch</code> and submit it through the same validator and bounded queue. The
+    wrapper adds an HTTP surface; it does not add a second payload model.
+  </p>
+  <p>
+    The wrapper routes are <code>/preview/&lt;token&gt;/</code> for the document and
+    <code>/preview/&lt;token&gt;/annotations</code> for JSON POSTs. The in-app path reaches the same
+    queue without going through the loopback server.
+  </p>
+
+  <h2 id="payload">Payload</h2>
+  <CodeBlock filename="annotation batch" code={payload} />
+  <p>
+    A target must carry either a selector or screenshot coordinates, never both. A screenshot target
+    includes a path under the task's attachment root plus the marked point and image box. The server
+    also accepts a batch-level framing instruction from the chat message.
+  </p>
+
+  <h2 id="validation">Validation</h2>
+  <TableScroll label="Annotation payload bounds">
+    <table>
+      <thead><tr><th>Field</th><th>Bound</th></tr></thead>
+      <tbody>{limits.map((entry) => <tr><td>{entry.field}</td><td>{entry.bound}</td></tr>)}</tbody>
+    </table>
+  </TableScroll>
+  <ul>
+    <li>The project and task IDs must match the selected preview session; another tuple is forbidden.</li>
+    <li>The page URL must be HTTP(S), contain no credentials and match the configured origin.</li>
+    <li>Annotation IDs are client-generated, unique within a batch and bounded to 128 characters; a repeated ID is rejected as a replay.</li>
+    <li>Each annotation must have a note or a non-empty batch framing instruction.</li>
+    <li>Computed styles are capped at 32 fields; each name and value has a byte limit.</li>
+  </ul>
+  <p>
+    Errors map to 400 for invalid input, 403 for a mismatched tuple or origin, 409 for a replay,
+    413 for an oversized body and 429 when the queue is full. Valid submissions return 202 with a
+    batch ID and accepted count.
+  </p>
+
+  <h2 id="security">Wrapper security</h2>
+  <p>
+    The wrapper is a loopback-only capability, not a proxy. It embeds the configured preview URL in
+    an iframe and cannot select elements itself; element selection stays in the app's Preview tab.
+  </p>
+  <ul>
+    <li>Listen on <code>127.0.0.1</code> only. Reject non-loopback targets, credentials in the URL, and non-HTTP(S) schemes.</li>
+    <li>The token is 64 hex characters and is scoped to one project, task and target. It is reused only while that tuple is unchanged and rotates when the tuple changes, the project is forgotten or the app quits.</li>
+    <li>The first document load claims the wrapper with an <code>HttpOnly</code>, <code>SameSite=Strict</code> cookie. Later POSTs require that cookie, the exact wrapper origin and <code>Sec-Fetch-Site: same-origin</code>.</li>
+    <li>Reject a mismatched <code>Host</code> or <code>Origin</code>, a cross-site POST, and any non-document wrapper navigation. A copied URL can view the page but cannot submit from another browser profile after the claim.</li>
+    <li>Set <code>Referrer-Policy: no-referrer</code>, a matching meta tag, <code>X-Frame-Options: deny</code>, <code>Cross-Origin-Resource-Policy: same-origin</code> and a restrictive content-security policy. Wrapper links use <code>noreferrer</code>.</li>
+    <li>Log only the failure kind, never the token or claim. Debug formatting redacts both.</li>
+  </ul>
+
+  <h2 id="prompt">Prompt assembly</h2>
+  <p>
+    Add to prompt validates the queue, then appends one ordered review block to the active composer.
+    The block repeats each note as an instruction and includes the page, selector or screenshot,
+    excerpt, bounds, computed styles and source metadata. It instructs the agent to locate and edit
+    the front end and verify the result, not merely describe a plan.
+  </p>
+  <p>
+    If the task is live, Send queues the block behind the current turn. The core delivers it as a
+    separate user message once the turn settles; it is never injected into the active turn. The
+    queue is cleared only after the block is accepted.
+  </p>
+
+  <h2 id="tests">Tests</h2>
+  <p>
+    The server tests in <code>preview_server.rs</code> cover the scoped task, wrong and missing claim
+    cookies, foreign Origin, replay, wrong task, invalid screenshot path, oversized body, wrong token,
+    unbound sessions, non-document navigation, token rotation and redacted debug output. The payload
+    tests cover bounds, duplicate IDs and screenshot/selector exclusivity. Keep the wrapper tests on
+    real loopback sockets rather than mocking the HTTP layer.
+  </p>
+  <p>
+    The user-facing behavior is on <a href="/docs/users/preview">Preview and annotation</a>.
+  </p>
+</Docs>

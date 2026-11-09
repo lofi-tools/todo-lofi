@@ -2286,9 +2286,10 @@ own acceptance evidence exists.
   separate Astro/Panda package from the Taskstream docs in `apps/ts-docs-web`.
   It is built from `libs/web-design-system` marketing blocks, tokens and the
   existing blueprint layout, with design-system workspace, agent-pool and
-  preview illustrations. The Shepherd package has a Shepherd-only shell and
-  section anchors; `/docs`, `/downloads` and `/roadmap` remain in the Taskstream
-  package. The `Shepherd landing page` Playwright tests
+  preview illustrations. The Shepherd package has a Shepherd-only shell,
+  landing section anchors and its own audience guides under `/docs/users` and
+  `/docs/contributors`; the Taskstream `/docs` tree, downloads and roadmap stay
+  in `apps/ts-docs-web`. The `Shepherd landing page` Playwright tests
   (`renders the promise and marks available versus planned work`, `the hero CTA
   and header links move between availability sections`, `the mobile drawer
   exposes the same section links`, `the source CTA and in-page anchors resolve`)
@@ -2303,7 +2304,7 @@ own acceptance evidence exists.
   `pnpm --dir apps/shepherd/ui typecheck`, the two focused Shepherd preview
   tests, `cargo fmt --check`, both clippy runs, and `cargo test -p
   shepherd-core --lib` (178 passed, 4 ignored) also passed.
-- [ ] Split documentation by audience under `/docs/users` and
+- [x] Split documentation by audience under `/docs/users` and
   `/docs/contributors`.
   User pages cover installation, configuration, the mental model, preview and
   annotation, the agent pool, releases and troubleshooting; they do not explain
@@ -2311,6 +2312,18 @@ own acceptance evidence exists.
   API, quota ledger, release pipeline and test fixtures. Keep one search and one
   navigation source of truth, with the same landing/header/footer pattern as the
   reference documentation site.
+  Evidence: `apps/shep-docs-web` serves 14 routes under `/docs/users` and
+  `/docs/contributors`; `src/data/docs.ts` is the only source for the guide tabs,
+  left nav, footer and previous/next links. `src/layouts/Docs.astro`,
+  `DocsHeader.astro` and `DocsFooter.astro` reuse the reference docs shell and
+  the existing Shepherd landing tokens. The pages cover installation,
+  configuration, the mental model, preview/annotation, the planned agent pool,
+  releases, troubleshooting, adapter contracts, the annotation API, the planned
+  quota ledger, the release pipeline and test fixtures. The docs Playwright
+  suite covers every route, guide switching, mobile navigation, honest-claim
+  copy, 375/768/1440 overflow and axe WCAG 2.1 AA. `pnpm --dir
+  apps/shep-docs-web run typecheck` reported 0 errors; the static build emitted
+  15 pages; `pnpm --dir apps/shep-docs-web run test:e2e` passed 28 tests.
 - [ ] Produce a content map before writing the pages.
   Audit `docs/references/by-feature` and the shipped Shepherd features, then
   classify each capability as a landing-page argument, a user-guide page, or a

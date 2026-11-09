@@ -1,0 +1,109 @@
+---
+import Docs from '../../../layouts/Docs.astro'
+import Callout from 'web-design-system/astro/marketing/Callout.astro'
+import CodeBlock from 'web-design-system/astro/product/CodeBlock.astro'
+import TableScroll from '../../../components/atoms/TableScroll.astro'
+
+const toc = [
+  { label: 'Build inputs', href: '#inputs' },
+  { label: 'CI and smoke workflows', href: '#workflows' },
+  { label: 'The clean-machine gate', href: '#gate' },
+  { label: 'Artifact checks', href: '#artifacts' },
+  { label: 'Signing and updates', href: '#signing' },
+]
+
+const commands = `direnv exec . cargo fmt --check
+direnv exec . cargo clippy --workspace -- -D warnings
+direnv exec . cargo test -p agent-harness
+direnv exec . cargo test -p shepherd-core
+direnv exec . cargo test -p shepherd
+direnv exec . cargo test -p shepherd --test packaging
+direnv exec . cargo test -p shepherd --test shell_scope
+direnv exec . pnpm --dir apps/shepherd/ui run typecheck
+direnv exec . pnpm --dir apps/shepherd/ui run test:e2e`
+
+const workflows = [
+  { name: 'shepherd-package-smoke.yml', what: 'Manually dispatched debug macOS and Ubuntu bundle builds on clean runners. Checks packaging config, the macOS minimum version and the Debian executable.' },
+  { name: 'shepherd-terminal-smoke.yml', what: 'The two-launch terminal suite under Xvfb on Ubuntu 24.04; the macOS window suites cover focus, visibility and IME.' },
+  { name: 'shepherd-adapter-smoke.yml', what: 'Self-hosted installed-agent probes for OpenCode, Claude ACP and native RPC adapters. Each feature is gated separately.' },
+]
+---
+
+<Docs
+  title="Release pipeline"
+  description="What builds Shepherd, what the smoke workflows prove, and why the clean-machine release gate is still pending."
+  toc={toc}
+>
+  <Callout tone="warning" title="Preflight is not a release">
+    The package smoke workflows build debug bundles without launching the app. They do not replace
+    the clean-machine macOS 13+ and Ubuntu 24.04+ gate. That gate has not been run.
+  </Callout>
+
+  <h2 id="inputs">Build inputs</h2>
+  <p>
+    The app build is a Tauri 2 bundle over the SolidJS UI and the Rust core. The macOS build sets a
+    deployment target of 13.0. The package test is the guard that keeps the Tauri config, build
+    script, CI workflow and this document from drifting apart.
+  </p>
+  <CodeBlock filename="terminal" code={commands} showLineNumbers={false} />
+  <p>
+    The release checklist also records the commit being released. A local target directory is not
+    evidence for a release; use a fresh target or <code>CARGO_TARGET_DIR</code>.
+  </p>
+
+  <h2 id="workflows">CI and smoke workflows</h2>
+  <TableScroll label="Shepherd smoke workflows">
+    <table>
+      <thead><tr><th>Workflow</th><th>What it covers</th></tr></thead>
+      <tbody>
+        {workflows.map((entry) => (
+          <tr><td><code>{entry.name}</code></td><td>{entry.what}</td></tr>
+        ))}
+      </tbody>
+    </table>
+  </TableScroll>
+  <p>
+    The package smoke is manually dispatched and builds debug bundles. It verifies the macOS
+    <code>LSMinimumSystemVersion</code> and <code>minos</code> values, the Debian package contents and
+    that the executable has no <code>/nix/store</code> dependency. It does not launch the app, add a
+    project or exercise an agent.
+  </p>
+
+  <h2 id="gate">The clean-machine gate</h2>
+  <p>
+    The gate uses clean macOS 13+ and Ubuntu 24.04+ machines or VMs with the release commit, not a
+    developer checkout. For each platform it:
+  </p>
+  <ol>
+    <li>Installs with <code>pnpm install --frozen-lockfile</code> and removes the target directory.</li>
+    <li>Builds the macOS app bundle or Ubuntu Debian package.</li>
+    <li>Checks the minimum system version and confirms the artifact has no Nix store path.</li>
+    <li>Installs the package and launches it under the desktop session.</li>
+    <li>Adds a repository, starts a task, answers an approval and inspects the diff.</li>
+    <li>Runs the terminal smoke, plus the platform input checks where claimed.</li>
+  </ol>
+  <p>
+    The evidence table is still pending for both platforms. A green preflight does not fill it.
+  </p>
+
+  <h2 id="artifacts">Artifact checks</h2>
+  <ul>
+    <li>macOS: exactly the expected <code>.app</code>, <code>LSMinimumSystemVersion 13.0</code>, <code>minos 13.0</code>, no <code>/nix/store</code> entries.</li>
+    <li>Ubuntu: exactly one <code>.deb</code>, <code>usr/bin/shepherd</code> present, no <code>/nix/store</code> dependency, WebKitGTK 2.44+ at launch.</li>
+    <li>Record the artifact hash, exact OS and commit in the release evidence.</li>
+    <li>An unsigned or unnotarized build is a failure, not a warning, once signing is required.</li>
+  </ul>
+
+  <h2 id="signing">Signing and updates</h2>
+  <p>
+    Signing and notarization are human-gated and are not configured for an ordinary build. The
+    release owner either configures them or explicitly accepts unsigned artifacts for a release. v1
+    has no updater; a new build is a manual replacement. Windows packages and signed Windows
+    installers are planned, not part of the current gate.
+  </p>
+  <p>
+    The user-facing status is on <a href="/docs/users/releases">Releases</a>. The checklist lives at
+    <code>apps/shepherd/docs/release-checklist.md</code>; keep it and the packaging test in sync when
+    a build input changes.
+  </p>
+</Docs>

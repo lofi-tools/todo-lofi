@@ -1,0 +1,18 @@
+---
+import { css } from 'styled-system/css'
+
+interface Props {
+  label: string
+}
+
+const { label } = Astro.props
+---
+
+<div
+  role="region"
+  aria-label={label}
+  tabindex="0"
+  class={css({ overflowX: 'auto', maxW: '100%', _focusVisible: { outline: 'none', boxShadow: 'focus' } })}
+>
+  <slot />
+</div>

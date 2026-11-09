@@ -1,0 +1,139 @@
+---
+import { css } from 'styled-system/css'
+import { Badge } from 'web-design-system/components'
+import ThemeToggle from 'web-design-system/astro/ThemeToggle.astro'
+import { GitHub } from 'web-design-system/icons'
+import { docGuides, guideFor, REPO_URL } from '../../data/docs'
+
+const active = guideFor(Astro.url.pathname)
+
+const navItem = (active: boolean) =>
+  css({
+    display: 'inline-flex',
+    alignItems: 'center',
+    h: '8',
+    px: '3',
+    borderRadius: 'sm',
+    fontSize: 'sm',
+    color: active ? 'fg.default' : 'fg.muted',
+    bg: active ? 'surface.hover' : 'transparent',
+    fontWeight: active ? 'medium' : 'normal',
+    transitionProperty: 'color, background-color',
+    transitionDuration: 'fast',
+    _hover: { color: 'fg.default', bg: 'surface.hover' },
+    _focusVisible: { outline: 'none', boxShadow: 'focus' },
+  })
+---
+
+<header
+  class={css({
+    position: 'sticky',
+    top: '0',
+    zIndex: 'sticky',
+    w: 'full',
+    borderBottomWidth: 'hairline',
+    borderStyle: 'solid',
+    borderColor: 'border.subtle',
+    bg: 'canvas',
+    backdropFilter: 'blur(12px)',
+    backgroundColor: 'rgba(8, 9, 10, 0.72)',
+    _light: { backgroundColor: 'rgba(255, 255, 255, 0.78)' },
+  })}
+>
+  <nav
+    aria-label="Main"
+    class={css({
+      display: 'flex',
+      alignItems: 'center',
+      gap: '4',
+      h: '14',
+      w: '100%',
+      maxW: '1280px',
+      mx: 'auto',
+      px: { base: '5', md: '8' },
+    })}
+  >
+    <span class={css({ display: 'inline-flex', alignItems: 'center', gap: '1', flexShrink: '0' })}>
+      <a
+        href="/"
+        class={css({
+          display: 'inline-flex',
+          alignItems: 'center',
+          gap: '2',
+          fontWeight: 'semibold',
+          letterSpacing: 'tight',
+          color: 'fg.default',
+          flexShrink: '0',
+          _focusVisible: { outline: 'none', boxShadow: 'focus' },
+        })}
+      >
+        <img
+          src="/shepherd-logo.svg"
+          alt=""
+          width="20"
+          height="20"
+          class={css({
+            borderRadius: 'xs',
+            boxShadow: '0 0 0 0.25px rgba(255, 255, 255, 0.65)',
+            _light: { boxShadow: '0 0 0 0.25px rgba(0, 0, 0, 0.35)' },
+          })}
+        />
+        <span>Shepherd</span>
+      </a>
+      <Badge tone="accent" variant="subtle">docs</Badge>
+    </span>
+
+    <ul
+      class={css({
+        display: { base: 'none', lg: 'flex' },
+        alignItems: 'center',
+        gap: '0.5',
+        listStyle: 'none',
+        m: '0',
+        ml: '6',
+        p: '0',
+      })}
+    >
+      {
+        docGuides.map((guide) => (
+          <li>
+            <a
+              class={navItem(active?.heading === guide.heading)}
+              href={guide.href}
+              aria-current={active?.heading === guide.heading ? 'true' : undefined}
+              title={guide.summary}
+            >
+              {guide.heading}
+            </a>
+          </li>
+        ))
+      }
+    </ul>
+
+    <div class={css({ flex: '1' })} />
+
+    <a
+      class={css({
+        display: 'inline-flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        w: '8',
+        h: '8',
+        borderRadius: 'sm',
+        color: 'fg.muted',
+        transitionProperty: 'color, background-color',
+        transitionDuration: 'fast',
+        _hover: { color: 'fg.default', bg: 'surface.hover' },
+        _focusVisible: { outline: 'none', boxShadow: 'focus' },
+      })}
+      href={REPO_URL}
+      target="_blank"
+      rel="noreferrer"
+      aria-label="GitHub repository"
+    >
+      <GitHub size={18} />
+    </a>
+
+    <ThemeToggle />
+  </nav>
+</header>

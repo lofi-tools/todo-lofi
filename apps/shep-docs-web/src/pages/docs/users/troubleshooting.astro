@@ -1,0 +1,116 @@
+---
+import Docs from '../../../layouts/Docs.astro'
+import Callout from 'web-design-system/astro/marketing/Callout.astro'
+
+const toc = [
+  { label: 'Agent not found', href: '#agents' },
+  { label: 'Authentication', href: '#auth' },
+  { label: 'Adapter fallback', href: '#fallback' },
+  { label: 'Preview', href: '#preview' },
+  { label: 'Worktrees and Git', href: '#git' },
+  { label: 'Terminals', href: '#terminals' },
+  { label: 'Settings and logs', href: '#logs' },
+]
+---
+
+<Docs
+  title="Troubleshooting"
+  description="Fix the common setup, adapter, preview, worktree and terminal problems without guessing."
+  toc={toc}
+>
+  <Callout tone="note" title="Start with the app">
+    The app reports the command, adapter tier, working directory and failure category. Open the
+    task's diagnostics before changing configuration; the site cannot see your installed versions.
+  </Callout>
+
+  <h2 id="agents">Agent not found</h2>
+  <p>
+    Shepherd launches an installed CLI; it does not bundle an agent. Check that the executable is on
+    the path the app sees, or pin its absolute path in <code>settings.json</code> under the matching
+    <code>agents.&lt;name&gt;.executable</code> key. Restart Shepherd after editing settings.
+  </p>
+  <p>
+    For Claude Code, the ACP executable is a separate binary from the terminal CLI. Set
+    <code>agents.claude.executable</code> and, if needed, <code>agents.claude.args</code>. For
+    OpenCode, <code>agents.opencode.executable</code> and an optional
+    <code>agents.opencode.config_file</code> are enough.
+  </p>
+
+  <h2 id="auth">Authentication</h2>
+  <p>
+    Authenticate in the agent's own CLI first. Shepherd stores no provider keys and cannot repair an
+    expired login. If a launch environment value begins with <code>!</code>, its command must succeed
+    within five seconds; a failure blocks the spawn. Shepherd hides adapter stderr when launch
+    environment values may contain secrets, so check the failure category and the agent's own
+    diagnostics.
+  </p>
+
+  <h2 id="fallback">Adapter fallback</h2>
+  <p>
+    A task can fall back to a lower adapter tier when the installed CLI does not support the richer
+    protocol. The conversation header and diagnostics show the tier and the reason. A fallback is not
+    automatically a failure: the agent may still stream output and accept prompts, but approvals or
+    resume can be unavailable. The UI hides actions the connected adapter cannot perform rather than
+    showing a dead control.
+  </p>
+  <p>
+    If a session cannot resume, the task says so and offers a new session with transcript replay. It
+    does not pretend the old session survived.
+  </p>
+
+  <h2 id="preview">Preview</h2>
+  <p>
+    The preview only accepts a loopback HTTP(S) URL. If the page is blank, confirm the URL in Settings
+    → Projects and open it directly in a browser. Element selection needs script injection; when a
+    page refuses framing or injection, or navigates off the configured origin, use the screenshot
+    picker instead.
+  </p>
+  <p>
+    If the external wrapper refuses to submit, do not copy the URL between browser profiles. The
+    first load claims the wrapper with an HttpOnly cookie, and later POSTs require that exact browser,
+    origin and task. Reopen the wrapper from the app after changing projects or tasks.
+  </p>
+
+  <h2 id="git">Worktrees and Git</h2>
+  <p>
+    Agent tasks require a Git repository. Shepherd creates the worktree under the resolved Git
+    directory, not inside the checkout. Removing a task refuses when the worktree is dirty; commit or
+    discard the changes first. Archived worktrees are collected after 30 days only when clean, and
+    reopening recreates them from the branch or recorded tip.
+  </p>
+  <p>
+    If the root is on another branch, a new task still starts from the project's default branch.
+    Squash-merge is disabled on a dirty or off-base root. Git failures appear in the app's error toast
+    with retry controls; a hook failure preserves the commit message.
+  </p>
+
+  <h2 id="terminals">Terminals</h2>
+  <p>
+    Closing a terminal view does not stop its PTY. Reopen it from the Terminals tab's instance menu.
+    Quitting the app ends every PTY; the next launch shows those terminals as ended with their last
+    directory and command. Use Restart to create a new shell.
+  </p>
+  <p>
+    A shared terminal belongs to the project and appears in every task. A task terminal appears only
+    while its task is selected. If focus seems stuck, remember that arrow keys go to the PTY while
+    terminal input is focused; use the app's focus commands to leave it.
+  </p>
+
+  <h2 id="logs">Settings and logs</h2>
+  <p>
+    A malformed <code>settings.json</code> is copied to <code>.bak</code>, defaults load, and a banner
+    names the path. Repair the file and use Reload settings. Keybindings have the same repair path in
+    Settings → Keyboard shortcuts; a newer file version stays intact.
+  </p>
+  <p>
+    Runtime errors appear in a toast and in Error history in the status bar. The structured log is
+    <code>logs/errors.jsonl</code> in the active data directory, normally
+    <code>.cache/test-db/logs/errors.jsonl</code> for a development run. Follow it with
+    <code>tail -F</code>. New log files are owner-only on Unix.
+  </p>
+  <p>
+    To isolate a problem from your normal project list and database, run <code>shep --test</code>.
+    If the problem reproduces there, the fastest useful report includes the OS, agent version, adapter
+    tier, the diagnostics text and the matching error record.
+  </p>
+</Docs>

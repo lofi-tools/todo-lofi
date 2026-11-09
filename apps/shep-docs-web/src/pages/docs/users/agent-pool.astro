@@ -1,0 +1,95 @@
+---
+import Docs from '../../../layouts/Docs.astro'
+import Callout from 'web-design-system/astro/marketing/Callout.astro'
+import { Badge } from 'web-design-system/components'
+
+const toc = [
+  { label: 'Status', href: '#status' },
+  { label: 'Why a pool', href: '#why' },
+  { label: 'How selection will work', href: '#selection' },
+  { label: 'What a task will show', href: '#visibility' },
+  { label: 'Your controls', href: '#controls' },
+  { label: 'What it will not do', href: '#limits' },
+  { label: 'Today', href: '#today' },
+]
+---
+
+<Docs
+  title="Agent pool"
+  description="The quota-aware pool is Shepherd's next step: choose the next healthy installed agent when the preferred one is exhausted."
+  toc={toc}
+>
+  <Callout tone="note" title="Next, not in the current build">
+    The agent pool is specified and being built. The current app lets you choose an agent for a task
+    and use terminals; it does not choose among quota-limited slots for you yet.
+  </Callout>
+
+  <h2 id="status">Status</h2>
+  <p>
+    <Badge tone="accent" variant="subtle">next</Badge> A pool slot is an installed agent plus one
+    provider/model plus the credential or account it uses. Shepherd will keep the user's priority
+    order, the local usage ledger, reset windows, cooldown state and last-used time. Credentials are
+    referenced, never copied into the pool record or logs.
+  </p>
+
+  <h2 id="why">Why a pool</h2>
+  <p>
+    Running several agents is useful until one hits a rate limit and you become the scheduler. The
+    pool is meant to keep the workspace moving: when the preferred slot is exhausted, cooling down
+    or unhealthy, the next healthy slot can take the task. The task must say which slot ran and which
+    higher-priority slots it skipped, so the choice is visible rather than mysterious.
+  </p>
+
+  <h2 id="selection">How selection will work</h2>
+  <ol>
+    <li>A new task or conversation tries the user's preferred healthy slot.</li>
+    <li>If that slot is exhausted, cooling down or otherwise unavailable, the next slot that can accept work gets the task.</li>
+    <li>An explicit task override wins over the priority order.</li>
+    <li>After the turn settles plus an idle timeout (15 minutes by default), an idle reservation is released without losing a resumable session.</li>
+    <li>A slot is never released during a running turn or a pending approval.</li>
+  </ol>
+  <p>
+    Selection is atomic across concurrent tasks, so two prompts cannot claim the same slot at once.
+    If an adapter cannot resume after a release, the task says so and selects another slot for the
+    next turn instead of pretending to continue.
+  </p>
+
+  <h2 id="visibility">What a task will show</h2>
+  <ul>
+    <li>The selected slot, its provider/model and the agent's visible tier.</li>
+    <li>Higher-priority slots that were skipped, with a visible reason: exhausted, cooling down, disabled or unhealthy.</li>
+    <li>Known limit and reset time, or <strong>unknown</strong> when the provider has not exposed them.</li>
+    <li>The current task, last error and last-used time in the pool UI.</li>
+  </ul>
+  <p>
+    Unknown capacity is shown as unknown, never as free. Shepherd must not claim a provider quota it
+    cannot observe.
+  </p>
+
+  <h2 id="controls">Your controls</h2>
+  <p>
+    The pool UI will let you reorder slots, disable one, edit its limits or reset time, clear a
+    cooldown and force a slot for one turn. Saved limits are a local correction, not a provider
+    guarantee. Provider credentials stay in the agent's own configuration and are never displayed.
+  </p>
+
+  <h2 id="limits">What it will not do</h2>
+  <ul>
+    <li>It will not create accounts, buy capacity or store provider keys.</li>
+    <li>It will not treat an unobserved quota as free or unlimited.</li>
+    <li>It will not make a catalog or a website authoritative over the local ledger.</li>
+    <li>It will not hide a fallback: the task records the slot that ran and the slots that were skipped.</li>
+  </ul>
+  <p>
+    The implementation contract, including the deterministic clock and failure cases, is on the
+    <a href="/docs/contributors/quota-ledger">quota ledger</a> page.
+  </p>
+
+  <h2 id="today">Today</h2>
+  <p>
+    Use the agent picker per task and keep a terminal open when you need to switch manually. If an
+    agent is missing or its adapter falls back, <a href="/docs/users/troubleshooting#agents">Troubleshooting</a>
+    explains what to check. The <a href="/docs/users/releases">releases page</a> tracks the other
+    next-step items.
+  </p>
+</Docs>

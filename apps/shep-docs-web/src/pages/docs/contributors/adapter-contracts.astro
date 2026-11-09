@@ -1,0 +1,153 @@
+---
+import Docs from '../../../layouts/Docs.astro'
+import Callout from 'web-design-system/astro/marketing/Callout.astro'
+import CodeBlock from 'web-design-system/astro/product/CodeBlock.astro'
+import TableScroll from '../../../components/atoms/TableScroll.astro'
+
+const toc = [
+  { label: 'Tiers', href: '#tiers' },
+  { label: 'The trait', href: '#trait' },
+  { label: 'Events', href: '#events' },
+  { label: 'Turn ownership', href: '#turn' },
+  { label: 'Capabilities', href: '#capabilities' },
+  { label: 'Approvals', href: '#approvals' },
+  { label: 'Failure modes', href: '#failures' },
+  { label: 'Contract tests', href: '#tests' },
+]
+
+const tiers = [
+  { tier: '1. Native adapter', mechanism: "The CLI's own machine protocol", events: 'Structured', approvals: 'Where offered', resume: 'Session/thread ID' },
+  { tier: '2. ACP adapter', mechanism: 'ACP over stdio', events: 'Structured', approvals: 'Yes', resume: 'session/load where supported' },
+  { tier: '3. Terminal wrapper', mechanism: 'PTY plus a bundled screen manifest', events: 'Coarse: working, waiting, exited', approvals: 'No', resume: 'No' },
+  { tier: '4. Plain pane', mechanism: 'A terminal the user drives', events: 'None', approvals: 'No', resume: 'No' },
+]
+
+const trait = `trait AgentHarness {
+    async fn start(&mut self, spec: SpawnSpec, roots: SessionRoots) -> Result<Capabilities>;
+    async fn open_session(&mut self, resume: Option<SessionId>) -> Result<SessionId>;
+    async fn prompt(&mut self, input: PromptInput) -> Result<()>;
+    async fn cancel(&mut self) -> Result<()>;
+    async fn respond(&mut self, request: ApprovalId, decision: Decision) -> Result<()>;
+    async fn shutdown(&mut self) -> Result<()>;
+}`
+---
+
+<Docs
+  title="Adapter contracts"
+  description="The tier model and the UI-free contract every agent integration implements."
+  toc={toc}
+>
+  <p>
+    Shepherd treats agent protocols as adapters, not identity. <code>libs/agent-harness</code> is a
+    UI-free crate with one async trait and one event enum. It has no Tauri, GPUI or database types,
+    so the UI never branches on a particular CLI.
+  </p>
+
+  <h2 id="tiers">Tiers</h2>
+  <TableScroll label="Adapter tiers">
+    <table>
+      <thead><tr><th>Tier</th><th>Mechanism</th><th>Events</th><th>Approvals</th><th>Resume</th></tr></thead>
+      <tbody>
+        {tiers.map((entry) => (
+          <tr>
+            <td>{entry.tier}</td>
+            <td>{entry.mechanism}</td>
+            <td>{entry.events}</td>
+            <td>{entry.approvals}</td>
+            <td>{entry.resume}</td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  </TableScroll>
+  <p>
+    Shepherd prefers the richest tier the installed CLI supports; the user can force a lower one.
+    The task and diagnostics show the negotiated tier, so a wrapper's coarse "waiting" state is never
+    confused with a protocol-level approval.
+  </p>
+
+  <h2 id="trait">The trait</h2>
+  <CodeBlock filename="libs/agent-harness" code={trait} showLineNumbers={false} />
+  <p>
+    A native adapter speaks Codex or OpenCode's protocol directly. The ACP adapter uses
+    <code>libs/acp-client</code> over stdio and covers Claude Code and other ACP agents. A terminal
+    wrapper uses a PTY and a screen manifest when no protocol exists. The plain-pane tier is the
+    user-driven fallback.
+  </p>
+
+  <h2 id="events">Events</h2>
+  <p>
+    Adapters send <code>HarnessEvent</code> values over one bounded channel per session:
+  </p>
+  <ul>
+    <li><code>TurnStarted</code>, <code>Delta</code> (message or thought), and <code>TurnFinished</code> with a reason.</li>
+    <li><code>ToolCall</code> start, update and end, plus <code>Plan</code> and <code>Usage</code>.</li>
+    <li><code>ApprovalRequested</code>, <code>ApprovalResolved</code>, <code>ModeChanged</code> and <code>SessionState</code>.</li>
+    <li><code>Exited</code> when the process ends.</li>
+  </ul>
+  <p>
+    Native protocol events are mapped into the transcript types owned by the harness crate, so
+    persistence, rendering and search are shared. Adapters never write to the store.
+  </p>
+
+  <h2 id="turn">Turn ownership</h2>
+  <p>
+    The core, not the adapter, owns turn boundaries and assembly. It starts a turn on
+    <code>TurnStarted</code>, assembles deltas into messages or tool calls, persists only settled
+    entries, and moves the task on <code>TurnFinished</code>. It never infers completion from idle
+    time or process exit.
+  </p>
+  <p>
+    The core assigns a per-session <code>seq</code> and a canonical item ID to every persisted entry.
+    Adapter item IDs are mapped in memory so later updates land on the same entry, and ordering
+    survives reconnects and mixed adapters.
+  </p>
+
+  <h2 id="capabilities">Capabilities</h2>
+  <p>
+    Every adapter declares capabilities instead of assuming them: streaming granularity, images,
+    resource links, model picker, mode picker, resume, cancel, approval kinds, whether approvals carry
+    patches, usage reporting and agent-created terminals. Capabilities are probed at connect and
+    refined per session. Unknown defaults to false; a false capability hides the corresponding UI
+    rather than showing a dead control.
+  </p>
+  <p>
+    Shepherd saves the negotiated capabilities with the session. A legacy handle can reconnect and be
+    probed again. If the adapter falls back, the task shows the reason.
+  </p>
+
+  <h2 id="approvals">Approvals</h2>
+  <p>
+    An approval request carries the tool, arguments, the paths the call touches and an optional
+    patch. If the adapter supplies no patch, the core diffs the named paths inside the worktree. If
+    there are no paths either, the card says the diff is unavailable and shows the arguments only.
+  </p>
+  <p>
+    Safe reads and a visible local command list are auto-allowed. Other calls go to the agent's own
+    review mode where one is exposed; if no judge is available, the core creates a user card. Session
+    and project grants are scoped to the configured executable, arguments and launch environment, and
+    are reviewable in Settings → Projects.
+  </p>
+
+  <h2 id="failures">Failure modes</h2>
+  <ul>
+    <li><strong>Binary missing</strong> — the task does not start; the error row names the install hint.</li>
+    <li><strong>Version too old</strong> — the adapter probes methods and refuses features the installed version does not support.</li>
+    <li><strong>Auth required</strong> — the adapter reports the provider's auth state; Shepherd does not store a key.</li>
+    <li><strong>Process exits mid-turn</strong> — the task fails or becomes interrupted; completion is never inferred.</li>
+    <li><strong>Approval bridge missing</strong> — the task is labelled unreviewed and no approval is claimed.</li>
+  </ul>
+
+  <h2 id="tests">Contract tests</h2>
+  <p>
+    Each adapter has recorded protocol fixtures for parsing, one live smoke against an installed CLI
+    and explicit tests for binary missing, version too old, auth required and process exit mid-turn.
+    The ACP fake agent is built under <code>test-support</code>. The
+    <a href="/docs/contributors/test-fixtures">test fixtures</a> page explains the layers and the
+    gated live commands.
+  </p>
+  <Callout tone="note" title="No UI coupling">
+    Do not add a Tauri, GPUI or database type to the harness crate. If the UI needs a new state, add
+    it to the event or capability contract and let the shell render it.
+  </Callout>
+</Docs>

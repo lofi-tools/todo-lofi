@@ -1,0 +1,141 @@
+---
+import Docs from '../../../layouts/Docs.astro'
+import Callout from 'web-design-system/astro/marketing/Callout.astro'
+import TableScroll from '../../../components/atoms/TableScroll.astro'
+
+const toc = [
+  { label: 'Projects', href: '#projects' },
+  { label: 'Tasks', href: '#tasks' },
+  { label: 'Worktrees', href: '#worktrees' },
+  { label: 'The inspector', href: '#inspector' },
+  { label: 'Approvals', href: '#approvals' },
+  { label: 'Review', href: '#review' },
+  { label: 'Quit and resume', href: '#quit' },
+]
+
+const states = [
+  { state: 'draft', meaning: 'A prompt is being composed; no agent session or worktree exists yet.' },
+  { state: 'starting', meaning: 'The first prompt was sent and the worktree or process is starting.' },
+  { state: 'ready', meaning: 'The agent is idle and the task can take another prompt.' },
+  { state: 'working', meaning: 'The agent is running a turn.' },
+  { state: 'waiting', meaning: 'An approval or question needs a person.' },
+  { state: 'review', meaning: 'A completed turn changed HEAD, the branch or the worktree diff.' },
+  { state: 'done', meaning: 'The task was archived; its branch is kept.' },
+  { state: 'failed / interrupted', meaning: 'The process failed, or the app stopped while the task was live.' },
+]
+---
+
+<Docs
+  title="Mental model"
+  description="Projects, tasks, worktrees, terminals and reviews: what each object owns, and what happens when you quit."
+  toc={toc}
+>
+  <p>
+    Shepherd is one window over persistent local projects. A task is not just a chat: it is the
+    durable record of one agent conversation, the worktree it edited and the review that follows.
+    Keeping those boundaries clear makes parallel work predictable.
+  </p>
+
+  <h2 id="projects">Projects</h2>
+  <p>
+    A project is a local directory you added, usually a Git repository. Shepherd remembers its path,
+    Git metadata, last active task and per-project terminal layout. A missing or moved directory is
+    reported honestly; deleting a project from Shepherd never deletes its files, worktrees or
+    branches.
+  </p>
+
+  <h2 id="tasks">Tasks</h2>
+  <p>
+    A task owns one conversation with one agent, in its own worktree. It carries a state, transcript,
+    workspace layout and review data. Switching tasks swaps the chat and task-specific content; the
+    inspector's selected tab and project-shared terminals stay where they are.
+  </p>
+  <TableScroll label="Task states">
+    <table>
+      <thead><tr><th>State</th><th>Meaning</th></tr></thead>
+      <tbody>{states.map((entry) => <tr><td><code>{entry.state}</code></td><td>{entry.meaning}</td></tr>)}</tbody>
+    </table>
+  </TableScroll>
+  <p>
+    The state comes from adapter events and process exit, not polling. A task moves to
+    <strong>waiting</strong> when an approval or question is pending, and to <strong>review</strong>
+    only when a completed turn actually changed the code.
+  </p>
+
+  <h2 id="worktrees">Worktrees</h2>
+  <p>
+    Each task gets a Git worktree and a branch from the project's default branch. The default path is
+    <code>&lt;git-dir&gt;/shepherd/worktrees/&lt;slug&gt;</code> on branch
+    <code>shepherd/&lt;slug&gt;</code>, outside the working tree, so it needs no ignore rule.
+    Repositories with a <code>.git</code> file (worktrees and submodules) are handled.
+  </p>
+  <p>
+    A shared checkout is an explicit opt-in with a warning. Dirty worktrees are never deleted:
+    removing a task refuses when changes exist. Archived worktrees unused for 30 days are removed
+    automatically, but dirty ones are skipped; reopening recreates a worktree from the branch or the
+    recorded tip.
+  </p>
+
+  <h2 id="inspector">The inspector</h2>
+  <p>
+    Every task workspace has a required chat region and an always-on inspector with five tabs:
+    <strong>Terminals</strong>, <strong>Preview</strong>, <strong>Review</strong>,
+    <strong>Git</strong> and <strong>Files</strong>. Regions are fixed; panes resize inside their
+    region and terminals split only inside the Terminals tab.
+  </p>
+  <ul>
+    <li><strong>Project-shared terminal</strong> — visible in every task of the project and keeps its PTY across task switches.</li>
+    <li><strong>Task terminal</strong> — belongs to one task, keeps running while another task is active, and reappears when its task is selected.</li>
+    <li><strong>Closing a terminal view</strong> — detaches the view only; the PTY keeps running and can be reopened.</li>
+  </ul>
+  <p>
+    The terminal layout, split sizes and slot scopes are saved per project. Presets are starting
+    points, not separate layouts per task.
+  </p>
+
+  <h2 id="approvals">Approvals</h2>
+  <p>
+    The default policy is <strong>agent-judged</strong>. Safe reads and a visible local command list
+    are auto-allowed. Everything else goes to the agent's own review mode when the adapter exposes
+    one; if no judge is available, it becomes a normal approval card and waits. It is never silently
+    allowed.
+  </p>
+  <p>
+    A card shows the tool, its arguments and the affected diff when one is available. Decisions
+    record their source: safe list, agent or user. Projects may tighten the policy but cannot loosen
+    it. Session and project grants can be reviewed and reset in Settings → Projects.
+  </p>
+
+  <h2 id="review">Review</h2>
+  <p>
+    A completed turn enters review only when HEAD, the branch or the worktree status/diff changed
+    since the turn started. An edit that nets to zero, or a chat-only answer, returns the task to
+    ready. Review is not a separate inbox: the task row and Review tab carry the badge, and the
+    status bar and dock badge show the count.
+  </p>
+  <p>
+    <strong>Mark reviewed and archive</strong> keeps the branch and moves the task to done.
+    <strong>Send review note</strong> starts a new turn with the note and the changed files.
+    <strong>Squash-merge into base</strong> is available from the Git tab when the root is clean and
+    on the base branch.
+  </p>
+
+  <h2 id="quit">Quit and resume</h2>
+  <p>
+    Quitting is quitting. If a task is working or waiting, Shepherd asks first and names what will
+    stop. It then cancels turns where supported, closes agent input, terminates process groups, ends
+    PTYs and marks working tasks interrupted.
+  </p>
+  <p>
+    On the next launch, task workspaces restore, interrupted tasks offer <strong>Resume</strong>, and
+    terminals appear as <strong>ended</strong> with their last working directory and command. Nothing
+    claims to have survived that did not. If the app crashed, recorded process IDs are offered for
+    termination only when their identity still matches.
+  </p>
+
+  <Callout tone="note" title="What is not here">
+    There is no daemon, background service, second window or remote sandbox in v1. Shepherd is not a
+    code editor, LSP host or debugger; files are viewable and diffs reviewable. Agent orchestration
+    teams and the quota-aware pool are next, not current.
+  </Callout>
+</Docs>

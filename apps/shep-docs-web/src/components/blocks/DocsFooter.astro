@@ -1,6 +1,6 @@
 ---
 import { css } from 'styled-system/css'
-import { REPO_URL } from '../../../data/shepherd'
+import { footerDocLinks, REPO_URL } from '../../data/docs'
 
 interface Props {
   /** Align the footer to the homepage blueprint's content column. */
@@ -19,6 +19,10 @@ const columns = [
     ],
   },
   {
+    heading: 'Documentation',
+    links: footerDocLinks,
+  },
+  {
     heading: 'Project',
     links: [
       { label: 'Source', href: REPO_URL },
@@ -29,7 +33,7 @@ const columns = [
   },
 ]
 
-const footerGrid = { base: '1fr', sm: 'repeat(2, 1fr)', md: '2fr repeat(2, 1fr)' }
+const footerGrid = { base: '1fr', sm: 'repeat(2, 1fr)', md: '2fr repeat(3, 1fr)' }
 
 const headingStyle = css({
   fontSize: '2xs',

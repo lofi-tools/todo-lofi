@@ -1,0 +1,117 @@
+---
+import Docs from '../../../layouts/Docs.astro'
+import Callout from 'web-design-system/astro/marketing/Callout.astro'
+import CodeBlock from 'web-design-system/astro/product/CodeBlock.astro'
+
+const toc = [
+  { label: 'Layers', href: '#layers' },
+  { label: 'Rust and adapter fixtures', href: '#rust' },
+  { label: 'Fake harness', href: '#harness' },
+  { label: 'UI surfaces', href: '#ui' },
+  { label: 'Live smokes', href: '#live' },
+  { label: 'Docs tests', href: '#docs' },
+  { label: 'Rules', href: '#rules' },
+]
+
+const commands = `direnv exec . cargo test -p agent-harness
+direnv exec . cargo test -p shepherd-core
+direnv exec . pnpm --dir apps/shepherd/ui run test:e2e
+pnpm --dir apps/shep-docs-web run test:e2e`
+---
+
+<Docs
+  title="Test fixtures"
+  description="The fixture layers that keep adapter, terminal, preview and docs behavior testable without a live provider."
+  toc={toc}
+>
+  <p>
+    Shepherd tests behavior at the boundary that owns it. Protocol parsing is tested with recorded
+    fixtures; turn assembly with a fake harness; the shell with a Playwright webview; and installed
+    agents only in explicitly gated live smokes.
+  </p>
+
+  <h2 id="layers">Layers</h2>
+  <ul>
+    <li><strong>Unit and contract tests</strong> — pure parsing, validation, Git, store and settings behavior.</li>
+    <li><strong>Fake adapters</strong> — drive the core's event and approval contract without a provider.</li>
+    <li><strong>Playwright shell tests</strong> — the Tauri webview's palette, task workspace, terminals, preview and settings flows.</li>
+    <li><strong>Live smokes</strong> — opt-in probes against installed CLIs, disabled by default and never the only coverage for a feature.</li>
+    <li><strong>Docs tests</strong> — route, navigation, responsive overflow and accessibility checks for this site.</li>
+  </ul>
+
+  <h2 id="rust">Rust and adapter fixtures</h2>
+  <p>
+    Native adapters use recorded protocol fixtures for parsing and event mapping. The ACP fake agent
+    is built under <code>test-support</code> and covers filesystem, terminal and permission requests.
+    Terminal-wrapper manifests are tested against captured screen output.
+  </p>
+  <p>
+    Each adapter has explicit failure fixtures: binary missing, version too old, auth required and
+    process exit mid-turn. Native RPC fixtures cover framing and record-family probing; a missing
+    approval bridge must surface an unreviewed-tools state rather than a fake approval.
+  </p>
+
+  <h2 id="harness">Fake harness</h2>
+  <p>
+    The harness contract test drives <code>TurnStarted</code>, <code>Delta</code>,
+    <code>ToolCall</code> and <code>TurnFinished</code>; approval requests with and without a patch;
+    and a process exit without a finish. The core must not infer completion. Out-of-order updates must
+    map to one canonical entry, and ordering must survive a reconnect.
+  </p>
+  <p>
+    Use temporary repositories and disposable data directories for persistence, worktree and settings
+    tests. A test must not touch the developer's real project list or database.
+  </p>
+
+  <h2 id="ui">UI surfaces</h2>
+  <p>
+    The v1 Playwright suite runs against the Tauri webview. It covers the palette, task list, project
+    switching, fixed chat/inspector regions, shared and task terminals, review attention, preview
+    element annotation and the screenshot fallback. The native macOS smokes cover window focus,
+    visibility and IME behavior that a headless browser cannot.
+  </p>
+  <p>
+    Terminal tests assert parser and frame state, not pixels. Git tests use temporary repositories for
+    status, diffs, hooks, signing disabled, worktrees, dirty refusal and squash-merge conflicts.
+  </p>
+
+  <h2 id="live">Live smokes</h2>
+  <p>
+    Installed-process probes are excluded by default and behind a per-agent feature. A replay would
+    skip the process being tested, so a cache miss needs the feature rather than a silent pass.
+    Codex scenarios replay app-server responses and recorded worktree edits under
+    <code>.cache/shepherd-live/codex/terra-low-v1/</code>. Recording uses
+    <code>gpt-6.1-terra</code> at <code>low</code> effort; captures with another model or effort, or
+    an empty session, are rejected.
+  </p>
+  <p>
+    The adapter smoke workflow chooses one installed agent on a self-hosted runner. Do not launch a
+    real agent in a test that is supposed to use a fixture, and never put credentials or tokens in a
+    fixture.
+  </p>
+
+  <h2 id="docs">Docs tests</h2>
+  <p>
+    This package's Playwright suite runs the built site on its own preview port. It checks every
+    user and contributor route, the guide tabs, the shared navigation, responsive overflow at 375,
+    768 and 1440 px, and axe WCAG 2.1 AA. It also fails on an internal reference-project name or a
+    planned feature described as available.
+  </p>
+  <CodeBlock filename="terminal" code={commands} showLineNumbers={false} />
+  <p>
+    The committed <code>test:e2e</code> scripts clean stale preview state before and after the run;
+    do not add manual port or worker flags to the documented command.
+  </p>
+
+  <h2 id="rules">Rules</h2>
+  <ul>
+    <li>A test that needs a real CLI must be gated and documented; the default suite uses fixtures.</li>
+    <li>Never assert a provider's live quota or model output in a deterministic test.</li>
+    <li>Keep tokens, claims, provider keys and launch-environment values out of fixtures, logs and screenshots.</li>
+    <li>Run the narrowest suite that covers the change, then the package's committed typecheck and e2e script before handing it back.</li>
+  </ul>
+  <Callout tone="note" title="A failure is not a flake by default">
+    Fix the cause. Do not skip a test, weaken an assertion or add a retry to hide a real race. If the
+    environment genuinely cannot run a probe, report it as a limitation.
+  </Callout>
+</Docs>

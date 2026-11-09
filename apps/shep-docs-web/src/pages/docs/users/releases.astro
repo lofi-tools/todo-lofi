@@ -1,0 +1,101 @@
+---
+import Docs from '../../../layouts/Docs.astro'
+import Callout from 'web-design-system/astro/marketing/Callout.astro'
+import CodeBlock from 'web-design-system/astro/product/CodeBlock.astro'
+import TableScroll from '../../../components/atoms/TableScroll.astro'
+import { Badge } from 'web-design-system/components'
+
+const toc = [
+  { label: 'Current status', href: '#status' },
+  { label: 'Run from source', href: '#source' },
+  { label: 'Build a bundle', href: '#bundle' },
+  { label: 'Platforms', href: '#platforms' },
+  { label: 'The release gate', href: '#gate' },
+  { label: 'Signing and updates', href: '#signing' },
+]
+
+const platforms = [
+  { platform: 'macOS', status: 'Development bundle; release gate pending', detail: 'macOS 13+; app bundle. Signing and notarization are not complete.' },
+  { platform: 'Linux', status: 'Development package; release gate pending', detail: 'Ubuntu 24.04+; Debian package. WebKitGTK 2.44+ is required.' },
+  { platform: 'Windows', status: 'Planned', detail: 'No supported build or installer yet.' },
+]
+
+const bundle = `# macOS app bundle
+direnv exec . pnpm --dir apps/shepherd build --bundles app
+
+# Ubuntu Debian package
+direnv exec . pnpm --dir apps/shepherd build --bundles deb`
+---
+
+<Docs
+  title="Releases"
+  description="What Shepherd ships today, how to build it yourself, and what the clean-machine release gate still requires."
+  toc={toc}
+>
+  <Callout tone="warning" title="There is no signed release yet">
+    Shepherd runs from a checkout. The macOS and Linux release gate has not been run, and signed
+    installers are a next-step item. A development bundle is not a release.
+  </Callout>
+
+  <h2 id="status">Current status</h2>
+  <p>
+    <Badge tone="warning" variant="subtle">pre-release</Badge> The repository builds a debug macOS app
+    bundle and a debug Debian package for packaging checks. The manually dispatched package smoke
+    verifies those bundles on clean runners without launching the app; it is preflight, not the
+    release gate.
+  </p>
+
+  <h2 id="source">Run from source</h2>
+  <p>
+    The supported way to use Shepherd today is from a checkout:
+  </p>
+  <CodeBlock filename="terminal" code={'direnv allow .\npnpm install\nshep'} showLineNumbers={false} />
+  <p>
+    The <a href="/docs/users/install">install page</a> covers test mode, agent setup and the first
+    project. If you are working on the code, the contributor guide has the test and release commands.
+  </p>
+
+  <h2 id="bundle">Build a bundle</h2>
+  <p>
+    The app build pins the macOS deployment target to 13.0. Use a clean target directory when checking
+    a release so cached objects cannot change the result.
+  </p>
+  <CodeBlock filename="terminal" code={bundle} showLineNumbers={false} />
+  <p>
+    <code>cargo test -p shepherd --test packaging</code> checks that the Tauri config, build script,
+    CI workflows and platform settings still agree. It does not replace a clean-machine run.
+  </p>
+
+  <h2 id="platforms">Platforms</h2>
+  <TableScroll label="Shepherd release platforms">
+    <table>
+      <thead><tr><th>Platform</th><th>Status</th><th>Details</th></tr></thead>
+      <tbody>
+        {platforms.map((entry) => (
+          <tr><td>{entry.platform}</td><td>{entry.status}</td><td>{entry.detail}</td></tr>
+        ))}
+      </tbody>
+    </table>
+  </TableScroll>
+
+  <h2 id="gate">The release gate</h2>
+  <p>
+    A release needs clean machines, not a developer checkout. The gate runs the Rust and frontend
+    suites, builds the macOS app and Ubuntu package from scratch, checks the minimum system version,
+    confirms no <code>/nix/store</code> path leaks into the bundle, installs the package, adds a
+    project, starts a task, answers an approval and inspects the diff.
+  </p>
+  <p>
+    The <a href="/docs/contributors/release-pipeline">release pipeline page</a> lists the workflows
+    and artifact checks. The checklist's evidence table is still pending for both platforms, so a
+    release is not ready even when the preflight passes.
+  </p>
+
+  <h2 id="signing">Signing and updates</h2>
+  <p>
+    Signing and notarization are human-gated. Until they are configured, macOS Gatekeeper will warn
+    about an unsigned build. v1 has no updater: you replace the app from the source or a new bundle
+    yourself. Windows support, a signed Windows installer and a downloads page are planned with no
+    date.
+  </p>
+</Docs>

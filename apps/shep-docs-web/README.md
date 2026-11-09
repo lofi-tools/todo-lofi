@@ -4,20 +4,24 @@ Shepherd's documentation site, built with the repository's own design system
 (`libs/web-design-system`) and the same Panda preset, tokens and marketing
 components as the rest of the web packages.
 
-This package currently ships `/`: the individual-developer promise, the local
-workspace, preview annotation, and an explicit available/next/planned split.
-The user and contributor guides are later roadmap items; this package does not
-contain Taskstream documentation.
+This package ships `/`: the individual-developer promise, the local workspace,
+preview annotation, and an explicit available/next/planned split. It also ships
+two audience guides: `/docs/users` for installation, configuration and the
+workspace, and `/docs/contributors` for adapter, annotation, quota-ledger,
+release and fixture internals. It does not contain Taskstream documentation.
 
 ## Structure
 
 - `src/pages/index.astro` — the landing page.
+- `src/pages/docs/users/` and `src/pages/docs/contributors/` — the two guides.
+- `src/data/docs.ts` — the one navigation source for tabs, sidebars, footer and pagers.
+- `src/layouts/Docs.astro`, `src/components/blocks/DocsHeader.astro` and
+  `DocsFooter.astro` — the docs shell.
 - `data/shepherd.ts` — landing copy, availability groups and illustrative data.
 - `src/components/illustrations/` — the workspace, agent-pool and preview
   replicas, plus the shared illustration stage.
-- `src/components/blocks/SiteHeader.astro` and `DocsFooter.astro` — the
-  Shepherd-only site shell.
-- `tests/landing.spec.ts` — landing, navigation, theme, layout and axe checks.
+- `tests/landing.spec.ts` and `tests/docs.spec.ts` — landing and docs route,
+  navigation, honest-claims, layout, theme and axe checks.
 
 ## Running
 
@@ -43,7 +47,7 @@ pnpm codegen    # panda codegen + panda cssgen
 pnpm dev
 pnpm build
 pnpm typecheck  # astro check
-pnpm test:e2e   # Playwright landing, theming, layout and axe AA checks
+pnpm test:e2e   # Playwright landing/docs routes, theming, layout and axe AA checks
 ```
 
 ## Notes

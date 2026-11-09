@@ -1,0 +1,113 @@
+---
+import { css } from 'styled-system/css'
+import Docs from '../../../layouts/Docs.astro'
+import Callout from 'web-design-system/astro/marketing/Callout.astro'
+import { docGuides, guideLinks, REPO_URL } from '../../../data/docs'
+
+const toc = [
+  { label: 'What lives where', href: '#layout' },
+  { label: 'Runtime shape', href: '#runtime' },
+  { label: 'Current status', href: '#status' },
+  { label: 'Reading order', href: '#reading-order' },
+  { label: 'Ground rules', href: '#rules' },
+]
+
+const guide = docGuides.find((entry) => entry.heading === 'Contributor guide')
+const pages = guide ? guideLinks(guide).filter((item) => item.href !== guide.href) : []
+
+const summaries: Record<string, string> = {
+  'Adapter contracts': 'The tier model, the UI-free harness trait, events, capabilities, approvals and contract tests.',
+  'Annotation API': 'The shared payload, wrapper security model, validation bounds and prompt assembly.',
+  'Quota ledger': 'The planned local record for pool slots, reset windows, cooldowns and quota-aware selection.',
+  'Release pipeline': 'Packaging checks, smoke workflows, the clean-machine gate, and what signing still requires.',
+  'Test fixtures': 'Recorded protocol fixtures, fake adapters, Playwright surfaces and gated live smokes.',
+}
+
+const layout = [
+  { path: 'libs/shepherd-core', owns: 'Agents, terminals, task state, Git, storage, input routing and commands. No Tauri or GPUI types.' },
+  { path: 'libs/agent-harness', owns: 'The UI-free adapter trait, transcript event types and native adapter implementations.' },
+  { path: 'libs/acp-client', owns: 'ACP connection, sessions, permissions, filesystem and terminal client capabilities.' },
+  { path: 'apps/shepherd/ui', owns: 'SolidJS views over the core bridge: task workspace, canvas terminal, preview and review.' },
+  { path: 'apps/shepherd/src-tauri', owns: 'The window, Tauri commands, the event channel and the loopback preview wrapper.' },
+  { path: 'apps/shepherd-gpui', owns: 'The planned v2 shell over the same core; it is not part of the v1 path.' },
+]
+---
+
+<Docs
+  title="Contributor guide"
+  description="How Shepherd is put together, where each responsibility lives, and how to work on the core without breaking the UI contract."
+  toc={toc}
+>
+  <Callout tone="note" title="Here to use the app?">
+    This guide is about the implementation. Installing, running and configuring Shepherd is the
+    <a href="/docs/users">user guide</a>.
+  </Callout>
+
+  <h2 id="layout">What lives where</h2>
+  <p>
+    Shepherd is one application with a UI-free Rust core. The v1 shell is Tauri 2 with a SolidJS and
+    TypeScript frontend; v2 is planned to replace only the shell with GPUI. The core must stay
+    reusable across both.
+  </p>
+  <ul>
+    {
+      layout.map((entry) => (
+        <li><code>{entry.path}</code> — {entry.owns}</li>
+      ))
+    }
+  </ul>
+
+  <h2 id="runtime">Runtime shape</h2>
+  <p>
+    One Rust process owns the tokio runtime, every agent process, every PTY, the Git commands and
+    the database writes. The shell sends commands and receives core events over one channel. The UI
+    renders core snapshots; it is not a second frontend model.
+  </p>
+  <p>
+    There is no daemon and no attach protocol. The only listener is the token-scoped loopback preview
+    wrapper, and it exists only while the Preview tab is using it. Quitting the app ends agents and
+    terminals by design; the recovery path is the interrupted state, not a background service.
+  </p>
+
+  <h2 id="status">Current status</h2>
+  <p>
+    The v1 workspace is functional: native and ACP adapters, task worktrees, review, Git, terminals,
+    preview annotation and the settings/shell flows are implemented and exercised. The quota-aware
+    agent pool and signed installers are next, not shipped. The v2 GPUI shell is planned but
+    unscheduled and starts only after v1 is feature complete.
+  </p>
+  <p>
+    When a task and this guide disagree, the task in <code>apps/shepherd/docs/todo.md</code> and the
+    master specification are the source of truth. If a planned feature is documented here, the page
+    says so.
+  </p>
+
+  <h2 id="reading-order">Reading order</h2>
+  <ol>
+    {
+      pages.map((page) => (
+        <li>
+          <a href={page.href}><strong>{page.label}</strong></a> — {summaries[page.label]}
+        </li>
+      ))
+    }
+  </ol>
+  <p>
+    The behavior lives in <code>apps/shepherd/docs/spec/master-spec.md</code>, the workspace layout
+    decisions in <code>workspace-ui.md</code>, and the build shape in <code>stack.md</code>. Read
+    the relevant spec before changing a flow that the spec covers.
+  </p>
+
+  <h2 id="rules">Ground rules</h2>
+  <ul>
+    <li><strong>Local-first.</strong> No account, telemetry, crash upload or provider key. Agents use the credentials you already installed.</li>
+    <li><strong>No silent allow.</strong> An approval without a judge becomes a user card; it never becomes an automatic yes.</li>
+    <li><strong>No hidden state.</strong> The task shows the adapter tier, spawn command, fallback reason and every decision source.</li>
+    <li><strong>Adapters do not write storage.</strong> The core owns turn boundaries, canonical item IDs and persistence.</li>
+    <li><strong>Errors reach the UI.</strong> Do not discard a fallible operation with <code>let _ =</code>; propagate it or surface it with context.</li>
+    <li><strong>Tests assert behavior, not pixels.</strong> Terminal, Git, adapter and preview tests use fixtures and temporary repositories.</li>
+  </ul>
+  <p class={css({ fontSize: 'sm', color: 'fg.subtle' })}>
+    Repository: <a href={REPO_URL}>{REPO_URL.replace('https://', '')}</a>.
+  </p>
+</Docs>

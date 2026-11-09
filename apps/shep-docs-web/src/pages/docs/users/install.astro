@@ -1,0 +1,133 @@
+---
+import Docs from '../../../layouts/Docs.astro'
+import Callout from 'web-design-system/astro/marketing/Callout.astro'
+import CodeBlock from 'web-design-system/astro/product/CodeBlock.astro'
+import TableScroll from '../../../components/atoms/TableScroll.astro'
+
+const toc = [
+  { label: 'Requirements', href: '#requirements' },
+  { label: 'Run from a checkout', href: '#checkout' },
+  { label: 'Test mode', href: '#test-mode' },
+  { label: 'Build a desktop bundle', href: '#bundle' },
+  { label: 'Install an agent', href: '#agents' },
+  { label: 'First project', href: '#first-project' },
+]
+
+const requirements = [
+  { need: 'macOS', detail: 'macOS 13 (Ventura) or newer.' },
+  { need: 'Linux', detail: 'Ubuntu 24.04+ with WebKitGTK 2.44 or newer.' },
+  { need: 'Git', detail: 'Agent tasks need a Git repository; Shepherd creates their worktrees.' },
+  { need: 'Nix + direnv', detail: 'The repository dev shell supplies the pinned Rust, Node, pnpm and helper scripts.' },
+  { need: 'An agent CLI', detail: 'Install and sign in to the agent you want to use. Shepherd does not bundle one.' },
+]
+
+const run = `direnv allow .   # once, from the repository root
+pnpm install
+shep`
+
+const testRun = `shep --test
+# or, in a non-interactive shell:
+direnv exec . shep --test`
+
+const build = `direnv exec . pnpm --dir apps/shepherd build
+# macOS bundle:
+# target/release/bundle/macos/Shepherd.app
+# Ubuntu package:
+# target/release/bundle/deb/*.deb`
+---
+
+<Docs
+  title="Install and run"
+  description="Run Shepherd from a checkout today; signed desktop installers are still being prepared."
+  toc={toc}
+>
+  <Callout tone="warning" title="No signed installer yet">
+    Shepherd currently runs from a checkout. Signed macOS and Linux artifacts are on the
+    <a href="/docs/users/releases">release roadmap</a>; do not treat a development bundle as a
+    released installer.
+  </Callout>
+
+  <h2 id="requirements">Requirements</h2>
+  <TableScroll label="Shepherd requirements">
+    <table>
+      <thead>
+        <tr><th>You need</th><th>Details</th></tr>
+      </thead>
+      <tbody>
+        {
+          requirements.map((entry) => (
+            <tr><td>{entry.need}</td><td>{entry.detail}</td></tr>
+          ))
+        }
+      </tbody>
+    </table>
+  </TableScroll>
+  <p>
+    The development shell is the supported path because it brings the exact toolchain and helper
+    scripts. If you already have a working Rust and pnpm setup, the checkout commands below are the
+    short version.
+  </p>
+
+  <h2 id="checkout">Run from a checkout</h2>
+  <CodeBlock filename="terminal" code={run} showLineNumbers={false} />
+  <p>
+    <code>shep</code> starts the desktop app and its Vite server. Development data lives in
+    <code>.cache/test-db/shepherd.db</code>, so projects and chats survive a normal restart. Use
+    <code>direnv exec . shep</code> when you need to launch it from a non-interactive runner.
+  </p>
+
+  <h2 id="test-mode">Test mode</h2>
+  <p>
+    <code>shep --test</code> starts on its own port with an empty database in a fresh directory
+    under <code>.cache/test-db/</code>. Changes survive Tauri reloads during that launch; closing the
+    app discards the session database, and the next test launch starts empty again.
+  </p>
+  <CodeBlock filename="terminal" code={testRun} showLineNumbers={false} />
+  <p>
+    Set <code>SHEPHERD_DEV_DATA_DIR</code> to an absolute path to keep a separate project list and
+    database. <code>SHEPHERD_DEV_PROJECT_ROOT</code> points the debug project picker at a fixture
+    directory.
+  </p>
+
+  <h2 id="bundle">Build a desktop bundle</h2>
+  <p>
+    The app build sets the macOS deployment target to 13.0. Use the bundle command rather than
+    copying a debug binary around:
+  </p>
+  <CodeBlock filename="terminal" code={build} showLineNumbers={false} />
+  <p>
+    <code>cargo test -p shepherd --test packaging</code> checks that the Tauri config, build script
+    and package workflow still agree. The clean-machine release gate is documented in the
+    <a href="/docs/contributors/release-pipeline">release pipeline</a>.
+  </p>
+
+  <h2 id="agents">Install an agent</h2>
+  <p>
+    Shepherd starts installed agent CLIs as subprocesses. It probes the executable, chooses the
+    richest protocol the installed version supports, and shows the tier and fallback reason in the
+    task and diagnostics. Install and authenticate the agent first; Shepherd never stores provider
+    keys.
+  </p>
+  <ul>
+    <li><strong>Codex</strong> — install the CLI and sign in. The desktop app can supply its local project list for batch import, but the CLI must still be reachable.</li>
+    <li><strong>OpenCode</strong> — install the executable, or point <code>agents.opencode.executable</code> at an existing one in <code>settings.json</code>.</li>
+    <li><strong>Claude Code</strong> — configure an ACP executable with <code>agents.claude.executable</code> and optional <code>agents.claude.args</code>.</li>
+    <li><strong>Custom ACP agent</strong> — add its executable and arguments in settings if it speaks ACP over stdio.</li>
+  </ul>
+  <p>
+    The <a href="/docs/users/configuration">configuration page</a> has the settings paths and examples.
+    If an agent is missing, the chat shows the install hint and offers a terminal as the working
+    alternative.
+  </p>
+
+  <h2 id="first-project">First project</h2>
+  <ol>
+    <li>Add a local directory. Agent tasks require a Git repository; the folder picker accepts either a <code>.git</code> directory or a <code>.git</code> file pointing at a worktree.</li>
+    <li>Select the project and type a prompt. Sending the first prompt creates the task, its branch and its worktree.</li>
+    <li>Answer any approval, then open the Review, Git or Files tab to inspect what changed.</li>
+  </ol>
+  <p>
+    Continue with the <a href="/docs/users/mental-model">mental model</a> before running several
+    tasks in parallel; it explains what each task owns and what survives a restart.
+  </p>
+</Docs>

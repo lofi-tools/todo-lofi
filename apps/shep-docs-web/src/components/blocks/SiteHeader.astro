@@ -15,6 +15,7 @@ const links = [
   { label: 'Product', href: '/#product' },
   { label: 'Available', href: '/#available' },
   { label: 'Next', href: '/#next' },
+  { label: 'Docs', href: '/docs/users' },
 ]
 
 const brandName = 'Shepherd'
@@ -23,6 +24,9 @@ const brandLogo = '/shepherd-logo.svg'
 // The brand link is only current on `/`; section links are same-page anchors.
 const path = Astro.url.pathname.replace(/\/+$/, '') || '/'
 const isHome = path === '/'
+
+const isActive = (href: string) =>
+  href === '/docs/users' ? path === href || path.startsWith(`${href}/`) : path === href
 
 const linkStyle = (active: boolean) =>
   css({
@@ -202,9 +206,9 @@ const drawerLink = (active: boolean) =>
         links.map((link) => (
           <li>
             <a
-              class={linkStyle(path === link.href)}
+              class={linkStyle(isActive(link.href))}
               href={link.href}
-              aria-current={path === link.href ? 'page' : undefined}
+              aria-current={isActive(link.href) ? 'page' : undefined}
             >
               {link.label}
             </a>
@@ -265,9 +269,9 @@ const drawerLink = (active: boolean) =>
           links.map((link) => (
             <li>
               <a
-                class={drawerLink(path === link.href)}
+                class={drawerLink(isActive(link.href))}
                 href={link.href}
-                aria-current={path === link.href ? 'page' : undefined}
+                aria-current={isActive(link.href) ? 'page' : undefined}
               >
                 {link.label}
               </a>

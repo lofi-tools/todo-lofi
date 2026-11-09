@@ -1,0 +1,117 @@
+---
+import Docs from '../../../layouts/Docs.astro'
+import Callout from 'web-design-system/astro/marketing/Callout.astro'
+import { Badge } from 'web-design-system/components'
+
+const toc = [
+  { label: 'Status', href: '#status' },
+  { label: 'The slot record', href: '#slot' },
+  { label: 'The ledger', href: '#ledger' },
+  { label: 'Availability', href: '#availability' },
+  { label: 'Selection', href: '#selection' },
+  { label: 'Idle release', href: '#release' },
+  { label: 'Corrections and privacy', href: '#privacy' },
+  { label: 'Planned tests', href: '#tests' },
+]
+---
+
+<Docs
+  title="Quota ledger"
+  description="The planned local record behind the quota-aware agent pool. This is a design contract, not implemented behavior."
+  toc={toc}
+>
+  <Callout tone="warning" title="Not implemented">
+    There is no pool code, ledger table or quota UI in the current build. This page records the
+    agreed contract so the implementation, tests and user guide cannot drift. Do not present it as a
+    shipped capability.
+  </Callout>
+
+  <h2 id="status">Status</h2>
+  <p>
+    <Badge tone="warning" variant="subtle">planned</Badge> The pool work is split into slot
+    persistence, the quota ledger, priority selection, idle release and the pool UI. None of those
+    items is checked off. The user-facing promise is on the
+    <a href="/docs/users/agent-pool">agent pool</a> page; this page is for the implementation.
+  </p>
+
+  <h2 id="slot">The slot record</h2>
+  <p>
+    A slot is an installed agent plus one provider/model plus the credential or account it uses. A
+    persisted slot needs:
+  </p>
+  <ul>
+    <li>The user's priority order and the provider/model metadata.</li>
+    <li>A local usage ledger, reset window, cooldown state and last-used timestamp.</li>
+    <li>A reference to the credential or account. Never copy the credential into the slot, logs or database.</li>
+    <li>An enabled/disabled state and the last error or health signal.</li>
+  </ul>
+
+  <h2 id="ledger">The ledger</h2>
+  <p>
+    The ledger is local. It can be seeded from a catalog snapshot when one is available, updated from
+    provider rate-limit or quota responses, and corrected by the user. It is not a provider billing
+    record and must not claim a limit it cannot observe.
+  </p>
+  <p>
+    A quota response is evidence for a slot, not a global fact. Preserve the source and timestamp so
+    a later reset or correction can be explained. If the provider reports no capacity, record
+    <strong>unknown</strong>; never translate that to free or unlimited.
+  </p>
+
+  <h2 id="availability">Availability</h2>
+  <p>
+    Before selection, a slot must answer whether it can accept work at the current time. The
+    implementation needs states for available, exhausted, cooling down, disabled, unhealthy and
+    unknown. Exhausted and cooling-down slots are skipped with a visible reason; unknown capacity is
+    not treated as available.
+  </p>
+
+  <h2 id="selection">Selection</h2>
+  <ol>
+    <li>Try the user's preferred healthy slot.</li>
+    <li>If it cannot accept work, try the next slot in priority order.</li>
+    <li>An explicit task override wins over the order.</li>
+    <li>Record the chosen slot and every skipped higher-priority slot with its reason.</li>
+  </ol>
+  <p>
+    Selection must be atomic across concurrent tasks. The transcript or task header names the chosen
+    slot, so a fallback is never silent. A slot that is exhausted for one provider/model must not
+    block an unrelated slot.
+  </p>
+
+  <h2 id="release">Idle release</h2>
+  <p>
+    After a turn settles, keep the slot reserved for a configurable idle timeout (default 15
+    minutes). Release it after that timeout so another task can use it. Never release during a
+    running turn or a pending approval.
+  </p>
+  <p>
+    Releasing a reservation must not destroy a resumable agent session. If the adapter cannot resume,
+    the task says so and selects another slot for the next turn. Tests need a follow-up after release,
+    a slot claimed in the meantime, cancellation and restart recovery.
+  </p>
+
+  <h2 id="privacy">Corrections and privacy</h2>
+  <p>
+    The user can edit a limit or reset time, clear a cooldown, reorder slots, disable a slot and force
+    a slot for one turn. The pool UI shows provider/model, priority, availability, known limit/reset,
+    current task, last error and last-used time. It must not display credentials or invent a quota.
+  </p>
+  <p>
+    The catalog is advisory. A local ledger and the user's correction are authoritative for local
+    selection; a stale catalog snapshot must not silently overwrite them.
+  </p>
+
+  <h2 id="tests">Planned tests</h2>
+  <ul>
+    <li>Deterministic clock tests for reset windows, provider errors, clock changes and user corrections.</li>
+    <li>Simultaneous starts, exhaustion, cooldown, provider failure and manual override.</li>
+    <li>Idle release, a follow-up after release, a slot claimed meanwhile, cancellation and restart recovery.</li>
+    <li>Credential redaction in records, logs and diagnostics.</li>
+  </ul>
+  <p>
+    Until those tests exist, the agent pool remains a next-step item. See the
+    <a href="/docs/contributors/test-fixtures">test fixtures</a> page for the fixture rules that apply
+    when the work lands.
+  </p>
+</Docs>
