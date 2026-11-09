@@ -1,6 +1,6 @@
 # Providers catalog — implementation plan
 
-Status: S1 and S3 implemented on 2026-11-09. S2's source-independent merge policy, review summary, free-offer normalization and synthetic fixture gate are implemented; its source adapters remain blocked on approved sources. S4 is blocked on Cloudflare credentials. S5's advisory contract is implemented; connecting it to the Shepherd pool remains a separate Shepherd todo.
+Status: S1 and S3 implemented on 2026-11-09. S2's source-independent merge policy, review summary, free-offer normalization and synthetic fixture gate are implemented; its source adapters remain blocked on approved sources. S4's deploy job is implemented but inert until the Pages project and secrets are configured; S4 itself remains blocked on that configuration and deployed verification. S5's advisory contract is implemented; connecting it to the Shepherd pool remains a separate Shepherd todo.
 
 Spec: [spec.md](./spec/spec.md). The spec governs behavior and data semantics;
 this file gives the working order.
@@ -229,8 +229,10 @@ Pages deployment remains S4 and was not attempted.
 
 - [ ] Add the Cloudflare Pages project configuration, build command and output
   directory.
-- [ ] Add the deploy job after a successful scrape/validate step. Download the
-  artifact from the same workflow run.
+- [x] Add the deploy job after a successful scrape/validate step. Download the
+  artifact from the same workflow run. The job is gated by
+  `CLOUDFLARE_PAGES_ENABLED` and a zero-exit guard; it skips before install,
+  build or deploy when secrets are absent.
 - [ ] Use repository/environment secrets for `CLOUDFLARE_API_TOKEN`,
   `CLOUDFLARE_ACCOUNT_ID` and the Pages project name. Do not commit them.
 - [ ] Deploy only when the snapshot validates. A stale but valid snapshot may
@@ -242,6 +244,11 @@ Pages deployment remains S4 and was not attempted.
 - [ ] Gate: package typecheck, static build, package e2e, full Shepherd e2e,
   root typecheck, a successful deployed-preview check and a clean tree. Commit
   S4 alone.
+
+S4 partial evidence (2026-11-09): the deploy job is committed but has not run.
+The guard unit/CLI test proves missing configuration exits zero with
+`enabled=false`; no deployment was attempted. Pages project configuration,
+secret setup, manual recovery and URL/content-type verification remain blocked.
 
 ## Slice S5 — agent pool advisory integration
 

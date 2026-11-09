@@ -4,8 +4,10 @@ Status: S1 (snapshot/schema) and S3 (static catalog site) implemented on
 2026-11-09. The S2 merge policy, review summary, free-offer normalization and
 synthetic fixture gate are implemented; S2 sources for plans/offers/agents/local
 runtimes remain blocked. The S5 advisory JSON contract is published at
-`/agent-pool-advisory.v1.json`; pool wiring remains separate. S4 is blocked on
-Cloudflare Pages credentials. No deployment exists yet.
+`/agent-pool-advisory.v1.json`; pool wiring remains separate. S4 has an inert
+deploy job gated on `CLOUDFLARE_PAGES_ENABLED` and a zero-exit configuration
+guard; it is blocked on Pages project/secret setup and deployed verification.
+No deployment exists yet.
 
 This is a separate public site from Shepherd. It compares coding-agent
 providers, plans, models and recurring free offers. It is informational only:

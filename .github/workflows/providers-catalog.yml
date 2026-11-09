@@ -75,3 +75,55 @@ jobs:
           else
             echo 'No validation report was produced. Check the scrape and validation steps.' >> "$GITHUB_STEP_SUMMARY"
           fi
+
+  deploy:
+    needs: snapshot
+    if: ${{ vars.CLOUDFLARE_PAGES_ENABLED == 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.21.0'
+      - name: Check Cloudflare Pages configuration
+        id: guard
+        env:
+          CLOUDFLARE_PAGES_ENABLED: ${{ vars.CLOUDFLARE_PAGES_ENABLED }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_PAGES_PROJECT: ${{ secrets.CLOUDFLARE_PAGES_PROJECT }}
+        run: node --experimental-strip-types apps/providers-catalog-web/scripts/pages-deploy-guard.ts
+      - name: Report a skipped deployment
+        if: steps.guard.outputs.enabled != 'true'
+        run: |
+          echo '### Cloudflare Pages deployment skipped' >> "$GITHUB_STEP_SUMMARY"
+          echo '${{ steps.guard.outputs.reason }}' >> "$GITHUB_STEP_SUMMARY"
+      - uses: pnpm/action-setup@v4
+        if: steps.guard.outputs.enabled == 'true'
+        with:
+          version: 11.25.0
+      - name: Install
+        if: steps.guard.outputs.enabled == 'true'
+        run: pnpm install --frozen-lockfile
+      - name: Download the validated snapshot
+        if: steps.guard.outputs.enabled == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          pattern: providers-catalog-*
+          path: apps/providers-catalog-web/artifacts
+          merge-multiple: true
+      - name: Build the static catalog
+        if: steps.guard.outputs.enabled == 'true'
+        run: |
+          set -euo pipefail
+          snapshot=$(find apps/providers-catalog-web/artifacts -maxdepth 1 -name '*.duckdb' -print | sort | tail -1)
+          test -n "$snapshot"
+          CATALOG_DUCKDB_PATH="$snapshot" pnpm --dir apps/providers-catalog-web run build
+      - name: Deploy to Cloudflare Pages
+        if: steps.guard.outputs.enabled == 'true'
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: pages deploy apps/providers-catalog-web/dist --project-name=${{ secrets.CLOUDFLARE_PAGES_PROJECT }}
