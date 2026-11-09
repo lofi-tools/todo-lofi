@@ -326,8 +326,8 @@ terminal encoder without waiting for IPC.
 ### 3.4 Concurrency rules
 
 - One agent process per task; at most one in-flight prompt per task.
-- Prompts queue per task and drain when the turn ends, never while an approval is
-  pending.
+- Prompts queue durably per task, rehydrate after restart and drain when the turn
+  ends, never while an approval is pending.
 - Terminal IO is one reader task per PTY plus a writer queue; rendering reads a
   ring-buffer snapshot, never the PTY.
 - One Turso writer task; reads go through the same core layer.

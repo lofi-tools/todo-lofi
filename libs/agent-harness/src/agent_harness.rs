@@ -426,7 +426,8 @@ impl Capabilities {
     }
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct PromptInput {
     pub text: String,
     pub attachments: Vec<PromptAttachment>,
@@ -434,7 +435,7 @@ pub struct PromptInput {
     pub mode: Option<String>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct CodexTurnOptions {
     pub model: Option<String>,
@@ -450,7 +451,8 @@ impl PromptInput {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct PromptAttachment {
     pub path: PathBuf,
     pub image_mime_type: Option<String>,

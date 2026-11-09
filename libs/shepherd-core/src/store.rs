@@ -6,7 +6,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use agent_harness::{AttachmentMetadata, Entry, EntryKind};
+use agent_harness::{AttachmentMetadata, Entry, EntryKind, PromptInput};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -65,6 +65,8 @@ pub enum StoreError {
     ApprovalOwnerMissing { project_id: ProjectId },
     #[error("workspace layout cannot be saved for missing task {task_id}")]
     WorkspaceOwnerMissing { task_id: TaskId },
+    #[error("prompt queue cannot be saved for missing task {task_id}")]
+    PromptQueueOwnerMissing { task_id: TaskId },
     #[error("task {task_id} cannot be saved for project {project_id}")]
     TaskOwnerMissing {
         task_id: TaskId,
@@ -127,6 +129,12 @@ pub trait Store: Send + Sync {
         &self,
         task_id: &TaskId,
         layout: WorkspaceLayout,
+    ) -> Result<(), StoreError>;
+    async fn load_prompt_queues(&self) -> Result<Vec<(TaskId, Vec<PromptInput>)>, StoreError>;
+    async fn save_prompt_queue(
+        &self,
+        task_id: &TaskId,
+        prompts: &[PromptInput],
     ) -> Result<(), StoreError>;
     async fn load_terminals(&self) -> Result<Vec<TerminalRecord>, StoreError>;
     async fn save_terminal(&self, terminal: &TerminalRecord) -> Result<(), StoreError>;
@@ -243,6 +251,10 @@ const MIGRATIONS: &[Migration] = &[
     Migration {
         name: "0017_process_token.sql",
         sql: include_str!("../toasty/migrations/0017_process_token.sql"),
+    },
+    Migration {
+        name: "0018_prompt_queues.sql",
+        sql: include_str!("../toasty/migrations/0018_prompt_queues.sql"),
     },
 ];
 
@@ -1370,6 +1382,19 @@ impl Store for TursoStore {
                     task_id: task.id.clone(),
                 });
             }
+            if let Err(error) =
+                toasty::sql::statement("DELETE FROM prompt_queues WHERE task_id = ?1")
+                    .bind(task.id.as_str())
+                    .exec(&mut transaction)
+                    .await
+            {
+                if let Err(rollback_error) = transaction.rollback().await {
+                    return Err(StoreError::Backend(format!(
+                        "archive failed: {error}; rollback failed: {rollback_error}"
+                    )));
+                }
+                return Err(error.into());
+            }
         }
         transaction.commit().await?;
         Ok(())
@@ -1389,6 +1414,7 @@ impl Store for TursoStore {
             "DELETE FROM sessions WHERE task_id = ?1",
             "DELETE FROM terminals WHERE task_id = ?1",
             "DELETE FROM layouts WHERE task_id = ?1",
+            "DELETE FROM prompt_queues WHERE task_id = ?1",
             "DELETE FROM tasks WHERE id = ?1",
         ] {
             if let Err(error) = toasty::sql::statement(statement)
@@ -1536,6 +1562,64 @@ impl Store for TursoStore {
         .await?;
         if updated != 1 {
             return Err(StoreError::WorkspaceOwnerMissing {
+                task_id: task_id.clone(),
+            });
+        }
+        Ok(())
+    }
+
+    async fn load_prompt_queues(&self) -> Result<Vec<(TaskId, Vec<PromptInput>)>, StoreError> {
+        let mut db = self.db.lock().await;
+        let rows =
+            toasty::sql::query("SELECT task_id, prompts_json FROM prompt_queues ORDER BY task_id")
+                .column_types([Type::String, Type::String])
+                .exec(&mut *db)
+                .await?;
+        let mut queues = Vec::new();
+        for row in rows {
+            let Value::Record(fields) = row else {
+                return Err(StoreError::InvalidRow(
+                    "expected a prompt queue record".into(),
+                ));
+            };
+            let task = TaskId::new(required_string(fields.first())?);
+            let json = required_string(fields.get(1))?;
+            let prompts: Vec<PromptInput> = serde_json::from_str(&json).map_err(|error| {
+                StoreError::InvalidRow(format!("unreadable prompt queue for {task}: {error}"))
+            })?;
+            if !prompts.is_empty() {
+                queues.push((task, prompts));
+            }
+        }
+        Ok(queues)
+    }
+
+    async fn save_prompt_queue(
+        &self,
+        task_id: &TaskId,
+        prompts: &[PromptInput],
+    ) -> Result<(), StoreError> {
+        let mut db = self.db.lock().await;
+        if prompts.is_empty() {
+            toasty::sql::statement("DELETE FROM prompt_queues WHERE task_id = ?1")
+                .bind(task_id.as_str())
+                .exec(&mut *db)
+                .await?;
+            return Ok(());
+        }
+        let json = serde_json::to_string(prompts)
+            .map_err(|error| StoreError::Backend(error.to_string()))?;
+        let updated = toasty::sql::statement(
+            "INSERT INTO prompt_queues (task_id, prompts_json)
+             SELECT ?1, ?2 FROM tasks WHERE id = ?1
+             ON CONFLICT (task_id) DO UPDATE SET prompts_json = excluded.prompts_json",
+        )
+        .bind(task_id.as_str())
+        .bind(json)
+        .exec(&mut *db)
+        .await?;
+        if updated != 1 {
+            return Err(StoreError::PromptQueueOwnerMissing {
                 task_id: task_id.clone(),
             });
         }
@@ -2029,6 +2113,7 @@ pub struct MemoryStore {
     projects: RwLock<BTreeMap<String, Project>>,
     tasks: RwLock<BTreeMap<String, Task>>,
     workspace_layouts: RwLock<BTreeMap<TaskId, WorkspaceLayout>>,
+    prompt_queues: RwLock<BTreeMap<TaskId, Vec<PromptInput>>>,
     terminals: RwLock<BTreeMap<String, TerminalRecord>>,
     terminal_layouts: RwLock<BTreeMap<ProjectId, TerminalLayout>>,
     sessions: RwLock<Vec<SessionRecord>>,
@@ -2284,6 +2369,10 @@ impl Store for MemoryStore {
                 stored.updated_at = task.updated_at;
             }
         }
+        let mut prompt_queues = self.prompt_queues.write().await;
+        for task in archived {
+            prompt_queues.remove(&task.id);
+        }
         Ok(())
     }
 
@@ -2316,6 +2405,7 @@ impl Store for MemoryStore {
         }
         tasks.remove(task_id.as_str());
         workspace_layouts.remove(task_id);
+        self.prompt_queues.write().await.remove(task_id);
         transcripts.remove(task_id);
         sessions.retain(|session| &session.task_id != task_id);
         terminals.retain(|_, terminal| terminal.task_id.as_ref() != Some(task_id));
@@ -2347,6 +2437,38 @@ impl Store for MemoryStore {
             .write()
             .await
             .insert(task_id.clone(), layout);
+        Ok(())
+    }
+
+    async fn load_prompt_queues(&self) -> Result<Vec<(TaskId, Vec<PromptInput>)>, StoreError> {
+        Ok(self
+            .prompt_queues
+            .read()
+            .await
+            .iter()
+            .map(|(task, prompts)| (task.clone(), prompts.clone()))
+            .collect())
+    }
+
+    async fn save_prompt_queue(
+        &self,
+        task_id: &TaskId,
+        prompts: &[PromptInput],
+    ) -> Result<(), StoreError> {
+        if prompts.is_empty() {
+            self.prompt_queues.write().await.remove(task_id);
+            return Ok(());
+        }
+        let tasks = self.tasks.read().await;
+        if !tasks.contains_key(task_id.as_str()) {
+            return Err(StoreError::PromptQueueOwnerMissing {
+                task_id: task_id.clone(),
+            });
+        }
+        self.prompt_queues
+            .write()
+            .await
+            .insert(task_id.clone(), prompts.to_vec());
         Ok(())
     }
 
@@ -3657,6 +3779,72 @@ mod tests {
         assert_eq!(reopened.load_workspace_layouts().await?.len(), 1);
         assert_eq!(reopened.load_sessions().await?.len(), 1);
         assert_eq!(reopened.load_terminals().await?.len(), 2);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn prompt_queues_round_trip_and_clear_with_their_task()
+    -> Result<(), Box<dyn std::error::Error>> {
+        async fn verify(store: &dyn Store, root: &Path) -> Result<(), Box<dyn std::error::Error>> {
+            let project = Project::new(root.to_path_buf());
+            let task = Task::draft(project.id.clone(), "Queued", root);
+            let first = PromptInput::text("first batch");
+            let second = PromptInput::text("second batch");
+            assert!(matches!(
+                store
+                    .save_prompt_queue(&task.id, std::slice::from_ref(&first))
+                    .await,
+                Err(StoreError::PromptQueueOwnerMissing { .. })
+            ));
+            store.save_project(&project).await?;
+            store.save_task(&task).await?;
+            store
+                .save_prompt_queue(&task.id, &[first.clone(), second.clone()])
+                .await?;
+            let queues = store.load_prompt_queues().await?;
+            assert_eq!(queues.len(), 1);
+            assert_eq!(queues[0].0, task.id);
+            assert_eq!(
+                queues[0]
+                    .1
+                    .iter()
+                    .map(|input| input.text.as_str())
+                    .collect::<Vec<_>>(),
+                ["first batch", "second batch"]
+            );
+            store.save_prompt_queue(&task.id, &[second]).await?;
+            assert_eq!(
+                store.load_prompt_queues().await?[0]
+                    .1
+                    .iter()
+                    .map(|input| input.text.as_str())
+                    .collect::<Vec<_>>(),
+                ["second batch"]
+            );
+
+            let mut review = task.clone();
+            review.state = TaskState::Review;
+            store.save_task(&review).await?;
+            store.save_prompt_queue(&review.id, &[first]).await?;
+            store.archive_tasks(&[review.clone()]).await?;
+            assert!(store.load_prompt_queues().await?.is_empty());
+
+            let removed = Task::draft(project.id.clone(), "Removed", root);
+            store.save_task(&removed).await?;
+            store
+                .save_prompt_queue(&removed.id, &[PromptInput::text("remove me")])
+                .await?;
+            store.delete_task(&removed.id, None).await?;
+            assert!(store.load_prompt_queues().await?.is_empty());
+            Ok(())
+        }
+        let directory = TestDirectory::new()?;
+        verify(&MemoryStore::new(), directory.path()).await?;
+        verify(
+            &TursoStore::open_at(&directory.join("prompt-queues.db")).await?,
+            directory.path(),
+        )
+        .await?;
         Ok(())
     }
 

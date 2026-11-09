@@ -344,6 +344,15 @@ impl Core {
             core.tasks.insert(task.id.clone(), task);
         }
 
+        for (task, prompts) in core.store.load_prompt_queues().await? {
+            if core.tasks.contains_key(&task) {
+                core.queued_prompts
+                    .insert(task, prompts.into_iter().collect());
+            } else {
+                tracing::warn!(%task, "ignored a prompt queue for a missing task");
+            }
+        }
+
         for (task, layout) in core.store.load_workspace_layouts().await? {
             if core.tasks.contains_key(&task) && layout.is_valid() {
                 core.workspace_layouts.insert(task, layout);
@@ -1885,19 +1894,23 @@ impl Core {
             }
             prompts.front().cloned().map(|input| (id.clone(), input))
         }) {
-            if let Some(prompts) = self.queued_prompts.get_mut(&task_id) {
-                prompts.pop_front();
-                if prompts.is_empty() {
-                    self.queued_prompts.remove(&task_id);
-                }
-            }
             match self.send_prompt(&task_id, input.clone()).await {
-                Ok(_) => changed = true,
+                Ok(_) => {
+                    changed = true;
+                    let remaining = self
+                        .queued_prompts
+                        .get_mut(&task_id)
+                        .map(|prompts| {
+                            prompts.pop_front();
+                            prompts.iter().cloned().collect::<Vec<_>>()
+                        })
+                        .unwrap_or_default();
+                    if remaining.is_empty() {
+                        self.queued_prompts.remove(&task_id);
+                    }
+                    self.store.save_prompt_queue(&task_id, &remaining).await?;
+                }
                 Err(error) => {
-                    self.queued_prompts
-                        .entry(task_id.clone())
-                        .or_default()
-                        .push_front(input);
                     self.emit(Event::Error {
                         task_id: Some(task_id.to_string()),
                         message: format!("Could not send a queued prompt: {error}"),
@@ -1957,10 +1970,15 @@ impl Core {
                     state: state.as_str(),
                 });
             }
-            self.queued_prompts
-                .entry(task_id.clone())
-                .or_default()
-                .push_back(input);
+            let mut prompts = self
+                .queued_prompts
+                .get(task_id)
+                .cloned()
+                .unwrap_or_default();
+            prompts.push_back(input);
+            let persisted = prompts.iter().cloned().collect::<Vec<_>>();
+            self.store.save_prompt_queue(task_id, &persisted).await?;
+            self.queued_prompts.insert(task_id.clone(), prompts);
             return Ok(CommandResult::TaskWorkspace(self.publish_task(task_id)?));
         }
         match state {
@@ -8480,6 +8498,148 @@ mod tests {
             ]
         );
         assert!(sent.try_recv().is_err());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn queued_prompts_survive_reload_and_deliver_once()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let repository = TestRepository::new()?;
+        let database = TestDatabase::new()?;
+        let uri = database.uri();
+        let (sender, receiver) = mpsc::unbounded_channel();
+        let (prompts, mut sent) = mpsc::unbounded_channel();
+        let mut core = Core::with_services(
+            Box::new(TursoStore::open(&uri).await?),
+            Box::new(LateHarnessFactory {
+                receiver: Mutex::new(Some(receiver)),
+                prompts,
+            }),
+        );
+        let project = add_project(&mut core, repository.path().to_path_buf()).await?;
+        let draft = workspace_of(
+            core.execute(Command::CreateDraft {
+                agent: Agent::Codex,
+                project_id: project,
+                title: "Reload the queue".to_string(),
+            })
+            .await?,
+        );
+        let task_id = TaskId::new(draft.task.id);
+
+        core.execute(Command::SendPrompt {
+            task_id: task_id.clone(),
+            input: PromptInput::text("First turn"),
+        })
+        .await?;
+        assert_eq!(sent.try_recv()?.1.text, "First turn");
+        let first_batch = "Preview annotations\n\nAnnotation 1\nInstruction: Increase contrast.";
+        let second_batch =
+            "Preview annotations\n\nAnnotation 1\nInstruction: Quiet the cancel action.";
+        for text in [first_batch, second_batch] {
+            core.execute(Command::SendPrompt {
+                task_id: task_id.clone(),
+                input: PromptInput::text(text),
+            })
+            .await?;
+        }
+        let persisted = core.store.load_prompt_queues().await?;
+        assert_eq!(persisted.len(), 1);
+        assert_eq!(persisted[0].0, task_id);
+        assert_eq!(
+            persisted[0]
+                .1
+                .iter()
+                .map(|input| input.text.as_str())
+                .collect::<Vec<_>>(),
+            [first_batch, second_batch]
+        );
+        assert!(sent.try_recv().is_err());
+
+        sender.send(HarnessEvent::TurnFinished {
+            reason: TurnFinishReason::Completed,
+        })?;
+        assert!(core.pump().await?);
+        assert_eq!(sent.try_recv()?.1.text, first_batch);
+        let persisted = core.store.load_prompt_queues().await?;
+        assert_eq!(persisted.len(), 1);
+        assert_eq!(
+            persisted[0]
+                .1
+                .iter()
+                .map(|input| input.text.as_str())
+                .collect::<Vec<_>>(),
+            [second_batch]
+        );
+        drop(core);
+
+        let (sender, receiver) = mpsc::unbounded_channel();
+        let (prompts, mut sent) = mpsc::unbounded_channel();
+        let mut reloaded = Core::load(
+            Box::new(TursoStore::open(&uri).await?),
+            Box::new(LateHarnessFactory {
+                receiver: Mutex::new(Some(receiver)),
+                prompts,
+            }),
+        )
+        .await?;
+        let restored = reloaded.open_task_workspace(&task_id).await?;
+        assert_eq!(restored.task.state, TaskState::Interrupted);
+        let persisted = reloaded.store.load_prompt_queues().await?;
+        assert_eq!(persisted.len(), 1);
+        assert_eq!(
+            persisted[0]
+                .1
+                .iter()
+                .map(|input| input.text.as_str())
+                .collect::<Vec<_>>(),
+            [second_batch]
+        );
+
+        let resumed = workspace_of(
+            reloaded
+                .execute(Command::ResumeTask {
+                    task_id: task_id.clone(),
+                })
+                .await?,
+        );
+        assert_eq!(resumed.task.state, TaskState::Ready);
+        assert!(sent.try_recv().is_err());
+        assert!(reloaded.pump().await?);
+        assert_eq!(sent.try_recv()?.1.text, second_batch);
+        assert!(sent.try_recv().is_err());
+        assert!(reloaded.store.load_prompt_queues().await?.is_empty());
+        let _ = reloaded.pump().await?;
+        assert!(sent.try_recv().is_err());
+
+        sender.send(HarnessEvent::TurnFinished {
+            reason: TurnFinishReason::Completed,
+        })?;
+        assert!(reloaded.pump().await?);
+        let final_workspace = reloaded.open_task_workspace(&task_id).await?;
+        assert_eq!(final_workspace.task.state, TaskState::Ready);
+        let rows = summaries(&final_workspace);
+        let first = rows
+            .iter()
+            .position(|row| row == &format!("you: {first_batch}"))
+            .ok_or("the first queued batch should be in the transcript")?;
+        let second = rows
+            .iter()
+            .position(|row| row == &format!("you: {second_batch}"))
+            .ok_or("the second queued batch should be in the transcript")?;
+        assert_eq!(
+            rows.iter()
+                .filter(|row| *row == &format!("you: {first_batch}"))
+                .count(),
+            1
+        );
+        assert_eq!(
+            rows.iter()
+                .filter(|row| *row == &format!("you: {second_batch}"))
+                .count(),
+            1
+        );
+        assert!(first < second, "queued batches must retain FIFO order");
         Ok(())
     }
 }

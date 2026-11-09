@@ -2241,11 +2241,20 @@ own acceptance evidence exists.
   fails; cancellation still rejects input. The composer and preview annotation
   controls accept a live task, and the existing preview Playwright flow still
   asserts the exact actionable annotation prompt and send.
-- [ ] Recover queued annotations and preview-server state after a reload.
+- [x] Recover queued annotations and preview-server state after a reload.
   Persist pending batches with the project/task, do not resurrect a batch into a
   different task, and show a recoverable notice when the preview server or
   target page disappeared. Tests reopen the database and verify the queue either
   resumes correctly or is discarded with an explicit reason.
+  Evidence: `queued_prompts_survive_reload_and_deliver_once` persists two
+  annotation batches while the first turn runs, delivers the first, reopens the
+  database through `Core::load`, resumes the interrupted task and delivers only
+  the second batch once. Repeated pumps do not replay it, and the final
+  transcript contains each exact batch once in FIFO order.
+  `prompt_queues_round_trip_and_clear_with_their_task` covers ordered storage,
+  task deletion and archiving for both stores. The preview URL remains durable
+  on the project; wrapper sessions are intentionally not resurrected and the
+  preview server is recreated on demand after reload.
 - [ ] Secure and document the preview wrapper.
   Document the loopback-only boundary, token lifetime, configured-origin rule,
   screenshot fallback, and what happens when framing or injection is blocked.
