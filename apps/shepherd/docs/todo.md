@@ -2554,6 +2554,24 @@ implemented; no public deployment exists yet.
   current task, last error and last-used time. Users can reorder, disable, edit
   limits, clear a cooldown and force a slot for one turn. The UI must not expose
   credentials or claim a provider quota it cannot observe.
+  - [x] Expose pool status, priority ordering and enable/disable controls in
+    the core.
+    Evidence (2026-11-09): `PoolSlotStatus`, `PoolStatus`, `PoolReorderRequest`,
+    `PoolReorderOutcome`, `PoolSlotEnabledRequest` and `PoolSlotEnabledOutcome`
+    are implemented with `load_pool_status`, `reorder_pool_slots` and
+    `set_pool_slot_enabled` in `TursoStore` and `MemoryStore`. Status joins each
+    slot with its latest ledger entry, derived availability and active request.
+    Reorder requires every current slot exactly once, assigns priorities
+    `0..n-1` atomically and repeats as a no-op; unknown, missing, duplicate and
+    empty orders are rejected. Enable/disable repeats safely and changes which
+    slot selection can choose. Tests against both stores cover status contents,
+    disabled selection fallback, order changes, repeat calls and rejected input.
+    No migration was needed; slots, selections and the ledger already persist.
+    `cargo test -p shepherd-core` passes 195 tests (4 ignored), and `cargo
+    clippy -p shepherd-core --all-targets -- -D warnings` and `cargo fmt -p
+    shepherd-core` pass.
+  - [ ] Build the pool UI and wire limit/reset correction, cooldown clearing,
+    ordering, enable/disable and the existing one-turn force override into it.
 
 ---
 

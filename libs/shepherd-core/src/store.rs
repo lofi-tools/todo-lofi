@@ -66,6 +66,8 @@ pub enum StoreError {
     ApprovalOwnerMissing { project_id: ProjectId },
     #[error("quota ledger entry cannot be saved for missing pool slot {slot_id}")]
     QuotaLedgerOwnerMissing { slot_id: PoolSlotId },
+    #[error("pool slot {slot_id} was not found")]
+    PoolSlotNotFound { slot_id: PoolSlotId },
     #[error("workspace layout cannot be saved for missing task {task_id}")]
     WorkspaceOwnerMissing { task_id: TaskId },
     #[error("prompt queue cannot be saved for missing task {task_id}")]
@@ -427,6 +429,51 @@ pub struct PoolIdleReleaseOutcome {
     pub kept: Vec<PoolIdleKept>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PoolSlotStatus {
+    pub slot: PoolSlot,
+    pub availability: PoolAvailability,
+    pub latest_quota: Option<PoolQuotaEntry>,
+    pub current_request: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PoolStatus {
+    pub generated_at: u64,
+    pub slots: Vec<PoolSlotStatus>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PoolReorderRequest {
+    pub slot_ids: Vec<PoolSlotId>,
+    pub now: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PoolReorderOutcome {
+    pub slots: Vec<PoolSlot>,
+    pub reason: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PoolSlotEnabledRequest {
+    pub slot_id: PoolSlotId,
+    pub enabled: bool,
+    pub now: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PoolSlotEnabledOutcome {
+    pub slot: PoolSlot,
+    pub reason: String,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WorktreeDeletion {
     pub task_id: TaskId,
@@ -544,6 +591,15 @@ pub trait Store: Send + Sync {
         &self,
         request: &PoolIdleReleaseRequest,
     ) -> Result<PoolIdleReleaseOutcome, StoreError>;
+    async fn load_pool_status(&self, now: u64) -> Result<PoolStatus, StoreError>;
+    async fn reorder_pool_slots(
+        &self,
+        request: &PoolReorderRequest,
+    ) -> Result<PoolReorderOutcome, StoreError>;
+    async fn set_pool_slot_enabled(
+        &self,
+        request: &PoolSlotEnabledRequest,
+    ) -> Result<PoolSlotEnabledOutcome, StoreError>;
 }
 
 struct Migration {
@@ -2094,6 +2150,120 @@ impl Store for TursoStore {
             }
         }
         Ok(PoolIdleReleaseOutcome { released, kept })
+    }
+
+    async fn load_pool_status(&self, now: u64) -> Result<PoolStatus, StoreError> {
+        timestamp(now)?;
+        let slots = self.load_pool_slots().await?;
+        let selections = self.load_pool_selections().await?;
+        let mut statuses = Vec::with_capacity(slots.len());
+        for slot in slots {
+            let latest_quota = self.latest_pool_quota_entry(&slot.id).await?;
+            let availability = slot.availability(latest_quota.as_ref(), now);
+            let current_request = selections
+                .iter()
+                .find(|selection| {
+                    selection.released_at.is_none() && selection.slot_id.as_ref() == Some(&slot.id)
+                })
+                .map(|selection| selection.request_id.clone());
+            statuses.push(PoolSlotStatus {
+                slot,
+                availability,
+                latest_quota,
+                current_request,
+            });
+        }
+        Ok(PoolStatus {
+            generated_at: now,
+            slots: statuses,
+        })
+    }
+
+    async fn reorder_pool_slots(
+        &self,
+        request: &PoolReorderRequest,
+    ) -> Result<PoolReorderOutcome, StoreError> {
+        validate_pool_reorder_request(request)?;
+        let slots = self.load_pool_slots().await?;
+        if slots.len() != request.slot_ids.len() {
+            return Err(StoreError::InvalidRow(
+                "pool reorder must include every slot exactly once".to_string(),
+            ));
+        }
+        for slot_id in &request.slot_ids {
+            if !slots.iter().any(|slot| &slot.id == slot_id) {
+                return Err(StoreError::PoolSlotNotFound {
+                    slot_id: slot_id.clone(),
+                });
+            }
+        }
+        let mut db = self.db.lock().await;
+        let mut transaction = db.transaction().await?;
+        for (index, slot_id) in request.slot_ids.iter().enumerate() {
+            let priority = i64::try_from(index).map_err(|_| {
+                StoreError::InvalidRow("pool reorder has too many slots".to_string())
+            })?;
+            let updated = toasty::sql::statement(
+                "UPDATE pool_slots SET priority = ?2, updated_at = ?3 WHERE id = ?1",
+            )
+            .bind(slot_id.as_str())
+            .bind(priority)
+            .bind(timestamp(request.now)?)
+            .exec(&mut transaction)
+            .await?;
+            if updated != 1 {
+                return Err(StoreError::PoolSlotNotFound {
+                    slot_id: slot_id.clone(),
+                });
+            }
+        }
+        transaction.commit().await?;
+        drop(db);
+        Ok(PoolReorderOutcome {
+            slots: self.load_pool_slots().await?,
+            reason: "priority order updated by user".to_string(),
+        })
+    }
+
+    async fn set_pool_slot_enabled(
+        &self,
+        request: &PoolSlotEnabledRequest,
+    ) -> Result<PoolSlotEnabledOutcome, StoreError> {
+        timestamp(request.now)?;
+        if request.slot_id.as_str().trim().is_empty() {
+            return Err(StoreError::InvalidRow("pool slot id is empty".to_string()));
+        }
+        let mut db = self.db.lock().await;
+        let updated = toasty::sql::statement(
+            "UPDATE pool_slots SET enabled = ?2, updated_at = ?3 WHERE id = ?1",
+        )
+        .bind(request.slot_id.as_str())
+        .bind(request.enabled)
+        .bind(timestamp(request.now)?)
+        .exec(&mut *db)
+        .await?;
+        if updated != 1 {
+            return Err(StoreError::PoolSlotNotFound {
+                slot_id: request.slot_id.clone(),
+            });
+        }
+        drop(db);
+        let slot = self
+            .load_pool_slots()
+            .await?
+            .into_iter()
+            .find(|slot| slot.id == request.slot_id)
+            .ok_or_else(|| StoreError::PoolSlotNotFound {
+                slot_id: request.slot_id.clone(),
+            })?;
+        Ok(PoolSlotEnabledOutcome {
+            slot,
+            reason: if request.enabled {
+                "slot enabled by user".to_string()
+            } else {
+                "slot disabled by user".to_string()
+            },
+        })
     }
 
     async fn load_projects(&self) -> Result<Vec<Project>, StoreError> {
@@ -3673,6 +3843,90 @@ impl Store for MemoryStore {
         }
         Ok(PoolIdleReleaseOutcome { released, kept })
     }
+
+    async fn load_pool_status(&self, now: u64) -> Result<PoolStatus, StoreError> {
+        timestamp(now)?;
+        let slots = self.load_pool_slots().await?;
+        let selections = self.load_pool_selections().await?;
+        let mut statuses = Vec::with_capacity(slots.len());
+        for slot in slots {
+            let latest_quota = self.latest_pool_quota_entry(&slot.id).await?;
+            let availability = slot.availability(latest_quota.as_ref(), now);
+            let current_request = selections
+                .iter()
+                .find(|selection| {
+                    selection.released_at.is_none() && selection.slot_id.as_ref() == Some(&slot.id)
+                })
+                .map(|selection| selection.request_id.clone());
+            statuses.push(PoolSlotStatus {
+                slot,
+                availability,
+                latest_quota,
+                current_request,
+            });
+        }
+        Ok(PoolStatus {
+            generated_at: now,
+            slots: statuses,
+        })
+    }
+
+    async fn reorder_pool_slots(
+        &self,
+        request: &PoolReorderRequest,
+    ) -> Result<PoolReorderOutcome, StoreError> {
+        validate_pool_reorder_request(request)?;
+        let mut slots = self.pool_slots.write().await;
+        if slots.len() != request.slot_ids.len() {
+            return Err(StoreError::InvalidRow(
+                "pool reorder must include every slot exactly once".to_string(),
+            ));
+        }
+        for (index, slot_id) in request.slot_ids.iter().enumerate() {
+            let priority = i64::try_from(index).map_err(|_| {
+                StoreError::InvalidRow("pool reorder has too many slots".to_string())
+            })?;
+            let slot = slots
+                .get_mut(slot_id)
+                .ok_or_else(|| StoreError::PoolSlotNotFound {
+                    slot_id: slot_id.clone(),
+                })?;
+            slot.priority = priority;
+            slot.updated_at = request.now;
+        }
+        let mut ordered: Vec<_> = slots.values().cloned().collect();
+        ordered.sort_by(pool_slot_order);
+        Ok(PoolReorderOutcome {
+            slots: ordered,
+            reason: "priority order updated by user".to_string(),
+        })
+    }
+
+    async fn set_pool_slot_enabled(
+        &self,
+        request: &PoolSlotEnabledRequest,
+    ) -> Result<PoolSlotEnabledOutcome, StoreError> {
+        timestamp(request.now)?;
+        if request.slot_id.as_str().trim().is_empty() {
+            return Err(StoreError::InvalidRow("pool slot id is empty".to_string()));
+        }
+        let mut slots = self.pool_slots.write().await;
+        let slot = slots
+            .get_mut(&request.slot_id)
+            .ok_or_else(|| StoreError::PoolSlotNotFound {
+                slot_id: request.slot_id.clone(),
+            })?;
+        slot.enabled = request.enabled;
+        slot.updated_at = request.now;
+        Ok(PoolSlotEnabledOutcome {
+            slot: slot.clone(),
+            reason: if request.enabled {
+                "slot enabled by user".to_string()
+            } else {
+                "slot disabled by user".to_string()
+            },
+        })
+    }
 }
 
 fn parse_pool_slot(value: Value) -> Result<PoolSlot, StoreError> {
@@ -3827,6 +4081,27 @@ fn pool_quota_entry_order(left: &PoolQuotaEntry, right: &PoolQuotaEntry) -> std:
     left.observed_at
         .cmp(&right.observed_at)
         .then(left.id.cmp(&right.id))
+}
+
+fn validate_pool_reorder_request(request: &PoolReorderRequest) -> Result<(), StoreError> {
+    timestamp(request.now)?;
+    if request.slot_ids.is_empty() {
+        return Err(StoreError::InvalidRow(
+            "pool reorder must include every slot exactly once".to_string(),
+        ));
+    }
+    let mut seen = BTreeSet::new();
+    for slot_id in &request.slot_ids {
+        if slot_id.as_str().trim().is_empty() {
+            return Err(StoreError::InvalidRow("pool slot id is empty".to_string()));
+        }
+        if !seen.insert(slot_id) {
+            return Err(StoreError::InvalidRow(
+                "pool reorder contains a duplicate slot".to_string(),
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn validate_pool_idle_release_request(request: &PoolIdleReleaseRequest) -> Result<(), StoreError> {
@@ -5220,6 +5495,256 @@ mod tests {
         verify(&MemoryStore::new()).await?;
         let directory = TestDirectory::new()?;
         verify(&TursoStore::open_at(&directory.join("pool-idle-validation.db")).await?).await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn pool_status_reports_availability_quota_and_current_request()
+    -> Result<(), Box<dyn std::error::Error>> {
+        async fn verify(store: &dyn Store) -> Result<(), Box<dyn std::error::Error>> {
+            let available = save_available_slot(store, "slot-status", 0, 100).await?;
+            let exhausted = pool_slot("slot-exhausted", 1, 200);
+            store.save_pool_slot(&exhausted).await?;
+            store
+                .append_pool_quota_entry(&state_entry(
+                    &exhausted.id,
+                    Some(10),
+                    Some(10),
+                    Some(1_000),
+                    None,
+                    None,
+                ))
+                .await?;
+            store
+                .select_pool_slot(&PoolSelectionRequest::new("task-status", 100))
+                .await?;
+
+            let status = store.load_pool_status(150).await?;
+            assert_eq!(status.generated_at, 150);
+            assert_eq!(status.slots.len(), 2);
+            let first = status.slots.first().ok_or("available status missing")?;
+            assert_eq!(first.slot.id, available.id);
+            assert_eq!(first.availability.state, PoolAvailabilityState::Available);
+            assert_eq!(
+                first.latest_quota.as_ref().and_then(|entry| entry.used),
+                Some(0)
+            );
+            assert_eq!(first.current_request.as_deref(), Some("task-status"));
+            let second = status.slots.get(1).ok_or("exhausted status missing")?;
+            assert_eq!(second.slot.id, exhausted.id);
+            assert_eq!(second.availability.state, PoolAvailabilityState::Exhausted);
+            assert_eq!(second.current_request, None);
+
+            store.release_pool_selection("task-status", 160).await?;
+            let released = store.load_pool_status(170).await?;
+            assert_eq!(released.slots[0].current_request, None);
+            Ok(())
+        }
+
+        verify(&MemoryStore::new()).await?;
+        let directory = TestDirectory::new()?;
+        verify(&TursoStore::open_at(&directory.join("pool-status.db")).await?).await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn pool_reorder_changes_priority_and_is_idempotent()
+    -> Result<(), Box<dyn std::error::Error>> {
+        async fn verify(store: &dyn Store) -> Result<(), Box<dyn std::error::Error>> {
+            let first = save_available_slot(store, "slot-first", 0, 100).await?;
+            let second = save_available_slot(store, "slot-second", 1, 200).await?;
+            let selected = store
+                .select_pool_slot(&PoolSelectionRequest::new("task-before", 100))
+                .await?;
+            assert_eq!(selected.slot.as_ref().map(|slot| &slot.id), Some(&first.id));
+            store.release_pool_selection("task-before", 150).await?;
+
+            let request = PoolReorderRequest {
+                slot_ids: vec![second.id.clone(), first.id.clone()],
+                now: 200,
+            };
+            let reordered = store.reorder_pool_slots(&request).await?;
+            assert_eq!(
+                reordered
+                    .slots
+                    .iter()
+                    .map(|slot| &slot.id)
+                    .collect::<Vec<_>>(),
+                vec![&second.id, &first.id]
+            );
+            assert_eq!(reordered.slots[0].priority, 0);
+            assert_eq!(reordered.slots[1].priority, 1);
+            assert_eq!(reordered.reason, "priority order updated by user");
+
+            let repeated = store.reorder_pool_slots(&request).await?;
+            assert_eq!(
+                repeated
+                    .slots
+                    .iter()
+                    .map(|slot| &slot.id)
+                    .collect::<Vec<_>>(),
+                vec![&second.id, &first.id]
+            );
+            let selected = store
+                .select_pool_slot(&PoolSelectionRequest::new("task-after", 300))
+                .await?;
+            assert_eq!(
+                selected.slot.as_ref().map(|slot| &slot.id),
+                Some(&second.id)
+            );
+
+            assert!(matches!(
+                store
+                    .reorder_pool_slots(&PoolReorderRequest {
+                        slot_ids: Vec::new(),
+                        now: 300,
+                    })
+                    .await,
+                Err(StoreError::InvalidRow(_))
+            ));
+            assert!(matches!(
+                store
+                    .reorder_pool_slots(&PoolReorderRequest {
+                        slot_ids: vec![second.id.clone(), second.id.clone(), first.id.clone()],
+                        now: 300,
+                    })
+                    .await,
+                Err(StoreError::InvalidRow(_))
+            ));
+            assert!(matches!(
+                store
+                    .reorder_pool_slots(&PoolReorderRequest {
+                        slot_ids: vec![second.id.clone()],
+                        now: 300,
+                    })
+                    .await,
+                Err(StoreError::InvalidRow(_))
+            ));
+            assert!(matches!(
+                store
+                    .reorder_pool_slots(&PoolReorderRequest {
+                        slot_ids: vec![second.id.clone(), PoolSlotId::new("slot-missing")],
+                        now: 300,
+                    })
+                    .await,
+                Err(StoreError::PoolSlotNotFound { .. })
+            ));
+            Ok(())
+        }
+
+        verify(&MemoryStore::new()).await?;
+        let directory = TestDirectory::new()?;
+        verify(&TursoStore::open_at(&directory.join("pool-reorder.db")).await?).await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn pool_enable_toggle_controls_selection_and_is_idempotent()
+    -> Result<(), Box<dyn std::error::Error>> {
+        async fn verify(store: &dyn Store) -> Result<(), Box<dyn std::error::Error>> {
+            let first = save_available_slot(store, "slot-toggle", 0, 100).await?;
+            let second = save_available_slot(store, "slot-fallback", 1, 200).await?;
+            let disabled = store
+                .set_pool_slot_enabled(&PoolSlotEnabledRequest {
+                    slot_id: first.id.clone(),
+                    enabled: false,
+                    now: 150,
+                })
+                .await?;
+            assert!(!disabled.slot.enabled);
+            assert_eq!(disabled.reason, "slot disabled by user");
+            let repeated = store
+                .set_pool_slot_enabled(&PoolSlotEnabledRequest {
+                    slot_id: first.id.clone(),
+                    enabled: false,
+                    now: 160,
+                })
+                .await?;
+            assert!(!repeated.slot.enabled);
+
+            let status = store.load_pool_status(170).await?;
+            assert_eq!(
+                status.slots[0].availability.state,
+                PoolAvailabilityState::Disabled
+            );
+            let selected = store
+                .select_pool_slot(&PoolSelectionRequest::new("task-while-disabled", 180))
+                .await?;
+            assert_eq!(
+                selected.slot.as_ref().map(|slot| &slot.id),
+                Some(&second.id)
+            );
+
+            store
+                .set_pool_slot_enabled(&PoolSlotEnabledRequest {
+                    slot_id: second.id.clone(),
+                    enabled: false,
+                    now: 200,
+                })
+                .await?;
+            let none = store
+                .select_pool_slot(&PoolSelectionRequest::new("task-all-disabled", 210))
+                .await?;
+            assert!(none.slot.is_none());
+
+            let enabled = store
+                .set_pool_slot_enabled(&PoolSlotEnabledRequest {
+                    slot_id: first.id.clone(),
+                    enabled: true,
+                    now: 300,
+                })
+                .await?;
+            assert!(enabled.slot.enabled);
+            assert_eq!(enabled.reason, "slot enabled by user");
+            let again = store
+                .set_pool_slot_enabled(&PoolSlotEnabledRequest {
+                    slot_id: first.id.clone(),
+                    enabled: true,
+                    now: 310,
+                })
+                .await?;
+            assert!(again.slot.enabled);
+            let selected = store
+                .select_pool_slot(&PoolSelectionRequest::new("task-enabled", 320))
+                .await?;
+            assert_eq!(selected.slot.as_ref().map(|slot| &slot.id), Some(&first.id));
+
+            assert!(matches!(
+                store
+                    .set_pool_slot_enabled(&PoolSlotEnabledRequest {
+                        slot_id: PoolSlotId::new("slot-missing"),
+                        enabled: false,
+                        now: 400,
+                    })
+                    .await,
+                Err(StoreError::PoolSlotNotFound { .. })
+            ));
+            assert!(matches!(
+                store
+                    .set_pool_slot_enabled(&PoolSlotEnabledRequest {
+                        slot_id: PoolSlotId::new(""),
+                        enabled: true,
+                        now: 400,
+                    })
+                    .await,
+                Err(StoreError::InvalidRow(_))
+            ));
+            assert!(matches!(
+                store
+                    .set_pool_slot_enabled(&PoolSlotEnabledRequest {
+                        slot_id: first.id.clone(),
+                        enabled: true,
+                        now: u64::MAX,
+                    })
+                    .await,
+                Err(StoreError::InvalidRow(_))
+            ));
+            Ok(())
+        }
+
+        verify(&MemoryStore::new()).await?;
+        let directory = TestDirectory::new()?;
+        verify(&TursoStore::open_at(&directory.join("pool-toggle.db")).await?).await?;
         Ok(())
     }
 

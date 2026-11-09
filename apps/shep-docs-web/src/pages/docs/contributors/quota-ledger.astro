@@ -20,20 +20,22 @@ const toc = [
   description="The local record behind the quota-aware agent pool, its persisted ledger and availability states."
   toc={toc}
 >
-  <Callout tone="note" title="Slot persistence, the ledger, selection and idle release are implemented">
+  <Callout tone="note" title="Slot persistence, the ledger, selection, release and controls are implemented">
     The pool slot record, the append-only quota ledger, the six availability states, durable
-    priority selection and idle release now exist in the core. Task-start wiring and the pool UI are
-    still planned, so the agent pool is not available in the current build. This page records the
-    agreed contract so the implementation, tests and user guide cannot drift.
+    priority selection, idle release and the core status/reorder/enable controls now exist in the
+    core. Task-start wiring and the pool UI are still planned, so the agent pool is not available in
+    the current build. This page records the agreed contract so the implementation, tests and user
+    guide cannot drift.
   </Callout>
 
   <h2 id="status">Status</h2>
   <p>
     <Badge tone="warning" variant="subtle">partly implemented</Badge> The pool work is split into
-    slot persistence, the quota ledger, priority selection, idle release and the pool UI. Slot
-    persistence, the quota ledger, priority selection and idle release are implemented and tested in
-    the core; task-start wiring and the pool UI are not checked off. The user-facing promise is on the
-    <a href="/docs/users/agent-pool">agent pool</a> page; this page is for the implementation.
+    slot persistence, the quota ledger, priority selection, idle release, core controls and the pool
+    UI. Persistence, the ledger, selection, release, status, reordering and enable/disable are
+    implemented and tested in the core; task-start wiring and the pool UI are not checked off. The
+    user-facing promise is on the <a href="/docs/users/agent-pool">agent pool</a> page; this page is
+    for the implementation.
   </p>
 
   <h2 id="slot">The slot record</h2>
@@ -110,9 +112,18 @@ const toc = [
 
   <h2 id="privacy">Corrections and privacy</h2>
   <p>
-    The user can edit a limit or reset time, clear a cooldown, reorder slots, disable a slot and force
-    a slot for one turn. The pool UI shows provider/model, priority, availability, known limit/reset,
-    current task, last error and last-used time. It must not display credentials or invent a quota.
+    The core exposes a status snapshot joining each slot with its latest quota entry, derived
+    availability and active request. Reordering assigns the submitted order to priorities
+    <code>0..n-1</code>; it requires every current slot exactly once and is idempotent. Enabling or
+    disabling a slot also repeats safely, and a disabled slot is skipped by selection. These are core
+    APIs only: the pool UI that presents provider/model, priority, availability, known limit/reset,
+    current task, last error and last-used time is still planned. The UI must not display credentials
+    or invent a quota.
+  </p>
+  <p>
+    The ledger already accepts user-source entries for limit/reset corrections and cooldown clearing.
+    A forced slot already uses the selection request's one-turn override. The pending UI work is to
+    expose those controls, not to add another selection path.
   </p>
   <p>
     The catalog is advisory. A local ledger and the user's correction are authoritative for local
@@ -126,12 +137,13 @@ const toc = [
     <li>Implemented: priority selection and fallback against both stores, including every unavailable state, precedence, an expired reset period, overrides, reservations, concurrent requests, deterministic tie-breaking and re-open durability.</li>
     <li>Implemented: malformed selection rows and invalid requests or timestamps are rejected.</li>
     <li>Implemented: idle release against both stores, including the timeout boundary, repeat release, active and unsettled reservations, session resumability and slot reuse; a Turso re-open covers durability.</li>
-    <li>Pending: task-start wiring, the pool UI, cancellation and restart scheduling.</li>
+    <li>Implemented: pool status, reordering and enable/disable against both stores, including latest quota/availability/active request, disabled selection fallback, repeat calls and rejected duplicate, missing or unknown orders.</li>
+    <li>Pending: task-start wiring, the pool UI, limit/reset and cooldown controls in that UI, cancellation and restart scheduling.</li>
     <li>Credential redaction in records, logs and diagnostics.</li>
   </ul>
   <p>
-    The core release API is tested; task-start wiring, cancellation and the pool UI remain next-step
-    items. See the <a href="/docs/contributors/test-fixtures">test fixtures</a> page for the fixture
-    rules that apply when the work lands.
+    The core release and control APIs are tested; task-start wiring, cancellation and the pool UI
+    remain next-step items. See the <a href="/docs/contributors/test-fixtures">test fixtures</a> page
+    for the fixture rules that apply when the work lands.
   </p>
 </Docs>
