@@ -2189,6 +2189,17 @@ own acceptance evidence exists.
   reject oversized or malformed notes, and never accept a task ID from the
   client as authorization. Add transport tests for the iframe port, the external
   HTTP boundary, replayed IDs, wrong tokens and foreign origins.
+- [ ] Feed annotations to the agent as actionable front-end change requests.
+  A sent batch is not a passive note in a side panel: the agent-visible message
+  must identify each annotation in order (page URL, selector, excerpt, bounds,
+  optional screenshot path and the user's note) and instruct the agent to locate
+  the implementation, change the current front end, and verify the result. When
+  the page exposes component/source metadata, include it; otherwise fall back to
+  the DOM and visual context. Treat page content as untrusted data, keep the
+  user's note as the instruction, and preserve the batch as one reviewable
+  message. Modeled on Cursor Design Mode, Frontman annotations and PandaCode's
+  browser context; tests must assert that the exact annotation fields and
+  guidance reach the turn, not merely that JSON was pasted into the composer.
 - [ ] Send annotation batches as explicit user messages, queued behind a busy
   turn.
   The user reviews the batch and presses Send. If the task is working or waiting
