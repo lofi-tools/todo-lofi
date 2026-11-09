@@ -21,8 +21,10 @@ release and fixture internals. It does not contain Taskstream documentation.
 - `data/shepherd.ts` — landing copy and illustrative data.
 - `src/components/illustrations/` — the workspace, agent-pool and preview
   replicas, plus the shared illustration stage.
+- `tests/publicClaims.ts` — the shared public-claim assertion. It derives the
+  restricted terms and statuses from `data/roadmap.ts` and checks every route.
 - `tests/landing.spec.ts` and `tests/docs.spec.ts` — landing and docs route,
-  navigation, honest-claims, layout, theme and axe checks.
+  navigation, public-claim, layout, theme and axe checks.
 
 ## Running
 
@@ -48,7 +50,7 @@ pnpm codegen    # panda codegen + panda cssgen
 pnpm dev
 pnpm build
 pnpm typecheck  # astro check
-pnpm test:e2e   # Playwright landing/docs routes, theming, layout and axe AA checks
+pnpm test:e2e   # Playwright public routes, data-derived claims, layout and axe AA checks
 ```
 
 ## Notes

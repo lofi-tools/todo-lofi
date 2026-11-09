@@ -1,5 +1,6 @@
 import AxeBuilder from '@axe-core/playwright'
 import { expect, test } from '@playwright/test'
+import { expectPublicClaims } from './publicClaims'
 
 test.describe('Shepherd landing page', () => {
   test('renders the promise and marks available versus planned work', async ({ page }) => {
@@ -60,6 +61,11 @@ test.describe('Shepherd landing page', () => {
     await expect(drawer.getByRole('link', { name: 'Available' })).toBeVisible()
     await drawer.getByRole('link', { name: 'Available' }).click()
     await expect(page).toHaveURL(/#available$/)
+  })
+
+  test('restricted public claims are marked next or planned', async ({ page }) => {
+    await page.goto('/')
+    await expectPublicClaims(page, '/')
   })
 
   test('the source CTA and in-page anchors resolve', async ({ page }) => {

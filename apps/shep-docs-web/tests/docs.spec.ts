@@ -1,5 +1,6 @@
 import AxeBuilder from '@axe-core/playwright'
 import { expect, test } from '@playwright/test'
+import { expectPublicClaims } from './publicClaims'
 
 const REPO_URL = 'https://github.com/lofi-tools/todo-lofi'
 
@@ -85,6 +86,13 @@ test.describe('Shepherd docs routes', () => {
       for (const route of docsRoutes.filter((entry) => entry.path.startsWith(guide))) {
         expect(hrefs, `${route.path} is missing from ${guide}`).toContain(route.path)
       }
+    }
+  })
+
+  test('no docs route presents a restricted public claim as available or shipped', async ({ page }) => {
+    for (const route of docsRoutes) {
+      await page.goto(route.path)
+      await expectPublicClaims(page, route.path)
     }
   })
 

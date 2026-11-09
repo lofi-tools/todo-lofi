@@ -144,7 +144,9 @@ a guide page, a contributor note, or not public.
 - The release page says no signed installer and the release gate is pending. Do
   not add a download link until the release item supplies one.
 - The roadmap page renders from `data/roadmap.ts`; that file is the only public
-  item list. Keep the landing availability columns derived from it.
+  item list. Keep the landing availability columns derived from it. Site tests
+  also derive restricted claim terms and non-shipped markers from that file and
+  check every public route, so do not add a page-specific availability list.
 - Docs search is not implemented. When it is, it must index the same
   `src/data/docs.ts` navigation and not become a second page inventory.
 

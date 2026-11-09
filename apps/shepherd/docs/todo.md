@@ -2350,11 +2350,20 @@ own acceptance evidence exists.
   are Next; Windows support is Later. Typecheck reports 0 errors, the static
   build emits 16 pages including `/docs/users/roadmap`, and the 29-test e2e
   suite passes, including 375/768/1440 overflow and axe WCAG 2.1 AA.
-- [ ] Add site tests for the public claims.
+- [x] Add site tests for the public claims.
   Browser tests cover responsive navigation, theme, WCAG 2.1 AA basics, docs
   search, downloads links, and a build check that every navigation entry resolves.
   Copy-level tests fail if the site names an internal reference project or
   describes an unimplemented feature as available.
+  Evidence: `apps/shep-docs-web/tests/publicClaims.ts` derives restricted terms
+  and non-shipped markers from `data/roadmap.ts`; the landing and docs suites
+  apply it to every public route. The agent pool, signed release artifacts and
+  Windows support cannot render with an available/shipped marker, and the
+  roadmap statuses must remain next/later. The roadmap route must exercise every
+  restricted item, so the claim check cannot pass vacuously. The same check
+  rejects live `/downloads` and `/roadmap` links on every route, and rejects old
+  `/docs-web` bases. Typecheck reports 0 errors, the static build emits 16 pages, and the
+  31-test e2e suite passes with the new claim checks.
 
 ### Free-tier and subscription catalog
 

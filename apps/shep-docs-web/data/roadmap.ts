@@ -25,6 +25,8 @@ export interface RoadmapItem {
   links: RoadmapLink[]
   /** The text used on the landing page; absent means roadmap-only. */
   landing?: string
+  /** Phrases that assert this item's public availability; covered across every route. */
+  publicClaimTerms?: string[]
 }
 
 export interface RoadmapStatusDefinition {
@@ -35,6 +37,8 @@ export interface RoadmapStatusDefinition {
   summary: string
   detail: string
   shipped: boolean
+  /** Copy variants that mark a status as shipped or not shipped. */
+  claimMarkers: string[]
   landingHeading?: string
   landingBadge?: string
   landingSummary?: string
@@ -58,6 +62,7 @@ export const roadmapStatuses: RoadmapStatusDefinition[] = [
     summary: 'Implemented and exercised by the app and its test suites.',
     detail: 'These capabilities are in the current build. They are the only items on this page that are available today.',
     shipped: true,
+    claimMarkers: ['available now', 'in this build', 'works today'],
     landingHeading: 'Available now',
     landingBadge: 'in this build',
     landingSummary: 'Implemented and exercised by the app and its test suites.',
@@ -70,6 +75,19 @@ export const roadmapStatuses: RoadmapStatusDefinition[] = [
     summary: 'Specified and being built, but not in the current build.',
     detail: 'The next slice is under active work. It is not available in the current build, and the app remains the source of truth.',
     shipped: false,
+    claimMarkers: [
+      'not in the current build',
+      'being built',
+      'specified',
+      'next step',
+      'next-step',
+      'still being prepared',
+      'release roadmap',
+      'not available',
+      'not current',
+      'not yet',
+      'no signed',
+    ],
     landingHeading: 'Next',
     landingBadge: 'being built',
     landingSummary: 'Specified and actively being built, but not in the current build.',
@@ -82,6 +100,7 @@ export const roadmapStatuses: RoadmapStatusDefinition[] = [
     summary: 'Planned, with no promise that it lands in the next release.',
     detail: 'Later work is on the roadmap but not scheduled. It has no date and must not be described as available.',
     shipped: false,
+    claimMarkers: ['no date', 'not supported', 'no supported build', 'not part of the current gate'],
     landingHeading: 'Planned',
     landingBadge: 'no date',
     landingSummary: 'On the roadmap, with no promise that it lands in the next release.',
@@ -94,6 +113,7 @@ export const roadmapStatuses: RoadmapStatusDefinition[] = [
     summary: 'Research only; not committed to a release.',
     detail: 'Exploring items are possible directions, not planned work. No delivery date or support promise is implied.',
     shipped: false,
+    claimMarkers: ['not committed', 'no committed design', 'research only'],
   },
 ]
 
@@ -192,6 +212,7 @@ export const roadmapItems: RoadmapItem[] = [
       { label: 'Quota ledger', href: '/docs/contributors/quota-ledger' },
     ],
     landing: 'Quota-aware agent pool with priority fallback',
+    publicClaimTerms: ['agent pool', 'quota-aware pool'],
   },
   {
     id: 'signed-releases',
@@ -203,6 +224,7 @@ export const roadmapItems: RoadmapItem[] = [
       { label: 'Release pipeline', href: '/docs/contributors/release-pipeline' },
     ],
     landing: 'Signed macOS and Linux release artifacts',
+    publicClaimTerms: ['signed'],
   },
   {
     id: 'release-downloads',
@@ -219,6 +241,7 @@ export const roadmapItems: RoadmapItem[] = [
     summary: 'Bring the desktop workspace to Windows; no date is promised.',
     links: [{ label: 'Releases', href: '/docs/users/releases' }],
     landing: 'Windows desktop support',
+    publicClaimTerms: ['windows'],
   },
   {
     id: 'windows-installer',
