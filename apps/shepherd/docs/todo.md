@@ -2370,16 +2370,21 @@ own acceptance evidence exists.
 Catalog spec: [providers-catalog-web spec](../../providers-catalog-web/docs/spec/spec.md).
 Implementation plan: [providers-catalog-web plan](../../providers-catalog-web/docs/plan.md).
 
-The interview decisions are recorded in the spec. The first slice is the
-scraper and DuckDB schema; no public catalog route or deployment exists yet.
+The interview decisions are recorded in the spec. The static catalog is
+implemented; no public deployment exists yet.
 
-- [ ] Create a separate catalog site backed by a scheduled DuckDB dataset.
+- [x] Create a separate catalog site backed by a scheduled DuckDB dataset.
   The scraper writes versioned DuckDB tables for agents, providers, plans,
   models and free offers; the Astro build reads DuckDB and emits a static,
   searchable catalog. There is no public runtime database or scraper endpoint.
   The schema links one agent to many plans and models without duplicating quota
   claims, and records source URL, verification time, confidence and scrape
-  failure state for each fact.
+  failure state for each fact. Evidence (2026-11-09): the real snapshot
+  validates with 235 providers and 9,000 models; the static build emits 9,240
+  pages; the 9-test catalog e2e suite covers routes, filters, comparison, public
+  claims and responsive/axe checks. The weekly workflow writes and uploads the
+  versioned DuckDB artifact, and the site has no runtime database or scraper
+  endpoint.
 - [ ] Scrape hosted free tiers and local open-weight models, and exclude
   one-time trials.
   Include recurring hosted allowances and models that can be run locally, with
