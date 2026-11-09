@@ -1,0 +1,146 @@
+---
+import Base from '../../../layouts/Base.astro'
+import EmptyState from '../../../components/EmptyState.astro'
+import Provenance from '../../../components/Provenance.astro'
+import { loadCatalog, type CatalogModel, type CatalogProvider } from '../../../lib/catalog'
+import {
+  compareHref,
+  formatBoolean,
+  formatContext,
+  formatCost,
+  formatDate,
+  formatModalities,
+  formatNumber,
+  modelHref,
+  modelKey,
+  providerHref,
+} from '../../../lib/format'
+
+export async function getStaticPaths() {
+  const catalog = await loadCatalog()
+  return catalog.models.map((model) => ({
+    params: { provider: model.providerId, model: model.modelId },
+  }))
+}
+
+const { provider, model: modelParam } = Astro.params
+const catalog = await loadCatalog()
+const providerRecord: CatalogProvider | undefined = catalog.providers.find(
+  (entry) => entry.providerId === provider,
+)
+const model: CatalogModel | undefined = catalog.models.find(
+  (entry) => entry.providerId === provider && entry.modelId === modelParam,
+)
+if (!providerRecord || !model) {
+  throw new Error(`Model not found: ${provider}/${modelParam}`)
+}
+
+const title = model.name ?? model.modelId
+---
+
+<Base title={title} description={`${title} from ${providerRecord.name}: limits, modalities, pricing and provenance.`}>
+  <a class="back-link" href={providerHref(providerRecord.providerId)}>
+    ← {providerRecord.name}
+  </a>
+
+  <header class="page-header">
+    <p class="eyebrow">Model</p>
+    <h1>{title}</h1>
+    <p class="mono">{model.modelId}</p>
+    {
+      model.description && <p class="lede">{model.description}</p>
+    }
+    <div class="meta-row">
+      <span class="pill">{providerRecord.name}</span>
+      <span class="pill">{formatContext(model.contextLimit)} context</span>
+      <span class="pill">{model.openWeights === true ? 'Open weights' : 'Hosted weights'}</span>
+      <span class="pill">Verified {formatDate(model.verifiedAt)}</span>
+      <a class="button" href={compareHref([modelKey(model.providerId, model.modelId)])}>
+        Compare this model
+      </a>
+    </div>
+  </header>
+
+  <div class="detail-grid">
+    <section class="card">
+      <h2>Limits</h2>
+      <dl class="detail-list">
+        <div><dt>Context</dt><dd>{formatContext(model.contextLimit)}</dd></div>
+        <div><dt>Input tokens</dt><dd>{formatNumber(model.inputLimit)}</dd></div>
+        <div><dt>Output tokens</dt><dd>{formatNumber(model.outputLimit)}</dd></div>
+        <div><dt>Knowledge date</dt><dd>{formatDate(model.knowledgeDate)}</dd></div>
+      </dl>
+    </section>
+
+    <section class="card">
+      <h2>Capabilities</h2>
+      <dl class="detail-list">
+        <div><dt>Reasoning</dt><dd>{formatBoolean(model.reasoning)}</dd></div>
+        <div><dt>Tool calls</dt><dd>{formatBoolean(model.toolCall)}</dd></div>
+        <div><dt>Structured output</dt><dd>{formatBoolean(model.structuredOutput)}</dd></div>
+        <div><dt>Attachments</dt><dd>{formatBoolean(model.attachment)}</dd></div>
+        <div><dt>Temperature</dt><dd>{formatBoolean(model.temperature)}</dd></div>
+      </dl>
+    </section>
+
+    <section class="card">
+      <h2>Modalities</h2>
+      <dl class="detail-list">
+        <div><dt>Input</dt><dd>{formatModalities(model.modalitiesInput)}</dd></div>
+        <div><dt>Output</dt><dd>{formatModalities(model.modalitiesOutput)}</dd></div>
+        <div><dt>Open weights</dt><dd>{formatBoolean(model.openWeights)}</dd></div>
+        <div><dt>Status</dt><dd>{model.status ?? 'Unknown'}</dd></div>
+      </dl>
+    </section>
+
+    <section class="card">
+      <h2>Pricing</h2>
+      <p class="small muted">USD per 1M tokens, as published by models.dev. A zero price is not a recurring free offer.</p>
+      <dl class="detail-list">
+        <div><dt>Input</dt><dd>{formatCost(model.costInput)}</dd></div>
+        <div><dt>Output</dt><dd>{formatCost(model.costOutput)}</dd></div>
+        <div><dt>Cache read</dt><dd>{formatCost(model.costCacheRead)}</dd></div>
+        <div><dt>Cache write</dt><dd>{formatCost(model.costCacheWrite)}</dd></div>
+        <div><dt>Reasoning</dt><dd>{formatCost(model.costReasoning)}</dd></div>
+      </dl>
+    </section>
+  </div>
+
+  <section class="section">
+    <h2>Plans and recurring free offers</h2>
+    <EmptyState title="No verified plan or offer is linked to this model">
+      The catalog does not infer a plan or recurring allowance from the model price. Plans and
+      offers need an approved official source, a source URL and a verification time.
+    </EmptyState>
+  </section>
+
+  <section class="section">
+    <h2>Local runtime and hardware</h2>
+    <EmptyState title="No local runtime data yet">
+      The model may be open-weight, but this catalog does not yet publish a runtime, quantization
+      or approximate hardware requirement. That needs an approved source.
+    </EmptyState>
+  </section>
+
+  <section class="section">
+    <h2>Identity</h2>
+    <dl class="detail-list">
+      <div><dt>Provider</dt><dd><a href={providerHref(model.providerId)}>{providerRecord.name}</a></dd></div>
+      <div><dt>Model id</dt><dd><code class="mono">{model.modelId}</code></dd></div>
+      <div><dt>Canonical id</dt><dd><code class="mono">{model.canonicalModelId ?? 'Unknown'}</code></dd></div>
+      <div><dt>Family</dt><dd>{model.family ?? 'Unknown'}</dd></div>
+      <div><dt>Type</dt><dd>{model.modelType ?? 'Unknown'}</dd></div>
+      <div><dt>Released</dt><dd>{formatDate(model.releaseDate)}</dd></div>
+      <div><dt>Last updated</dt><dd>{formatDate(model.lastUpdated)}</dd></div>
+      <div><dt>Catalog link</dt><dd><a href={modelHref(model.providerId, model.modelId)}>This model</a></dd></div>
+    </dl>
+  </section>
+
+  <Provenance
+    sourceUrl={model.sourceUrl}
+    sourceRecord={model.sourceRecord}
+    verifiedAt={model.verifiedAt}
+    confidence={model.confidence}
+    scrapeStatus={model.scrapeStatus}
+  />
+</Base>

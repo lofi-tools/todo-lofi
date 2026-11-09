@@ -1,0 +1,42 @@
+---
+import ThemeToggle from 'web-design-system/astro/ThemeToggle.astro'
+
+const path = Astro.url.pathname.replace(/\/+$/, '') || '/'
+const links = [
+  { label: 'Catalog', href: '/' },
+  { label: 'Models', href: '/models' },
+  { label: 'Compare', href: '/compare' },
+  { label: 'About', href: '/about' },
+]
+
+function isActive(href: string): boolean {
+  if (href === '/') return path === '/'
+  return path === href || path.startsWith(`${href}/`)
+}
+---
+
+<header class="site-header">
+  <div class="site-header__inner">
+    <a class="brand" href="/" aria-label="Providers catalog home">
+      <img src="/catalog.svg" alt="" width="22" height="22" />
+      <span>Providers catalog</span>
+    </a>
+    <ul class="nav-links" aria-label="Main">
+      {
+        links.map((link) => (
+          <li>
+            <a
+              class="nav-link"
+              href={link.href}
+              aria-current={isActive(link.href) ? 'page' : undefined}
+            >
+              {link.label}
+            </a>
+          </li>
+        ))
+      }
+    </ul>
+    <div class="header-spacer"></div>
+    <ThemeToggle />
+  </div>
+</header>

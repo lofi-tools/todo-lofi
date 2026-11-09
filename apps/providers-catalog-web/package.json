@@ -5,19 +5,38 @@
   "type": "module",
   "description": "Static catalog of coding-agent providers, models, plans and recurring free offers.",
   "scripts": {
+    "codegen": "pnpm --filter web-design-system run codegen && panda codegen && panda cssgen --outfile styled-system/styles.css",
+    "predev": "pnpm run codegen",
+    "dev": "astro dev",
+    "prebuild": "pnpm run codegen",
+    "build": "astro build",
+    "preview": "astro preview --port 4326",
+    "typecheck": "pnpm run codegen && astro check",
     "scrape": "tsx scripts/snapshot.ts",
     "snapshot": "tsx scripts/snapshot.ts",
     "validate": "tsx scripts/validate.ts",
     "test": "vitest run",
-    "typecheck": "tsc --noEmit"
+    "e2e:cleanup": "astro preview stop || true",
+    "e2e:server": "astro preview --port 4326",
+    "test:e2e": "pnpm run e2e:cleanup && playwright test; status=$?; pnpm run e2e:cleanup; exit $status"
   },
   "dependencies": {
-    "@duckdb/node-api": "2.0.0-r.1"
+    "@astrojs/solid-js": "^7.0.2",
+    "@duckdb/node-api": "2.0.0-r.1",
+    "astro": "^7.3.3",
+    "solid-js": "^1.9.15",
+    "web-design-system": "workspace:*"
   },
   "devDependencies": {
+    "@astrojs/check": "^0.9.10",
+    "@axe-core/playwright": "^4.13.0",
+    "@pandacss/dev": "^1.12.1",
+    "@pandacss/preset-panda": "^1.12.1",
+    "@playwright/test": "^1.63.0",
     "@types/node": "^26.6.6",
     "tsx": "^4.23.15",
     "typescript": "^5.9.3",
-    "vitest": "^5.0.1"
+    "vitest": "^5.0.1",
+    "web-test-guards": "workspace:*"
   }
 }

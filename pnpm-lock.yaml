@@ -10,10 +10,37 @@ importers:
 
   apps/providers-catalog-web:
     dependencies:
+      '@astrojs/solid-js':
+        specifier: ^7.0.2
+        version: 7.0.2(@types/node@26.6.6)(esbuild@0.28.2)(solid-js@1.9.15)(tsx@4.23.15)(yaml@2.9.1)
       '@duckdb/node-api':
         specifier: 2.0.0-r.1
         version: 2.0.0-r.1
+      astro:
+        specifier: ^7.3.3
+        version: 7.3.3(@emnapi/core@1.11.3)(@emnapi/runtime@1.11.3)(@types/node@26.6.6)(tsx@4.23.15)(yaml@2.9.1)
+      solid-js:
+        specifier: ^1.9.15
+        version: 1.9.15
+      web-design-system:
+        specifier: workspace:*
+        version: link:../../libs/web-design-system
     devDependencies:
+      '@astrojs/check':
+        specifier: ^0.9.10
+        version: 0.9.10(@emnapi/runtime@1.11.3)(prettier@3.9.8)(typescript@5.9.3)
+      '@axe-core/playwright':
+        specifier: ^4.13.0
+        version: 4.13.0(playwright-core@1.63.0)
+      '@pandacss/dev':
+        specifier: ^1.12.1
+        version: 1.12.1(jsdom@27.4.0)(typescript@5.9.3)
+      '@pandacss/preset-panda':
+        specifier: ^1.12.1
+        version: 1.12.1
+      '@playwright/test':
+        specifier: ^1.63.0
+        version: 1.63.0
       '@types/node':
         specifier: ^26.6.6
         version: 26.6.6
@@ -26,6 +53,9 @@ importers:
       vitest:
         specifier: ^5.0.1
         version: 5.0.1(@types/node@26.6.6)(jsdom@27.4.0)(vite@8.3.0(@types/node@26.6.6)(esbuild@0.28.2)(tsx@4.23.15)(yaml@2.9.1))
+      web-test-guards:
+        specifier: workspace:*
+        version: link:../../libs/web-test-guards
 
   apps/shep-docs-web:
     dependencies:
@@ -60,6 +90,9 @@ importers:
       typescript:
         specifier: ^5.9.3
         version: 5.9.3
+      web-test-guards:
+        specifier: workspace:*
+        version: link:../../libs/web-test-guards
 
   apps/shepherd:
     devDependencies:
@@ -221,6 +254,15 @@ importers:
       vitest:
         specifier: ^5.0.1
         version: 5.0.1(@types/node@26.6.6)(jsdom@27.4.0)(vite@8.3.0(@types/node@26.6.6)(esbuild@0.28.2)(tsx@4.23.15)(yaml@2.9.1))
+
+  libs/web-test-guards:
+    devDependencies:
+      '@playwright/test':
+        specifier: ^1.63.0
+        version: 1.63.0
+      typescript:
+        specifier: ^5.9.3
+        version: 5.9.3
 
 packages:
 

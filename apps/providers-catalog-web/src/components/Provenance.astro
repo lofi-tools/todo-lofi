@@ -1,0 +1,36 @@
+---
+import type { Confidence, ScrapeStatus } from '../types'
+import { formatDateTime } from '../lib/format'
+
+interface Props {
+  sourceUrl: string
+  sourceRecord: string
+  verifiedAt: string
+  confidence: Confidence
+  scrapeStatus: ScrapeStatus
+}
+
+const { sourceUrl, sourceRecord, verifiedAt, confidence, scrapeStatus } = Astro.props
+---
+
+<section class="provenance" aria-label="Provenance">
+  <h2>Provenance</h2>
+  <dl>
+    <div>
+      <dt>Source</dt>
+      <dd><a href={sourceUrl} target="_blank" rel="noreferrer">models.dev public data</a></dd>
+    </div>
+    <div>
+      <dt>Record</dt>
+      <dd><code class="mono">{sourceRecord}</code></dd>
+    </div>
+    <div>
+      <dt>Last verified</dt>
+      <dd>{formatDateTime(verifiedAt)}</dd>
+    </div>
+    <div>
+      <dt>Confidence / status</dt>
+      <dd>{confidence} / {scrapeStatus}</dd>
+    </div>
+  </dl>
+</section>

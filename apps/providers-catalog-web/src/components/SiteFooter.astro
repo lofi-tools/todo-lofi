@@ -1,0 +1,32 @@
+---
+import type { CatalogSnapshot } from '../lib/catalog'
+import { formatDateTime } from '../lib/format'
+
+interface Props {
+  snapshot: CatalogSnapshot
+}
+
+const { snapshot } = Astro.props
+const sources = Object.values(snapshot.sourceUrls)
+---
+
+<footer class="site-footer">
+  <div class="site-footer__inner">
+    <div>
+      <div class="site-footer__links">
+        <a href="/models">Models</a>
+        <a href="/compare">Compare</a>
+        <a href="/about">About and sources</a>
+        <a href="https://models.dev" target="_blank" rel="noreferrer">models.dev</a>
+      </div>
+      <p>
+        Data is informational and may change. No recurring allowance or price is guaranteed.
+        Snapshot <span class="mono">{snapshot.snapshotId}</span> generated {formatDateTime(snapshot.generatedAt)}.
+      </p>
+      <p>
+        Source: {snapshot.attribution}. {sources.length > 0 && <a href={sources[0]}>Source data</a>}
+      </p>
+    </div>
+    <p>Not affiliated with any provider or model vendor.</p>
+  </div>
+</footer>

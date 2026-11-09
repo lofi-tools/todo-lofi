@@ -1,0 +1,164 @@
+---
+import Base from '../../layouts/Base.astro'
+import EmptyState from '../../components/EmptyState.astro'
+import Provenance from '../../components/Provenance.astro'
+import { loadCatalog, type CatalogProvider } from '../../lib/catalog'
+import {
+  formatContext,
+  formatDate,
+  formatModalities,
+  formatNumber,
+  modelHref,
+  providerHref,
+} from '../../lib/format'
+
+export async function getStaticPaths() {
+  const catalog = await loadCatalog()
+  return catalog.providers.map((provider) => ({
+    params: { provider: provider.providerId },
+    props: { providerId: provider.providerId },
+  }))
+}
+
+interface Props {
+  providerId: string
+}
+
+const { providerId } = Astro.props as Props
+const catalog = await loadCatalog()
+const provider: CatalogProvider | undefined = catalog.providers.find(
+  (entry) => entry.providerId === providerId,
+)
+if (!provider) {
+  throw new Error(`Provider not found: ${providerId}`)
+}
+
+const models = catalog.models.filter((model) => model.providerId === provider.providerId)
+const plans = catalog.plans.filter((plan) => plan.providerId === provider.providerId)
+const offers = catalog.offers.filter((offer) => offer.providerId === provider.providerId)
+const localRuntimes = catalog.localRuntimes.filter(
+  (runtime) => runtime.providerId === provider.providerId,
+)
+---
+
+<Base
+  title={provider.name}
+  description={`Models and provenance for ${provider.name} in the providers catalog.`}
+>
+  <a class="back-link" href="/">← All providers</a>
+
+  <header class="page-header">
+    <p class="eyebrow">Provider</p>
+    <h1>{provider.name}</h1>
+    <p class="mono">{provider.providerId}</p>
+    <div class="meta-row">
+      <span class="pill">{formatNumber(provider.modelCount)} models</span>
+      <span class="pill">{formatNumber(provider.openWeightCount)} open-weight</span>
+      <span class="pill">Verified {formatDate(provider.verifiedAt)}</span>
+    </div>
+    <p class="lede">
+      Provider and model facts are sourced from models.dev. Plan and recurring-offer data is not
+      published until an approved official source is recorded.
+    </p>
+  </header>
+
+  <section class="section">
+    <div class="section__head">
+      <div>
+        <h2>Models</h2>
+        <p>Models attributed to this provider in the snapshot.</p>
+      </div>
+    </div>
+    {
+      models.length === 0 ? (
+        <EmptyState title="No models for this provider">The source has no models under this provider in this snapshot.</EmptyState>
+      ) : (
+        <div class="table-wrap">
+          <table>
+            <caption class="visually-hidden">Models from {provider.name}</caption>
+            <thead>
+              <tr>
+                <th scope="col">Model</th>
+                <th scope="col">Context</th>
+                <th scope="col">Input</th>
+                <th scope="col">Open weights</th>
+                <th scope="col">Verified</th>
+              </tr>
+            </thead>
+            <tbody>
+              {models.map((model) => (
+                <tr>
+                  <td>
+                    <a href={modelHref(model.providerId, model.modelId)}>
+                      {model.name ?? model.modelId}
+                    </a>
+                    <div class="mono subtle">{model.modelId}</div>
+                  </td>
+                  <td>{formatContext(model.contextLimit)}</td>
+                  <td>{formatModalities(model.modalitiesInput)}</td>
+                  <td>{model.openWeights === null ? 'Unknown' : model.openWeights ? 'Yes' : 'No'}</td>
+                  <td>{formatDate(model.verifiedAt)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )
+    }
+  </section>
+
+  <section class="section">
+    <h2>Plans and recurring free offers</h2>
+    {
+      plans.length === 0 && offers.length === 0 ? (
+        <EmptyState title="No verified plans or offers yet">
+          This catalog does not publish a plan, price, usage model or recurring free allowance for
+          {provider.name}. A zero model token price is not a free offer. Those claims need an
+          approved official source and a verification date.
+        </EmptyState>
+      ) : (
+        <p class="muted">Verified plans and offers are listed in the snapshot.</p>
+      )
+    }
+  </section>
+
+  <section class="section">
+    <h2>Local runtimes</h2>
+    {
+      localRuntimes.length === 0 ? (
+        <EmptyState title="No local runtime data yet">
+          Open-weight status is recorded per model, but the catalog does not yet publish a runtime,
+          quantization or hardware requirement. That needs an approved source.
+        </EmptyState>
+      ) : (
+        <p class="muted">Local runtime requirements are listed in the snapshot.</p>
+      )
+    }
+  </section>
+
+  <section class="section">
+    <h2>Provider metadata</h2>
+    <div class="detail-grid">
+      <dl class="detail-list">
+        <div><dt>npm package</dt><dd><code class="mono">{provider.npm ?? 'Unknown'}</code></dd></div>
+        <div><dt>API endpoint</dt><dd><code class="mono">{provider.apiUrl ?? 'Unknown'}</code></dd></div>
+        <div><dt>Environment names</dt><dd><code class="mono">{provider.envKeys.join(', ') || 'Unknown'}</code></dd></div>
+        <div><dt>Provider id</dt><dd><code class="mono">{provider.providerId}</code></dd></div>
+      </dl>
+      <dl class="detail-list">
+        <div><dt>Documentation</dt><dd>{provider.docUrl ? <a href={provider.docUrl} target="_blank" rel="noreferrer">Provider docs</a> : 'Unknown'}</dd></div>
+        <div><dt>Source</dt><dd><a href={provider.sourceUrl} target="_blank" rel="noreferrer">models.dev</a></dd></div>
+        <div><dt>Source record</dt><dd><code class="mono">{provider.sourceRecord}</code></dd></div>
+        <div><dt>Catalog link</dt><dd><a href={providerHref(provider.providerId)}>This provider</a></dd></div>
+      </dl>
+    </div>
+  </section>
+
+  <Provenance
+    sourceUrl={provider.sourceUrl}
+    sourceRecord={provider.sourceRecord}
+    verifiedAt={provider.verifiedAt}
+    confidence={provider.confidence}
+    scrapeStatus={provider.scrapeStatus}
+  />
+</Base>

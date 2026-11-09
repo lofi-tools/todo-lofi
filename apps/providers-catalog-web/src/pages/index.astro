@@ -1,0 +1,128 @@
+---
+import { Badge } from 'web-design-system/components'
+import Base from '../layouts/Base.astro'
+import { loadCatalog } from '../lib/catalog'
+import { formatDate, formatNumber, providerHref } from '../lib/format'
+
+const catalog = await loadCatalog()
+const openWeightModels = catalog.models.filter((model) => model.openWeights === true).length
+const localModels = catalog.models.filter((model) => model.openWeights === true).length
+---
+
+<Base
+  title="Provider and model catalog"
+  description="Compare coding-agent providers and models from models.dev, with source links and verification dates."
+>
+  <section class="hero">
+    <p class="eyebrow">Provider and model catalog</p>
+    <h1 class="h1">Know what you can run, and where it came from.</h1>
+    <p class="lede">
+      Browse coding-agent providers and the models they serve. Every entry links back to its
+      public source, records when it was last verified, and marks unknown values as unknown.
+    </p>
+    <div class="meta-row">
+      <Badge tone="accent" variant="subtle">models.dev data</Badge>
+      <span class="pill">Snapshot {formatDate(catalog.snapshot.generatedAt)}</span>
+      <span class="pill">MIT licensed source</span>
+    </div>
+  </section>
+
+  <div class="stats" aria-label="Snapshot totals">
+    <div class="stat">
+      <span class="stat__value">{formatNumber(catalog.providers.length)}</span>
+      <span class="stat__label">providers</span>
+    </div>
+    <div class="stat">
+      <span class="stat__value">{formatNumber(catalog.models.length)}</span>
+      <span class="stat__label">models</span>
+    </div>
+    <div class="stat">
+      <span class="stat__value">{formatNumber(openWeightModels)}</span>
+      <span class="stat__label">open-weight models</span>
+    </div>
+    <div class="stat">
+      <span class="stat__value">{formatNumber(catalog.offers.length)}</span>
+      <span class="stat__label">verified recurring offers</span>
+    </div>
+  </div>
+
+  <section class="section" id="providers">
+    <div class="section__head">
+      <div>
+        <h2>Browse by provider</h2>
+        <p>{formatNumber(catalog.providers.length)} providers in this snapshot.</p>
+      </div>
+      <label class="filter-field">
+        <span>Search providers</span>
+        <input type="search" data-provider-search placeholder="Provider name or id" autocomplete="off" />
+      </label>
+    </div>
+
+    <div class="grid provider-grid">
+      {
+        catalog.providers.map((provider) => (
+          <a
+            class="card"
+            href={providerHref(provider.providerId)}
+            data-provider-card
+            data-name={`${provider.name} ${provider.providerId}`.toLowerCase()}
+          >
+            <h3>{provider.name}</h3>
+            <p class="mono">{provider.providerId}</p>
+            <p>
+              {formatNumber(provider.modelCount)} models · {formatNumber(provider.openWeightCount)} open-weight
+            </p>
+            <div class="card__meta">
+              <span class="pill">Verified {formatDate(provider.verifiedAt)}</span>
+              {provider.planCount === 0 && <span class="pill">Plans not published</span>}
+            </div>
+          </a>
+        ))
+      }
+    </div>
+    <p class="empty" data-provider-empty hidden>No providers match that search.</p>
+  </section>
+
+  <section class="section grid grid--2" aria-label="Catalog scope">
+    <div class="card">
+      <h2>What is verified</h2>
+      <p>
+        Provider names, API metadata, model limits, capabilities, modalities, pricing and
+        open-weight status come from the public models.dev catalog. Each provider and model page
+        shows its source record and verification time.
+      </p>
+      <p>
+        {formatNumber(localModels)} models are marked open-weight. That is a model property, not
+        a claim that a particular local runtime or machine can run it.
+      </p>
+    </div>
+    <div class="card">
+      <h2>What is deliberately empty</h2>
+      <p>
+        No coding-agent registry, subscription plan, recurring free allowance or local hardware
+        requirement is published yet. Those facts need an approved official source; this site
+        does not infer them from a zero token price or a community claim.
+      </p>
+      <p><a href="/about">Read the data and freshness policy →</a></p>
+    </div>
+  </section>
+
+  <script>
+    const search = document.querySelector<HTMLInputElement>('[data-provider-search]')
+    const cards = Array.from(document.querySelectorAll<HTMLElement>('[data-provider-card]'))
+    const empty = document.querySelector<HTMLElement>('[data-provider-empty]')
+
+    function updateProviders() {
+      const query = (search?.value ?? '').trim().toLowerCase()
+      let visible = 0
+      for (const card of cards) {
+        const matches = query === '' || (card.dataset.name ?? '').includes(query)
+        card.hidden = !matches
+        if (matches) visible += 1
+      }
+      if (empty) empty.hidden = visible !== 0
+    }
+
+    search?.addEventListener('input', updateProviders)
+  </script>
+</Base>

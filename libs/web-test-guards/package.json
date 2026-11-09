@@ -1,0 +1,19 @@
+{
+  "name": "web-test-guards",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    "./publicLinks": "./src/publicLinks.ts"
+  },
+  "peerDependencies": {
+    "@playwright/test": "^1.63.0"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.63.0",
+    "typescript": "^5.9.3"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  }
+}

@@ -1,0 +1,101 @@
+---
+import Base from '../layouts/Base.astro'
+import { loadCatalog } from '../lib/catalog'
+import { formatDateTime, formatNumber } from '../lib/format'
+
+const catalog = await loadCatalog()
+const { snapshot } = catalog
+const sourceUrls = Object.entries(snapshot.sourceUrls)
+---
+
+<Base
+  title="About and sources"
+  description="Catalog data sources, freshness policy, free-offer rules and known gaps."
+>
+  <header class="page-header">
+    <p class="eyebrow">About this catalog</p>
+    <h1>Sources, freshness and limits</h1>
+    <p class="lede">
+      This is a separate, static catalog. It is not the Shepherd agent pool, does not expose a
+      runtime database and does not publish private account data.
+    </p>
+  </header>
+
+  <div class="detail-grid">
+    <section class="card">
+      <h2>Snapshot</h2>
+      <dl class="detail-list">
+        <div><dt>Snapshot id</dt><dd><code class="mono">{snapshot.snapshotId}</code></dd></div>
+        <div><dt>Schema</dt><dd>v{snapshot.schemaVersion}</dd></div>
+        <div><dt>Generated</dt><dd>{formatDateTime(snapshot.generatedAt)}</dd></div>
+        <div><dt>Age</dt><dd>{snapshot.ageDays.toFixed(1)} days</dd></div>
+        <div><dt>Stale</dt><dd>{snapshot.stale ? 'Yes — last verified values retained' : 'No'}</dd></div>
+      </dl>
+    </section>
+
+    <section class="card">
+      <h2>Source and license</h2>
+      <p>{snapshot.attribution}</p>
+      <dl class="detail-list">
+        <div><dt>License</dt><dd>{snapshot.license}</dd></div>
+        {sourceUrls.map(([id, url]) => (
+          <div><dt>{id}</dt><dd><a href={url} target="_blank" rel="noreferrer">Public data</a></dd></div>
+        ))}
+      </dl>
+    </section>
+  </div>
+
+  <section class="section">
+    <h2>What is in this snapshot</h2>
+    <div class="stats">
+      <div class="stat"><span class="stat__value">{formatNumber(catalog.providers.length)}</span><span class="stat__label">providers</span></div>
+      <div class="stat"><span class="stat__value">{formatNumber(catalog.models.length)}</span><span class="stat__label">models</span></div>
+      <div class="stat"><span class="stat__value">{formatNumber(catalog.plans.length)}</span><span class="stat__label">plans</span></div>
+      <div class="stat"><span class="stat__value">{formatNumber(catalog.offers.length)}</span><span class="stat__label">recurring offers</span></div>
+    </div>
+  </section>
+
+  <section class="section">
+    <h2>Free-offer policy</h2>
+    <div class="card">
+      <p>
+        A free offer is published only when a provider documents a recurring allowance with a
+        defined unit and reset period. Launch credits, one-time signup grants, expiring trials and
+        unverified community claims are excluded.
+      </p>
+      <p>
+        A zero token price is a model price, not a recurring free offer. Unknown allowance or reset
+        information stays unknown; this catalog does not estimate it.
+      </p>
+    </div>
+  </section>
+
+  <section class="section">
+    <h2>Known gaps in this snapshot</h2>
+    <div class="card">
+      <ul>
+        {snapshot.knownGaps.map((gap) => <li>{gap}</li>)}
+      </ul>
+      <p>
+        The catalog also does not yet have an approved source for coding-agent identities,
+        subscription plans, recurring free allowances or local runtime hardware. Those tables are
+        intentionally empty rather than guessed.
+      </p>
+    </div>
+  </section>
+
+  <section class="section">
+    <h2>Freshness and failure</h2>
+    <div class="card">
+      <p>
+        A snapshot older than seven days shows a warning, but the last verified values remain
+        visible. A failed scrape does not overwrite the previous snapshot and does not turn a known
+        value into free, zero or unknown.
+      </p>
+      <p>
+        This site is generated from a DuckDB snapshot at build time. There is no public query API,
+        scraper endpoint or runtime database.
+      </p>
+    </div>
+  </section>
+</Base>

@@ -1,7 +1,8 @@
 # Providers catalog — specification
 
-Status: draft, recorded from the catalog interview of 2026-11-09. No package,
-public route, snapshot or deployment exists yet.
+Status: S1 (snapshot/schema) and S3 (static catalog site) implemented on
+2026-11-09. S2 is blocked on approved plan/offer/agent/local-runtime sources; S4
+is blocked on Cloudflare Pages credentials. No deployment exists yet.
 
 This is a separate public site from Shepherd. It compares coding-agent
 providers, plans, models and recurring free offers. It is informational only:

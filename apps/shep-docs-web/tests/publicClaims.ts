@@ -1,4 +1,5 @@
 import { expect, type Page } from '@playwright/test'
+import { expectNoLegacyPublicLinks } from 'web-test-guards/publicLinks'
 import { ROADMAP_PATH, roadmapItems, roadmapStatuses } from '../data/roadmap'
 
 interface ClaimEntry {
@@ -175,8 +176,5 @@ export async function expectPublicClaims(page: Page, path: string): Promise<void
     ).toBe(true)
   }
 
-  await expect(
-    page.locator('a[href^="/downloads"], a[href^="/roadmap"], a[href^="/docs-web"]'),
-    `${path} has a live legacy download, roadmap or docs-web link`,
-  ).toHaveCount(0)
+  await expectNoLegacyPublicLinks(page, path)
 }

@@ -1,0 +1,290 @@
+---
+import Base from '../../layouts/Base.astro'
+import { loadCatalog } from '../../lib/catalog'
+import {
+  formatContext,
+  formatDate,
+  formatModalities,
+  formatNumber,
+  modelHref,
+  modelKey,
+} from '../../lib/format'
+
+const catalog = await loadCatalog()
+const providers = catalog.providers
+const models = catalog.models
+const modalities = ['text', 'image', 'audio', 'video', 'pdf']
+---
+
+<Base
+  title="Models"
+  description="Filter coding-agent models by provider, context, modality, local weights and verification date."
+>
+  <header class="page-header">
+    <p class="eyebrow">Model browser</p>
+    <h1>Models in this snapshot</h1>
+    <p class="lede">
+      {formatNumber(models.length)} models across {formatNumber(providers.length)} providers. Filters
+      run in your browser over this build's static data. No request leaves the page.
+    </p>
+    <div class="meta-row">
+      <span class="pill">Verified {formatDate(catalog.snapshot.generatedAt)}</span>
+      <span class="pill">Plans and offers not published</span>
+      <span class="pill">Zero price is not a free offer</span>
+    </div>
+  </header>
+
+  <div class="filters" aria-label="Model filters">
+    <label class="filter-field">
+      <span>Search</span>
+      <input data-filter="q" type="search" placeholder="Model or provider" autocomplete="off" />
+    </label>
+
+    <label class="filter-field">
+      <span>Provider</span>
+      <select data-filter="provider">
+        <option value="">All providers</option>
+        {providers.map((provider) => <option value={provider.providerId}>{provider.name}</option>)}
+      </select>
+    </label>
+
+    <label class="filter-field">
+      <span>Offer status</span>
+      <select data-filter="offer">
+        <option value="">Any status</option>
+        <option value="free">Recurring free offer</option>
+        <option value="paid">Paid plan</option>
+        <option value="unknown">Unknown</option>
+      </select>
+      <span class="filter-note">No verified plans or recurring offers yet.</span>
+    </label>
+
+    <label class="filter-field">
+      <span>Agent</span>
+      <select data-filter="agent" disabled>
+        <option value="">No verified agents yet</option>
+      </select>
+      <span class="filter-note">Agent compatibility needs an approved source.</span>
+    </label>
+
+    <label class="filter-field">
+      <span>Usage model</span>
+      <select data-filter="usage" disabled>
+        <option value="">No verified plans yet</option>
+      </select>
+      <span class="filter-note">Plan usage models need an approved source.</span>
+    </label>
+
+    <label class="filter-field">
+      <span>Minimum context</span>
+      <input data-filter="context" type="number" min="0" step="1000" placeholder="Any" />
+    </label>
+
+    <label class="filter-field">
+      <span>Input modality</span>
+      <select data-filter="modality">
+        <option value="">Any modality</option>
+        {modalities.map((modality) => <option value={modality}>{modality}</option>)}
+      </select>
+    </label>
+
+    <label class="filter-field">
+      <span>Local weights</span>
+      <select data-filter="local">
+        <option value="">Any</option>
+        <option value="yes">Open weights</option>
+        <option value="no">Hosted only</option>
+        <option value="unknown">Unknown</option>
+      </select>
+    </label>
+
+    <label class="filter-field">
+      <span>Verified on or after</span>
+      <input data-filter="verified" type="date" />
+    </label>
+
+    <div class="filter-actions">
+      <button class="button" type="button" data-reset>Reset filters</button>
+    </div>
+  </div>
+
+  <div class="table-toolbar">
+    <p data-result-count>{formatNumber(models.length)} models</p>
+    <button class="button button--primary" type="button" data-compare disabled>
+      Compare selected
+    </button>
+  </div>
+
+  <p class="empty" data-model-empty hidden>No models match these filters.</p>
+
+  <div class="table-wrap">
+    <table>
+      <caption class="visually-hidden">Models from the current providers catalog snapshot</caption>
+      <thead>
+        <tr>
+          <th class="checkbox-cell" scope="col">
+            <span class="visually-hidden">Select</span>
+            <input type="checkbox" data-select-all aria-label="Select all visible models" />
+          </th>
+          <th scope="col">Model</th>
+          <th scope="col">Provider</th>
+          <th scope="col">Context</th>
+          <th scope="col">Input</th>
+          <th scope="col">Local</th>
+          <th scope="col">Offer</th>
+          <th scope="col">Verified</th>
+        </tr>
+      </thead>
+      <tbody>
+        {
+          models.map((model) => {
+            const key = modelKey(model.providerId, model.modelId)
+            const local = model.openWeights === true ? 'yes' : model.openWeights === false ? 'no' : 'unknown'
+            return (
+              <tr
+                data-model-row
+                data-provider={model.providerId}
+                data-offer="unknown"
+                data-usage="unknown"
+                data-context={model.contextLimit ?? 0}
+                data-modalities={(model.modalitiesInput ?? []).join(' ')}
+                data-local={local}
+                data-verified={model.verifiedAt.slice(0, 10)}
+                data-search={`${model.name ?? ''} ${model.modelId} ${model.providerName} ${model.providerId}`.toLowerCase()}
+              >
+                <td class="checkbox-cell">
+                  <input
+                    type="checkbox"
+                    value={key}
+                    data-compare-checkbox
+                    aria-label={`Select ${model.name ?? model.modelId} for comparison`}
+                  />
+                </td>
+                <td>
+                  <a href={modelHref(model.providerId, model.modelId)}>
+                    {model.name ?? model.modelId}
+                  </a>
+                  <div class="mono subtle">{model.modelId}</div>
+                </td>
+                <td>{model.providerName}</td>
+                <td>{formatContext(model.contextLimit)}</td>
+                <td>{formatModalities(model.modalitiesInput)}</td>
+                <td>{local}</td>
+                <td>Unknown</td>
+                <td>{formatDate(model.verifiedAt)}</td>
+              </tr>
+            )
+          })
+        }
+      </tbody>
+    </table>
+  </div>
+
+  <noscript>
+    <p class="noscript">
+      All models are listed above without JavaScript. Client-side filters and comparison need
+      JavaScript; use the provider pages for a smaller view.
+    </p>
+  </noscript>
+
+  <script>
+    const rows = Array.from(document.querySelectorAll<HTMLTableRowElement>('[data-model-row]'))
+    const resultCount = document.querySelector<HTMLElement>('[data-result-count]')
+    const empty = document.querySelector<HTMLElement>('[data-model-empty]')
+    const compare = document.querySelector<HTMLButtonElement>('[data-compare]')
+    const selectAll = document.querySelector<HTMLInputElement>('[data-select-all]')
+
+    function filterValue(name: string): string {
+      const element = document.querySelector<HTMLInputElement | HTMLSelectElement>(
+        `[data-filter="${name}"]`,
+      )
+      return element?.value.trim() ?? ''
+    }
+
+    function visibleRows(): HTMLTableRowElement[] {
+      return rows.filter((row) => !row.hidden)
+    }
+
+    function updateCompare() {
+      const selected = rows.filter(
+        (row) => row.querySelector<HTMLInputElement>('[data-compare-checkbox]')?.checked,
+      ).length
+      if (compare) {
+        compare.disabled = selected === 0
+        compare.textContent = selected > 0 ? `Compare ${selected} selected` : 'Compare selected'
+      }
+    }
+
+    function applyFilters() {
+      const query = filterValue('q').toLowerCase()
+      const provider = filterValue('provider')
+      const offer = filterValue('offer')
+      const context = Number(filterValue('context') || 0)
+      const modality = filterValue('modality')
+      const local = filterValue('local')
+      const verified = filterValue('verified')
+
+      let visible = 0
+      for (const row of rows) {
+        const matches =
+          (query === '' || (row.dataset.search ?? '').includes(query)) &&
+          (provider === '' || row.dataset.provider === provider) &&
+          (offer === '' || row.dataset.offer === offer) &&
+          (context === 0 || Number(row.dataset.context ?? 0) >= context) &&
+          (modality === '' || (row.dataset.modalities ?? '').split(' ').includes(modality)) &&
+          (local === '' || row.dataset.local === local) &&
+          (verified === '' || (row.dataset.verified ?? '') >= verified)
+
+        row.hidden = !matches
+        if (matches) visible += 1
+      }
+
+      if (resultCount) {
+        resultCount.textContent = `${visible.toLocaleString()} of ${rows.length.toLocaleString()} models`
+      }
+      if (empty) empty.hidden = visible !== 0
+      if (selectAll) selectAll.checked = false
+      updateCompare()
+    }
+
+    for (const element of document.querySelectorAll<HTMLInputElement | HTMLSelectElement>(
+      '[data-filter]',
+    )) {
+      element.addEventListener('input', applyFilters)
+      element.addEventListener('change', applyFilters)
+    }
+
+    document.querySelector('[data-reset]')?.addEventListener('click', () => {
+      for (const element of document.querySelectorAll<HTMLInputElement | HTMLSelectElement>(
+        '[data-filter]',
+      )) {
+        element.value = ''
+      }
+      applyFilters()
+    })
+
+    for (const checkbox of document.querySelectorAll<HTMLInputElement>('[data-compare-checkbox]')) {
+      checkbox.addEventListener('change', updateCompare)
+    }
+
+    selectAll?.addEventListener('change', () => {
+      for (const row of visibleRows()) {
+        const checkbox = row.querySelector<HTMLInputElement>('[data-compare-checkbox]')
+        if (checkbox) checkbox.checked = selectAll.checked
+      }
+      updateCompare()
+    })
+
+    compare?.addEventListener('click', () => {
+      const keys = rows
+        .map((row) => row.querySelector<HTMLInputElement>('[data-compare-checkbox]'))
+        .filter((checkbox): checkbox is HTMLInputElement => checkbox?.checked === true)
+        .map((checkbox) => checkbox.value)
+      if (keys.length > 0) {
+        window.location.assign(`/compare?models=${encodeURIComponent(keys.join(','))}`)
+      }
+    })
+
+    applyFilters()
+  </script>
+</Base>

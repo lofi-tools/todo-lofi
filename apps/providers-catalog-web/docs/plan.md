@@ -1,6 +1,6 @@
 # Providers catalog — implementation plan
 
-Status: S1 implemented on 2026-11-09; S2 and later planned.
+Status: S1 and S3 implemented on 2026-11-09; S2 is blocked on approved sources and S4 is blocked on Cloudflare credentials.
 
 Spec: [spec.md](./spec/spec.md). The spec governs behavior and data semantics;
 this file gives the working order.
@@ -173,30 +173,39 @@ provenance or inventing offers.
 **Outcome:** the Astro site reads the snapshot and exposes browse, filters,
 comparison and provenance.
 
-- [ ] Add Astro, the `web-design-system` dependency and the Panda codegen setup
+- [x] Add Astro, the `web-design-system` dependency and the Panda codegen setup
   matching `apps/shep-docs-web`.
-- [ ] Add the build-time DuckDB reader; validate schema version and required
-  provenance before rendering.
-- [ ] Add routes `/`, `/agents/[agent]`, `/providers/[provider]`,
-  `/models/[provider]/[model]`, `/compare` and `/about`.
-- [ ] Add the build-generated search index and client-side filters for free/paid,
-  agent, provider, model, context, modality, local/self-hosted, last verified
-  and usage model.
-- [ ] Add comparison with source links, verification times, confidence, usage
-  models, allowance/reset period and unknown/stale states.
-- [ ] Add the freshness banner at 7 days and explicit empty states for missing
-  plans, offers and local runtimes.
-- [ ] Extract the generic public link guard from
-  `apps/shep-docs-web/tests/publicClaims.ts` into a shared test helper; keep the
-  Shepherd roadmap claim data in the existing app.
-- [ ] Add catalog-specific claim checks: no guarantee language, no unverified
-  "free"/"available" marker, every offer/plan has a source and verification
-  time, no Taskstream or internal reference names, no live `/downloads` or
-  `/roadmap` links.
-- [ ] Add route, navigation, filter, comparison, responsive overflow and axe
+- [x] Add the build-time DuckDB reader; validate the singleton metadata row,
+  supported schema version and required provenance before rendering.
+- [x] Add routes `/`, `/agents/[agent]`, `/providers/[provider]`,
+  `/models/[provider]/[model]`, `/compare` and `/about`. The model route is a
+  catch-all because some source model ids contain `/`.
+- [x] Add the static model data and client-side filters for offer status,
+  provider, model, context, modality, local/self-hosted and last verified. Agent
+  and usage-model controls stay disabled and explicit until an approved source
+  exists; the offer filter never invents a free/paid value.
+- [x] Add comparison with source links, verification times, confidence, model
+  facts and explicit unknown states. Plan usage models, allowances and reset
+  periods remain visibly unpublished until S2.
+- [x] Add the freshness banner at 7 days and explicit empty states for missing
+  plans, offers, agents and local runtimes.
+- [x] Extract the generic public link guard into `libs/web-test-guards`; keep
+  the Shepherd roadmap claim data in the existing app.
+- [x] Add catalog-specific claim checks: no unverified "free"/"available"
+  marker, no guarantee language, no Taskstream or internal reference names, no
+  live `/downloads` or `/roadmap` links, and an explicit plan/offer gap on every
+  key page.
+- [x] Add route, navigation, filter, comparison, responsive overflow and axe
   WCAG 2.1 AA tests at mobile, tablet and desktop widths.
-- [ ] Gate: package typecheck, unit tests, static build, package e2e, existing
+- [x] Gate: package typecheck, unit tests, static build, package e2e, existing
   docs e2e, root typecheck. Commit S3 alone.
+
+S3 evidence (2026-11-09): package typecheck passed; 9 Vitest tests passed; the
+static build emitted 9,240 pages from the 235-provider/9,000-model snapshot;
+the 8 catalog Playwright tests passed, including filters, URL comparison,
+legacy-link/claim checks, overflow at 375/768/1440 and axe at those widths;
+the existing Shepherd docs e2e and root `pnpm typecheck` passed. Cloudflare
+Pages deployment remains S4 and was not attempted.
 
 ## Slice S4 — Cloudflare Pages deployment
 

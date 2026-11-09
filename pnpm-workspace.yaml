@@ -1,5 +1,6 @@
 packages:
   - libs/web-design-system
+  - libs/web-test-guards
   - demos/design-system-showcase
   - apps/ts-docs-web
   - apps/shep-docs-web

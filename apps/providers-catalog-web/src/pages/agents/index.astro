@@ -1,0 +1,43 @@
+---
+import Base from '../../layouts/Base.astro'
+import EmptyState from '../../components/EmptyState.astro'
+import { loadCatalog } from '../../lib/catalog'
+import { providerHref } from '../../lib/format'
+
+const catalog = await loadCatalog()
+---
+
+<Base title="Agents" description="Coding agents in the providers catalog.">
+  <header class="page-header">
+    <p class="eyebrow">Agents</p>
+    <h1>Coding agents</h1>
+    <p class="lede">
+      Agent identity and provider compatibility are not published yet. This catalog will add them
+      only from an approved source with a verification date.
+    </p>
+  </header>
+
+  {
+    catalog.agents.length === 0 ? (
+      <EmptyState title="No verified agents yet">
+        Use the <a href="/models">model browser</a> or browse <a href="/">providers</a> while the
+        agent registry is being sourced.
+      </EmptyState>
+    ) : (
+      <div class="grid grid--2">
+        {catalog.agents.map((agent) => (
+          <a class="card" href={`/agents/${encodeURIComponent(agent.agentId)}`}>
+            <h2>{agent.name}</h2>
+            <p>{agent.vendor ?? 'Vendor unknown'}</p>
+          </a>
+        ))}
+      </div>
+    )
+  }
+
+  <p class="section small muted">
+    Provider pages: {catalog.providers.slice(0, 5).map((provider) => (
+      <span><a href={providerHref(provider.providerId)}>{provider.name}</a>{' · '}</span>
+    ))}
+  </p>
+</Base>
