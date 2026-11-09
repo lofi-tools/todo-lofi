@@ -64,6 +64,8 @@ pub enum StoreError {
     TerminalLayoutOwnerMissing { project_id: ProjectId },
     #[error("approval cannot be saved for missing project {project_id}")]
     ApprovalOwnerMissing { project_id: ProjectId },
+    #[error("quota ledger entry cannot be saved for missing pool slot {slot_id}")]
+    QuotaLedgerOwnerMissing { slot_id: PoolSlotId },
     #[error("workspace layout cannot be saved for missing task {task_id}")]
     WorkspaceOwnerMissing { task_id: TaskId },
     #[error("prompt queue cannot be saved for missing task {task_id}")]
@@ -164,6 +166,160 @@ impl PoolSlot {
             updated_at: now,
         }
     }
+
+    pub fn availability(&self, latest: Option<&PoolQuotaEntry>, now: u64) -> PoolAvailability {
+        if !self.enabled {
+            return PoolAvailability::new(PoolAvailabilityState::Disabled, "slot is disabled");
+        }
+        let Some(entry) = latest else {
+            return PoolAvailability::new(PoolAvailabilityState::Unknown, "no quota observation");
+        };
+        if let Some(until) = entry.cooldown_until.filter(|until| *until > now) {
+            return PoolAvailability::new(
+                PoolAvailabilityState::CoolingDown,
+                format!("cooling down until {until}"),
+            );
+        }
+        if let Some(error) = entry
+            .error
+            .as_deref()
+            .filter(|error| !error.trim().is_empty())
+        {
+            return PoolAvailability::new(
+                PoolAvailabilityState::Unhealthy,
+                format!("last observation failed: {error}"),
+            );
+        }
+        if entry.reset_at.is_some_and(|reset_at| reset_at <= now) {
+            return match entry.limit {
+                Some(0) => {
+                    PoolAvailability::new(PoolAvailabilityState::Exhausted, "quota limit is zero")
+                }
+                Some(_) => {
+                    PoolAvailability::new(PoolAvailabilityState::Available, "quota window reset")
+                }
+                None => PoolAvailability::new(
+                    PoolAvailabilityState::Unknown,
+                    "quota window reset without a known limit",
+                ),
+            };
+        }
+        let unit = entry.limit_unit.as_deref().unwrap_or("units");
+        match (entry.used, entry.limit) {
+            (Some(used), Some(limit)) if used >= limit => PoolAvailability::new(
+                PoolAvailabilityState::Exhausted,
+                format!("quota exhausted: used {used} of {limit} {unit}"),
+            ),
+            (Some(used), Some(limit)) => PoolAvailability::new(
+                PoolAvailabilityState::Available,
+                format!("quota available: used {used} of {limit} {unit}"),
+            ),
+            _ => PoolAvailability::new(PoolAvailabilityState::Unknown, "usage or limit is unknown"),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PoolQuotaSource {
+    Catalog,
+    Provider,
+    User,
+}
+
+impl PoolQuotaSource {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "catalog" => Some(Self::Catalog),
+            "provider" => Some(Self::Provider),
+            "user" => Some(Self::User),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Catalog => "catalog",
+            Self::Provider => "provider",
+            Self::User => "user",
+        }
+    }
+}
+
+/// One append-only quota observation for a pool slot.
+///
+/// The ledger carries evidence, not credentials: `source` and `observed_at`
+/// explain where the values came from and when they were seen.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PoolQuotaEntry {
+    pub id: String,
+    pub slot_id: PoolSlotId,
+    pub observed_at: u64,
+    pub source: PoolQuotaSource,
+    pub used: Option<u64>,
+    pub limit: Option<u64>,
+    pub limit_unit: Option<String>,
+    pub reset_at: Option<u64>,
+    pub cooldown_until: Option<u64>,
+    pub error: Option<String>,
+}
+
+impl PoolQuotaEntry {
+    pub fn new(slot_id: PoolSlotId, source: PoolQuotaSource, observed_at: u64) -> Self {
+        Self {
+            id: uuid::Uuid::new_v4().to_string(),
+            slot_id,
+            observed_at,
+            source,
+            used: None,
+            limit: None,
+            limit_unit: None,
+            reset_at: None,
+            cooldown_until: None,
+            error: None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PoolAvailabilityState {
+    Available,
+    Exhausted,
+    CoolingDown,
+    Disabled,
+    Unhealthy,
+    Unknown,
+}
+
+impl PoolAvailabilityState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Available => "available",
+            Self::Exhausted => "exhausted",
+            Self::CoolingDown => "cooling-down",
+            Self::Disabled => "disabled",
+            Self::Unhealthy => "unhealthy",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PoolAvailability {
+    pub state: PoolAvailabilityState,
+    pub reason: String,
+}
+
+impl PoolAvailability {
+    pub fn new(state: PoolAvailabilityState, reason: impl Into<String>) -> Self {
+        Self {
+            state,
+            reason: reason.into(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -255,6 +411,15 @@ pub trait Store: Send + Sync {
     async fn load_pool_slots(&self) -> Result<Vec<PoolSlot>, StoreError>;
     async fn save_pool_slot(&self, slot: &PoolSlot) -> Result<(), StoreError>;
     async fn remove_pool_slot(&self, slot_id: &PoolSlotId) -> Result<(), StoreError>;
+    async fn append_pool_quota_entry(&self, entry: &PoolQuotaEntry) -> Result<(), StoreError>;
+    async fn load_pool_quota_entries(
+        &self,
+        slot_id: &PoolSlotId,
+    ) -> Result<Vec<PoolQuotaEntry>, StoreError>;
+    async fn latest_pool_quota_entry(
+        &self,
+        slot_id: &PoolSlotId,
+    ) -> Result<Option<PoolQuotaEntry>, StoreError>;
 }
 
 struct Migration {
@@ -344,6 +509,10 @@ const MIGRATIONS: &[Migration] = &[
     Migration {
         name: "0019_pool_slots.sql",
         sql: include_str!("../toasty/migrations/0019_pool_slots.sql"),
+    },
+    Migration {
+        name: "0020_pool_quota_ledger.sql",
+        sql: include_str!("../toasty/migrations/0020_pool_quota_ledger.sql"),
     },
 ];
 
@@ -1437,11 +1606,107 @@ impl Store for TursoStore {
 
     async fn remove_pool_slot(&self, slot_id: &PoolSlotId) -> Result<(), StoreError> {
         let mut db = self.db.lock().await;
+        let mut transaction = db.transaction().await?;
+        toasty::sql::statement("DELETE FROM pool_quota_ledger WHERE slot_id = ?1")
+            .bind(slot_id.as_str())
+            .exec(&mut transaction)
+            .await?;
         toasty::sql::statement("DELETE FROM pool_slots WHERE id = ?1")
             .bind(slot_id.as_str())
-            .exec(&mut *db)
+            .exec(&mut transaction)
             .await?;
+        transaction.commit().await?;
         Ok(())
+    }
+
+    async fn append_pool_quota_entry(&self, entry: &PoolQuotaEntry) -> Result<(), StoreError> {
+        validate_pool_quota_entry(entry)?;
+        let mut db = self.db.lock().await;
+        let inserted = toasty::sql::statement(
+            "INSERT INTO pool_quota_ledger (\
+                id, slot_id, observed_at, source, used, quota_limit, limit_unit, \
+                reset_at, cooldown_until, error\
+             ) SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10 \
+             FROM pool_slots WHERE id = ?2",
+        )
+        .bind(&entry.id)
+        .bind(entry.slot_id.as_str())
+        .bind(timestamp(entry.observed_at)?)
+        .bind(entry.source.as_str())
+        .bind(timestamp_or_missing(entry.used)?)
+        .bind(timestamp_or_missing(entry.limit)?)
+        .bind(entry.limit_unit.as_deref().unwrap_or_default())
+        .bind(timestamp_or_missing(entry.reset_at)?)
+        .bind(timestamp_or_missing(entry.cooldown_until)?)
+        .bind(entry.error.as_deref().unwrap_or_default())
+        .exec(&mut *db)
+        .await?;
+        if inserted != 1 {
+            return Err(StoreError::QuotaLedgerOwnerMissing {
+                slot_id: entry.slot_id.clone(),
+            });
+        }
+        Ok(())
+    }
+
+    async fn load_pool_quota_entries(
+        &self,
+        slot_id: &PoolSlotId,
+    ) -> Result<Vec<PoolQuotaEntry>, StoreError> {
+        let mut db = self.db.lock().await;
+        let rows = toasty::sql::query(
+            "SELECT id, slot_id, observed_at, source, used, quota_limit, limit_unit, \
+                    reset_at, cooldown_until, error \
+             FROM pool_quota_ledger WHERE slot_id = ?1 ORDER BY observed_at, id",
+        )
+        .column_types([
+            Type::String,
+            Type::String,
+            Type::I64,
+            Type::String,
+            Type::I64,
+            Type::I64,
+            Type::String,
+            Type::I64,
+            Type::I64,
+            Type::String,
+        ])
+        .bind(slot_id.as_str())
+        .exec(&mut *db)
+        .await?;
+        rows.into_iter().map(parse_pool_quota_entry).collect()
+    }
+
+    async fn latest_pool_quota_entry(
+        &self,
+        slot_id: &PoolSlotId,
+    ) -> Result<Option<PoolQuotaEntry>, StoreError> {
+        let mut db = self.db.lock().await;
+        let rows = toasty::sql::query(
+            "SELECT id, slot_id, observed_at, source, used, quota_limit, limit_unit, \
+                    reset_at, cooldown_until, error \
+             FROM pool_quota_ledger WHERE slot_id = ?1 \
+             ORDER BY observed_at DESC, id DESC LIMIT 1",
+        )
+        .column_types([
+            Type::String,
+            Type::String,
+            Type::I64,
+            Type::String,
+            Type::I64,
+            Type::I64,
+            Type::String,
+            Type::I64,
+            Type::I64,
+            Type::String,
+        ])
+        .bind(slot_id.as_str())
+        .exec(&mut *db)
+        .await?;
+        rows.into_iter()
+            .next()
+            .map(parse_pool_quota_entry)
+            .transpose()
     }
 
     async fn load_projects(&self) -> Result<Vec<Project>, StoreError> {
@@ -2293,6 +2558,7 @@ pub struct MemoryStore {
     transcripts: RwLock<BTreeMap<TaskId, BTreeMap<u64, Entry>>>,
     project_approvals: RwLock<BTreeMap<ProjectId, BTreeMap<String, ProjectApproval>>>,
     pool_slots: RwLock<BTreeMap<PoolSlotId, PoolSlot>>,
+    pool_quota_ledger: RwLock<Vec<PoolQuotaEntry>>,
 }
 
 impl MemoryStore {
@@ -2748,8 +3014,59 @@ impl Store for MemoryStore {
     }
 
     async fn remove_pool_slot(&self, slot_id: &PoolSlotId) -> Result<(), StoreError> {
+        self.pool_quota_ledger
+            .write()
+            .await
+            .retain(|entry| entry.slot_id.as_str() != slot_id.as_str());
         self.pool_slots.write().await.remove(slot_id);
         Ok(())
+    }
+
+    async fn append_pool_quota_entry(&self, entry: &PoolQuotaEntry) -> Result<(), StoreError> {
+        validate_pool_quota_entry(entry)?;
+        if !self.pool_slots.read().await.contains_key(&entry.slot_id) {
+            return Err(StoreError::QuotaLedgerOwnerMissing {
+                slot_id: entry.slot_id.clone(),
+            });
+        }
+        let mut ledger = self.pool_quota_ledger.write().await;
+        if ledger.iter().any(|stored| stored.id == entry.id) {
+            return Err(StoreError::Backend(
+                "quota ledger entry is already recorded".into(),
+            ));
+        }
+        ledger.push(entry.clone());
+        Ok(())
+    }
+
+    async fn load_pool_quota_entries(
+        &self,
+        slot_id: &PoolSlotId,
+    ) -> Result<Vec<PoolQuotaEntry>, StoreError> {
+        let mut entries: Vec<_> = self
+            .pool_quota_ledger
+            .read()
+            .await
+            .iter()
+            .filter(|entry| entry.slot_id.as_str() == slot_id.as_str())
+            .cloned()
+            .collect();
+        entries.sort_by(pool_quota_entry_order);
+        Ok(entries)
+    }
+
+    async fn latest_pool_quota_entry(
+        &self,
+        slot_id: &PoolSlotId,
+    ) -> Result<Option<PoolQuotaEntry>, StoreError> {
+        Ok(self
+            .pool_quota_ledger
+            .read()
+            .await
+            .iter()
+            .filter(|entry| entry.slot_id.as_str() == slot_id.as_str())
+            .max_by(|left, right| pool_quota_entry_order(left, right))
+            .cloned())
     }
 }
 
@@ -2834,7 +3151,7 @@ fn optional_u64(value: Option<&Value>) -> Result<Option<u64>, StoreError> {
 
 fn timestamp(value: u64) -> Result<i64, StoreError> {
     i64::try_from(value).map_err(|_| {
-        StoreError::InvalidRow("pool slot timestamp exceeds the database range".to_string())
+        StoreError::InvalidRow("pool timestamp exceeds the database range".to_string())
     })
 }
 
@@ -2849,6 +3166,61 @@ fn pool_slot_order(left: &PoolSlot, right: &PoolSlot) -> std::cmp::Ordering {
     left.priority
         .cmp(&right.priority)
         .then(left.created_at.cmp(&right.created_at))
+        .then(left.id.cmp(&right.id))
+}
+
+fn parse_pool_quota_entry(value: Value) -> Result<PoolQuotaEntry, StoreError> {
+    let Value::Record(record) = value else {
+        return Err(StoreError::InvalidRow(
+            "expected a quota ledger record".to_string(),
+        ));
+    };
+    let source_name = required_string(record.get(3))?;
+    let source = PoolQuotaSource::parse(&source_name).ok_or_else(|| {
+        StoreError::InvalidRow(format!("unknown quota ledger source: {source_name}"))
+    })?;
+    let entry = PoolQuotaEntry {
+        id: required_string(record.first())?,
+        slot_id: PoolSlotId::new(required_string(record.get(1))?),
+        observed_at: required_u64(record.get(2))?,
+        source,
+        used: optional_u64(record.get(4))?,
+        limit: optional_u64(record.get(5))?,
+        limit_unit: optional_string(record.get(6))?,
+        reset_at: optional_u64(record.get(7))?,
+        cooldown_until: optional_u64(record.get(8))?,
+        error: optional_string(record.get(9))?,
+    };
+    validate_pool_quota_entry(&entry)?;
+    Ok(entry)
+}
+
+fn validate_pool_quota_entry(entry: &PoolQuotaEntry) -> Result<(), StoreError> {
+    if entry.id.trim().is_empty() {
+        return Err(StoreError::InvalidRow(
+            "quota ledger entry id is empty".to_string(),
+        ));
+    }
+    if entry.slot_id.as_str().trim().is_empty() {
+        return Err(StoreError::InvalidRow(
+            "quota ledger slot id is empty".to_string(),
+        ));
+    }
+    if entry
+        .limit_unit
+        .as_deref()
+        .is_some_and(|unit| unit.trim().is_empty())
+    {
+        return Err(StoreError::InvalidRow(
+            "quota ledger limit unit is empty".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn pool_quota_entry_order(left: &PoolQuotaEntry, right: &PoolQuotaEntry) -> std::cmp::Ordering {
+    left.observed_at
+        .cmp(&right.observed_at)
         .then(left.id.cmp(&right.id))
 }
 
@@ -3162,6 +3534,222 @@ mod tests {
         let directory = TestDirectory::new()?;
         verify(&TursoStore::open_at(&directory.join("pool-validation.db")).await?).await?;
         Ok(())
+    }
+
+    fn quota_entry(
+        id: &str,
+        slot_id: &PoolSlotId,
+        source: PoolQuotaSource,
+        observed_at: u64,
+    ) -> PoolQuotaEntry {
+        let mut entry = PoolQuotaEntry::new(slot_id.clone(), source, observed_at);
+        entry.id = id.into();
+        entry
+    }
+
+    #[tokio::test]
+    async fn pool_quota_ledger_round_trips_orders_and_removes()
+    -> Result<(), Box<dyn std::error::Error>> {
+        async fn seed(
+            store: &dyn Store,
+        ) -> Result<(PoolSlot, Vec<PoolQuotaEntry>), Box<dyn std::error::Error>> {
+            let mut slot = PoolSlot::new(Agent::Codex, "acme", "Acme", "model-1", "Model One");
+            slot.id = PoolSlotId::new("quota-slot");
+            store.save_pool_slot(&slot).await?;
+
+            let mut catalog =
+                quota_entry("ledger-catalog", &slot.id, PoolQuotaSource::Catalog, 100);
+            catalog.used = Some(2);
+            catalog.limit = Some(10);
+            catalog.limit_unit = Some("requests".into());
+            catalog.reset_at = Some(1_000);
+
+            let mut provider =
+                quota_entry("ledger-provider", &slot.id, PoolQuotaSource::Provider, 200);
+            provider.used = Some(10);
+            provider.limit = Some(10);
+            provider.limit_unit = Some("requests".into());
+            provider.reset_at = Some(1_000);
+            provider.cooldown_until = Some(500);
+            provider.error = Some("rate limited".into());
+
+            let mut user = quota_entry("ledger-user", &slot.id, PoolQuotaSource::User, 300);
+            user.used = Some(0);
+            user.limit = Some(20);
+            user.limit_unit = Some("requests".into());
+            user.reset_at = Some(2_000);
+
+            let entries = vec![catalog, provider, user];
+            for entry in &entries {
+                store.append_pool_quota_entry(entry).await?;
+            }
+            assert_eq!(store.load_pool_quota_entries(&slot.id).await?, entries);
+            assert_eq!(
+                store.latest_pool_quota_entry(&slot.id).await?.as_ref(),
+                entries.last()
+            );
+            assert!(
+                store
+                    .load_pool_quota_entries(&PoolSlotId::new("missing-slot"))
+                    .await?
+                    .is_empty()
+            );
+            assert!(
+                store
+                    .latest_pool_quota_entry(&PoolSlotId::new("missing-slot"))
+                    .await?
+                    .is_none()
+            );
+
+            let latest = entries.last().ok_or("missing latest quota entry")?;
+            assert_eq!(
+                slot.availability(Some(latest), 400).state,
+                PoolAvailabilityState::Available
+            );
+            Ok((slot, entries))
+        }
+
+        let memory = MemoryStore::new();
+        let (memory_slot, _) = seed(&memory).await?;
+        memory.remove_pool_slot(&memory_slot.id).await?;
+        assert!(
+            memory
+                .load_pool_quota_entries(&memory_slot.id)
+                .await?
+                .is_empty()
+        );
+
+        let directory = TestDirectory::new()?;
+        let path = directory.join("pool-ledger.db");
+        let store = TursoStore::open_at(&path).await?;
+        let (slot, entries) = seed(&store).await?;
+        drop(store);
+
+        let reopened = TursoStore::open_at(&path).await?;
+        assert_eq!(reopened.load_pool_quota_entries(&slot.id).await?, entries);
+        assert_eq!(
+            reopened.latest_pool_quota_entry(&slot.id).await?,
+            entries.last().cloned()
+        );
+        reopened.remove_pool_slot(&slot.id).await?;
+        assert!(reopened.load_pool_quota_entries(&slot.id).await?.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn pool_quota_ledger_rejects_missing_slots_and_invalid_entries()
+    -> Result<(), Box<dyn std::error::Error>> {
+        async fn verify(store: &dyn Store) -> Result<(), Box<dyn std::error::Error>> {
+            let missing = quota_entry(
+                "ledger-missing",
+                &PoolSlotId::new("missing-slot"),
+                PoolQuotaSource::Provider,
+                100,
+            );
+            assert!(matches!(
+                store.append_pool_quota_entry(&missing).await,
+                Err(StoreError::QuotaLedgerOwnerMissing { .. })
+            ));
+
+            let mut slot = PoolSlot::new(Agent::Codex, "acme", "Acme", "model-1", "Model One");
+            slot.id = PoolSlotId::new("ledger-slot");
+            store.save_pool_slot(&slot).await?;
+
+            let mut invalid = quota_entry("ledger-invalid", &slot.id, PoolQuotaSource::User, 100);
+            invalid.limit_unit = Some(" ".into());
+            assert!(matches!(
+                store.append_pool_quota_entry(&invalid).await,
+                Err(StoreError::InvalidRow(_))
+            ));
+            invalid.limit_unit = None;
+            invalid.id.clear();
+            assert!(matches!(
+                store.append_pool_quota_entry(&invalid).await,
+                Err(StoreError::InvalidRow(_))
+            ));
+            assert!(store.load_pool_quota_entries(&slot.id).await?.is_empty());
+            Ok(())
+        }
+        verify(&MemoryStore::new()).await?;
+        let directory = TestDirectory::new()?;
+        verify(&TursoStore::open_at(&directory.join("pool-ledger-validation.db")).await?).await?;
+        Ok(())
+    }
+
+    #[test]
+    fn pool_availability_derives_states_and_expires_windows() {
+        let mut slot = PoolSlot::new(Agent::Codex, "acme", "Acme", "model-1", "Model One");
+        slot.id = PoolSlotId::new("availability-slot");
+
+        let no_observation = slot.availability(None, 100);
+        assert_eq!(no_observation.state, PoolAvailabilityState::Unknown);
+        assert!(no_observation.reason.contains("no quota observation"));
+
+        let mut entry = PoolQuotaEntry::new(slot.id.clone(), PoolQuotaSource::Provider, 100);
+        entry.used = Some(5);
+        entry.limit = Some(10);
+        entry.limit_unit = Some("requests".into());
+        entry.reset_at = Some(1_000);
+
+        assert_eq!(
+            slot.availability(Some(&entry), 100).state,
+            PoolAvailabilityState::Available
+        );
+        entry.used = Some(10);
+        let exhausted = slot.availability(Some(&entry), 999);
+        assert_eq!(exhausted.state, PoolAvailabilityState::Exhausted);
+        assert!(exhausted.reason.contains("10 of 10 requests"));
+        assert_eq!(
+            slot.availability(Some(&entry), 1_000).state,
+            PoolAvailabilityState::Available
+        );
+        entry.limit = Some(0);
+        entry.used = Some(0);
+        assert_eq!(
+            slot.availability(Some(&entry), 1_000).state,
+            PoolAvailabilityState::Exhausted
+        );
+
+        entry.limit = Some(10);
+        entry.used = Some(9);
+        entry.cooldown_until = Some(200);
+        let cooling = slot.availability(Some(&entry), 100);
+        assert_eq!(cooling.state, PoolAvailabilityState::CoolingDown);
+        assert!(cooling.reason.contains("cooling down until 200"));
+        assert_eq!(
+            slot.availability(Some(&entry), 200).state,
+            PoolAvailabilityState::Available
+        );
+
+        entry.cooldown_until = None;
+        entry.error = Some("provider unavailable".into());
+        assert_eq!(
+            slot.availability(Some(&entry), 100).state,
+            PoolAvailabilityState::Unhealthy
+        );
+        entry.error = None;
+        assert_eq!(
+            slot.availability(Some(&entry), 100).state,
+            PoolAvailabilityState::Available
+        );
+
+        entry.used = None;
+        assert_eq!(
+            slot.availability(Some(&entry), 100).state,
+            PoolAvailabilityState::Unknown
+        );
+        entry.used = Some(5);
+        entry.limit = None;
+        assert_eq!(
+            slot.availability(Some(&entry), 100).state,
+            PoolAvailabilityState::Unknown
+        );
+
+        slot.enabled = false;
+        assert_eq!(
+            slot.availability(Some(&entry), 100).state,
+            PoolAvailabilityState::Disabled
+        );
     }
 
     #[test]

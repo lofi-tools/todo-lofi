@@ -2481,12 +2481,27 @@ implemented; no public deployment exists yet.
   validation and re-open durability. `cargo test -p shepherd-core` passes 180
   tests (4 ignored), and `cargo clippy -p shepherd-core --all-targets -- -D
   warnings` and `cargo fmt -p shepherd-core` pass.
-- [ ] Implement the quota ledger and availability states.
+- [x] Implement the quota ledger and availability states.
   Seed limits from a catalog snapshot when available, update from provider
   rate-limit/quota responses, and let the user correct limits or reset times.
   Unknown capacity is `unknown`, not `free`; exhausted and cooling-down slots are
   skipped with a visible reason. Tests use a deterministic clock for reset
   windows, provider errors, clock changes and user corrections.
+  Evidence (2026-11-09): `PoolQuotaEntry` and `PoolQuotaSource` record
+  append-only catalog, provider and user observations with used, limit, unit,
+  reset, cooldown and error fields; migration `0020_pool_quota_ledger.sql`
+  creates `pool_quota_ledger`. `TursoStore` and `MemoryStore` implement append,
+  load and latest, reject a missing slot or invalid entry, order by observation
+  time and id, and delete a slot's ledger with the slot. `PoolSlot::availability`
+  derives available, exhausted, cooling down, disabled, unhealthy and unknown
+  with a visible reason: disabled wins, an active cooldown and a recorded error
+  are checked next, an expired reset window makes a known limit available again,
+  and unknown usage or limits stay unknown. Tests cover both stores, ordering,
+  re-open durability, removal, owner and input validation, every state
+  transition, clock changes across a reset and a later user correction.
+  `cargo test -p shepherd-core` passes 183 tests (4 ignored), and `cargo clippy
+  -p shepherd-core --all-targets -- -D warnings` and `cargo fmt -p shepherd-core`
+  pass.
 - [ ] Select a slot by user priority with quota-aware fallback.
   A new task or conversation tries the user's preferred healthy slot, then the
   next one that can accept work; an explicit task override wins. Selection is

@@ -11,29 +11,29 @@ const toc = [
   { label: 'Selection', href: '#selection' },
   { label: 'Idle release', href: '#release' },
   { label: 'Corrections and privacy', href: '#privacy' },
-  { label: 'Planned tests', href: '#tests' },
+  { label: 'Tests', href: '#tests' },
 ]
 ---
 
 <Docs
   title="Quota ledger"
-  description="The local record behind the quota-aware agent pool, its persistence, and the remaining design contract."
+  description="The local record behind the quota-aware agent pool, its persisted ledger and availability states."
   toc={toc}
 >
-  <Callout tone="note" title="Slot persistence is implemented">
-    The pool slot record and its local database table now exist. The quota ledger, priority
-    selection, idle release and pool UI are still planned, so the agent pool is not available in
-    the current build. This page records the agreed contract so the implementation, tests and user
-    guide cannot drift.
+  <Callout tone="note" title="Slot persistence and the ledger are implemented">
+    The pool slot record, its local database table and the append-only quota ledger now exist,
+    together with the six availability states. Priority selection, idle release and the pool UI are
+    still planned, so the agent pool is not available in the current build. This page records the
+    agreed contract so the implementation, tests and user guide cannot drift.
   </Callout>
 
   <h2 id="status">Status</h2>
   <p>
     <Badge tone="warning" variant="subtle">planned</Badge> The pool work is split into slot
     persistence, the quota ledger, priority selection, idle release and the pool UI. Slot
-    persistence is implemented and tested; the other four items are not checked off. The
-    user-facing promise is on the <a href="/docs/users/agent-pool">agent pool</a> page; this page is
-    for the implementation.
+    persistence and the quota ledger are implemented and tested; priority selection, idle release
+    and the pool UI are not checked off. The user-facing promise is on the
+    <a href="/docs/users/agent-pool">agent pool</a> page; this page is for the implementation.
   </p>
 
   <h2 id="slot">The slot record</h2>
@@ -50,22 +50,25 @@ const toc = [
 
   <h2 id="ledger">The ledger</h2>
   <p>
-    The ledger is local. It can be seeded from a catalog snapshot when one is available, updated from
-    provider rate-limit or quota responses, and corrected by the user. It is not a provider billing
-    record and must not claim a limit it cannot observe.
+    The ledger is local and append-only. Each observation records its source (catalog, provider or
+    user), timestamp, used and limit values, unit, reset time, cooldown and error. A later
+    observation, including a user correction, is the current one. The ledger is not a provider
+    billing record and must not claim a limit it cannot observe.
   </p>
   <p>
-    A quota response is evidence for a slot, not a global fact. Preserve the source and timestamp so
-    a later reset or correction can be explained. If the provider reports no capacity, record
-    <strong>unknown</strong>; never translate that to free or unlimited.
+    A quota response is evidence for a slot, not a global fact. The source and timestamp are
+    preserved so a later reset or correction can be explained. If the provider reports no capacity,
+    the observation leaves the usage or limit unknown; never translate that to free or unlimited.
   </p>
 
   <h2 id="availability">Availability</h2>
   <p>
-    Before selection, a slot must answer whether it can accept work at the current time. The
-    implementation needs states for available, exhausted, cooling down, disabled, unhealthy and
-    unknown. Exhausted and cooling-down slots are skipped with a visible reason; unknown capacity is
-    not treated as available.
+    Before selection, a slot answers whether it can accept work at the current time. The derived
+    states are available, exhausted, cooling down, disabled, unhealthy and unknown. A disabled slot
+    wins first; an active cooldown, then a recorded error, then an expired reset window are checked
+    before the used/limit comparison. Expired reset periods make a known limit available again;
+    unknown usage or limits stay unknown. Exhausted and cooling-down slots are skipped with a visible reason,
+    and unknown capacity is not treated as available.
   </p>
 
   <h2 id="selection">Selection</h2>
@@ -104,16 +107,16 @@ const toc = [
     selection; a stale catalog snapshot must not silently overwrite them.
   </p>
 
-  <h2 id="tests">Planned tests</h2>
+  <h2 id="tests">Tests</h2>
   <ul>
-    <li>Deterministic clock tests for reset windows, provider errors, clock changes and user corrections.</li>
-    <li>Simultaneous starts, exhaustion, cooldown, provider failure and manual override.</li>
-    <li>Idle release, a follow-up after release, a slot claimed meanwhile, cancellation and restart recovery.</li>
+    <li>Implemented: ledger round-trips both stores, ordering, re-open durability, owner checks and rejected invalid input.</li>
+    <li>Implemented: a deterministic clock covers reset windows, cooldowns, provider errors, clock changes, user corrections and every availability state.</li>
+    <li>Pending: simultaneous starts, manual override, idle release, a slot claimed meanwhile, cancellation and restart recovery.</li>
     <li>Credential redaction in records, logs and diagnostics.</li>
   </ul>
   <p>
-    Until those tests exist, the agent pool remains a next-step item. See the
-    <a href="/docs/contributors/test-fixtures">test fixtures</a> page for the fixture rules that apply
-    when the work lands.
+    The selection and release tests arrive with those slices, so the agent pool remains a next-step
+    item. See the <a href="/docs/contributors/test-fixtures">test fixtures</a> page for the fixture
+    rules that apply when the work lands.
   </p>
 </Docs>
