@@ -17,6 +17,10 @@ import PreviewAnnotation from '../components/illustrations/PreviewAnnotation.ast
 import IllustrationStage from '../components/illustrations/IllustrationStage.astro'
 import { reasonCards, reviewCards, REPO_URL } from '../../data/shepherd'
 import { availability, ROADMAP_PATH, roadmapStatuses } from '../../data/roadmap'
+import { RELEASES_PAGE } from '../lib/releases'
+import tauriConfig from '../../../shepherd/src-tauri/tauri.conf.json?raw'
+
+const appVersion = (JSON.parse(tauriConfig) as { version: string }).version
 
 const shippedStatusLabel = roadmapStatuses.find((status) => status.shipped)?.label ?? 'Now'
 const unshippedStatusLabels = roadmapStatuses
@@ -103,6 +107,18 @@ const availabilityItem = css({
 
 const availabilityMark = css({ color: 'accent.text', mt: '0.5', flexShrink: '0' })
 
+const heroRelease = css({
+  display: 'flex',
+  alignItems: 'center',
+  justifyContent: 'center',
+  gap: '2',
+  flexWrap: 'wrap',
+  mt: { base: '4', md: '6' },
+  fontSize: 'sm',
+  color: 'fg.muted',
+  '& a': { color: 'fg.default', textDecoration: 'underline' },
+})
+
 const honestyNote = css({
   mt: { base: '6', md: '8' },
   fontSize: 'sm',
@@ -133,6 +149,13 @@ const honestyNote = css({
           <ShepherdWorkspace />
         </div>
       </Hero>
+      <p class={heroRelease}>
+        <span>Version {appVersion}</span>
+        <span aria-hidden="true">·</span>
+        <a href="/downloads">Download</a>
+        <span aria-hidden="true">·</span>
+        <a href={RELEASES_PAGE}>Releases</a>
+      </p>
     </HomepageSection>
 
     <HomepageSection id="product" index={2} label="why shepherd">

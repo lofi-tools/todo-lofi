@@ -80,7 +80,11 @@ test.describe('Shepherd landing page', () => {
       'href',
       '/docs/users/roadmap',
     )
-    await expect(page.locator('a[href="/downloads"], a[href="/roadmap"]')).toHaveCount(0)
+    await expect(page.getByRole('link', { name: 'Download', exact: true })).toHaveAttribute(
+      'href',
+      '/downloads',
+    )
+    await expect(page.locator('a[href="/roadmap"]')).toHaveCount(0)
   })
 
   test('the design system stylesheet is applied and the theme persists', async ({ page }) => {

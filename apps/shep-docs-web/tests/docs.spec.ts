@@ -114,7 +114,8 @@ test.describe('Shepherd docs routes', () => {
     await page.goto('/docs/users/releases')
     await expect(page.locator('main')).toContainText(/no signed release yet/i)
     await expect(page.locator('main')).toContainText(/release gate has not been run/i)
-    await expect(page.locator('a[href="/downloads"], a[href="/roadmap"]')).toHaveCount(0)
+    await expect(page.locator('main a[href="/downloads"]')).toHaveCount(1)
+    await expect(page.locator('a[href="/roadmap"]')).toHaveCount(0)
   })
 
   test('no docs page names an internal reference project or Taskstream copy', async ({ page }) => {

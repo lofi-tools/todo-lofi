@@ -71,7 +71,8 @@ copy.
 | Capability | Classification | Public treatment |
 | --- | --- | --- |
 | Quota-aware agent pool | **L** next; **U** agent pool; **C** quota ledger | The landing page says next. The user page says management exists but task selection does not. The contributor page documents slots, the ledger, availability, selection, idle release, the Settings status/reorder/enable/correction/cooldown/force UI, catalog snapshot limit seeding, hardcoded built-in harness windows (Codex 5-hour and weekly roll from the last observed use; Claude's 5-hour and weekly windows take provider-reported resets; no counts are hardcoded) and all-window selection; snapshot refresh is pending; a turn selects a slot before it starts. |
-| Signed macOS/Linux artifacts | **L** next; **U** releases; **C** release pipeline | No signed release yet. The release gate has not been run; no downloads route. |
+| Signed macOS/Linux artifacts | **L** next; **U** releases; **C** release pipeline | No signed release yet. The release gate has not been run. The downloads page resolves only a published `shepherd-v*` release; none exists yet. |
+| Release downloads | **U** downloads | The page reads the newest `shepherd-v*` release from GitHub and links only assets that release carries. With no release it points at the source install and the releases page. |
 | Windows support and installer | **L** planned; **U** releases | Planned with no date; no setup page. |
 | Preview annotation wrapper | **U** preview (user warning); **C** annotation API (token, claim, origin, validation) | The user page explains the capability and the sharing warning; the protocol is contributor-only. |
 | Release and test pipeline | **C** release pipeline and test fixtures | Never a landing argument. |
@@ -134,8 +135,8 @@ a guide page, a contributor note, or not public.
   telemetry, code editor, LSP, debugger, plugin API, background daemon.
 - **Research-only:** reference-project names, comparison tables, feature counts,
   screenshots and implementation details copied from another product.
-- **Later site work:** docs search, the generated roadmap page, the downloads
-  page, and tests for every public claim.
+- **Later site work:** docs search, the generated roadmap page, and tests for
+  every public claim.
 
 ## Open gaps
 

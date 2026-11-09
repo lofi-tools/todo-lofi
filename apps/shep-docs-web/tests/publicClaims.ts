@@ -176,5 +176,5 @@ export async function expectPublicClaims(page: Page, path: string): Promise<void
     ).toBe(true)
   }
 
-  await expectNoLegacyPublicLinks(page, path)
+  await expectNoLegacyPublicLinks(page, path, { allowDownloads: true })
 }

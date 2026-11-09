@@ -2539,11 +2539,28 @@ implemented; no public deployment exists yet.
   use Authenticode; Linux assets ship checksums. CI fails if signing or
   notarization verification fails. Signing credentials stay in protected CI
   secrets and never enter the repository or build logs.
-- [ ] Make GitHub releases the source of truth for downloads.
+- [x] Make GitHub releases the source of truth for downloads.
   Add a downloads page that resolves the newest release and selects the right
   asset for the visitor's platform and architecture, with a working releases
   fallback when the API is unavailable. The home page shows the current version
   and a download action without claiming unsupported artifacts exist.
+  Evidence (2026-11-09): `/downloads`
+  (`apps/shep-docs-web/src/pages/downloads.astro`) reads
+  `https://api.github.com/repos/lofi-tools/todo-lofi/releases?per_page=30` in the
+  browser, accepts only `shepherd-v*` tags and links only assets that release
+  carries. `src/lib/releases.ts` maps the macOS arm64/x86_64 zip, Linux
+  arm64/x86_64 deb and Windows x86_64 setup assets, narrows to the visitor's
+  platform and architecture when known, lists all bundles otherwise, and keeps
+  checksum metadata separate. With no Shepherd release, an empty or malformed
+  payload or a non-OK response, the page keeps its "No published Shepherd
+  release yet" fallback and links
+  `https://github.com/lofi-tools/todo-lofi/releases`; it never renders a
+  download for an unpublished tag. The home page shows `Version 0.1.0` from
+  `tauri.conf.json` with `/downloads` and Releases links, and the header carries
+  Downloads. `tests/downloads.spec.ts` covers release filtering, empty-asset
+  rejection, asset and platform selection, UA detection, the stubbed success,
+  empty and 503 fallbacks and the home version. Docs e2e pass 40 tests;
+  typecheck and build are clean, and `web-test-guards` typechecks.
 - [ ] Verify packaged artifacts and their install story.
   Extend the release checklist to Windows and both architectures. On clean
   machines, verify launch, first-run configuration, an agent turn, preview

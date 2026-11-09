@@ -1,0 +1,184 @@
+---
+import { css } from 'styled-system/css'
+import Base from '../layouts/Base.astro'
+import SiteHeader from '../components/blocks/SiteHeader.astro'
+import DocsFooter from '../components/blocks/DocsFooter.astro'
+import { RELEASES_PAGE } from '../lib/releases'
+
+const page = css({
+  maxW: '880px',
+  mx: 'auto',
+  px: { base: '5', md: '8' },
+  py: { base: '10', md: '16' },
+})
+
+const title = css({
+  fontSize: { base: '3xl', md: '4xl' },
+  fontWeight: 'semibold',
+  letterSpacing: 'tight',
+  color: 'fg.default',
+})
+
+const intro = css({
+  mt: '3',
+  maxW: '68ch',
+  color: 'fg.muted',
+  lineHeight: 'relaxed',
+})
+
+const status = css({
+  mt: '8',
+  p: { base: '5', md: '6' },
+  borderRadius: 'lg',
+  borderWidth: 'hairline',
+  borderStyle: 'solid',
+  borderColor: 'border',
+  bg: 'surface.subtle',
+  color: 'fg.muted',
+  lineHeight: 'relaxed',
+})
+
+const heading = css({ mt: '8', fontSize: 'lg', fontWeight: 'semibold', color: 'fg.default' })
+const list = css({
+  display: 'grid',
+  gap: '2',
+  mt: '3',
+  p: '0',
+  listStyle: 'none',
+  '& a': { color: 'fg.default', textDecoration: 'underline' },
+})
+const meta = css({ fontSize: 'sm', color: 'fg.subtle', mt: '2' })
+---
+
+<Base
+  title="Download Shepherd"
+  description="Download the newest published Shepherd release, or run Shepherd from source."
+>
+  <SiteHeader blueprint />
+  <main id="content" class={page}>
+    <h1 class={title}>Download Shepherd</h1>
+    <p class={intro}>
+      Shepherd publishes unsigned bundles from its release workflow. This page reads the newest
+      <code>shepherd-v*</code> release from GitHub and links only assets that release carries; it
+      never invents a download.
+    </p>
+
+    <div class={status} data-downloads>
+      <p data-release-empty>
+        No published Shepherd release yet. <a href="/docs/users/install">Run from source</a> or browse
+        <a href={RELEASES_PAGE}>GitHub releases</a>.
+      </p>
+      <p data-release-error hidden>
+        Could not load release data from GitHub. Browse the
+        <a href={RELEASES_PAGE}>releases page</a> instead.
+      </p>
+      <section data-release-content hidden>
+        <h2 class={heading}>Shepherd <span data-release-version></span></h2>
+        <p class={meta}><a data-release-page>Release notes</a> <span data-release-date></span></p>
+
+        <h3 class={heading}>Downloads</h3>
+        <ul class={list} data-release-assets></ul>
+
+        <h3 class={heading}>Checksums</h3>
+        <p class={meta}>
+          Each release also publishes the metadata and checksum files the build recorded.
+        </p>
+        <ul class={list} data-release-checksums></ul>
+      </section>
+    </div>
+  </main>
+  <DocsFooter />
+
+  <script>
+    import {
+      archFrom,
+      assetsFor,
+      bundleAssets,
+      metadataAssets,
+      platformFrom,
+      RELEASES_API,
+      shepherdReleaseFrom,
+      type Arch,
+      type ReleaseAsset,
+    } from '../lib/releases'
+
+    const root = document.querySelector<HTMLElement>('[data-downloads]')
+
+    if (root) {
+      const empty = root.querySelector<HTMLElement>('[data-release-empty]')
+      const failed = root.querySelector<HTMLElement>('[data-release-error]')
+      const content = root.querySelector<HTMLElement>('[data-release-content]')
+      const assetsList = root.querySelector<HTMLElement>('[data-release-assets]')
+      const checksumsList = root.querySelector<HTMLElement>('[data-release-checksums]')
+
+      const linkItem = (asset: ReleaseAsset, recommended: boolean) => {
+        const item = document.createElement('li')
+        const link = document.createElement('a')
+        link.href = asset.url
+        link.textContent = recommended ? `${asset.name} (for this machine)` : asset.name
+        link.rel = 'noreferrer'
+        item.append(link)
+        return item
+      }
+
+      type NavigatorWithHints = Navigator & {
+        userAgentData?: {
+          platform?: string
+          getHighEntropyValues?: (hints: string[]) => Promise<{ architecture?: string }>
+        }
+      }
+
+      const render = async () => {
+        const response = await fetch(RELEASES_API, {
+          headers: { accept: 'application/vnd.github+json' },
+        })
+        if (!response.ok) throw new Error(`GitHub returned ${response.status}`)
+        const release = shepherdReleaseFrom(await response.json())
+        if (!release || !content || !assetsList || !checksumsList) return
+
+        const version = root.querySelector<HTMLElement>('[data-release-version]')
+        const page = root.querySelector<HTMLAnchorElement>('[data-release-page]')
+        const date = root.querySelector<HTMLElement>('[data-release-date]')
+        if (version) version.textContent = release.version
+        if (page) {
+          page.href = release.url
+          page.textContent = `Release ${release.tag}`
+        }
+        if (date && release.publishedAt) {
+          date.textContent = `· published ${new Date(release.publishedAt).toLocaleDateString()}`
+        }
+
+        const hints = (navigator as NavigatorWithHints).userAgentData
+        const platform = platformFrom(hints?.platform ?? navigator.platform, navigator.userAgent)
+        let arch: Arch
+        if (hints?.getHighEntropyValues) {
+          try {
+            const values = await hints.getHighEntropyValues(['architecture'])
+            arch = archFrom(values.architecture, navigator.platform)
+          } catch {
+            arch = archFrom(undefined, navigator.platform)
+          }
+        } else {
+          arch = archFrom(undefined, navigator.platform)
+        }
+        const recommended = assetsFor(release, platform, arch)
+        const ordered = [
+          ...recommended,
+          ...bundleAssets(release).filter((asset) => !recommended.includes(asset)),
+        ]
+        assetsList.replaceChildren(
+          ...ordered.map((asset) => linkItem(asset, recommended.includes(asset))),
+        )
+        checksumsList.replaceChildren(...metadataAssets(release).map((asset) => linkItem(asset, false)))
+        content.hidden = false
+        if (empty) empty.hidden = true
+        if (failed) failed.hidden = true
+      }
+
+      void render().catch(() => {
+        if (empty) empty.hidden = true
+        if (failed) failed.hidden = false
+      })
+    }
+  </script>
+</Base>
