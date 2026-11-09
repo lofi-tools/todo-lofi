@@ -3,8 +3,9 @@
 Status: S1 (snapshot/schema) and S3 (static catalog site) implemented on
 2026-11-09. The S2 merge policy, review summary, free-offer normalization and
 synthetic fixture gate are implemented; S2 sources for plans/offers/agents/local
-runtimes remain blocked. S4
-is blocked on Cloudflare Pages credentials. No deployment exists yet.
+runtimes remain blocked. The S5 advisory JSON contract is published at
+`/agent-pool-advisory.v1.json`; pool wiring remains separate. S4 is blocked on
+Cloudflare Pages credentials. No deployment exists yet.
 
 This is a separate public site from Shepherd. It compares coding-agent
 providers, plans, models and recurring free offers. It is informational only:
@@ -450,11 +451,14 @@ from memory.
 
 The catalog can seed the future pool, but it is never authoritative.
 
-The published advisory record is keyed by provider/model/plan/offer and includes:
+The published advisory contract is version 1 at `/agent-pool-advisory.v1.json`.
+Its records are keyed by provider/model/plan/offer and include:
 
-- `provider_id`, `model_id`, `plan_id`, `offer_id`;
+- `provider_id`, `model_id` (null until a plan/model link exists), `plan_id`,
+  `offer_id`;
 - `allowance`, `allowance_unit`, `reset_period`;
-- `usage_model`, `confidence`, `verified_at`, `scrape_status`;
+- `usage_model`, `capacity` (`known` or `unknown`), `confidence`, `verified_at`,
+  `scrape_status`;
 - `snapshot_id`, `schema_version`, `stale` (derived from the 7-day threshold);
 - source URL and conditions.
 
@@ -465,8 +469,9 @@ Rules for the pool:
 - The pool must not copy credentials or account data into a catalog record.
 - The catalog is read as a snapshot; the pool does not fetch the scraper or a
   runtime catalog API.
-- The contract can be implemented later. This spec only fixes the fields and
-  semantics so the catalog does not have to be redesigned for the pool.
+- The catalog publishes the contract now; the pool connection remains a
+  separate implementation. This spec fixes the fields and semantics so the
+  catalog does not have to be redesigned for the pool.
 
 ## 10. Verification
 

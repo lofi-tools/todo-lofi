@@ -1,6 +1,6 @@
 # Providers catalog — implementation plan
 
-Status: S1 and S3 implemented on 2026-11-09. S2's source-independent merge policy, review summary, free-offer normalization and synthetic fixture gate are implemented; its source adapters remain blocked on approved sources. S4 is blocked on Cloudflare credentials; S5 waits on the Shepherd agent pool.
+Status: S1 and S3 implemented on 2026-11-09. S2's source-independent merge policy, review summary, free-offer normalization and synthetic fixture gate are implemented; its source adapters remain blocked on approved sources. S4 is blocked on Cloudflare credentials. S5's advisory contract is implemented; connecting it to the Shepherd pool remains a separate Shepherd todo.
 
 Spec: [spec.md](./spec/spec.md). The spec governs behavior and data semantics;
 this file gives the working order.
@@ -248,14 +248,22 @@ Pages deployment remains S4 and was not attempted.
 **Outcome:** the future pool can consume the advisory snapshot without making
 the catalog authoritative.
 
-- [ ] Publish the advisory record shape from spec §9 as a versioned JSON or
-  DuckDB view.
-- [ ] Ensure missing or stale entries map to `unknown`, never `free`.
-- [ ] Add a fixture test showing local usage/provider responses overriding a
+- [x] Publish the advisory record shape from spec §9 as versioned JSON at
+  `/agent-pool-advisory.v1.json`.
+- [x] Ensure missing or stale entries map to `capacity: 'unknown'`, never
+  `known` or a free-capacity claim.
+- [x] Add a fixture test showing local usage/provider responses overriding a
   catalog allowance.
-- [ ] Do not add credentials or private account data to the catalog snapshot.
-- [ ] Gate: contract test plus the full catalog checks. This slice can wait until
-  the pool implementation exists.
+- [x] Do not add credentials or private account data to the catalog snapshot or
+  the advisory records.
+- [x] Gate: contract test plus the full catalog checks. Pool wiring remains a
+  separate Shepherd todo.
+
+S5 evidence (2026-11-09): the static endpoint publishes contract version 1 with
+one record per recurring offer and the plan's usage model. Unit tests cover a
+known record, stale/missing/unknown-plan records mapping to `capacity:
+'unknown'`, and a local observation overriding a stale catalog allowance. The
+contract test checks the built public route; the Shepherd pool is not modified.
 
 ## Risks and follow-ups
 

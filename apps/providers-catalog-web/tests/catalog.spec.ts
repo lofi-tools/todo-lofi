@@ -107,6 +107,21 @@ test.describe('Providers catalog', () => {
     await expect(page.locator('main')).toContainText('No local runtime data yet')
   })
 
+  test('agent pool advisory is a versioned public JSON contract', async ({ request }) => {
+    const response = await request.get('/agent-pool-advisory.v1.json')
+    expect(response.status()).toBe(200)
+    expect(response.headers()['content-type']).toContain('application/json')
+
+    const body = (await response.json()) as {
+      contractVersion: number
+      snapshotId: string
+      records: unknown[]
+    }
+    expect(body.contractVersion).toBe(1)
+    expect(body.snapshotId).toBeTruthy()
+    expect(Array.isArray(body.records)).toBe(true)
+  })
+
   test('catalog pages do not make unverified public claims', async ({ page }) => {
     for (const route of keyRoutes) {
       await page.goto(route.path)

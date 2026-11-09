@@ -29,6 +29,10 @@ conflicting duplicates fail, and one-time or expiring-trial wording is rejected.
 Unit tests also write a synthetic agent, plan, recurring offer and local runtime;
 that fixture does not enable an unapproved source.
 
+The build also publishes `/agent-pool-advisory.v1.json`, a versioned advisory
+contract derived from recurring offers. Stale or missing records expose
+`capacity: "unknown"`; local pool observations remain authoritative.
+
 ## Static site
 
 The Astro site opens the newest `artifacts/*.duckdb` read-only at build time.
