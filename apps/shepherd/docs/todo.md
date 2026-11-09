@@ -2512,12 +2512,28 @@ implemented; no public deployment exists yet.
 
 ### Packaged releases and downloads
 
-- [ ] Build the release artifact matrix in CI.
+- [x] Build the release artifact matrix in CI.
   Produce macOS arm64 and x86_64, Linux x86_64 and arm64, and Windows x86_64
   bundles. A tag push builds and verifies every artifact, then publishes the
   GitHub release automatically only after all required jobs and checks pass.
   Record artifact names, versions, checksums, and the source commit in the
   release metadata.
+  Evidence (2026-11-09): `.github/workflows/shepherd-release.yml` triggers on a
+  `shepherd-v*` tag and builds the five targets (`macos-14`, `macos-15-intel`,
+  `ubuntu-24.04`, `ubuntu-24.04-arm`, `windows-2025`), packaging one versioned
+  artifact per target. `scripts/shepherd-release-metadata.sh` records each
+  artifact's name, SHA-256, byte count, version and source commit, and its
+  `--check` mode re-verifies all five targets. The publish job needs the test
+  workflow and every bundle, fails on a missing target, wrong version or
+  commit, or a checksum mismatch, and only then runs `gh release create`.
+  `cargo test -p shepherd --test packaging` covers the matrix and publish
+  gating and exercises the metadata script, including a changed-checksum and a
+  missing-artifact failure. The hosted tag run has not been exercised from this
+  checkout; the first `shepherd-v*` tag is its acceptance run, and no release
+  is claimed to exist. `cargo test -p shepherd-core` passes 210 tests (4
+  ignored), clippy and fmt are clean, `cargo check -p shepherd` and the
+  packaging test pass, the app has 129 passing e2e tests, and the docs have 31
+  passing e2e tests.
 - [ ] Sign and verify every installable artifact.
   macOS builds use a Developer ID certificate and notarization; Windows builds
   use Authenticode; Linux assets ship checksums. CI fails if signing or

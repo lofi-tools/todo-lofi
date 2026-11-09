@@ -5,9 +5,16 @@ release is not ready until both platform rows in [Evidence](#evidence) are
 filled from a clean machine at the release commit.
 
 `cargo test -p shepherd --test packaging` keeps this document, the Tauri
-configuration, the app build script and the package smoke workflow in
-agreement. The manually dispatched `shepherd-package-smoke` workflow is
-preflight only; it does not replace a clean-machine run.
+configuration, the app build script, the package smoke workflow and the
+release matrix in agreement. The manually dispatched `shepherd-package-smoke`
+workflow is preflight only; it does not replace a clean-machine run.
+
+Pushing a `shepherd-v*` tag runs the `Shepherd release` workflow. It builds the
+macOS arm64 and x86_64, Linux x86_64 and arm64 and Windows x86_64 bundles,
+records every artifact's SHA-256, version and source commit, and publishes only
+after the test workflow and every bundle job pass and the publish job re-checks
+all five targets. That is the automated bundle matrix; the clean-machine rows
+below are still the release gate.
 
 ## Preflight (any machine)
 

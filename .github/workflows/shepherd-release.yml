@@ -1,0 +1,183 @@
+name: Shepherd release
+
+# A `shepherd-v*` tag is the release trigger. It is a separate prefix from the
+# taskstream `v*` tags so the two products never publish over each other.
+on:
+  push:
+    tags: ["shepherd-v*"]
+
+permissions:
+  contents: read
+  actions: write
+
+concurrency:
+  group: shepherd-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  test:
+    uses: ./.github/workflows/test.yml
+
+  build:
+    name: Bundle (${{ matrix.platform }} ${{ matrix.arch }})
+    needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos
+            arch: arm64
+            os: macos-14
+            bundles: app
+            expect: zip
+          - platform: macos
+            arch: x86_64
+            os: macos-15-intel
+            bundles: app
+            expect: zip
+          - platform: linux
+            arch: x86_64
+            os: ubuntu-24.04
+            bundles: deb
+            expect: deb
+          - platform: linux
+            arch: arm64
+            os: ubuntu-24.04-arm
+            bundles: deb
+            expect: deb
+          - platform: windows
+            arch: x86_64
+            os: windows-2025
+            bundles: nsis
+            expect: exe
+    runs-on: ${{ matrix.os }}
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_RELEASE_DEBUG: "0"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: DeterminateSystems/determinate-nix-action@v3
+        if: runner.os != 'Windows'
+
+      - name: Install Rust
+        if: runner.os == 'Windows'
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: pnpm/action-setup@v4
+        if: runner.os == 'Windows'
+        with:
+          version: 9
+
+      - uses: actions/setup-node@v4
+        if: runner.os == 'Windows'
+        with:
+          node-version: 20
+
+      - name: Install frontend dependencies
+        if: runner.os == 'Windows'
+        run: pnpm install --frozen-lockfile
+
+      - name: Install frontend dependencies
+        if: runner.os != 'Windows'
+        run: nix develop --impure -c pnpm install --frozen-lockfile
+
+      - name: Build the bundle
+        if: runner.os == 'Windows'
+        shell: bash
+        run: pnpm --dir apps/shepherd build --bundles "${{ matrix.bundles }}"
+
+      - name: Build the bundle
+        if: runner.os != 'Windows'
+        shell: bash
+        run: nix develop --impure -c pnpm --dir apps/shepherd build --bundles "${{ matrix.bundles }}"
+
+      - name: Package the bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=$(node -p "require('./apps/shepherd/src-tauri/tauri.conf.json').version")
+          mkdir -p dist
+          case "${{ matrix.platform }}" in
+            macos)
+              app=$(find target/release/bundle/macos -maxdepth 1 -name '*.app' -print -quit)
+              test -n "$app"
+              ditto -c -k --sequesterRsrc --keepParent "$app" \
+                "dist/shepherd-$version-macos-${{ matrix.arch }}.zip"
+              ;;
+            linux)
+              deb=$(find target/release/bundle/deb -maxdepth 1 -name '*.deb' -print -quit)
+              test -n "$deb"
+              cp "$deb" "dist/shepherd-$version-linux-${{ matrix.arch }}.deb"
+              ;;
+            windows)
+              setup=$(find target/release/bundle/nsis -maxdepth 1 -name '*.exe' -print -quit)
+              test -n "$setup"
+              cp "$setup" "dist/shepherd-$version-windows-${{ matrix.arch }}-setup.exe"
+              ;;
+          esac
+          bash scripts/shepherd-release-metadata.sh \
+            --dist dist \
+            --version "$version" \
+            --commit "$GITHUB_SHA" \
+            --platform "${{ matrix.platform }}" \
+            --arch "${{ matrix.arch }}" \
+            --expect "${{ matrix.expect }}" \
+            --out "dist/release-metadata-${{ matrix.platform }}-${{ matrix.arch }}.json"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: shepherd-${{ matrix.platform }}-${{ matrix.arch }}
+          path: dist/*
+          if-no-files-found: error
+
+  publish:
+    name: Publish
+    needs: [test, build]
+    if: startsWith(github.ref, 'refs/tags/shepherd-v')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Verify every target
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF#refs/tags/}"
+          version="${tag#shepherd-v}"
+          configured=$(node -p "require('./apps/shepherd/src-tauri/tauri.conf.json').version")
+          test "$version" = "$configured"
+          bash scripts/shepherd-release-metadata.sh \
+            --check dist --version "$version" --commit "$GITHUB_SHA"
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF#refs/tags/}"
+          version="${tag#shepherd-v}"
+          notes="Shepherd $version, built from $GITHUB_SHA.
+
+          macOS: shepherd-$version-macos-arm64.zip, shepherd-$version-macos-x86_64.zip
+          Linux: shepherd-$version-linux-x86_64.deb, shepherd-$version-linux-arm64.deb
+          Windows: shepherd-$version-windows-x86_64-setup.exe
+
+          These bundles are not signed or notarized. Verify each file against the checksum metadata."
+          gh release create "$tag" dist/* \
+            --title "Shepherd $version" \
+            --notes "$notes" \
+            --verify-tag
