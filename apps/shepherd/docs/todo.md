@@ -2367,6 +2367,12 @@ own acceptance evidence exists.
 
 ### Free-tier and subscription catalog
 
+Catalog spec: [providers-catalog-web spec](../../providers-catalog-web/docs/spec/spec.md).
+Implementation plan: [providers-catalog-web plan](../../providers-catalog-web/docs/plan.md).
+
+The interview decisions are recorded in the spec. The first slice is the
+scraper and DuckDB schema; no public catalog route or deployment exists yet.
+
 - [ ] Create a separate catalog site backed by a scheduled DuckDB dataset.
   The scraper writes versioned DuckDB tables for agents, providers, plans,
   models and free offers; the Astro build reads DuckDB and emits a static,
