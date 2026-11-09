@@ -2167,6 +2167,172 @@ developer machine.
 
 ---
 
+## After v1 — preview relay, site, catalog, releases and agent pool
+
+These are product tasks after the v1 gates above. They do not start v2/GPUI work
+and do not weaken the v1 release gate. All entries are unchecked until their
+own acceptance evidence exists.
+
+### Shared preview annotation relay
+
+- [ ] Serve a loopback preview wrapper with a per-session token.
+  Shepherd serves one wrapper URL per selected project that embeds the project's
+  configured preview URL and adds the annotation toolbar. Bind only to loopback
+  and require an unguessable session token; the server is not a general proxy and
+  must reject origins, projects or target URLs it was not configured for. Stop
+  the server on quit. The existing in-app preview keeps its sandboxed frame and
+  screenshot fallback.
+- [ ] Put the iframe and external wrapper on one annotation API.
+  Both surfaces submit the same bounded payload: project and task IDs, page URL,
+  selector or screenshot coordinates, optional excerpt and bounds, note, and a
+  client-generated annotation ID. Validate URLs against the configured origin,
+  reject oversized or malformed notes, and never accept a task ID from the
+  client as authorization. Add transport tests for the iframe port, the external
+  HTTP boundary, replayed IDs, wrong tokens and foreign origins.
+- [ ] Send annotation batches as explicit user messages, queued behind a busy
+  turn.
+  The user reviews the batch and presses Send. If the task is working or waiting
+  for approval, the batch stays queued and is delivered once the task settles;
+  do not inject into an active turn. Add the batch to the composer/transcript as
+  structured editable text and start or resume the turn only after the user
+  confirms. Tests cover idle send, busy queueing, cancellation, task switching,
+  duplicate submission, and a failed send that leaves the batch retryable.
+- [ ] Recover queued annotations and preview-server state after a reload.
+  Persist pending batches with the project/task, do not resurrect a batch into a
+  different task, and show a recoverable notice when the preview server or
+  target page disappeared. Tests reopen the database and verify the queue either
+  resumes correctly or is discarded with an explicit reason.
+- [ ] Secure and document the preview wrapper.
+  Document the loopback-only boundary, token lifetime, configured-origin rule,
+  screenshot fallback, and what happens when framing or injection is blocked.
+  Cover token leakage through logs, referrer headers, clipboard links, and a
+  second local user; none may submit an annotation.
+
+### Shepherd site and documentation
+
+- [ ] Build Shepherd's landing page at `/` on the existing Astro design system.
+  Lead with the individual-developer promise: use several coding agents without
+  babysitting rate limits or switching tools. Support it with the agent pool,
+  one local workspace, preview/annotation, worktrees, approvals and terminals.
+  Do not lead with the tech stack. The page must state what is available now
+  versus planned, and must not name the internal reference projects.
+- [ ] Split documentation by audience under `/docs/users` and
+  `/docs/contributors`.
+  User pages cover installation, configuration, the mental model, preview and
+  annotation, the agent pool, releases and troubleshooting; they do not explain
+  internal protocols. Contributor pages cover adapter contracts, the annotation
+  API, quota ledger, release pipeline and test fixtures. Keep one search and one
+  navigation source of truth, with the same landing/header/footer pattern as the
+  reference documentation site.
+- [ ] Produce a content map before writing the pages.
+  Audit `docs/references/by-feature` and the shipped Shepherd features, then
+  classify each capability as a landing-page argument, a user-guide page, or a
+  contributor-only implementation note. Record why an item is not
+  landing-worthy. The reference projects are research inputs only; no public
+  comparison table or competing-app names.
+- [ ] Add a Shepherd roadmap page generated from one maintained data file.
+  Use Now / Next / Later / Exploring, define what each label means, link every
+  item to its user or contributor page when one exists, and keep it consistent
+  with the checkboxes in this plan. Do not present an unstarted task as shipped.
+- [ ] Add site tests for the public claims.
+  Browser tests cover responsive navigation, theme, WCAG 2.1 AA basics, docs
+  search, downloads links, and a build check that every navigation entry resolves.
+  Copy-level tests fail if the site names an internal reference project or
+  describes an unimplemented feature as available.
+
+### Free-tier and subscription catalog
+
+- [ ] Create a separate catalog site backed by a scheduled DuckDB dataset.
+  The scraper writes versioned DuckDB tables for agents, providers, plans,
+  models and free offers; the Astro build reads DuckDB and emits a static,
+  searchable catalog. There is no public runtime database or scraper endpoint.
+  The schema links one agent to many plans and models without duplicating quota
+  claims, and records source URL, verification time, confidence and scrape
+  failure state for each fact.
+- [ ] Scrape hosted free tiers and local open-weight models, and exclude
+  one-time trials.
+  Include recurring hosted allowances and models that can be run locally, with
+  hardware/setup burden shown separately. Do not treat launch credits, expiring
+  trials or unverified community claims as free tiers. A failed or stale scrape
+  is visible in the build output and never silently replaces the last verified
+  value.
+- [ ] Build the catalog's browse and comparison experience.
+  Users can filter by free/paid, agent, provider, model, context, modality,
+  local/self-hosted and last-verified date; compare selected offers without
+  implying a guaranteed quota. Every paid subscription shows its usage model and
+  source link. Local model entries state the runtime and approximate hardware
+  requirement.
+- [ ] Publish catalog provenance and freshness.
+  Each release of the catalog includes a generated data snapshot, source URLs,
+  scrape timestamps, schema version and known gaps. A provider page change or
+  scraper failure creates a review item rather than an invented value. Add
+  tests for schema validation, stale-data warnings, duplicate offers and a
+  failed scrape that leaves the previous snapshot buildable.
+- [ ] Connect the catalog to the agent pool without making it authoritative.
+  The pool can seed limits and reset windows from a catalog snapshot, but local
+  usage and provider responses win. A missing or stale catalog entry marks a
+  slot's capacity unknown, not free. No catalog credential or private account
+  data is published.
+
+### Packaged releases and downloads
+
+- [ ] Build the release artifact matrix in CI.
+  Produce macOS arm64 and x86_64, Linux x86_64 and arm64, and Windows x86_64
+  bundles. A tag push builds and verifies every artifact, then publishes the
+  GitHub release automatically only after all required jobs and checks pass.
+  Record artifact names, versions, checksums, and the source commit in the
+  release metadata.
+- [ ] Sign and verify every installable artifact.
+  macOS builds use a Developer ID certificate and notarization; Windows builds
+  use Authenticode; Linux assets ship checksums. CI fails if signing or
+  notarization verification fails. Signing credentials stay in protected CI
+  secrets and never enter the repository or build logs.
+- [ ] Make GitHub releases the source of truth for downloads.
+  Add a downloads page that resolves the newest release and selects the right
+  asset for the visitor's platform and architecture, with a working releases
+  fallback when the API is unavailable. The home page shows the current version
+  and a download action without claiming unsupported artifacts exist.
+- [ ] Verify packaged artifacts and their install story.
+  Extend the release checklist to Windows and both architectures. On clean
+  machines, verify launch, first-run configuration, an agent turn, preview
+  annotation, worktree cleanup and uninstall/upgrade behavior. Record the
+  artifact hash and exact OS in the evidence log; an unsigned or unnotarized
+  build is a failure, not a warning.
+
+### Agent pool
+
+- [ ] Define a pool slot and persist it.
+  A slot is an installed agent plus one provider/model plus the credential or
+  account it uses. Store the user's priority order, provider/model metadata,
+  local usage ledger, reset window, cooldown state and last-used timestamp.
+  Credentials are referenced, never copied into the pool record or logs.
+- [ ] Implement the quota ledger and availability states.
+  Seed limits from a catalog snapshot when available, update from provider
+  rate-limit/quota responses, and let the user correct limits or reset times.
+  Unknown capacity is `unknown`, not `free`; exhausted and cooling-down slots are
+  skipped with a visible reason. Tests use a deterministic clock for reset
+  windows, provider errors, clock changes and user corrections.
+- [ ] Select a slot by user priority with quota-aware fallback.
+  A new task or conversation tries the user's preferred healthy slot, then the
+  next one that can accept work; an explicit task override wins. Selection is
+  atomic across concurrent tasks, and the transcript or task header names the
+  chosen slot and any skipped higher-priority slots. Tests cover simultaneous
+  starts, exhaustion, cooldown, provider failure and manual override.
+- [ ] Release idle reservations without losing resumable sessions.
+  After the turn settles plus a configurable idle timeout (default 15 minutes),
+  release the slot for other tasks. Never release during a running turn or a
+  pending approval. Keep the agent session resumable when the adapter supports
+  it; if it cannot resume, say so and select another slot for the next turn.
+  Tests cover idle release, a follow-up after release, a slot claimed meanwhile,
+  cancellation and restart recovery.
+- [ ] Add the pool UI and operating limits.
+  Show each slot's provider/model, priority, availability, known limit/reset,
+  current task, last error and last-used time. Users can reorder, disable, edit
+  limits, clear a cooldown and force a slot for one turn. The UI must not expose
+  credentials or claim a provider quota it cannot observe.
+
+---
+
 ## Parallel work rules
 
 - S0 must finish before any UI or adapter work.
