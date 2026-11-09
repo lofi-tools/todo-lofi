@@ -104,6 +104,7 @@ export interface CatalogPlan {
   currency: string | null
   includedAllowance: number | null
   allowanceUnit: string | null
+  sourceId: string
   sourceUrl: string
   sourceRecord: string
   verifiedAt: string
@@ -122,6 +123,7 @@ export interface CatalogOffer {
   resetPeriod: string
   eligibility: string | null
   conditions: string | null
+  sourceId: string
   sourceUrl: string
   sourceRecord: string
   verifiedAt: string
@@ -149,6 +151,7 @@ export interface CatalogLocalRuntime {
   quantization: string | null
   approximateHardware: string | null
   setupNotes: string | null
+  sourceId: string
   sourceUrl: string
   sourceRecord: string
   verifiedAt: string
@@ -258,7 +261,7 @@ async function readCatalog(): Promise<CatalogData> {
         `SELECT pl.plan_id, pl.provider_id, pr.name AS provider_name, pl.name,
                 pl.usage_model, pl.billing_period, CAST(pl.price AS DOUBLE) AS price,
                 pl.currency, CAST(pl.included_allowance AS DOUBLE) AS included_allowance,
-                pl.allowance_unit, pl.source_url, pl.source_record,
+                pl.allowance_unit, pl.source_id, pl.source_url, pl.source_record,
                 epoch_ms(pl.verified_at) AS verified_at_ms, pl.confidence, pl.scrape_status
          FROM plans pl
          JOIN providers pr ON pr.provider_id = pl.provider_id
@@ -271,7 +274,8 @@ async function readCatalog(): Promise<CatalogData> {
         connection,
         `SELECT o.offer_id, o.provider_id, pr.name AS provider_name, o.plan_id,
                 o.offer_kind, CAST(o.allowance AS DOUBLE) AS allowance, o.allowance_unit,
-                o.reset_period, o.eligibility, o.conditions, o.source_url, o.source_record,
+                o.reset_period, o.eligibility, o.conditions, o.source_id, o.source_url,
+                o.source_record,
                 epoch_ms(o.verified_at) AS verified_at_ms, o.confidence, o.scrape_status
          FROM free_offers o
          JOIN providers pr ON pr.provider_id = o.provider_id
@@ -292,8 +296,8 @@ async function readCatalog(): Promise<CatalogData> {
       await readRows(
         connection,
         `SELECT provider_id, model_id, runtime, quantization, approximate_hardware,
-                setup_notes, source_url, source_record, epoch_ms(verified_at) AS verified_at_ms,
-                confidence, scrape_status
+                setup_notes, source_id, source_url, source_record,
+                epoch_ms(verified_at) AS verified_at_ms, confidence, scrape_status
          FROM local_runtimes ORDER BY provider_id, model_id, runtime`,
       )
     ).map(mapLocalRuntime)
@@ -436,6 +440,7 @@ function mapPlan(row: Record<string, DuckDBValue>): CatalogPlan {
     currency: nullableString(row.currency),
     includedAllowance: nullableNumber(row.included_allowance),
     allowanceUnit: nullableString(row.allowance_unit),
+    sourceId: stringValue(row.source_id),
     sourceUrl: stringValue(row.source_url),
     sourceRecord: stringValue(row.source_record),
     verifiedAt: isoFromMs(row.verified_at_ms),
@@ -456,6 +461,7 @@ function mapOffer(row: Record<string, DuckDBValue>): CatalogOffer {
     resetPeriod: stringValue(row.reset_period),
     eligibility: nullableString(row.eligibility),
     conditions: nullableString(row.conditions),
+    sourceId: stringValue(row.source_id),
     sourceUrl: stringValue(row.source_url),
     sourceRecord: stringValue(row.source_record),
     verifiedAt: isoFromMs(row.verified_at_ms),
@@ -487,6 +493,7 @@ function mapLocalRuntime(row: Record<string, DuckDBValue>): CatalogLocalRuntime 
     quantization: nullableString(row.quantization),
     approximateHardware: nullableString(row.approximate_hardware),
     setupNotes: nullableString(row.setup_notes),
+    sourceId: stringValue(row.source_id),
     sourceUrl: stringValue(row.source_url),
     sourceRecord: stringValue(row.source_record),
     verifiedAt: isoFromMs(row.verified_at_ms),

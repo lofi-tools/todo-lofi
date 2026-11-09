@@ -73,6 +73,37 @@ test.describe('Providers catalog', () => {
     await page.click('[data-reset]')
     await expect(count).toHaveText('9,000 of 9,000 models')
     await expect(page.locator('[data-model-empty]')).toBeHidden()
+
+    await page.fill('[data-filter="context"]', '200000')
+    const contextRows = await rows.count()
+    expect(contextRows).toBeGreaterThan(0)
+    expect(contextRows).toBeLessThan(allRows)
+    await page.fill('[data-filter="context"]', '')
+
+    await page.selectOption('[data-filter="modality"]', 'image')
+    const imageRows = await rows.count()
+    expect(imageRows).toBeGreaterThan(0)
+    expect(imageRows).toBeLessThan(allRows)
+    await page.selectOption('[data-filter="modality"]', '')
+
+    await page.selectOption('[data-filter="local"]', 'yes')
+    const localRows = await rows.count()
+    expect(localRows).toBeGreaterThan(0)
+    expect(localRows).toBeLessThan(allRows)
+    await page.selectOption('[data-filter="local"]', 'no')
+    const hostedRows = await rows.count()
+    expect(hostedRows).toBeGreaterThan(0)
+    await page.selectOption('[data-filter="local"]', '')
+
+    await page.fill('[data-filter="verified"]', '2026-11-10')
+    await expect(page.locator('[data-model-empty]')).toBeVisible()
+    await expect(count).toHaveText('0 of 9,000 models')
+    await page.fill('[data-filter="verified"]', '2026-11-09')
+    await expect(count).toHaveText('9,000 of 9,000 models')
+    await page.fill('[data-filter="verified"]', '')
+
+    await expect(page.locator('[data-filter="agent"]')).toBeDisabled()
+    await expect(page.locator('[data-filter="usage"]')).toBeDisabled()
   })
 
   test('comparison renders selected models and provenance', async ({ page }) => {
@@ -82,6 +113,15 @@ test.describe('Providers catalog', () => {
     await expect(page.locator('#compare-root')).toContainText('Input cost / 1M')
     await expect(page.locator('#compare-root')).toContainText('Verified')
     await expect(page.locator('#compare-root')).toContainText('models.dev')
+    await expect(page.locator('#compare-root')).toContainText('Plan usage model')
+    await expect(page.locator('#compare-root')).toContainText('Unknown — no verified plan')
+    await expect(page.locator('#compare-root')).toContainText('Recurring free allowance')
+    await expect(page.locator('#compare-root')).toContainText(
+      'Unknown — no verified recurring offer',
+    )
+    await expect(page.locator('#compare-root')).toContainText('Local runtime')
+    await expect(page.locator('#compare-root')).toContainText('Unknown — no verified local runtime')
+    await expect(page.locator('#compare-root')).toContainText('no quota is guaranteed')
     await expect(page.locator('#compare-root')).not.toContainText(/allowance:/i)
 
     await page.goto('/compare')

@@ -2392,12 +2392,25 @@ implemented; no public deployment exists yet.
   trials or unverified community claims as free tiers. A failed or stale scrape
   is visible in the build output and never silently replaces the last verified
   value.
-- [ ] Build the catalog's browse and comparison experience.
+- [x] Build the catalog's browse and comparison experience.
   Users can filter by free/paid, agent, provider, model, context, modality,
   local/self-hosted and last-verified date; compare selected offers without
   implying a guaranteed quota. Every paid subscription shows its usage model and
   source link. Local model entries state the runtime and approximate hardware
-  requirement.
+  requirement. Evidence (2026-11-09): the 9,000-row browser filters on search,
+  provider, offer status, context, input modality, open weights and
+  last-verified date; the offer filter reaches an explicit empty state, and the
+  agent and usage-model controls stay disabled with a note until an approved
+  source exists. Comparison carries per-record source names and links,
+  verification dates, confidence, plan usage models, recurring allowance, reset
+  period, conditions, local runtime, quantization and approximate hardware,
+  read from the snapshot; unavailable facts render as "Unknown — no verified
+  plan/offer/runtime", never as zero or free, with an explicit no-guarantee
+  note. Unit tests cover populated plan, offer and runtime fixtures plus the
+  empty fallback. Package typecheck reports 0 errors, 33 unit tests pass, the
+  real build emits 9,240 pages, and the 10-test e2e suite passes including the
+  context, modality, open-weights and verified-date filters, comparison
+  unknowns, overflow at 375/768/1440 and axe WCAG 2.1 AA.
 - [x] Publish catalog provenance and freshness.
   Each release of the catalog includes a generated data snapshot, source URLs,
   scrape timestamps, schema version and known gaps. A provider page change or

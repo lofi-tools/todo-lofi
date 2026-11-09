@@ -1,34 +1,10 @@
 ---
 import Base from '../layouts/Base.astro'
 import { loadCatalog } from '../lib/catalog'
-import { modelHref, modelKey } from '../lib/format'
+import { buildComparisonModels } from '../lib/compare'
 
 const catalog = await loadCatalog()
-const summaries = catalog.models.map((model) => ({
-  key: modelKey(model.providerId, model.modelId),
-  href: modelHref(model.providerId, model.modelId),
-  providerId: model.providerId,
-  providerName: model.providerName,
-  modelId: model.modelId,
-  name: model.name,
-  modelType: model.modelType,
-  canonicalModelId: model.canonicalModelId,
-  contextLimit: model.contextLimit,
-  inputLimit: model.inputLimit,
-  outputLimit: model.outputLimit,
-  modalitiesInput: model.modalitiesInput,
-  modalitiesOutput: model.modalitiesOutput,
-  openWeights: model.openWeights,
-  costInput: model.costInput,
-  costOutput: model.costOutput,
-  costCacheRead: model.costCacheRead,
-  costCacheWrite: model.costCacheWrite,
-  sourceUrl: model.sourceUrl,
-  sourceRecord: model.sourceRecord,
-  verifiedAt: model.verifiedAt,
-  confidence: model.confidence,
-}))
-const summariesJson = JSON.stringify(summaries).replace(/</g, '\\u003c')
+const summariesJson = JSON.stringify(buildComparisonModels(catalog)).replace(/</g, '\\u003c')
 ---
 
 <Base
@@ -39,12 +15,13 @@ const summariesJson = JSON.stringify(summaries).replace(/</g, '\\u003c')
     <p class="eyebrow">Comparison</p>
     <h1>Compare models</h1>
     <p class="lede">
-      Select models from the model browser to compare context, limits, modalities, pricing and
-      provenance. The comparison runs over this build's static data.
+      Select models from the model browser to compare context, limits, modalities, pricing,
+      plan and offer facts, local runtimes and provenance. The comparison runs over this build's
+      static data.
     </p>
     <p class="small muted">
-      No verified plans or recurring free offers are published yet, so comparison does not show
-      plan allowances.
+      No verified plans, recurring free offers or local runtimes are published yet, so those
+      fields stay unknown rather than being shown as zero or free.
     </p>
     <p><a href="/models">Choose models →</a></p>
   </header>
@@ -59,6 +36,29 @@ const summariesJson = JSON.stringify(summaries).replace(/</g, '\\u003c')
 
   <script type="application/json" id="catalog-model-data" set:html={summariesJson}></script>
   <script>
+    type LinkEntry = {
+      sourceName: string
+      sourceUrl: string
+    }
+
+    type Plan = LinkEntry & {
+      name: string
+      usageModel: string
+    }
+
+    type Offer = LinkEntry & {
+      allowance: number
+      allowanceUnit: string
+      resetPeriod: string
+      conditions: string | null
+    }
+
+    type Runtime = LinkEntry & {
+      runtime: string
+      quantization: string | null
+      approximateHardware: string | null
+    }
+
     type Summary = {
       key: string
       href: string
@@ -77,10 +77,14 @@ const summariesJson = JSON.stringify(summaries).replace(/</g, '\\u003c')
       costOutput: number | null
       costCacheRead: number | null
       costCacheWrite: number | null
+      sourceName: string
       sourceUrl: string
       sourceRecord: string
       verifiedAt: string
       confidence: string
+      plans: Plan[]
+      offers: Offer[]
+      localRuntimes: Runtime[]
     }
 
     const dataElement = document.getElementById('catalog-model-data')
@@ -190,6 +194,58 @@ const summariesJson = JSON.stringify(summaries).replace(/</g, '\\u003c')
         ['Output cost / 1M', (model) => formatCost(model.costOutput)],
         ['Cache read / 1M', (model) => formatCost(model.costCacheRead)],
         ['Cache write / 1M', (model) => formatCost(model.costCacheWrite)],
+        [
+          'Plan usage model',
+          (model) =>
+            model.plans.length > 0
+              ? model.plans.map((plan) => `${plan.name}: ${plan.usageModel}`).join('; ')
+              : 'Unknown — no verified plan',
+        ],
+        [
+          'Recurring free allowance',
+          (model) =>
+            model.offers.length > 0
+              ? model.offers
+                  .map(
+                    (offer) =>
+                      `${formatNumber(offer.allowance)} ${offer.allowanceUnit} / ${offer.resetPeriod}`,
+                  )
+                  .join('; ')
+              : 'Unknown — no verified recurring offer',
+        ],
+        [
+          'Offer conditions',
+          (model) =>
+            model.offers.length > 0
+              ? model.offers
+                  .map((offer) => offer.conditions)
+                  .filter((conditions): conditions is string => conditions !== null)
+                  .join('; ') || 'No conditions published'
+              : 'Unknown — no verified recurring offer',
+        ],
+        [
+          'Local runtime',
+          (model) =>
+            model.localRuntimes.length > 0
+              ? model.localRuntimes
+                  .map((runtime) =>
+                    runtime.quantization
+                      ? `${runtime.runtime} (${runtime.quantization})`
+                      : runtime.runtime,
+                  )
+                  .join('; ')
+              : 'Unknown — no verified local runtime',
+        ],
+        [
+          'Local hardware',
+          (model) =>
+            model.localRuntimes.length > 0
+              ? model.localRuntimes
+                  .map((runtime) => runtime.approximateHardware)
+                  .filter((hardware): hardware is string => hardware !== null)
+                  .join('; ') || 'Unknown'
+              : 'Unknown — no verified local runtime',
+        ],
         ['Verified', (model) => date(model.verifiedAt)],
         ['Confidence', (model) => model.confidence],
       ]
@@ -207,6 +263,48 @@ const summariesJson = JSON.stringify(summaries).replace(/</g, '\\u003c')
         tbody.append(row)
       }
 
+      const linkFields: Array<[string, (model: Summary) => LinkEntry[], string]> = [
+        ['Plan source', (model) => model.plans, 'Unknown — no verified plan'],
+        ['Offer source', (model) => model.offers, 'Unknown — no verified recurring offer'],
+        [
+          'Local runtime source',
+          (model) => model.localRuntimes,
+          'Unknown — no verified local runtime',
+        ],
+      ]
+
+      for (const [label, entries, fallback] of linkFields) {
+        const row = document.createElement('tr')
+        const heading = document.createElement('th')
+        heading.scope = 'row'
+        heading.textContent = label
+        row.append(heading)
+        for (const model of selected) {
+          const sourceCell = document.createElement('td')
+          const seen = new Set<string>()
+          const unique = entries(model).filter((entry) => {
+            if (seen.has(entry.sourceUrl)) return false
+            seen.add(entry.sourceUrl)
+            return true
+          })
+          if (unique.length === 0) {
+            sourceCell.textContent = fallback
+          } else {
+            unique.forEach((entry, index) => {
+              if (index > 0) sourceCell.append('; ')
+              const link = document.createElement('a')
+              link.href = entry.sourceUrl
+              link.target = '_blank'
+              link.rel = 'noreferrer'
+              link.textContent = entry.sourceName
+              sourceCell.append(link)
+            })
+          }
+          row.append(sourceCell)
+        }
+        tbody.append(row)
+      }
+
       const sourceRow = document.createElement('tr')
       const sourceHeading = document.createElement('th')
       sourceHeading.scope = 'row'
@@ -218,7 +316,7 @@ const summariesJson = JSON.stringify(summaries).replace(/</g, '\\u003c')
         link.href = model.sourceUrl
         link.target = '_blank'
         link.rel = 'noreferrer'
-        link.textContent = 'models.dev'
+        link.textContent = model.sourceName
         sourceCell.append(link)
         sourceRow.append(sourceCell)
       }
@@ -230,7 +328,8 @@ const summariesJson = JSON.stringify(summaries).replace(/</g, '\\u003c')
       wrapper.append(table)
       const note = document.createElement('p')
       note.className = 'small muted'
-      note.textContent = 'Values are from the current snapshot. Missing values are shown as Unknown, not as zero.'
+      note.textContent =
+        'Values are from the current snapshot. Missing values are shown as Unknown, not as zero. Allowances and prices are sourced observations that can change; no quota is guaranteed.'
       root.replaceChildren(wrapper, note)
     }
 
