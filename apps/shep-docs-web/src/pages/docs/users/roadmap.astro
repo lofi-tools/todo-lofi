@@ -1,0 +1,116 @@
+---
+import { css } from 'styled-system/css'
+import Docs from '../../../layouts/Docs.astro'
+import Callout from 'web-design-system/astro/marketing/Callout.astro'
+import { Badge } from 'web-design-system/components'
+import { roadmapItems, roadmapStatuses } from '../../../../data/roadmap'
+
+const toc = roadmapStatuses.map((status) => ({ label: status.label, href: `#${status.id}` }))
+const shippedLabel = roadmapStatuses.find((status) => status.shipped)?.label ?? 'Now'
+const unshippedLabels = roadmapStatuses
+  .filter((status) => !status.shipped)
+  .map((status) => status.label)
+
+const card = css({
+  p: '5',
+  borderRadius: 'lg',
+  borderWidth: 'hairline',
+  borderStyle: 'solid',
+  borderColor: 'border',
+  bg: 'surface.subtle',
+})
+
+const cardHead = css({
+  display: 'flex',
+  alignItems: 'flex-start',
+  justifyContent: 'space-between',
+  gap: '4',
+  flexWrap: 'wrap',
+  mb: '2',
+})
+
+const cardTitle = css({ m: '0', fontSize: 'md', color: 'fg.default' })
+
+const links = css({
+  display: 'flex',
+  flexWrap: 'wrap',
+  gap: '3',
+  m: '0',
+  mt: '3',
+  fontSize: 'sm',
+})
+---
+
+<Docs
+  title="Roadmap"
+  description="What Shepherd ships today, what is being built next, and what is planned or only being explored."
+  toc={toc}
+>
+  <Callout tone="warning" title={`Only ${shippedLabel} is shipped`}>
+    <strong>{shippedLabel}</strong> is the current build. {unshippedLabels.join(', ')} are not available
+    yet. The app remains the source of truth.
+  </Callout>
+
+  <p>
+    Every item below is rendered from the same maintained roadmap data as the landing page's
+    availability columns. The labels mean:
+  </p>
+
+  <div class={css({ display: 'grid', gridTemplateColumns: { base: '1fr', sm: 'repeat(2, 1fr)' }, gap: '4', my: '6' })}>
+    {
+      roadmapStatuses.map((status) => (
+        <section class={card}>
+          <div class={cardHead}>
+            <h2 class={cardTitle}>{status.label}</h2>
+            <Badge tone={status.tone} variant="subtle">{status.badge}</Badge>
+          </div>
+          <p class={css({ m: '0', fontSize: 'sm', color: 'fg.muted', lineHeight: 'relaxed' })}>
+            {status.summary}
+          </p>
+        </section>
+      ))
+    }
+  </div>
+
+  {
+    roadmapStatuses.map((status) => {
+      const items = roadmapItems.filter((item) => item.status === status.id)
+      return (
+        <section id={status.id}>
+          <h2>
+            {status.label}{' '}
+            <Badge tone={status.tone} variant="subtle">{status.badge}</Badge>
+          </h2>
+          <p>{status.detail}</p>
+          <ul class={css({ listStyle: 'none', p: '0', m: '0', display: 'flex', flexDirection: 'column', gap: '3' })}>
+            {
+              items.map((item) => (
+                <li class={card}>
+                  <div class={cardHead}>
+                    <h3 class={cardTitle}>{item.title}</h3>
+                    <Badge tone={status.tone} variant="subtle">{status.badge}</Badge>
+                  </div>
+                  <p class={css({ m: '0', fontSize: 'sm', color: 'fg.muted', lineHeight: 'relaxed' })}>
+                    {item.summary}
+                  </p>
+                  {
+                    item.links.length > 0 && (
+                      <p class={links}>
+                        {item.links.map((link, index) => (
+                          <>
+                            {index > 0 && <span class={css({ color: 'fg.subtle' })}>·</span>}
+                            <a href={link.href}>{link.label}</a>
+                          </>
+                        ))}
+                      </p>
+                    )
+                  }
+                </li>
+              ))
+            }
+          </ul>
+        </section>
+      )
+    })
+  }
+</Docs>

@@ -2338,10 +2338,18 @@ own acceptance evidence exists.
   the initial docs split, so it is the audit baseline for those committed pages
   and the gate for the roadmap page and later copy changes; no public page
   names a reference project.
-- [ ] Add a Shepherd roadmap page generated from one maintained data file.
+- [x] Add a Shepherd roadmap page generated from one maintained data file.
   Use Now / Next / Later / Exploring, define what each label means, link every
   item to its user or contributor page when one exists, and keep it consistent
   with the checkboxes in this plan. Do not present an unstarted task as shipped.
+  Evidence: `/docs/users/roadmap` is rendered entirely from
+  `apps/shep-docs-web/data/roadmap.ts`; the landing availability columns and the
+  docs navigation read the same file. The page defines Now as shipped and Next,
+  Later and Exploring as not yet shipped, with links to the user or contributor
+  page for each item that has one. The agent pool and signed release artifacts
+  are Next; Windows support is Later. Typecheck reports 0 errors, the static
+  build emits 16 pages including `/docs/users/roadmap`, and the 29-test e2e
+  suite passes, including 375/768/1440 overflow and axe WCAG 2.1 AA.
 - [ ] Add site tests for the public claims.
   Browser tests cover responsive navigation, theme, WCAG 2.1 AA basics, docs
   search, downloads links, and a build check that every navigation entry resolves.

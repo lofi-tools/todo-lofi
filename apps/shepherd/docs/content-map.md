@@ -110,6 +110,7 @@ a guide page, a contributor note, or not public.
 | `/docs/users/mental-model` | Project/task/worktree, states, inspector, terminals, approvals, review, quit | Adapter event contract |
 | `/docs/users/preview` | Configure, annotate, add to prompt, wrapper warning, screenshot fallback, bounds | Wrapper HTTP validation and tests |
 | `/docs/users/agent-pool` | Next status, selection promise, visibility, controls, limits | Ledger persistence and selection tests |
+| `/docs/users/roadmap` | Now/Next/Later/Exploring, definitions, links and the shipped boundary | Individual delivery dates or unpromised support |
 | `/docs/users/releases` | No signed release, source build, platforms, clean-machine gate, signing | Workflow file details |
 | `/docs/users/troubleshooting` | Agent discovery, auth, fallback, preview, Git, terminals, settings and logs | Implementation fixes |
 
@@ -142,8 +143,8 @@ a guide page, a contributor note, or not public.
   marked planned; the split and map do not make them shipped.
 - The release page says no signed installer and the release gate is pending. Do
   not add a download link until the release item supplies one.
-- The roadmap page is a separate unchecked item; keep its data out of this map
-  until that page exists.
+- The roadmap page renders from `data/roadmap.ts`; that file is the only public
+  item list. Keep the landing availability columns derived from it.
 - Docs search is not implemented. When it is, it must index the same
   `src/data/docs.ts` navigation and not become a second page inventory.
 

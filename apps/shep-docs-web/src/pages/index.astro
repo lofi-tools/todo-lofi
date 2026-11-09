@@ -15,7 +15,13 @@ import ShepherdWorkspace from '../components/illustrations/ShepherdWorkspace.ast
 import AgentPool from '../components/illustrations/AgentPool.astro'
 import PreviewAnnotation from '../components/illustrations/PreviewAnnotation.astro'
 import IllustrationStage from '../components/illustrations/IllustrationStage.astro'
-import { availability, reasonCards, reviewCards, REPO_URL } from '../../data/shepherd'
+import { reasonCards, reviewCards, REPO_URL } from '../../data/shepherd'
+import { availability, ROADMAP_PATH, roadmapStatuses } from '../../data/roadmap'
+
+const shippedStatusLabel = roadmapStatuses.find((status) => status.shipped)?.label ?? 'Now'
+const unshippedStatusLabels = roadmapStatuses
+  .filter((status) => !status.shipped)
+  .map((status) => status.label)
 
 const reasonIcons = {
   parallel: Users,
@@ -256,7 +262,9 @@ const honestyNote = css({
       </div>
 
       <p class={honestyNote}>
-        The agent pool, signed installers, download page and Windows support are not available yet. When this page and the app disagree, believe the app.
+        Only <strong>{shippedStatusLabel}</strong> is shipped. {unshippedStatusLabels.join(', ')} are not in
+        the current build. When this page and the app disagree, believe the app.{' '}
+        <a href={ROADMAP_PATH}>See the full roadmap</a>.
       </p>
     </HomepageSection>
 

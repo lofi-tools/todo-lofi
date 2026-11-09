@@ -27,8 +27,9 @@ export interface DocGuide {
 }
 
 import { REPO_URL } from '../../data/shepherd'
+import { ROADMAP_PATH } from '../../data/roadmap'
 
-export { REPO_URL }
+export { REPO_URL, ROADMAP_PATH }
 
 export const DOCS_ROOT = '/docs/users'
 
@@ -57,6 +58,7 @@ export const docGuides: DocGuide[] = [
       {
         heading: 'Operations',
         items: [
+          { label: 'Roadmap', href: ROADMAP_PATH },
           { label: 'Releases', href: '/docs/users/releases' },
           { label: 'Troubleshooting', href: '/docs/users/troubleshooting' },
         ],
@@ -86,6 +88,7 @@ export const docGuides: DocGuide[] = [
 /** The docs links that repeat in the site footer. */
 export const footerDocLinks: DocLink[] = [
   { label: 'User guide', href: '/docs/users' },
+  { label: 'Roadmap', href: ROADMAP_PATH },
   { label: 'Install and run', href: '/docs/users/install' },
   { label: 'Preview and annotation', href: '/docs/users/preview' },
   { label: 'Contributor guide', href: '/docs/contributors' },

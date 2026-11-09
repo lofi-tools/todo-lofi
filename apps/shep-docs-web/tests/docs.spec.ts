@@ -10,6 +10,7 @@ const docsRoutes = [
   { path: '/docs/users/mental-model', title: 'Mental model', guide: 'User guide' },
   { path: '/docs/users/preview', title: 'Preview and annotation', guide: 'User guide' },
   { path: '/docs/users/agent-pool', title: 'Agent pool', guide: 'User guide' },
+  { path: '/docs/users/roadmap', title: 'Roadmap', guide: 'User guide' },
   { path: '/docs/users/releases', title: 'Releases', guide: 'User guide' },
   { path: '/docs/users/troubleshooting', title: 'Troubleshooting', guide: 'User guide' },
   { path: '/docs/contributors', title: 'Contributor guide', guide: 'Contributor guide' },
@@ -87,10 +88,19 @@ test.describe('Shepherd docs routes', () => {
     }
   })
 
-  test('the agent pool and releases are described honestly', async ({ page }) => {
+  test('the agent pool, roadmap and releases are described honestly', async ({ page }) => {
     await page.goto('/docs/users/agent-pool')
     await expect(page.locator('main')).toContainText(/not in the current build/i)
     await expect(page.locator('main')).not.toContainText(/available now/i)
+
+    await page.goto('/docs/users/roadmap')
+    await expect(page.locator('main')).toContainText(/only now is shipped/i)
+    await expect(page.locator('#next')).toContainText('Quota-aware agent pool')
+    await expect(page.locator('#next')).toContainText('Signed macOS and Linux release artifacts')
+    await expect(page.locator('#next')).toContainText('not shipped')
+    await expect(page.locator('#later')).toContainText('Windows desktop support')
+    await expect(page.locator('#later')).toContainText('planned')
+    await expect(page.locator('#exploring')).toContainText('Agent teams and orchestration')
 
     await page.goto('/docs/users/releases')
     await expect(page.locator('main')).toContainText(/no signed release yet/i)

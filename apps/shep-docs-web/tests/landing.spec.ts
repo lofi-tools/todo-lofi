@@ -70,6 +70,10 @@ test.describe('Shepherd landing page', () => {
       'href',
       /apps\/shepherd\/README\.md$/,
     )
+    await expect(page.getByRole('link', { name: /see the full roadmap/i })).toHaveAttribute(
+      'href',
+      '/docs/users/roadmap',
+    )
     await expect(page.locator('a[href="/downloads"], a[href="/roadmap"]')).toHaveCount(0)
   })
 

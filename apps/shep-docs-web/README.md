@@ -15,9 +15,10 @@ release and fixture internals. It does not contain Taskstream documentation.
 - `src/pages/index.astro` — the landing page.
 - `src/pages/docs/users/` and `src/pages/docs/contributors/` — the two guides.
 - `src/data/docs.ts` — the one navigation source for tabs, sidebars, footer and pagers.
+- `data/roadmap.ts` — the one maintained roadmap and landing availability source.
 - `src/layouts/Docs.astro`, `src/components/blocks/DocsHeader.astro` and
   `DocsFooter.astro` — the docs shell.
-- `data/shepherd.ts` — landing copy, availability groups and illustrative data.
+- `data/shepherd.ts` — landing copy and illustrative data.
 - `src/components/illustrations/` — the workspace, agent-pool and preview
   replicas, plus the shared illustration stage.
 - `tests/landing.spec.ts` and `tests/docs.spec.ts` — landing and docs route,

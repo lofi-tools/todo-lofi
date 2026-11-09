@@ -67,54 +67,6 @@ export const reviewCards: ReviewCard[] = [
   },
 ]
 
-export type AvailabilityTone = 'success' | 'accent' | 'warning'
-
-export interface AvailabilityGroup {
-  id: string
-  heading: string
-  badge: string
-  tone: AvailabilityTone
-  summary: string
-  items: string[]
-}
-
-export const availability: AvailabilityGroup[] = [
-  {
-    id: 'now',
-    heading: 'Available now',
-    badge: 'in this build',
-    tone: 'success',
-    summary: 'Implemented and exercised by the app and its test suites.',
-    items: [
-      'Several agents and projects in one window',
-      'Git worktrees, review, commit and squash-merge',
-      'Project-shared and task-specific terminals',
-      'Preview with element annotation and screenshot fallback',
-      'Prompt queues that survive a reload',
-      'Codex, OpenCode, Claude Code and custom ACP agents',
-    ],
-  },
-  {
-    id: 'next',
-    heading: 'Next',
-    badge: 'being built',
-    tone: 'accent',
-    summary: 'Specified and actively being built, but not in the current build.',
-    items: [
-      'Quota-aware agent pool with priority fallback',
-      'Signed macOS and Linux release artifacts',
-      'Downloads that resolve the newest release',
-    ],
-  },
-  {
-    id: 'planned',
-    heading: 'Planned',
-    badge: 'no date',
-    tone: 'warning',
-    summary: 'On the roadmap, with no promise that it lands in the next release.',
-    items: ['Windows desktop support', 'A signed Windows installer'],
-  },
-]
 
 /** An illustrative task turn; the workspace mock is not a real session. */
 export const workspaceThread: ChatMessage[] = [
