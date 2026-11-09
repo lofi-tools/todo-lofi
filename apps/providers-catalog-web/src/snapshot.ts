@@ -3,6 +3,7 @@ import { existsSync } from 'node:fs'
 import { mkdir, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { DuckDBInstance, type DuckDBConnection, type DuckDBValue } from '@duckdb/node-api'
+import { mergePreviousFacts, type MergeReport } from './merge'
 import { loadSchemaSql, SCHEMA_VERSION } from './schema'
 import type {
   CatalogModel,
@@ -36,6 +37,7 @@ export interface CreateSnapshotOptions {
   etag: string | null
   outputDirectory?: string
   now?: Date
+  previousSnapshotPath?: string
 }
 
 export interface SnapshotReport {
@@ -46,6 +48,7 @@ export interface SnapshotReport {
   schemaVersion: number
   generatedAt: string
   counts: SnapshotCounts
+  merge: MergeReport | null
 }
 
 export interface ValidationReport {
@@ -87,6 +90,10 @@ export async function createSnapshot(options: CreateSnapshotOptions): Promise<Sn
   const snapshotPath = path.join(outputDirectory, fileName)
   const checksumPath = `${snapshotPath}.sha256`
   const tempPath = path.join(outputDirectory, `.tmp-${randomUUID()}.duckdb`)
+  const merged = options.previousSnapshotPath
+    ? await mergePreviousFacts(options.catalog, options.previousSnapshotPath, options.fetchedAt)
+    : null
+  const catalog = merged?.catalog ?? options.catalog
 
   await mkdir(outputDirectory, { recursive: true })
 
@@ -101,8 +108,8 @@ export async function createSnapshot(options: CreateSnapshotOptions): Promise<Sn
 
     try {
       await insertSource(connection, options, snapshotId, generatedAt)
-      await insertProviders(connection, options.catalog.providers)
-      await insertModels(connection, options.catalog.models)
+      await insertProviders(connection, catalog.providers)
+      await insertModels(connection, catalog.models)
       await connection.run('COMMIT')
     } catch (error) {
       try {
@@ -144,6 +151,7 @@ export async function createSnapshot(options: CreateSnapshotOptions): Promise<Sn
       schemaVersion: SCHEMA_VERSION,
       generatedAt,
       counts: validation.counts,
+      merge: merged?.report ?? null,
     }
   } catch (error) {
     connection?.closeSync()

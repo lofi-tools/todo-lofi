@@ -1,6 +1,6 @@
 import path from 'node:path'
 import { fetchModelsDevCatalog, MODELS_DEV_SOURCE } from '../src/models-dev'
-import { createSnapshot, recordSnapshotFailure } from '../src/snapshot'
+import { createSnapshot, findLatestSnapshot, recordSnapshotFailure } from '../src/snapshot'
 
 const outputDirectory = path.resolve(
   process.env.CATALOG_ARTIFACT_DIR ?? path.join(process.cwd(), 'artifacts'),
@@ -8,6 +8,7 @@ const outputDirectory = path.resolve(
 
 try {
   const fetched = await fetchModelsDevCatalog()
+  const previousSnapshotPath = await findLatestSnapshot(outputDirectory)
   const report = await createSnapshot({
     catalog: fetched.catalog,
     source: { ...MODELS_DEV_SOURCE, sourceUrl: fetched.sourceUrl },
@@ -16,7 +17,14 @@ try {
     httpStatus: fetched.httpStatus,
     etag: fetched.etag,
     outputDirectory,
+    previousSnapshotPath: previousSnapshotPath ?? undefined,
   })
+
+  if (report.merge && report.merge.reviewItems.length > 0) {
+    console.warn(
+      `Preserved ${report.merge.reviewItems.length} missing facts for review: ${report.merge.reviewItems.join(', ')}`,
+    )
+  }
 
   console.log(
     JSON.stringify(

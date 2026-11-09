@@ -1,7 +1,8 @@
 # Providers catalog — specification
 
 Status: S1 (snapshot/schema) and S3 (static catalog site) implemented on
-2026-11-09. S2 is blocked on approved plan/offer/agent/local-runtime sources; S4
+2026-11-09. The S2 merge policy and review summary are implemented for providers
+and models; S2 sources for plans/offers/agents/local runtimes remain blocked. S4
 is blocked on Cloudflare Pages credentials. No deployment exists yet.
 
 This is a separate public site from Shepherd. It compares coding-agent

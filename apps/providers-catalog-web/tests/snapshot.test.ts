@@ -122,6 +122,95 @@ describe('catalog snapshots', () => {
     )
   })
 
+  it('retains facts omitted by a later successful scrape and reports them for review', async () => {
+    const first = await createSnapshot({
+      catalog: fixtureCatalog,
+      source: MODELS_DEV_SOURCE,
+      fetchedAt: FIXED_VERIFIED_AT,
+      contentSha256: FIXED_CONTENT_SHA256,
+      httpStatus: 200,
+      etag: null,
+      outputDirectory,
+      now: FIXED_NOW,
+    })
+
+    const replacementCatalog: ModelsDevCatalog = {
+      providers: [
+        {
+          ...fixtureCatalog.providers[0],
+          providerId: 'beta',
+          name: 'Beta',
+          sourceRecord: 'beta',
+        },
+      ],
+      models: [
+        {
+          ...fixtureCatalog.models[0],
+          providerId: 'beta',
+          modelId: 'new-model',
+          canonicalModelId: 'beta/new-model',
+          name: 'New Model',
+          sourceRecord: 'beta/new-model',
+        },
+      ],
+      knownGaps: fixtureCatalog.knownGaps,
+    }
+
+    const second = await createSnapshot({
+      catalog: replacementCatalog,
+      source: MODELS_DEV_SOURCE,
+      fetchedAt: '2026-11-09T12:01:00.000Z',
+      contentSha256: 'b'.repeat(64),
+      httpStatus: 200,
+      etag: null,
+      outputDirectory,
+      now: new Date(FIXED_NOW.getTime() + 60_000),
+      previousSnapshotPath: first.snapshotPath,
+    })
+
+    expect(second.counts.providers).toBe(2)
+    expect(second.counts.models).toBe(2)
+    expect(second.merge).toMatchObject({
+      previousSnapshotPath: first.snapshotPath,
+      retainedProviders: ['acme'],
+      retainedModels: ['acme/free-model'],
+    })
+    expect(second.merge?.reviewItems).toEqual(['model acme/free-model', 'provider acme'])
+
+    const instance = await DuckDBInstance.create(second.snapshotPath, { access_mode: 'READ_ONLY' })
+    const connection = await instance.connect()
+    try {
+      const reader = await connection.runAndReadAll(
+        `SELECT provider_id, scrape_status, last_error,
+                epoch_ms(verified_at) AS verified_at_ms,
+                epoch_ms(last_attempt_at) AS last_attempt_at_ms
+         FROM providers ORDER BY provider_id`,
+      )
+      const providers = reader.getRowObjects()
+      const acme = providers.find((row) => row.provider_id === 'acme')
+      const beta = providers.find((row) => row.provider_id === 'beta')
+
+      expect(acme?.scrape_status).toBe('missing')
+      expect(acme?.last_error).toContain('latest source response')
+      expect(Number(acme?.verified_at_ms)).toBe(new Date(FIXED_VERIFIED_AT).getTime())
+      expect(Number(acme?.last_attempt_at_ms)).toBe(
+        new Date('2026-11-09T12:01:00.000Z').getTime(),
+      )
+      expect(beta?.scrape_status).toBe('ok')
+
+      const modelReader = await connection.runAndReadAll(
+        `SELECT model_id, scrape_status FROM models ORDER BY model_id`,
+      )
+      expect(modelReader.getRowObjects()).toEqual([
+        expect.objectContaining({ model_id: 'free-model', scrape_status: 'missing' }),
+        expect.objectContaining({ model_id: 'new-model', scrape_status: 'ok' }),
+      ])
+    } finally {
+      connection.closeSync()
+      instance.closeSync()
+    }
+  })
+
   it('warns after seven days without deleting the snapshot', async () => {
     const report = await createSnapshot({
       catalog: fixtureCatalog,

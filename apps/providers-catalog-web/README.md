@@ -21,6 +21,9 @@ pnpm --dir apps/providers-catalog-web run test
 ```
 
 Snapshots are gitignored. A failed scrape never replaces the previous artifact.
+When the newest artifact is present in `artifacts/`, the writer retains any
+provider or model omitted by the new response, preserves its `verified_at`, marks
+it `missing`, and includes it in the snapshot report's review items.
 
 ## Static site
 
