@@ -44,8 +44,9 @@ and login diagnostics are now implemented.
       Freebuff or triggering its updater; report missing or unusable candidates.
       An offline discovery primitive reads `agents.freebuff.executable` from
       agent settings; wire it into the desktop factory and verify its fixtures
-      (not selected in shard 8/8) when the selected shard
-      includes them before marking this item complete.
+      when the selected shard includes them before marking this item complete.
+      Missing and unusable-candidate fixtures passed in shard 6/8; configured
+      precedence and settings fixtures remain unverified.
     - [ ] Inspect the installed launcher and runtime metadata without sending
       project data; record version provenance and the update lifecycle. A
       bounded metadata reader is implemented; its valid-metadata fixture passed
@@ -64,6 +65,9 @@ and login diagnostics are now implemented.
       connect recording and replay once the transport exists. The storage
       primitive compiles; its invalid-name and ordering fixture passed in shard
       8/8, while its round-trip fixture has not yet been selected.
+    - [ ] Replay capture records in order through a streaming consumer; the
+      primitive compiles, but its fixture was not selected in shard 6/8. Connect
+      it to the terminal parser and safely restore recorded worktree effects.
     - [ ] Version the capture format and reject incompatible headers. The
       implementation compiles; shard 3/8 passed 21 tests but did not select
       the new header fixture or the capture round-trip fixture.

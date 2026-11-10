@@ -144,6 +144,18 @@ impl CaptureWriter {
 }
 
 pub fn read_capture(path: &Path) -> HarnessResult<Vec<CaptureRecord>> {
+    let mut records = Vec::new();
+    visit_capture(path, |record| {
+        records.push(record);
+        Ok(())
+    })?;
+    Ok(records)
+}
+
+pub fn visit_capture(
+    path: &Path,
+    mut visit: impl FnMut(CaptureRecord) -> HarnessResult<()>,
+) -> HarnessResult<()> {
     let file = File::open(path).map_err(|error| {
         HarnessError::Protocol(format!(
             "could not open Freebuff capture at {}: {error}",
@@ -177,7 +189,7 @@ pub fn read_capture(path: &Path) -> HarnessResult<Vec<CaptureRecord>> {
             path.display()
         )));
     }
-    let mut records = Vec::new();
+    let mut previous_elapsed_micros = None;
     for (index, line) in lines.enumerate() {
         let line = line.map_err(|error| {
             HarnessError::Protocol(format!(
@@ -194,18 +206,16 @@ pub fn read_capture(path: &Path) -> HarnessResult<Vec<CaptureRecord>> {
             ))
         })?;
         validate_record(&record)?;
-        if records
-            .last()
-            .is_some_and(|previous: &CaptureRecord| previous.elapsed_micros > record.elapsed_micros)
-        {
+        if previous_elapsed_micros.is_some_and(|previous| previous > record.elapsed_micros) {
             return Err(HarnessError::Protocol(format!(
                 "Freebuff capture at {} is out of order",
                 path.display()
             )));
         }
-        records.push(record);
+        previous_elapsed_micros = Some(record.elapsed_micros);
+        visit(record)?;
     }
-    Ok(records)
+    Ok(())
 }
 
 fn validate_record(record: &CaptureRecord) -> HarnessResult<()> {
@@ -300,6 +310,33 @@ mod tests {
             fs::write(&path, contents)?;
             assert!(read_capture(&path).is_err());
         }
+        Ok(())
+    }
+
+    #[test]
+    fn replay_visits_records_in_order_and_stops_on_consumer_error()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let mut writer = CaptureWriter::create(directory.path(), "replay")?;
+        for byte in 1..=3 {
+            writer.append(&CaptureRecord {
+                elapsed_micros: u64::from(byte),
+                event: CaptureEvent::Output { bytes: vec![byte] },
+            })?;
+        }
+        let path = directory
+            .path()
+            .join(".cache/shepherd-live/freebuff/replay.jsonl");
+        let mut observed = Vec::new();
+        let result = visit_capture(&path, |record| {
+            observed.push(record.elapsed_micros);
+            if record.elapsed_micros == 2 {
+                return Err(HarnessError::Protocol("consumer stopped".into()));
+            }
+            Ok(())
+        });
+        assert!(result.is_err());
+        assert_eq!(observed, [1, 2]);
         Ok(())
     }
 
