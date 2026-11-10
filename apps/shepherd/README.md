@@ -298,10 +298,22 @@ versions in `.cache/test-shards/runs.jsonl`. `--last-ran` only reports clean,
 successful runs on the current first-parent history; dirty runs, rewritten
 commits, a missing local history, and tests not yet present in an old revision
 cannot establish a clean ancestor. Use the printed identity from the history
-for an exact lookup. For bisection, run the failing test by its exact Rust name
-at each candidate, check that the test exists there, and use `git bisect skip`
-when it does not or when the candidate cannot be built. Do not infer a passing
-test from a scheduled shard or a missing run record.
+for an exact lookup. To bisect a Rust failure, copy the helper outside the
+checkout before starting, so it remains available at older commits:
+
+```sh
+cp scripts/bisect-rust-test.py /tmp/shepherd-bisect-rust-test.py
+git bisect start HEAD <known-good-commit>
+git bisect run direnv exec . python3 /tmp/shepherd-bisect-rust-test.py module::tests::example
+git bisect reset
+```
+
+The helper runs the exact test at each candidate and skips revisions where it
+is missing, ignored, cannot build, or the runner fails for a reason other than
+a test failure. A skipped revision can leave a range of possible first bad
+commits. If an older revision lacks a working Nix environment, assess it
+manually. Do not infer a passing test from a scheduled shard or a missing run
+record.
 
 ## Run the installed-agent smokes
 
