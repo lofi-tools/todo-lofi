@@ -654,6 +654,12 @@ pub enum HarnessEvent {
         /// Retains the stream buffer permit while this event is in use.
         stream_permit: Option<Arc<tokio::sync::OwnedSemaphorePermit>>,
     },
+    TextReplaced {
+        item_id: ItemId,
+        kind: DeltaKind,
+        text: String,
+        stream_permit: Option<Arc<tokio::sync::OwnedSemaphorePermit>>,
+    },
     ToolCall {
         tool_call_id: ToolCallId,
         title: String,
@@ -1005,6 +1011,12 @@ impl Transcript {
                 text,
                 ..
             } => self.push_delta(item_id.as_str(), *kind, text),
+            HarnessEvent::TextReplaced {
+                item_id,
+                kind,
+                text,
+                ..
+            } => self.set_delta(item_id.as_str(), *kind, text, true),
             HarnessEvent::ToolCall {
                 tool_call_id,
                 title,
@@ -1063,12 +1075,25 @@ impl Transcript {
     }
 
     fn push_delta(&mut self, item_id: &str, kind: DeltaKind, text: &str) -> TranscriptChange {
+        self.set_delta(item_id, kind, text, false)
+    }
+
+    fn set_delta(
+        &mut self,
+        item_id: &str,
+        kind: DeltaKind,
+        text: &str,
+        replace: bool,
+    ) -> TranscriptChange {
         let key = format!("{kind:?}:{item_id}");
         if let Some(index) = self.item_rows.get(&key).copied() {
             if let Some(entry) = self.entries.get_mut(index) {
                 match (&mut entry.kind, kind) {
                     (EntryKind::AgentText { text: existing }, DeltaKind::Message)
                     | (EntryKind::Thought { text: existing }, DeltaKind::Thought) => {
+                        if replace {
+                            existing.clear();
+                        }
                         existing.push_str(text);
                     }
                     _ => {
@@ -1459,6 +1484,40 @@ mod tests {
         assert_eq!(
             transcript.entry(0).map(Entry::summary),
             Some("agent: Hello world".to_string())
+        );
+    }
+
+    #[test]
+    fn a_redraw_replaces_the_existing_message_and_continues_streaming() {
+        let mut transcript = Transcript::default();
+        let item_id = ItemId::new("message-1");
+        transcript.apply(&HarnessEvent::Delta {
+            item_id: item_id.clone(),
+            kind: DeltaKind::Message,
+            text: "original".into(),
+            stream_permit: None,
+        });
+        let changed = transcript.apply(&HarnessEvent::TextReplaced {
+            item_id: item_id.clone(),
+            kind: DeltaKind::Message,
+            text: "corrected".into(),
+            stream_permit: None,
+        });
+        assert!(!changed.appended);
+        assert_eq!(transcript.len(), 1);
+        assert_eq!(
+            transcript.entry(0).map(Entry::summary),
+            Some("agent: corrected".into())
+        );
+        transcript.apply(&HarnessEvent::Delta {
+            item_id,
+            kind: DeltaKind::Message,
+            text: " text".into(),
+            stream_permit: None,
+        });
+        assert_eq!(
+            transcript.entry(0).map(Entry::summary),
+            Some("agent: corrected text".into())
         );
     }
 

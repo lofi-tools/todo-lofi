@@ -80,12 +80,12 @@ and login diagnostics are now implemented.
       serialized with output capture, and readiness is polled outside the lock.
       The fake interactive and backpressure fixtures were not selected in
       Shepherd shard 1/8; verify both before enabling live capture. The capture
-      primitive's nonblocking fixture was not selected in agent-harness shard
-      4/8. Failed sessions must never be treated as complete replay.
+      primitive's nonblocking fixture passed in agent-harness shard 5/8.
+      Failed sessions must never be treated as complete replay.
     - [ ] Finalize captures only after terminal output, responses, and worktree
       effects are drained; require a completion marker for successful replay.
-      The capture API rejects missing or trailing records, but its completion
-      fixture was not selected in agent-harness shard 2/8. The terminal host and
+      The capture API rejects missing or trailing records; its completion
+      fixture passed in agent-harness shard 5/8. The terminal host and
       replay callers still need to use this API; partial captures remain
       available for diagnostics.
     - [ ] Replay capture records in order through a streaming consumer. An
@@ -96,6 +96,9 @@ and login diagnostics are now implemented.
     - [ ] Version the capture format and reject incompatible headers. The
       header rejection fixture passed in shard 4/8; the capture round-trip
       fixture has not yet been selected.
+    - [ ] Translate verified redraws into transcript text replacements. The
+      harness now supports replacing an existing streamed row, with its fixture
+      passing in agent-harness shard 5/8; connect it to the Freebuff parser.
   - [ ] **P1 — Implement the integrated adapter:** launch the installed CLI in
     the task worktree with the existing login, forward input with normal CLI
     terminal interpretation, stream and reconcile text, map tool activity,
