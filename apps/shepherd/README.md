@@ -262,6 +262,47 @@ selected task's Terminals tab. You can type into it, resize it, hide it, or
 stop the process. Shepherd closes unreleased terminals with their ACP
 session.
 
+## Split test runs
+
+From the repository root, run the explicit sharding command in the Nix
+environment:
+
+```sh
+direnv exec . python3 scripts/test-shards.py
+direnv exec . python3 scripts/test-shards.py --all
+direnv exec . python3 scripts/test-shards.py --shard 3/8
+direnv exec . python3 scripts/test-shards.py --seed HEAD~4 --dry-run
+direnv exec . python3 scripts/test-shards.py --test module::tests::example
+direnv exec . python3 scripts/test-shards.py --last-ran 'rust:crate::module::tests::example'
+```
+
+The default run selects all tests in changed Rust packages and their workspace
+dependents, plus a hash shard of the remaining workspace tests. It also runs
+the affected Shepherd UI suite, or a Playwright shard if it is unaffected.
+Changes include the latest first-parent commit and staged, unstaged and
+untracked files. Shared and unknown paths cause a full run. The seed is a
+revision hash modulo the shard count, so consecutive commits can repeat a
+shard. `--seed` reuses only the shard selection; it does not check out that
+revision or reproduce its affected files. `--shard` overrides that selection.
+Playwright partitions individual tests with one worker; its membership can
+change when tests are added or reordered, unlike nextest's hash partitions.
+
+The command reminds you when a clean full run is at least eight first-parent
+commits old or no recent full run is recorded. `--all` includes default Rust
+tests, doctests and the UI suite; CI runs this suite for pull requests. Native
+desktop smokes and gated live-agent probes remain separate. Ordinary tests
+retain their existing harness and live-agent cache rules.
+
+Successful invocations record exact Rust and Playwright identities and runner
+versions in `.cache/test-shards/runs.jsonl`. `--last-ran` only reports clean,
+successful runs on the current first-parent history; dirty runs, rewritten
+commits, a missing local history, and tests not yet present in an old revision
+cannot establish a clean ancestor. Use the printed identity from the history
+for an exact lookup. For bisection, run the failing test by its exact Rust name
+at each candidate, check that the test exists there, and use `git bisect skip`
+when it does not or when the candidate cannot be built. Do not infer a passing
+test from a scheduled shard or a missing run record.
+
 ## Run the installed-agent smokes
 
 The **Shepherd adapter smoke** GitHub Actions workflow runs on demand from
