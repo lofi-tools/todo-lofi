@@ -761,9 +761,16 @@ pub(crate) fn capture_worktree_effects(
 #[allow(dead_code)]
 pub(crate) fn capture_git_worktree_effects(
     root: &std::path::Path,
+    initial_identity: &crate::git::CaptureGitIdentity,
     capture: &agent_harness::freebuff_capture::CaptureSession,
 ) -> Result<(), CoreError> {
     let result = (|| {
+        if crate::git::GitService.capture_git_identity(root)? != *initial_identity {
+            return Err(HarnessError::Protocol(
+                "worktree Git identity or index changed during capture".into(),
+            )
+            .into());
+        }
         reject_ignored_worktree_files(root)?;
         let mut paths = BTreeSet::new();
         for entry in crate::git::GitService.status(root)? {
@@ -783,7 +790,14 @@ pub(crate) fn capture_git_worktree_effects(
                 paths.insert(PathBuf::from(original));
             }
         }
-        capture_worktree_effects_inner(root, &paths.into_iter().collect::<Vec<_>>(), capture)
+        capture_worktree_effects_inner(root, &paths.into_iter().collect::<Vec<_>>(), capture)?;
+        if crate::git::GitService.capture_git_identity(root)? != *initial_identity {
+            return Err(HarnessError::Protocol(
+                "worktree Git identity or index changed while collecting effects".into(),
+            )
+            .into());
+        }
+        Ok(())
     })();
     if let Err(error) = result {
         if let Err(failure) = capture.fail() {
@@ -1049,10 +1063,11 @@ mod tests {
         };
         let repository = TestRepository::new()?;
         let cache = TestDirectory::new()?;
+        let identity = crate::git::GitService.capture_git_identity(repository.path())?;
         repository.write_file("README.md", "changed\n")?;
         repository.write_file("new.txt", "new\n")?;
         let capture = CaptureSession::new(CaptureWriter::create(cache.path(), "git-effects")?);
-        capture_git_worktree_effects(repository.path(), &capture)?;
+        capture_git_worktree_effects(repository.path(), &identity, &capture)?;
         let records = read_capture(&cache.join(".cache/shepherd-live/freebuff/git-effects.jsonl"))?;
         assert!(records.iter().any(|record| matches!(&record.event, CaptureEvent::WorktreeFile { path, contents, .. } if path == std::path::Path::new("README.md") && contents == b"changed\n")));
         assert!(records.iter().any(|record| matches!(&record.event, CaptureEvent::WorktreeFile { path, contents, .. } if path == std::path::Path::new("new.txt") && contents == b"new\n")));
@@ -1065,6 +1080,7 @@ mod tests {
         use agent_harness::freebuff_capture::{CaptureSession, CaptureWriter};
         let repository = TestRepository::new()?;
         let cache = TestDirectory::new()?;
+        let identity = crate::git::GitService.capture_git_identity(repository.path())?;
         repository.write_file("README.md", "staged\n")?;
         let status = std::process::Command::new("git")
             .arg("-C")
@@ -1073,7 +1089,7 @@ mod tests {
             .status()?;
         assert!(status.success());
         let capture = CaptureSession::new(CaptureWriter::create(cache.path(), "staged")?);
-        assert!(capture_git_worktree_effects(repository.path(), &capture).is_err());
+        assert!(capture_git_worktree_effects(repository.path(), &identity, &capture).is_err());
         assert!(capture.finish().is_err());
         let status = std::process::Command::new("git")
             .arg("-C")
@@ -1085,7 +1101,28 @@ mod tests {
         repository.write_file(".gitignore", "ignored.txt\n")?;
         repository.write_file("ignored.txt", "secret\n")?;
         let capture = CaptureSession::new(CaptureWriter::create(cache.path(), "ignored")?);
-        assert!(capture_git_worktree_effects(repository.path(), &capture).is_err());
+        assert!(capture_git_worktree_effects(repository.path(), &identity, &capture).is_err());
+        assert!(capture.finish().is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_branch_changes_during_effect_capture() -> Result<(), Box<dyn std::error::Error>> {
+        use crate::test_support::TestRepository;
+        use agent_harness::freebuff_capture::{CaptureSession, CaptureWriter};
+        let repository = TestRepository::new()?;
+        let cache = TestDirectory::new()?;
+        let identity = crate::git::GitService.capture_git_identity(repository.path())?;
+        let status = std::process::Command::new("git")
+            .arg("-C")
+            .arg(repository.path())
+            .args(["switch", "-c", "other"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()?;
+        assert!(status.success());
+        let capture = CaptureSession::new(CaptureWriter::create(cache.path(), "branch")?);
+        assert!(capture_git_worktree_effects(repository.path(), &identity, &capture).is_err());
         assert!(capture.finish().is_err());
         Ok(())
     }

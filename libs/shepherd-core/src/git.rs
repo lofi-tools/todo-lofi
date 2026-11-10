@@ -383,6 +383,15 @@ impl GitService {
         Ok(())
     }
 
+    pub(crate) fn capture_git_identity(&self, path: &Path) -> Result<CaptureGitIdentity, GitError> {
+        Ok(CaptureGitIdentity {
+            head: run_git(path, &["rev-parse", "HEAD"])?,
+            branch: run_git(path, &["rev-parse", "--symbolic-full-name", "HEAD"])?,
+            index: git_digest(path, &["ls-files", "--stage", "-z"])?,
+            flags: git_digest(path, &["ls-files", "-v", "-z"])?,
+        })
+    }
+
     pub fn turn_baseline(&self, path: &Path) -> Result<TurnBaseline, GitError> {
         let status = git_bytes(
             path,
@@ -1058,6 +1067,14 @@ pub struct TurnBaseline {
     unstaged: [u8; 32],
     status: Vec<u8>,
     untracked: Vec<[u8; 32]>,
+}
+
+#[derive(PartialEq, Eq)]
+pub(crate) struct CaptureGitIdentity {
+    head: String,
+    branch: String,
+    index: [u8; 32],
+    flags: [u8; 32],
 }
 
 /// The branch a new worktree starts from. A recorded remote HEAD wins, then

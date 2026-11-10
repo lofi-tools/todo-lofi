@@ -101,8 +101,11 @@ and login diagnostics are now implemented.
       oversized captures. Its fixtures were outside shepherd-core shard 7/8.
       Git status now supplies tracked, untracked and rename paths; staged or
       ignored files are rejected rather than omitted. Discovery fixtures were
-      outside shepherd-core shard 6/8. Detect or reject Git metadata changes,
-      handle other effect types, and implement confined replay before live use.
+      outside shepherd-core shard 6/8. Effect collection now compares HEAD,
+      branch, index entries and index flags against a pre-run identity; its
+      branch-change fixture was outside shard 5/8. Detect or reject other Git
+      metadata changes, handle other effect types, and implement confined
+      replay before live use.
     - [ ] Replay capture records in order through a streaming consumer. An
       offline synthetic capture replays split output and a resize through the
       shell's VT parser (Shepherd shard 8/8 passed); the consumer's own fixture
@@ -147,7 +150,8 @@ and login diagnostics are now implemented.
       working task and rolls back its in-memory transcript on save failure;
       its fixture was not selected in shepherd-core shard 8/8. Core admission
       now establishes the baseline, persists the prompt and task, then updates
-      the in-memory task state; its fixture was also outside shard 8/8. An
+      the in-memory task state; its baseline and gate fixture passed in
+      shepherd-core shard 5/8. An
       internal submit gate serializes admission and input, blocks forwarding on
       admission failure, and marks ambiguous write failures; its failed-admission
       fixture passed in shepherd-core shard 6/8. Connect every integrated Freebuff input
