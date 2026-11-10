@@ -63,6 +63,13 @@ and login diagnostics are now implemented.
     membership behavior rather than assuming it matches nextest's stable hash
     partitions, and document any limits on historical replay.
 
+- [ ] Consider extracting reusable test-sharding pieces into my-nix. Wait until
+  the implementation has been verified and the user has confirmed that the
+  workflow works for them in practice. Then conduct a short interview about
+  which pieces to move, such as runner orchestration, Nix dependencies,
+  configurable test selection, run history, and agent instructions; agree on
+  the shared and repository-specific boundaries before implementing extraction.
+
 - [x] Import the primary folders of local Codex projects from the ChatGPT desktop
   app. Offer batch import in the sidebar when the Projects list is empty. A
   protocol fixture covers pagination, and the browser smoke covers batch import.
