@@ -32,6 +32,37 @@ and login diagnostics are now implemented.
 
 ## Next feature
 
+- [ ] Add a scripted split-test workflow for small commits:
+  - [x] Keep ordinary Rust tests on the standard harness; add a pinned
+    `cargo-nextest` to the Nix development environment for runtime hash
+    partitioning. Keep live-agent tests behind their existing per-agent gates
+    and preserve their caching requirements.
+  - [ ] Provide an explicit test command, with no Git hooks, that runs tests
+    for affected packages plus one rotating shard of the remaining default
+    Rust and Playwright suites. Define and document the changed-path mapping,
+    including shared files, deletions and unknown paths; choose a conservative
+    fallback so affected coverage is not silently omitted.
+  - [ ] Default to eight shards and select a shard deterministically using a
+    revision-derived value modulo the shard count. Selection need not cover
+    every shard within any eight-commit cycle; tests should run regularly over
+    time. Allow an explicit shard count and selection, and explain behavior for
+    uncommitted changes, branches and rewritten history. A full default-suite
+    run is due every eight commits; report when it is due rather than installing
+    a hook. Run the complete default suite in pull-request CI as well.
+  - [ ] Provide explicit full-suite and individual-test commands, plus a way
+    to replay a revision's shard selection. Include Rust doctests and other
+    default tests that nextest cannot execute, and preserve existing platform,
+    native smoke and live-agent gates instead of silently expanding them.
+  - [x] Record actual successful runs with the revision, selection and runner
+    versions so a diagnostic command can identify when a test was last
+    confirmed to run. Do not infer success from a scheduled shard. Document
+    how to bisect a failure by running that test at each candidate, and how
+    to handle missing history or tests that did not exist at older revisions.
+  - [ ] Verify shard partitioning and selection, affected-path fallback, full-run
+    cadence and replay with representative fixtures. Check Playwright's shard
+    membership behavior rather than assuming it matches nextest's stable hash
+    partitions, and document any limits on historical replay.
+
 - [x] Import the primary folders of local Codex projects from the ChatGPT desktop
   app. Offer batch import in the sidebar when the Projects list is empty. A
   protocol fixture covers pagination, and the browser smoke covers batch import.
