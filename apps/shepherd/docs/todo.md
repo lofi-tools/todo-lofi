@@ -129,8 +129,11 @@ and login diagnostics are now implemented.
       working task and rolls back its in-memory transcript on save failure;
       its fixture was not selected in shepherd-core shard 8/8. Core admission
       now establishes the baseline, persists the prompt and task, then updates
-      the in-memory task state; its fixture was also outside shard 8/8. Connect
-      admission to the terminal submit gate before enabling direct prompts.
+      the in-memory task state; its fixture was also outside shard 8/8. An
+      internal submit gate serializes admission and input, blocks forwarding on
+      admission failure, and marks ambiguous write failures; its fixtures were
+      outside shepherd-core shard 4/8. Connect every integrated Freebuff input
+      path and the verified screen classifier to the gate before enabling it.
   - [ ] **P2 — Validate and document:** run offline fixture and fake-CLI
     coverage by default. Gate genuinely live probes with `live-freebuff`,
     disabled by default. Before each live submission, confirm the exact

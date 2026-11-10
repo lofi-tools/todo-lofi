@@ -722,6 +722,85 @@ impl crate::Core {
         }
         Ok(())
     }
+
+    async fn fail_terminal_turn(&mut self, task_id: &crate::TaskId) -> Result<(), CoreError> {
+        self.turn_baselines.remove(task_id);
+        let message = "Terminal input could not be delivered; the turn may have started.";
+        if let Some(session) = self.sessions.get_mut(task_id) {
+            session.push_failure(FailureKind::Protocol, message, None);
+        }
+        self.set_task_state(task_id, crate::TaskState::Failed)?;
+        if let Some(task) = self.tasks.get_mut(task_id) {
+            task.error = Some(message.into());
+        }
+        self.save_task(task_id).await?;
+        self.publish_task(task_id)?;
+        Ok(())
+    }
+}
+
+pub(crate) struct TerminalSubmitGate {
+    core: Arc<tokio::sync::Mutex<crate::Core>>,
+    failed: tokio::sync::Mutex<bool>,
+}
+
+#[allow(dead_code)]
+impl TerminalSubmitGate {
+    pub(crate) fn new(core: Arc<tokio::sync::Mutex<crate::Core>>) -> Self {
+        Self {
+            core,
+            failed: tokio::sync::Mutex::new(false),
+        }
+    }
+
+    pub(crate) async fn write_unsubmitted<F, Fut>(&self, write: F) -> Result<(), CoreError>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = Result<(), CoreError>>,
+    {
+        let mut failed = self.failed.lock().await;
+        if *failed {
+            return Err(HarnessError::Protocol("terminal input gate has failed".into()).into());
+        }
+        let result = write().await;
+        if result.is_err() {
+            *failed = true;
+        }
+        result
+    }
+
+    pub(crate) async fn submit<F, Fut>(
+        &self,
+        task_id: &crate::TaskId,
+        item_id: ItemId,
+        text: String,
+        write: F,
+    ) -> Result<(), CoreError>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = Result<(), CoreError>>,
+    {
+        let mut failed = self.failed.lock().await;
+        if *failed {
+            return Err(HarnessError::Protocol("terminal input gate has failed".into()).into());
+        }
+        self.core
+            .lock()
+            .await
+            .admit_terminal_turn(task_id, item_id, text)
+            .await?;
+        if let Err(error) = write().await {
+            *failed = true;
+            if let Err(cleanup) = self.core.lock().await.fail_terminal_turn(task_id).await {
+                return Err(HarnessError::Protocol(format!(
+                    "terminal submit failed: {error}; could not persist failure: {cleanup}"
+                ))
+                .into());
+            }
+            return Err(error);
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -758,11 +837,29 @@ mod tests {
         core.sessions.insert(id.clone(), session);
         core.session_records.insert(id.clone(), record);
 
-        core.admit_terminal_turn(&id, ItemId::new("terminal-turn"), "make a change".into())
-            .await?;
+        let core = Arc::new(tokio::sync::Mutex::new(core));
+        let gate = TerminalSubmitGate::new(core.clone());
+        let submitting_core = core.clone();
+        let submitting_id = id.clone();
+        gate.submit(
+            &id,
+            ItemId::new("terminal-turn"),
+            "make a change".into(),
+            || async {
+                assert_eq!(
+                    submitting_core.lock().await.task(&submitting_id)?.state,
+                    crate::TaskState::Working
+                );
+                repository
+                    .write_file("README.md", "changed\n")
+                    .map_err(|error| HarnessError::Protocol(error.to_string()))?;
+                Ok(())
+            },
+        )
+        .await?;
+        let mut core = core.lock().await;
         assert_eq!(core.task(&id)?.state, crate::TaskState::Working);
         assert_eq!(core.store.load_transcript(&id).await?.len(), 1);
-        repository.write_file("README.md", "changed\n")?;
         assert_eq!(
             core.state_after_completed_turn(&id)?,
             crate::TaskState::Review
@@ -773,6 +870,26 @@ mod tests {
                 .is_err()
         );
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn terminal_submit_does_not_write_when_admission_fails() {
+        let core = Arc::new(tokio::sync::Mutex::new(crate::Core::new()));
+        let gate = TerminalSubmitGate::new(core);
+        let mut wrote = false;
+        let result = gate
+            .submit(
+                &crate::TaskId::new("missing"),
+                ItemId::new("prompt"),
+                "hello".into(),
+                || async {
+                    wrote = true;
+                    Ok(())
+                },
+            )
+            .await;
+        assert!(result.is_err());
+        assert!(!wrote);
     }
 
     #[tokio::test]
