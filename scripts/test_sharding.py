@@ -4,12 +4,40 @@
 from dataclasses import dataclass
 from pathlib import PurePosixPath
 
+PROTOTYPE_PACKAGES = frozenset({"dson_freeform_task", "dson_typed_task", "test_dson", "op_crdt"})
+
 
 @dataclass(frozen=True)
 class Selection:
     packages: frozenset[str]
     ui: bool
     all_tests: bool
+
+
+def excluded_packages(packages: dict[str, str], dependents: dict[str, set[str]]) -> frozenset[str]:
+    names = set(packages.values())
+    demos = {name for root, name in packages.items() if root.startswith("demos/")}
+    dependencies = {name: set() for name in names}
+    for dependency, users in dependents.items():
+        for user in users:
+            if user in dependencies and dependency in names:
+                dependencies[user].add(dependency)
+
+    def reachable(start):
+        found = set(start)
+        pending = list(start)
+        while pending:
+            for dependency in dependencies[pending.pop()] - found:
+                found.add(dependency)
+                pending.append(dependency)
+        return found
+
+    demo_closure = reachable(demos)
+    apps = {name for root, name in packages.items() if root.startswith("apps/")}
+    required_elsewhere = reachable((names - demo_closure) | apps)
+    demo_only_libraries = {name for root, name in packages.items()
+                           if root.startswith("libs/") and name in demo_closure - required_elsewhere}
+    return frozenset(demos | demo_only_libraries | (PROTOTYPE_PACKAGES & names))
 
 
 def shard_for_revision(revision: str, count: int) -> int:

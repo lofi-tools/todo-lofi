@@ -9,7 +9,7 @@ from pathlib import Path
 
 from test_shard_history import first_parent_ancestors, full_suite_due, last_test_run, read_runs
 from test_shard_recording import Recorder
-from test_sharding import affected_tests, shard_for_revision
+from test_sharding import affected_tests, excluded_packages, shard_for_revision
 
 ROOT = Path(__file__).resolve().parent.parent
 UI = ROOT / "apps/shepherd/ui"
@@ -18,9 +18,28 @@ RECORDER = None
 CONTEXT = None
 
 
+def web_workspace():
+    patterns = ("apps/*/package.json", "apps/*/ui/package.json", "libs/*/package.json", "demos/*/package.json")
+    manifests = sorted({path for pattern in patterns for path in ROOT.glob(pattern)})
+    packages = [(path, json.loads(path.read_text(encoding="utf-8"))) for path in manifests]
+    roots = {str(path.parent.relative_to(ROOT)): data["name"] for path, data in packages}
+    names = set(roots.values())
+    dependents = {}
+    for _, data in packages:
+        for section in ("dependencies", "devDependencies", "peerDependencies", "optionalDependencies"):
+            for dependency in data.get(section, {}):
+                if dependency in names:
+                    dependents.setdefault(dependency, set()).add(data["name"])
+    return roots, dependents, packages
+
+
 def playwright_suites():
-    patterns = ("apps/*/playwright.config.*", "apps/*/ui/playwright.config.*", "libs/*/playwright.config.*", "demos/*/playwright.config.*")
-    return sorted({config.parent for pattern in patterns for config in ROOT.glob(pattern)})
+    roots, dependents, _ = web_workspace()
+    omitted = excluded_packages(roots, dependents)
+    excluded_roots = {ROOT / path for path, name in roots.items() if name in omitted}
+    patterns = ("apps/*/playwright.config.*", "apps/*/ui/playwright.config.*", "libs/*/playwright.config.*")
+    return sorted({config.parent for pattern in patterns for config in ROOT.glob(pattern)
+                   if config.parent not in excluded_roots})
 
 
 def run_playwright(index=None, count=None, affected_ui=False, dry_run=False):
@@ -32,10 +51,11 @@ def run_playwright(index=None, count=None, affected_ui=False, dry_run=False):
 
 
 def web_test_suites():
-    patterns = ("apps/*/package.json", "apps/*/ui/package.json", "libs/*/package.json", "demos/*/package.json")
-    for manifest in sorted({path for pattern in patterns for path in ROOT.glob(pattern)}):
-        script = json.loads(manifest.read_text(encoding="utf-8")).get("scripts", {}).get("test")
-        if script:
+    roots, dependents, packages = web_workspace()
+    omitted = excluded_packages(roots, dependents)
+    for manifest, data in packages:
+        script = data.get("scripts", {}).get("test")
+        if script and data["name"] not in omitted:
             yield manifest.parent, script
 
 
@@ -141,10 +161,13 @@ def main(argv=None):
         selection = ["--package", args.package] if args.package else ["--workspace"]
         execute(["cargo", "nextest", "run", *selection, "--", "--exact", args.test], dry_run=args.dry_run)
         return
+    roots, dependents = workspace()
+    omitted = excluded_packages(roots, dependents)
+    excluded = [item for name in sorted(omitted) for item in ("--exclude", name)]
     if args.all:
         execute(["python3", "-m", "unittest", "discover", "-s", "scripts", "-p", "test_test_shard*.py"], dry_run=args.dry_run)
-        execute(["cargo", "nextest", "run", "--workspace", "--no-fail-fast"], dry_run=args.dry_run)
-        execute(["cargo", "test", "--workspace", "--doc"], dry_run=args.dry_run)
+        execute(["cargo", "nextest", "run", "--workspace", *excluded, "--no-fail-fast"], dry_run=args.dry_run)
+        execute(["cargo", "test", "--workspace", *excluded, "--doc"], dry_run=args.dry_run)
         run_web_unit_tests(dry_run=args.dry_run)
         run_playwright(dry_run=args.dry_run)
         if RECORDER is not None:
@@ -152,26 +175,27 @@ def main(argv=None):
         return
     if full_suite_due(read_runs(HISTORY), first_parent_ancestors(ROOT, head)):
         print("A full default-suite run is due: use --all.", file=sys.stderr)
-    roots, dependents = workspace()
-    selection = affected_tests(changed_paths(), roots, dependents)
+    paths = [path for path in changed_paths() if not path.startswith("demos/")]
+    selection = affected_tests(paths, roots, dependents)
     if selection.all_tests:
         print("Unknown or shared paths changed; running the full default suite.", flush=True)
         execute(["python3", "-m", "unittest", "discover", "-s", "scripts", "-p", "test_test_shard*.py"], dry_run=args.dry_run)
-        execute(["cargo", "nextest", "run", "--workspace", "--no-fail-fast"], dry_run=args.dry_run)
-        execute(["cargo", "test", "--workspace", "--doc"], dry_run=args.dry_run)
+        execute(["cargo", "nextest", "run", "--workspace", *excluded, "--no-fail-fast"], dry_run=args.dry_run)
+        execute(["cargo", "test", "--workspace", *excluded, "--doc"], dry_run=args.dry_run)
         run_web_unit_tests(dry_run=args.dry_run)
         run_playwright(dry_run=args.dry_run)
         if RECORDER is not None:
             RECORDER.save([], full=True)
         return
-    if selection.packages:
-        packages = [item for name in sorted(selection.packages) for item in ("-p", name)]
+    affected = selection.packages - omitted
+    if affected:
+        packages = [item for name in sorted(affected) for item in ("-p", name)]
         execute(["cargo", "nextest", "run", *packages], dry_run=args.dry_run)
-    excluded = [item for name in sorted(selection.packages) for item in ("--exclude", name)]
-    if selection.packages != frozenset(roots.values()):
+    excluded = [item for name in sorted(omitted | affected) for item in ("--exclude", name)]
+    if affected != frozenset(roots.values()) - omitted:
         execute(["cargo", "nextest", "run", "--workspace", *excluded, "--partition", f"hash:{index}/{count}", "--no-tests=pass"], dry_run=args.dry_run)
     run_web_unit_tests(index, count, args.dry_run)
-    affected_ui = selection.ui or bool(selection.packages.intersection({"shepherd", "shepherd-core", "agent-harness"}))
+    affected_ui = selection.ui or bool(affected.intersection({"shepherd", "shepherd-core", "agent-harness"}))
     run_playwright(index, count, affected_ui, args.dry_run)
 
 

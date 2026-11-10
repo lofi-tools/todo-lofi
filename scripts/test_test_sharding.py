@@ -1,9 +1,18 @@
 import unittest
 
-from test_sharding import affected_tests, shard_for_revision
+from test_sharding import affected_tests, excluded_packages, shard_for_revision
 
 
 class SelectionTests(unittest.TestCase):
+    def test_excludes_demo_closure_but_keeps_shared_and_non_demo_dependencies(self):
+        packages = {"demos/example": "demo", "apps/app": "app", "libs/demo": "demo-lib",
+                    "libs/shared": "shared", "libs/consumer": "consumer",
+                    "libs/independent": "independent", "libs/dson_freeform_task": "dson_freeform_task"}
+        dependents = {"demo-lib": {"demo"}, "shared": {"demo", "app"},
+                      "independent": {"demo", "consumer"}}
+        self.assertEqual(excluded_packages(packages, dependents),
+                         {"demo", "demo-lib", "dson_freeform_task"})
+
     def test_modulo_selection_is_one_based_and_reproducible(self):
         self.assertEqual(shard_for_revision("a", 8), 3)
         self.assertEqual(shard_for_revision("a", 8), shard_for_revision("a", 8))

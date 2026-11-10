@@ -279,11 +279,12 @@ direnv exec . python3 scripts/test-shards.py --last-ran 'rust:crate::module::tes
 The default run selects all tests in changed Rust packages and their workspace
 dependents, plus a hash shard of the remaining workspace tests. It also runs
 the affected Shepherd UI suite, or a Playwright shard if it is unaffected,
-and shards the other workspace Playwright and Vitest suites.
+and shards the other included workspace Playwright and Vitest suites.
 Workspace packages with a different `test` script run that script in full;
 the runner does not assume that an unfamiliar test command supports sharding.
 Changes include the latest first-parent commit and staged, unstaged and
-untracked files. Shared and unknown paths cause a full run. The seed is a
+untracked files. Paths under `demos/` are ignored. Shared and unknown paths
+cause a full run. The seed is a
 revision hash modulo the shard count, so consecutive commits can repeat a
 shard. `--seed` reuses only the shard selection; it does not check out that
 revision or reproduce its affected files. `--shard` overrides that selection.
@@ -298,10 +299,23 @@ unlike nextest's hash partitions. Some shards can be empty.
 
 The command reminds you when a clean full run is at least eight first-parent
 commits old or no recent full run is recorded. `--all` includes default Rust
-tests, doctests, Vitest and all workspace Playwright suites; CI runs this suite
-for pull requests. Native
-desktop smokes and gated live-agent probes remain separate. Ordinary tests
-retain their existing harness and live-agent cache rules.
+tests, doctests, Vitest and the included Playwright suites; CI runs this suite
+for pull requests. It excludes `demos/`, libraries only used by demos, and the
+`dson_freeform_task`, `dson_typed_task`, `test_dson` and `op_crdt` prototypes.
+The runner derives demo-only library exclusions from workspace dependencies;
+currently there are none. Native desktop smokes and gated live-agent probes
+remain separate. Ordinary tests retain their existing harness and live-agent
+cache rules.
+
+The prototype crates and Rust demos are also gated behind the non-default
+`prototype` Cargo feature, so `cargo test --workspace` does not run their
+tests. Apply the same gate to any new library used only by demos. Cargo may
+still compile an empty library target for a workspace member.
+To return to a prototype deliberately, opt in, for example with
+`direnv exec . cargo test -p dson_freeform_task --features prototype` or
+`direnv exec . cargo run -p symphony --features prototype`. These unfinished
+prototypes can still fail. Demo browser tests are run separately through their
+own package commands.
 
 Successful invocations record exact Rust, Vitest and Playwright identities
 and runner versions in `.cache/test-shards/runs.jsonl`. Other test scripts
