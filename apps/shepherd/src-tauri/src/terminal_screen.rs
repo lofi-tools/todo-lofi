@@ -728,14 +728,14 @@ fn named_color(color: NamedColor, appearance: TerminalAppearance) -> u32 {
 
 #[allow(dead_code)]
 pub(crate) fn verify_recorded_screens(path: &std::path::Path) -> agent_harness::HarnessResult<()> {
-    visit_verified_screens(path, |_| Ok(()))
+    visit_verified_screens(path, |_, _| Ok(()))
 }
 
 /// The visitor must defer external effects until replay succeeds.
 #[allow(dead_code)]
 pub(crate) fn visit_verified_screens(
     path: &std::path::Path,
-    visit: impl FnMut(TerminalFrame) -> agent_harness::HarnessResult<()>,
+    visit: impl FnMut(u64, TerminalFrame) -> agent_harness::HarnessResult<()>,
 ) -> agent_harness::HarnessResult<()> {
     verify_screens(path, true, visit)
 }
@@ -744,13 +744,13 @@ pub(crate) fn visit_verified_screens(
 pub(crate) fn verify_unfinished_screens(
     path: &std::path::Path,
 ) -> agent_harness::HarnessResult<()> {
-    verify_screens(path, false, |_| Ok(()))
+    verify_screens(path, false, |_, _| Ok(()))
 }
 
 fn verify_screens(
     path: &std::path::Path,
     complete: bool,
-    mut visit: impl FnMut(TerminalFrame) -> agent_harness::HarnessResult<()>,
+    mut visit: impl FnMut(u64, TerminalFrame) -> agent_harness::HarnessResult<()>,
 ) -> agent_harness::HarnessResult<()> {
     use agent_harness::HarnessError;
     use agent_harness::freebuff_capture::{CaptureEvent, visit_capture, visit_complete_capture};
@@ -811,7 +811,7 @@ fn verify_screens(
                     ));
                 }
                 awaiting_screen = false;
-                visit(frame)?;
+                visit(record.elapsed_micros, frame)?;
             }
             CaptureEvent::Complete if !complete => {
                 return Err(HarnessError::Protocol(
@@ -887,13 +887,15 @@ mod tests {
             assert!(verify_unfinished_screens(&path).is_err());
             if !tampered {
                 let mut replayed = Vec::new();
-                visit_verified_screens(&path, |frame| {
-                    replayed.push(row(&frame, 0));
+                visit_verified_screens(&path, |elapsed_micros, frame| {
+                    replayed.push((elapsed_micros, row(&frame, 0)));
                     Ok(())
                 })?;
-                assert_eq!(replayed.len(), 2);
-                assert_eq!(replayed[0].trim_end(), "hello");
-                assert_eq!(replayed[1].trim_end(), "world");
+                let [(first_time, first), (second_time, second)] = replayed.as_slice() else {
+                    return Err("expected two replayed frames".into());
+                };
+                assert_eq!((*first_time, first.trim_end()), (2, "hello"));
+                assert_eq!((*second_time, second.trim_end()), (4, "world"));
             }
         }
         Ok(())
