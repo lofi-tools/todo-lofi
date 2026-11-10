@@ -51,7 +51,7 @@
 
           # Node + pnpm supply the web design system under libs/ and its Astro
           # showcase under demos/ (see docs/spec/web-design-system-spec.md).
-          devDeps = [ pkgs.cargo-tauri pkgs.cargo-watch pkgs.nodejs_22 pkgs.pnpm ];
+          devDeps = [ pkgs.cargo-nextest pkgs.cargo-tauri pkgs.cargo-watch pkgs.nodejs_22 pkgs.pnpm ];
 
           # The macOS bundle's Info.plist is checked in at
           # apps/taskstream-desktop/assets/Info.plist and its assembly recipe (icon,
