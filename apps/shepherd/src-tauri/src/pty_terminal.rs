@@ -1484,20 +1484,23 @@ mod tests {
 
     use super::*;
 
-    #[cfg(all(feature = "live-freebuff", unix))]
-    #[tokio::test]
-    #[ignore = "requires an explicitly approved Freebuff prompt and disposable worktree"]
-    async fn approved_freebuff_capture() -> Result<(), Box<dyn std::error::Error>> {
+    #[cfg(unix)]
+    struct CaptureRunnerConfig {
+        workspace: std::path::PathBuf,
+        worktree: std::path::PathBuf,
+        markers: std::path::PathBuf,
+        executable: std::path::PathBuf,
+        args: Vec<String>,
+        metadata: std::path::PathBuf,
+        prompt: Vec<u8>,
+        scenario: String,
+    }
+
+    #[cfg(unix)]
+    async fn run_capture(config: CaptureRunnerConfig) -> Result<(), Box<dyn std::error::Error>> {
         use agent_harness::freebuff_capture::CaptureEvent;
         use shepherd_core::harness::FreebuffLiveCapture;
         use std::io::Write as _;
-        use std::path::PathBuf;
-
-        fn required(name: &str) -> Result<PathBuf, Box<dyn std::error::Error>> {
-            std::env::var_os(name)
-                .map(PathBuf::from)
-                .ok_or_else(|| format!("missing {name}").into())
-        }
         fn runtime(
             session: &agent_harness::freebuff_capture::CaptureSession,
             directory: &std::path::Path,
@@ -1514,13 +1517,18 @@ mod tests {
             Ok(())
         }
 
-        let workspace = required("SHEPHERD_FREEBUFF_WORKSPACE")?;
-        let worktree = required("SHEPHERD_FREEBUFF_WORKTREE")?.canonicalize()?;
-        let markers = required("SHEPHERD_FREEBUFF_MARKERS")?.canonicalize()?;
-        let executable = required("SHEPHERD_FREEBUFF_EXECUTABLE")?;
-        let metadata = required("SHEPHERD_FREEBUFF_METADATA_DIR")?;
-        let prompt_path = required("SHEPHERD_FREEBUFF_PROMPT_FILE")?;
-        let scenario = std::env::var("SHEPHERD_FREEBUFF_SCENARIO")?;
+        let CaptureRunnerConfig {
+            workspace,
+            worktree,
+            markers,
+            executable,
+            args,
+            metadata,
+            prompt,
+            scenario,
+        } = config;
+        let worktree = worktree.canonicalize()?;
+        let markers = markers.canonicalize()?;
         if !executable.is_absolute() || markers.starts_with(&worktree) {
             return Err("use an absolute executable and markers outside the worktree".into());
         }
@@ -1529,7 +1537,6 @@ mod tests {
         if send_marker.exists() || stop_marker.exists() {
             return Err("capture marker files must not exist before launch".into());
         }
-        let prompt = std::fs::read(prompt_path)?;
         if prompt.is_empty() || prompt.len() >= MAX_WRITE_BYTES {
             return Err("approved prompt must contain 1 to 65535 bytes".into());
         }
@@ -1556,7 +1563,7 @@ mod tests {
                     .to_str()
                     .ok_or("executable path is not UTF-8")?
                     .into(),
-                args: Vec::new(),
+                args,
                 environment: BTreeMap::new(),
             },
             sender,
@@ -1614,6 +1621,115 @@ mod tests {
         }
         runtime(&session, &metadata)?;
         capture.finish_after_drain()?;
+        Ok(())
+    }
+
+    #[cfg(all(feature = "live-freebuff", unix))]
+    #[tokio::test]
+    #[ignore = "requires an explicitly approved Freebuff prompt and disposable worktree"]
+    async fn approved_freebuff_capture() -> Result<(), Box<dyn std::error::Error>> {
+        fn required(name: &str) -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
+            std::env::var_os(name)
+                .map(std::path::PathBuf::from)
+                .ok_or_else(|| format!("missing {name}").into())
+        }
+        let prompt = std::fs::read(required("SHEPHERD_FREEBUFF_PROMPT_FILE")?)?;
+        run_capture(CaptureRunnerConfig {
+            workspace: required("SHEPHERD_FREEBUFF_WORKSPACE")?,
+            worktree: required("SHEPHERD_FREEBUFF_WORKTREE")?,
+            markers: required("SHEPHERD_FREEBUFF_MARKERS")?,
+            executable: required("SHEPHERD_FREEBUFF_EXECUTABLE")?,
+            args: Vec::new(),
+            metadata: required("SHEPHERD_FREEBUFF_METADATA_DIR")?,
+            prompt,
+            scenario: std::env::var("SHEPHERD_FREEBUFF_SCENARIO")?,
+        })
+        .await
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn capture_runner_records_fake_cli_and_worktree_effects()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use agent_harness::freebuff_capture::{CaptureEvent, read_complete_capture};
+        use shepherd_core::test_support::TestRepository;
+
+        async fn wait_for(path: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
+            tokio::time::timeout(Duration::from_secs(10), async {
+                while !path.exists() {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            })
+            .await?;
+            Ok(())
+        }
+
+        let repository = TestRepository::new()?;
+        let workspace = tempfile::tempdir()?;
+        let markers = tempfile::tempdir()?;
+        std::fs::write(
+            markers.path().join("freebuff-metadata.json"),
+            br#"{"version":"fixture","target":"local"}"#,
+        )?;
+        let marker_path = markers.path().to_path_buf();
+        let config = CaptureRunnerConfig {
+            workspace: workspace.path().to_path_buf(),
+            worktree: repository.path().to_path_buf(),
+            markers: marker_path.clone(),
+            executable: "/bin/sh".into(),
+            args: vec!["-c".into(), "printf ready > \"$1/ready\"; IFS= read -r prompt; printf 'fake:%s\\n' \"$prompt\"; printf 'changed\\n' > README.md; printf done > \"$1/replied\"; exec sleep 30".into(), "fixture".into(), marker_path.to_str().ok_or("non-UTF-8 marker path")?.into()],
+            metadata: marker_path.clone(),
+            prompt: b"inspect README".to_vec(),
+            scenario: "fake-runner".into(),
+        };
+        let operator = async {
+            wait_for(&marker_path.join("ready")).await?;
+            std::fs::write(marker_path.join("send"), b"")?;
+            wait_for(&marker_path.join("replied")).await?;
+            std::fs::write(marker_path.join("stop"), b"")?;
+            Ok::<(), Box<dyn std::error::Error>>(())
+        };
+        let (result, operator_result) = tokio::time::timeout(Duration::from_secs(15), async {
+            tokio::join!(run_capture(config), operator)
+        })
+        .await?;
+        operator_result?;
+        result?;
+        let records = read_complete_capture(
+            &workspace
+                .path()
+                .join(".cache/shepherd-live/freebuff/fake-runner.jsonl"),
+        )?;
+        let input: Vec<u8> = records
+            .iter()
+            .filter_map(|record| match &record.event {
+                CaptureEvent::Input { bytes } => Some(bytes.as_slice()),
+                _ => None,
+            })
+            .flatten()
+            .copied()
+            .collect();
+        let output: Vec<u8> = records
+            .iter()
+            .filter_map(|record| match &record.event {
+                CaptureEvent::Output { bytes } => Some(bytes.as_slice()),
+                _ => None,
+            })
+            .flatten()
+            .copied()
+            .collect();
+        assert_eq!(input, b"inspect README\r");
+        assert!(
+            output
+                .windows(b"fake:inspect README".len())
+                .any(|window| window == b"fake:inspect README")
+        );
+        assert!(
+            records
+                .iter()
+                .any(|record| matches!(record.event, CaptureEvent::Screen { .. }))
+        );
+        assert!(records.iter().any(|record| matches!(&record.event, CaptureEvent::WorktreeFile { path, contents, .. } if path == std::path::Path::new("README.md") && contents == b"changed\n")));
         Ok(())
     }
 
