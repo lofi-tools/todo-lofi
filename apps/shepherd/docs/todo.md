@@ -61,6 +61,9 @@ and login diagnostics are now implemented.
       before submission; request examples if the ChatGPT project is inaccessible.
       Candidate supplied by the user: “give me the dotenv fragment to override /
       ignore battery / wifi and run ar3 regardless”. It is not yet approved.
+      The relevant `crates/ar3/docs/agent-api.md` is present in the committed
+      `tools` project. The checkout has unrelated uncommitted changes; disclose
+      that a disposable worktree uses the committed state when seeking approval.
   - [ ] **P0 — Capture fixtures and define contracts:** create sanitized,
     versioned PTY/screen fixtures and a deterministic fake CLI. Map terminal
     states to harness events; identify necessary contract changes for
