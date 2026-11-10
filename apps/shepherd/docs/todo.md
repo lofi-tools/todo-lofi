@@ -99,8 +99,10 @@ and login diagnostics are now implemented.
       A worktree-effect collector records specified regular files, deletion,
       and file modes without following symlinks, invalidating unsupported or
       oversized captures. Its fixtures were outside shepherd-core shard 7/8.
-      Discover every relevant changed path, handle or explicitly reject other
-      effect types, and implement confined replay before live use.
+      Git status now supplies tracked, untracked and rename paths; staged or
+      ignored files are rejected rather than omitted. Discovery fixtures were
+      outside shepherd-core shard 6/8. Detect or reject Git metadata changes,
+      handle other effect types, and implement confined replay before live use.
     - [ ] Replay capture records in order through a streaming consumer. An
       offline synthetic capture replays split output and a resize through the
       shell's VT parser (Shepherd shard 8/8 passed); the consumer's own fixture
@@ -147,8 +149,8 @@ and login diagnostics are now implemented.
       now establishes the baseline, persists the prompt and task, then updates
       the in-memory task state; its fixture was also outside shard 8/8. An
       internal submit gate serializes admission and input, blocks forwarding on
-      admission failure, and marks ambiguous write failures; its fixtures were
-      outside shepherd-core shard 4/8. Connect every integrated Freebuff input
+      admission failure, and marks ambiguous write failures; its failed-admission
+      fixture passed in shepherd-core shard 6/8. Connect every integrated Freebuff input
       path and the verified screen classifier to the gate before enabling it.
   - [ ] **P2 — Validate and document:** run offline fixture and fake-CLI
     coverage by default. Gate genuinely live probes with `live-freebuff`,

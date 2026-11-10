@@ -758,6 +758,112 @@ pub(crate) fn capture_worktree_effects(
     Ok(())
 }
 
+#[allow(dead_code)]
+pub(crate) fn capture_git_worktree_effects(
+    root: &std::path::Path,
+    capture: &agent_harness::freebuff_capture::CaptureSession,
+) -> Result<(), CoreError> {
+    let result = (|| {
+        reject_ignored_worktree_files(root)?;
+        let mut paths = BTreeSet::new();
+        for entry in crate::git::GitService.status(root)? {
+            if !entry.actionable {
+                return Err(
+                    HarnessError::Protocol("worktree has a non-UTF-8 changed path".into()).into(),
+                );
+            }
+            if entry.index != " " && entry.index != "?" {
+                return Err(HarnessError::Protocol(
+                    "staged worktree changes cannot yet be captured".into(),
+                )
+                .into());
+            }
+            paths.insert(PathBuf::from(entry.path));
+            if let Some(original) = entry.original_path {
+                paths.insert(PathBuf::from(original));
+            }
+        }
+        capture_worktree_effects_inner(root, &paths.into_iter().collect::<Vec<_>>(), capture)
+    })();
+    if let Err(error) = result {
+        if let Err(failure) = capture.fail() {
+            return Err(HarnessError::Protocol(format!(
+                "{error}; could not invalidate capture: {failure}"
+            ))
+            .into());
+        }
+        return Err(error);
+    }
+    Ok(())
+}
+
+fn reject_ignored_worktree_files(root: &std::path::Path) -> Result<(), CoreError> {
+    use std::io::Read;
+    use std::process::{Command, Stdio};
+    let mut child = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args([
+            "--no-optional-locks",
+            "ls-files",
+            "--others",
+            "--ignored",
+            "--exclude-standard",
+            "--directory",
+            "-z",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|error| {
+            HarnessError::Protocol(format!("could not inspect ignored worktree files: {error}"))
+        })?;
+    let read = match child.stdout.take() {
+        Some(mut output) => output.read(&mut [0u8; 1]),
+        None => Err(std::io::Error::other("missing Git output")),
+    };
+    if !matches!(read, Ok(0)) {
+        match child.try_wait() {
+            Ok(Some(_)) => {}
+            Ok(None) => {
+                if let Err(error) = child.kill() {
+                    if !matches!(child.try_wait(), Ok(Some(_))) {
+                        return Err(HarnessError::Protocol(format!(
+                            "could not stop ignored-file inspection: {error}"
+                        ))
+                        .into());
+                    }
+                }
+            }
+            Err(error) => {
+                return Err(HarnessError::Protocol(format!(
+                    "could not inspect Git process: {error}"
+                ))
+                .into());
+            }
+        }
+    }
+    let status = child.wait().map_err(|error| {
+        HarnessError::Protocol(format!(
+            "could not wait for ignored-file inspection: {error}"
+        ))
+    })?;
+    match read {
+        Ok(0) if status.success() => Ok(()),
+        Ok(0) => {
+            Err(HarnessError::Protocol(format!("ignored-file inspection failed: {status}")).into())
+        }
+        Ok(_) => Err(HarnessError::Protocol(
+            "ignored worktree files cannot yet be captured".into(),
+        )
+        .into()),
+        Err(error) => Err(HarnessError::Protocol(format!(
+            "could not read ignored-file inspection: {error}"
+        ))
+        .into()),
+    }
+}
+
 fn capture_worktree_effects_inner(
     root: &std::path::Path,
     paths: &[PathBuf],
@@ -933,6 +1039,56 @@ mod tests {
     use crate::Project;
     use crate::store::TursoStore;
     use crate::test_support::{TestDatabase, TestDirectory};
+
+    #[test]
+    fn discovers_unstaged_and_untracked_worktree_effects() -> Result<(), Box<dyn std::error::Error>>
+    {
+        use crate::test_support::TestRepository;
+        use agent_harness::freebuff_capture::{
+            CaptureEvent, CaptureSession, CaptureWriter, read_capture,
+        };
+        let repository = TestRepository::new()?;
+        let cache = TestDirectory::new()?;
+        repository.write_file("README.md", "changed\n")?;
+        repository.write_file("new.txt", "new\n")?;
+        let capture = CaptureSession::new(CaptureWriter::create(cache.path(), "git-effects")?);
+        capture_git_worktree_effects(repository.path(), &capture)?;
+        let records = read_capture(&cache.join(".cache/shepherd-live/freebuff/git-effects.jsonl"))?;
+        assert!(records.iter().any(|record| matches!(&record.event, CaptureEvent::WorktreeFile { path, contents, .. } if path == std::path::Path::new("README.md") && contents == b"changed\n")));
+        assert!(records.iter().any(|record| matches!(&record.event, CaptureEvent::WorktreeFile { path, contents, .. } if path == std::path::Path::new("new.txt") && contents == b"new\n")));
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_staged_and_ignored_worktree_effects() -> Result<(), Box<dyn std::error::Error>> {
+        use crate::test_support::TestRepository;
+        use agent_harness::freebuff_capture::{CaptureSession, CaptureWriter};
+        let repository = TestRepository::new()?;
+        let cache = TestDirectory::new()?;
+        repository.write_file("README.md", "staged\n")?;
+        let status = std::process::Command::new("git")
+            .arg("-C")
+            .arg(repository.path())
+            .args(["add", "README.md"])
+            .status()?;
+        assert!(status.success());
+        let capture = CaptureSession::new(CaptureWriter::create(cache.path(), "staged")?);
+        assert!(capture_git_worktree_effects(repository.path(), &capture).is_err());
+        assert!(capture.finish().is_err());
+        let status = std::process::Command::new("git")
+            .arg("-C")
+            .arg(repository.path())
+            .args(["reset", "--hard", "HEAD"])
+            .stdout(std::process::Stdio::null())
+            .status()?;
+        assert!(status.success());
+        repository.write_file(".gitignore", "ignored.txt\n")?;
+        repository.write_file("ignored.txt", "secret\n")?;
+        let capture = CaptureSession::new(CaptureWriter::create(cache.path(), "ignored")?);
+        assert!(capture_git_worktree_effects(repository.path(), &capture).is_err());
+        assert!(capture.finish().is_err());
+        Ok(())
+    }
 
     #[test]
     fn worktree_effect_capture_records_files_and_deletions()
