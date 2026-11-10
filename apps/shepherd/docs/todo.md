@@ -98,7 +98,10 @@ and login diagnostics are now implemented.
       fixture has not yet been selected.
     - [ ] Translate verified redraws into transcript text replacements. The
       harness now supports replacing an existing streamed row, with its fixture
-      passing in agent-harness shard 5/8; connect it to the Freebuff parser.
+      passing in agent-harness shard 5/8. A bounded Freebuff text reconciler
+      emits deltas, replacements and no events for repeated snapshots; its
+      fixture was not selected in shard 8/8. Connect it to a verified screen
+      classifier and enforce event-stream backpressure.
   - [ ] **P1 — Implement the integrated adapter:** launch the installed CLI in
     the task worktree with the existing login, forward input with normal CLI
     terminal interpretation, stream and reconcile text, map tool activity,

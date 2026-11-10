@@ -1,12 +1,85 @@
+use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
-use crate::{HarnessError, HarnessResult, settings::AgentSettings};
+use crate::{
+    DeltaKind, HarnessError, HarnessEvent, HarnessResult, ItemId, settings::AgentSettings,
+};
 
 const MAX_METADATA_BYTES: u64 = 16 * 1024;
+const MAX_MESSAGE_BYTES: usize = 1024 * 1024;
+const MAX_MESSAGE_ITEMS: usize = 256;
+const MAX_TRANSCRIPT_BYTES: usize = 4 * 1024 * 1024;
+
+#[derive(Default)]
+pub struct FreebuffTextReconciler {
+    messages: BTreeMap<String, String>,
+    total_bytes: usize,
+}
+
+impl FreebuffTextReconciler {
+    pub fn update(&mut self, item_id: &str, text: &str) -> HarnessResult<Option<HarnessEvent>> {
+        if item_id.is_empty() || item_id.len() > 256 {
+            return Err(HarnessError::Protocol(
+                "invalid Freebuff message identity".into(),
+            ));
+        }
+        if text.len() > MAX_MESSAGE_BYTES {
+            return Err(HarnessError::Protocol(
+                "Freebuff message exceeds the supported size".into(),
+            ));
+        }
+        let previous = self.messages.get(item_id);
+        if previous.is_none() && self.messages.len() >= MAX_MESSAGE_ITEMS {
+            return Err(HarnessError::Protocol(
+                "too many Freebuff messages in a turn".into(),
+            ));
+        }
+        let previous_size = previous.map_or(0, String::len);
+        let total_bytes = self
+            .total_bytes
+            .checked_sub(previous_size)
+            .and_then(|size| size.checked_add(text.len()))
+            .filter(|size| *size <= MAX_TRANSCRIPT_BYTES)
+            .ok_or_else(|| {
+                HarnessError::Protocol("Freebuff turn text exceeds the supported size".into())
+            })?;
+        let event = match previous {
+            Some(previous) if previous == text => return Ok(None),
+            Some(previous) => match text.strip_prefix(previous.as_str()) {
+                Some(suffix) => HarnessEvent::Delta {
+                    item_id: ItemId::new(item_id),
+                    kind: DeltaKind::Message,
+                    text: suffix.to_owned(),
+                    stream_permit: None,
+                },
+                None => HarnessEvent::TextReplaced {
+                    item_id: ItemId::new(item_id),
+                    kind: DeltaKind::Message,
+                    text: text.to_owned(),
+                    stream_permit: None,
+                },
+            },
+            None => HarnessEvent::Delta {
+                item_id: ItemId::new(item_id),
+                kind: DeltaKind::Message,
+                text: text.to_owned(),
+                stream_permit: None,
+            },
+        };
+        self.messages.insert(item_id.to_owned(), text.to_owned());
+        self.total_bytes = total_bytes;
+        Ok(Some(event))
+    }
+
+    pub fn clear(&mut self) {
+        self.messages.clear();
+        self.total_bytes = 0;
+    }
+}
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 pub struct FreebuffRuntimeMetadata {
@@ -213,6 +286,30 @@ fn executable_permissions(_metadata: &std::fs::Metadata) -> bool {
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn reconciles_streamed_snapshots_and_redraws_without_duplicates()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut reconciler = FreebuffTextReconciler::default();
+        let mut transcript = crate::Transcript::default();
+        for text in ["h", "hé", "hé", "hello", "hello!"] {
+            if let Some(event) = reconciler.update("message", text)? {
+                transcript.apply(&event);
+            }
+        }
+        assert_eq!(transcript.len(), 1);
+        assert_eq!(
+            transcript.entry(0).map(crate::Entry::summary),
+            Some("agent: hello!".into())
+        );
+        assert!(
+            reconciler
+                .update("message", &"x".repeat(MAX_MESSAGE_BYTES + 1))
+                .is_err()
+        );
+        assert!(reconciler.update("message", "hello!")?.is_none());
+        Ok(())
+    }
 
     #[test]
     fn discovery_reads_the_configured_executable_from_agent_settings()
