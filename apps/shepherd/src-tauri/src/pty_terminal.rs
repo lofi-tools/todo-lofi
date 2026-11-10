@@ -1621,6 +1621,10 @@ mod tests {
         }
         runtime(&session, &metadata)?;
         capture.finish_after_drain()?;
+        let capture_path = workspace
+            .join(".cache/shepherd-live/freebuff")
+            .join(format!("{scenario}.jsonl"));
+        crate::terminal_screen::verify_recorded_screens(&capture_path)?;
         Ok(())
     }
 
