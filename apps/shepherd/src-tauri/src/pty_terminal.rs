@@ -1055,6 +1055,111 @@ mod tests {
 
     use super::*;
 
+    #[tokio::test]
+    async fn fake_cli_pty_stream_can_be_recorded_with_screen_states()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use crate::terminal_screen::Screen;
+        use agent_harness::freebuff_capture::{
+            CaptureEvent, CaptureSession, CaptureWriter, read_capture,
+        };
+
+        let directory = tempfile::tempdir()?;
+        let session = CaptureSession::new(CaptureWriter::create(directory.path(), "fake-pty")?);
+        let mut screen = Screen::new(80, 24);
+        let mut engine = PtyTerminals::new();
+        let (sender, mut receiver) = mpsc::channel(16);
+        let terminal_id = engine.spawn(
+            TerminalSpec {
+                id: TerminalId::new("fake-freebuff"),
+                columns: 80,
+                rows: 24,
+                cwd: directory.path().to_path_buf(),
+                command: "/bin/sh".into(),
+                args: vec![
+                    "-c".into(),
+                    "printf 'ready>'; IFS= read -r line; printf 'reply:%s\\n' \"$line\"".into(),
+                ],
+                environment: BTreeMap::new(),
+            },
+            sender,
+        )?;
+        let mut output = Vec::new();
+        let mut submitted = false;
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while let Some(event) = receiver.recv().await {
+                match event {
+                    TerminalEvent::Output(bytes) => {
+                        session
+                            .record_and_apply(
+                                CaptureEvent::Output {
+                                    bytes: bytes.clone(),
+                                },
+                                || {
+                                    screen.process(&bytes);
+                                    let state =
+                                        serde_json::to_value(screen.frame()).map_err(|error| {
+                                            agent_harness::HarnessError::Protocol(error.to_string())
+                                        })?;
+                                    Ok(((), vec![CaptureEvent::Screen { state }]))
+                                },
+                            )
+                            .map_err(|error| error.to_string())?;
+                        output.extend(bytes);
+                        if !submitted && output.windows(6).any(|bytes| bytes == b"ready>") {
+                            let input = b"hello\n".to_vec();
+                            let completion = session
+                                .record_and_apply(
+                                    CaptureEvent::Input {
+                                        bytes: input.clone(),
+                                    },
+                                    || {
+                                        let completion =
+                                            engine.write(&terminal_id, input).map_err(|error| {
+                                                agent_harness::HarnessError::Protocol(
+                                                    error.to_string(),
+                                                )
+                                            })?;
+                                        Ok((completion, Vec::new()))
+                                    },
+                                )
+                                .map_err(|error| error.to_string())?;
+                            completion
+                                .await
+                                .map_err(|error| error.to_string())?
+                                .map_err(|error| error.to_string())?;
+                            submitted = true;
+                        }
+                    }
+                    TerminalEvent::Exited { exit_code, .. } => {
+                        if exit_code != Some(0) {
+                            return Err("fake CLI failed".to_string());
+                        }
+                        return Ok::<(), String>(());
+                    }
+                }
+            }
+            Err("fake CLI output ended before exit".into())
+        })
+        .await??;
+        assert!(output.windows(11).any(|bytes| bytes == b"reply:hello"));
+        let records = read_capture(
+            &directory
+                .path()
+                .join(".cache/shepherd-live/freebuff/fake-pty.jsonl"),
+        )?;
+        assert!(
+            records
+                .iter()
+                .any(|record| matches!(record.event, CaptureEvent::Input { .. }))
+        );
+        assert!(
+            records
+                .iter()
+                .any(|record| matches!(record.event, CaptureEvent::Screen { .. }))
+        );
+        Ok(())
+    }
+
     #[test]
     fn refuses_unavailable_terminal_working_directories() -> Result<(), Box<dyn std::error::Error>>
     {
