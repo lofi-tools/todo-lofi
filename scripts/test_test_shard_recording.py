@@ -18,7 +18,7 @@ class RecordingTests(unittest.TestCase):
         self.assertEqual(rust_test_ids(data), ["rust:crate::integration::runs"])
 
     def test_list_preserves_exact_filter_and_removes_run_only_flags(self):
-        command = ["cargo", "nextest", "run", "--workspace", "--no-tests=pass", "--", "--exact", "example"]
+        command = ["cargo", "nextest", "run", "--workspace", "--no-tests=pass", "--no-fail-fast", "--", "--exact", "example"]
         self.assertEqual(rust_list_command(command), ["cargo", "nextest", "list", "--workspace", "--message-format", "json", "--", "--exact", "example"])
 
     def test_only_passed_ui_results_are_recorded(self):

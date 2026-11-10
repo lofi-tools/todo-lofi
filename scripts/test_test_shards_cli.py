@@ -74,7 +74,7 @@ class RunnerTests(unittest.TestCase):
             shards_cli.main(["--all"])
         commands = [call.args[0] for call in execute.call_args_list]
         self.assertEqual(commands, [["python3", "-m", "unittest", "discover", "-s", "scripts", "-p", "test_test_shard*.py"],
-                                    ["cargo", "nextest", "run", "--workspace"],
+                                    ["cargo", "nextest", "run", "--workspace", "--no-fail-fast"],
                                     ["cargo", "test", "--workspace", "--doc"],
                                     ["pnpm", "exec", "vitest", "run"],
                                     ["pnpm", "exec", "vitest", "run"],

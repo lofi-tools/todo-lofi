@@ -50,7 +50,7 @@ def vitest_ids(data, root):
 
 
 def rust_list_command(command):
-    command = [part for part in command if part != "--no-tests=pass"]
+    command = [part for part in command if part not in {"--no-tests=pass", "--no-fail-fast"}]
     command[2] = "list"
     position = command.index("--") if "--" in command else len(command)
     command[position:position] = ["--message-format", "json"]

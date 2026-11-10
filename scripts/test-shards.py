@@ -143,7 +143,7 @@ def main(argv=None):
         return
     if args.all:
         execute(["python3", "-m", "unittest", "discover", "-s", "scripts", "-p", "test_test_shard*.py"], dry_run=args.dry_run)
-        execute(["cargo", "nextest", "run", "--workspace"], dry_run=args.dry_run)
+        execute(["cargo", "nextest", "run", "--workspace", "--no-fail-fast"], dry_run=args.dry_run)
         execute(["cargo", "test", "--workspace", "--doc"], dry_run=args.dry_run)
         run_web_unit_tests(dry_run=args.dry_run)
         run_playwright(dry_run=args.dry_run)
@@ -157,7 +157,7 @@ def main(argv=None):
     if selection.all_tests:
         print("Unknown or shared paths changed; running the full default suite.", flush=True)
         execute(["python3", "-m", "unittest", "discover", "-s", "scripts", "-p", "test_test_shard*.py"], dry_run=args.dry_run)
-        execute(["cargo", "nextest", "run", "--workspace"], dry_run=args.dry_run)
+        execute(["cargo", "nextest", "run", "--workspace", "--no-fail-fast"], dry_run=args.dry_run)
         execute(["cargo", "test", "--workspace", "--doc"], dry_run=args.dry_run)
         run_web_unit_tests(dry_run=args.dry_run)
         run_playwright(dry_run=args.dry_run)
