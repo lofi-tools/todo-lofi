@@ -57,6 +57,10 @@ and login diagnostics are now implemented.
     states to harness events; identify necessary contract changes for
     questions and transcript corrections. Cover split bytes, ANSI/VT redraws,
     reflow, prompt boundaries, ambiguous output and process exits.
+    - [ ] Implement and verify ordered, private capture storage for PTY input,
+      output, screen states, runtime changes, responses and worktree effects;
+      connect recording and replay once the transport exists. The storage
+      primitive compiles, but its fixtures were not in the selected shard.
   - [ ] **P1 — Implement the integrated adapter:** launch the installed CLI in
     the task worktree with the existing login, forward input with normal CLI
     terminal interpretation, stream and reconcile text, map tool activity,

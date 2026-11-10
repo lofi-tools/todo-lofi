@@ -13,6 +13,7 @@ live-codex = ["live-test-support"]
 live-opencode = []
 live-claude = []
 live-pi = []
+live-freebuff = []
 
 [dependencies]
 acp-client = { path = "../acp-client" }

@@ -118,6 +118,8 @@ and report failures through Shepherd's normal diagnostics.
    PTY bytes, terminal-size changes and rendered terminal-state transitions
    in their original order, plus external effects needed by assertions, under
    the repository `.cache/`; replay them on later runs.
+   Treat a capture write failure as a live-test failure and stop further
+   submissions rather than continuing without a replayable record.
    Gate genuinely live Freebuff probes behind a separate `live-freebuff`
    feature disabled by default. Use disposable worktrees and the existing
    login; do not publish captures or credentials. Document how to record,
