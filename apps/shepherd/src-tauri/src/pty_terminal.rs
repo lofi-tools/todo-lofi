@@ -1147,10 +1147,26 @@ impl PtyTerminals {
             None
         };
 
-        let mut child = pair
-            .slave
-            .spawn_command(command)
-            .map_err(|error| TerminalError::Backend(format!("spawn failed: {error}")))?;
+        let mut child = match pair.slave.spawn_command(command) {
+            Ok(child) => child,
+            Err(error) => {
+                let mut message = format!("spawn failed: {error}");
+                if let Some(recording) = &recording {
+                    match recording.failure_signal.lock() {
+                        Ok(mut signal) => {
+                            signal.take();
+                        }
+                        Err(failure) => {
+                            message.push_str(&format!("; recording signal is poisoned: {failure}"));
+                        }
+                    }
+                    if let Err(failure) = recording.capture.fail() {
+                        message.push_str(&format!("; could not invalidate capture: {failure}"));
+                    }
+                }
+                return Err(TerminalError::Backend(message));
+            }
+        };
         drop(pair.slave);
 
         let (reader_finished, reader_status) = std::sync::mpsc::sync_channel(1);
@@ -1797,6 +1813,46 @@ mod tests {
     }
 
     #[cfg(unix)]
+    #[cfg(unix)]
+    #[test]
+    fn failed_recorded_spawn_invalidates_capture() -> Result<(), Box<dyn std::error::Error>> {
+        use agent_harness::freebuff_capture::{CaptureSession, CaptureWriter};
+        let directory = tempfile::tempdir()?;
+        let capture =
+            CaptureSession::new(CaptureWriter::create(directory.path(), "spawn-failure")?);
+        let (error_sender, _errors) = mpsc::unbounded_channel();
+        let recording = Arc::new(TerminalRecording::new(capture, 80, 24, error_sender)?);
+        let mut engine = PtyTerminals::new();
+        let (sender, _receiver) = mpsc::channel(8);
+        let result = engine.spawn_recorded(
+            TerminalSpec {
+                id: TerminalId::new("failed-spawn"),
+                columns: 80,
+                rows: 24,
+                cwd: directory.path().to_path_buf(),
+                command: directory
+                    .path()
+                    .join("missing-executable")
+                    .display()
+                    .to_string(),
+                args: Vec::new(),
+                environment: BTreeMap::new(),
+            },
+            sender,
+            recording.clone(),
+        );
+        assert!(result.is_err());
+        assert!(
+            recording
+                .failure_signal
+                .lock()
+                .map_err(|error| error.to_string())?
+                .is_none()
+        );
+        assert!(recording.capture.finish().is_err());
+        Ok(())
+    }
+
     #[tokio::test]
     async fn recording_failure_stops_the_terminal_process() -> Result<(), Box<dyn std::error::Error>>
     {

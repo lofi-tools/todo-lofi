@@ -85,6 +85,8 @@ and login diagnostics are now implemented.
       The backpressure fixture passed in Shepherd shard 3/8. The capture
       primitive's nonblocking fixture passed in agent-harness shard 5/8.
       Failed sessions must never be treated as complete replay.
+      A failed process spawn clears its recording attachment and invalidates
+      the capture; this error path has not been exercised since the no-build request.
       The waiter now invalidates captures if PTY output cannot be confirmed
       drained; its new fixture was outside Shepherd shard 7/8. The live runner
       must wait for that drain result before finalizing effects.
