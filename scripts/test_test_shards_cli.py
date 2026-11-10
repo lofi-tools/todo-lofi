@@ -135,6 +135,22 @@ class RunnerTests(unittest.TestCase):
         self.assertIn("dson_freeform_task", command)
         self.assertNotIn("-p", command)
 
+    def test_affected_web_packages_run_in_full(self):
+        web_roots = {"libs/design": "design", "apps/site": "site"}
+        with patch.object(shards_cli, "output", return_value="a"), \
+             patch.object(shards_cli, "first_parent_ancestors", return_value=[]), \
+             patch.object(shards_cli, "workspace", return_value=({"libs/core": "core"}, {})), \
+             patch.object(shards_cli, "web_workspace", return_value=(web_roots, {"design": {"site"}}, [])), \
+             patch.object(shards_cli, "changed_paths", return_value=["libs/design/src/button.ts"]), \
+             patch.object(shards_cli, "playwright_suites", return_value=[shards_cli.ROOT / "apps/site"]), \
+             patch.object(shards_cli, "web_test_suites", return_value=[(shards_cli.ROOT / "libs/design", "vitest run")]), \
+             patch.object(shards_cli, "execute") as execute:
+            shards_cli.main(["--shard", "3/8"])
+        commands = [call.args[0] for call in execute.call_args_list]
+        self.assertIn("hash:3/8", commands[0])
+        self.assertEqual(commands[1], ["pnpm", "exec", "vitest", "run"])
+        self.assertEqual(commands[2], ["pnpm", "exec", "playwright", "test"])
+
     def test_full_run_excludes_demo_and_prototype_packages(self):
         roots = {"demos/example": "demo", "libs/dson_freeform_task": "dson_freeform_task", "libs/core": "core"}
         with patch.object(shards_cli, "output", return_value="a"), \

@@ -276,10 +276,10 @@ direnv exec . python3 scripts/test-shards.py --package shepherd-core --test modu
 direnv exec . python3 scripts/test-shards.py --last-ran 'rust:crate::module::tests::example'
 ```
 
-The default run selects all tests in changed Rust packages and their workspace
-dependents, plus a hash shard of the remaining workspace tests. It also runs
-the affected Shepherd UI suite, or a Playwright shard if it is unaffected,
-and shards the other included workspace Playwright and Vitest suites.
+The default run selects all tests in changed Rust and web packages and their
+workspace dependents, plus a shard of the remaining workspace tests. Rust uses
+nextest's hash partitions; Playwright and Vitest use their own sharding. A
+Shepherd Rust change also selects the Shepherd UI suite.
 Workspace packages with a different `test` script run that script in full;
 the runner does not assume that an unfamiliar test command supports sharding.
 Changes include the latest first-parent commit and staged, unstaged and

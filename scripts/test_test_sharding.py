@@ -29,6 +29,32 @@ class SelectionTests(unittest.TestCase):
         self.assertFalse(selection.ui)
         self.assertFalse(selection.all_tests)
 
+    def test_web_change_includes_web_dependents_without_selecting_everything(self):
+        selection = affected_tests(
+            ["libs/design/src/button.ts"], {"libs/core": "core"}, {},
+            {"libs/design": "design", "apps/site": "site", "apps/other": "other"},
+            {"design": {"site"}},
+        )
+        self.assertEqual(selection.web_packages, {"design", "site"})
+        self.assertEqual(selection.packages, set())
+        self.assertFalse(selection.all_tests)
+
+    def test_most_specific_root_wins_between_rust_and_web(self):
+        selection = affected_tests(
+            ["apps/shepherd/src-tauri/src/lib.rs", "apps/shepherd/ui/src/App.tsx"],
+            {"apps/shepherd/src-tauri": "shepherd"}, {},
+            {"apps/shepherd": "shell", "apps/shepherd/ui": "ui"}, {},
+        )
+        self.assertEqual(selection.packages, {"shepherd"})
+        self.assertEqual(selection.web_packages, {"ui"})
+
+    def test_unknown_path_still_selects_the_complete_suite(self):
+        selection = affected_tests(["shared-config.toml"], {"libs/core": "core"}, {},
+                                   {"apps/site": "site"}, {})
+        self.assertTrue(selection.all_tests)
+        self.assertEqual(selection.packages, {"core"})
+        self.assertEqual(selection.web_packages, {"site"})
+
     def test_ui_and_deleted_paths_are_mapped(self):
         selection = affected_tests(
             ["apps/shepherd/ui/src/deleted.ts", "libs/core/deleted.rs"],

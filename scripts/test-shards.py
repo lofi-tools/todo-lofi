@@ -42,10 +42,10 @@ def playwright_suites():
                    if config.parent not in excluded_roots})
 
 
-def run_playwright(index=None, count=None, affected_ui=False, dry_run=False):
+def run_playwright(index=None, count=None, affected_directories=frozenset(), dry_run=False):
     for directory in playwright_suites():
         command = ["pnpm", "exec", "playwright", "test"]
-        if index is not None and not (affected_ui and directory == UI):
+        if index is not None and directory not in affected_directories:
             command.extend(["--pass-with-no-tests", "--shard", f"{index}/{count}"])
         execute(command, directory, dry_run)
 
@@ -59,13 +59,13 @@ def web_test_suites():
             yield manifest.parent, script
 
 
-def run_web_unit_tests(index=None, count=None, dry_run=False):
+def run_web_unit_tests(index=None, count=None, affected_directories=frozenset(), dry_run=False):
     for directory, script in web_test_suites():
         if script.strip() != "vitest run":
             execute(["pnpm", "run", "test"], directory, dry_run)
             continue
         command = ["pnpm", "exec", "vitest", "run"]
-        if index is not None:
+        if index is not None and directory not in affected_directories:
             command.extend(["--passWithNoTests", "--shard", f"{index}/{count}"])
         execute(command, directory, dry_run)
 
@@ -176,7 +176,8 @@ def main(argv=None):
     if full_suite_due(read_runs(HISTORY), first_parent_ancestors(ROOT, head)):
         print("A full default-suite run is due: use --all.", file=sys.stderr)
     paths = [path for path in changed_paths() if not path.startswith("demos/")]
-    selection = affected_tests(paths, roots, dependents)
+    web_roots, web_dependents, _ = web_workspace()
+    selection = affected_tests(paths, roots, dependents, web_roots, web_dependents)
     if selection.all_tests:
         print("Unknown or shared paths changed; running the full default suite.", flush=True)
         execute(["python3", "-m", "unittest", "discover", "-s", "scripts", "-p", "test_test_shard*.py"], dry_run=args.dry_run)
@@ -188,15 +189,21 @@ def main(argv=None):
             RECORDER.save([], full=True)
         return
     affected = selection.packages - omitted
+    if "shepherd-app" in selection.web_packages and "shepherd" in roots.values():
+        affected |= {"shepherd"}
     if affected:
         packages = [item for name in sorted(affected) for item in ("-p", name)]
         execute(["cargo", "nextest", "run", *packages], dry_run=args.dry_run)
     excluded = [item for name in sorted(omitted | affected) for item in ("--exclude", name)]
     if affected != frozenset(roots.values()) - omitted:
         execute(["cargo", "nextest", "run", "--workspace", *excluded, "--partition", f"hash:{index}/{count}", "--no-tests=pass"], dry_run=args.dry_run)
-    run_web_unit_tests(index, count, args.dry_run)
-    affected_ui = selection.ui or bool(affected.intersection({"shepherd", "shepherd-core", "agent-harness"}))
-    run_playwright(index, count, affected_ui, args.dry_run)
+    omitted_web = excluded_packages(web_roots, web_dependents)
+    affected_directories = {ROOT / path for path, name in web_roots.items()
+                            if name in selection.web_packages - omitted_web}
+    if "shepherd-app" in selection.web_packages or affected.intersection({"shepherd", "shepherd-core", "agent-harness"}):
+        affected_directories.add(UI)
+    run_web_unit_tests(index, count, affected_directories, args.dry_run)
+    run_playwright(index, count, affected_directories, args.dry_run)
 
 
 if __name__ == "__main__":
