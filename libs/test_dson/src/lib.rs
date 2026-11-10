@@ -1,4 +1,4 @@
-#![cfg(test)]
+#![cfg(all(test, feature = "prototype"))]
 #![allow(non_snake_case)]
 use dson::crdts::ValueType;
 use dson::sentinel::{KeySentinel, Sentinel, TypeSentinel, ValueSentinel, Visit};

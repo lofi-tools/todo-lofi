@@ -3,10 +3,13 @@ name = "op_crdt"
 version.workspace = true
 edition.workspace = true
 
+[features]
+prototype = ["dep:serde", "dep:uuid", "dep:chrono"]
+
 [dependencies]
-serde.workspace = true
-uuid.workspace = true
-chrono.workspace = true
+serde = { workspace = true, optional = true }
+uuid = { workspace = true, optional = true }
+chrono = { workspace = true, optional = true }
 
 
 # serde = { workspace = true, features = ["derive"] }

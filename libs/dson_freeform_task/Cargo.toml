@@ -3,7 +3,10 @@ name = "dson_freeform_task"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+prototype = ["dep:dson", "dep:uuid", "dep:anyhow"]
+
 [dependencies]
-dson = "0.3.0"
-uuid = { version = "1", features = ["v7"] }
-anyhow.workspace = true
+dson = { version = "0.3.0", optional = true }
+uuid = { version = "1", features = ["v7"], optional = true }
+anyhow = { workspace = true, optional = true }

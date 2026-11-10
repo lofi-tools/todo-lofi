@@ -3,6 +3,14 @@ name = "desktop-gpui"
 version.workspace = true
 edition.workspace = true
 
+[features]
+prototype = []
+
+[[bin]]
+name = "desktop-gpui"
+path = "src/main.rs"
+required-features = ["prototype"]
+
 [dependencies]
 storage = { path = "../../libs/storage" }
 tokio = { workspace = true, features = ["rt-multi-thread"] }

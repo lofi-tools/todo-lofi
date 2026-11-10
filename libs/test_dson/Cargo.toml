@@ -4,5 +4,8 @@ name = "test_dson"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+prototype = ["dep:dson"]
+
 [dependencies]
-dson = "0.3.0"
+dson = { version = "0.3.0", optional = true }

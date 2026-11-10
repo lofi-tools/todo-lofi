@@ -7,6 +7,14 @@ edition = "2021"
 [build-dependencies]
 tauri-build = { version = "2.6.3", features = [] }
 
+[features]
+prototype = []
+
+[[bin]]
+name = "desktop-tauri"
+path = "src/main.rs"
+required-features = ["prototype"]
+
 [dependencies]
 # todo-core.workspace = true
 tauri = { version = "^2", features = [] }

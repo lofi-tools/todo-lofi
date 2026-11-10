@@ -1,3 +1,5 @@
+#![cfg(feature = "prototype")]
+
 pub mod utils;
 pub use crate::utils::*;
 
