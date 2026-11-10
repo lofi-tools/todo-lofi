@@ -32,6 +32,49 @@ and login diagnostics are now implemented.
 
 ## Next feature
 
+- [ ] **Freebuff interactive CLI adapter** — implement the agreed
+  [spec](./spec/freebuff-adapter.md), keeping the existing standalone terminal.
+  - [ ] **P0 — Characterize the installed runtime:** resolve a configured
+    executable then PATH; distinguish the Nix launcher from its runtime,
+    identify version and update behavior, and document observed prompt,
+    streaming, tool, approval, question, interrupt and resume interactions.
+    Do not install Freebuff. Surface detectable launcher updates and reject
+    versions or screen states that cannot be identified reliably.
+  - [ ] **P0 — Capture fixtures and define contracts:** create sanitized,
+    versioned PTY/screen fixtures and a deterministic fake CLI. Map terminal
+    states to harness events; identify necessary contract changes for
+    questions and transcript corrections. Cover split bytes, ANSI/VT redraws,
+    reflow, prompt boundaries, ambiguous output and process exits.
+  - [ ] **P1 — Implement the integrated adapter:** launch the installed CLI in
+    the task worktree with the existing login, forward input with normal CLI
+    terminal interpretation, stream and reconcile text, map tool activity,
+    completion and errors, and persist normalized transcript events. Bound
+    buffers, clean up the PTY/process tree, and fail visibly on uncertainty.
+  - [ ] **P1 — Bridge interactions and lifecycle:** connect approvals and
+    questions to existing Shepherd controls, implement normal interruption and
+    prompt-readiness confirmation, support multi-turn sessions, and implement
+    restart resume only if the runtime demonstrates it. Advertise only proven
+    capabilities; use Freebuff defaults for model/agent initially.
+  - [ ] **P1 — Integrate the picker:** expose the integrated agent separately
+    from **Freebuff (terminal)**, preserve the terminal's existing behavior,
+    and test task routing, persistence, diagnostics, and update status.
+  - [ ] **P1 — Share the live terminal:** keep the integrated Freebuff PTY
+    visible and interactive in the terminal panel. Record direct terminal
+    prompts and replies in the conversation; serialize both input paths and
+    replace an unfinished terminal prompt when the composer submits. Fail
+    clearly if the input cannot be recognized or cleared reliably.
+  - [ ] **P2 — Validate and document:** run offline fixture and fake-CLI
+    coverage by default. Gate genuinely live probes with `live-freebuff`,
+    disabled by default. Before each live submission, confirm the exact
+    message, project/worktree and potentially sent files or context with the
+    user. Use few metered queries, choosing useful tasks in a real user project
+    and a disposable worktree with the existing login. Cache every response,
+    including partial responses, raw PTY bytes, terminal-size changes and
+    rendered terminal-state transitions in order, plus assertion-relevant
+    effects under `.cache/` for replay. Record version,
+    limitations, safe capture and replay instructions, and evidence for
+    streaming, interactions, cancel and restart behavior.
+
 - [ ] Add a scripted split-test workflow for small commits:
   - [x] Keep ordinary Rust tests on the standard harness; add a pinned
     `cargo-nextest` to the Nix development environment for runtime hash

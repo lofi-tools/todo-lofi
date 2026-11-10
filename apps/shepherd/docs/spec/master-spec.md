@@ -494,6 +494,11 @@ Each native adapter records the exact command and protocol version used, shown i
 
 ### 4.4 Freebuff terminal
 
+The planned [integrated Freebuff adapter](./freebuff-adapter.md) adds a
+separate task agent alongside this existing standalone terminal. Its approved
+live-test policy applies to that adapter; the standalone terminal's default
+fixture tests remain offline.
+
 Choosing **Freebuff (terminal)** starts the `freebuff` executable directly as
 the PTY process in the selected project's directory. The terminal replaces
 the conversation pane.
@@ -502,7 +507,8 @@ Shepherd renders the terminal screen and forwards terminal input. The PTY is
 temporary and sits outside the task lifecycle, worktrees, transcript, inspector
 layout, and persisted terminal records. The terminal fills the conversation
 pane. **Back to chat** in the window header closes it. Use mocked terminal IPC
-and a local shell fixture for tests. Test suites must never launch Freebuff.
+and a local shell fixture for tests. Default test suites must not launch
+Freebuff; opt-in live adapter checks follow the planned adapter spec.
 
 ### 4.5 ACP path
 

@@ -73,7 +73,8 @@ closing the app keeps working.
   presets.
 - **Native adapters** for Codex (first), OpenCode, then Pi over its RPC mode.
   **ACP** supports Claude Code and other ACP agents. Freebuff runs directly in a
-  standalone terminal in the conversation region.
+  standalone terminal in the conversation region. A separate
+  [integrated Freebuff adapter](./freebuff-adapter.md) is planned alongside it.
 - **Task isolation**: one Git worktree per task by default, under the repository's
   resolved Git directory, with a warned shared checkout as the exception.
 - **Task management**: parallel tasks with visible state (working, waiting on

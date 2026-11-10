@@ -272,6 +272,10 @@ current layout and give future changes a point of comparison.
   a standalone terminal that fills the conversation pane. Use **Back to chat**
   in the window header to close it. Other unavailable agents are disabled until
   their integrations are ready.
+- The planned [integrated Freebuff agent](./freebuff-adapter.md) is a separate
+  picker choice that uses the normal task conversation; retain the standalone
+  terminal choice and its Back to chat behavior. Keep the integrated session's
+  actual terminal visible in the terminal panel and allow direct input there.
 - OpenCode and Claude Code are available when their executables are configured
   in `settings.json`.
   The selection applies to the new draft. The composer can change a draft's

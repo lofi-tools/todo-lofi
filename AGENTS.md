@@ -183,6 +183,15 @@ Live Codex tests using a ChatGPT plan must use `gpt-6.1-terra` at `low` effort.
 Use `LiveCodexRun` to record under `.cache/shepherd-live/`. A cache miss
 requires the `live-codex` feature to record.
 
+Before each live Freebuff submission, ask the user to confirm the exact test
+message, project/worktree, and files or other context that may be sent. Use
+only a small number of useful tasks related to one of their projects because
+Freebuff is metered. Cache every response, including partial responses, raw PTY
+bytes, terminal-size changes, rendered terminal-state transitions in order, and
+assertion-relevant effects under the repository `.cache/` for replay. Keep live
+Freebuff probes behind the non-default
+`live-freebuff` feature; default tests must not make live agent calls.
+
 Run workspace commands through the repository's Nix direnv environment, not
 the ambient shell:
 
