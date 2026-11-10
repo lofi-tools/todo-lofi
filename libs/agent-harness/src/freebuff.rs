@@ -7,13 +7,107 @@ use std::sync::Arc;
 use serde::Deserialize;
 
 use crate::{
-    DeltaKind, HarnessError, HarnessEvent, HarnessResult, ItemId, settings::AgentSettings,
+    DeltaKind, HarnessError, HarnessEvent, HarnessResult, ItemId, ToolCallId, ToolStatus,
+    settings::AgentSettings,
 };
 
 const MAX_METADATA_BYTES: u64 = 16 * 1024;
 const MAX_MESSAGE_BYTES: usize = 1024 * 1024;
 const MAX_MESSAGE_ITEMS: usize = 256;
 const MAX_TRANSCRIPT_BYTES: usize = 4 * 1024 * 1024;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FreebuffToolSnapshot {
+    pub id: String,
+    pub title: String,
+    pub kind: String,
+    pub status: ToolStatus,
+    pub output: Option<String>,
+}
+
+#[derive(Default)]
+pub struct FreebuffToolReconciler {
+    tools: BTreeMap<String, FreebuffToolSnapshot>,
+    total_bytes: usize,
+}
+
+impl FreebuffToolReconciler {
+    pub fn update(
+        &mut self,
+        snapshot: FreebuffToolSnapshot,
+    ) -> HarnessResult<Option<HarnessEvent>> {
+        if snapshot.id.is_empty()
+            || snapshot.id.len() > 256
+            || snapshot.title.is_empty()
+            || snapshot.title.len() > 16 * 1024
+            || snapshot.kind.is_empty()
+            || snapshot.kind.len() > 256
+            || snapshot
+                .output
+                .as_ref()
+                .is_some_and(|output| output.len() > 64 * 1024)
+        {
+            return Err(HarnessError::Protocol(
+                "invalid Freebuff tool snapshot".into(),
+            ));
+        }
+        let previous = self.tools.get(&snapshot.id);
+        if previous.is_none() && self.tools.len() >= MAX_MESSAGE_ITEMS {
+            return Err(HarnessError::Protocol(
+                "too many Freebuff tool calls in a turn".into(),
+            ));
+        }
+        if let Some(previous) = previous {
+            if previous == &snapshot {
+                return Ok(None);
+            }
+            if previous.title != snapshot.title
+                || previous.kind != snapshot.kind
+                || matches!(
+                    previous.status,
+                    ToolStatus::Completed | ToolStatus::Failed | ToolStatus::Stopped
+                ) && previous.status != snapshot.status
+                || previous.status == ToolStatus::Running && snapshot.status == ToolStatus::Pending
+            {
+                return Err(HarnessError::Protocol(
+                    "conflicting Freebuff tool snapshot".into(),
+                ));
+            }
+        }
+        let size = |tool: &FreebuffToolSnapshot| {
+            tool.id.len()
+                + tool.title.len()
+                + tool.kind.len()
+                + tool.output.as_ref().map_or(0, String::len)
+        };
+        let total_bytes = self
+            .total_bytes
+            .checked_sub(previous.map_or(0, size))
+            .and_then(|total| total.checked_add(size(&snapshot)))
+            .filter(|total| *total <= MAX_TRANSCRIPT_BYTES)
+            .ok_or_else(|| {
+                HarnessError::Protocol("Freebuff tool activity exceeds the supported size".into())
+            })?;
+        let event = HarnessEvent::ToolCall {
+            tool_call_id: ToolCallId::new(&snapshot.id),
+            title: snapshot.title.clone(),
+            kind: snapshot.kind.clone(),
+            status: snapshot.status,
+            output: snapshot.output.clone(),
+            diffs: Vec::new(),
+            terminal_id: None,
+            stream_permit: None,
+        };
+        self.tools.insert(snapshot.id.clone(), snapshot);
+        self.total_bytes = total_bytes;
+        Ok(Some(event))
+    }
+
+    pub fn clear(&mut self) {
+        self.tools.clear();
+        self.total_bytes = 0;
+    }
+}
 
 #[derive(Default)]
 pub struct FreebuffTextReconciler {
@@ -340,6 +434,37 @@ fn executable_permissions(_metadata: &std::fs::Metadata) -> bool {
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn tool_redraws_update_one_call_and_reject_conflicting_states()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut reconciler = FreebuffToolReconciler::default();
+        let mut snapshot = FreebuffToolSnapshot {
+            id: "tool-1".into(),
+            title: "Read file".into(),
+            kind: "read".into(),
+            status: ToolStatus::Running,
+            output: None,
+        };
+        assert!(matches!(
+            reconciler.update(snapshot.clone())?,
+            Some(HarnessEvent::ToolCall {
+                status: ToolStatus::Running,
+                ..
+            })
+        ));
+        assert!(reconciler.update(snapshot.clone())?.is_none());
+        snapshot.output = Some("result".into());
+        snapshot.status = ToolStatus::Completed;
+        assert!(
+            matches!(reconciler.update(snapshot.clone())?, Some(HarnessEvent::ToolCall { status: ToolStatus::Completed, output: Some(output), .. }) if output == "result")
+        );
+        snapshot.status = ToolStatus::Running;
+        assert!(reconciler.update(snapshot.clone()).is_err());
+        snapshot.status = ToolStatus::Completed;
+        assert!(reconciler.update(snapshot)?.is_none());
+        Ok(())
+    }
 
     #[test]
     fn reconciles_streamed_snapshots_and_redraws_without_duplicates()

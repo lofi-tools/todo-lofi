@@ -167,6 +167,10 @@ and login diagnostics are now implemented.
       events and releases blocked producers when the receiver closes; the
       publisher fixture was not selected in shard 7/8. Connect it to a verified
       screen classifier and the adapter event stream.
+    - [ ] Translate recognized tool snapshots into stable, bounded tool-call
+      updates. A reconciler suppresses repeated snapshots and rejects conflicting
+      identities or status regressions; its fixture has not yet run. Connect it
+      to a verified classifier and enforce backpressure on its events.
   - [ ] **P1 — Implement the integrated adapter:** launch the installed CLI in
     the task worktree with the existing login, forward input with normal CLI
     terminal interpretation, stream and reconcile text, map tool activity,
@@ -178,7 +182,8 @@ and login diagnostics are now implemented.
     restart resume only if the runtime demonstrates it. Advertise only proven
     capabilities; use Freebuff defaults for model/agent initially.
     The current approval contract supports decisions rather than free-text
-    answers; the question presentation and answer path await the user's choice.
+    answers. Add a question card with a text-answer control, persist questions
+    and answers, and relay answers to the same Freebuff session.
   - [ ] **P1 — Integrate the picker:** expose the integrated agent separately
     from **Freebuff (terminal)**, preserve the terminal's existing behavior,
     and test task routing, persistence, diagnostics, and update status.
