@@ -46,7 +46,10 @@ and login diagnostics are now implemented.
       the desktop factory and verify its fixtures when the selected shard
       includes them before marking this item complete.
     - [ ] Inspect the installed launcher and runtime metadata without sending
-      project data; record version provenance and the update lifecycle.
+      project data; record version provenance and the update lifecycle. A
+      bounded metadata reader is implemented but its fixtures were not in the
+      selected shard. Verify it and wire it into update/restart handling; do not
+      treat metadata as proof that the runtime is supported.
     - [ ] With user-approved live messages only, capture the terminal states
       needed to establish a version-specific interaction contract.
   - [ ] **P0 — Capture fixtures and define contracts:** create sanitized,

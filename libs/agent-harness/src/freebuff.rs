@@ -1,5 +1,60 @@
 use std::ffi::OsStr;
+use std::io::Read;
 use std::path::{Path, PathBuf};
+
+use serde::Deserialize;
+
+use crate::{HarnessError, HarnessResult};
+
+const MAX_METADATA_BYTES: u64 = 16 * 1024;
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+pub struct FreebuffRuntimeMetadata {
+    pub version: String,
+    pub target: String,
+}
+
+pub fn read_runtime_metadata(directory: &Path) -> HarnessResult<Option<FreebuffRuntimeMetadata>> {
+    let path = directory.join("freebuff-metadata.json");
+    let file = match std::fs::File::open(&path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(HarnessError::Protocol(format!(
+                "could not open Freebuff runtime metadata at {}: {error}",
+                path.display()
+            )));
+        }
+    };
+    let mut bytes = Vec::new();
+    file.take(MAX_METADATA_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| {
+            HarnessError::Protocol(format!(
+                "could not read Freebuff runtime metadata at {}: {error}",
+                path.display()
+            ))
+        })?;
+    if bytes.len() as u64 > MAX_METADATA_BYTES {
+        return Err(HarnessError::Protocol(format!(
+            "Freebuff runtime metadata at {} exceeds {MAX_METADATA_BYTES} bytes",
+            path.display()
+        )));
+    }
+    let metadata: FreebuffRuntimeMetadata = serde_json::from_slice(&bytes).map_err(|error| {
+        HarnessError::Protocol(format!(
+            "invalid Freebuff runtime metadata at {}: {error}",
+            path.display()
+        ))
+    })?;
+    if metadata.version.trim().is_empty() || metadata.target.trim().is_empty() {
+        return Err(HarnessError::Protocol(format!(
+            "Freebuff runtime metadata at {} has an empty version or target",
+            path.display()
+        )));
+    }
+    Ok(Some(metadata))
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FreebuffInstallSource {
@@ -209,5 +264,36 @@ mod tests {
         let result = discover(None, OsStr::new(""));
         assert!(result.install.is_none());
         assert!(result.summary().contains("configure its path"));
+    }
+
+    #[test]
+    fn runtime_metadata_is_read_without_launching_freebuff()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        assert!(read_runtime_metadata(directory.path())?.is_none());
+        std::fs::write(
+            directory.path().join("freebuff-metadata.json"),
+            br#"{"version":"0.2.36","target":"darwin-arm64"}"#,
+        )?;
+        assert_eq!(
+            read_runtime_metadata(directory.path())?,
+            Some(FreebuffRuntimeMetadata {
+                version: "0.2.36".into(),
+                target: "darwin-arm64".into(),
+            })
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn malformed_or_oversized_runtime_metadata_is_rejected()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("freebuff-metadata.json");
+        std::fs::write(&path, br#"{"version":"","target":"darwin-arm64"}"#)?;
+        assert!(read_runtime_metadata(directory.path()).is_err());
+        std::fs::write(&path, vec![b' '; MAX_METADATA_BYTES as usize + 1])?;
+        assert!(read_runtime_metadata(directory.path()).is_err());
+        Ok(())
     }
 }
