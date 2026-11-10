@@ -137,6 +137,7 @@ pub struct TerminalRecording {
     screen: Mutex<Screen>,
     errors: mpsc::UnboundedSender<String>,
     failure_signal: Mutex<Option<std::sync::mpsc::Sender<()>>>,
+    screen_observer: Option<mpsc::Sender<serde_json::Value>>,
     #[allow(dead_code)]
     initial_size: (u16, u16),
 }
@@ -156,6 +157,7 @@ impl TerminalRecording {
             screen: Mutex::new(screen),
             errors,
             failure_signal: Mutex::new(None),
+            screen_observer: None,
             initial_size: (columns, rows),
         };
         recording
@@ -167,24 +169,46 @@ impl TerminalRecording {
         Ok(recording)
     }
 
+    #[allow(dead_code)]
+    pub fn with_screen_observer(mut self, observer: mpsc::Sender<serde_json::Value>) -> Self {
+        self.screen_observer = Some(observer);
+        self
+    }
+
+    fn screen_state(&self, screen: &Screen) -> HarnessResult<serde_json::Value> {
+        serde_json::to_value(screen.frame()).map_err(|error| {
+            HarnessError::Protocol(format!(
+                "could not encode terminal recording screen: {error}"
+            ))
+        })
+    }
+
+    fn publish_screen(&self, state: &serde_json::Value) -> HarnessResult<()> {
+        if let Some(observer) = &self.screen_observer {
+            observer.try_send(state.clone()).map_err(|error| {
+                HarnessError::Protocol(format!("terminal screen observer unavailable: {error}"))
+            })?;
+        }
+        Ok(())
+    }
+
     fn output(&self, bytes: &[u8]) -> HarnessResult<()> {
-        self.capture.record_and_apply(
-            CaptureEvent::Output {
-                bytes: bytes.to_vec(),
-            },
-            || {
-                let mut screen = self.screen.lock().map_err(|_| {
-                    HarnessError::Protocol("terminal recording screen lock is poisoned".into())
-                })?;
-                screen.process(bytes);
-                let state = serde_json::to_value(screen.frame()).map_err(|error| {
-                    HarnessError::Protocol(format!(
-                        "could not encode terminal recording screen: {error}"
-                    ))
-                })?;
-                Ok(((), vec![CaptureEvent::Screen { state }]))
-            },
-        )
+        self.capture
+            .record_apply_and_publish(
+                CaptureEvent::Output {
+                    bytes: bytes.to_vec(),
+                },
+                || {
+                    let mut screen = self.screen.lock().map_err(|_| {
+                        HarnessError::Protocol("terminal recording screen lock is poisoned".into())
+                    })?;
+                    screen.process(bytes);
+                    let state = self.screen_state(&screen)?;
+                    Ok((state.clone(), vec![CaptureEvent::Screen { state }]))
+                },
+                |state| self.publish_screen(state),
+            )
+            .map(|_| ())
     }
 
     fn report_error(&self, error: &impl std::fmt::Display) {
@@ -1380,24 +1404,27 @@ impl TerminalService for PtyTerminals {
         if let Some(recording) = &session.recording {
             recording
                 .capture
-                .record_and_apply(CaptureEvent::Resize { columns, rows }, || {
-                    session
-                        .master
-                        .resize(Self::size(columns, rows))
-                        .map_err(|error| {
-                            HarnessError::Protocol(format!("resize failed: {error}"))
+                .record_apply_and_publish(
+                    CaptureEvent::Resize { columns, rows },
+                    || {
+                        session
+                            .master
+                            .resize(Self::size(columns, rows))
+                            .map_err(|error| {
+                                HarnessError::Protocol(format!("resize failed: {error}"))
+                            })?;
+                        let mut screen = recording.screen.lock().map_err(|_| {
+                            HarnessError::Protocol(
+                                "terminal recording screen lock is poisoned".into(),
+                            )
                         })?;
-                    let mut screen = recording.screen.lock().map_err(|_| {
-                        HarnessError::Protocol("terminal recording screen lock is poisoned".into())
-                    })?;
-                    screen.resize(usize::from(columns), usize::from(rows));
-                    let state = serde_json::to_value(screen.frame()).map_err(|error| {
-                        HarnessError::Protocol(format!(
-                            "could not encode terminal recording screen: {error}"
-                        ))
-                    })?;
-                    Ok(((), vec![CaptureEvent::Screen { state }]))
-                })
+                        screen.resize(usize::from(columns), usize::from(rows));
+                        let state = recording.screen_state(&screen)?;
+                        Ok((state.clone(), vec![CaptureEvent::Screen { state }]))
+                    },
+                    |state| recording.publish_screen(state),
+                )
+                .map(|_| ())
                 .map_err(|error| {
                     recording.report_error(&error);
                     TerminalError::Backend(error.to_string())
@@ -1426,6 +1453,24 @@ mod tests {
     use std::time::Instant;
 
     use super::*;
+
+    #[test]
+    fn a_full_screen_observer_fails_the_recording_without_dropping_frames()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use agent_harness::freebuff_capture::{CaptureSession, CaptureWriter};
+        let directory = tempfile::tempdir()?;
+        let capture =
+            CaptureSession::new(CaptureWriter::create(directory.path(), "observer-full")?);
+        let (errors, _receiver) = mpsc::unbounded_channel();
+        let (observer, mut frames) = mpsc::channel(1);
+        let recording =
+            TerminalRecording::new(capture, 80, 24, errors)?.with_screen_observer(observer);
+        recording.output(b"one")?;
+        assert!(recording.output(b"two").is_err());
+        assert!(frames.try_recv().is_ok());
+        assert!(recording.output(b"three").is_err());
+        Ok(())
+    }
 
     #[cfg(unix)]
     #[tokio::test]
@@ -1528,7 +1573,11 @@ mod tests {
         let directory = tempfile::tempdir()?;
         let session = CaptureSession::new(CaptureWriter::create(directory.path(), "fake-pty")?);
         let (error_sender, mut errors) = mpsc::unbounded_channel();
-        let recording = Arc::new(TerminalRecording::new(session, 80, 24, error_sender)?);
+        let (screen_sender, mut screens) = mpsc::channel(32);
+        let recording = Arc::new(
+            TerminalRecording::new(session, 80, 24, error_sender)?
+                .with_screen_observer(screen_sender),
+        );
         let mut engine = PtyTerminals::new();
         let (sender, mut receiver) = mpsc::channel(16);
         let terminal_id = engine.spawn_recorded(
@@ -1586,6 +1635,19 @@ mod tests {
                 .path()
                 .join(".cache/shepherd-live/freebuff/fake-pty.jsonl"),
         )?;
+        let expected_screens: Vec<_> = records
+            .iter()
+            .filter_map(|record| match &record.event {
+                CaptureEvent::Screen { state } => Some(state.clone()),
+                _ => None,
+            })
+            .collect();
+        let mut observed_screens = Vec::new();
+        while let Ok(screen) = screens.try_recv() {
+            observed_screens.push(screen);
+        }
+        assert!(!observed_screens.is_empty());
+        assert_eq!(observed_screens, expected_screens);
         assert!(
             records
                 .iter()

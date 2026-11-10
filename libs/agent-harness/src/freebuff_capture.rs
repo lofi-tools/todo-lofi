@@ -191,6 +191,15 @@ impl CaptureSession {
         event: CaptureEvent,
         apply: impl FnOnce() -> HarnessResult<(T, Vec<CaptureEvent>)>,
     ) -> HarnessResult<T> {
+        self.record_apply_and_publish(event, apply, |_| Ok(()))
+    }
+
+    pub fn record_apply_and_publish<T>(
+        &self,
+        event: CaptureEvent,
+        apply: impl FnOnce() -> HarnessResult<(T, Vec<CaptureEvent>)>,
+        publish: impl FnOnce(&T) -> HarnessResult<()>,
+    ) -> HarnessResult<T> {
         let mut state = self.state.lock().map_err(|_| {
             HarnessError::Protocol("Freebuff capture session lock is poisoned".into())
         })?;
@@ -215,6 +224,7 @@ impl CaptureSession {
                 }
                 self.append_event(&mut state.writer, derived_event)?;
             }
+            publish(&result)?;
             Ok(result)
         })();
         if outcome.is_err() {

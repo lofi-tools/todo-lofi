@@ -82,6 +82,12 @@ and login diagnostics are now implemented.
       enabling live capture. The capture
       primitive's nonblocking fixture passed in agent-harness shard 5/8.
       Failed sessions must never be treated as complete replay.
+    - [ ] Feed recorded screen frames to the integrated adapter. An opt-in
+      bounded observer now publishes each frame after capture; the interactive
+      fake-PTY fixture verified observer and capture order in Shepherd shard
+      4/8. The queue-full fixture was outside that shard. The shard's other
+      tests passed except `watcher_error_survives_later_file_events_and_is_reported_once`,
+      which was interrupted after running for over a minute.
     - [ ] Finalize captures only after terminal output, responses, and worktree
       effects are drained; require a completion marker for successful replay.
       The capture API rejects missing or trailing records; its completion
