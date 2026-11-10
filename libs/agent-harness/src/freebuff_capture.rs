@@ -1,6 +1,8 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -149,6 +151,68 @@ impl CaptureWriter {
     }
 }
 
+pub struct CaptureSession {
+    started: Instant,
+    state: Mutex<CaptureSessionState>,
+}
+
+struct CaptureSessionState {
+    writer: CaptureWriter,
+    failed: bool,
+}
+
+impl CaptureSession {
+    pub fn new(writer: CaptureWriter) -> Self {
+        Self {
+            started: Instant::now(),
+            state: Mutex::new(CaptureSessionState {
+                writer,
+                failed: false,
+            }),
+        }
+    }
+
+    /// Serialize terminal operations with their capture and derived screen events.
+    /// The first event records an attempt; an error leaves an incomplete capture.
+    /// The callback must not re-enter this session.
+    pub fn record_and_apply<T>(
+        &self,
+        event: CaptureEvent,
+        apply: impl FnOnce() -> HarnessResult<(T, Vec<CaptureEvent>)>,
+    ) -> HarnessResult<T> {
+        let mut state = self.state.lock().map_err(|_| {
+            HarnessError::Protocol("Freebuff capture session lock is poisoned".into())
+        })?;
+        if state.failed {
+            return Err(HarnessError::Protocol(
+                "Freebuff capture session has failed".into(),
+            ));
+        }
+        let outcome = (|| {
+            self.append_event(&mut state.writer, event)?;
+            let (result, derived_events) = apply()?;
+            for derived_event in derived_events {
+                self.append_event(&mut state.writer, derived_event)?;
+            }
+            Ok(result)
+        })();
+        if outcome.is_err() {
+            state.failed = true;
+        }
+        outcome
+    }
+
+    fn append_event(&self, writer: &mut CaptureWriter, event: CaptureEvent) -> HarnessResult<()> {
+        let elapsed_micros = u64::try_from(self.started.elapsed().as_micros()).map_err(|_| {
+            HarnessError::Protocol("Freebuff capture duration exceeds its format limit".into())
+        })?;
+        writer.append(&CaptureRecord {
+            elapsed_micros,
+            event,
+        })
+    }
+}
+
 pub fn read_capture(path: &Path) -> HarnessResult<Vec<CaptureRecord>> {
     let mut records = Vec::new();
     visit_capture(path, |record| {
@@ -241,6 +305,60 @@ fn validate_record(record: &CaptureRecord) -> HarnessResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn session_records_fake_process_output_and_stops_after_an_operation_fails()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let writer = CaptureWriter::create(directory.path(), "fake-process")?;
+        let path = writer.path.clone();
+        let session = CaptureSession::new(writer);
+        let output = std::process::Command::new("/bin/sh")
+            .args(["-c", "printf 'fake output'"])
+            .output()?;
+        assert!(output.status.success());
+        let bytes = output.stdout;
+        session.record_and_apply(
+            CaptureEvent::Output {
+                bytes: bytes.clone(),
+            },
+            || {
+                Ok((
+                    (),
+                    vec![CaptureEvent::Screen {
+                        state: serde_json::json!({"text": "fake output"}),
+                    }],
+                ))
+            },
+        )?;
+        let failed: HarnessResult<()> = session.record_and_apply(
+            CaptureEvent::Input {
+                bytes: b"attempt".to_vec(),
+            },
+            || Err(HarnessError::Protocol("fake write failed".into())),
+        );
+        assert!(failed.is_err());
+        let mut later_operation_ran = false;
+        let blocked: HarnessResult<()> = session.record_and_apply(
+            CaptureEvent::Input {
+                bytes: b"must not run".to_vec(),
+            },
+            || {
+                later_operation_ran = true;
+                Ok(((), Vec::new()))
+            },
+        );
+        assert!(blocked.is_err());
+        assert!(!later_operation_ran);
+        let records = read_capture(&path)?;
+        assert_eq!(records.len(), 3);
+        assert!(
+            matches!(&records[0].event, CaptureEvent::Output { bytes: recorded } if recorded == &bytes)
+        );
+        assert!(matches!(&records[1].event, CaptureEvent::Screen { .. }));
+        assert!(matches!(&records[2].event, CaptureEvent::Input { .. }));
+        Ok(())
+    }
 
     #[test]
     fn a_failed_capture_write_permanently_stops_recording() -> Result<(), Box<dyn std::error::Error>>

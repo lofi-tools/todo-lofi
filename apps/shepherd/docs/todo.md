@@ -68,6 +68,11 @@ and login diagnostics are now implemented.
       A writer now refuses further records after an I/O failure; its failure
       fixture was not selected in shard 2/8. The transport must stop live
       submissions on that error.
+    - [ ] Serialize PTY operations and resulting screen records with the
+      capture session. A fake-process fixture passed in agent-harness shard
+      3/8, including failure propagation; connect all terminal input, output,
+      and resize paths to it. An event recorded before a failed operation is
+      an attempt, so failed sessions must never be treated as complete replay.
     - [ ] Replay capture records in order through a streaming consumer. An
       offline synthetic capture replays split output and a resize through the
       shell's VT parser (Shepherd shard 8/8 passed); the consumer's own fixture
