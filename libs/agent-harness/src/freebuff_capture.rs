@@ -7,6 +7,14 @@ use serde_json::Value;
 
 use crate::{HarnessError, HarnessResult};
 
+const CAPTURE_VERSION: u32 = 1;
+
+#[derive(Serialize, Deserialize)]
+struct CaptureHeader {
+    format: String,
+    version: u32,
+}
+
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum CaptureEvent {
@@ -76,12 +84,30 @@ impl CaptureWriter {
             use std::os::unix::fs::OpenOptionsExt;
             options.mode(0o600);
         }
-        let file = options.open(&path).map_err(|error| {
+        let mut file = options.open(&path).map_err(|error| {
             HarnessError::Protocol(format!(
                 "could not create Freebuff capture at {}: {error}",
                 path.display()
             ))
         })?;
+        let header = CaptureHeader {
+            format: "shepherd-freebuff".into(),
+            version: CAPTURE_VERSION,
+        };
+        serde_json::to_writer(&mut file, &header).map_err(|error| {
+            HarnessError::Protocol(format!(
+                "could not write Freebuff capture header at {}: {error}",
+                path.display()
+            ))
+        })?;
+        file.write_all(b"\n")
+            .and_then(|()| file.flush())
+            .map_err(|error| {
+                HarnessError::Protocol(format!(
+                    "could not write Freebuff capture header at {}: {error}",
+                    path.display()
+                ))
+            })?;
         Ok(Self {
             file,
             path,
@@ -124,20 +150,47 @@ pub fn read_capture(path: &Path) -> HarnessResult<Vec<CaptureRecord>> {
             path.display()
         ))
     })?;
+    let mut lines = BufReader::new(file).lines();
+    let header = lines
+        .next()
+        .ok_or_else(|| {
+            HarnessError::Protocol(format!(
+                "missing Freebuff capture header at {}",
+                path.display()
+            ))
+        })?
+        .map_err(|error| {
+            HarnessError::Protocol(format!(
+                "could not read Freebuff capture header at {}: {error}",
+                path.display()
+            ))
+        })?;
+    let header: CaptureHeader = serde_json::from_str(&header).map_err(|error| {
+        HarnessError::Protocol(format!(
+            "invalid Freebuff capture header at {}: {error}",
+            path.display()
+        ))
+    })?;
+    if header.format != "shepherd-freebuff" || header.version != CAPTURE_VERSION {
+        return Err(HarnessError::Protocol(format!(
+            "unsupported Freebuff capture format or version at {}",
+            path.display()
+        )));
+    }
     let mut records = Vec::new();
-    for (index, line) in BufReader::new(file).lines().enumerate() {
+    for (index, line) in lines.enumerate() {
         let line = line.map_err(|error| {
             HarnessError::Protocol(format!(
                 "could not read Freebuff capture at {} line {}: {error}",
                 path.display(),
-                index + 1
+                index + 2
             ))
         })?;
         let record: CaptureRecord = serde_json::from_str(&line).map_err(|error| {
             HarnessError::Protocol(format!(
                 "invalid Freebuff capture at {} line {}: {error}",
                 path.display(),
-                index + 1
+                index + 2
             ))
         })?;
         validate_record(&record)?;
@@ -231,6 +284,22 @@ mod tests {
         )?;
         assert!(restored == records);
         assert!(CaptureWriter::create(directory.path(), "fixture").is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_missing_and_unsupported_capture_headers() -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("capture.jsonl");
+        for contents in [
+            "",
+            "{}\n",
+            "{\"format\":\"shepherd-freebuff\",\"version\":2}\n",
+            "{\"format\":\"other\",\"version\":1}\n",
+        ] {
+            fs::write(&path, contents)?;
+            assert!(read_capture(&path).is_err());
+        }
         Ok(())
     }
 

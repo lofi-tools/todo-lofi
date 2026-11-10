@@ -62,6 +62,9 @@ and login diagnostics are now implemented.
       output, screen states, runtime changes, responses and worktree effects;
       connect recording and replay once the transport exists. The storage
       primitive compiles, but its fixtures were not in the selected shard.
+    - [ ] Version the capture format and reject incompatible headers. The
+      implementation compiles; shard 3/8 passed 21 tests but did not select
+      the new header fixture or the capture round-trip fixture.
   - [ ] **P1 — Implement the integrated adapter:** launch the installed CLI in
     the task worktree with the existing login, forward input with normal CLI
     terminal interpretation, stream and reconcile text, map tool activity,
