@@ -7,10 +7,15 @@ import subprocess
 import sys
 from pathlib import Path
 
+from test_shard_history import first_parent_ancestors, full_suite_due, last_test_run, read_runs
+from test_shard_recording import Recorder
 from test_sharding import affected_tests, shard_for_revision
 
 ROOT = Path(__file__).resolve().parent.parent
 UI = ROOT / "apps/shepherd/ui"
+HISTORY = ROOT / ".cache/test-shards/runs.jsonl"
+RECORDER = None
+CONTEXT = None
 
 
 def output(*command):
@@ -50,9 +55,12 @@ def workspace():
 
 
 def execute(command, directory=ROOT, dry_run=False):
+    global RECORDER
     print("+", subprocess.list2cmdline(command), flush=True)
     if not dry_run:
-        subprocess.run(command, cwd=directory, check=True)
+        if RECORDER is None:
+            RECORDER = Recorder(ROOT, HISTORY, *CONTEXT)
+        RECORDER.run(command, directory)
 
 
 def parse_shard(value):
@@ -66,9 +74,12 @@ def parse_shard(value):
 
 
 def main(argv=None):
+    global RECORDER, CONTEXT
+    RECORDER = None
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--all", action="store_true", help="run all default Rust and UI tests, including doctests")
     parser.add_argument("--test", help="run an exact Rust test name across the workspace")
+    parser.add_argument("--last-ran", help="find the latest clean ancestor that ran an exact test identity")
     parser.add_argument("--seed", default="HEAD", help="revision used to select the shard (default: HEAD)")
     parser.add_argument("--shard", type=parse_shard, help="override the shard as INDEX/COUNT")
     parser.add_argument("--shards", type=int, default=8, help="number of rotating shards (default: 8)")
@@ -78,8 +89,18 @@ def main(argv=None):
         parser.error("--shards must be positive")
     if args.all and args.test:
         parser.error("--all and --test cannot be combined")
+    if args.last_ran:
+        ancestors = first_parent_ancestors(ROOT, "HEAD")
+        record = last_test_run(read_runs(HISTORY), ancestors, args.last_ran)
+        if record is None:
+            print("No recorded clean successful ancestor ran that exact test; history may be incomplete.")
+            return
+        print(f"{record['revision']} {record['timestamp']} {args.last_ran}")
+        return
     revision = output("git", "rev-parse", "--verify", f"{args.seed}^{{commit}}")
+    head = output("git", "rev-parse", "HEAD")
     index, count = args.shard or (shard_for_revision(revision, args.shards), args.shards)
+    CONTEXT = (head, revision, f"{index}/{count}")
     print(f"Selection seed {revision}; shard {index}/{count}", flush=True)
     if args.test:
         execute(["cargo", "nextest", "run", "--workspace", "--", "--exact", args.test], dry_run=args.dry_run)
@@ -88,9 +109,10 @@ def main(argv=None):
         execute(["cargo", "nextest", "run", "--workspace"], dry_run=args.dry_run)
         execute(["cargo", "test", "--workspace", "--doc"], dry_run=args.dry_run)
         execute(["pnpm", "exec", "playwright", "test"], UI, args.dry_run)
+        if RECORDER is not None:
+            RECORDER.save([], full=True)
         return
-    commit_count = int(output("git", "rev-list", "--first-parent", "--count", "HEAD"))
-    if commit_count % 8 == 0:
+    if full_suite_due(read_runs(HISTORY), first_parent_ancestors(ROOT, head)):
         print("A full default-suite run is due: use --all.", file=sys.stderr)
     roots, dependents = workspace()
     selection = affected_tests(changed_paths(), roots, dependents)
@@ -99,6 +121,8 @@ def main(argv=None):
         execute(["cargo", "nextest", "run", "--workspace"], dry_run=args.dry_run)
         execute(["cargo", "test", "--workspace", "--doc"], dry_run=args.dry_run)
         execute(["pnpm", "exec", "playwright", "test"], UI, args.dry_run)
+        if RECORDER is not None:
+            RECORDER.save([], full=True)
         return
     if selection.packages:
         packages = [item for name in sorted(selection.packages) for item in ("-p", name)]

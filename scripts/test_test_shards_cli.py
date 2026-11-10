@@ -21,6 +21,7 @@ class RunnerTests(unittest.TestCase):
         def output(*command):
             return "12" if command[:3] == ("git", "rev-list", "--first-parent") else "a"
         with patch.object(shards_cli, "output", side_effect=output), \
+             patch.object(shards_cli, "first_parent_ancestors", return_value=[]), \
              patch.object(shards_cli, "workspace", return_value=({"libs/core": "core", "libs/other": "other"}, {})), \
              patch.object(shards_cli, "changed_paths", return_value=["libs/core/src/lib.rs"]), \
              patch.object(shards_cli, "execute") as execute:
