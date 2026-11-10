@@ -106,6 +106,7 @@ def main(argv=None):
         execute(["cargo", "nextest", "run", "--workspace", "--", "--exact", args.test], dry_run=args.dry_run)
         return
     if args.all:
+        execute(["python3", "-m", "unittest", "discover", "-s", "scripts", "-p", "test_test_shard*.py"], dry_run=args.dry_run)
         execute(["cargo", "nextest", "run", "--workspace"], dry_run=args.dry_run)
         execute(["cargo", "test", "--workspace", "--doc"], dry_run=args.dry_run)
         execute(["pnpm", "exec", "playwright", "test"], UI, args.dry_run)
@@ -118,6 +119,7 @@ def main(argv=None):
     selection = affected_tests(changed_paths(), roots, dependents)
     if selection.all_tests:
         print("Unknown or shared paths changed; running the full default suite.", flush=True)
+        execute(["python3", "-m", "unittest", "discover", "-s", "scripts", "-p", "test_test_shard*.py"], dry_run=args.dry_run)
         execute(["cargo", "nextest", "run", "--workspace"], dry_run=args.dry_run)
         execute(["cargo", "test", "--workspace", "--doc"], dry_run=args.dry_run)
         execute(["pnpm", "exec", "playwright", "test"], UI, args.dry_run)

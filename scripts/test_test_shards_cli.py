@@ -13,7 +13,8 @@ class RunnerTests(unittest.TestCase):
         with patch.object(shards_cli, "output", return_value="a"), patch.object(shards_cli, "execute") as execute:
             shards_cli.main(["--all"])
         commands = [call.args[0] for call in execute.call_args_list]
-        self.assertEqual(commands, [["cargo", "nextest", "run", "--workspace"],
+        self.assertEqual(commands, [["python3", "-m", "unittest", "discover", "-s", "scripts", "-p", "test_test_shard*.py"],
+                                    ["cargo", "nextest", "run", "--workspace"],
                                     ["cargo", "test", "--workspace", "--doc"],
                                     ["pnpm", "exec", "playwright", "test"]])
 
