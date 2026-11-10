@@ -666,6 +666,64 @@ impl HarnessSession {
     }
 }
 
+impl crate::Core {
+    #[allow(dead_code)]
+    pub(crate) async fn admit_terminal_turn(
+        &mut self,
+        task_id: &crate::TaskId,
+        item_id: ItemId,
+        text: String,
+    ) -> Result<(), CoreError> {
+        let mut task = self.task(task_id)?.clone();
+        if !matches!(
+            task.state,
+            crate::TaskState::Ready | crate::TaskState::Review
+        ) || self.turn_baselines.contains_key(task_id)
+            || self
+                .queued_prompts
+                .get(task_id)
+                .is_some_and(|queue| !queue.is_empty())
+        {
+            return Err(CoreError::TaskNotReady {
+                id: task_id.as_str().to_owned(),
+                state: task.state.as_str(),
+            });
+        }
+        let worktree = task
+            .worktree_path
+            .as_ref()
+            .ok_or_else(|| HarnessError::Protocol("terminal task has no worktree".into()))?;
+        let record = self.session_records.get(task_id).cloned().ok_or_else(|| {
+            CoreError::SessionMissing {
+                id: task_id.as_str().to_owned(),
+            }
+        })?;
+        if record.is_ended() {
+            return Err(HarnessError::Protocol("terminal session has already ended".into()).into());
+        }
+        self.task_workspace(task_id)?;
+        self.task_list(&task.project_id)?;
+        let baseline = crate::git::GitService.turn_baseline(worktree)?;
+        task.set_state(crate::TaskState::Working)?;
+        task.error = None;
+        let session = self
+            .sessions
+            .get_mut(task_id)
+            .ok_or_else(|| CoreError::SessionMissing {
+                id: task_id.as_str().to_owned(),
+            })?;
+        session
+            .persist_terminal_prompt(&*self.store, &record, &task, item_id, text)
+            .await?;
+        self.tasks.insert(task_id.clone(), task);
+        self.turn_baselines.insert(task_id.clone(), baseline);
+        if let Err(error) = self.publish_task(task_id) {
+            tracing::error!(%error, "could not publish admitted terminal turn");
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use agent_harness::fake_harness::{FakeHarness, FakeStep, FakeTurn};
@@ -675,6 +733,47 @@ mod tests {
     use crate::Project;
     use crate::store::TursoStore;
     use crate::test_support::{TestDatabase, TestDirectory};
+
+    #[tokio::test]
+    async fn terminal_turn_admission_records_baseline_before_changes()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use crate::test_support::TestRepository;
+        let repository = TestRepository::new()?;
+        let mut core = crate::Core::new();
+        let project = Project::new(repository.path().to_path_buf());
+        core.store.save_project(&project).await?;
+        core.project_order.push(project.id.clone());
+        core.projects.insert(project.id.clone(), project.clone());
+        let mut task = Task::draft(project.id.clone(), "task", repository.path());
+        task.state = crate::TaskState::Ready;
+        task.worktree_path = Some(repository.path().to_path_buf());
+        core.store.save_task(&task).await?;
+        let id = task.id.clone();
+        core.tasks.insert(id.clone(), task);
+        let mut session = HarnessSession::new(Box::new(FakeHarness::new(Vec::new())));
+        session.start(SpawnSpec::default()).await?;
+        session.open_session(None).await?;
+        let record = SessionRecord::started(id.clone(), "fixture", None);
+        core.store.save_session(&record).await?;
+        core.sessions.insert(id.clone(), session);
+        core.session_records.insert(id.clone(), record);
+
+        core.admit_terminal_turn(&id, ItemId::new("terminal-turn"), "make a change".into())
+            .await?;
+        assert_eq!(core.task(&id)?.state, crate::TaskState::Working);
+        assert_eq!(core.store.load_transcript(&id).await?.len(), 1);
+        repository.write_file("README.md", "changed\n")?;
+        assert_eq!(
+            core.state_after_completed_turn(&id)?,
+            crate::TaskState::Review
+        );
+        assert!(
+            core.admit_terminal_turn(&id, ItemId::new("duplicate"), "next".into())
+                .await
+                .is_err()
+        );
+        Ok(())
+    }
 
     #[tokio::test]
     async fn terminal_prompt_admission_persists_once_and_rolls_back_on_failure()

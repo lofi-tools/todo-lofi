@@ -127,8 +127,10 @@ and login diagnostics are now implemented.
       CLI may have already changed files before the core handles it.
       A session-level persistence step now saves a terminal prompt with a
       working task and rolls back its in-memory transcript on save failure;
-      its fixture was not selected in shepherd-core shard 8/8. Connect it to
-      baseline preparation, the core lifecycle, and the terminal submit gate.
+      its fixture was not selected in shepherd-core shard 8/8. Core admission
+      now establishes the baseline, persists the prompt and task, then updates
+      the in-memory task state; its fixture was also outside shard 8/8. Connect
+      admission to the terminal submit gate before enabling direct prompts.
   - [ ] **P2 — Validate and document:** run offline fixture and fake-CLI
     coverage by default. Gate genuinely live probes with `live-freebuff`,
     disabled by default. Before each live submission, confirm the exact
