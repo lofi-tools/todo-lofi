@@ -1,5 +1,6 @@
 import unittest
-from test_shard_recording import rust_list_command, rust_test_ids, ui_test_ids
+from pathlib import Path
+from test_shard_recording import rust_list_command, rust_test_ids, ui_test_ids, vitest_ids
 
 
 class RecordingTests(unittest.TestCase):
@@ -20,7 +21,14 @@ class RecordingTests(unittest.TestCase):
             {"projectName": "chromium", "results": [{"status": "passed"}]},
             {"projectName": "other", "results": [{"status": "skipped"}]},
         ]}]}]}
-        self.assertEqual(ui_test_ids(data), ["ui:chromium:one.spec.ts::file::works"])
+        self.assertEqual(ui_test_ids(data, "apps/example"), ["ui:apps/example:chromium:one.spec.ts::file::works"])
+
+    def test_only_passed_vitest_cases_are_recorded(self):
+        data = {"testResults": [{"name": "/repo/tests/one.test.ts", "assertionResults": [
+            {"fullName": "group runs", "status": "passed"},
+            {"fullName": "group skipped", "status": "pending"},
+        ]}]}
+        self.assertEqual(vitest_ids(data, Path("/repo")), ["vitest:tests/one.test.ts::group runs"])
 
 
 if __name__ == "__main__":

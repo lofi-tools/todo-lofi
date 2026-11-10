@@ -18,7 +18,7 @@ def rust_test_ids(data):
     return sorted(result)
 
 
-def ui_test_ids(data):
+def ui_test_ids(data, workspace=""):
     result = []
 
     def visit(suite, parents):
@@ -29,12 +29,22 @@ def ui_test_ids(data):
                 results = test.get("results", [])
                 if results and results[-1].get("status") == "passed":
                     label = "::".join(names + [spec["title"]])
-                    result.append(f"ui:{test['projectName']}:{spec['file']}::{label}")
+                    result.append(f"ui:{workspace}:{test['projectName']}:{spec['file']}::{label}")
         for child in suite.get("suites", []):
             visit(child, names)
 
     for suite in data.get("suites", []):
         visit(suite, [])
+    return sorted(result)
+
+
+def vitest_ids(data, root):
+    result = []
+    for suite in data.get("testResults", []):
+        filename = Path(suite["name"]).relative_to(root)
+        for case in suite.get("assertionResults", []):
+            if case.get("status") == "passed":
+                result.append(f"vitest:{filename}::{case['fullName']}")
     return sorted(result)
 
 
@@ -58,6 +68,7 @@ class Recorder:
             "nextest": self.output("cargo", "nextest", "--version").splitlines()[0],
             "rustc": self.output("rustc", "--version"),
             "playwright": self.output("pnpm", "--dir", "apps/shepherd/ui", "exec", "playwright", "--version"),
+            "vitest": self.output("pnpm", "--dir", "libs/web-design-system", "exec", "vitest", "--version"),
         }
 
     def output(self, *command):
@@ -83,6 +94,14 @@ class Recorder:
                 report = Path(temporary) / "playwright.json"
                 environment = dict(os.environ, PLAYWRIGHT_JSON_OUTPUT_FILE=str(report))
                 subprocess.run([*command, "--reporter=list,json"], cwd=directory, env=environment, check=True)
-                self.save(ui_test_ids(json.loads(report.read_text(encoding="utf-8"))))
+                workspace = str(directory.relative_to(self.root))
+                self.save(ui_test_ids(json.loads(report.read_text(encoding="utf-8")), workspace))
+        elif command[:4] == ["pnpm", "exec", "vitest", "run"]:
+            self.history.parent.mkdir(parents=True, exist_ok=True)
+            with tempfile.TemporaryDirectory(dir=self.history.parent) as temporary:
+                report = Path(temporary) / "vitest.json"
+                subprocess.run([*command, "--reporter=default", "--reporter=json", f"--outputFile.json={report}"],
+                               cwd=directory, check=True)
+                self.save(vitest_ids(json.loads(report.read_text(encoding="utf-8")), self.root))
         else:
             subprocess.run(command, cwd=directory, check=True)

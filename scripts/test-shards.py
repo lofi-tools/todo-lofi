@@ -18,6 +18,38 @@ RECORDER = None
 CONTEXT = None
 
 
+def playwright_suites():
+    patterns = ("apps/*/playwright.config.*", "apps/*/ui/playwright.config.*", "demos/*/playwright.config.*")
+    return sorted({config.parent for pattern in patterns for config in ROOT.glob(pattern)})
+
+
+def run_playwright(index=None, count=None, affected_ui=False, dry_run=False):
+    for directory in playwright_suites():
+        command = ["pnpm", "exec", "playwright", "test", "--pass-with-no-tests"]
+        if index is not None and not (affected_ui and directory == UI):
+            command.extend(["--shard", f"{index}/{count}"])
+        execute(command, directory, dry_run)
+
+
+def web_test_suites():
+    patterns = ("apps/*/package.json", "apps/*/ui/package.json", "libs/*/package.json", "demos/*/package.json")
+    for manifest in sorted({path for pattern in patterns for path in ROOT.glob(pattern)}):
+        script = json.loads(manifest.read_text(encoding="utf-8")).get("scripts", {}).get("test")
+        if script:
+            yield manifest.parent, script
+
+
+def run_web_unit_tests(index=None, count=None, dry_run=False):
+    for directory, script in web_test_suites():
+        if script.strip() != "vitest run":
+            execute(["pnpm", "run", "test"], directory, dry_run)
+            continue
+        command = ["pnpm", "exec", "vitest", "run", "--passWithNoTests"]
+        if index is not None:
+            command.extend(["--shard", f"{index}/{count}"])
+        execute(command, directory, dry_run)
+
+
 def output(*command):
     return subprocess.check_output(command, cwd=ROOT, text=True).strip()
 
@@ -109,7 +141,8 @@ def main(argv=None):
         execute(["python3", "-m", "unittest", "discover", "-s", "scripts", "-p", "test_test_shard*.py"], dry_run=args.dry_run)
         execute(["cargo", "nextest", "run", "--workspace"], dry_run=args.dry_run)
         execute(["cargo", "test", "--workspace", "--doc"], dry_run=args.dry_run)
-        execute(["pnpm", "exec", "playwright", "test"], UI, args.dry_run)
+        run_web_unit_tests(dry_run=args.dry_run)
+        run_playwright(dry_run=args.dry_run)
         if RECORDER is not None:
             RECORDER.save([], full=True)
         return
@@ -122,7 +155,8 @@ def main(argv=None):
         execute(["python3", "-m", "unittest", "discover", "-s", "scripts", "-p", "test_test_shard*.py"], dry_run=args.dry_run)
         execute(["cargo", "nextest", "run", "--workspace"], dry_run=args.dry_run)
         execute(["cargo", "test", "--workspace", "--doc"], dry_run=args.dry_run)
-        execute(["pnpm", "exec", "playwright", "test"], UI, args.dry_run)
+        run_web_unit_tests(dry_run=args.dry_run)
+        run_playwright(dry_run=args.dry_run)
         if RECORDER is not None:
             RECORDER.save([], full=True)
         return
@@ -132,10 +166,9 @@ def main(argv=None):
     excluded = [item for name in sorted(selection.packages) for item in ("--exclude", name)]
     if selection.packages != frozenset(roots.values()):
         execute(["cargo", "nextest", "run", "--workspace", *excluded, "--partition", f"hash:{index}/{count}", "--no-tests=pass"], dry_run=args.dry_run)
-    ui_command = ["pnpm", "exec", "playwright", "test", "--pass-with-no-tests"]
-    if not selection.ui and not selection.packages.intersection({"shepherd", "shepherd-core", "agent-harness"}):
-        ui_command.extend(["--shard", f"{index}/{count}"])
-    execute(ui_command, UI, args.dry_run)
+    run_web_unit_tests(index, count, args.dry_run)
+    affected_ui = selection.ui or bool(selection.packages.intersection({"shepherd", "shepherd-core", "agent-harness"}))
+    run_playwright(index, count, affected_ui, args.dry_run)
 
 
 if __name__ == "__main__":
