@@ -43,6 +43,11 @@ if questions or text corrections cannot be expressed by them, extend the
 contracts and persistence deliberately rather than inventing an event mapping.
 Never infer approval or submit an answer from an ambiguous screen.
 
+The current harness approval contract supports decision choices, not an
+open-ended answer, and no separate question control was found in the shell.
+The presentation and answer path for Freebuff questions are awaiting the
+user's choice; do not represent free-text questions as approval decisions.
+
 ## Executable, updates, and compatibility
 
 Resolve a configured Freebuff executable first and then search PATH. Use the
@@ -128,6 +133,9 @@ and report failures through Shepherd's normal diagnostics.
    the exact messages from the user if the project is inaccessible. This
    preference does not approve any live submission. Default tests must not
    make live calls.
+   One proposed question is “give me the dotenv fragment to override / ignore
+   battery / wifi and run ar3 regardless”. It is a candidate, not an approved
+   submission; confirm its exact text and the worktree context before use.
    Cache every live response, including partial responses, together with raw
    PTY bytes, terminal-size changes and rendered terminal-state transitions
    in their original order, plus external effects needed by assertions, under

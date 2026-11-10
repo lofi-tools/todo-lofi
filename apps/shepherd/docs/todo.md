@@ -59,6 +59,8 @@ and login diagnostics are now implemented.
       project, using the corresponding Shepherd project at
       `/Users/me/src/me/tools`. Confirm each exact message and its context
       before submission; request examples if the ChatGPT project is inaccessible.
+      Candidate supplied by the user: “give me the dotenv fragment to override /
+      ignore battery / wifi and run ar3 regardless”. It is not yet approved.
   - [ ] **P0 — Capture fixtures and define contracts:** create sanitized,
     versioned PTY/screen fixtures and a deterministic fake CLI. Map terminal
     states to harness events; identify necessary contract changes for
@@ -170,6 +172,8 @@ and login diagnostics are now implemented.
     prompt-readiness confirmation, support multi-turn sessions, and implement
     restart resume only if the runtime demonstrates it. Advertise only proven
     capabilities; use Freebuff defaults for model/agent initially.
+    The current approval contract supports decisions rather than free-text
+    answers; the question presentation and answer path await the user's choice.
   - [ ] **P1 — Integrate the picker:** expose the integrated agent separately
     from **Freebuff (terminal)**, preserve the terminal's existing behavior,
     and test task routing, persistence, diagnostics, and update status.
