@@ -29,6 +29,13 @@ Coordinate the two input paths so their keystrokes cannot interleave. If the
 adapter cannot recognize or safely clear the current input, report the state
 rather than guessing. Retain ordinary terminal input and resizing.
 
+Before forwarding a terminal-origin submission, admit it through the task
+lifecycle: establish the worktree's turn baseline, update task state, and
+persist the prompt. Hold submission until admission succeeds, so file changes
+made immediately by the CLI cannot race the baseline. On failure, leave the
+prompt unsubmitted and show the error. Composer-origin submissions retain their
+existing admission path and must not be duplicated by terminal observation.
+
 When Freebuff requests approval or asks an interactive question, present it in
 Shepherd's existing approval or question UI and relay the user's response to
 the CLI. Inspect the current harness and UI contracts before implementation;

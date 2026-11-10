@@ -72,14 +72,14 @@ and login diagnostics are now implemented.
       capture session. A fake-process fixture passed in agent-harness shard
       3/8, including failure propagation. The PTY service now offers an opt-in
       recording path for input, output, resize and screen frames; its fake
-      interactive PTY fixture compiled but was not selected in Shepherd shard
-      1/8. A failure monitor now requests normal terminal cleanup and reports
+      interactive PTY fixture passed in Shepherd shard 4/8. A failure monitor
+      now requests normal terminal cleanup and reports
       cleanup errors; its failure fixture was also outside shard 1/8. Connect
       this path and its error channel to the Freebuff terminal host. Recorded Unix PTYs now
       use nonblocking writes: each successful write and its recorded bytes are
       serialized with output capture, and readiness is polled outside the lock.
-      The fake interactive and backpressure fixtures were not selected in
-      Shepherd shard 1/8; verify both before enabling live capture. The capture
+      The backpressure fixture has not yet been selected; verify it before
+      enabling live capture. The capture
       primitive's nonblocking fixture passed in agent-harness shard 5/8.
       Failed sessions must never be treated as complete replay.
     - [ ] Finalize captures only after terminal output, responses, and worktree
@@ -120,8 +120,11 @@ and login diagnostics are now implemented.
     clearly if the input cannot be recognized or cleared reliably.
     - [ ] Emit recognized terminal-origin prompts through the harness's new
       transcript event; its deduplication and restore fixture passed in
-      agent-harness shard 8/8. Connect task state transitions for turns started
-      directly in the terminal and avoid echoing composer-origin prompts.
+      agent-harness shard 8/8. Admit terminal-origin turns before forwarding
+      submit: establish the Git baseline, persist the prompt and transition the
+      task state, with failure preventing submission. Avoid echoing
+      composer-origin prompts. A later event alone is insufficient because the
+      CLI may have already changed files before the core handles it.
   - [ ] **P2 — Validate and document:** run offline fixture and fake-CLI
     coverage by default. Gate genuinely live probes with `live-freebuff`,
     disabled by default. Before each live submission, confirm the exact
