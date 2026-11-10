@@ -250,3 +250,18 @@ the flags for window, visibility and IME checks.
 
 Use the `commit-messages` skill to write commit messages: a `<short affected area>: <extremely terse description>` subject, with any needed rationale in the body.
 <!-- my-nix:agents-fragment:end commit-messages -->
+
+<!-- my-nix:agents-fragment:start test-sharding -->
+## Routine test selection
+
+For routine validation of small changes, run
+`direnv exec . python3 scripts/test-shards.py` to cover affected packages
+and rotating test shards. Reuse successful checks for unchanged code;
+rerun the relevant checks after changes that can affect them. Run
+additional focused tests when the change needs them. When the command
+reports that a full run is due, run
+`direnv exec . python3 scripts/test-shards.py --all` before completing
+the work. Follow an explicit user request for different checks, and
+preserve the documented gates for live agents and native window tests.
+See `apps/shepherd/README.md` for selection, history, and bisect usage.
+<!-- my-nix:agents-fragment:end test-sharding -->
