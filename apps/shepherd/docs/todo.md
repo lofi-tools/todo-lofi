@@ -82,6 +82,12 @@ and login diagnostics are now implemented.
       An event recorded before
       a failed operation is an attempt, so failed sessions must never be treated
       as complete replay.
+    - [ ] Finalize captures only after terminal output, responses, and worktree
+      effects are drained; require a completion marker for successful replay.
+      The capture API rejects missing or trailing records, but its completion
+      fixture was not selected in agent-harness shard 2/8. The terminal host and
+      replay callers still need to use this API; partial captures remain
+      available for diagnostics.
     - [ ] Replay capture records in order through a streaming consumer. An
       offline synthetic capture replays split output and a resize through the
       shell's VT parser (Shepherd shard 8/8 passed); the consumer's own fixture

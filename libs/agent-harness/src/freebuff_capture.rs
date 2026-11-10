@@ -1,5 +1,5 @@
 use std::fs::{self, File, OpenOptions};
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::Instant;
@@ -46,6 +46,7 @@ pub enum CaptureEvent {
         path: PathBuf,
         contents: Option<Vec<u8>>,
     },
+    Complete,
 }
 
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
@@ -59,6 +60,7 @@ pub struct CaptureWriter {
     path: PathBuf,
     last_elapsed_micros: Option<u64>,
     write_failed: bool,
+    finished: bool,
 }
 
 impl CaptureWriter {
@@ -116,10 +118,16 @@ impl CaptureWriter {
             path,
             last_elapsed_micros: None,
             write_failed: false,
+            finished: false,
         })
     }
 
     pub fn append(&mut self, record: &CaptureRecord) -> HarnessResult<()> {
+        if self.finished {
+            return Err(HarnessError::Protocol(
+                "Freebuff capture is already complete".into(),
+            ));
+        }
         if self.write_failed {
             return Err(HarnessError::Protocol(format!(
                 "Freebuff capture at {} previously failed; recording cannot continue",
@@ -147,6 +155,7 @@ impl CaptureWriter {
             )));
         }
         self.last_elapsed_micros = Some(record.elapsed_micros);
+        self.finished = matches!(record.event, CaptureEvent::Complete);
         Ok(())
     }
 }
@@ -159,6 +168,7 @@ pub struct CaptureSession {
 struct CaptureSessionState {
     writer: CaptureWriter,
     failed: bool,
+    finished: bool,
 }
 
 impl CaptureSession {
@@ -168,6 +178,7 @@ impl CaptureSession {
             state: Mutex::new(CaptureSessionState {
                 writer,
                 failed: false,
+                finished: false,
             }),
         }
     }
@@ -183,15 +194,25 @@ impl CaptureSession {
         let mut state = self.state.lock().map_err(|_| {
             HarnessError::Protocol("Freebuff capture session lock is poisoned".into())
         })?;
-        if state.failed {
+        if state.failed || state.finished {
             return Err(HarnessError::Protocol(
-                "Freebuff capture session has failed".into(),
+                "Freebuff capture session has failed or finished".into(),
+            ));
+        }
+        if matches!(event, CaptureEvent::Complete) {
+            return Err(HarnessError::Protocol(
+                "use finish to complete a Freebuff capture".into(),
             ));
         }
         let outcome = (|| {
             self.append_event(&mut state.writer, event)?;
             let (result, derived_events) = apply()?;
             for derived_event in derived_events {
+                if matches!(derived_event, CaptureEvent::Complete) {
+                    return Err(HarnessError::Protocol(
+                        "completion cannot be a derived capture event".into(),
+                    ));
+                }
                 self.append_event(&mut state.writer, derived_event)?;
             }
             Ok(result)
@@ -207,6 +228,24 @@ impl CaptureSession {
             HarnessError::Protocol("Freebuff capture session lock is poisoned".into())
         })?;
         state.failed = true;
+        Ok(())
+    }
+
+    /// Call only after the PTY, screen, responses and effects are fully drained.
+    pub fn finish(&self) -> HarnessResult<()> {
+        let mut state = self.state.lock().map_err(|_| {
+            HarnessError::Protocol("Freebuff capture session lock is poisoned".into())
+        })?;
+        if state.failed || state.finished {
+            return Err(HarnessError::Protocol(
+                "Freebuff capture session has failed or finished".into(),
+            ));
+        }
+        if let Err(error) = self.append_event(&mut state.writer, CaptureEvent::Complete) {
+            state.failed = true;
+            return Err(error);
+        }
+        state.finished = true;
         Ok(())
     }
 
@@ -227,6 +266,41 @@ pub fn read_capture(path: &Path) -> HarnessResult<Vec<CaptureRecord>> {
         records.push(record);
         Ok(())
     })?;
+    Ok(records)
+}
+
+pub fn read_complete_capture(path: &Path) -> HarnessResult<Vec<CaptureRecord>> {
+    let mut file = File::open(path).map_err(|error| {
+        HarnessError::Protocol(format!(
+            "could not open Freebuff capture at {}: {error}",
+            path.display()
+        ))
+    })?;
+    let mut last = [0u8; 1];
+    file.seek(SeekFrom::End(-1))
+        .and_then(|_| file.read_exact(&mut last))
+        .map_err(|error| {
+            HarnessError::Protocol(format!(
+                "could not read Freebuff capture ending at {}: {error}",
+                path.display()
+            ))
+        })?;
+    if last != [b'\n'] {
+        return Err(HarnessError::Protocol(format!(
+            "Freebuff capture at {} has an incomplete final record",
+            path.display()
+        )));
+    }
+    let records = read_capture(path)?;
+    if !records
+        .last()
+        .is_some_and(|record| matches!(record.event, CaptureEvent::Complete))
+    {
+        return Err(HarnessError::Protocol(format!(
+            "Freebuff capture at {} is incomplete",
+            path.display()
+        )));
+    }
     Ok(records)
 }
 
@@ -268,6 +342,7 @@ pub fn visit_capture(
         )));
     }
     let mut previous_elapsed_micros = None;
+    let mut finished = false;
     for (index, line) in lines.enumerate() {
         let line = line.map_err(|error| {
             HarnessError::Protocol(format!(
@@ -283,6 +358,12 @@ pub fn visit_capture(
                 index + 2
             ))
         })?;
+        if finished {
+            return Err(HarnessError::Protocol(format!(
+                "Freebuff capture at {} contains events after completion",
+                path.display()
+            )));
+        }
         validate_record(&record)?;
         if previous_elapsed_micros.is_some_and(|previous| previous > record.elapsed_micros) {
             return Err(HarnessError::Protocol(format!(
@@ -291,6 +372,7 @@ pub fn visit_capture(
             )));
         }
         previous_elapsed_micros = Some(record.elapsed_micros);
+        finished = matches!(record.event, CaptureEvent::Complete);
         visit(record)?;
     }
     Ok(())
@@ -313,6 +395,49 @@ fn validate_record(record: &CaptureRecord) -> HarnessResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn complete_capture_requires_a_final_marker_and_rejects_later_events()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let writer = CaptureWriter::create(directory.path(), "complete")?;
+        let path = writer.path.clone();
+        let session = CaptureSession::new(writer);
+        session.record_and_apply(
+            CaptureEvent::Input {
+                bytes: b"hello".to_vec(),
+            },
+            || Ok(((), Vec::new())),
+        )?;
+        assert!(read_complete_capture(&path).is_err());
+        session.finish()?;
+        assert_eq!(read_complete_capture(&path)?.len(), 2);
+        let size = fs::metadata(&path)?.len();
+        OpenOptions::new()
+            .write(true)
+            .open(&path)?
+            .set_len(size - 1)?;
+        assert!(read_complete_capture(&path).is_err());
+        OpenOptions::new()
+            .append(true)
+            .open(&path)?
+            .write_all(b"\n")?;
+        assert!(
+            session
+                .record_and_apply(CaptureEvent::Output { bytes: vec![] }, || Ok((
+                    (),
+                    Vec::new()
+                )))
+                .is_err()
+        );
+        assert!(session.finish().is_err());
+        OpenOptions::new()
+            .append(true)
+            .open(&path)?
+            .write_all(b"{\"elapsed_micros\":0,\"event\":{\"kind\":\"complete\"}}\n")?;
+        assert!(read_complete_capture(&path).is_err());
+        Ok(())
+    }
 
     #[test]
     fn session_records_fake_process_output_and_stops_after_an_operation_fails()
