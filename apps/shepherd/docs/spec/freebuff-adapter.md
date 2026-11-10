@@ -17,7 +17,9 @@ behavior and **Back to chat** control. The integrated option participates in
 the normal task lifecycle and persisted transcript.
 
 Keep the integrated session's actual Freebuff terminal visible in the terminal
-panel while the user interacts with it. Both the Shepherd composer and that
+panel while the user interacts with it. Open the terminal panel automatically
+when the integrated task starts, while allowing the user to switch to other
+inspector tabs. Both the Shepherd composer and that
 terminal send input to the same Freebuff process: the user can type prompts
 directly into the terminal, and the adapter must observe those turns and
 include both the user prompt and response in the same task transcript. A

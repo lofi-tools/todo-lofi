@@ -275,7 +275,8 @@ current layout and give future changes a point of comparison.
 - The planned [integrated Freebuff agent](./freebuff-adapter.md) is a separate
   picker choice that uses the normal task conversation; retain the standalone
   terminal choice and its Back to chat behavior. Keep the integrated session's
-  actual terminal visible in the terminal panel and allow direct input there.
+  actual terminal in the terminal panel and allow direct input there. Open the
+  panel automatically when the task starts, and allow switching inspector tabs.
 - OpenCode and Claude Code are available when their executables are configured
   in `settings.json`.
   The selection applies to the new draft. The composer can change a draft's

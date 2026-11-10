@@ -73,8 +73,9 @@ and login diagnostics are now implemented.
       3/8, including failure propagation. The PTY service now offers an opt-in
       recording path for input, output, resize and screen frames; its fake
       interactive PTY fixture compiled but was not selected in Shepherd shard
-      1/8. Connect this path to the Freebuff terminal host, handle its error
-      channel and stop the process on capture failure. Recorded Unix PTYs now
+      1/8. A failure monitor now requests normal terminal cleanup and reports
+      cleanup errors; its failure fixture was also outside shard 1/8. Connect
+      this path and its error channel to the Freebuff terminal host. Recorded Unix PTYs now
       use nonblocking writes: each successful write and its recorded bytes are
       serialized with output capture, and readiness is polled outside the lock.
       The fake interactive and backpressure fixtures were not selected in
@@ -109,7 +110,8 @@ and login diagnostics are now implemented.
     from **Freebuff (terminal)**, preserve the terminal's existing behavior,
     and test task routing, persistence, diagnostics, and update status.
   - [ ] **P1 — Share the live terminal:** keep the integrated Freebuff PTY
-    visible and interactive in the terminal panel. Record direct terminal
+    visible and interactive in the terminal panel. Open it automatically when
+    the integrated task starts, but let the user switch inspector tabs. Record direct terminal
     prompts and replies in the conversation; serialize both input paths and
     replace an unfinished terminal prompt when the composer submits. Fail
     clearly if the input cannot be recognized or cleared reliably.

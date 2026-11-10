@@ -136,6 +136,7 @@ pub struct TerminalRecording {
     capture: CaptureSession,
     screen: Mutex<Screen>,
     errors: mpsc::UnboundedSender<String>,
+    failure_signal: Mutex<Option<std::sync::mpsc::Sender<()>>>,
     #[allow(dead_code)]
     initial_size: (u16, u16),
 }
@@ -154,6 +155,7 @@ impl TerminalRecording {
             capture,
             screen: Mutex::new(screen),
             errors,
+            failure_signal: Mutex::new(None),
             initial_size: (columns, rows),
         };
         recording
@@ -186,6 +188,18 @@ impl TerminalRecording {
     }
 
     fn report_error(&self, error: &impl std::fmt::Display) {
+        match self.failure_signal.lock() {
+            Ok(signal) => {
+                if let Some(signal) = signal.as_ref()
+                    && signal.send(()).is_err()
+                {
+                    tracing::error!(%error, "terminal recording failure monitor is unavailable");
+                }
+            }
+            Err(failure) => {
+                tracing::error!(%failure, "terminal recording failure signal is poisoned")
+            }
+        }
         if self.errors.send(error.to_string()).is_err() {
             tracing::error!(%error, "terminal recording failed after its error receiver closed");
         }
@@ -722,9 +736,18 @@ impl TerminalSessions {
     }
 }
 
-#[derive(Default)]
 pub struct PtyTerminals {
     sessions: Arc<Mutex<TerminalSessions>>,
+    terminate_on_drop: bool,
+}
+
+impl Default for PtyTerminals {
+    fn default() -> Self {
+        Self {
+            sessions: Arc::new(Mutex::new(TerminalSessions::default())),
+            terminate_on_drop: true,
+        }
+    }
 }
 
 impl PtyTerminals {
@@ -901,7 +924,9 @@ impl PtyTerminals {
 
 impl Drop for PtyTerminals {
     fn drop(&mut self) {
-        if let Err(error) = self.terminate_all() {
+        if self.terminate_on_drop
+            && let Err(error) = self.terminate_all()
+        {
             tracing::error!(%error, "could not stop terminal sessions during drop");
         }
     }
@@ -1065,6 +1090,22 @@ impl PtyTerminals {
             ));
         }
 
+        let failure_receiver = if let Some(recording) = &recording {
+            let (sender, receiver) = std::sync::mpsc::channel();
+            let mut signal = recording.failure_signal.lock().map_err(|_| {
+                TerminalError::Backend("terminal recording failure signal is poisoned".into())
+            })?;
+            if signal.is_some() {
+                return Err(TerminalError::Backend(
+                    "terminal recording is already attached".into(),
+                ));
+            }
+            *signal = Some(sender);
+            Some(receiver)
+        } else {
+            None
+        };
+
         let mut child = pair
             .slave
             .spawn_command(command)
@@ -1191,6 +1232,7 @@ impl PtyTerminals {
             .and_then(|pid| capture_process_record(pid, "terminal", terminal_id.as_str(), &token));
         #[cfg(not(unix))]
         let process = None;
+        let monitor_errors = recording.as_ref().map(|recording| recording.errors.clone());
         self.sessions()?.live.insert(
             terminal_id.as_str().to_string(),
             Session {
@@ -1204,6 +1246,52 @@ impl PtyTerminals {
                 recording,
             },
         );
+
+        if let Some(failure_receiver) = failure_receiver {
+            let sessions = Arc::downgrade(&self.sessions);
+            let terminal_id = terminal_id.clone();
+            std::thread::spawn(move || {
+                loop {
+                    match failure_receiver.recv_timeout(Duration::from_millis(200)) {
+                        Ok(()) => {
+                            if let Some(sessions) = sessions.upgrade() {
+                                let mut terminal = PtyTerminals {
+                                    sessions,
+                                    terminate_on_drop: false,
+                                };
+                                if let Err(error) = terminal.close(&terminal_id) {
+                                    tracing::error!(%error, terminal_id = terminal_id.as_str(), "could not stop terminal after recording failure");
+                                    if let Some(sender) = &monitor_errors
+                                    && sender.send(format!("could not stop terminal after recording failure: {error}")).is_err()
+                                {
+                                    tracing::error!(%error, "terminal recording error receiver closed");
+                                }
+                                }
+                            }
+                            break;
+                        }
+                        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                            let Some(sessions) = sessions.upgrade() else {
+                                break;
+                            };
+                            match sessions.lock() {
+                                Ok(sessions)
+                                    if !sessions.live.contains_key(terminal_id.as_str()) =>
+                                {
+                                    break;
+                                }
+                                Err(error) => {
+                                    tracing::error!(%error, "terminal recording monitor could not inspect sessions");
+                                    break;
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+            });
+        }
 
         let sessions = Arc::clone(&self.sessions);
         let id = terminal_id.as_str().to_string();
@@ -1338,6 +1426,48 @@ mod tests {
     use std::time::Instant;
 
     use super::*;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn recording_failure_stops_the_terminal_process() -> Result<(), Box<dyn std::error::Error>>
+    {
+        use agent_harness::freebuff_capture::{CaptureSession, CaptureWriter};
+        let directory = tempfile::tempdir()?;
+        let capture =
+            CaptureSession::new(CaptureWriter::create(directory.path(), "stop-on-failure")?);
+        let (error_sender, mut errors) = mpsc::unbounded_channel();
+        let recording = Arc::new(TerminalRecording::new(capture, 80, 24, error_sender)?);
+        recording.capture.fail()?;
+        let mut engine = PtyTerminals::new();
+        let (sender, mut receiver) = mpsc::channel(8);
+        engine.spawn_recorded(
+            TerminalSpec {
+                id: TerminalId::new("recording-failure"),
+                columns: 80,
+                rows: 24,
+                cwd: directory.path().to_path_buf(),
+                command: "/bin/sh".into(),
+                args: vec!["-c".into(), "printf trigger; exec sleep 30".into()],
+                environment: BTreeMap::new(),
+            },
+            sender,
+            recording,
+        )?;
+        let message = tokio::time::timeout(Duration::from_secs(10), errors.recv())
+            .await?
+            .ok_or("no recording error")?;
+        assert!(message.contains("failed"));
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while let Some(event) = receiver.recv().await {
+                if matches!(event, TerminalEvent::Exited { .. }) {
+                    return Ok::<(), String>(());
+                }
+            }
+            Err("terminal exited without an exit event".into())
+        })
+        .await??;
+        Ok(())
+    }
 
     #[tokio::test]
     async fn recorded_terminal_drains_output_while_input_waits_for_the_child()
