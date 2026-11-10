@@ -122,7 +122,12 @@ and report failures through Shepherd's normal diagnostics.
    message, the project and worktree, and the files or other context that may
    be sent; obtain confirmation before submitting anything. Choose a small
    number of useful tasks related to one of the user's actual projects, and
-   avoid unnecessary metered queries. Default tests must not make live calls.
+   avoid unnecessary metered queries. Prefer the user's earlier question-only
+   messages from the ChatGPT project “tools” that required tool calls, using
+   the corresponding Shepherd project at `/Users/me/src/me/tools`. Obtain
+   the exact messages from the user if the project is inaccessible. This
+   preference does not approve any live submission. Default tests must not
+   make live calls.
    Cache every live response, including partial responses, together with raw
    PTY bytes, terminal-size changes and rendered terminal-state transitions
    in their original order, plus external effects needed by assertions, under

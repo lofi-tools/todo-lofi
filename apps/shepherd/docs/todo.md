@@ -54,7 +54,11 @@ and login diagnostics are now implemented.
       Finish verification and wire it into update/restart handling; do not treat
       metadata as proof that the runtime is supported.
     - [ ] With user-approved live messages only, capture the terminal states
-      needed to establish a version-specific interaction contract.
+      needed to establish a version-specific interaction contract. Prefer
+      question-only messages requiring tools from the user's ChatGPT “tools”
+      project, using the corresponding Shepherd project at
+      `/Users/me/src/me/tools`. Confirm each exact message and its context
+      before submission; request examples if the ChatGPT project is inaccessible.
   - [ ] **P0 — Capture fixtures and define contracts:** create sanitized,
     versioned PTY/screen fixtures and a deterministic fake CLI. Map terminal
     states to harness events; identify necessary contract changes for
