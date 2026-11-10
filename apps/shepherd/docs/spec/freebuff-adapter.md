@@ -136,8 +136,10 @@ and report failures through Shepherd's normal diagnostics.
    preference does not approve any live submission. Default tests must not
    make live calls.
    One proposed question is “give me the dotenv fragment to override / ignore
-   battery / wifi and run ar3 regardless”. It is a candidate, not an approved
-   submission; confirm its exact text and the worktree context before use.
+   battery / wifi and run ar3 regardless”. The user approved one live submission
+   of this exact question in the `tools` project when capture is ready. Use
+   Freebuff's existing default model, which the user identifies as DeepSeek 4.1;
+   do not change the model. This approval does not extend to other messages.
    Cache every live response, including partial responses, together with raw
    PTY bytes, terminal-size changes and rendered terminal-state transitions
    in their original order, plus external effects needed by assertions, under
