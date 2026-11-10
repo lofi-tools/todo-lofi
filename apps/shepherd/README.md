@@ -309,11 +309,11 @@ git bisect reset
 ```
 
 The helper runs the exact test at each candidate and skips revisions where it
-is missing, ignored, cannot build, or the runner fails for a reason other than
-a test failure. A skipped revision can leave a range of possible first bad
-commits. If an older revision lacks a working Nix environment, assess it
-manually. Do not infer a passing test from a scheduled shard or a missing run
-record.
+is missing, ignored, ambiguous across binaries, cannot build, or the runner
+fails for a reason other than a test failure. A skipped revision can leave a
+range of possible first bad commits. If an older revision lacks a working Nix
+environment, assess it manually. Do not infer a passing test from a scheduled
+shard or a missing run record.
 
 ## Run the installed-agent smokes
 

@@ -11,7 +11,7 @@ spec.loader.exec_module(module)
 
 
 def inventory(name="the_test"):
-    return json.dumps({"rust-suites": {"binary": {"testcases": {name: {"ignored": False, "filter-match": {"status": "matches"}}}}}})
+    return json.dumps({"rust-suites": {"binary": {"binary-id": "binary", "testcases": {name: {"ignored": False, "filter-match": {"status": "matches"}}}}}})
 
 
 class BisectTests(unittest.TestCase):
@@ -25,6 +25,12 @@ class BisectTests(unittest.TestCase):
                 subprocess.CompletedProcess([], 0, inventory()), subprocess.CompletedProcess([], status),
             ]):
                 self.assertEqual(module.main(["the_test"]), expected)
+
+    def test_ambiguous_test_is_skipped(self):
+        data = json.loads(inventory())
+        data["rust-suites"]["other"] = {**data["rust-suites"]["binary"], "binary-id": "other"}
+        with patch.object(module.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, json.dumps(data))):
+            self.assertEqual(module.main(["the_test"]), 125)
 
 
 if __name__ == "__main__":

@@ -16,13 +16,15 @@ def main(arguments):
         result = subprocess.run([*command, "list", "--workspace", "--message-format", "json", "--", "--exact", name],
                                 text=True, stdout=subprocess.PIPE, check=True)
         inventory = json.loads(result.stdout)
-        present = any(
-            case_name == name and not case.get("ignored") and case.get("filter-match", {}).get("status") == "matches"
+        matches = [suite["binary-id"]
             for suite in inventory.get("rust-suites", {}).values()
             for case_name, case in suite.get("testcases", {}).items()
-        )
-        if not present:
+            if case_name == name and not case.get("ignored") and case.get("filter-match", {}).get("status") == "matches"]
+        if not matches:
             print("Test is missing, ignored or unavailable at this revision; skipping.", file=sys.stderr)
+            return 125
+        if len(matches) != 1:
+            print("The test name matches multiple binaries; skipping this ambiguous revision.", file=sys.stderr)
             return 125
         result = subprocess.run([*command, "run", "--workspace", "--", "--exact", name])
         if result.returncode == 0:
