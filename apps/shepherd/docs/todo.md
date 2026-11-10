@@ -186,7 +186,10 @@ and login diagnostics are now implemented.
     and answers, and relay answers to the same Freebuff session.
     The harness transcript now has question-request and answer events with
     restorable question rows and search text. Its fixture has not yet run;
-    connect pending-question state, answer submission, and the UI before use.
+    A session now tracks pending questions and prevents duplicate answer
+    submissions until delivery is confirmed, and task state accounts for both
+    questions and approvals. This routing is untested; connect the command,
+    adapter transport and UI before use.
   - [ ] **P1 — Integrate the picker:** expose the integrated agent separately
     from **Freebuff (terminal)**, preserve the terminal's existing behavior,
     and test task routing, persistence, diagnostics, and update status.

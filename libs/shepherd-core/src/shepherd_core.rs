@@ -3186,6 +3186,9 @@ impl Core {
                 HarnessEvent::ApprovalRequested { .. } => {
                     next_state = Some(TaskState::Waiting);
                 }
+                HarnessEvent::QuestionRequested { .. } => {
+                    next_state = Some(TaskState::Waiting);
+                }
                 HarnessEvent::ApprovalResolved { .. } | HarnessEvent::ApprovalWithdrawn { .. } => {
                     if next_state.unwrap_or(initial_state) == TaskState::Waiting
                         && self
@@ -3193,6 +3196,19 @@ impl Core {
                             .get(task_id)
                             .and_then(HarnessSession::pending_approval)
                             .is_none()
+                        && !self
+                            .sessions
+                            .get(task_id)
+                            .is_some_and(HarnessSession::has_pending_questions)
+                    {
+                        next_state = Some(TaskState::Working);
+                    }
+                }
+                HarnessEvent::QuestionAnswered { .. } => {
+                    if next_state.unwrap_or(initial_state) == TaskState::Waiting
+                        && self.sessions.get(task_id).is_some_and(|session| {
+                            session.pending_approval().is_none() && !session.has_pending_questions()
+                        })
                     {
                         next_state = Some(TaskState::Working);
                     }

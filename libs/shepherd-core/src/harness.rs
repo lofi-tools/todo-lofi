@@ -152,6 +152,8 @@ pub struct HarnessSession {
     dirty_entries: BTreeSet<usize>,
     agent_terminals: Vec<AgentTerminal>,
     pending_approval: Option<ApprovalId>,
+    pending_questions: BTreeSet<String>,
+    answering_questions: BTreeSet<String>,
     cancelling: bool,
     failed: bool,
     closed: bool,
@@ -170,6 +172,8 @@ impl HarnessSession {
             dirty_entries: BTreeSet::new(),
             agent_terminals: Vec::new(),
             pending_approval: None,
+            pending_questions: BTreeSet::new(),
+            answering_questions: BTreeSet::new(),
             cancelling: false,
             failed: false,
             closed: false,
@@ -296,6 +300,39 @@ impl HarnessSession {
         Ok(self.pump())
     }
 
+    pub async fn answer_question(
+        &mut self,
+        question_id: &str,
+        answer: &str,
+    ) -> Result<Vec<HarnessEvent>, CoreError> {
+        if self.closed
+            || self.failed
+            || self.cancelling
+            || !self.pending_questions.contains(question_id)
+        {
+            return Err(
+                HarnessError::Protocol("Question is no longer awaiting an answer".into()).into(),
+            );
+        }
+        if self.answering_questions.contains(question_id) {
+            return Err(
+                HarnessError::Protocol("Question answer delivery is not confirmed".into()).into(),
+            );
+        }
+        if answer.len() > 64 * 1024 {
+            return Err(HarnessError::Protocol(
+                "Question answer exceeds the supported size".into(),
+            )
+            .into());
+        }
+        self.answering_questions.insert(question_id.to_owned());
+        self.harness
+            .answer_question(question_id, answer)
+            .await
+            .map_err(|error| self.safe_error(error))?;
+        Ok(self.pump())
+    }
+
     pub fn session_approvals(&self) -> Vec<SessionApproval> {
         if self.closed {
             return Vec::new();
@@ -324,6 +361,8 @@ impl HarnessSession {
         self.cleanup_complete = true;
         self.closed = true;
         self.pending_approval = None;
+        self.pending_questions.clear();
+        self.answering_questions.clear();
         self.agent_terminals.clear();
         Ok(self.pump_with_limit(usize::MAX))
     }
@@ -409,12 +448,23 @@ impl HarnessSession {
                         self.pending_approval = None;
                     }
                 }
+                HarnessEvent::QuestionRequested { question_id, .. } => {
+                    self.pending_questions.insert(question_id.clone());
+                }
+                HarnessEvent::QuestionAnswered { question_id, .. } => {
+                    self.pending_questions.remove(question_id);
+                    self.answering_questions.remove(question_id);
+                }
                 HarnessEvent::TurnFinished { .. } => {
                     self.cancelling = false;
                     self.pending_approval = None;
+                    self.pending_questions.clear();
+                    self.answering_questions.clear();
                 }
                 HarnessEvent::Exited { .. } | HarnessEvent::ConnectionFailed { .. } => {
                     self.cancelling = false;
+                    self.pending_questions.clear();
+                    self.answering_questions.clear();
                     if let Some(approval_id) = self.pending_approval.take() {
                         let change = self
                             .transcript
@@ -659,6 +709,10 @@ impl HarnessSession {
 
     pub fn pending_approval(&self) -> Option<&ApprovalId> {
         self.pending_approval.as_ref().filter(|_| !self.cancelling)
+    }
+
+    pub fn has_pending_questions(&self) -> bool {
+        !self.closed && !self.cancelling && !self.pending_questions.is_empty()
     }
 
     pub fn is_cancelling(&self) -> bool {

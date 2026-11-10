@@ -1556,6 +1556,12 @@ pub trait AgentHarness: Send {
 
     async fn respond(&mut self, approval_id: ApprovalId, decision: Decision) -> HarnessResult<()>;
 
+    async fn answer_question(&mut self, _question_id: &str, _answer: &str) -> HarnessResult<()> {
+        Err(HarnessError::Protocol(
+            "This agent does not support question answers".into(),
+        ))
+    }
+
     async fn shutdown(&mut self) -> HarnessResult<()>;
 }
 
