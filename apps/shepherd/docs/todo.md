@@ -118,6 +118,10 @@ and login diagnostics are now implemented.
     prompts and replies in the conversation; serialize both input paths and
     replace an unfinished terminal prompt when the composer submits. Fail
     clearly if the input cannot be recognized or cleared reliably.
+    - [ ] Emit recognized terminal-origin prompts through the harness's new
+      transcript event; its deduplication and restore fixture passed in
+      agent-harness shard 8/8. Connect task state transitions for turns started
+      directly in the terminal and avoid echoing composer-origin prompts.
   - [ ] **P2 — Validate and document:** run offline fixture and fake-CLI
     coverage by default. Gate genuinely live probes with `live-freebuff`,
     disabled by default. Before each live submission, confirm the exact

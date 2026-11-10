@@ -647,6 +647,12 @@ pub enum HarnessEvent {
     TurnStarted {
         turn_id: TurnId,
     },
+    /// A prompt entered directly into the agent's terminal, not an echo of a
+    /// prompt Shepherd already added to the transcript.
+    TerminalPrompt {
+        item_id: ItemId,
+        text: String,
+    },
     Delta {
         item_id: ItemId,
         kind: DeltaKind,
@@ -880,6 +886,7 @@ pub struct Transcript {
     item_rows: BTreeMap<String, usize>,
     tool_rows: BTreeMap<String, usize>,
     approval_rows: BTreeMap<String, usize>,
+    terminal_prompt_rows: BTreeMap<String, usize>,
     next_sequence: u64,
 }
 
@@ -910,6 +917,7 @@ impl Transcript {
         self.item_rows.clear();
         self.tool_rows.clear();
         self.approval_rows.clear();
+        self.terminal_prompt_rows.clear();
     }
 
     pub fn clear_streaming_row_keys(&mut self) {
@@ -952,9 +960,12 @@ impl Transcript {
                 EntryKind::Usage { .. } => {
                     self.item_rows.insert("usage".to_string(), index);
                 }
-                EntryKind::UserMessage { .. }
-                | EntryKind::Notice { .. }
-                | EntryKind::Failure { .. } => {}
+                EntryKind::UserMessage { .. } => {
+                    if let Some(source) = &entry.source_id {
+                        self.terminal_prompt_rows.insert(source.clone(), index);
+                    }
+                }
+                EntryKind::Notice { .. } | EntryKind::Failure { .. } => {}
             }
             self.next_sequence = self.next_sequence.max(entry.sequence + 1);
             self.entries.push(entry);
@@ -1005,6 +1016,9 @@ impl Transcript {
     /// transcript rows leave it untouched.
     pub fn apply(&mut self, event: &HarnessEvent) -> TranscriptChange {
         match event {
+            HarnessEvent::TerminalPrompt { item_id, text } => {
+                self.upsert_terminal_prompt(item_id.as_str(), text)
+            }
             HarnessEvent::Delta {
                 item_id,
                 kind,
@@ -1072,6 +1086,35 @@ impl Transcript {
             }
             _ => TranscriptChange::default(),
         }
+    }
+
+    fn upsert_terminal_prompt(&mut self, item_id: &str, text: &str) -> TranscriptChange {
+        if let Some(index) = self.terminal_prompt_rows.get(item_id).copied() {
+            if let Some(Entry {
+                kind: EntryKind::UserMessage { text: existing },
+                ..
+            }) = self.entries.get_mut(index)
+            {
+                if existing == text {
+                    return TranscriptChange::default();
+                }
+                *existing = text.to_owned();
+                return TranscriptChange {
+                    appended: false,
+                    changed: Some(index),
+                };
+            }
+        }
+        let change = self.append_from(
+            EntryKind::UserMessage {
+                text: text.to_owned(),
+            },
+            Some(item_id.to_owned()),
+        );
+        if let Some(index) = change.changed {
+            self.terminal_prompt_rows.insert(item_id.to_owned(), index);
+        }
+        change
     }
 
     fn push_delta(&mut self, item_id: &str, kind: DeltaKind, text: &str) -> TranscriptChange {
@@ -1485,6 +1528,34 @@ mod tests {
             transcript.entry(0).map(Entry::summary),
             Some("agent: Hello world".to_string())
         );
+    }
+
+    #[test]
+    fn terminal_prompts_keep_one_row_across_replay_and_restore() {
+        let mut transcript = Transcript::default();
+        let prompt = HarnessEvent::TerminalPrompt {
+            item_id: ItemId::new("terminal-turn-1"),
+            text: "fix this".into(),
+        };
+        assert!(transcript.apply(&prompt).appended);
+        assert!(transcript.apply(&prompt).is_empty());
+        let mut restored = Transcript::default();
+        restored.restore(transcript.entries().to_vec());
+        assert!(restored.apply(&prompt).is_empty());
+        assert_eq!(restored.len(), 1);
+        assert_eq!(
+            restored.entry(0).map(Entry::summary),
+            Some("you: fix this".into())
+        );
+        assert!(
+            restored
+                .apply(&HarnessEvent::TerminalPrompt {
+                    item_id: ItemId::new("terminal-turn-2"),
+                    text: "next".into()
+                })
+                .appended
+        );
+        assert_eq!(restored.len(), 2);
     }
 
     #[test]
