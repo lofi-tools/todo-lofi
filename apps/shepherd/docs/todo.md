@@ -184,6 +184,9 @@ and login diagnostics are now implemented.
     The current approval contract supports decisions rather than free-text
     answers. Add a question card with a text-answer control, persist questions
     and answers, and relay answers to the same Freebuff session.
+    The harness transcript now has question-request and answer events with
+    restorable question rows and search text. Its fixture has not yet run;
+    connect pending-question state, answer submission, and the UI before use.
   - [ ] **P1 — Integrate the picker:** expose the integrated agent separately
     from **Freebuff (terminal)**, preserve the terminal's existing behavior,
     and test task routing, persistence, diagnostics, and update status.

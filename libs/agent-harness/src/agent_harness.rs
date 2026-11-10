@@ -653,6 +653,14 @@ pub enum HarnessEvent {
         item_id: ItemId,
         text: String,
     },
+    QuestionRequested {
+        question_id: String,
+        text: String,
+    },
+    QuestionAnswered {
+        question_id: String,
+        answer: String,
+    },
     Delta {
         item_id: ItemId,
         kind: DeltaKind,
@@ -790,6 +798,11 @@ pub enum EntryKind {
     Thought {
         text: String,
     },
+    Question {
+        question_id: String,
+        text: String,
+        answer: Option<String>,
+    },
     ToolCall {
         tool_call_id: String,
         title: String,
@@ -839,6 +852,10 @@ impl Entry {
             EntryKind::UserMessage { text } => format!("you: {text}"),
             EntryKind::AgentText { text } => format!("agent: {text}"),
             EntryKind::Thought { text } => format!("thought: {text}"),
+            EntryKind::Question { text, answer, .. } => match answer {
+                Some(answer) => format!("question: {text} (answered: {answer})"),
+                None => format!("question: {text} (pending)"),
+            },
             EntryKind::ToolCall { title, status, .. } => format!("{title} ({status:?})"),
             EntryKind::Plan { rows } => format!("plan ({} rows)", rows.len()),
             EntryKind::Permission {
@@ -886,6 +903,7 @@ pub struct Transcript {
     item_rows: BTreeMap<String, usize>,
     tool_rows: BTreeMap<String, usize>,
     approval_rows: BTreeMap<String, usize>,
+    question_rows: BTreeMap<String, usize>,
     terminal_prompt_rows: BTreeMap<String, usize>,
     next_sequence: u64,
 }
@@ -917,6 +935,7 @@ impl Transcript {
         self.item_rows.clear();
         self.tool_rows.clear();
         self.approval_rows.clear();
+        self.question_rows.clear();
         self.terminal_prompt_rows.clear();
     }
 
@@ -953,6 +972,9 @@ impl Transcript {
                 }
                 EntryKind::Permission { approval_id, .. } => {
                     self.approval_rows.insert(approval_id.clone(), index);
+                }
+                EntryKind::Question { question_id, .. } => {
+                    self.question_rows.insert(question_id.clone(), index);
                 }
                 EntryKind::Plan { .. } => {
                     self.item_rows.insert("plan".to_string(), index);
@@ -1019,6 +1041,13 @@ impl Transcript {
             HarnessEvent::TerminalPrompt { item_id, text } => {
                 self.upsert_terminal_prompt(item_id.as_str(), text)
             }
+            HarnessEvent::QuestionRequested { question_id, text } => {
+                self.upsert_question(question_id, text)
+            }
+            HarnessEvent::QuestionAnswered {
+                question_id,
+                answer,
+            } => self.answer_question(question_id, answer),
             HarnessEvent::Delta {
                 item_id,
                 kind,
@@ -1086,6 +1115,60 @@ impl Transcript {
             }
             _ => TranscriptChange::default(),
         }
+    }
+
+    fn upsert_question(&mut self, question_id: &str, text: &str) -> TranscriptChange {
+        if let Some(index) = self.question_rows.get(question_id).copied()
+            && let Some(Entry {
+                kind:
+                    EntryKind::Question {
+                        text: current,
+                        answer,
+                        ..
+                    },
+                ..
+            }) = self.entries.get_mut(index)
+        {
+            if current == text || answer.is_some() {
+                return TranscriptChange::default();
+            }
+            *current = text.to_owned();
+            return TranscriptChange {
+                appended: false,
+                changed: Some(index),
+            };
+        }
+        let change = self.append(EntryKind::Question {
+            question_id: question_id.to_owned(),
+            text: text.to_owned(),
+            answer: None,
+        });
+        if let Some(index) = change.changed {
+            self.question_rows.insert(question_id.to_owned(), index);
+        }
+        change
+    }
+
+    fn answer_question(&mut self, question_id: &str, answer: &str) -> TranscriptChange {
+        if let Some(index) = self.question_rows.get(question_id).copied()
+            && let Some(Entry {
+                kind:
+                    EntryKind::Question {
+                        answer: current, ..
+                    },
+                ..
+            }) = self.entries.get_mut(index)
+        {
+            if current.is_some() {
+                return TranscriptChange::default();
+            }
+            *current = Some(answer.to_owned());
+            return TranscriptChange {
+                appended: false,
+                changed: Some(index),
+            };
+        }
+        TranscriptChange::default()
     }
 
     fn upsert_terminal_prompt(&mut self, item_id: &str, text: &str) -> TranscriptChange {
@@ -1479,6 +1562,31 @@ pub trait AgentHarness: Send {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn question_and_answer_restore_to_the_same_transcript_row() {
+        let mut transcript = Transcript::default();
+        let requested = HarnessEvent::QuestionRequested {
+            question_id: "question-1".into(),
+            text: "Which target?".into(),
+        };
+        transcript.apply(&requested);
+        assert!(transcript.apply(&requested).is_empty());
+        let answered = HarnessEvent::QuestionAnswered {
+            question_id: "question-1".into(),
+            answer: "debug".into(),
+        };
+        transcript.apply(&answered);
+        let mut restored = Transcript::default();
+        restored.restore(transcript.entries().iter().cloned());
+        assert!(restored.apply(&requested).is_empty());
+        assert!(restored.apply(&answered).is_empty());
+        assert_eq!(restored.len(), 1);
+        assert_eq!(
+            restored.entry(0).map(Entry::summary),
+            Some("question: Which target? (answered: debug)".into())
+        );
+    }
 
     #[test]
     fn spawn_spec_debug_does_not_expose_environment_values() {

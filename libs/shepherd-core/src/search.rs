@@ -200,6 +200,10 @@ pub(crate) fn entry_text(kind: &EntryKind) -> String {
             None => title.clone(),
         },
         EntryKind::Permission { title, .. } => title.clone(),
+        EntryKind::Question { text, answer, .. } => match answer {
+            Some(answer) => format!("{text} {answer}"),
+            None => text.clone(),
+        },
         EntryKind::Plan { rows } => rows
             .iter()
             .map(|row| row.text.as_str())
