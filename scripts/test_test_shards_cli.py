@@ -11,6 +11,36 @@ spec.loader.exec_module(shards_cli)
 
 
 class RunnerTests(unittest.TestCase):
+    def test_real_git_change_selects_package_and_rotating_shard(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+
+            def git(*arguments):
+                subprocess.run(["git", "-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null", *arguments],
+                               cwd=root, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+            git("init", "-q")
+            git("config", "user.name", "Test")
+            git("config", "user.email", "test@example.invalid")
+            (root / "libs/core").mkdir(parents=True)
+            (root / "libs/core/source.rs").write_text("before")
+            git("add", ".")
+            git("commit", "-qm", "initial")
+            (root / "libs/core/source.rs").write_text("after")
+            git("add", ".")
+            git("commit", "-qm", "change")
+            with patch.object(shards_cli, "ROOT", root), \
+                 patch.object(shards_cli, "HISTORY", root / "history.jsonl"), \
+                 patch.object(shards_cli, "workspace", return_value=({"libs/core": "core", "libs/other": "other"}, {})), \
+                 patch.object(shards_cli, "playwright_suites", return_value=[]), \
+                 patch.object(shards_cli, "web_test_suites", return_value=[]), \
+                 patch.object(shards_cli, "execute") as execute:
+                shards_cli.main(["--shard", "3/8", "--dry-run"])
+            commands = [call.args[0] for call in execute.call_args_list]
+            self.assertEqual(commands[0], ["cargo", "nextest", "run", "-p", "core"])
+            self.assertIn("hash:3/8", commands[1])
+            self.assertEqual(commands[1][4:6], ["--exclude", "core"])
+
     def test_changed_paths_include_commit_staged_unstaged_and_untracked(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
