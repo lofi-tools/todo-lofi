@@ -74,17 +74,13 @@ and login diagnostics are now implemented.
       recording path for input, output, resize and screen frames; its fake
       interactive PTY fixture compiled but was not selected in Shepherd shard
       1/8. Connect this path to the Freebuff terminal host, handle its error
-      channel and stop the process on capture failure. Input writes no longer
-      hold the recording lock while blocked, but this leaves a race where an
-      output capture failure can occur after an input attempt was recorded and
-      before its write completes. Close that race before enabling live capture.
-      The backpressure fixture compiled but was not selected in shard 1/8.
-      A nonblocking operation primitive records only successful progress while
-      serialized with capture; connect it to PTY writes and wait for readiness
-      outside the lock. Its fixture was not selected in shard 4/8.
-      An event recorded before
-      a failed operation is an attempt, so failed sessions must never be treated
-      as complete replay.
+      channel and stop the process on capture failure. Recorded Unix PTYs now
+      use nonblocking writes: each successful write and its recorded bytes are
+      serialized with output capture, and readiness is polled outside the lock.
+      The fake interactive and backpressure fixtures were not selected in
+      Shepherd shard 1/8; verify both before enabling live capture. The capture
+      primitive's nonblocking fixture was not selected in agent-harness shard
+      4/8. Failed sessions must never be treated as complete replay.
     - [ ] Finalize captures only after terminal output, responses, and worktree
       effects are drained; require a completion marker for successful replay.
       The capture API rejects missing or trailing records, but its completion

@@ -22,6 +22,99 @@ use crate::terminal_screen::Screen;
 
 const MAX_WRITE_BYTES: usize = 64 * 1024;
 
+#[cfg(unix)]
+fn recording_poll_handles(
+    master: &dyn MasterPty,
+) -> Result<(std::os::fd::OwnedFd, std::os::fd::OwnedFd), TerminalError> {
+    use std::os::fd::FromRawFd;
+    let fd = master.as_raw_fd().ok_or_else(|| {
+        TerminalError::Backend("recorded terminal has no pollable descriptor".into())
+    })?;
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if flags < 0 || unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
+        return Err(TerminalError::Backend(format!(
+            "could not set recorded terminal nonblocking: {}",
+            std::io::Error::last_os_error()
+        )));
+    }
+    let duplicate = || {
+        let duplicated = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 0) };
+        if duplicated < 0 {
+            Err(TerminalError::Backend(format!(
+                "could not duplicate terminal descriptor: {}",
+                std::io::Error::last_os_error()
+            )))
+        } else {
+            // The successful duplication returns a new owned descriptor.
+            Ok(unsafe { std::os::fd::OwnedFd::from_raw_fd(duplicated) })
+        }
+    };
+    Ok((duplicate()?, duplicate()?))
+}
+
+#[cfg(unix)]
+fn wait_recorded_pty(fd: &std::os::fd::OwnedFd, events: libc::c_short) -> std::io::Result<()> {
+    use std::os::fd::AsRawFd;
+    let mut descriptor = libc::pollfd {
+        fd: fd.as_raw_fd(),
+        events,
+        revents: 0,
+    };
+    let result = unsafe { libc::poll(&mut descriptor, 1, 100) };
+    if result < 0 {
+        let error = std::io::Error::last_os_error();
+        if error.kind() != std::io::ErrorKind::Interrupted {
+            return Err(error);
+        }
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn write_recorded_pty(
+    writer: &mut dyn Write,
+    fd: &std::os::fd::OwnedFd,
+    recording: &TerminalRecording,
+    bytes: &[u8],
+) -> HarnessResult<()> {
+    let mut offset = 0;
+    while offset < bytes.len() {
+        let written =
+            recording
+                .capture
+                .try_apply_and_record(|| match writer.write(&bytes[offset..]) {
+                    Ok(0) => Err(HarnessError::Protocol(
+                        "terminal write made no progress".into(),
+                    )),
+                    Ok(count) => Ok(Some((
+                        count,
+                        CaptureEvent::Input {
+                            bytes: bytes[offset..offset + count].to_vec(),
+                        },
+                    ))),
+                    Err(error)
+                        if matches!(
+                            error.kind(),
+                            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+                        ) =>
+                    {
+                        Ok(None)
+                    }
+                    Err(error) => Err(HarnessError::Protocol(format!(
+                        "terminal write failed: {error}"
+                    ))),
+                })?;
+        if let Some(written) = written {
+            offset += written;
+        } else {
+            wait_recorded_pty(fd, libc::POLLOUT).map_err(|error| {
+                HarnessError::Protocol(format!("terminal write polling failed: {error}"))
+            })?;
+        }
+    }
+    Ok(())
+}
+
 struct WriteRequest {
     bytes: Vec<u8>,
     completion: Option<oneshot::Sender<Result<(), TerminalError>>>,
@@ -958,6 +1051,20 @@ impl PtyTerminals {
             .take_writer()
             .map_err(|error| TerminalError::Backend(format!("writer failed: {error}")))?;
 
+        #[cfg(unix)]
+        let (reader_poll, writer_poll) = if recording.is_some() {
+            let (reader, writer) = recording_poll_handles(&*pair.master)?;
+            (Some(reader), Some(writer))
+        } else {
+            (None, None)
+        };
+        #[cfg(not(unix))]
+        if recording.is_some() {
+            return Err(TerminalError::Backend(
+                "recorded terminals require nonblocking PTY support".into(),
+            ));
+        }
+
         let mut child = pair
             .slave
             .spawn_command(command)
@@ -990,7 +1097,36 @@ impl PtyTerminals {
                         }
                     }
                     Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                    #[cfg(unix)]
+                    Err(error)
+                        if error.kind() == std::io::ErrorKind::WouldBlock
+                            && reader_poll.is_some() =>
+                    {
+                        if let Some(fd) = &reader_poll
+                            && let Err(error) = wait_recorded_pty(fd, libc::POLLIN)
+                        {
+                            if let Some(recording) = &reader_recording {
+                                if let Err(failure) = recording.capture.fail() {
+                                    recording.report_error(&failure);
+                                }
+                                recording.report_error(&error);
+                            }
+                            break;
+                        }
+                    }
                     Err(error) => {
+                        if let Some(recording) = &reader_recording {
+                            #[cfg(target_os = "linux")]
+                            let normal_hangup = error.raw_os_error() == Some(libc::EIO);
+                            #[cfg(not(target_os = "linux"))]
+                            let normal_hangup = false;
+                            if !normal_hangup {
+                                if let Err(failure) = recording.capture.fail() {
+                                    recording.report_error(&failure);
+                                }
+                                recording.report_error(&error);
+                            }
+                        }
                         tracing::debug!(%error, "terminal reader stopped");
                         break;
                     }
@@ -1006,31 +1142,24 @@ impl PtyTerminals {
         std::thread::spawn(move || {
             while let Some(request) = writes.blocking_recv() {
                 let result = if let Some(recording) = &writer_recording {
-                    recording
-                        .capture
-                        .record_and_apply(
-                            CaptureEvent::Input {
-                                bytes: request.bytes.clone(),
-                            },
-                            || Ok(((), Vec::new())),
-                        )
-                        .and_then(|()| {
-                            writer
-                                .write_all(&request.bytes)
-                                .and_then(|()| writer.flush())
-                                .map_err(|error| {
-                                    HarnessError::Protocol(format!(
-                                        "terminal write failed: {error}"
-                                    ))
-                                })
-                        })
-                        .map_err(|error| {
-                            if let Err(failure) = recording.capture.fail() {
-                                recording.report_error(&failure);
-                            }
-                            recording.report_error(&error);
-                            TerminalError::Backend(error.to_string())
-                        })
+                    #[cfg(unix)]
+                    let outcome = match &writer_poll {
+                        Some(fd) => write_recorded_pty(&mut *writer, fd, recording, &request.bytes),
+                        None => Err(HarnessError::Protocol(
+                            "recorded terminal has no poll descriptor".into(),
+                        )),
+                    };
+                    #[cfg(not(unix))]
+                    let outcome: HarnessResult<()> = Err(HarnessError::Protocol(
+                        "recorded terminals require nonblocking PTY support".into(),
+                    ));
+                    outcome.map_err(|error| {
+                        if let Err(failure) = recording.capture.fail() {
+                            recording.report_error(&failure);
+                        }
+                        recording.report_error(&error);
+                        TerminalError::Backend(error.to_string())
+                    })
                 } else {
                     writer
                         .write_all(&request.bytes)
