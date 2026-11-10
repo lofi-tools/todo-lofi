@@ -104,8 +104,10 @@ and login diagnostics are now implemented.
       outside shepherd-core shard 6/8. Effect collection now compares HEAD,
       branch, index entries and index flags against a pre-run identity; its
       branch-change fixture was outside shard 5/8. Detect or reject other Git
-      metadata changes, handle other effect types, and implement confined
-      replay before live use.
+      metadata changes and handle other effect types. Replay planning now
+      validates complete captures, modes, size limits and duplicate paths
+      before applying any effects; its fixture was outside shard 5/8. Implement
+      confined file application and base-identity verification before live use.
     - [ ] Replay capture records in order through a streaming consumer. An
       offline synthetic capture replays split output and a resize through the
       shell's VT parser (Shepherd shard 8/8 passed); the consumer's own fixture

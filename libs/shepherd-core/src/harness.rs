@@ -980,6 +980,81 @@ fn capture_worktree_effects_inner(
     Ok(())
 }
 
+#[allow(dead_code)]
+enum WorktreeReplayEffect {
+    File {
+        path: PathBuf,
+        contents: Vec<u8>,
+        mode: u32,
+    },
+    Deleted {
+        path: PathBuf,
+    },
+}
+
+#[allow(dead_code)]
+fn plan_worktree_replay(
+    capture_path: &std::path::Path,
+) -> Result<Vec<WorktreeReplayEffect>, CoreError> {
+    use agent_harness::freebuff_capture::{CaptureEvent, visit_complete_capture};
+    let mut effects = Vec::new();
+    let mut paths = BTreeSet::new();
+    let mut total_bytes = 0usize;
+    visit_complete_capture(capture_path, |record| {
+        let effect = match record.event {
+            CaptureEvent::WorktreeFile {
+                path,
+                contents,
+                mode,
+            } => {
+                let mode = mode.filter(|mode| *mode <= 0o777).ok_or_else(|| {
+                    HarnessError::Protocol("captured file has no supported mode".into())
+                })?;
+                if contents.len() > 16 * 1024 * 1024 {
+                    return Err(HarnessError::Protocol(
+                        "captured file exceeds replay limit".into(),
+                    ));
+                }
+                total_bytes = total_bytes
+                    .checked_add(contents.len())
+                    .filter(|total| *total <= 64 * 1024 * 1024)
+                    .ok_or_else(|| {
+                        HarnessError::Protocol("captured effects exceed replay limit".into())
+                    })?;
+                if !paths.insert(path.clone()) {
+                    return Err(HarnessError::Protocol(
+                        "duplicate captured worktree path".into(),
+                    ));
+                }
+                Some(WorktreeReplayEffect::File {
+                    path,
+                    contents,
+                    mode,
+                })
+            }
+            CaptureEvent::WorktreeDeleted { path } => {
+                if !paths.insert(path.clone()) {
+                    return Err(HarnessError::Protocol(
+                        "duplicate captured worktree path".into(),
+                    ));
+                }
+                Some(WorktreeReplayEffect::Deleted { path })
+            }
+            CaptureEvent::WorktreeEffect { .. } => {
+                return Err(HarnessError::Protocol(
+                    "legacy worktree effects cannot be replayed safely".into(),
+                ));
+            }
+            _ => None,
+        };
+        if let Some(effect) = effect {
+            effects.push(effect);
+        }
+        Ok(())
+    })?;
+    Ok(effects)
+}
+
 pub(crate) struct TerminalSubmitGate {
     core: Arc<tokio::sync::Mutex<crate::Core>>,
     failed: tokio::sync::Mutex<bool>,
@@ -1053,6 +1128,46 @@ mod tests {
     use crate::Project;
     use crate::store::TursoStore;
     use crate::test_support::{TestDatabase, TestDirectory};
+
+    #[test]
+    fn replay_planning_requires_a_complete_capture_without_duplicate_paths()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use agent_harness::freebuff_capture::{CaptureEvent, CaptureSession, CaptureWriter};
+        let directory = TestDirectory::new()?;
+        let capture = CaptureSession::new(CaptureWriter::create(directory.path(), "plan")?);
+        let path = directory.join(".cache/shepherd-live/freebuff/plan.jsonl");
+        capture.record_and_apply(
+            CaptureEvent::WorktreeFile {
+                path: "file".into(),
+                contents: b"data".to_vec(),
+                mode: Some(0o644),
+            },
+            || Ok(((), Vec::new())),
+        )?;
+        assert!(plan_worktree_replay(&path).is_err());
+        capture.record_and_apply(
+            CaptureEvent::WorktreeDeleted {
+                path: "file".into(),
+            },
+            || Ok(((), Vec::new())),
+        )?;
+        capture.finish()?;
+        assert!(plan_worktree_replay(&path).is_err());
+        let valid = CaptureSession::new(CaptureWriter::create(directory.path(), "valid")?);
+        valid.record_and_apply(
+            CaptureEvent::WorktreeFile {
+                path: "file".into(),
+                contents: b"data".to_vec(),
+                mode: Some(0o644),
+            },
+            || Ok(((), Vec::new())),
+        )?;
+        valid.finish()?;
+        let effects =
+            plan_worktree_replay(&directory.join(".cache/shepherd-live/freebuff/valid.jsonl"))?;
+        assert_eq!(effects.len(), 1);
+        Ok(())
+    }
 
     #[test]
     fn discovers_unstaged_and_untracked_worktree_effects() -> Result<(), Box<dyn std::error::Error>>

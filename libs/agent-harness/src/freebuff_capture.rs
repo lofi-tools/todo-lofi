@@ -320,6 +320,19 @@ pub fn read_capture(path: &Path) -> HarnessResult<Vec<CaptureRecord>> {
 }
 
 pub fn read_complete_capture(path: &Path) -> HarnessResult<Vec<CaptureRecord>> {
+    let mut records = Vec::new();
+    visit_complete_capture(path, |record| {
+        records.push(record);
+        Ok(())
+    })?;
+    Ok(records)
+}
+
+/// Visitors must defer external effects until this function returns successfully.
+pub fn visit_complete_capture(
+    path: &Path,
+    mut visit: impl FnMut(CaptureRecord) -> HarnessResult<()>,
+) -> HarnessResult<()> {
     let mut file = File::open(path).map_err(|error| {
         HarnessError::Protocol(format!(
             "could not open Freebuff capture at {}: {error}",
@@ -341,17 +354,18 @@ pub fn read_complete_capture(path: &Path) -> HarnessResult<Vec<CaptureRecord>> {
             path.display()
         )));
     }
-    let records = read_capture(path)?;
-    if !records
-        .last()
-        .is_some_and(|record| matches!(record.event, CaptureEvent::Complete))
-    {
+    let mut complete = false;
+    visit_capture(path, |record| {
+        complete = matches!(record.event, CaptureEvent::Complete);
+        visit(record)
+    })?;
+    if !complete {
         return Err(HarnessError::Protocol(format!(
             "Freebuff capture at {} is incomplete",
             path.display()
         )));
     }
-    Ok(records)
+    Ok(())
 }
 
 pub fn visit_capture(
