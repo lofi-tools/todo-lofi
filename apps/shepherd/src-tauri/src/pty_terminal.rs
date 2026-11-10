@@ -1513,6 +1513,43 @@ mod tests {
     }
 
     #[cfg(unix)]
+    async fn wait_for_capture_session_exit(
+        record: &ProcessRecord,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let session = libc::pid_t::try_from(record.session_id)?;
+        if session <= 1 {
+            return Err("invalid recorded terminal session".into());
+        }
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let mut alive = false;
+            for pid in list_processes()? {
+                if pid <= 1 {
+                    continue;
+                }
+                let observed = unsafe { libc::getsid(pid) };
+                if observed == session {
+                    alive = true;
+                    break;
+                }
+                if observed < 0 {
+                    let error = std::io::Error::last_os_error();
+                    if error.raw_os_error() != Some(libc::ESRCH) {
+                        return Err(error.into());
+                    }
+                }
+            }
+            if !alive {
+                return Ok(());
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Err("terminal session still has running processes after shutdown".into());
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
+    #[cfg(unix)]
     async fn run_capture(config: CaptureRunnerConfig) -> Result<(), Box<dyn std::error::Error>> {
         use agent_harness::freebuff_capture::CaptureEvent;
         use shepherd_core::harness::FreebuffLiveCapture;
@@ -1585,6 +1622,9 @@ mod tests {
             sender,
             recording,
         )?;
+        let process = engine
+            .process_record(&terminal_id)?
+            .ok_or("could not establish terminal process identity for capture")?;
         eprintln!(
             "Inspect the terminal output. Create the send marker only when the approved prompt can be submitted, then the stop marker after the response is complete."
         );
@@ -1635,6 +1675,7 @@ mod tests {
                 }
             }
         }
+        wait_for_capture_session_exit(&process).await?;
         runtime(&session, &metadata)?;
         let capture_path = workspace
             .join(".cache/shepherd-live/freebuff")

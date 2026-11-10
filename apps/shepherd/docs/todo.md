@@ -138,7 +138,9 @@ and login diagnostics are now implemented.
       compile-checked. Its new offline fake-CLI end-to-end fixture was outside
       Shepherd shard 5/8 and must pass before any approved live use. The runner
       waits for operator send/stop markers and does not infer readiness or
-      completion.
+      completion. Before collecting worktree effects it also checks that no
+      processes remain in the terminal session; that check is unverified and
+      does not detect a process that escaped into a different session.
     - [ ] Replay capture records in order through a streaming consumer. An
       offline synthetic capture replays split output and a resize through the
       shell's VT parser (Shepherd shard 8/8 passed); the consumer's own fixture
