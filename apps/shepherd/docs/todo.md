@@ -81,6 +81,9 @@ and login diagnostics are now implemented.
       The backpressure fixture passed in Shepherd shard 3/8. The capture
       primitive's nonblocking fixture passed in agent-harness shard 5/8.
       Failed sessions must never be treated as complete replay.
+      The waiter now invalidates captures if PTY output cannot be confirmed
+      drained; its new fixture was outside Shepherd shard 7/8. The live runner
+      must wait for that drain result before finalizing effects.
     - [ ] Feed recorded screen frames to the integrated adapter. An opt-in
       bounded observer now publishes each frame after capture; the interactive
       fake-PTY fixture verified observer and capture order in Shepherd shard

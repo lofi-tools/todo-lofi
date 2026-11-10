@@ -228,6 +228,13 @@ impl TerminalRecording {
             tracing::error!(%error, "terminal recording failed after its error receiver closed");
         }
     }
+
+    fn invalidate(&self, reason: &str) {
+        if let Err(error) = self.capture.fail() {
+            self.report_error(&error);
+        }
+        self.report_error(&reason);
+    }
 }
 
 #[cfg(unix)]
@@ -1158,6 +1165,11 @@ impl PtyTerminals {
                             .blocking_send(TerminalEvent::Output(buffer[..read].to_vec()));
                         reader_sending.store(false, Ordering::Release);
                         if sent.is_err() {
+                            if let Some(recording) = &reader_recording {
+                                recording.invalidate(
+                                    "terminal output receiver closed before capture drained",
+                                );
+                            }
                             break;
                         }
                     }
@@ -1256,6 +1268,7 @@ impl PtyTerminals {
             .and_then(|pid| capture_process_record(pid, "terminal", terminal_id.as_str(), &token));
         #[cfg(not(unix))]
         let process = None;
+        let waiter_recording = recording.clone();
         let monitor_errors = recording.as_ref().map(|recording| recording.errors.clone());
         self.sessions()?.live.insert(
             terminal_id.as_str().to_string(),
@@ -1275,41 +1288,22 @@ impl PtyTerminals {
             let sessions = Arc::downgrade(&self.sessions);
             let terminal_id = terminal_id.clone();
             std::thread::spawn(move || {
-                loop {
-                    match failure_receiver.recv_timeout(Duration::from_millis(200)) {
-                        Ok(()) => {
-                            if let Some(sessions) = sessions.upgrade() {
-                                let mut terminal = PtyTerminals {
-                                    sessions,
-                                    terminate_on_drop: false,
-                                };
-                                if let Err(error) = terminal.close(&terminal_id) {
-                                    tracing::error!(%error, terminal_id = terminal_id.as_str(), "could not stop terminal after recording failure");
-                                    if let Some(sender) = &monitor_errors
-                                    && sender.send(format!("could not stop terminal after recording failure: {error}")).is_err()
-                                {
-                                    tracing::error!(%error, "terminal recording error receiver closed");
-                                }
-                                }
-                            }
-                            break;
-                        }
-                        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
-                        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                            let Some(sessions) = sessions.upgrade() else {
-                                break;
-                            };
-                            match sessions.lock() {
-                                Ok(sessions)
-                                    if !sessions.live.contains_key(terminal_id.as_str()) =>
-                                {
-                                    break;
-                                }
-                                Err(error) => {
-                                    tracing::error!(%error, "terminal recording monitor could not inspect sessions");
-                                    break;
-                                }
-                                _ => {}
+                if failure_receiver.recv().is_ok() {
+                    if let Some(sessions) = sessions.upgrade() {
+                        let mut terminal = PtyTerminals {
+                            sessions,
+                            terminate_on_drop: false,
+                        };
+                        if let Err(error) = terminal.close(&terminal_id) {
+                            tracing::error!(%error, terminal_id = terminal_id.as_str(), "could not stop terminal after recording failure");
+                            if let Some(sender) = &monitor_errors
+                                && sender
+                                    .send(format!(
+                                        "could not stop terminal after recording failure: {error}"
+                                    ))
+                                    .is_err()
+                            {
+                                tracing::error!(%error, "terminal recording error receiver closed");
                             }
                         }
                     }
@@ -1326,6 +1320,9 @@ impl PtyTerminals {
                     status.signal().map(str::to_owned),
                 ),
                 Err(error) => {
+                    if let Some(recording) = &waiter_recording {
+                        recording.invalidate("terminal process wait failed during capture");
+                    }
                     tracing::debug!(%error, "waiting for the terminal child failed");
                     (None, None)
                 }
@@ -1338,14 +1335,37 @@ impl PtyTerminals {
             }
             loop {
                 match reader_status.recv_timeout(Duration::from_millis(150)) {
-                    Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                    Ok(()) => break,
+                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                        if let Some(recording) = &waiter_recording {
+                            recording.invalidate(
+                                "terminal reader stopped without confirming capture drain",
+                            );
+                        }
+                        break;
+                    }
                     Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
                         // A full queue still has output ahead of the exit. Only time out
                         // a reader waiting for descendants that inherited the slave.
                         if !sending.load(Ordering::Acquire) || events.is_closed() {
+                            if let Some(recording) = &waiter_recording {
+                                recording.invalidate(
+                                    "terminal output did not drain before capture exit",
+                                );
+                            }
                             tracing::debug!("terminal reader did not reach EOF before exit");
                             break;
                         }
+                    }
+                }
+            }
+            if let Some(recording) = &waiter_recording {
+                match recording.failure_signal.lock() {
+                    Ok(mut signal) => {
+                        signal.take();
+                    }
+                    Err(error) => {
+                        tracing::error!(%error, "terminal recording failure signal is poisoned")
                     }
                 }
             }
@@ -1453,6 +1473,47 @@ mod tests {
     use std::time::Instant;
 
     use super::*;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn undrained_recorded_terminal_cannot_finish_capture()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use agent_harness::freebuff_capture::{CaptureSession, CaptureWriter};
+        let directory = tempfile::tempdir()?;
+        let capture = CaptureSession::new(CaptureWriter::create(directory.path(), "undrained")?);
+        let (error_sender, mut errors) = mpsc::unbounded_channel();
+        let recording = Arc::new(TerminalRecording::new(capture, 80, 24, error_sender)?);
+        let mut engine = PtyTerminals::new();
+        let (sender, mut receiver) = mpsc::channel(8);
+        engine.spawn_recorded(
+            TerminalSpec {
+                id: TerminalId::new("undrained"),
+                columns: 80,
+                rows: 24,
+                cwd: directory.path().to_path_buf(),
+                command: "/bin/sh".into(),
+                args: vec!["-c".into(), "sleep 3 & exit 0".into()],
+                environment: BTreeMap::new(),
+            },
+            sender,
+            recording.clone(),
+        )?;
+        let error = tokio::time::timeout(Duration::from_secs(5), errors.recv())
+            .await?
+            .ok_or("missing drain error")?;
+        assert!(error.contains("drain"));
+        assert!(recording.capture.finish().is_err());
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while let Some(event) = receiver.recv().await {
+                if matches!(event, TerminalEvent::Exited { .. }) {
+                    return Ok::<(), String>(());
+                }
+            }
+            Err("missing terminal exit".into())
+        })
+        .await??;
+        Ok(())
+    }
 
     #[test]
     fn a_full_screen_observer_fails_the_recording_without_dropping_frames()
