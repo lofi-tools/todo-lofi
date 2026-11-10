@@ -137,8 +137,10 @@ and login diagnostics are now implemented.
       harness now supports replacing an existing streamed row, with its fixture
       passing in agent-harness shard 5/8. A bounded Freebuff text reconciler
       emits deltas, replacements and no events for repeated snapshots; its
-      fixture was not selected in shard 8/8. Connect it to a verified screen
-      classifier and enforce event-stream backpressure.
+      fixture passed in agent-harness shard 7/8. Its publisher bounds queued
+      events and releases blocked producers when the receiver closes; the
+      publisher fixture was not selected in shard 7/8. Connect it to a verified
+      screen classifier and the adapter event stream.
   - [ ] **P1 — Implement the integrated adapter:** launch the installed CLI in
     the task worktree with the existing login, forward input with normal CLI
     terminal interpretation, stream and reconcile text, map tool activity,

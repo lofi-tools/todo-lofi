@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use serde::Deserialize;
 
@@ -78,6 +79,59 @@ impl FreebuffTextReconciler {
     pub fn clear(&mut self) {
         self.messages.clear();
         self.total_bytes = 0;
+    }
+}
+
+pub struct FreebuffTextPublisher {
+    reconciler: FreebuffTextReconciler,
+    sender: tokio::sync::mpsc::UnboundedSender<HarnessEvent>,
+    capacity: Arc<tokio::sync::Semaphore>,
+}
+
+impl FreebuffTextPublisher {
+    pub fn new(
+        sender: tokio::sync::mpsc::UnboundedSender<HarnessEvent>,
+        capacity: usize,
+    ) -> HarnessResult<Self> {
+        if capacity == 0 || capacity > 256 {
+            return Err(HarnessError::Protocol(
+                "invalid Freebuff event capacity".into(),
+            ));
+        }
+        Ok(Self {
+            reconciler: FreebuffTextReconciler::default(),
+            sender,
+            capacity: Arc::new(tokio::sync::Semaphore::new(capacity)),
+        })
+    }
+
+    pub async fn update(&mut self, item_id: &str, text: &str) -> HarnessResult<()> {
+        let permit = tokio::select! {
+            _ = self.sender.closed() => return Err(HarnessError::TransportClosed("Freebuff event receiver closed".into())),
+            permit = self.capacity.clone().acquire_owned() => permit.map_err(|_| HarnessError::TransportClosed("Freebuff event capacity closed".into()))?,
+        };
+        let Some(mut event) = self.reconciler.update(item_id, text)? else {
+            return Ok(());
+        };
+        match &mut event {
+            HarnessEvent::Delta { stream_permit, .. }
+            | HarnessEvent::TextReplaced { stream_permit, .. } => {
+                *stream_permit = Some(Arc::new(permit));
+            }
+            _ => {
+                return Err(HarnessError::Protocol(
+                    "unexpected Freebuff text event".into(),
+                ));
+            }
+        }
+        self.sender
+            .send(event)
+            .map_err(|_| HarnessError::TransportClosed("Freebuff event receiver closed".into()))?;
+        Ok(())
+    }
+
+    pub fn clear(&mut self) {
+        self.reconciler.clear();
     }
 }
 
@@ -308,6 +362,31 @@ mod tests {
                 .is_err()
         );
         assert!(reconciler.update("message", "hello!")?.is_none());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn text_publisher_applies_backpressure_until_events_are_released()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let mut publisher = FreebuffTextPublisher::new(sender, 1)?;
+        publisher.update("message", "first").await?;
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(30),
+                publisher.update("message", "second")
+            )
+            .await
+            .is_err()
+        );
+        let first = receiver.recv().await.ok_or("missing first event")?;
+        drop(first);
+        publisher.update("message", "second").await?;
+        assert!(
+            matches!(receiver.recv().await, Some(HarnessEvent::TextReplaced { text, .. }) if text == "second")
+        );
+        drop(receiver);
+        assert!(publisher.update("message", "third").await.is_err());
         Ok(())
     }
 
