@@ -2,6 +2,7 @@
 
 import json
 import os
+import socket
 import subprocess
 import tempfile
 from pathlib import Path
@@ -56,6 +57,12 @@ def rust_list_command(command):
     return command
 
 
+def available_port():
+    with socket.socket() as listener:
+        listener.bind(("127.0.0.1", 0))
+        return listener.getsockname()[1]
+
+
 class Recorder:
     def __init__(self, root: Path, history: Path, revision: str, seed: str, shard: str):
         self.root = root
@@ -92,7 +99,10 @@ class Recorder:
             self.history.parent.mkdir(parents=True, exist_ok=True)
             with tempfile.TemporaryDirectory(dir=self.history.parent) as temporary:
                 report = Path(temporary) / "playwright.json"
-                environment = dict(os.environ, PLAYWRIGHT_JSON_OUTPUT_FILE=str(report))
+                environment = dict(os.environ, PLAYWRIGHT_JSON_OUTPUT_FILE=str(report),
+                                   TEST_SHARD_PORT=str(available_port()))
+                environment.pop("ASTRO_PREVIEW_BACKGROUND", None)
+                environment.pop("ASTRO_DEV_BACKGROUND", None)
                 subprocess.run([*command, "--reporter=list,json"], cwd=directory, env=environment, check=True)
                 workspace = str(directory.relative_to(self.root))
                 self.save(ui_test_ids(json.loads(report.read_text(encoding="utf-8")), workspace))
