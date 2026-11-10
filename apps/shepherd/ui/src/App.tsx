@@ -28,7 +28,7 @@ import { reportError } from './diagnostics'
 
 type CoreEvent = bridge.Event
 type TerminalBell = Extract<CoreEvent, { type: 'terminalBell' }>['data']
-type TurnSelection = { codex?: bridge.CodexTurnOptions; mode?: string }
+type TurnSelection = { codex?: bridge.CodexTurnOptions; mode?: string; model?: string }
 type PaletteKind = 'commands' | 'projects' | 'tasks'
 
 const LIVE_STATES: bridge.TaskState[] = ['starting', 'queued', 'working', 'waiting']
@@ -400,6 +400,33 @@ export function App() {
     const options = catalog && catalog.projectId === selectedProjectId() ? catalog.options : []
     if (options.length || selected) return { current: selected ?? null, options }
   }
+  const [projectModels] = createResource(
+    () => {
+      const project = selectedProject()
+      const task = workspace()?.task
+      return opencodeConfigured() && currentAgent() === 'opencode' && project && !project.missing
+        && (!task || task.state === 'draft') ? project.id : false
+    },
+    async (projectId) => {
+      try {
+        return { projectId, models: await bridge.opencodeProjectModels(projectId) }
+      } catch (error) {
+        console.warn('Could not read OpenCode project models', error)
+        return { projectId, models: { current: null, options: [] } }
+      }
+    },
+  )
+  const composerModels = (): bridge.AgentModels | undefined => {
+    const current = workspace()
+    const selected = turnOptions()?.model
+    if (current?.models) return selected ? { ...current.models, current: selected } : current.models
+    if (currentAgent() !== 'opencode' || (current && current.task.state !== 'draft' && !selected)) return
+    const catalog = projectModels()
+    const models = catalog && catalog.projectId === selectedProjectId()
+      ? catalog.models : { current: null, options: [] }
+    if (!models.options.length && !selected) return
+    return { current: selected ?? models.current, options: models.options }
+  }
   const composerModel = () => codexOptions()?.model ?? workspace()?.diagnostics?.model ?? codexCatalog()?.model ?? null
   const composerEffort = () => {
     const queued = codexOptions()
@@ -412,6 +439,10 @@ export function App() {
   function setTurnOptions(options: TurnSelection) {
     const key = fileQueueKey()
     if (key) setQueuedTurnOptions((queued) => new Map(queued).set(key, options))
+  }
+
+  function patchTurnOptions(patch: TurnSelection) {
+    setTurnOptions({ ...turnOptions(), ...patch })
   }
 
   function clearTurnOptions(taskId: string) {
@@ -1592,12 +1623,13 @@ export function App() {
     const files = promptFiles()
     const codex = currentAgent() === 'codex' ? codexOptions() : undefined
     const mode = pendingMode()
+    const model = currentAgent() !== 'codex' ? turnOptions()?.model : undefined
     if (!projectId || (!text && !files.length) || (!canCompose() && !canQueuePrompt()) || pending()) return
     void run(async () => {
       const task = current?.task ?? (await firstDraft(projectId)).task
       const attachmentIds: string[] = []
       for (const file of files) attachmentIds.push(await bridge.savePromptFile(task.id, file))
-      const updated = await bridge.sendPrompt(task.id, text, attachmentIds, codex, mode)
+      const updated = await bridge.sendPrompt(task.id, text, attachmentIds, codex, mode, model)
       clearPromptFiles(task.id)
       clearTurnOptions(task.id)
       if (selectedTaskId() === task.id) {
@@ -1612,7 +1644,7 @@ export function App() {
     const current = workspace()
     if (pending()) return
     if (!current?.modes) {
-      setTurnOptions({ mode: mode || undefined })
+      patchTurnOptions({ mode: mode || undefined })
       return
     }
     const taskId = current.task.id
@@ -2235,7 +2267,12 @@ export function App() {
                 <Show when={currentAgent() === 'codex'}>
                   <ComposerModelPicker model={composerModel()} effort={composerEffort()} models={codexCatalog()?.models ?? []}
                     disabled={!canCompose() || pending() || workspace()?.capabilities?.modelPicker === false}
-                    options={codexOptions()} onChange={(codex) => setTurnOptions({ codex })} />
+                    options={codexOptions()} onChange={(codex) => patchTurnOptions({ codex })} />
+                </Show>
+                <Show when={currentAgent() !== 'codex' ? composerModels() : undefined}>
+                  {(models) => <ComposerAgentModelPicker models={models()}
+                    disabled={!canCompose() || pending() || workspace()?.capabilities?.modelPicker === false}
+                    onChange={(model) => patchTurnOptions({ model })} />}
                 </Show>
                 <button
                   type="button"
@@ -2580,6 +2617,33 @@ function ComposerModePicker(props: { modes: bridge.AgentModes; disabled: boolean
   )
 }
 
+function ComposerAgentModelPicker(props: {
+  models: bridge.AgentModels
+  disabled: boolean
+  onChange: (model: string) => void
+}) {
+  const current = () => props.models.options.find((model) => model.id === props.models.current)
+  const label = () => current()?.name ?? props.models.current ?? 'Default model'
+  const options = () => [
+    ...(!current() && props.models.current
+      ? [{ id: `model:${props.models.current}`, name: props.models.current, disabled: true }]
+      : []),
+    ...props.models.options.map((model) => ({
+      id: `model:${model.id}`, name: model.name, detail: model.description ?? undefined, disabled: props.disabled,
+    })),
+  ]
+  function choose(id: string) {
+    if (id.startsWith('model:')) props.onChange(id.slice(6))
+  }
+  return (
+    <PickerMenu label="Model" text={label()} value={`model:${props.models.current ?? ''}`} options={options()}
+      onChange={choose} triggerClass="composer__picker" above>
+      <span class="composer__picker-label">{label()}</span>
+      <PickerCaret />
+    </PickerMenu>
+  )
+}
+
 function ComposerModelPicker(props: {
   model: string | null
   effort?: string | null
@@ -2880,6 +2944,16 @@ function SearchMark(props: { text: string; match?: string }) {
   </Show>
 }
 
+function authFailureSummary(text: string, detail: string | null | undefined) {
+  const haystack = `${text}\n${detail ?? ''}`.toLowerCase()
+  if (/turso|libsql/.test(haystack)) return 'Sign in to Turso and check its database token, then retry.'
+  if (/openrouter/.test(haystack)) return 'Sign in to OpenRouter and check its API key, then retry.'
+  if (/anthropic|claude/.test(haystack)) return 'Sign in to Anthropic and check its access token, then retry.'
+  if (/openai|codex/.test(haystack)) return 'Sign in to OpenAI and check its access token, then retry.'
+  if (/\bopencode\b/.test(haystack)) return 'Sign in to OpenCode and check its access token, then retry.'
+  return 'Sign in to the model provider and check its API key, then retry.'
+}
+
 function entryBody(
   entry: bridge.Entry,
   decide: (approvalId: string, decision: bridge.Decision) => void,
@@ -2978,18 +3052,38 @@ function entryBody(
     }
     case 'notice':
       return <p class={kind.data.isError ? 'entry__notice--error' : 'entry__notice'}>{text(kind.data.text)}</p>
-    case 'failure':
+    case 'failure': {
+      const authSummary = kind.data.kind === 'authRequired'
+        ? authFailureSummary(kind.data.text, kind.data.detail) : null
       return (
         <div class="entry__failure">
           <p class="entry__failure-title">
             {failureLabels[kind.data.kind] ?? kind.data.kind}
           </p>
-          <p class="entry__failure-text">{text(kind.data.text)}</p>
-          <Show when={kind.data.detail}>
-            {(detail) => <pre class="entry__failure-detail">{detail()}</pre>}
+          <Show when={authSummary} fallback={(
+            <>
+              <p class="entry__failure-text">{text(kind.data.text)}</p>
+              <Show when={kind.data.detail}>
+                {(detail) => <pre class="entry__failure-detail">{detail()}</pre>}
+              </Show>
+            </>
+          )}>
+            {(summary) => (
+              <>
+                <p class="entry__failure-text">{summary()}</p>
+                <details class="entry__failure-disclosure">
+                  <summary>Error details</summary>
+                  <p class="entry__failure-detail entry__failure-detail--message">{text(kind.data.text)}</p>
+                  <Show when={kind.data.detail}>
+                    {(detail) => <pre class="entry__failure-detail">{detail()}</pre>}
+                  </Show>
+                </details>
+              </>
+            )}
           </Show>
         </div>
       )
+    }
     case 'usage':
       return <p class="entry__usage">{`${kind.data.used} of ${kind.data.size} tokens`}</p>
   }

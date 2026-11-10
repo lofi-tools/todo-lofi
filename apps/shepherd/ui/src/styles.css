@@ -1700,6 +1700,24 @@ textarea {
   white-space: pre-wrap;
 }
 
+.entry__failure-detail--message {
+  color: var(--text);
+}
+
+.entry__failure-disclosure {
+  margin-top: 6px;
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.entry__failure-disclosure summary {
+  cursor: pointer;
+}
+
+.entry__failure-disclosure[open] summary {
+  margin-bottom: 4px;
+}
+
 .diagnostics {
   margin: 0 0 8px;
   color: var(--text-muted);

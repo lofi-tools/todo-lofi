@@ -26,7 +26,7 @@ test.beforeEach(async ({ context }) => {
     let screenshotSaves = 0
     const notifications: string[] = []
     const annotationWrapperOpens: string[] = []
-    const sentPrompts: Array<{ taskId: string; text: string }> = []
+    const sentPrompts: Array<{ taskId: string; text: string; model?: string }> = []
     const dockCounts: Array<number | undefined> = []
     const windowTitles: string[] = []
     const terminalAppearances: Array<{ light: boolean; moreContrast: boolean }> = []
@@ -49,9 +49,14 @@ test.beforeEach(async ({ context }) => {
     const promptFileUploads: Array<{ taskId: string; name: string; text: string }> = []
     const codexTurns: Array<{ taskId: string; model?: string; effort?: string }> = []
     const sessionModes = new Map<string, string>()
+    const sessionModels = new Map<string, string>()
     const advertisedModes = [
       { id: 'build', name: 'Build', description: null },
       { id: 'plan', name: 'Plan', description: 'Plan before editing' },
+    ]
+    const advertisedModels = [
+      { id: 'acme/deepseek', name: 'DeepSeek V3', description: 'acme' },
+      { id: 'acme/qwen', name: 'Qwen Coder', description: 'acme' },
     ]
     const fileListings: string[] = []
     const fileActions: Array<{ projectId: string; taskId: string | null; path: string; action: string }> = []
@@ -225,13 +230,15 @@ test.beforeEach(async ({ context }) => {
         id: 'task-1',
         projectId: 'project-1',
         title: 'Ship it',
-        state: options.has('agent-failed') ? 'failed' : options.has('interrupted-task') ? 'interrupted'
+        state: options.has('agent-failed') || options.has('agent-auth-failed') ? 'failed'
+          : options.has('interrupted-task') ? 'interrupted'
           : ['approval-fixture', 'scoped-approval', 'project-approval'].some((name) => options.has(name)) ? 'waiting' : 'ready',
-        agent: options.has('acp-fallback') ? 'opencode' : 'codex',
+        agent: options.has('acp-fallback') || options.has('agent-models') ? 'opencode' : 'codex',
         tier: options.has('acp-fallback') ? 'acp' : 'native',
         branch: 'shepherd/ship-it',
         worktreePath: '/tmp/demo/.git/shepherd/worktrees/ship-it',
-        error: options.has('agent-failed') ? 'The agent exited with code 23 before the turn finished.' : null,
+        error: options.has('agent-auth-failed') ? 'Turso rejected the database token: HTTP 401 Unauthorized'
+          : options.has('agent-failed') ? 'The agent exited with code 23 before the turn finished.' : null,
         createdAt: 1_760_000_000_000,
       },
     ]
@@ -309,10 +316,14 @@ test.beforeEach(async ({ context }) => {
         },
       ],
     }
-    if (options.has('agent-failed')) {
+    if (options.has('agent-failed') || options.has('agent-auth-failed')) {
+      const auth = options.has('agent-auth-failed')
       transcripts['task-1'] = options.has('reopened') ? [] : [entry('failure-1', 1, {
         type: 'failure',
-        data: { kind: 'midTurnExit', text: tasks[0].error, detail: 'Agent stderr fixture' },
+        data: {
+          kind: auth ? 'authRequired' : 'midTurnExit', text: tasks[0].error,
+          detail: auth ? 'Turso login required for workspace acme.' : 'Agent stderr fixture',
+        },
       })]
     }
 
@@ -424,7 +435,7 @@ test.beforeEach(async ({ context }) => {
         && task.agent === 'opencode' && task.state !== 'draft'
       const capabilities = task.state === 'draft' || legacySession ? null : {
         streaming: true, thoughts: true, toolCalls: true, approvals: !limited, resume: !limited,
-        cancel: !limited, modelPicker: !limited && task.agent === 'codex', modePicker: hasModes, images: false, resourceLinks: false,
+        cancel: !limited, modelPicker: !limited && (task.agent === 'codex' || (task.agent === 'opencode' && options.has('agent-models'))), modePicker: hasModes, images: false, resourceLinks: false,
         usage: true, agentTerminals: !limited, patchesInApprovals: !limited,
       }
       return {
@@ -443,6 +454,10 @@ test.beforeEach(async ({ context }) => {
         modes: hasModes ? {
           current: sessionModes.get(taskId) ?? 'build',
           options: advertisedModes,
+        } : undefined,
+        models: options.has('agent-models') && task.agent === 'opencode' && task.state !== 'draft' ? {
+          current: sessionModels.get(taskId) ?? advertisedModels[0].id,
+          options: advertisedModels,
         } : undefined,
         recovery: ['failed', 'interrupted'].includes(task.state) ? limited ? 'startNew' : capabilities ? 'resume' : 'reconnect' : null,
         diagnostics: options.has('acp-fallback') ? {
@@ -776,6 +791,8 @@ test.beforeEach(async ({ context }) => {
             return options.has('configured-opencode')
           case 'opencode_project_modes':
             return options.has('draft-modes') && args.projectId === 'project-notes' ? advertisedModes : []
+          case 'opencode_project_models':
+            return options.has('agent-models') ? { current: advertisedModels[0].id, options: advertisedModels } : { current: null, options: [] }
           case 'claude_configured':
             return options.has('configured-claude')
           case 'project_remote':
@@ -1059,7 +1076,8 @@ test.beforeEach(async ({ context }) => {
             const task = tasks.find((candidate) => candidate.id === args.taskId)
             if (args.codex) codexTurns.push({ taskId: args.taskId, ...args.codex })
             if (args.mode) sessionModes.set(args.taskId, args.mode)
-            sentPrompts.push({ taskId: args.taskId, text: args.text })
+            if (args.model) sessionModels.set(args.taskId, args.model)
+            sentPrompts.push({ taskId: args.taskId, text: args.text, ...(args.model ? { model: args.model } : {}) })
             const text = args.attachmentIds?.length ? `Attachments: ${args.attachmentIds.join(', ')}` : args.text
             task.state = 'waiting'
             transcripts[task.id] = [
@@ -3766,6 +3784,37 @@ test('passes the model and its advertised effort from the empty composer to the 
   await expect(page.locator('.transcript')).toContainText('Use the selected model')
   expect(await page.evaluate(() => window.__codexTurns)).toEqual([{ taskId: 'task-2', model: 'fixture-model', effort: 'high' }])
   await expect(selected).toBeVisible()
+})
+
+test('passes a generic model pick from the composer to the next turn', async ({ page }) => {
+  await page.goto('/?agent-models&configured-opencode')
+  const composer = page.locator('.composer')
+  const current = composer.getByRole('button', { name: 'Model: DeepSeek V3' })
+  await expect(current).toBeVisible()
+  await current.click()
+  const menu = composer.getByRole('menu', { name: 'Model' })
+  await menu.getByRole('menuitemradio', { name: 'Qwen Coder' }).click()
+  const selected = composer.getByRole('button', { name: 'Model: Qwen Coder' })
+  await expect(selected).toBeVisible()
+
+  await composer.getByLabel('Prompt', { exact: true }).fill('Use the selected model')
+  await composer.getByRole('button', { name: 'Send', exact: true }).click()
+  await expect.poll(() => page.evaluate(() => window.__sentPrompts))
+    .toContainEqual({ taskId: 'task-1', text: 'Use the selected model', model: 'acme/qwen' })
+  await expect(composer.getByRole('button', { name: 'Model: Qwen Coder' })).toBeVisible()
+})
+
+test('summarizes an auth failure and keeps the raw error behind details', async ({ page }) => {
+  await page.goto('/?agent-auth-failed')
+  const chat = page.getByRole('region', { name: 'Task chat' })
+  const failure = chat.locator('.entry__failure')
+  await expect(failure).toContainText('Sign-in required')
+  await expect(failure.locator('.entry__failure-text')).toHaveText('Sign in to Turso and check its database token, then retry.')
+  const details = failure.locator('details')
+  await expect(details).not.toHaveAttribute('open', '')
+  await details.locator('summary').click()
+  await expect(details).toContainText('Turso rejected the database token: HTTP 401 Unauthorized')
+  await expect(details).toContainText('Turso login required for workspace acme.')
 })
 
 test('shows advertised session modes and disables changing them during a turn', async ({ page }) => {

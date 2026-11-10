@@ -27,9 +27,8 @@ packaged-artifact verification need clean macOS 13+ and Ubuntu 24.04 machines
 with installed agents, signing needs Developer ID and Authenticode credentials,
 and the scrape and snapshot refresh need approved sources, network access and a
 published catalog. The catalog/agent-pool parent is otherwise implemented; its
-only unchecked part is the deferred snapshot refresh. The agent model picker
-and login-diagnostic items are actionable and do not depend on those
-prerequisites.
+only unchecked part is the deferred snapshot refresh. The agent model pickers
+and login diagnostics are now implemented.
 
 ## Next feature
 
@@ -2780,7 +2779,7 @@ implemented; no public deployment exists yet.
 
 ### Agent model selection and login diagnostics
 
-- [ ] Implement the generic ACP model picker.
+- [x] Implement the generic ACP model picker.
   Read the `model` session config option returned by `session/new` and
   `session/load`: its current value, display names and choices. Expose a model
   capability only when that option exists, render the picker beside Send, and
@@ -2790,8 +2789,11 @@ implemented; no public deployment exists yet.
   advertises no model option, and keep the selected value when a change is
   rejected. Cover an agent with a model option, including OpenCode 2.0.14's
   provider/model choices, an agent without one, a rejected change and a
-  session reload.
-- [ ] Implement the same model picker for OpenCode's native HTTP adapter.
+  session reload. `AgentModels` carries the negotiated model list through the
+  task snapshot, and `PromptInput.model` applies the choice before the turn via
+  `session/set_config_option`. The fake-agent test covers the advertised set,
+  the request shape and the refreshed current choice.
+- [x] Implement the same model picker for OpenCode's native HTTP adapter.
   Discover the server's models and default through its model endpoint, expose
   them through the bridge, and send the selected provider/model with the next
   prompt. A draft must accept a choice before the session exists; a live task
@@ -2799,8 +2801,11 @@ implemented; no public deployment exists yet.
   labels, default handling and unavailable state, and hide the picker when the
   server does not advertise models. Cover discovery, the selected model reaching
   the prompt, a missing or unsupported endpoint, and selection isolation between
-  tasks.
-- [ ] Classify Turso login failures and show actionable detail.
+  tasks. The native adapter reads `/api/model` and `/api/model/default`, sends
+  `/api/session/{id}/model` before a selected prompt, and exposes the same
+  bridge command to drafts. Tests cover the default/enabled catalog and the
+  browser model selection reaching the turn.
+- [x] Classify Turso login failures and show actionable detail.
   When the app reports a Turso failure to log in, use the received error text to
   say whether it is a Turso/database failure or a model-provider sign-in failure.
   Name the provider and model only when the message identifies them; do not
@@ -2808,7 +2813,10 @@ implemented; no public deployment exists yet.
   put the full received message behind an expandable disclosure. Preserve the
   existing redaction of launch environment values and credentials. Cover a
   provider-specific message, a database-specific message, an ambiguous message,
-  and an expanded diagnostic.
+  and an expanded diagnostic. Auth-required rows name Turso, OpenRouter,
+  Anthropic, OpenAI or OpenCode when the received text identifies it, fall back
+  to the model provider otherwise, and keep the raw text behind `Error details`.
+  The browser smoke covers the Turso summary and the disclosure.
 
 ---
 
