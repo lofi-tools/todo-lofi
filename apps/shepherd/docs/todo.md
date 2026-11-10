@@ -118,8 +118,10 @@ and login diagnostics are now implemented.
       effects using confined directory handles after checking a clean worktree
       against the identity recorded before capture. Replay planning rejects
       missing, duplicated or late identities; its updated fixture passed in
-      shard 8/8. The application fixture was outside that shard. Report partial
-      application failures and connect capture and replay before live use.
+      shard 8/8. The application fixture was outside that shard. Replay now
+      reports the failing path and warns that the worktree may be partially
+      modified; its partial-failure fixture was outside core shard 7/8.
+      Connect capture and replay before live use.
       A capture lifecycle now records the clean base and, after the caller
       confirms terminal drain, collects effects before finalizing. Its combined
       capture/replay fixture was outside shepherd-core shard 1/8; connect the

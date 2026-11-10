@@ -1216,102 +1216,119 @@ fn replay_worktree_effects(
         }
     }
     let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
-    for effect in effects {
-        let (path, create_parent) = match &effect {
-            WorktreeReplayEffect::File { path, .. } => (path, true),
-            WorktreeReplayEffect::Deleted { path } => (path, false),
+    for (applied, effect) in effects.into_iter().enumerate() {
+        let effect_path = match &effect {
+            WorktreeReplayEffect::File { path, .. } | WorktreeReplayEffect::Deleted { path } => {
+                path.clone()
+            }
         };
-        let mut directory =
-            open(root, flags, Mode::empty()).map_err(|error| io_error(error.into()))?;
-        let parent = path
-            .parent()
-            .ok_or_else(|| HarnessError::Protocol("invalid replay parent".into()))?;
-        let mut missing = false;
-        for component in parent.components() {
-            let Component::Normal(name) = component else {
-                return Err(HarnessError::Protocol("invalid replay path".into()).into());
+        let result = (|| -> Result<(), CoreError> {
+            let (path, create_parent) = match &effect {
+                WorktreeReplayEffect::File { path, .. } => (path, true),
+                WorktreeReplayEffect::Deleted { path } => (path, false),
             };
-            let next = match openat(&directory, name, flags, Mode::empty()) {
-                Ok(next) => next,
-                Err(rustix::io::Errno::NOENT) if create_parent => {
-                    match mkdirat(&directory, name, Mode::from_raw_mode(0o755)) {
-                        Ok(()) | Err(rustix::io::Errno::EXIST) => {}
+            let mut directory =
+                open(root, flags, Mode::empty()).map_err(|error| io_error(error.into()))?;
+            let parent = path
+                .parent()
+                .ok_or_else(|| HarnessError::Protocol("invalid replay parent".into()))?;
+            let mut missing = false;
+            for component in parent.components() {
+                let Component::Normal(name) = component else {
+                    return Err(HarnessError::Protocol("invalid replay path".into()).into());
+                };
+                let next = match openat(&directory, name, flags, Mode::empty()) {
+                    Ok(next) => next,
+                    Err(rustix::io::Errno::NOENT) if create_parent => {
+                        match mkdirat(&directory, name, Mode::from_raw_mode(0o755)) {
+                            Ok(()) | Err(rustix::io::Errno::EXIST) => {}
+                            Err(error) => return Err(io_error(error.into())),
+                        }
+                        openat(&directory, name, flags, Mode::empty())
+                            .map_err(|error| io_error(error.into()))?
+                    }
+                    Err(rustix::io::Errno::NOENT) => {
+                        missing = true;
+                        break;
+                    }
+                    Err(error) => return Err(io_error(error.into())),
+                };
+                directory = next;
+            }
+            if missing {
+                return Ok(());
+            }
+            let name = path
+                .file_name()
+                .ok_or_else(|| HarnessError::Protocol("invalid replay filename".into()))?
+                .to_os_string();
+            match statat(&directory, name.as_os_str(), AtFlags::SYMLINK_NOFOLLOW) {
+                Ok(stat) if FileType::from_raw_mode(stat.st_mode) != FileType::RegularFile => {
+                    return Err(HarnessError::Protocol(
+                        "replay target is not a regular file".into(),
+                    )
+                    .into());
+                }
+                Ok(_) | Err(rustix::io::Errno::NOENT) => {}
+                Err(error) => return Err(io_error(error.into())),
+            }
+            match effect {
+                WorktreeReplayEffect::Deleted { .. } => {
+                    match unlinkat(&directory, name.as_os_str(), AtFlags::empty()) {
+                        Ok(()) | Err(rustix::io::Errno::NOENT) => {}
                         Err(error) => return Err(io_error(error.into())),
                     }
-                    openat(&directory, name, flags, Mode::empty())
-                        .map_err(|error| io_error(error.into()))?
                 }
-                Err(rustix::io::Errno::NOENT) => {
-                    missing = true;
-                    break;
-                }
-                Err(error) => return Err(io_error(error.into())),
-            };
-            directory = next;
-        }
-        if missing {
-            continue;
-        }
-        let name = path
-            .file_name()
-            .ok_or_else(|| HarnessError::Protocol("invalid replay filename".into()))?
-            .to_os_string();
-        match statat(&directory, name.as_os_str(), AtFlags::SYMLINK_NOFOLLOW) {
-            Ok(stat) if FileType::from_raw_mode(stat.st_mode) != FileType::RegularFile => {
-                return Err(
-                    HarnessError::Protocol("replay target is not a regular file".into()).into(),
-                );
-            }
-            Ok(_) | Err(rustix::io::Errno::NOENT) => {}
-            Err(error) => return Err(io_error(error.into())),
-        }
-        match effect {
-            WorktreeReplayEffect::Deleted { .. } => {
-                match unlinkat(&directory, name.as_os_str(), AtFlags::empty()) {
-                    Ok(()) | Err(rustix::io::Errno::NOENT) => {}
-                    Err(error) => return Err(io_error(error.into())),
-                }
-            }
-            WorktreeReplayEffect::File { contents, mode, .. } => {
-                let temporary = format!(".shepherd-replay-{}", uuid::Uuid::new_v4());
-                let fd = openat(
-                    &directory,
-                    temporary.as_str(),
-                    OFlags::WRONLY
-                        | OFlags::CREATE
-                        | OFlags::EXCL
-                        | OFlags::NOFOLLOW
-                        | OFlags::CLOEXEC,
-                    Mode::from_raw_mode(0o600),
-                )
-                .map_err(|error| io_error(error.into()))?;
-                let mut file = std::fs::File::from(fd);
-                let written = file.write_all(&contents).and_then(|()| {
-                    fchmod(&file, Mode::from_raw_mode(mode as _)).map_err(std::io::Error::from)
-                });
-                if let Err(error) = written {
-                    if let Err(cleanup) = unlinkat(&directory, temporary.as_str(), AtFlags::empty())
-                    {
-                        return Err(HarnessError::Protocol(format!(
-                            "replay write failed: {error}; temporary cleanup failed: {cleanup}"
-                        ))
-                        .into());
+                WorktreeReplayEffect::File { contents, mode, .. } => {
+                    let temporary = format!(".shepherd-replay-{}", uuid::Uuid::new_v4());
+                    let fd = openat(
+                        &directory,
+                        temporary.as_str(),
+                        OFlags::WRONLY
+                            | OFlags::CREATE
+                            | OFlags::EXCL
+                            | OFlags::NOFOLLOW
+                            | OFlags::CLOEXEC,
+                        Mode::from_raw_mode(0o600),
+                    )
+                    .map_err(|error| io_error(error.into()))?;
+                    let mut file = std::fs::File::from(fd);
+                    let written = file.write_all(&contents).and_then(|()| {
+                        fchmod(&file, Mode::from_raw_mode(mode as _)).map_err(std::io::Error::from)
+                    });
+                    if let Err(error) = written {
+                        if let Err(cleanup) =
+                            unlinkat(&directory, temporary.as_str(), AtFlags::empty())
+                        {
+                            return Err(HarnessError::Protocol(format!(
+                                "replay write failed: {error}; temporary cleanup failed: {cleanup}"
+                            ))
+                            .into());
+                        }
+                        return Err(io_error(error));
                     }
-                    return Err(io_error(error));
-                }
-                if let Err(error) =
-                    renameat(&directory, temporary.as_str(), &directory, name.as_os_str())
-                {
-                    if let Err(cleanup) = unlinkat(&directory, temporary.as_str(), AtFlags::empty())
+                    if let Err(error) =
+                        renameat(&directory, temporary.as_str(), &directory, name.as_os_str())
                     {
-                        return Err(HarnessError::Protocol(format!(
-                            "replay rename failed: {error}; temporary cleanup failed: {cleanup}"
-                        ))
-                        .into());
+                        if let Err(cleanup) =
+                            unlinkat(&directory, temporary.as_str(), AtFlags::empty())
+                        {
+                            return Err(HarnessError::Protocol(format!(
+                                "replay rename failed: {error}; temporary cleanup failed: {cleanup}"
+                            ))
+                            .into());
+                        }
+                        return Err(io_error(error.into()));
                     }
-                    return Err(io_error(error.into()));
                 }
             }
+            Ok(())
+        })();
+        if let Err(error) = result {
+            return Err(HarnessError::Protocol(format!(
+                "replay failed at {} after {applied} effects; the worktree may be partially modified: {error}",
+                effect_path.display()
+            )).into());
         }
     }
     Ok(())
@@ -1479,6 +1496,42 @@ mod tests {
         );
         assert!(!repository.path().join("README.md").exists());
         assert!(replay_worktree_effects(repository.path(), &path).is_err());
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn replay_reports_partial_application_on_failure() -> Result<(), Box<dyn std::error::Error>> {
+        use agent_harness::freebuff_capture::{CaptureEvent, CaptureSession, CaptureWriter};
+        let repository = crate::test_support::TestRepository::new()?;
+        let cache = TestDirectory::new()?;
+        let capture = CaptureSession::new(CaptureWriter::create(cache.path(), "partial")?);
+        begin_worktree_capture(repository.path(), &capture)?;
+        for path in ["first.txt", "README.md/child.txt"] {
+            capture.record_and_apply(
+                CaptureEvent::WorktreeFile {
+                    path: path.into(),
+                    contents: b"captured".to_vec(),
+                    mode: Some(0o644),
+                },
+                || Ok(((), Vec::new())),
+            )?;
+        }
+        capture.finish()?;
+        let error = replay_worktree_effects(
+            repository.path(),
+            &cache.join(".cache/shepherd-live/freebuff/partial.jsonl"),
+        )
+        .err()
+        .ok_or("expected replay failure")?
+        .to_string();
+        assert!(error.contains("README.md/child.txt"));
+        assert!(error.contains("after 1 effects"));
+        assert!(error.contains("worktree may be partially modified"));
+        assert_eq!(
+            std::fs::read(repository.path().join("first.txt"))?,
+            b"captured"
+        );
         Ok(())
     }
 
