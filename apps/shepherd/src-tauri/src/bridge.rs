@@ -19,7 +19,7 @@ use agent_harness::acp::{
     TerminalBackend, TerminalExitStatus, TerminalLaunch, TerminalProcessEvent,
 };
 use agent_harness::codex::CodexProjectModels;
-use agent_harness::{AgentMode, CodexTurnOptions, Decision, PromptInput, SpawnSpec};
+use agent_harness::{AgentMode, AgentModels, CodexTurnOptions, Decision, PromptInput, SpawnSpec};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use shepherd_core::files::{self, DirectoryListing, FileSearchQuery, FileSearchResult, TextFile};
@@ -1564,6 +1564,7 @@ impl ShellState {
             .await
     }
 
+    #[cfg(test)]
     pub async fn send_prompt_with_files(
         &self,
         task_id: String,
@@ -1572,10 +1573,24 @@ impl ShellState {
         codex: CodexTurnOptions,
         mode: Option<String>,
     ) -> Result<TaskWorkspace, BridgeError> {
+        self.send_prompt_with_files_and_model(task_id, text, ids, codex, mode, None)
+            .await
+    }
+
+    pub async fn send_prompt_with_files_and_model(
+        &self,
+        task_id: String,
+        text: String,
+        ids: Vec<String>,
+        codex: CodexTurnOptions,
+        mode: Option<String>,
+        model: Option<String>,
+    ) -> Result<TaskWorkspace, BridgeError> {
         let mut input = PromptInput {
             text,
             codex,
             mode,
+            model,
             ..PromptInput::default()
         };
         if !ids.is_empty() {
@@ -1783,6 +1798,21 @@ impl ShellState {
         agent_harness::opencode::project_modes(&spec)
             .await
             .map_err(|error| BridgeError::new("opencode_modes", error.to_string()))
+    }
+
+    async fn opencode_project_models(
+        &self,
+        project_id: String,
+    ) -> Result<AgentModels, BridgeError> {
+        let Some(launch) = &self.opencode_launch else {
+            return Ok(AgentModels::default());
+        };
+        let spec = self
+            .discovery_spec(project_id, Agent::OpenCode, launch.clone())
+            .await?;
+        agent_harness::opencode::project_models(&spec)
+            .await
+            .map_err(|error| BridgeError::new("opencode_models", error.to_string()))
     }
 
     async fn discovery_spec(
@@ -2969,15 +2999,17 @@ pub mod commands {
         attachment_ids: Option<Vec<String>>,
         codex: Option<CodexTurnOptions>,
         mode: Option<String>,
+        model: Option<String>,
     ) -> Result<TaskWorkspace, BridgeError> {
         state
             .inner()
-            .send_prompt_with_files(
+            .send_prompt_with_files_and_model(
                 task_id,
                 text,
                 attachment_ids.unwrap_or_default(),
                 codex.unwrap_or_default(),
                 mode,
+                model,
             )
             .await
     }
@@ -3094,6 +3126,14 @@ pub mod commands {
         project_id: String,
     ) -> Result<Vec<AgentMode>, BridgeError> {
         state.opencode_project_modes(project_id).await
+    }
+
+    #[tauri::command]
+    pub async fn opencode_project_models(
+        state: State<'_, ShellState>,
+        project_id: String,
+    ) -> Result<AgentModels, BridgeError> {
+        state.opencode_project_models(project_id).await
     }
 
     #[tauri::command]

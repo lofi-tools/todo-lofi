@@ -9,8 +9,8 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use reqwest::{Client, Method, RequestBuilder, Response, Url};
-use serde::Deserialize;
 use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
@@ -22,10 +22,10 @@ use tokio::time::{Instant, timeout, timeout_at};
 use crate::acp::{AcpHarness, TerminalBackend};
 use crate::settings::AgentSettings;
 use crate::{
-    AdapterTier, AgentDiagnostics, AgentHarness, AgentMode, AgentModes, ApprovalId,
-    ApprovalRequest, Capabilities, Decision, DeltaKind, Entry, FailureKind, HarnessError,
-    HarnessEvent, HarnessResult, ItemId, PromptInput, SessionId, SessionState, SpawnSpec,
-    ToolCallId, ToolStatus, TurnFinishReason, TurnId, command_line,
+    AdapterTier, AgentDiagnostics, AgentHarness, AgentMode, AgentModel, AgentModels, AgentModes,
+    ApprovalId, ApprovalRequest, Capabilities, Decision, DeltaKind, Entry, FailureKind,
+    HarnessError, HarnessEvent, HarnessResult, ItemId, PromptInput, SessionId, SessionState,
+    SpawnSpec, ToolCallId, ToolStatus, TurnFinishReason, TurnId, command_line,
 };
 
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(20);
@@ -64,6 +64,44 @@ pub fn configured_launch(settings: &AgentSettings) -> HarnessResult<Option<Spawn
         spec.environment.insert("OPENCODE_CONFIG".into(), path);
     }
     Ok(Some(spec))
+}
+
+pub async fn project_models(spec: &SpawnSpec) -> HarnessResult<AgentModels> {
+    let hide_diagnostics = spec
+        .environment
+        .keys()
+        .any(|key| key != crate::PROCESS_TOKEN_ENV);
+    let (server, mut startup_group) = OpenCodeServer::start_guarded(spec, None)
+        .await
+        .map_err(|error| crate::protect_discovery_error(error, hide_diagnostics))?;
+    let models = if server.probe.models {
+        server.model_catalog().await.map(|catalog| catalog.models)
+    } else {
+        Ok(AgentModels::default())
+    };
+    let shutdown = server.shutdown().await;
+    startup_group.disarm();
+    finish_model_discovery(models, shutdown, hide_diagnostics)
+}
+
+fn finish_model_discovery(
+    models: HarnessResult<AgentModels>,
+    shutdown: HarnessResult<()>,
+    hide_diagnostics: bool,
+) -> HarnessResult<AgentModels> {
+    match (models, shutdown) {
+        (Ok(models), Ok(())) => Ok(models),
+        (Err(error), Ok(())) | (Ok(_), Err(error)) => {
+            Err(crate::protect_discovery_error(error, hide_diagnostics))
+        }
+        (Err(discovery), Err(cleanup)) => {
+            let discovery = crate::protect_discovery_error(discovery, hide_diagnostics);
+            let cleanup = crate::protect_discovery_error(cleanup, hide_diagnostics);
+            Err(HarnessError::Protocol(format!(
+                "OpenCode model discovery failed: {discovery}; cleanup failed: {cleanup}"
+            )))
+        }
+    }
 }
 
 pub async fn project_modes(spec: &SpawnSpec) -> HarnessResult<Vec<AgentMode>> {
@@ -119,6 +157,7 @@ pub struct OpenCodeProbe {
     pub resume: bool,
     pub prompt_files: bool,
     pub modes: bool,
+    pub models: bool,
 }
 
 #[derive(Deserialize)]
@@ -168,6 +207,9 @@ impl Api {
             modes: self.supports("get", "/api/session/{sessionID}")
                 && self.supports("get", "/api/agent")
                 && self.supports("post", "/api/session/{sessionID}/agent"),
+            models: self.supports("get", "/api/model")
+                && self.supports("get", "/api/model/default")
+                && self.supports("post", "/api/session/{sessionID}/model"),
             prompt_files: self
                 .paths
                 .get("/api/session/{sessionID}/prompt")
@@ -186,6 +228,94 @@ struct SessionRecord {
     id: String,
     location: SessionLocation,
     agent: Option<String>,
+    model: Option<OpenCodeModelRef>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+struct OpenCodeModelRef {
+    id: String,
+    #[serde(rename = "providerID")]
+    provider_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    variant: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct OpenCodeModel {
+    #[serde(rename = "modelID")]
+    model_id: String,
+    #[serde(rename = "providerID")]
+    provider_id: String,
+    name: String,
+    #[serde(default)]
+    enabled: bool,
+}
+
+#[derive(Deserialize)]
+struct OpenCodeModelsResponse {
+    location: SessionLocation,
+    data: Vec<OpenCodeModel>,
+}
+
+struct OpenCodeCatalog {
+    models: AgentModels,
+    refs: BTreeMap<String, OpenCodeModelRef>,
+}
+
+impl OpenCodeModel {
+    fn selection_id(&self) -> String {
+        format!("{}/{}", self.provider_id, self.model_id)
+    }
+
+    fn reference(&self) -> OpenCodeModelRef {
+        OpenCodeModelRef {
+            id: self.model_id.clone(),
+            provider_id: self.provider_id.clone(),
+            variant: None,
+        }
+    }
+}
+
+impl OpenCodeModelRef {
+    fn selection_id(&self) -> String {
+        format!("{}/{}", self.provider_id, self.id)
+    }
+}
+
+fn catalog_models(models: Vec<OpenCodeModel>, default: Option<OpenCodeModel>) -> OpenCodeCatalog {
+    let default_id = default.as_ref().map(OpenCodeModel::selection_id);
+    let mut refs = BTreeMap::new();
+    let mut options = Vec::new();
+    for model in models.into_iter().filter(|model| model.enabled) {
+        let id = model.selection_id();
+        if refs.contains_key(&id) {
+            continue;
+        }
+        refs.insert(id.clone(), model.reference());
+        options.push(AgentModel {
+            id,
+            name: model.name,
+            description: Some(model.provider_id),
+        });
+    }
+    if options.is_empty()
+        && let Some(model) = default
+    {
+        let id = model.selection_id();
+        refs.insert(id.clone(), model.reference());
+        options.push(AgentModel {
+            id,
+            name: model.name,
+            description: Some(model.provider_id),
+        });
+    }
+    let current = default_id
+        .filter(|id| options.iter().any(|model| &model.id == id))
+        .or_else(|| options.first().map(|model| model.id.clone()));
+    OpenCodeCatalog {
+        models: AgentModels { current, options },
+        refs,
+    }
 }
 
 #[derive(Deserialize)]
@@ -222,6 +352,8 @@ pub struct OpenCodeHarness {
     server: Option<OpenCodeServer>,
     session: Option<SessionId>,
     modes: Option<AgentModes>,
+    models: Option<AgentModels>,
+    model_refs: BTreeMap<String, OpenCodeModelRef>,
     turn: Option<ActiveTurn>,
     sender: mpsc::UnboundedSender<HarnessEvent>,
     receiver: mpsc::UnboundedReceiver<HarnessEvent>,
@@ -241,6 +373,8 @@ impl Default for OpenCodeHarness {
             server: None,
             session: None,
             modes: None,
+            models: None,
+            model_refs: BTreeMap::new(),
             turn: None,
             sender,
             receiver,
@@ -380,6 +514,13 @@ impl AgentHarness for OpenCodeHarness {
         }
     }
 
+    fn models(&self) -> Option<AgentModels> {
+        self.fallback
+            .as_ref()
+            .and_then(AgentHarness::models)
+            .or_else(|| self.models.clone())
+    }
+
     fn modes(&self) -> Option<AgentModes> {
         match &self.fallback {
             Some(fallback) => fallback.modes(),
@@ -505,6 +646,7 @@ impl AgentHarness for OpenCodeHarness {
             approvals: true,
             resume: probe.resume,
             cancel: true,
+            model_picker: probe.models,
             images: probe.prompt_files,
             resource_links: probe.prompt_files,
             ..Capabilities::default()
@@ -539,6 +681,26 @@ impl AgentHarness for OpenCodeHarness {
                 Err(_) => tracing::warn!("could not load OpenCode session modes"),
             }
         }
+        if server.probe.models {
+            let current = server
+                .read_session(&session)
+                .await
+                .ok()
+                .and_then(|record| record.model);
+            match server.model_catalog().await {
+                Ok(mut catalog) => {
+                    if let Some(model) = current {
+                        let id = model.selection_id();
+                        if catalog.models.options.iter().any(|option| option.id == id) {
+                            catalog.models.current = Some(id);
+                        }
+                    }
+                    self.models = Some(catalog.models);
+                    self.model_refs = catalog.refs;
+                }
+                Err(error) => tracing::warn!(%error, "could not load OpenCode session models"),
+            }
+        }
         self.session = Some(session.clone());
         publish(
             &self.sender,
@@ -549,7 +711,7 @@ impl AgentHarness for OpenCodeHarness {
         Ok(session)
     }
 
-    async fn prompt(&mut self, input: PromptInput) -> HarnessResult<()> {
+    async fn prompt(&mut self, mut input: PromptInput) -> HarnessResult<()> {
         if let Some(fallback) = &mut self.fallback {
             return fallback.prompt(input).await;
         }
@@ -566,6 +728,20 @@ impl AgentHarness for OpenCodeHarness {
             return Err(HarnessError::Protocol(
                 "OpenCode turn is already running".into(),
             ));
+        }
+        if let Some(model) = input.model.take() {
+            let model_ref = self
+                .model_refs
+                .get(&model)
+                .cloned()
+                .ok_or(HarnessError::ModelUnavailable)?;
+            let server = self.server.as_ref().ok_or(HarnessError::NotStarted)?;
+            let session = self.session.clone().ok_or(HarnessError::SessionMissing)?;
+            server.set_session_model(&session, &model_ref).await?;
+            if let Some(models) = &mut self.models {
+                models.current = Some(model.clone());
+            }
+            self.diagnostics.model = Some(model);
         }
         let server = self.server.as_ref().ok_or(HarnessError::NotStarted)?;
         let session = self.session.clone().ok_or(HarnessError::SessionMissing)?;
@@ -1842,6 +2018,39 @@ impl OpenCodeServer {
         }
         let current = self.read_session(session).await?.agent;
         Ok(Some(AgentModes { current, options }))
+    }
+
+    async fn model_catalog(&self) -> HarnessResult<OpenCodeCatalog> {
+        let models: OpenCodeModelsResponse = response_json(
+            self.request(Method::GET, "/api/model")
+                .query(&[("location[directory]", self.directory.as_str())]),
+        )
+        .await?;
+        if models.location.directory != Path::new(&self.directory) {
+            return Err(HarnessError::Protocol(
+                "OpenCode returned models outside the task directory".into(),
+            ));
+        }
+        let default: ResponseData<Option<OpenCodeModel>> = response_json(
+            self.request(Method::GET, "/api/model/default")
+                .query(&[("location[directory]", self.directory.as_str())]),
+        )
+        .await?;
+        Ok(catalog_models(models.data, default.data))
+    }
+
+    async fn set_session_model(
+        &self,
+        session: &SessionId,
+        model: &OpenCodeModelRef,
+    ) -> HarnessResult<()> {
+        let path = format!("{}/model", session_path(session)?);
+        send_request(
+            self.request(Method::POST, &path)
+                .json(&json!({ "model": model })),
+        )
+        .await?;
+        Ok(())
     }
 
     async fn mode_catalog(&self) -> HarnessResult<Vec<AgentMode>> {
@@ -3132,6 +3341,38 @@ mod tests {
             r#"{"app":{"agents.opencode.executable":"opencode"}}"#,
         )?;
         assert!(configured_executable(&settings).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn catalog_prefers_the_default_model_and_lists_only_enabled_choices()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let model = |id: &str, enabled: bool| OpenCodeModel {
+            model_id: id.into(),
+            provider_id: "acme".into(),
+            name: id.to_uppercase(),
+            enabled,
+        };
+        let catalog = catalog_models(
+            vec![model("a", true), model("b", true), model("c", false)],
+            Some(model("b", true)),
+        );
+        assert_eq!(catalog.models.current.as_deref(), Some("acme/b"));
+        assert_eq!(
+            catalog
+                .models
+                .options
+                .iter()
+                .map(|model| model.id.as_str())
+                .collect::<Vec<_>>(),
+            ["acme/a", "acme/b"]
+        );
+        assert!(!catalog.refs.contains_key("acme/c"));
+
+        let fallback = catalog_models(vec![model("a", false)], Some(model("d", true)));
+        assert_eq!(fallback.models.current.as_deref(), Some("acme/d"));
+        assert_eq!(fallback.models.options.len(), 1);
+        assert!(fallback.refs.contains_key("acme/d"));
         Ok(())
     }
 

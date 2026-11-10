@@ -447,6 +447,17 @@ export interface AgentModes {
   options: Array<{ id: string; name: string; description: string | null }>
 }
 
+export interface AgentModel {
+  id: string
+  name: string
+  description: string | null
+}
+
+export interface AgentModels {
+  current: string | null
+  options: AgentModel[]
+}
+
 export interface WorkspaceLayout {
   inspectorWidth: number | null
 }
@@ -463,6 +474,7 @@ export interface TaskWorkspace {
   adapterTier: AgentTier | null
   capabilities: AgentCapabilities | null
   modes?: AgentModes
+  models?: AgentModels
   recovery: SessionRecovery | null
 }
 
@@ -648,12 +660,16 @@ export interface CodexTurnOptions {
   effort?: string
 }
 
-export function sendPrompt(taskId: string, text: string, attachmentIds: string[] = [], codex?: CodexTurnOptions, mode?: string): Promise<TaskWorkspace> {
-  return invoke<TaskWorkspace>('send_prompt', { taskId, text, attachmentIds, codex, mode })
+export function sendPrompt(taskId: string, text: string, attachmentIds: string[] = [], codex?: CodexTurnOptions, mode?: string, model?: string): Promise<TaskWorkspace> {
+  return invoke<TaskWorkspace>('send_prompt', { taskId, text, attachmentIds, codex, mode, model })
 }
 
 export function opencodeProjectModes(projectId: string): Promise<AgentModes['options']> {
   return invoke('opencode_project_modes', { projectId })
+}
+
+export function opencodeProjectModels(projectId: string): Promise<AgentModels> {
+  return invoke('opencode_project_models', { projectId })
 }
 
 export function setSessionMode(taskId: string, mode: string): Promise<TaskWorkspace> {

@@ -269,6 +269,7 @@ pub fn run() -> Result<(), tauri::Error> {
             bridge::commands::local_codex_projects,
             bridge::commands::codex_project_models,
             bridge::commands::opencode_project_modes,
+            bridge::commands::opencode_project_models,
             bridge::commands::task_list,
             bridge::commands::pool_status,
             bridge::commands::pool_reorder_slots,
