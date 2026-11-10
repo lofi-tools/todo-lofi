@@ -70,13 +70,15 @@ and login diagnostics are now implemented.
       submissions on that error.
     - [ ] Serialize PTY operations and resulting screen records with the
       capture session. A fake-process fixture passed in agent-harness shard
-      3/8, including failure propagation; connect all terminal input, output,
-      and resize paths to it. An event recorded before a failed operation is
-      an attempt, so failed sessions must never be treated as complete replay.
-      A fake interactive shell PTY fixture compiles and records output and
-      screen frames, but it was not selected in Shepherd shard 6/8. Its write
-      completion is awaited outside the capture session; production integration
-      must handle failures and concurrent operations explicitly.
+      3/8, including failure propagation. The PTY service now offers an opt-in
+      recording path for input, output, resize and screen frames; its fake
+      interactive PTY fixture compiled but was not selected in Shepherd shard
+      1/8. Connect this path to the Freebuff terminal host, handle its error
+      channel and stop the process on capture failure. Resolve potential PTY
+      backpressure deadlocks while recording holds the operation lock before
+      enabling this path. An event recorded before
+      a failed operation is an attempt, so failed sessions must never be treated
+      as complete replay.
     - [ ] Replay capture records in order through a streaming consumer. An
       offline synthetic capture replays split output and a resize through the
       shell's VT parser (Shepherd shard 8/8 passed); the consumer's own fixture

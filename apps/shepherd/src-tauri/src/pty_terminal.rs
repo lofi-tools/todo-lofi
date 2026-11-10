@@ -9,12 +9,16 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use agent_harness::freebuff_capture::{CaptureEvent, CaptureSession};
+use agent_harness::{HarnessError, HarnessResult};
 use portable_pty::{ChildKiller, CommandBuilder, MasterPty, PtySize, native_pty_system};
 use shepherd_core::terminal::{
     ProcessRecord, TerminalError, TerminalEvent, TerminalId, TerminalService, TerminalSpec,
     TerminalWrite, validate_size,
 };
 use tokio::sync::{mpsc, oneshot};
+
+use crate::terminal_screen::Screen;
 
 const MAX_WRITE_BYTES: usize = 64 * 1024;
 
@@ -32,6 +36,67 @@ struct Session {
     #[cfg(unix)]
     session_id: Option<libc::pid_t>,
     process: Option<ProcessRecord>,
+    recording: Option<Arc<TerminalRecording>>,
+}
+
+pub struct TerminalRecording {
+    capture: CaptureSession,
+    screen: Mutex<Screen>,
+    errors: mpsc::UnboundedSender<String>,
+    #[allow(dead_code)]
+    initial_size: (u16, u16),
+}
+
+impl TerminalRecording {
+    #[allow(dead_code)]
+    pub fn new(
+        capture: CaptureSession,
+        columns: u16,
+        rows: u16,
+        errors: mpsc::UnboundedSender<String>,
+    ) -> Result<Self, TerminalError> {
+        validate_size(columns, rows)?;
+        let screen = Screen::with_scrollback(usize::from(columns), usize::from(rows), 0);
+        let recording = Self {
+            capture,
+            screen: Mutex::new(screen),
+            errors,
+            initial_size: (columns, rows),
+        };
+        recording
+            .capture
+            .record_and_apply(CaptureEvent::Resize { columns, rows }, || {
+                Ok(((), Vec::new()))
+            })
+            .map_err(|error| TerminalError::Backend(error.to_string()))?;
+        Ok(recording)
+    }
+
+    fn output(&self, bytes: &[u8]) -> HarnessResult<()> {
+        self.capture.record_and_apply(
+            CaptureEvent::Output {
+                bytes: bytes.to_vec(),
+            },
+            || {
+                let mut screen = self.screen.lock().map_err(|_| {
+                    HarnessError::Protocol("terminal recording screen lock is poisoned".into())
+                })?;
+                screen.process(bytes);
+                let state = serde_json::to_value(screen.frame()).map_err(|error| {
+                    HarnessError::Protocol(format!(
+                        "could not encode terminal recording screen: {error}"
+                    ))
+                })?;
+                Ok(((), vec![CaptureEvent::Screen { state }]))
+            },
+        )
+    }
+
+    fn report_error(&self, error: &impl std::fmt::Display) {
+        if self.errors.send(error.to_string()).is_err() {
+            tracing::error!(%error, "terminal recording failed after its error receiver closed");
+        }
+    }
 }
 
 #[cfg(unix)]
@@ -828,11 +893,27 @@ impl PtyTerminals {
     }
 }
 
-impl TerminalService for PtyTerminals {
-    fn spawn(
+impl PtyTerminals {
+    #[allow(dead_code)]
+    pub fn spawn_recorded(
         &mut self,
         spec: TerminalSpec,
         events: mpsc::Sender<TerminalEvent>,
+        recording: Arc<TerminalRecording>,
+    ) -> Result<TerminalId, TerminalError> {
+        if recording.initial_size != (spec.columns, spec.rows) {
+            return Err(TerminalError::Backend(
+                "terminal recording size does not match the terminal".into(),
+            ));
+        }
+        self.spawn_internal(spec, events, Some(recording))
+    }
+
+    fn spawn_internal(
+        &mut self,
+        spec: TerminalSpec,
+        events: mpsc::Sender<TerminalEvent>,
+        recording: Option<Arc<TerminalRecording>>,
     ) -> Result<TerminalId, TerminalError> {
         validate_size(spec.columns, spec.rows)?;
         let terminal_id = spec.id;
@@ -887,12 +968,19 @@ impl TerminalService for PtyTerminals {
         let output_events = events.clone();
         let sending = Arc::new(AtomicBool::new(false));
         let reader_sending = Arc::clone(&sending);
+        let reader_recording = recording.clone();
         std::thread::spawn(move || {
             let mut buffer = [0u8; 8192];
             loop {
                 match reader.read(&mut buffer) {
                     Ok(0) => break,
                     Ok(read) => {
+                        if let Some(recording) = &reader_recording
+                            && let Err(error) = recording.output(&buffer[..read])
+                        {
+                            recording.report_error(&error);
+                            break;
+                        }
                         reader_sending.store(true, Ordering::Release);
                         let sent = output_events
                             .blocking_send(TerminalEvent::Output(buffer[..read].to_vec()));
@@ -914,12 +1002,38 @@ impl TerminalService for PtyTerminals {
         });
 
         let (input, mut writes) = mpsc::channel::<WriteRequest>(32);
+        let writer_recording = recording.clone();
         std::thread::spawn(move || {
             while let Some(request) = writes.blocking_recv() {
-                let result = writer
-                    .write_all(&request.bytes)
-                    .and_then(|()| writer.flush())
-                    .map_err(|error| TerminalError::Backend(format!("write failed: {error}")));
+                let result = if let Some(recording) = &writer_recording {
+                    recording
+                        .capture
+                        .record_and_apply(
+                            CaptureEvent::Input {
+                                bytes: request.bytes.clone(),
+                            },
+                            || {
+                                writer
+                                    .write_all(&request.bytes)
+                                    .and_then(|()| writer.flush())
+                                    .map_err(|error| {
+                                        HarnessError::Protocol(format!(
+                                            "terminal write failed: {error}"
+                                        ))
+                                    })?;
+                                Ok(((), Vec::new()))
+                            },
+                        )
+                        .map_err(|error| {
+                            recording.report_error(&error);
+                            TerminalError::Backend(error.to_string())
+                        })
+                } else {
+                    writer
+                        .write_all(&request.bytes)
+                        .and_then(|()| writer.flush())
+                        .map_err(|error| TerminalError::Backend(format!("write failed: {error}")))
+                };
                 match request.completion {
                     Some(completion) => {
                         if let Err(Err(error)) = completion.send(result) {
@@ -955,6 +1069,7 @@ impl TerminalService for PtyTerminals {
                 #[cfg(unix)]
                 session_id,
                 process,
+                recording,
             },
         );
 
@@ -1000,6 +1115,16 @@ impl TerminalService for PtyTerminals {
 
         Ok(terminal_id)
     }
+}
+
+impl TerminalService for PtyTerminals {
+    fn spawn(
+        &mut self,
+        spec: TerminalSpec,
+        events: mpsc::Sender<TerminalEvent>,
+    ) -> Result<TerminalId, TerminalError> {
+        self.spawn_internal(spec, events, None)
+    }
 
     fn write(
         &mut self,
@@ -1032,10 +1157,37 @@ impl TerminalService for PtyTerminals {
             .ok_or_else(|| {
                 TerminalError::Backend(format!("no live terminal {}", terminal_id.as_str()))
             })?;
-        session
-            .master
-            .resize(Self::size(columns, rows))
-            .map_err(|error| TerminalError::Backend(format!("resize failed: {error}")))
+        if let Some(recording) = &session.recording {
+            recording
+                .capture
+                .record_and_apply(CaptureEvent::Resize { columns, rows }, || {
+                    session
+                        .master
+                        .resize(Self::size(columns, rows))
+                        .map_err(|error| {
+                            HarnessError::Protocol(format!("resize failed: {error}"))
+                        })?;
+                    let mut screen = recording.screen.lock().map_err(|_| {
+                        HarnessError::Protocol("terminal recording screen lock is poisoned".into())
+                    })?;
+                    screen.resize(usize::from(columns), usize::from(rows));
+                    let state = serde_json::to_value(screen.frame()).map_err(|error| {
+                        HarnessError::Protocol(format!(
+                            "could not encode terminal recording screen: {error}"
+                        ))
+                    })?;
+                    Ok(((), vec![CaptureEvent::Screen { state }]))
+                })
+                .map_err(|error| {
+                    recording.report_error(&error);
+                    TerminalError::Backend(error.to_string())
+                })
+        } else {
+            session
+                .master
+                .resize(Self::size(columns, rows))
+                .map_err(|error| TerminalError::Backend(format!("resize failed: {error}")))
+        }
     }
 
     fn close(&mut self, terminal_id: &TerminalId) -> Result<(), TerminalError> {
@@ -1058,17 +1210,16 @@ mod tests {
     #[tokio::test]
     async fn fake_cli_pty_stream_can_be_recorded_with_screen_states()
     -> Result<(), Box<dyn std::error::Error>> {
-        use crate::terminal_screen::Screen;
         use agent_harness::freebuff_capture::{
             CaptureEvent, CaptureSession, CaptureWriter, read_capture,
         };
-
         let directory = tempfile::tempdir()?;
         let session = CaptureSession::new(CaptureWriter::create(directory.path(), "fake-pty")?);
-        let mut screen = Screen::new(80, 24);
+        let (error_sender, mut errors) = mpsc::unbounded_channel();
+        let recording = Arc::new(TerminalRecording::new(session, 80, 24, error_sender)?);
         let mut engine = PtyTerminals::new();
         let (sender, mut receiver) = mpsc::channel(16);
-        let terminal_id = engine.spawn(
+        let terminal_id = engine.spawn_recorded(
             TerminalSpec {
                 id: TerminalId::new("fake-freebuff"),
                 columns: 80,
@@ -1082,6 +1233,7 @@ mod tests {
                 environment: BTreeMap::new(),
             },
             sender,
+            recording,
         )?;
         let mut output = Vec::new();
         let mut submitted = false;
@@ -1089,39 +1241,13 @@ mod tests {
             while let Some(event) = receiver.recv().await {
                 match event {
                     TerminalEvent::Output(bytes) => {
-                        session
-                            .record_and_apply(
-                                CaptureEvent::Output {
-                                    bytes: bytes.clone(),
-                                },
-                                || {
-                                    screen.process(&bytes);
-                                    let state =
-                                        serde_json::to_value(screen.frame()).map_err(|error| {
-                                            agent_harness::HarnessError::Protocol(error.to_string())
-                                        })?;
-                                    Ok(((), vec![CaptureEvent::Screen { state }]))
-                                },
-                            )
-                            .map_err(|error| error.to_string())?;
                         output.extend(bytes);
                         if !submitted && output.windows(6).any(|bytes| bytes == b"ready>") {
-                            let input = b"hello\n".to_vec();
-                            let completion = session
-                                .record_and_apply(
-                                    CaptureEvent::Input {
-                                        bytes: input.clone(),
-                                    },
-                                    || {
-                                        let completion =
-                                            engine.write(&terminal_id, input).map_err(|error| {
-                                                agent_harness::HarnessError::Protocol(
-                                                    error.to_string(),
-                                                )
-                                            })?;
-                                        Ok((completion, Vec::new()))
-                                    },
-                                )
+                            engine
+                                .resize(&terminal_id, 90, 24)
+                                .map_err(|error| error.to_string())?;
+                            let completion = engine
+                                .write(&terminal_id, b"hello\n".to_vec())
                                 .map_err(|error| error.to_string())?;
                             completion
                                 .await
@@ -1141,6 +1267,7 @@ mod tests {
             Err("fake CLI output ended before exit".into())
         })
         .await??;
+        assert!(errors.try_recv().is_err());
         assert!(output.windows(11).any(|bytes| bytes == b"reply:hello"));
         let records = read_capture(
             &directory
@@ -1156,6 +1283,11 @@ mod tests {
             records
                 .iter()
                 .any(|record| matches!(record.event, CaptureEvent::Screen { .. }))
+        );
+        assert!(
+            records
+                .iter()
+                .any(|record| matches!(record.event, CaptureEvent::Resize { columns: 90, .. }))
         );
         Ok(())
     }
