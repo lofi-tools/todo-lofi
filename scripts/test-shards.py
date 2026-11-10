@@ -25,9 +25,9 @@ def playwright_suites():
 
 def run_playwright(index=None, count=None, affected_ui=False, dry_run=False):
     for directory in playwright_suites():
-        command = ["pnpm", "exec", "playwright", "test", "--pass-with-no-tests"]
+        command = ["pnpm", "exec", "playwright", "test"]
         if index is not None and not (affected_ui and directory == UI):
-            command.extend(["--shard", f"{index}/{count}"])
+            command.extend(["--pass-with-no-tests", "--shard", f"{index}/{count}"])
         execute(command, directory, dry_run)
 
 
@@ -44,9 +44,9 @@ def run_web_unit_tests(index=None, count=None, dry_run=False):
         if script.strip() != "vitest run":
             execute(["pnpm", "run", "test"], directory, dry_run)
             continue
-        command = ["pnpm", "exec", "vitest", "run", "--passWithNoTests"]
+        command = ["pnpm", "exec", "vitest", "run"]
         if index is not None:
-            command.extend(["--shard", f"{index}/{count}"])
+            command.extend(["--passWithNoTests", "--shard", f"{index}/{count}"])
         execute(command, directory, dry_run)
 
 

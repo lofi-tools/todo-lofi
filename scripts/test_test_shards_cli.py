@@ -76,9 +76,9 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(commands, [["python3", "-m", "unittest", "discover", "-s", "scripts", "-p", "test_test_shard*.py"],
                                     ["cargo", "nextest", "run", "--workspace"],
                                     ["cargo", "test", "--workspace", "--doc"],
-                                    ["pnpm", "exec", "vitest", "run", "--passWithNoTests"],
-                                    ["pnpm", "exec", "vitest", "run", "--passWithNoTests"],
-                                    ["pnpm", "exec", "playwright", "test", "--pass-with-no-tests"]])
+                                    ["pnpm", "exec", "vitest", "run"],
+                                    ["pnpm", "exec", "vitest", "run"],
+                                    ["pnpm", "exec", "playwright", "test"]])
 
     def test_affected_packages_and_remaining_shard(self):
         def output(*command):
@@ -95,7 +95,9 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(commands[0], ["cargo", "nextest", "run", "-p", "core"])
         self.assertIn("--exclude", commands[1])
         self.assertIn("hash:3/8", commands[1])
+        self.assertIn("--passWithNoTests", commands[2])
         self.assertEqual(commands[2][-2:], ["--shard", "3/8"])
+        self.assertIn("--pass-with-no-tests", commands[-1])
         self.assertEqual(commands[-1][-2:], ["--shard", "3/8"])
 
     def test_invalid_shard_rejected(self):
