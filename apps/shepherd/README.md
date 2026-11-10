@@ -280,6 +280,8 @@ The default run selects all tests in changed Rust packages and their workspace
 dependents, plus a hash shard of the remaining workspace tests. It also runs
 the affected Shepherd UI suite, or a Playwright shard if it is unaffected,
 and shards the other workspace Playwright and Vitest suites.
+Workspace packages with a different `test` script run that script in full;
+the runner does not assume that an unfamiliar test command supports sharding.
 Changes include the latest first-parent commit and staged, unstaged and
 untracked files. Shared and unknown paths cause a full run. The seed is a
 revision hash modulo the shard count, so consecutive commits can repeat a
@@ -296,8 +298,10 @@ for pull requests. Native
 desktop smokes and gated live-agent probes remain separate. Ordinary tests
 retain their existing harness and live-agent cache rules.
 
-Successful invocations record exact Rust, Vitest and Playwright identities and runner
-versions in `.cache/test-shards/runs.jsonl`. `--last-ran` only reports clean,
+Successful invocations record exact Rust, Vitest and Playwright identities
+and runner versions in `.cache/test-shards/runs.jsonl`. Other test scripts
+contribute to the full-run result but do not supply individual identities.
+`--last-ran` only reports clean,
 successful runs on the current first-parent history; dirty runs, rewritten
 commits, a missing local history, and tests not yet present in an old revision
 cannot establish a clean ancestor. Use the printed identity from the history

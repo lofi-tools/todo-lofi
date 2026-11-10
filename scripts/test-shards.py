@@ -88,7 +88,7 @@ def workspace():
 
 def execute(command, directory=ROOT, dry_run=False):
     global RECORDER
-    print("+", subprocess.list2cmdline(command), flush=True)
+    print(f"+ [{directory.relative_to(ROOT)}]", subprocess.list2cmdline(command), flush=True)
     if not dry_run:
         if RECORDER is None:
             RECORDER = Recorder(ROOT, HISTORY, *CONTEXT)
