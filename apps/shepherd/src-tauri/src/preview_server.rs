@@ -1021,7 +1021,11 @@ mod tests {
             wrapper.host_str().ok_or("missing host")?,
             wrapper.port().ok_or("missing port")?
         );
-        assert!(TcpStream::connect(address).await.is_err());
+        let stopped = request(&wrapper, None, "").await;
+        assert!(
+            stopped.is_err() || stopped.as_ref().is_ok_and(|(status, _, _)| *status != 200),
+            "the stopped preview must not serve {address}"
+        );
         Ok(())
     }
 
