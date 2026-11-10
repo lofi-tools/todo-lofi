@@ -728,12 +728,21 @@ fn named_color(color: NamedColor, appearance: TerminalAppearance) -> u32 {
 
 #[allow(dead_code)]
 pub(crate) fn verify_recorded_screens(path: &std::path::Path) -> agent_harness::HarnessResult<()> {
+    verify_screens(path, true)
+}
+
+#[allow(dead_code)]
+pub(crate) fn verify_unfinished_screens(path: &std::path::Path) -> agent_harness::HarnessResult<()> {
+    verify_screens(path, false)
+}
+
+fn verify_screens(path: &std::path::Path, complete: bool) -> agent_harness::HarnessResult<()> {
     use agent_harness::HarnessError;
-    use agent_harness::freebuff_capture::{CaptureEvent, visit_complete_capture};
+    use agent_harness::freebuff_capture::{CaptureEvent, visit_capture, visit_complete_capture};
 
     let mut screen: Option<Screen> = None;
     let mut awaiting_screen = false;
-    visit_complete_capture(path, |record| {
+    let mut verify = |record: agent_harness::freebuff_capture::CaptureRecord| {
         if awaiting_screen && !matches!(&record.event, CaptureEvent::Screen { .. }) {
             return Err(HarnessError::Protocol(
                 "terminal capture is missing a screen frame".into(),
@@ -790,10 +799,25 @@ pub(crate) fn verify_recorded_screens(path: &std::path::Path) -> agent_harness::
                 }
                 awaiting_screen = false;
             }
+            CaptureEvent::Complete if !complete => {
+                return Err(HarnessError::Protocol(
+                    "terminal capture was already completed".into(),
+                ));
+            }
             _ => {}
         }
         Ok(())
-    })?;
+    };
+    if complete {
+        visit_complete_capture(path, &mut verify)?;
+    } else {
+        visit_capture(path, &mut verify)?;
+    }
+    if awaiting_screen {
+        return Err(HarnessError::Protocol(
+            "terminal capture is missing a screen frame".into(),
+        ));
+    }
     if screen.is_none() {
         return Err(HarnessError::Protocol(
             "terminal capture has no initial size".into(),
@@ -831,7 +855,6 @@ mod tests {
                 }
                 events.push(CaptureEvent::Screen { state });
             }
-            events.push(CaptureEvent::Complete);
             for (elapsed_micros, event) in events.into_iter().enumerate() {
                 writer.append(&CaptureRecord {
                     elapsed_micros: elapsed_micros as u64,
@@ -841,7 +864,13 @@ mod tests {
             let path = directory
                 .path()
                 .join(format!(".cache/shepherd-live/freebuff/{name}.jsonl"));
+            assert_eq!(verify_unfinished_screens(&path).is_err(), tampered);
+            writer.append(&CaptureRecord {
+                elapsed_micros: 100,
+                event: CaptureEvent::Complete,
+            })?;
             assert_eq!(verify_recorded_screens(&path).is_err(), tampered);
+            assert!(verify_unfinished_screens(&path).is_err());
         }
         Ok(())
     }

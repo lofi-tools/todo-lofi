@@ -136,7 +136,8 @@ and login diagnostics are now implemented.
       shell's VT parser (Shepherd shard 8/8 passed); the consumer's own fixture
       was not selected in shard 6/8. A verifier now compares recorded frames
       with screens reconstructed from captured bytes and resizes, and the fake
-      runner verifies its saved capture before reporting success. Its new
+      runner verifies its saved frames before writing the completion marker, so
+      a mismatch leaves an incomplete capture. Its new
       fixture and the updated fake runner remain unverified; the user requested
       no builds. Make verification mandatory for every replay consumer and
       connect replay to versioned Freebuff screen fixtures and worktree effects.
