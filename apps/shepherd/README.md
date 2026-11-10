@@ -287,6 +287,11 @@ untracked files. Shared and unknown paths cause a full run. The seed is a
 revision hash modulo the shard count, so consecutive commits can repeat a
 shard. `--seed` reuses only the shard selection; it does not check out that
 revision or reproduce its affected files. `--shard` overrides that selection.
+Uncommitted changes affect package selection but do not change the seed.
+Switching branches uses the selected branch's revision and first-parent run
+history. Rebasing or amending changes revision hashes and can therefore change
+the chosen shard; records for commits outside the new history are not treated
+as evidence for it.
 Shepherd's Playwright suite partitions individual tests with one worker.
 Playwright and Vitest membership can change when tests are added or reordered,
 unlike nextest's hash partitions. Some shards can be empty.

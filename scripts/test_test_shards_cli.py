@@ -1,4 +1,6 @@
 import importlib.util
+import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -9,6 +11,31 @@ spec.loader.exec_module(shards_cli)
 
 
 class RunnerTests(unittest.TestCase):
+    def test_changed_paths_include_commit_staged_unstaged_and_untracked(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+
+            def git(*arguments):
+                subprocess.run(["git", "-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null", *arguments], cwd=root,
+                               check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+            git("init", "-q")
+            git("config", "user.name", "Test")
+            git("config", "user.email", "test@example.invalid")
+            (root / "deleted").write_text("before")
+            (root / "modified").write_text("before")
+            git("add", ".")
+            git("commit", "-qm", "initial")
+            (root / "committed").write_text("committed")
+            git("add", "committed")
+            git("commit", "-qm", "change")
+            (root / "deleted").unlink()
+            git("add", "-u")
+            (root / "modified").write_text("after")
+            (root / "untracked").write_text("new")
+            with patch.object(shards_cli, "ROOT", root):
+                self.assertEqual(set(shards_cli.changed_paths()), {"committed", "deleted", "modified", "untracked"})
+
     def test_explicit_full_includes_doctests_and_ui(self):
         with patch.object(shards_cli, "output", return_value="a"), \
              patch.object(shards_cli, "playwright_suites", return_value=[shards_cli.UI]), \
