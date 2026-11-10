@@ -57,6 +57,16 @@ state from the rendered terminal state and transitions, not a naive line or
 escape-code substring. Preserve the CLI's normal interpretation of input,
 including multiline text and terminal control characters, as requested.
 
+### Local inspection on 2026-11-10
+
+Without launching the CLI, the `freebuff` entry on PATH was observed to be a
+Nix-provided Node launcher, version `0.0.171`. Its configured runtime path is
+`~/.config/manicode/freebuff`; adjacent metadata reported runtime version
+`0.2.36` and the runtime was an arm64 macOS executable. The launcher source
+ensures the runtime is present, launches it, and schedules an update check
+shortly afterward. These are local observations, not a verified screen
+protocol or a guarantee that the runtime will remain at that version.
+
 ## Session and transcript
 
 Support multiple turns in the same running process. Investigate whether the

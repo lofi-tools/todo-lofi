@@ -40,6 +40,15 @@ and login diagnostics are now implemented.
     streaming, tool, approval, question, interrupt and resume interactions.
     Do not install Freebuff. Surface detectable launcher updates and reject
     versions or screen states that cannot be identified reliably.
+    - [ ] Resolve a configured executable followed by PATH without launching
+      Freebuff or triggering its updater; report missing or unusable candidates.
+      An offline discovery primitive is present in `agent-harness`; wire it into
+      the desktop factory and verify its fixtures when the selected shard
+      includes them before marking this item complete.
+    - [ ] Inspect the installed launcher and runtime metadata without sending
+      project data; record version provenance and the update lifecycle.
+    - [ ] With user-approved live messages only, capture the terminal states
+      needed to establish a version-specific interaction contract.
   - [ ] **P0 — Capture fixtures and define contracts:** create sanitized,
     versioned PTY/screen fixtures and a deterministic fake CLI. Map terminal
     states to harness events; identify necessary contract changes for
