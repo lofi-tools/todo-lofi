@@ -134,6 +134,59 @@ impl GitService {
         Ok(())
     }
 
+    pub fn create_detached_worktree(
+        &self,
+        repository: &GitRepository,
+        worktree_path: &Path,
+        base_branch: &str,
+    ) -> Result<(), GitError> {
+        if let Some(parent) = worktree_path.parent() {
+            std::fs::create_dir_all(parent).map_err(|source| GitError::Io { source })?;
+        }
+        run_git(
+            &repository.root,
+            &[
+                "worktree",
+                "add",
+                "--detach",
+                &worktree_path.display().to_string(),
+                base_branch,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn detach_worktree(&self, path: &Path, base_branch: &str) -> Result<(), GitError> {
+        if self.has_changes(path)? {
+            return Err(GitError::DirtyWorktree {
+                path: path.to_path_buf(),
+            });
+        }
+        run_git(path, &["switch", "--detach", "--no-guess", base_branch])?;
+        Ok(())
+    }
+
+    /// Create the task branch on the current worktree without rejecting local
+    /// edits: those edits belong to the task and must move onto its branch.
+    pub fn create_task_branch(&self, path: &Path, proposed: &str) -> Result<String, GitError> {
+        for suffix in 0..100 {
+            let branch = if suffix == 0 {
+                proposed.to_string()
+            } else {
+                format!("{proposed}-{suffix}")
+            };
+            let reference = format!("refs/heads/{branch}");
+            run_git(path, &["check-ref-format", &reference])?;
+            if run_git(path, &["show-ref", "--verify", "--quiet", &reference]).is_err() {
+                run_git(path, &["switch", "-c", &branch, "--"])?;
+                return Ok(branch);
+            }
+        }
+        Err(GitError::UnknownBranch {
+            branch: proposed.to_string(),
+        })
+    }
+
     pub fn restore_worktree(
         &self,
         repository: &GitRepository,
@@ -147,7 +200,19 @@ impl GitService {
             });
         }
         match path.symlink_metadata() {
-            Ok(_) => return self.validate_worktree(repository, path),
+            Ok(_) => {
+                self.validate_worktree(repository, path)?;
+                let current = run_git(path, &["branch", "--show-current"])?;
+                if current.trim() != branch {
+                    if self.has_changes(path)? {
+                        return Err(GitError::DirtyWorktree {
+                            path: path.to_path_buf(),
+                        });
+                    }
+                    run_git(path, &["switch", branch])?;
+                }
+                return Ok(());
+            }
             Err(source) if source.kind() == std::io::ErrorKind::NotFound => {}
             Err(source) => return Err(GitError::Io { source }),
         }

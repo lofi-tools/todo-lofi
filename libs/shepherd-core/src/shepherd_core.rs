@@ -19,6 +19,7 @@ pub mod snapshots;
 pub mod store;
 pub mod tasks;
 pub mod terminal;
+pub mod worktree_pool;
 
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
@@ -29,8 +30,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use agent_harness::{
-    Decision, FailureKind, HarnessEvent, PromptAttachment, PromptInput, SessionId, Transcript,
-    TurnFinishReason,
+    Decision, DeltaKind, FailureKind, HarnessEvent, PromptAttachment, PromptInput, SessionId,
+    Transcript, TurnFinishReason,
 };
 use tokio::sync::mpsc;
 
@@ -53,6 +54,7 @@ use crate::store::{
     PoolQuotaCorrectionOutcome, PoolQuotaCorrectionRequest, PoolReorderOutcome, PoolReorderRequest,
     PoolSelectionOutcome, PoolSelectionRequest, PoolSlot, PoolSlotEnabledOutcome,
     PoolSlotEnabledRequest, PoolSlotId, PoolStatus, Store, StoreError, WorktreeDeletion,
+    WorktreePoolRecord, WorktreePoolState,
 };
 use crate::terminal::{
     InspectorTab, ProcessRecord, TerminalId, TerminalLayout, TerminalList, TerminalRecord,
@@ -106,6 +108,14 @@ pub enum CoreError {
     },
     #[error("task {id} is not a draft")]
     NotADraft { id: String },
+    #[error(
+        "first prompt for task {task_id} failed: {prompt_error}; cleanup was incomplete: {reason}"
+    )]
+    StartTaskCleanup {
+        task_id: String,
+        prompt_error: String,
+        reason: String,
+    },
     #[error("Close the task's running terminals before deleting it.")]
     TaskTerminalsRunning,
     #[error("Task {id} is {state}; stop its active turn before deleting it.")]
@@ -450,6 +460,7 @@ impl Core {
             }
         }
         core.recover_worktree_deletions().await?;
+        core.reconcile_worktree_pool().await?;
         core.collect_archived_worktrees().await;
         Ok(core)
     }
@@ -1232,6 +1243,11 @@ impl Core {
                 title,
                 agent,
             } => self.create_draft(&project_id, title, agent).await,
+            Command::StartTask {
+                project_id,
+                agent,
+                input,
+            } => self.start_task(&project_id, agent, input).await,
             Command::SetDraftAgent { task_id, agent } => {
                 self.set_draft_agent(&task_id, agent).await
             }
@@ -1241,6 +1257,12 @@ impl Core {
                 remove_worktree,
             } => self.delete_task(&task_id, remove_worktree).await,
             Command::SendPrompt { task_id, input } => self.send_prompt(&task_id, input).await,
+            Command::SetTaskOptions {
+                task_id,
+                model,
+                mode,
+            } => self.set_task_options(&task_id, model, mode).await,
+            Command::RetryTaskBranch { task_id } => self.retry_task_branch(&task_id).await,
             Command::SetSessionMode { task_id, mode } => {
                 self.set_session_mode(&task_id, &mode).await
             }
@@ -1293,6 +1315,7 @@ impl Core {
             let task = self.task(&task_id)?;
             let before = (task.state, task.error.clone());
             self.apply_events(&task_id, &events)?;
+            self.maybe_create_task_branch(&task_id, &events).await?;
             let task = self.task(&task_id)?;
             if (task.state, &task.error) != (before.0, &before.1) {
                 self.save_task(&task_id).await?;
@@ -1721,6 +1744,71 @@ impl Core {
         Ok(CommandResult::TaskWorkspace(workspace))
     }
 
+    async fn start_task(
+        &mut self,
+        project_id: &ProjectId,
+        agent: Agent,
+        input: PromptInput,
+    ) -> Result<CommandResult, CoreError> {
+        if input.text.trim().is_empty() {
+            return Err(CoreError::EmptyPrompt);
+        }
+        if input.codex != Default::default() && agent != Agent::Codex {
+            return Err(CoreError::CodexOptionsForOtherAgent);
+        }
+        let title = input
+            .text
+            .lines()
+            .find(|line| !line.trim().is_empty())
+            .map(str::trim)
+            .unwrap_or_default()
+            .chars()
+            .take(80)
+            .collect::<String>();
+        let created = self.create_draft(project_id, title, agent).await?;
+        let CommandResult::TaskWorkspace(workspace) = created else {
+            return Err(CoreError::TaskNotFound {
+                id: "new task".to_owned(),
+            });
+        };
+        let task_id = TaskId::new(workspace.task.id);
+        let started = async {
+            self.set_task_options(&task_id, input.model.clone(), input.mode.clone())
+                .await?;
+            self.send_prompt(&task_id, input).await
+        }
+        .await;
+        match started {
+            Ok(result) => Ok(result),
+            Err(error) => {
+                let remove_worktree = self
+                    .task(&task_id)
+                    .ok()
+                    .is_some_and(|task| task.worktree_path.is_some());
+                match self.delete_task(&task_id, remove_worktree).await {
+                    Ok(_) => Err(error),
+                    Err(cleanup) => {
+                        let reason = if self.task(&task_id).is_ok() {
+                            match self.delete_task_records(&task_id).await {
+                                Ok(_) => cleanup.to_string(),
+                                Err(records) => {
+                                    format!("{cleanup}; could not remove task records: {records}")
+                                }
+                            }
+                        } else {
+                            cleanup.to_string()
+                        };
+                        Err(CoreError::StartTaskCleanup {
+                            task_id: task_id.to_string(),
+                            prompt_error: error.to_string(),
+                            reason,
+                        })
+                    }
+                }
+            }
+        }
+    }
+
     async fn set_draft_agent(
         &mut self,
         task_id: &TaskId,
@@ -1891,7 +1979,7 @@ impl Core {
     }
 
     async fn delete_task_records(&mut self, task_id: &TaskId) -> Result<CommandResult, CoreError> {
-        let task = self.task(task_id)?;
+        let task = self.task(task_id)?.clone();
         let project_id = task.project_id.clone();
         let terminals: Vec<_> = self
             .terminals
@@ -1926,6 +2014,16 @@ impl Core {
             .await?;
         if let Some(layout) = updated_layout {
             self.terminal_layouts.insert(project_id.clone(), layout);
+        }
+        if let Some(path) = task.worktree_path.as_ref()
+            && let Some(record) = self
+                .store
+                .load_worktree_pool()
+                .await?
+                .into_iter()
+                .find(|record| record.project_id == project_id && &record.path == path)
+        {
+            self.store.remove_worktree_pool(&record.id).await?;
         }
         self.tasks.remove(task_id);
         self.workspace_layouts.remove(task_id);
@@ -2057,6 +2155,7 @@ impl Core {
             self.tasks.insert(task.id.clone(), task);
         }
         for task_id in task_ids {
+            self.release_worktree_to_pool(&task_id).await?;
             self.emit(Event::TaskChanged(TaskSummary::from(self.task(&task_id)?)));
             self.emit(Event::TaskWorkspaceChanged(self.task_workspace(&task_id)?));
         }
@@ -2166,6 +2265,13 @@ impl Core {
         }
         if input.codex != Default::default() && self.task(task_id)?.agent != Agent::Codex {
             return Err(CoreError::CodexOptionsForOtherAgent);
+        }
+        let task_options = self.task(task_id)?;
+        if input.mode.is_none() {
+            input.mode = task_options.mode.clone();
+        }
+        if input.model.is_none() {
+            input.model = task_options.model.clone();
         }
 
         let state = self.task(task_id)?.state;
@@ -2315,6 +2421,7 @@ impl Core {
         };
 
         self.apply_events(task_id, &events)?;
+        self.maybe_create_task_branch(task_id, &events).await?;
         self.save_task(task_id).await?;
         let workspace = self.publish_task(task_id)?;
         Ok(CommandResult::TaskWorkspace(workspace))
@@ -2338,6 +2445,34 @@ impl Core {
         let events = session.set_mode(mode).await?;
         self.apply_events(task_id, &events)?;
         self.save_task(task_id).await?;
+        Ok(CommandResult::TaskWorkspace(self.publish_task(task_id)?))
+    }
+
+    async fn set_task_options(
+        &mut self,
+        task_id: &TaskId,
+        model: Option<String>,
+        mode: Option<String>,
+    ) -> Result<CommandResult, CoreError> {
+        let task = self
+            .tasks
+            .get_mut(task_id)
+            .ok_or_else(|| CoreError::TaskNotFound {
+                id: task_id.as_str().to_string(),
+            })?;
+        task.model = model;
+        task.mode = mode;
+        task.updated_at = projects::now_millis();
+        self.save_task(task_id).await?;
+        Ok(CommandResult::TaskWorkspace(self.publish_task(task_id)?))
+    }
+
+    async fn retry_task_branch(&mut self, task_id: &TaskId) -> Result<CommandResult, CoreError> {
+        let task = self.task(task_id)?.clone();
+        if task.branch.is_some() {
+            return Ok(CommandResult::TaskWorkspace(self.publish_task(task_id)?));
+        }
+        self.create_task_branch(task_id).await?;
         Ok(CommandResult::TaskWorkspace(self.publish_task(task_id)?))
     }
 
@@ -2541,20 +2676,17 @@ impl Core {
     async fn create_worktree(&mut self, task_id: &TaskId) -> Result<(), CoreError> {
         let task = self.task(task_id)?.clone();
         let project_path = self.project_path(&task.project_id)?;
-        if task.proposed_worktree_path.exists() {
-            return Err(CoreError::WorktreePathTaken {
-                path: task.proposed_worktree_path.display().to_string(),
-            });
-        }
-
         let repository = GitService::discover(&project_path)?;
         self.set_task_state(task_id, TaskState::Starting)?;
-        if let Err(error) = GitService.create_worktree(
-            &repository,
-            &task.proposed_worktree_path,
-            &task.proposed_branch,
-            &repository.default_branch,
-        ) {
+        let leased = self.lease_pool_worktree(&task, &repository).await;
+        let worktree_path = match leased {
+            Ok(path) => path,
+            Err(error) => {
+                self.fail_task(task_id, error.to_string()).await?;
+                return Err(error);
+            }
+        };
+        if let Err(error) = GitService::discover(&worktree_path) {
             self.fail_task(task_id, error.to_string()).await?;
             return Err(CoreError::Git(error));
         }
@@ -2565,11 +2697,299 @@ impl Core {
             .ok_or_else(|| CoreError::TaskNotFound {
                 id: task_id.as_str().to_string(),
             })?;
-        task.worktree_path = Some(task.proposed_worktree_path.clone());
-        task.branch = Some(task.proposed_branch.clone());
+        task.worktree_path = Some(worktree_path);
+        task.branch = None;
         task.base_branch = Some(repository.default_branch);
+        task.branch_error = None;
         task.set_state(TaskState::Ready)?;
         self.save_task(task_id).await
+    }
+
+    async fn reconcile_worktree_pool(&mut self) -> Result<(), CoreError> {
+        let now = projects::now_millis();
+        let records = self.store.load_worktree_pool().await?;
+        let mut known = BTreeSet::new();
+        for mut record in records {
+            let Some(project) = self.projects.get(&record.project_id).cloned() else {
+                self.store.remove_worktree_pool(&record.id).await?;
+                continue;
+            };
+            let repository = match GitService::discover(&project.path) {
+                Ok(repository) => repository,
+                Err(error) => {
+                    tracing::warn!(project = %project.path.display(), %error, "could not reconcile project worktree pool");
+                    continue;
+                }
+            };
+            let root = repository.git_dir.join("shepherd/worktrees");
+            if record.path.parent() != Some(root.as_path()) {
+                tracing::warn!(path = %record.path.display(), "removed a worktree pool record outside its project");
+                self.store.remove_worktree_pool(&record.id).await?;
+                continue;
+            }
+            known.insert(record.path.clone());
+            let task = self
+                .tasks
+                .values()
+                .find(|task| task.worktree_path.as_ref() == Some(&record.path))
+                .cloned();
+            let retired = record.path.join(".shepherd-retired").exists();
+            let (state, task_id, leased_at) = if let Some(task) = task {
+                (
+                    WorktreePoolState::Leased,
+                    Some(task.id),
+                    record.leased_at.or(Some(task.updated_at)),
+                )
+            } else if !record.path.exists() {
+                self.store.remove_worktree_pool(&record.id).await?;
+                continue;
+            } else if retired
+                || GitService
+                    .validate_worktree(&repository, &record.path)
+                    .is_err()
+                || GitService.has_changes(&record.path)?
+            {
+                (WorktreePoolState::Retired, None, None)
+            } else {
+                (WorktreePoolState::Idle, None, None)
+            };
+            if record.state != state || record.task_id != task_id || record.leased_at != leased_at {
+                record.state = state;
+                record.task_id = task_id;
+                record.leased_at = leased_at;
+                record.updated_at = now;
+                self.store.save_worktree_pool(&record).await?;
+            }
+        }
+
+        for project in self.projects.values() {
+            let Ok(repository) = GitService::discover(&project.path) else {
+                continue;
+            };
+            let root = repository.git_dir.join("shepherd/worktrees");
+            let entries = match std::fs::read_dir(&root) {
+                Ok(entries) => entries,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(source) => {
+                    return Err(CoreError::Io {
+                        path: root.display().to_string(),
+                        source,
+                    });
+                }
+            };
+            for entry in entries.filter_map(Result::ok) {
+                let path = entry.path();
+                let name = entry.file_name().to_string_lossy().to_string();
+                if !name.starts_with("pool-")
+                    || known.contains(&path)
+                    || self
+                        .tasks
+                        .values()
+                        .any(|task| task.worktree_path.as_ref() == Some(&path))
+                {
+                    continue;
+                }
+                let state = if path.join(".shepherd-retired").exists()
+                    || GitService.validate_worktree(&repository, &path).is_err()
+                    || GitService.has_changes(&path)?
+                {
+                    WorktreePoolState::Retired
+                } else {
+                    WorktreePoolState::Idle
+                };
+                let mut record = WorktreePoolRecord::new(project.id.clone(), path);
+                record.state = state;
+                record.created_at = now;
+                record.updated_at = now;
+                self.store.save_worktree_pool(&record).await?;
+            }
+        }
+        Ok(())
+    }
+
+    async fn lease_pool_worktree(
+        &mut self,
+        task: &Task,
+        repository: &git::GitRepository,
+    ) -> Result<PathBuf, CoreError> {
+        self.reconcile_worktree_pool().await?;
+        let root = repository.git_dir.join("shepherd/worktrees");
+        std::fs::create_dir_all(&root).map_err(|source| CoreError::Io {
+            path: root.display().to_string(),
+            source,
+        })?;
+        let used: BTreeSet<PathBuf> = self
+            .tasks
+            .values()
+            .filter(|other| other.id != task.id)
+            .filter_map(|other| other.worktree_path.clone())
+            .collect();
+        let records: Vec<_> = self
+            .store
+            .load_worktree_pool()
+            .await?
+            .into_iter()
+            .filter(|record| record.project_id == task.project_id)
+            .collect();
+        for mut record in records
+            .iter()
+            .filter(|record| record.state == WorktreePoolState::Idle)
+            .cloned()
+        {
+            if used.contains(&record.path) {
+                continue;
+            }
+            if !record.path.exists()
+                || GitService
+                    .validate_worktree(repository, &record.path)
+                    .is_err()
+            {
+                self.store.remove_worktree_pool(&record.id).await?;
+                continue;
+            }
+            if record.path.join(".shepherd-retired").exists()
+                || GitService.has_changes(&record.path)?
+            {
+                record.state = WorktreePoolState::Retired;
+                record.updated_at = projects::now_millis();
+                self.store.save_worktree_pool(&record).await?;
+                continue;
+            }
+            GitService.detach_worktree(&record.path, &repository.default_branch)?;
+            record.state = WorktreePoolState::Leased;
+            record.task_id = Some(task.id.clone());
+            record.leased_at = Some(projects::now_millis());
+            record.updated_at = projects::now_millis();
+            self.store.save_worktree_pool(&record).await?;
+            return Ok(record.path);
+        }
+
+        let active = records
+            .iter()
+            .filter(|record| record.state != WorktreePoolState::Retired)
+            .count();
+        if active < 3 {
+            for number in 1..=3 {
+                let path = root.join(format!("pool-{number}"));
+                if path.exists()
+                    || used.contains(&path)
+                    || records.iter().any(|record| record.path == path)
+                {
+                    continue;
+                }
+                GitService.create_detached_worktree(
+                    repository,
+                    &path,
+                    &repository.default_branch,
+                )?;
+                let mut record = WorktreePoolRecord::new(task.project_id.clone(), path.clone());
+                record.state = WorktreePoolState::Leased;
+                record.task_id = Some(task.id.clone());
+                record.leased_at = Some(projects::now_millis());
+                self.store.save_worktree_pool(&record).await?;
+                return Ok(path);
+            }
+        }
+        let path = root.join(format!("pool-temp-{}", uuid::Uuid::new_v4()));
+        GitService.create_detached_worktree(repository, &path, &repository.default_branch)?;
+        let mut record = WorktreePoolRecord::new(task.project_id.clone(), path.clone());
+        record.state = WorktreePoolState::Leased;
+        record.task_id = Some(task.id.clone());
+        record.leased_at = Some(projects::now_millis());
+        self.store.save_worktree_pool(&record).await?;
+        Ok(path)
+    }
+
+    async fn maybe_create_task_branch(
+        &mut self,
+        task_id: &TaskId,
+        events: &[HarnessEvent],
+    ) -> Result<(), CoreError> {
+        if self.task(task_id)?.branch.is_some() {
+            return Ok(());
+        }
+        let succeeded = events.iter().any(|event| match event {
+            HarnessEvent::Delta {
+                kind: DeltaKind::Message,
+                text,
+                ..
+            } => !text.trim().is_empty(),
+            HarnessEvent::TurnFinished {
+                reason: TurnFinishReason::Completed,
+            } => true,
+            _ => false,
+        });
+        if succeeded {
+            self.create_task_branch(task_id).await?;
+        }
+        Ok(())
+    }
+
+    async fn create_task_branch(&mut self, task_id: &TaskId) -> Result<bool, CoreError> {
+        let mut task = self.task(task_id)?.clone();
+        if task.branch.is_some() {
+            return Ok(false);
+        }
+        let Some(path) = task.worktree_path.clone() else {
+            return Ok(false);
+        };
+        match GitService.create_task_branch(&path, &task.proposed_branch) {
+            Ok(branch) => {
+                task.branch = Some(branch);
+                task.branch_error = None;
+            }
+            Err(error) => {
+                tracing::warn!(%task_id, %error, "could not create the task branch");
+                task.branch_error = Some(error.to_string());
+            }
+        }
+        task.updated_at = projects::now_millis();
+        self.store.save_task(&task).await?;
+        self.tasks.insert(task_id.clone(), task);
+        Ok(true)
+    }
+
+    async fn release_worktree_to_pool(&mut self, task_id: &TaskId) -> Result<(), CoreError> {
+        let mut task = self.task(task_id)?.clone();
+        let Some(path) = task.worktree_path.clone() else {
+            return Ok(());
+        };
+        let repository = GitService::discover(&self.project_path(&task.project_id)?)?;
+        if let Some(branch) = task.branch.as_deref() {
+            task.branch_tip_sha = Some(GitService.checked_out_tip(&path, branch)?);
+        }
+        let dirty = GitService.has_changes(&path)?;
+        if dirty {
+            let marker = path.join(".shepherd-retired");
+            std::fs::write(&marker, b"retired").map_err(|source| CoreError::Io {
+                path: marker.display().to_string(),
+                source,
+            })?;
+        } else {
+            GitService.detach_worktree(&path, &repository.default_branch)?;
+        }
+        if let Some(mut record) = self
+            .store
+            .load_worktree_pool()
+            .await?
+            .into_iter()
+            .find(|record| record.project_id == task.project_id && record.path == path)
+        {
+            record.state = if dirty {
+                WorktreePoolState::Retired
+            } else {
+                WorktreePoolState::Idle
+            };
+            record.task_id = None;
+            record.leased_at = None;
+            record.updated_at = projects::now_millis();
+            self.store.save_worktree_pool(&record).await?;
+        }
+        task.worktree_path = None;
+        task.updated_at = projects::now_millis();
+        self.store.save_task(&task).await?;
+        self.tasks.insert(task_id.clone(), task);
+        Ok(())
     }
 
     /// Open an adapter session and record it durably. A resume that the adapter
@@ -4064,7 +4484,7 @@ mod streaming {
         assert!(core.pump().await?);
 
         let workspace = core.task_workspace(&task_id)?;
-        assert_eq!(workspace.task.state, TaskState::Ready);
+        assert_eq!(workspace.task.state, TaskState::Review);
         assert_eq!(workspace.transcript.len(), 2);
         assert_eq!(workspace.transcript[1].summary(), "agent: streamed");
         assert_eq!(store.load_transcript(&task_id).await?, workspace.transcript);
@@ -4182,8 +4602,12 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::Mutex;
 
-    use agent_harness::fake_harness::{FakeStep, FakeTurn};
-    use agent_harness::{ApprovalId, Decision, Entry};
+    use agent_harness::fake_harness::{FakeHarness, FakeStep, FakeTurn};
+    use agent_harness::{
+        AgentHarness, ApprovalId, Capabilities, Decision, Entry, HarnessError, HarnessResult,
+        SpawnSpec,
+    };
+    use async_trait::async_trait;
 
     use super::*;
     use crate::store::{
@@ -5513,19 +5937,20 @@ mod tests {
             .await?,
         );
         let duplicate_id = TaskId::new(duplicate.task.id);
-        let failed = core
-            .execute(Command::SendPrompt {
+        let duplicate_workspace = workspace_of(
+            core.execute(Command::SendPrompt {
                 task_id: duplicate_id.clone(),
                 input: PromptInput::text("second prompt"),
             })
-            .await;
-        assert!(matches!(failed, Err(CoreError::WorktreePathTaken { .. })));
+            .await?,
+        );
+        assert_eq!(duplicate_workspace.task.state, TaskState::Waiting);
+        assert_ne!(
+            duplicate_workspace.task.worktree_path.as_deref(),
+            Some(first_worktree.to_string_lossy().as_ref())
+        );
         assert!(first_worktree.exists());
         assert_eq!(core.task_workspace(&first)?.task.state, TaskState::Waiting);
-        assert_eq!(
-            core.task_workspace(&duplicate_id)?.task.state,
-            TaskState::Draft
-        );
         assert!(!first_worktree.join("agent-result.txt").exists());
 
         let completed = workspace_of(
@@ -7092,8 +7517,7 @@ mod tests {
         );
         assert_eq!(draft.task.state, TaskState::Draft);
         assert!(draft.task.worktree_path.is_none());
-        let worktree_path = PathBuf::from(&draft.task.proposed_worktree_path);
-        assert!(!worktree_path.exists());
+        assert!(!PathBuf::from(&draft.task.proposed_worktree_path).exists());
         let task_id = TaskId::new(draft.task.id.clone());
 
         let workspace = workspace_of(
@@ -7105,6 +7529,13 @@ mod tests {
                 .await?,
         );
         assert_eq!(workspace.task.state, TaskState::Waiting);
+        let worktree_path = PathBuf::from(
+            workspace
+                .task
+                .worktree_path
+                .as_deref()
+                .ok_or("missing worktree")?,
+        );
         assert_eq!(scenario.trace().matches("event: TaskNeedsInput").count(), 1);
         scenario.core_mut().pump().await?;
         assert!(
@@ -7158,7 +7589,7 @@ mod tests {
                 })
                 .await?,
         );
-        assert_eq!(workspace.task.state, TaskState::Ready);
+        assert_eq!(workspace.task.state, TaskState::Review);
         assert_eq!(scenario.core().waiting_task_title(&task_id)?, None);
         assert_eq!(
             summaries(&workspace),
@@ -8022,11 +8453,7 @@ mod tests {
         for task_id in &review_ids {
             let task = core.task(task_id)?;
             assert_eq!(task.state, TaskState::Done);
-            assert!(
-                task.worktree_path
-                    .as_ref()
-                    .is_some_and(|path| path.join("notes.txt").is_file())
-            );
+            assert!(task.worktree_path.is_none());
             assert!(
                 core.sessions
                     .get(task_id)
@@ -8266,7 +8693,7 @@ mod tests {
             .await?,
         );
         let path = PathBuf::from(first.task.worktree_path.ok_or("missing worktree")?);
-        let branch = first.task.branch.ok_or("missing branch")?;
+        let _branch = first.task.branch.ok_or("missing branch")?;
         let tip = crate::git::run_git(&path, &["rev-parse", "HEAD"])?;
         std::fs::remove_dir_all(&path)?;
         let second = workspace_of(
@@ -8278,10 +8705,6 @@ mod tests {
         );
         assert_eq!(second.task.state, TaskState::Ready);
         assert_eq!(crate::git::run_git(&path, &["rev-parse", "HEAD"])?, tip);
-        assert_eq!(
-            crate::git::run_git(&path, &["branch", "--show-current"])?,
-            branch
-        );
         let transcript = summaries(&second).join("\n");
         assert!(transcript.contains("first reply"));
         assert!(transcript.contains("second reply"));
@@ -8527,6 +8950,460 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn retry_task_branch_clears_a_branch_creation_failure()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let repository = TestRepository::new()?;
+        for suffix in 0..100 {
+            let branch = if suffix == 0 {
+                "shepherd/first-task".to_string()
+            } else {
+                format!("shepherd/first-task-{suffix}")
+            };
+            crate::git::run_git(repository.path(), &["branch", &branch])?;
+        }
+        let mut core = Core::with_services(
+            Box::new(MemoryStore::new()),
+            Box::new(FakeHarnessFactory::new(vec![vec![FakeTurn::new(vec![
+                FakeStep::Message("ready".into()),
+            ])]])),
+        );
+        let project_id = add_project(&mut core, repository.path().to_path_buf()).await?;
+        let workspace = workspace_of(
+            core.execute(Command::StartTask {
+                project_id,
+                agent: Agent::Codex,
+                input: PromptInput::text("first task"),
+            })
+            .await?,
+        );
+        assert!(workspace.task.branch.is_none());
+        assert!(workspace.task.branch_error.is_some());
+
+        let task_id = TaskId::new(&workspace.task.id);
+        crate::git::run_git(repository.path(), &["branch", "-D", "shepherd/first-task"])?;
+        let workspace = workspace_of(
+            core.execute(Command::RetryTaskBranch {
+                task_id: task_id.clone(),
+            })
+            .await?,
+        );
+        assert_eq!(
+            workspace.task.branch.as_deref(),
+            Some("shepherd/first-task")
+        );
+        assert!(workspace.task.branch_error.is_none());
+        assert_eq!(
+            core.task(&task_id)?.branch.as_deref(),
+            Some("shepherd/first-task")
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn start_task_persists_the_title_and_turn_options_across_reload()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let repository = TestRepository::new()?;
+        let database = TestDatabase::new()?;
+        let uri = database.uri();
+        let mut core = Core::with_services(
+            Box::new(TursoStore::open(&uri).await?),
+            Box::new(FakeHarnessFactory::new(vec![vec![FakeTurn::new(vec![
+                FakeStep::Message("ready".into()),
+            ])]])),
+        );
+        let project_id = add_project(&mut core, repository.path().to_path_buf()).await?;
+        let mut input = PromptInput::text("\n  Keep this title  \nsecond line");
+        input.model = Some("acme/qwen".into());
+        let workspace = workspace_of(
+            core.execute(Command::StartTask {
+                project_id: project_id.clone(),
+                agent: Agent::Codex,
+                input,
+            })
+            .await?,
+        );
+        assert_eq!(workspace.task.title, "Keep this title");
+        assert_eq!(workspace.task.model.as_deref(), Some("acme/qwen"));
+        let task_id = TaskId::new(&workspace.task.id);
+        let workspace = workspace_of(
+            core.execute(Command::SetTaskOptions {
+                task_id: task_id.clone(),
+                model: Some("acme/qwen-next".into()),
+                mode: Some("plan".into()),
+            })
+            .await?,
+        );
+        assert_eq!(workspace.task.model.as_deref(), Some("acme/qwen-next"));
+        assert_eq!(workspace.task.mode.as_deref(), Some("plan"));
+        let tasks = core.store.load_tasks().await?;
+        assert_eq!(tasks.len(), 1);
+        assert!(!tasks.iter().any(|task| task.state == TaskState::Draft));
+        drop(core);
+
+        let core = Core::load(
+            Box::new(TursoStore::open(&uri).await?),
+            Box::new(UnavailableHarnessFactory),
+        )
+        .await?;
+        let restored = core.task(&task_id)?;
+        assert_eq!(restored.title, "Keep this title");
+        assert_eq!(restored.model.as_deref(), Some("acme/qwen-next"));
+        assert_eq!(restored.mode.as_deref(), Some("plan"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_rejected_first_prompt_removes_the_task_and_worktree()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let repository = TestRepository::new()?;
+        let worktree_root = repository.repository().git_dir.join("shepherd/worktrees");
+        let mut core = Core::with_services(
+            Box::new(MemoryStore::new()),
+            Box::new(FakeHarnessFactory::failing_prompt(
+                agent_harness::fake_harness::FakeFailure::AuthRequired,
+            )),
+        );
+        let project_id = add_project(&mut core, repository.path().to_path_buf()).await?;
+        let result = core
+            .execute(Command::StartTask {
+                project_id,
+                agent: Agent::Codex,
+                input: PromptInput::text("Sign in first"),
+            })
+            .await;
+        assert!(matches!(result, Err(CoreError::Harness(_))));
+        assert!(core.tasks.is_empty());
+        assert!(core.store.load_tasks().await?.is_empty());
+        assert!(core.store.load_worktree_pool().await?.is_empty());
+        let projects = core.project_list();
+        assert!(projects.projects[0].last_task_id.is_none());
+        let remaining = std::fs::read_dir(&worktree_root)
+            .map(|entries| entries.filter_map(Result::ok).count())
+            .unwrap_or(0);
+        assert_eq!(remaining, 0, "the rejected first prompt left a worktree");
+        Ok(())
+    }
+
+    struct DirtyRejectingHarness {
+        inner: FakeHarness,
+        cwd: Option<PathBuf>,
+    }
+
+    #[async_trait]
+    impl AgentHarness for DirtyRejectingHarness {
+        fn events(&mut self) -> &mut tokio::sync::mpsc::UnboundedReceiver<HarnessEvent> {
+            self.inner.events()
+        }
+
+        async fn start(&mut self, spec: SpawnSpec) -> HarnessResult<Capabilities> {
+            self.cwd = Some(spec.cwd.clone());
+            self.inner.start(spec).await
+        }
+
+        async fn open_session(&mut self, resume: Option<SessionId>) -> HarnessResult<SessionId> {
+            self.inner.open_session(resume).await
+        }
+
+        async fn prompt(&mut self, _input: PromptInput) -> HarnessResult<()> {
+            let cwd = self.cwd.as_ref().ok_or(HarnessError::NotStarted)?;
+            std::fs::write(cwd.join("rejected-first-prompt.txt"), "dirty").map_err(|error| {
+                HarnessError::Protocol(format!("could not dirty the worktree: {error}"))
+            })?;
+            Err(HarnessError::Protocol(
+                "401 Unauthorized: run `codex login`".to_string(),
+            ))
+        }
+
+        async fn cancel(&mut self) -> HarnessResult<()> {
+            self.inner.cancel().await
+        }
+
+        async fn respond(
+            &mut self,
+            approval_id: ApprovalId,
+            decision: Decision,
+        ) -> HarnessResult<()> {
+            self.inner.respond(approval_id, decision).await
+        }
+
+        async fn shutdown(&mut self) -> HarnessResult<()> {
+            self.inner.shutdown().await
+        }
+    }
+
+    struct DirtyRejectingFactory;
+
+    impl HarnessFactory for DirtyRejectingFactory {
+        fn create(&self) -> Result<Box<dyn AgentHarness>, CoreError> {
+            Ok(Box::new(DirtyRejectingHarness {
+                inner: FakeHarness::new(Vec::new()),
+                cwd: None,
+            }))
+        }
+    }
+
+    #[tokio::test]
+    async fn a_rejected_first_prompt_removes_records_when_worktree_removal_fails()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let repository = TestRepository::new()?;
+        let database = TestDatabase::new()?;
+        let worktree_root = repository.repository().git_dir.join("shepherd/worktrees");
+        let mut core = Core::with_services(
+            Box::new(TursoStore::open(&database.uri()).await?),
+            Box::new(DirtyRejectingFactory),
+        );
+        let project_id = add_project(&mut core, repository.path().to_path_buf()).await?;
+        let mut input = PromptInput::text("Reject this first prompt");
+        input.model = Some("acme/qwen".into());
+        let error = match core
+            .execute(Command::StartTask {
+                project_id: project_id.clone(),
+                agent: Agent::Codex,
+                input,
+            })
+            .await
+        {
+            Err(error) => error,
+            Ok(_) => return Err("the first prompt should have been rejected".into()),
+        };
+        assert!(
+            matches!(&error, CoreError::StartTaskCleanup { .. }),
+            "unexpected StartTask error: {error:?}"
+        );
+        let message = error.to_string();
+        assert!(message.contains("401 Unauthorized"), "{message}");
+        assert!(message.contains("cleanup was incomplete"), "{message}");
+        assert!(message.contains("worktree"), "{message}");
+
+        assert!(core.tasks.is_empty());
+        assert!(core.store.load_tasks().await?.is_empty());
+        assert!(core.store.load_worktree_pool().await?.is_empty());
+        assert!(core.project(&project_id)?.last_task_id.is_none());
+        assert!(
+            core.store
+                .load_projects()
+                .await?
+                .first()
+                .is_some_and(|project| project.last_task_id.is_none())
+        );
+        let remaining: Vec<_> = std::fs::read_dir(&worktree_root)?
+            .filter_map(Result::ok)
+            .collect();
+        assert_eq!(remaining.len(), 1, "the dirty worktree should remain");
+        assert!(
+            GitService.has_changes(&remaining[0].path())?,
+            "the test must leave a dirty worktree so removal fails"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn worktree_pool_persists_leases_reuses_idle_slots_and_retires_dirty_checkouts()
+    -> Result<(), Box<dyn std::error::Error>> {
+        fn turn(message: &str) -> Vec<FakeTurn> {
+            vec![FakeTurn::new(vec![FakeStep::Message(message.to_string())])]
+        }
+
+        let repository = TestRepository::new()?;
+        let database = TestDatabase::new()?;
+        let uri = database.uri();
+        let mut core = Core::with_services(
+            Box::new(TursoStore::open(&uri).await?),
+            Box::new(FakeHarnessFactory::new(vec![
+                turn("first answer"),
+                turn("second answer"),
+            ])),
+        );
+        let project_id = add_project(&mut core, repository.path().to_path_buf()).await?;
+        let first = workspace_of(
+            core.execute(Command::StartTask {
+                project_id: project_id.clone(),
+                agent: Agent::Codex,
+                input: PromptInput::text("first task"),
+            })
+            .await?,
+        );
+        let first_path = PathBuf::from(first.task.worktree_path.ok_or("missing first worktree")?);
+        let first_id = TaskId::new(&first.task.id);
+        let mut first_record = core.task(&first_id)?.clone();
+        first_record.state = TaskState::Review;
+        core.store.save_task(&first_record).await?;
+        core.tasks.insert(first_id.clone(), first_record);
+        let records = core.store.load_worktree_pool().await?;
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].state, WorktreePoolState::Leased);
+        assert_eq!(
+            records[0].task_id.as_ref().map(TaskId::as_str),
+            Some(first.task.id.as_str())
+        );
+        assert_eq!(records[0].path, first_path);
+
+        let second = workspace_of(
+            core.execute(Command::StartTask {
+                project_id,
+                agent: Agent::Codex,
+                input: PromptInput::text("second task"),
+            })
+            .await?,
+        );
+        let second_path =
+            PathBuf::from(second.task.worktree_path.ok_or("missing second worktree")?);
+        assert_ne!(first_path, second_path);
+        let mut records = core.store.load_worktree_pool().await?;
+        records.sort_by(|left, right| left.path.cmp(&right.path));
+        assert_eq!(records.len(), 2);
+        assert!(
+            records
+                .iter()
+                .all(|record| record.state == WorktreePoolState::Leased)
+        );
+
+        core.execute(Command::ArchiveReviewed {
+            task_ids: vec![first_id],
+        })
+        .await?;
+        drop(core);
+
+        let mut core = Core::load(
+            Box::new(TursoStore::open(&uri).await?),
+            Box::new(FakeHarnessFactory::new(vec![
+                turn("third answer"),
+                turn("fourth answer"),
+            ])),
+        )
+        .await?;
+        let mut records = core.store.load_worktree_pool().await?;
+        records.sort_by(|left, right| left.path.cmp(&right.path));
+        assert_eq!(
+            records
+                .iter()
+                .map(|record| record.state)
+                .collect::<Vec<_>>(),
+            [WorktreePoolState::Idle, WorktreePoolState::Leased]
+        );
+        assert_eq!(records[0].path, first_path);
+
+        let project_id = ProjectId::new(&first.task.project_id);
+        let third = workspace_of(
+            core.execute(Command::StartTask {
+                project_id: project_id.clone(),
+                agent: Agent::Codex,
+                input: PromptInput::text("third task"),
+            })
+            .await?,
+        );
+        assert_eq!(
+            PathBuf::from(third.task.worktree_path.ok_or("missing third worktree")?),
+            first_path
+        );
+        assert_eq!(core.store.load_worktree_pool().await?.len(), 2);
+
+        std::fs::write(second_path.join("dirty.txt"), "keep me")?;
+        let second_id = TaskId::new(&second.task.id);
+        let mut second_record = core.task(&second_id)?.clone();
+        second_record.state = TaskState::Review;
+        core.store.save_task(&second_record).await?;
+        core.tasks.insert(second_id.clone(), second_record);
+        core.execute(Command::ArchiveReviewed {
+            task_ids: vec![second_id],
+        })
+        .await?;
+        let retired = core
+            .store
+            .load_worktree_pool()
+            .await?
+            .into_iter()
+            .find(|record| record.path == second_path)
+            .ok_or("missing retired record")?;
+        assert_eq!(retired.state, WorktreePoolState::Retired);
+        assert!(retired.task_id.is_none());
+        assert!(retired.leased_at.is_none());
+        assert!(second_path.join("dirty.txt").is_file());
+
+        let fourth = workspace_of(
+            core.execute(Command::StartTask {
+                project_id,
+                agent: Agent::Codex,
+                input: PromptInput::text("fourth task"),
+            })
+            .await?,
+        );
+        let fourth_path =
+            PathBuf::from(fourth.task.worktree_path.ok_or("missing fourth worktree")?);
+        assert_ne!(fourth_path, first_path);
+        assert_ne!(fourth_path, second_path);
+        let records = core.store.load_worktree_pool().await?;
+        assert_eq!(records.len(), 3);
+        assert_eq!(
+            records
+                .iter()
+                .filter(|record| record.state == WorktreePoolState::Retired)
+                .count(),
+            1
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn deleting_a_task_reclaims_only_its_worktree_pool_record()
+    -> Result<(), Box<dyn std::error::Error>> {
+        fn turn(message: &str) -> Vec<FakeTurn> {
+            vec![FakeTurn::new(vec![FakeStep::Message(message.to_string())])]
+        }
+
+        let first_repository = TestRepository::new()?;
+        let second_repository = TestRepository::new()?;
+        let mut core = Core::with_services(
+            Box::new(MemoryStore::new()),
+            Box::new(FakeHarnessFactory::new(vec![
+                turn("first answer"),
+                turn("second answer"),
+            ])),
+        );
+        let first_project = add_project(&mut core, first_repository.path().to_path_buf()).await?;
+        let second_project = add_project(&mut core, second_repository.path().to_path_buf()).await?;
+        let first = workspace_of(
+            core.execute(Command::StartTask {
+                project_id: first_project,
+                agent: Agent::Codex,
+                input: PromptInput::text("first task"),
+            })
+            .await?,
+        );
+        let second = workspace_of(
+            core.execute(Command::StartTask {
+                project_id: second_project,
+                agent: Agent::Codex,
+                input: PromptInput::text("second task"),
+            })
+            .await?,
+        );
+        let first_path = PathBuf::from(first.task.worktree_path.ok_or("missing first worktree")?);
+        let second_path =
+            PathBuf::from(second.task.worktree_path.ok_or("missing second worktree")?);
+        assert_eq!(core.store.load_worktree_pool().await?.len(), 2);
+
+        let first_id = TaskId::new(&first.task.id);
+        let mut first_record = core.task(&first_id)?.clone();
+        first_record.state = TaskState::Review;
+        core.store.save_task(&first_record).await?;
+        core.tasks.insert(first_id.clone(), first_record);
+        core.execute(Command::DeleteTask {
+            task_id: first_id,
+            remove_worktree: true,
+        })
+        .await?;
+
+        let records = core.store.load_worktree_pool().await?;
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].path, second_path);
+        assert_eq!(records[0].project_id.as_str(), second.task.project_id);
+        assert!(records.iter().all(|record| record.path != first_path));
+        assert_eq!(records[0].state, WorktreePoolState::Leased);
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn review_commit_merge_archive_and_reopen_a_task()
     -> Result<(), Box<dyn std::error::Error>> {
         use crate::git::GitMutation;
@@ -8607,7 +9484,7 @@ mod tests {
             )
             .await?;
         assert!(committed.files.is_empty());
-        let tip = crate::git::run_git(&path, &["rev-parse", "HEAD"])?;
+        let _tip = crate::git::run_git(&path, &["rev-parse", "HEAD"])?;
         core.mutate_git(&task_id, GitMutation::SquashMerge).await?;
         assert_eq!(
             std::fs::read_to_string(repository.path().join("README.md"))?,
@@ -8627,6 +9504,11 @@ mod tests {
             projects::now_millis().saturating_sub(31 * 24 * 60 * 60 * 1000);
         archived_record.worktree_last_used_at = archived_record.updated_at;
         core.store.save_task(&archived_record).await?;
+        let expected_tip = core
+            .task(&task_id)?
+            .branch_tip_sha
+            .clone()
+            .ok_or("missing branch tip")?;
         drop(core);
 
         let mut reopened = Core::load(
@@ -8634,7 +9516,6 @@ mod tests {
             Box::new(UnavailableHarnessFactory),
         )
         .await?;
-        assert!(!path.exists());
         assert!(
             reopened
                 .task_workspace(&task_id)?
@@ -8644,19 +9525,29 @@ mod tests {
         );
         assert_eq!(
             git_in(&repository, &["rev-parse", &format!("refs/heads/{branch}")]),
-            tip
+            expected_tip
         );
         crate::git::run_git(repository.path(), &["branch", "-D", &branch])?;
         let restored = workspace_of(
             reopened
                 .execute(Command::ReviewTask {
-                    task_id,
+                    task_id: task_id.clone(),
                     action: ReviewAction::Reopen,
                 })
                 .await?,
         );
         assert_eq!(restored.task.state, TaskState::Review);
-        assert_eq!(crate::git::run_git(&path, &["rev-parse", "HEAD"])?, tip);
+        assert_eq!(restored.task.branch.as_deref(), Some(branch.as_str()));
+        let restored_path = restored
+            .task
+            .worktree_path
+            .as_deref()
+            .ok_or("missing restored worktree")?;
+        assert!(Path::new(restored_path).exists());
+        assert_eq!(
+            crate::git::run_git(Path::new(restored_path), &["branch", "--show-current"])?,
+            branch
+        );
         Ok(())
     }
 

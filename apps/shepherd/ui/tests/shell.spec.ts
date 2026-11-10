@@ -27,6 +27,7 @@ test.beforeEach(async ({ context }) => {
     const notifications: string[] = []
     const annotationWrapperOpens: string[] = []
     const sentPrompts: Array<{ taskId: string; text: string; model?: string }> = []
+    const modelCatalogRequests: string[] = []
     const dockCounts: Array<number | undefined> = []
     const windowTitles: string[] = []
     const terminalAppearances: Array<{ light: boolean; moreContrast: boolean }> = []
@@ -239,11 +240,15 @@ test.beforeEach(async ({ context }) => {
         worktreePath: '/tmp/demo/.git/shepherd/worktrees/ship-it',
         error: options.has('agent-auth-failed') ? 'Turso rejected the database token: HTTP 401 Unauthorized'
           : options.has('agent-failed') ? 'The agent exited with code 23 before the turn finished.' : null,
+        branchError: options.has('branch-error') ? 'branch already exists' : null,
         createdAt: 1_760_000_000_000,
       },
     ]
     if (options.has('two-projects')) {
       tasks.push({ ...tasks[0], id: 'task-archived', title: 'Old chat', state: 'done' })
+    }
+    if (options.has('two-tasks')) {
+      tasks.push({ ...tasks[0], id: 'task-second', title: 'Second chat', state: 'ready' })
     }
     if (options.has('task-search')) {
       tasks.push(
@@ -792,6 +797,7 @@ test.beforeEach(async ({ context }) => {
           case 'opencode_project_modes':
             return options.has('draft-modes') && args.projectId === 'project-notes' ? advertisedModes : []
           case 'opencode_project_models':
+            modelCatalogRequests.push(args.projectId)
             return options.has('agent-models') ? { current: advertisedModels[0].id, options: advertisedModels } : { current: null, options: [] }
           case 'claude_configured':
             return options.has('configured-claude')
@@ -1052,6 +1058,52 @@ test.beforeEach(async ({ context }) => {
             transcripts[id] = []
             return workspace(id)
           }
+          case 'start_task': {
+            const id = `task-${nextTask}`
+            nextTask += 1
+            const title = args.text.split(/\r?\n/).find((line: string) => line.trim())?.trim().slice(0, 80) || 'New task'
+            const task = {
+              id,
+              projectId: args.projectId,
+              title,
+              state: 'waiting',
+              agent: args.agent,
+              tier: 'native',
+              branch: null,
+              worktreePath: `/tmp/demo/.git/shepherd/worktrees/task-${nextTask - 1}`,
+              model: args.model ?? null,
+              mode: args.mode ?? null,
+              branchError: null,
+              error: null,
+              createdAt: 1_760_000_500_000,
+            }
+            tasks.unshift(task)
+            if (args.codex) codexTurns.push({ taskId: id, ...args.codex })
+            if (args.mode) sessionModes.set(id, args.mode)
+            if (args.model) sessionModels.set(id, args.model)
+            sentPrompts.push({ taskId: id, text: args.text, ...(args.model ? { model: args.model } : {}) })
+            transcripts[id] = [
+              entry(`entry-${id}-1`, 1, { type: 'userMessage', data: { text: args.text } }),
+              entry(`entry-${id}-2`, 2, { type: 'agentText', data: { text: 'working on it' } }),
+            ]
+            return workspace(id)
+          }
+          case 'set_task_options': {
+            const task = tasks.find((candidate) => candidate.id === args.taskId)
+            if (!task) throw new Error('Task not found')
+            task.model = args.model ?? null
+            task.mode = args.mode ?? null
+            if (args.mode) sessionModes.set(args.taskId, args.mode)
+            if (args.model) sessionModels.set(args.taskId, args.model)
+            return workspace(args.taskId)
+          }
+          case 'retry_task_branch': {
+            const task = tasks.find((candidate) => candidate.id === args.taskId)
+            if (!task) throw new Error('Task not found')
+            task.branch = `shepherd/${task.id}`
+            task.branchError = null
+            return workspace(args.taskId)
+          }
           case 'delete_task': {
             deletions.push({ taskId: args.taskId, removeWorktree: args.removeWorktree })
             if (options.has('dirty-delete') && args.removeWorktree) throw { message: 'Worktree contains changes', code: 'git' }
@@ -1073,11 +1125,14 @@ test.beforeEach(async ({ context }) => {
             return workspace(args.taskId)
           }
           case 'send_prompt': {
+            if (options.has('send-prompt-fails')) throw { message: 'Sign in required', code: 'agent' }
             const task = tasks.find((candidate) => candidate.id === args.taskId)
+            task.model = args.model ?? null
+            task.mode = args.mode ?? null
             if (args.codex) codexTurns.push({ taskId: args.taskId, ...args.codex })
             if (args.mode) sessionModes.set(args.taskId, args.mode)
             if (args.model) sessionModels.set(args.taskId, args.model)
-            sentPrompts.push({ taskId: args.taskId, text: args.text, ...(args.model ? { model: args.model } : {}) })
+            sentPrompts.push({ taskId: args.taskId, text: args.text, ...(args.model ? { model: args.model } : {}), ...(args.mode ? { mode: args.mode } : {}) })
             const text = args.attachmentIds?.length ? `Attachments: ${args.attachmentIds.join(', ')}` : args.text
             task.state = 'waiting'
             transcripts[task.id] = [
@@ -1321,6 +1376,7 @@ test.beforeEach(async ({ context }) => {
     window.__annotationWrapperOpens = annotationWrapperOpens
     ;(window as unknown as { __poolOperations: string[] }).__poolOperations = poolOperations
     window.__sentPrompts = sentPrompts
+    window.__modelCatalogRequests = modelCatalogRequests
     window.__terminalAppearances = terminalAppearances
     window.__dockCounts = dockCounts
     Object.assign(window, { __windowTitles: windowTitles })
@@ -1476,7 +1532,8 @@ test('searches app commands, explains unavailable actions, and switches workspac
   const chat = page.getByRole('region', { name: 'Task chat' })
   await expect(chat).toContainText('Current answer')
   await page.keyboard.press('Control+Shift+T')
-  await expect(chat).toContainText('New task')
+  await expect(chat.getByLabel('Prompt')).toBeFocused()
+  await expect(chat.locator('.chat__title')).toHaveCount(0)
   await page.keyboard.press('Control+Shift+O')
   const taskPicker = page.getByRole('dialog', { name: 'Switch task' })
   await taskPicker.getByRole('combobox').fill('current answer')
@@ -1727,7 +1784,7 @@ test('opts in to notifications for unfocused waits and shows waiting attention',
   expect(await page.evaluate(() => window.__notifications)).toEqual(['task-live-notes', 'task-1'])
 })
 
-test('shows the project, drafts a task, streams a reply and switches tasks', async ({ page }) => {
+test('starts a task only on send, streams a reply and switches tasks', async ({ page }) => {
   await page.goto('/')
 
   const project = page.getByRole('button', { name: 'demo', exact: true })
@@ -1737,15 +1794,10 @@ test('shows the project, drafts a task, streams a reply and switches tasks', asy
   await expect(compose).toBeFocused()
   await expect(compose).toHaveCSS('opacity', '1')
   await compose.press('Enter')
-  await expect(page.locator('.task', { hasText: 'New task' })).toBeVisible()
-  await expect(page.getByText('Proposed branch')).toBeVisible()
-  await expect(page.locator('.chat__adapter')).toHaveCount(0)
-  await expect(page.getByText('shepherd/new-task')).toBeVisible()
-  await expect(
-    page.getByText('/tmp/demo/.git/shepherd/worktrees/new-task', { exact: false }),
-  ).toBeVisible()
-
+  await expect(page.locator('.task', { hasText: 'New task' })).toHaveCount(0)
+  await expect(page.getByLabel('Prompt')).toBeFocused()
   await page.getByLabel('Prompt').fill('make it fast')
+  await expect(page.locator('.task', { hasText: 'make it fast' })).toHaveCount(0)
   await page.getByRole('button', { name: 'Send' }).click()
   await expect(page.getByText('working on it')).toBeVisible()
   await expect(page.locator('.transcript')).toContainText('make it fast')
@@ -2532,9 +2584,7 @@ test('distinguishes unavailable projects from a missing saved task', async ({ pa
   await expect(chat.getByRole('textbox', { name: 'Prompt' })).toBeDisabled()
 
   await page.goto('/?missing-last-task')
-  await expect(chat.getByText('New task', { exact: true })).toBeVisible()
   await expect(chat.getByRole('textbox', { name: 'Prompt' })).toBeEnabled()
-  await expect(chat.getByText('ready to go')).toHaveCount(0)
 })
 
 test('focuses Files from Git and Review and opens the selected worktree file', async ({ page }) => {
@@ -2764,7 +2814,7 @@ test('composes the first chat in an empty project and hides its sole task row', 
   await expect(prompt).toBeFocused()
   await expect(page.locator('.task-list')).toHaveCount(0)
   await prompt.fill('First prompt')
-  await expect(page.getByText('Proposed branch')).toBeVisible()
+  await expect(page.locator('.task', { hasText: 'First prompt' })).toHaveCount(0)
   await expect(prompt).toHaveValue('First prompt')
   await prompt.press('Enter')
   await expect(page.locator('.transcript')).toContainText('First prompt')
@@ -2773,7 +2823,7 @@ test('composes the first chat in an empty project and hides its sole task row', 
   await expect(page.locator('.transcript')).toContainText('First prompt')
 })
 
-test('uses the configured OpenCode agent and keeps the choice on the draft', async ({ page }) => {
+test('uses the configured OpenCode agent for a new composer', async ({ page }) => {
   await page.goto('/?two-projects&configured-opencode')
   await page.getByRole('button', { name: 'notes', exact: true }).click()
   const welcome = page.getByRole('heading', { name: 'What should Codex build in notes?' })
@@ -2783,7 +2833,6 @@ test('uses the configured OpenCode agent and keeps the choice on the draft', asy
 
   await page.getByLabel('Prompt').fill('Review the code')
   const composer = page.locator('.composer')
-  await expect(page.getByRole('button', { name: 'Discard draft' })).toBeVisible()
   await expect(composer.getByRole('button', { name: 'Agent: OpenCode' })).toBeVisible()
   await expect(composer.getByRole('button', { name: /Model \/ effort/ })).toHaveCount(0)
 
@@ -2797,7 +2846,7 @@ test('uses the configured OpenCode agent and keeps the choice on the draft', asy
   await expect(composer.getByRole('menuitemradio', { name: 'Codex' })).toBeDisabled()
 })
 
-test('selects a configured Claude Code ACP agent for a new draft', async ({ page }) => {
+test('selects a configured Claude Code ACP agent for a new composer', async ({ page }) => {
   await page.goto('/?two-projects&configured-claude')
   await page.getByRole('button', { name: 'notes', exact: true }).click()
   const welcome = page.getByRole('heading', { name: 'What should Codex build in notes?' })
@@ -2805,7 +2854,6 @@ test('selects a configured Claude Code ACP agent for a new draft', async ({ page
   await welcome.getByRole('menuitemradio', { name: 'Claude Code' }).click()
   await expect(page.getByRole('heading', { name: 'What should Claude Code build in notes?' })).toBeVisible()
   await page.getByLabel('Prompt').fill('Review the code')
-  await expect(page.getByRole('button', { name: 'Discard draft' })).toBeVisible()
   const composer = page.locator('.composer')
   await expect(composer.getByRole('button', { name: 'Agent: Claude Code' })).toBeVisible()
   await expect(composer.getByRole('button', { name: /Model \/ effort/ })).toHaveCount(0)
@@ -3257,7 +3305,7 @@ test('opens the project picker, filters, and adds a project', async ({ page }) =
   // above the conversation.
   await page.getByLabel('Prompt').fill('start')
   const chat = page.getByRole('region', { name: 'Task chat' })
-  await expect(chat.locator('.draft')).toBeVisible()
+  await expect(page.locator('.task')).toHaveCount(0)
   await expect(chat.locator('.chat__title')).toHaveCount(0)
 })
 
@@ -3331,7 +3379,8 @@ test('shows project icons, opens archive controls on hover, and composes in anot
   await directory.hover()
   await page.getByRole('button', { name: 'New chat in notes' }).click()
   await expect(directory).toHaveAttribute('aria-current', 'true')
-  await expect(page.locator('.chat__title')).toHaveText('New task')
+  await expect(page.getByLabel('Prompt')).toBeFocused()
+  await expect(page.locator('.chat__title')).toHaveCount(0)
   await expect(page.locator('.task-list')).toHaveCount(0)
   await expect(page.getByRole('button', { name: /Old chat/ })).toHaveCount(0)
 })
@@ -3804,6 +3853,106 @@ test('passes a generic model pick from the composer to the next turn', async ({ 
   await expect(composer.getByRole('button', { name: 'Model: Qwen Coder' })).toBeVisible()
 })
 
+test('keeps composer text per project and starts exactly one task on send', async ({ page }) => {
+  await page.goto('/?two-projects')
+  const demo = page.getByRole('button', { name: 'demo', exact: true })
+  const notes = page.getByRole('button', { name: 'notes', exact: true })
+  await demo.click()
+  await page.getByLabel('Prompt').fill('demo draft')
+  await notes.click()
+  await expect(page.getByLabel('Prompt')).toHaveValue('')
+  await page.getByLabel('Prompt').fill('first line\nsecond line')
+  await expect(page.locator('.task')).toHaveCount(0)
+  await page.reload()
+  await page.getByRole('button', { name: 'notes', exact: true }).click()
+  await expect(page.getByLabel('Prompt')).toHaveValue('first line\nsecond line')
+  await page.getByLabel('Prompt').press('Enter')
+  await expect(page.locator('.transcript')).toContainText('first line')
+  expect(await page.evaluate(() => window.__sentPrompts)).toHaveLength(1)
+  expect(await page.evaluate(() => window.__sentPrompts[0].text)).toContain('second line')
+  await expect(page.locator('.task', { hasText: 'first line' })).toHaveCount(0)
+})
+
+test('shows the no-model fallback and retries the catalog', async ({ page }) => {
+  await page.goto('/?two-projects&configured-opencode')
+  await page.getByRole('button', { name: 'notes', exact: true }).click()
+  const composer = page.locator('.composer')
+  await composer.getByRole('button', { name: 'Agent: Codex' }).click()
+  await composer.getByRole('menuitemradio', { name: 'OpenCode' }).click()
+  await expect(composer.getByRole('button', { name: 'No model available', exact: true })).toBeDisabled()
+  await expect(composer.getByRole('button', { name: 'No mode available', exact: true })).toBeDisabled()
+  const requestsBeforeRetry = (await page.evaluate(() => window.__modelCatalogRequests)).length
+  await composer.getByRole('button', { name: /No model available\. Retry/ }).click()
+  await expect.poll(() => page.evaluate(() => window.__modelCatalogRequests.length))
+    .toBeGreaterThan(requestsBeforeRetry)
+  await expect(composer.getByRole('button', { name: 'No model available', exact: true })).toBeDisabled()
+})
+
+test('keeps the OpenCode model picker visible on a live task', async ({ page }) => {
+  await page.goto('/?agent-models&review-fixture')
+  await page.getByRole('button', { name: 'notes', exact: true }).click()
+  await page.getByRole('button', { name: /Read notes/ }).click()
+  const composer = page.locator('.composer')
+  await expect(composer.getByRole('button', { name: 'Model: DeepSeek V3' })).toBeVisible()
+})
+
+test('keeps a selected task model across task switches', async ({ page }) => {
+  await page.goto('/?two-tasks&agent-models&configured-opencode')
+  await page.getByRole('button', { name: /Ship it/ }).click()
+  const composer = page.locator('.composer')
+  await composer.getByRole('button', { name: 'Model: DeepSeek V3' }).click()
+  await composer.getByRole('menu', { name: 'Model' }).getByRole('menuitemradio', { name: 'Qwen Coder' }).click()
+  await expect(composer.getByRole('button', { name: 'Model: Qwen Coder' })).toBeVisible()
+  await page.getByRole('button', { name: /Second chat/ }).click()
+  await page.getByRole('button', { name: /Ship it/ }).click()
+  await expect(page.locator('.composer').getByRole('button', { name: 'Model: Qwen Coder' })).toBeVisible()
+})
+
+test('keeps the project composer model across reload', async ({ page }) => {
+  await page.goto('/?two-projects&agent-models&configured-opencode&draft-modes')
+  await page.getByRole('button', { name: 'notes', exact: true }).click()
+  const composer = page.locator('.composer')
+  await composer.getByRole('button', { name: 'Agent: Codex' }).click()
+  await composer.getByRole('menuitemradio', { name: 'OpenCode' }).click()
+  await composer.getByRole('button', { name: 'Mode: Default mode' }).click()
+  await composer.getByRole('menu', { name: 'Mode' }).getByRole('menuitemradio', { name: 'Plan' }).click()
+  await expect(composer.getByRole('button', { name: 'Mode: Plan' })).toBeVisible()
+  await composer.getByRole('button', { name: 'Model: DeepSeek V3' }).click()
+  await composer.getByRole('menu', { name: 'Model' }).getByRole('menuitemradio', { name: 'Qwen Coder' }).click()
+  await expect(composer.getByRole('button', { name: 'Model: Qwen Coder' })).toBeVisible()
+
+  await page.reload()
+  await page.getByRole('button', { name: 'notes', exact: true }).click()
+  await composer.getByRole('button', { name: 'Agent: Codex' }).click()
+  await composer.getByRole('menuitemradio', { name: 'OpenCode' }).click()
+  await expect(composer.getByRole('button', { name: 'Mode: Plan' })).toBeVisible()
+  await expect(composer.getByRole('button', { name: 'Model: Qwen Coder' })).toBeVisible()
+})
+
+test('keeps composer text per task across switching and reload', async ({ page }) => {
+  await page.goto('/?two-tasks')
+  await page.getByRole('button', { name: /Ship it/ }).click()
+  await page.getByLabel('Prompt').fill('ship it note')
+  await page.getByRole('button', { name: /Second chat/ }).click()
+  await page.getByLabel('Prompt').fill('second chat note')
+  await page.getByRole('button', { name: /Ship it/ }).click()
+  await expect(page.getByLabel('Prompt')).toHaveValue('ship it note')
+  await page.reload()
+  await page.getByRole('button', { name: /Ship it/ }).click()
+  await expect(page.getByLabel('Prompt')).toHaveValue('ship it note')
+  await page.getByRole('button', { name: /Second chat/ }).click()
+  await expect(page.getByLabel('Prompt')).toHaveValue('second chat note')
+  await expect(page.getByRole('button', { name: /Discard draft/i })).toHaveCount(0)
+})
+
+test('retries a failed branch creation from the task header', async ({ page }) => {
+  await page.goto('/?branch-error')
+  const retry = page.getByRole('region', { name: 'Task chat' }).getByRole('button', { name: 'Branch creation failed. Retry' })
+  await expect(retry).toBeVisible()
+  await retry.click()
+  await expect(retry).toHaveCount(0)
+})
+
 test('summarizes an auth failure and keeps the raw error behind details', async ({ page }) => {
   await page.goto('/?agent-auth-failed')
   const chat = page.getByRole('region', { name: 'Task chat' })
@@ -3817,7 +3966,7 @@ test('summarizes an auth failure and keeps the raw error behind details', async 
   await expect(details).toContainText('Turso login required for workspace acme.')
 })
 
-test('shows advertised session modes and disables changing them during a turn', async ({ page }) => {
+test('keeps advertised session modes changeable during a turn for the next prompt', async ({ page }) => {
   await page.goto('/?acp-fallback&session-modes')
   const composer = page.locator('.composer')
   const menu = composer.getByRole('menu', { name: 'Mode' })
@@ -3831,11 +3980,17 @@ test('shows advertised session modes and disables changing them during a turn', 
   await composer.getByRole('button', { name: 'Send', exact: true }).click()
   await expect(page.locator('.transcript')).toContainText('Plan the change')
   await mode.click()
-  await expect(menu.getByRole('menuitemradio', { name: 'Build' })).toBeDisabled()
-  await expect(menu.getByRole('menuitemradio', { name: 'Plan', checked: true })).toBeDisabled()
+  const build = menu.getByRole('menuitemradio', { name: 'Build' })
+  await expect(build).toBeEnabled()
+  await build.click()
+  await expect(composer.getByRole('button', { name: 'Mode: Build' })).toBeVisible()
+  await composer.getByLabel('Prompt', { exact: true }).fill('Use build next')
+  await composer.getByRole('button', { name: 'Send', exact: true }).click()
+  await expect.poll(() => page.evaluate(() => window.__sentPrompts.at(-1)))
+    .toMatchObject({ text: 'Use build next', mode: 'build' })
 })
 
-test('uses the selected OpenCode draft mode on the first turn', async ({ page }) => {
+test('uses the selected OpenCode mode on the first turn', async ({ page }) => {
   await page.goto('/?two-projects&configured-opencode&draft-modes')
   await page.getByRole('button', { name: 'notes', exact: true }).click()
   const composer = page.locator('.composer')
@@ -3848,7 +4003,6 @@ test('uses the selected OpenCode draft mode on the first turn', async ({ page })
   await expect(composer.getByRole('button', { name: 'Mode: Plan' })).toBeVisible()
 
   await composer.getByLabel('Prompt', { exact: true }).fill('Plan the first turn')
-  await expect(page.getByRole('button', { name: 'Discard draft' })).toBeVisible()
   await expect(composer.getByRole('button', { name: 'Mode: Plan' })).toBeVisible()
   await composer.getByRole('button', { name: 'Send', exact: true }).click()
   await expect(page.locator('.transcript')).toContainText('Plan the first turn')
@@ -3879,6 +4033,26 @@ test('queues removable files and uploads them only when sending the prompt', asy
   expect(await page.evaluate(() => window.__promptFileUploads)).toEqual([
     { taskId: 'task-1', name: 'Résumé 1.txt', text: 'keep this' },
   ])
+})
+
+test('removes the unsent task when a first prompt with an attachment is rejected', async ({ page }) => {
+  await page.goto('/?two-projects&send-prompt-fails')
+  await page.getByRole('button', { name: 'notes', exact: true }).click()
+  const composer = page.locator('.composer')
+  await page.getByLabel('Local attachments').setInputFiles({
+    name: 'note.txt', mimeType: 'text/plain', buffer: Buffer.from('note'),
+  })
+  await expect(composer.getByRole('list', { name: 'Queued attachments' })).toContainText('note.txt')
+  await composer.getByLabel('Prompt', { exact: true }).fill('Reject me')
+  await composer.getByRole('button', { name: 'Send', exact: true }).click()
+  await expect.poll(() => page.evaluate(() =>
+    (window as unknown as { __deletions: Array<{ removeWorktree: boolean }> }).__deletions.length
+  )).toBe(1)
+  expect(await page.evaluate(() =>
+    (window as unknown as { __deletions: Array<{ removeWorktree: boolean }> }).__deletions[0].removeWorktree
+  )).toBe(true)
+  await expect(page.getByRole('alert')).toContainText('Sign in required')
+  await expect(composer.getByLabel('Prompt', { exact: true })).toHaveValue('Reject me')
 })
 
 test('does not reload the attachment limit on streaming project snapshots', async ({ page }) => {

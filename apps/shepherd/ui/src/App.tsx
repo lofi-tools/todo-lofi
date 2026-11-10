@@ -4,7 +4,7 @@
  * frontend model.
  */
 
-import { For, Show, batch, createEffect, createMemo, createResource, createSignal, createUniqueId, onCleanup, onMount, type JSX } from 'solid-js'
+import { For, Show, batch, createEffect, createMemo, createResource, createSignal, createUniqueId, onCleanup, onMount, untrack, type JSX } from 'solid-js'
 import { isTauri } from '@tauri-apps/api/core'
 import { homeDir } from '@tauri-apps/api/path'
 import { getCurrentWindow } from '@tauri-apps/api/window'
@@ -59,6 +59,7 @@ const CAPABILITY_LABELS: Record<Exclude<keyof bridge.AgentCapabilities, 'unrevie
   patchesInApprovals: 'Approval patches',
 }
 const SEND_ACCENT_KEY = 'shepherd.sendAccent'
+const COMPOSER_KEY_PREFIX = 'shepherd.composer.v1.'
 const APPROVAL_LABELS: Record<bridge.Decision, string> = {
   allow: 'Allow once',
   allowSession: 'Allow for session',
@@ -199,6 +200,7 @@ export function App() {
   const [piConfigured, setPiConfigured] = createSignal(false)
   const [claudeConfigured, setClaudeConfigured] = createSignal(false)
   const [newTaskAgent, setNewTaskAgent] = createSignal<bridge.Agent>('codex')
+  const [composingProjectId, setComposingProjectId] = createSignal<string>()
   const [selectedProjectId, setSelectedProjectId] = createSignal<string | null>(null)
   const [freebuffProjectId, setFreebuffProjectId] = createSignal<string>()
   const selectedProject = () => projects().find((project) => project.id === selectedProjectId())
@@ -373,59 +375,128 @@ export function App() {
   const promptFiles = () => queuedFiles().get(fileQueueKey() ?? '') ?? []
   const [queuedTurnOptions, setQueuedTurnOptions] = createSignal(new Map<string, TurnSelection>())
   const turnOptions = () => queuedTurnOptions().get(fileQueueKey() ?? '')
+  let promptSaveTimer: ReturnType<typeof setTimeout> | undefined
+  let currentPromptScope: string | undefined
+  type StoredComposer = { text: string; options?: TurnSelection }
+  function readComposer(scope: string): StoredComposer | undefined {
+    try {
+      const stored = localStorage.getItem(`${COMPOSER_KEY_PREFIX}${scope}`)
+      if (!stored) return undefined
+      const value = JSON.parse(stored) as Partial<StoredComposer>
+      return { text: typeof value.text === 'string' ? value.text : '', options: value.options }
+    } catch {
+      return undefined
+    }
+  }
+  function persistComposer(scope: string) {
+    const stored: StoredComposer = { text: prompt(), options: turnOptions() }
+    try {
+      localStorage.setItem(`${COMPOSER_KEY_PREFIX}${scope}`, JSON.stringify(stored))
+    } catch (error) {
+      console.warn('Could not save the unsent prompt', error)
+    }
+  }
+  function saveComposerSoon() {
+    const scope = fileQueueKey()
+    if (!scope) return
+    if (promptSaveTimer) clearTimeout(promptSaveTimer)
+    promptSaveTimer = setTimeout(() => {
+      promptSaveTimer = undefined
+      persistComposer(scope)
+    }, 150)
+  }
+  function forgetComposer(scope: string) {
+    if (promptSaveTimer) clearTimeout(promptSaveTimer)
+    promptSaveTimer = undefined
+    localStorage.removeItem(`${COMPOSER_KEY_PREFIX}${scope}`)
+  }
+  createEffect(() => {
+    const scope = fileQueueKey()
+    if (scope === currentPromptScope) return
+    if (currentPromptScope) untrack(() => persistComposer(currentPromptScope!))
+    currentPromptScope = scope
+    const stored = scope ? readComposer(scope) : undefined
+    batch(() => {
+      setPrompt(stored?.text ?? '')
+      if (scope) {
+        if (stored?.options) setQueuedTurnOptions((queued) => new Map(queued).set(scope, stored.options!))
+        else setQueuedTurnOptions((queued) => { const next = new Map(queued); next.delete(scope); return next })
+      }
+    })
+  })
+  onMount(() => {
+    const flush = () => {
+      const scope = fileQueueKey()
+      if (scope) untrack(() => persistComposer(scope))
+    }
+    window.addEventListener('pagehide', flush)
+    onCleanup(() => {
+      window.removeEventListener('pagehide', flush)
+      if (promptSaveTimer) clearTimeout(promptSaveTimer)
+    })
+  })
   const codexOptions = () => turnOptions()?.codex
   const pendingMode = () => currentAgent() === 'opencode' ? turnOptions()?.mode : undefined
-  const [projectModes] = createResource(
+  const [projectModes, { refetch: refetchProjectModes }] = createResource(
     () => {
       const project = selectedProject()
-      const task = workspace()?.task
       return opencodeConfigured() && currentAgent() === 'opencode' && project && !project.missing
-        && (!task || task.state === 'draft') ? project.id : false
+        ? project.id : false
     },
     async (projectId) => {
       try {
-        return { projectId, options: await bridge.opencodeProjectModes(projectId) }
+        return { projectId, options: await bridge.opencodeProjectModes(projectId), failed: false }
       } catch (error) {
         console.warn('Could not read OpenCode project modes', error)
-        return { projectId, options: [] }
+        return { projectId, options: [], failed: true }
       }
     },
   )
   const composerModes = (): bridge.AgentModes | undefined => {
     const current = workspace()
-    const selected = pendingMode()
+    if (currentAgent() !== 'opencode') return
+    const selected = pendingMode() ?? current?.task.mode ?? undefined
     if (current?.modes) return selected ? { ...current.modes, current: selected } : current.modes
-    if (currentAgent() !== 'opencode' || (current && current.task.state !== 'draft' && !selected)) return
     const catalog = projectModes()
     const options = catalog && catalog.projectId === selectedProjectId() ? catalog.options : []
-    if (options.length || selected) return { current: selected ?? null, options }
+    return { current: selected ?? null, options }
   }
-  const [projectModels] = createResource(
+  const modeCatalogError = () => {
+    const current = workspace()
+    if (current?.modes) return undefined
+    const catalog = projectModes()
+    return catalog?.projectId === selectedProjectId() && catalog.failed ? 'Mode catalog unavailable.' : undefined
+  }
+  const [projectModels, { refetch: refetchProjectModels }] = createResource(
     () => {
       const project = selectedProject()
-      const task = workspace()?.task
       return opencodeConfigured() && currentAgent() === 'opencode' && project && !project.missing
-        && (!task || task.state === 'draft') ? project.id : false
+        ? project.id : false
     },
     async (projectId) => {
       try {
-        return { projectId, models: await bridge.opencodeProjectModels(projectId) }
+        return { projectId, models: await bridge.opencodeProjectModels(projectId), failed: false }
       } catch (error) {
         console.warn('Could not read OpenCode project models', error)
-        return { projectId, models: { current: null, options: [] } }
+        return { projectId, models: { current: null, options: [] }, failed: true }
       }
     },
   )
   const composerModels = (): bridge.AgentModels | undefined => {
     const current = workspace()
-    const selected = turnOptions()?.model
+    const selected = turnOptions()?.model ?? current?.task.model ?? undefined
+    if (currentAgent() === 'codex') return
     if (current?.models) return selected ? { ...current.models, current: selected } : current.models
-    if (currentAgent() !== 'opencode' || (current && current.task.state !== 'draft' && !selected)) return
     const catalog = projectModels()
     const models = catalog && catalog.projectId === selectedProjectId()
       ? catalog.models : { current: null, options: [] }
-    if (!models.options.length && !selected) return
     return { current: selected ?? models.current, options: models.options }
+  }
+  const modelCatalogError = () => {
+    const current = workspace()
+    if (current?.models) return undefined
+    const catalog = projectModels()
+    return catalog?.projectId === selectedProjectId() && catalog.failed ? 'Model catalog unavailable.' : undefined
   }
   const composerModel = () => codexOptions()?.model ?? workspace()?.diagnostics?.model ?? codexCatalog()?.model ?? null
   const composerEffort = () => {
@@ -443,6 +514,7 @@ export function App() {
 
   function patchTurnOptions(patch: TurnSelection) {
     setTurnOptions({ ...turnOptions(), ...patch })
+    if (fileQueueKey()?.startsWith('project:')) saveComposerSoon()
   }
 
   function clearTurnOptions(taskId: string) {
@@ -455,19 +527,8 @@ export function App() {
     })
   }
 
-  function moveTurnOptionsToDraft(projectId: string, taskId: string) {
-    setQueuedTurnOptions((queued) => {
-      const key = `project:${projectId}`
-      const options = queued.get(key)
-      if (!options) return queued
-      const next = new Map(queued)
-      next.delete(key)
-      return next.set(`task:${taskId}`, options)
-    })
-  }
   let fileInput: HTMLInputElement | undefined
   let promptInput: HTMLTextAreaElement | undefined
-  const firstDrafts = new Map<string, Promise<bridge.TaskWorkspace>>()
   const [pickerOpen, setPickerOpen] = createSignal(false)
   const [scan, setScan] = createSignal<bridge.ProjectScan | null>(null)
   const [scanning, setScanning] = createSignal(false)
@@ -661,16 +722,14 @@ export function App() {
   const canStartTask = () => {
     const project = selectedProject()
     return !!project && !project.missing && loadedTasksFor() === project.id
-      && !selectedTaskId() && visibleTasks().length === 0
+      && !selectedTaskId()
   }
   const canCompose = () => {
     if (selectedProject()?.missing) return false
     const state = workspace()?.task.state
-    return state === 'draft' || state === 'ready' || canStartTask()
-      || (!selectedTaskId() && firstDrafts.has(selectedProjectId() ?? ''))
+    return state === 'ready' || canStartTask()
   }
-  const showsChatTitle = () =>
-    !(workspace()?.task.state === 'draft' && visibleTasks().length <= 1)
+  const showsChatTitle = () => !!workspace()
   const canQueuePrompt = () => {
     const state = workspace()?.task.state
     return !!state && LIVE_STATES.includes(state) && !cancellingTurn()
@@ -684,7 +743,7 @@ export function App() {
     if (loadedTasksFor() !== project.id) return pending() ? 'Loading project tasks…' : 'Project tasks are unavailable.'
     return 'Choose a task from Projects or use Compose to start a new one.'
   }
-  const canAddPreviewNote = () => (canCompose() || canQueuePrompt()) && !pending() && !settingsOpen() && !freebuffProjectId()
+  const canAddPreviewNote = () => !!workspace() && (canCompose() || canQueuePrompt()) && !pending() && !settingsOpen() && !freebuffProjectId()
   const canCancel = () => {
     const current = workspace()
     return !!current?.capabilities?.cancel && LIVE_STATES.includes(current.task.state)
@@ -1059,6 +1118,7 @@ export function App() {
 
   async function selectProject(project: bridge.ProjectSnapshot, taskId?: string) {
     setFreebuffProjectId(undefined)
+    setComposingProjectId(undefined)
     setSearchJump(undefined)
     if (selectedProjectId() !== project.id) setPrompt('')
     setTerminalListEvent(undefined)
@@ -1074,14 +1134,10 @@ export function App() {
       await selectTask(taskId)
       return
     }
-    if (!project.missing && project.lastTaskId && !listed.some((task) => task.id === project.lastTaskId)) {
-      await firstDraft(project.id)
-      await loadTasks(project.id)
-      return
-    }
     const visible = listed.filter((task) => showsArchived(project.id) || task.state !== 'done')
-    const task = visible.find((entry) => entry.id === project.lastTaskId)
-      ?? (visible.length === 1 ? visible[0] : undefined)
+    const task = project.lastTaskId
+      ? visible.find((entry) => entry.id === project.lastTaskId)
+      : visible.length === 1 ? visible[0] : undefined
     if (task) await selectTask(task.id)
   }
 
@@ -1148,7 +1204,7 @@ export function App() {
   })
 
   createEffect(() => {
-    if (pending() || firstDrafts.has(selectedProjectId() ?? '') || searchJump()?.taskId === selectedTaskId()) return
+    if (pending() || composingProjectId() === selectedProjectId() || searchJump()?.taskId === selectedTaskId()) return
     const visible = visibleTasks()
     const [only] = visible
     if (visible.length === 1 && only && only.id !== selectedTaskId()) {
@@ -1460,51 +1516,25 @@ export function App() {
   function newTask(projectId: string) {
     setFreebuffProjectId(undefined)
     setSettingsOpen(false)
+    setComposingProjectId(projectId)
     void run(async () => {
-      const draft = await bridge.createDraft(projectId, 'New task', newTaskAgent())
-      moveTurnOptionsToDraft(projectId, draft.task.id)
-      setPrompt('')
       if (selectedProjectId() !== projectId) {
         setTerminalListEvent(undefined)
         setSelectedProjectId(projectId)
         setTasks([])
         setLoadedTasksFor(undefined)
       }
-      setSelectedTaskId(draft.task.id)
-      setWorkspace(draft)
+      setSelectedTaskId(null)
+      setWorkspace(null)
       await loadTasks(projectId)
+    }).then(() => {
+      if (selectedProjectId() === projectId && !selectedTaskId()) promptInput?.focus()
     })
-  }
-
-  function firstDraft(projectId: string) {
-    const inFlight = firstDrafts.get(projectId)
-    if (inFlight) return inFlight
-    const request = bridge.createDraft(projectId, 'New task', newTaskAgent()).then((draft) => {
-      moveTurnOptionsToDraft(projectId, draft.task.id)
-      setQueuedFiles((queues) => {
-        const files = queues.get(`project:${projectId}`)
-        if (!files) return queues
-        const next = new Map(queues)
-        next.delete(`project:${projectId}`)
-        return next.set(`task:${draft.task.id}`, files)
-      })
-      if (selectedProjectId() === projectId && !selectedTaskId()) {
-        setSelectedTaskId(draft.task.id)
-        setWorkspace(draft)
-      }
-      return draft
-    }).finally(() => firstDrafts.delete(projectId))
-    firstDrafts.set(projectId, request)
-    return request
   }
 
   function updatePrompt(text: string) {
     setPrompt(text)
-    const projectId = selectedProjectId()
-    if (!projectId || !text.trim() || pending() || !canStartTask() || firstDrafts.has(projectId)) return
-    void firstDraft(projectId).then(() => loadTasks(projectId)).catch((failure) => {
-      if (selectedProjectId() === projectId) setError(describe(failure))
-    })
+    saveComposerSoon()
   }
 
   function queuePromptFiles(files: FileList) {
@@ -1556,7 +1586,8 @@ export function App() {
     let validated: bridge.PreviewAnnotationBatch | undefined
     setPending(true)
     try {
-      const task = workspace()?.task ?? (await firstDraft(projectId)).task
+      const task = workspace()?.task
+      if (!task) throw new Error('Select a task to add preview annotations.')
       for (const annotation of annotations) {
         const targets: bridge.PreviewAnnotationTarget[] = []
         if ('screenshot' in annotation) {
@@ -1586,20 +1617,6 @@ export function App() {
     appendPreviewAnnotations(validated)
   }
 
-  function discardDraft() {
-    const current = workspace()
-    if (!current) return
-    void run(async () => {
-      await bridge.discardDraft(current.task.id)
-      clearTurnOptions(current.task.id)
-      clearPromptFiles(current.task.id)
-      setWorkspace(null)
-      setSelectedTaskId(null)
-      const projectId = selectedProjectId()
-      if (projectId) await loadTasks(projectId)
-    })
-  }
-
   function deleteTask(removeWorktree: boolean) {
     const task = deleteRequest()
     if (!task || pending()) return
@@ -1625,15 +1642,47 @@ export function App() {
     const mode = pendingMode()
     const model = currentAgent() !== 'codex' ? turnOptions()?.model : undefined
     if (!projectId || (!text && !files.length) || (!canCompose() && !canQueuePrompt()) || pending()) return
+    const projectScope = `project:${projectId}`
     void run(async () => {
-      const task = current?.task ?? (await firstDraft(projectId)).task
-      const attachmentIds: string[] = []
-      for (const file of files) attachmentIds.push(await bridge.savePromptFile(task.id, file))
-      const updated = await bridge.sendPrompt(task.id, text, attachmentIds, codex, mode, model)
-      clearPromptFiles(task.id)
-      clearTurnOptions(task.id)
-      if (selectedTaskId() === task.id) {
+      let updated: bridge.TaskWorkspace
+      if (current?.task) {
+        const task = current.task
+        const attachmentIds: string[] = []
+        for (const file of files) attachmentIds.push(await bridge.savePromptFile(task.id, file))
+        updated = await bridge.sendPrompt(task.id, text, attachmentIds, codex, mode, model)
+        clearPromptFiles(task.id)
+        clearTurnOptions(task.id)
+        forgetComposer(`task:${task.id}`)
+        if (selectedTaskId() === task.id) {
+          setPrompt((value) => value.trim() === text ? '' : value)
+          setWorkspace(updated)
+        }
+      } else {
+        if (files.length) {
+          const title = text.split(/\r?\n/).find((line) => line.trim())?.trim().slice(0, 80) || 'New task'
+          const created = await bridge.createDraft(projectId, title, newTaskAgent())
+          try {
+            await bridge.setTaskOptions(created.task.id, model ?? null, mode ?? null)
+            const attachmentIds: string[] = []
+            for (const file of files) attachmentIds.push(await bridge.savePromptFile(created.task.id, file))
+            updated = await bridge.sendPrompt(created.task.id, text, attachmentIds, codex, mode, model)
+          } catch (failure) {
+            try {
+              await bridge.deleteTask(created.task.id, true)
+            } catch (cleanup) {
+              throw new Error(`${describe(failure)} Could not remove the unsent task: ${describe(cleanup)}`)
+            }
+            throw failure
+          }
+        } else {
+          updated = await bridge.startTask(projectId, text, codex, mode, model, newTaskAgent())
+        }
+        forgetComposer(projectScope)
+        setQueuedTurnOptions((queued) => { const next = new Map(queued); next.delete(projectScope); return next })
+        setComposingProjectId(undefined)
+        currentPromptScope = `task:${updated.task.id}`
         setPrompt((value) => value.trim() === text ? '' : value)
+        setSelectedTaskId(updated.task.id)
         setWorkspace(updated)
       }
       await loadTasks(projectId)
@@ -1643,19 +1692,35 @@ export function App() {
   function chooseMode(mode: string) {
     const current = workspace()
     if (pending()) return
-    if (!current?.modes) {
-      patchTurnOptions({ mode: mode || undefined })
-      return
-    }
+    patchTurnOptions({ mode: mode || undefined })
+    if (!current) return
     const taskId = current.task.id
-    if (!mode) {
-      clearTurnOptions(taskId)
-      return
-    }
+    const model = turnOptions()?.model ?? current.task.model
     void run(async () => {
-      const updated = await bridge.setSessionMode(taskId, mode)
-      clearTurnOptions(taskId)
+      const updated = await bridge.setTaskOptions(taskId, model ?? null, mode || null)
       if (selectedTaskId() === taskId) setWorkspace(updated)
+    })
+  }
+
+  function chooseModel(model: string) {
+    if (pending()) return
+    patchTurnOptions({ model: model || undefined })
+    const current = workspace()
+    if (!current) return
+    const taskId = current.task.id
+    const mode = pendingMode() ?? current.task.mode
+    void run(async () => {
+      const updated = await bridge.setTaskOptions(taskId, model || null, mode ?? null)
+      if (selectedTaskId() === taskId) setWorkspace(updated)
+    })
+  }
+
+  function retryBranch() {
+    const current = workspace()
+    if (!current || pending()) return
+    void run(async () => {
+      const updated = await bridge.retryTaskBranch(current.task.id)
+      if (selectedTaskId() === current.task.id) setWorkspace(updated)
     })
   }
 
@@ -2071,10 +2136,14 @@ export function App() {
                   <span class="chat__adapter" title="Pi's tools run under Pi's configuration; Shepherd cannot approve them">unreviewed tools</span>
                 </Show>
                 <span class="chat__state">{current().task.state}</span>
-                <Show when={current().task.state !== 'draft'}>
-                  <button type="button" class="project-action" disabled={pending() || LIVE_STATES.includes(current().task.state)}
-                    onClick={() => setDeleteRequest(current().task)}>Delete task…</button>
+                <Show when={current().task.branchError}>
+                  {(error) => <button type="button" class="branch-error" title={error()}
+                    aria-label="Branch creation failed. Retry" disabled={pending()} onClick={retryBranch}>
+                    Branch creation failed · Retry
+                  </button>}
                 </Show>
+                <button type="button" class="project-action" disabled={pending() || LIVE_STATES.includes(current().task.state)}
+                  onClick={() => setDeleteRequest(current().task)}>Delete task…</button>
                 <Show when={canCancel()}>
                   <button type="button" class="project-action" onClick={cancelTurn}
                     aria-keyshortcuts={chordFor('cancelTurn')}
@@ -2088,32 +2157,6 @@ export function App() {
                   </button>}
                 </Show>
               </header>
-            )}
-          </Show>
-
-          <Show when={workspace()}>
-            {(current) => (
-              <Show when={current().task.state === 'draft'}>
-                <div class="draft">
-                  <p class="draft__note">
-                    Nothing is created yet. The first prompt creates the branch and the
-                    worktree below.
-                  </p>
-                  <dl class="draft__facts">
-                    <dt>Proposed branch</dt>
-                    <dd>
-                      <code>{current().task.proposedBranch}</code>
-                    </dd>
-                    <dt>Proposed worktree</dt>
-                    <dd>
-                      <code>{current().task.proposedWorktreePath}</code>
-                    </dd>
-                  </dl>
-                  <button type="button" onClick={discardDraft} disabled={pending()}>
-                    Discard draft
-                  </button>
-                </div>
-              </Show>
             )}
           </Show>
 
@@ -2262,17 +2305,19 @@ export function App() {
                 <Show when={composerModes()}>
                   {(modes) => <ComposerModePicker modes={modes()} onChange={chooseMode}
                     defaultOption={workspace()?.modes ? pendingMode() ? 'Use session mode' : undefined : 'Default mode'}
-                    disabled={pending() || (!canCompose() && workspace()?.task.state !== 'review')} />}
+                    disabled={pending() || cancellingTurn() || workspace()?.capabilities?.modePicker === false}
+                    unavailable={modeCatalogError()} onRetry={() => void refetchProjectModes()} />}
                 </Show>
                 <Show when={currentAgent() === 'codex'}>
                   <ComposerModelPicker model={composerModel()} effort={composerEffort()} models={codexCatalog()?.models ?? []}
-                    disabled={!canCompose() || pending() || workspace()?.capabilities?.modelPicker === false}
+                    disabled={pending() || cancellingTurn() || workspace()?.capabilities?.modelPicker === false}
                     options={codexOptions()} onChange={(codex) => patchTurnOptions({ codex })} />
                 </Show>
                 <Show when={currentAgent() !== 'codex' ? composerModels() : undefined}>
                   {(models) => <ComposerAgentModelPicker models={models()}
-                    disabled={!canCompose() || pending() || workspace()?.capabilities?.modelPicker === false}
-                    onChange={(model) => patchTurnOptions({ model })} />}
+                    disabled={pending() || cancellingTurn() || workspace()?.capabilities?.modelPicker === false}
+                    unavailable={modelCatalogError()} onRetry={() => void refetchProjectModels()}
+                    onChange={chooseModel} />}
                 </Show>
                 <button
                   type="button"
@@ -2599,7 +2644,8 @@ function ComposerPickers(props: { agent: bridge.Agent; agentName: string; agents
   )
 }
 
-function ComposerModePicker(props: { modes: bridge.AgentModes; disabled: boolean; defaultOption?: string; onChange: (mode: string) => void }) {
+function ComposerModePicker(props: { modes: bridge.AgentModes; disabled: boolean; defaultOption?: string; unavailable?: string; onRetry?: () => void; onChange: (mode: string) => void }) {
+  const available = () => props.modes.options.length > 0 || !!props.modes.current
   const label = () => props.modes.options.find((option) => option.id === props.modes.current)?.name
     ?? props.modes.current ?? 'Default mode'
   const options = () => [
@@ -2609,19 +2655,24 @@ function ComposerModePicker(props: { modes: bridge.AgentModes; disabled: boolean
     })),
   ]
   return (
-    <PickerMenu label="Mode" text={label()} value={props.modes.current ?? ''} options={options()}
-      onChange={props.onChange} triggerClass="composer__picker" above>
-      <span class="composer__picker-label">{label()}</span>
-      <PickerCaret />
-    </PickerMenu>
+    <Show when={available()} fallback={<ComposerPickerFallback label="No mode available" detail={props.unavailable} onRetry={props.onRetry} />}>
+      <PickerMenu label="Mode" text={label()} value={props.modes.current ?? ''} options={options()}
+        onChange={props.onChange} triggerClass="composer__picker" above>
+        <span class="composer__picker-label">{label()}</span>
+        <PickerCaret />
+      </PickerMenu>
+    </Show>
   )
 }
 
 function ComposerAgentModelPicker(props: {
   models: bridge.AgentModels
   disabled: boolean
+  unavailable?: string
+  onRetry?: () => void
   onChange: (model: string) => void
 }) {
+  const available = () => props.models.options.length > 0 || !!props.models.current
   const current = () => props.models.options.find((model) => model.id === props.models.current)
   const label = () => current()?.name ?? props.models.current ?? 'Default model'
   const options = () => [
@@ -2636,11 +2687,32 @@ function ComposerAgentModelPicker(props: {
     if (id.startsWith('model:')) props.onChange(id.slice(6))
   }
   return (
-    <PickerMenu label="Model" text={label()} value={`model:${props.models.current ?? ''}`} options={options()}
-      onChange={choose} triggerClass="composer__picker" above>
-      <span class="composer__picker-label">{label()}</span>
-      <PickerCaret />
-    </PickerMenu>
+    <Show when={available()} fallback={<ComposerPickerFallback label="No model available" detail={props.unavailable} onRetry={props.onRetry} />}>
+      <PickerMenu label="Model" text={label()} value={`model:${props.models.current ?? ''}`} options={options()}
+        onChange={choose} triggerClass="composer__picker" above>
+        <span class="composer__picker-label">{label()}</span>
+        <PickerCaret />
+      </PickerMenu>
+    </Show>
+  )
+}
+
+function ComposerPickerFallback(props: { label: string; detail?: string; onRetry?: () => void }) {
+  return (
+    <span class="composer__picker-fallback">
+      <button type="button" class="composer__picker-warning"
+        aria-label={`${props.detail ?? props.label}. Retry`}
+        title={`${props.detail ?? props.label} Click to retry.`}
+        onClick={props.onRetry} disabled={!props.onRetry}>
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M12 3 2.5 20h19L12 3Z" /><path d="M12 9v5" /><path d="M12 17h.01" />
+        </svg>
+      </button>
+      <button type="button" class="composer__picker composer__picker--empty" disabled
+        aria-label={props.label} title={`${props.detail ?? props.label} Use the warning to retry.`}>
+        <span class="composer__picker-label">{props.label}</span>
+      </button>
+    </span>
   )
 }
 

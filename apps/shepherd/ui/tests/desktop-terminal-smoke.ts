@@ -722,20 +722,18 @@ async function selectTask(title: string) {
 
 async function prepareTask(project: bridge.ProjectSnapshot) {
   const compose = await enabledButton(`New chat in ${project.name}`)
+  const before = (await bridge.taskList(project.id)).tasks.length
   compose.click()
-  await waitFor('draft worktree proposal', () => chatState() === 'draft' && document.querySelector('.draft__facts'))
-  const [draft] = (await bridge.taskList(project.id)).tasks
-  if (draft?.state !== 'draft' || draft.branch !== null || draft.worktreePath !== null) {
-    throw new Error('Creating a draft should leave its branch and worktree uncreated')
-  }
-
-  const composer = await waitFor('active draft composer', () =>
+  const composer = await waitFor('active new-task composer', () =>
     document.querySelector<HTMLTextAreaElement>('textarea[aria-label="Prompt"]:enabled'))
+  if ((await bridge.taskList(project.id)).tasks.length !== before) {
+    throw new Error('Composing should not create a task row')
+  }
   composer.focus()
   composer.value = `${WORKTREE_PROMPT} @workspace-guide`
   composer.setSelectionRange(composer.value.length, composer.value.length)
   composer.dispatchEvent(new InputEvent('input', { bubbles: true }))
-  await waitFor('project file found before the draft has a worktree', () =>
+  await waitFor('project file found before the task exists', () =>
     document.querySelector('[aria-label="Mention a workspace file"] [aria-selected="true"]')?.textContent?.trim() === WORKSPACE_FILE)
   press(composer, 'Enter')
   const mentionedPrompt = `${WORKTREE_PROMPT} @file("${WORKSPACE_FILE}")`
@@ -752,7 +750,9 @@ async function prepareTask(project: bridge.ProjectSnapshot) {
   const allow = await enabledButton('Allow')
   allow.click()
   await waitFor('ready after the scripted approval', () => chatState() === 'ready')
-  const { task } = await bridge.taskWorkspace(draft.id)
+  const listed = (await bridge.taskList(project.id)).tasks
+  if (listed.length !== before + 1) throw new Error('Sending the first prompt should create exactly one task')
+  const { task } = await bridge.taskWorkspace(listed[0].id)
   if (!task.worktreePath) throw new Error('Sending the first prompt should create a worktree')
   return { id: task.id, title: task.title, worktree: task.worktreePath, branch: task.branch }
 }

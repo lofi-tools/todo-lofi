@@ -1385,6 +1385,50 @@ impl ShellState {
         .await
     }
 
+    pub async fn start_task(
+        &self,
+        project_id: String,
+        text: String,
+        codex: CodexTurnOptions,
+        mode: Option<String>,
+        model: Option<String>,
+        agent: Agent,
+    ) -> Result<TaskWorkspace, BridgeError> {
+        self.workspace(Command::StartTask {
+            project_id: ProjectId::new(project_id),
+            agent,
+            input: PromptInput {
+                text,
+                codex,
+                mode,
+                model,
+                ..PromptInput::default()
+            },
+        })
+        .await
+    }
+
+    pub async fn set_task_options(
+        &self,
+        task_id: String,
+        model: Option<String>,
+        mode: Option<String>,
+    ) -> Result<TaskWorkspace, BridgeError> {
+        self.workspace(Command::SetTaskOptions {
+            task_id: TaskId::new(task_id),
+            model,
+            mode,
+        })
+        .await
+    }
+
+    pub async fn retry_task_branch(&self, task_id: String) -> Result<TaskWorkspace, BridgeError> {
+        self.workspace(Command::RetryTaskBranch {
+            task_id: TaskId::new(task_id),
+        })
+        .await
+    }
+
     pub async fn set_draft_agent(
         &self,
         task_id: String,
@@ -1395,10 +1439,6 @@ impl ShellState {
             agent,
         })
         .await
-    }
-
-    pub async fn discard_draft(&self, task_id: String) -> Result<(), BridgeError> {
-        self.remove_task(task_id, true, false).await
     }
 
     pub async fn delete_task(
@@ -2962,6 +3002,47 @@ pub mod commands {
     }
 
     #[tauri::command]
+    pub async fn start_task(
+        state: State<'_, ShellState>,
+        project_id: String,
+        text: String,
+        codex: Option<CodexTurnOptions>,
+        mode: Option<String>,
+        model: Option<String>,
+        agent: Option<Agent>,
+    ) -> Result<TaskWorkspace, BridgeError> {
+        state
+            .inner()
+            .start_task(
+                project_id,
+                text,
+                codex.unwrap_or_default(),
+                mode,
+                model,
+                agent.unwrap_or_default(),
+            )
+            .await
+    }
+
+    #[tauri::command]
+    pub async fn set_task_options(
+        state: State<'_, ShellState>,
+        task_id: String,
+        model: Option<String>,
+        mode: Option<String>,
+    ) -> Result<TaskWorkspace, BridgeError> {
+        state.inner().set_task_options(task_id, model, mode).await
+    }
+
+    #[tauri::command]
+    pub async fn retry_task_branch(
+        state: State<'_, ShellState>,
+        task_id: String,
+    ) -> Result<TaskWorkspace, BridgeError> {
+        state.inner().retry_task_branch(task_id).await
+    }
+
+    #[tauri::command]
     pub async fn set_draft_agent(
         state: State<'_, ShellState>,
         task_id: String,
@@ -2983,14 +3064,6 @@ pub mod commands {
     #[tauri::command]
     pub fn claude_configured(state: State<'_, ShellState>) -> bool {
         state.claude_configured
-    }
-
-    #[tauri::command]
-    pub async fn discard_draft(
-        state: State<'_, ShellState>,
-        task_id: String,
-    ) -> Result<(), BridgeError> {
-        state.inner().discard_draft(task_id).await
     }
 
     #[tauri::command]
@@ -4601,7 +4674,7 @@ mod tests {
                             "x".repeat(600)
                         ))
                     })
-                    && workspace.task.state == TaskState::Ready
+                    && workspace.task.state == TaskState::Review
                 {
                     return Ok::<_, tokio::sync::broadcast::error::RecvError>(());
                 }
@@ -4923,7 +4996,7 @@ mod tests {
         let workspace = state
             .resolve_approval(task_id.clone(), "approval-1".to_string(), Decision::Allow)
             .await?;
-        assert_eq!(workspace.task.state, TaskState::Ready);
+        assert_eq!(workspace.task.state, TaskState::Review);
 
         let summary: QuitSummary = state.quit(true).await?;
         assert_eq!(summary.interrupted_tasks, 0);
@@ -6318,7 +6391,7 @@ mod tests {
         .for_task(TaskId::new(task.clone()));
         state.launch_terminal(shared.clone(), 80, 24).await?;
         state.launch_terminal(scoped.clone(), 80, 24).await?;
-        state.discard_draft(task).await?;
+        state.delete_task(task, false).await?;
         let remaining = state.terminal_list(project.id.clone()).await;
         assert_eq!(remaining.terminals.len(), 1);
         assert_eq!(remaining.terminals[0].id, shared.id.as_str());
@@ -6610,7 +6683,7 @@ mod tests {
                 .save_prompt_file(task.clone(), "notes.txt".into(), b"important attachment")
                 .await?;
             std::fs::write(data.join("fixture-attachment-id"), id)?;
-            state.discard_draft(task).await?;
+            state.delete_task(task, false).await?;
             return Err("attachment deletion fixture unexpectedly finished".into());
         }
         use std::os::unix::process::ExitStatusExt as _;
@@ -6867,7 +6940,7 @@ mod tests {
         let other_directory = directory.path().join("attachments").join(&other);
         let file = attachments::prompt_file(&task_directory, &file_id)?;
         let other_file = attachments::prompt_file(&other_directory, &other_file_id)?;
-        state.discard_draft(task.clone()).await?;
+        state.delete_task(task.clone(), false).await?;
         assert!(!path.exists());
         assert!(!file.exists());
         assert!(!task_directory.exists());
@@ -7265,7 +7338,24 @@ mod tests {
             wrapper
         );
         state.quit(true).await?;
-        assert!(tokio::net::TcpStream::connect(address).await.is_err());
+        if let Ok(mut stream) = tokio::net::TcpStream::connect(&address).await {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            stream
+                .write_all(
+                    format!(
+                        "GET {} HTTP/1.1\r\nHost: {address}\r\nConnection: close\r\n\r\n",
+                        wrapper.path()
+                    )
+                    .as_bytes(),
+                )
+                .await?;
+            let mut response = Vec::new();
+            stream.read_to_end(&mut response).await?;
+            assert!(
+                !String::from_utf8_lossy(&response).starts_with("HTTP/1.1 200"),
+                "the annotation wrapper must not serve after quit"
+            );
+        }
         Ok(())
     }
 }

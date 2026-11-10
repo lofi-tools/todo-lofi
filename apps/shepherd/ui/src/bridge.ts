@@ -350,6 +350,9 @@ export interface TaskDetail {
   branch: string | null
   worktreePath: string | null
   baseBranch: string | null
+  model: string | null
+  mode: string | null
+  branchError: string | null
   error: string | null
   createdAt: number
   updatedAt: number
@@ -631,6 +634,10 @@ export function createDraft(projectId: string, title: string, agent: Agent = 'co
   return invoke<TaskWorkspace>('create_draft', { projectId, title, agent })
 }
 
+export function startTask(projectId: string, text: string, codex: CodexTurnOptions | undefined, mode: string | undefined, model: string | undefined, agent: Agent): Promise<TaskWorkspace> {
+  return invoke<TaskWorkspace>('start_task', { projectId, text, codex, mode, model, agent })
+}
+
 export function setDraftAgent(taskId: string, agent: Agent): Promise<TaskWorkspace> {
   return invoke<TaskWorkspace>('set_draft_agent', { taskId, agent })
 }
@@ -647,10 +654,6 @@ export function claudeConfigured(): Promise<boolean> {
   return invoke<boolean>('claude_configured')
 }
 
-export function discardDraft(taskId: string): Promise<void> {
-  return invoke<void>('discard_draft', { taskId })
-}
-
 export function deleteTask(taskId: string, removeWorktree: boolean): Promise<void> {
   return invoke<void>('delete_task', { taskId, removeWorktree })
 }
@@ -662,6 +665,14 @@ export interface CodexTurnOptions {
 
 export function sendPrompt(taskId: string, text: string, attachmentIds: string[] = [], codex?: CodexTurnOptions, mode?: string, model?: string): Promise<TaskWorkspace> {
   return invoke<TaskWorkspace>('send_prompt', { taskId, text, attachmentIds, codex, mode, model })
+}
+
+export function setTaskOptions(taskId: string, model: string | null, mode: string | null): Promise<TaskWorkspace> {
+  return invoke<TaskWorkspace>('set_task_options', { taskId, model, mode })
+}
+
+export function retryTaskBranch(taskId: string): Promise<TaskWorkspace> {
+  return invoke<TaskWorkspace>('retry_task_branch', { taskId })
 }
 
 export function opencodeProjectModes(projectId: string): Promise<AgentModes['options']> {

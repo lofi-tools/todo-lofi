@@ -23,6 +23,11 @@ pub enum Command {
         title: String,
         agent: Agent,
     },
+    StartTask {
+        project_id: ProjectId,
+        agent: Agent,
+        input: PromptInput,
+    },
     SetDraftAgent {
         task_id: TaskId,
         agent: Agent,
@@ -37,6 +42,14 @@ pub enum Command {
     SendPrompt {
         task_id: TaskId,
         input: PromptInput,
+    },
+    SetTaskOptions {
+        task_id: TaskId,
+        model: Option<String>,
+        mode: Option<String>,
+    },
+    RetryTaskBranch {
+        task_id: TaskId,
     },
     SetSessionMode {
         task_id: TaskId,

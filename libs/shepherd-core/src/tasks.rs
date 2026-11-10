@@ -188,6 +188,9 @@ pub struct Task {
     pub branch: Option<String>,
     pub base_branch: Option<String>,
     pub branch_tip_sha: Option<String>,
+    pub model: Option<String>,
+    pub mode: Option<String>,
+    pub branch_error: Option<String>,
     pub error: Option<String>,
     pub created_at: u64,
     pub updated_at: u64,
@@ -196,10 +199,8 @@ pub struct Task {
 }
 
 impl Task {
-    /// A draft appears in the sidebar immediately, but no worktree or branch is
-    /// created until the first prompt. The proposal names the repository's real
-    /// Git directory, so a checkout whose `.git` is a file still gets the right
-    /// path.
+    /// The proposal names the repository's real Git directory, so a checkout
+    /// whose `.git` is a file still gets the right path.
     pub fn draft(project_id: ProjectId, title: &str, git_dir: &Path) -> Self {
         let slug = slugify(title);
         let now = now_millis();
@@ -216,6 +217,9 @@ impl Task {
             branch: None,
             base_branch: None,
             branch_tip_sha: None,
+            model: None,
+            mode: None,
+            branch_error: None,
             error: None,
             created_at: now,
             updated_at: now,
@@ -289,6 +293,9 @@ pub struct TaskDetail {
     pub branch: Option<String>,
     pub worktree_path: Option<String>,
     pub base_branch: Option<String>,
+    pub model: Option<String>,
+    pub mode: Option<String>,
+    pub branch_error: Option<String>,
     pub error: Option<String>,
     pub created_at: u64,
     pub updated_at: u64,
@@ -311,6 +318,9 @@ impl From<&Task> for TaskDetail {
                 .as_ref()
                 .map(|path| path.display().to_string()),
             base_branch: task.base_branch.clone(),
+            model: task.model.clone(),
+            mode: task.mode.clone(),
+            branch_error: task.branch_error.clone(),
             error: task.error.clone(),
             created_at: task.created_at,
             updated_at: task.updated_at,

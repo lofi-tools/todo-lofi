@@ -22,6 +22,7 @@ use crate::session::SessionRecord;
 use crate::snapshots::WorkspaceLayout;
 use crate::tasks::{Agent, AgentTier, Task, TaskId, TaskState};
 use crate::terminal::{ProcessRecord, TerminalId, TerminalLayout, TerminalRecord, TerminalScope};
+pub use crate::worktree_pool::{WorktreePoolId, WorktreePoolRecord, WorktreePoolState};
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
@@ -69,6 +70,8 @@ pub enum StoreError {
     QuotaLedgerOwnerMissing { slot_id: PoolSlotId },
     #[error("pool slot {slot_id} was not found")]
     PoolSlotNotFound { slot_id: PoolSlotId },
+    #[error("worktree pool record cannot be saved for missing project {project_id}")]
+    WorktreePoolOwnerMissing { project_id: ProjectId },
     #[error("workspace layout cannot be saved for missing task {task_id}")]
     WorkspaceOwnerMissing { task_id: TaskId },
     #[error("prompt queue cannot be saved for missing task {task_id}")]
@@ -751,6 +754,9 @@ pub trait Store: Send + Sync {
         project_id: &ProjectId,
         layout: &TerminalLayout,
     ) -> Result<(), StoreError>;
+    async fn load_worktree_pool(&self) -> Result<Vec<WorktreePoolRecord>, StoreError>;
+    async fn save_worktree_pool(&self, record: &WorktreePoolRecord) -> Result<(), StoreError>;
+    async fn remove_worktree_pool(&self, id: &WorktreePoolId) -> Result<(), StoreError>;
     async fn load_sessions(&self) -> Result<Vec<SessionRecord>, StoreError>;
     async fn save_session(&self, session: &SessionRecord) -> Result<(), StoreError>;
     async fn load_transcript(&self, task_id: &TaskId) -> Result<Vec<Entry>, StoreError>;
@@ -935,6 +941,14 @@ const MIGRATIONS: &[Migration] = &[
     Migration {
         name: "0023_pool_quota_window.sql",
         sql: include_str!("../toasty/migrations/0023_pool_quota_window.sql"),
+    },
+    Migration {
+        name: "0024_task_turn_options.sql",
+        sql: include_str!("../toasty/migrations/0024_task_turn_options.sql"),
+    },
+    Migration {
+        name: "0025_worktree_pool.sql",
+        sql: include_str!("../toasty/migrations/0025_worktree_pool.sql"),
     },
 ];
 
@@ -1483,10 +1497,12 @@ async fn write_task(
             "INSERT INTO tasks (\
                 id, project_id, title, state, tier, proposed_worktree_path, \
                 proposed_branch, worktree_path, branch, base_branch, error, \
-                created_at, updated_at, branch_tip_sha, agent, worktree_last_used_at, collection_pending\
+                created_at, updated_at, branch_tip_sha, agent, worktree_last_used_at, collection_pending, \
+                model, mode, branch_error\
              ) SELECT \
                 ?1, ?2, ?3, ?4, ?5, ?6, ?7, \
-                NULLIF(?8, ''), NULLIF(?9, ''), NULLIF(?10, ''), NULLIF(?11, ''), ?12, ?13, NULLIF(?14, ''), ?15, ?16, ?17\
+                NULLIF(?8, ''), NULLIF(?9, ''), NULLIF(?10, ''), NULLIF(?11, ''), ?12, ?13, NULLIF(?14, ''), ?15, ?16, ?17, \
+                NULLIF(?18, ''), NULLIF(?19, ''), NULLIF(?20, '')\
              FROM projects WHERE id = ?2 \
              ON CONFLICT (id) DO UPDATE SET \
                 title = excluded.title, \
@@ -1503,7 +1519,10 @@ async fn write_task(
                 branch_tip_sha = excluded.branch_tip_sha, \
                 agent = excluded.agent, \
                 worktree_last_used_at = excluded.worktree_last_used_at, \
-                collection_pending = excluded.collection_pending \
+                collection_pending = excluded.collection_pending, \
+                model = excluded.model, \
+                mode = excluded.mode, \
+                branch_error = excluded.branch_error \
              WHERE tasks.project_id = excluded.project_id",
         )
         .bind(task.id.as_str())
@@ -1523,6 +1542,9 @@ async fn write_task(
         .bind(task.agent.as_str())
         .bind(task.worktree_last_used_at as i64)
         .bind(i64::from(task.collection_pending))
+        .bind(task.model.as_deref().unwrap_or_default())
+        .bind(task.mode.as_deref().unwrap_or_default())
+        .bind(task.branch_error.as_deref().unwrap_or_default())
         .exec(&mut *executor)
         .await?;
     if updated != 1 {
@@ -2651,7 +2673,8 @@ impl Store for TursoStore {
         let rows = toasty::sql::query(
             "SELECT id, project_id, title, state, tier, proposed_worktree_path, \
                     proposed_branch, worktree_path, branch, base_branch, error, \
-                    created_at, updated_at, branch_tip_sha, agent, worktree_last_used_at, collection_pending \
+                    created_at, updated_at, branch_tip_sha, agent, worktree_last_used_at, collection_pending, \
+                    model, mode, branch_error \
              FROM tasks ORDER BY created_at, id",
         )
         .column_types([
@@ -2672,6 +2695,9 @@ impl Store for TursoStore {
             Type::String,
             Type::I64,
             Type::I64,
+            Type::String,
+            Type::String,
+            Type::String,
         ])
         .exec(&mut *db)
         .await?;
@@ -2989,6 +3015,68 @@ impl Store for TursoStore {
         write_terminal_layout(&mut *db, project_id, layout).await
     }
 
+    async fn load_worktree_pool(&self) -> Result<Vec<WorktreePoolRecord>, StoreError> {
+        let mut db = self.db.lock().await;
+        let rows = toasty::sql::query(
+            "SELECT id, project_id, path, state, task_id, leased_at, created_at, updated_at \
+             FROM worktree_pool ORDER BY project_id, path, id",
+        )
+        .column_types([
+            Type::String,
+            Type::String,
+            Type::String,
+            Type::String,
+            Type::String,
+            Type::I64,
+            Type::I64,
+            Type::I64,
+        ])
+        .exec(&mut *db)
+        .await?;
+        rows.into_iter().map(parse_worktree_pool_record).collect()
+    }
+
+    async fn save_worktree_pool(&self, record: &WorktreePoolRecord) -> Result<(), StoreError> {
+        if record.path.as_os_str().is_empty() {
+            return Err(StoreError::InvalidRow(
+                "worktree pool path is empty".to_string(),
+            ));
+        }
+        let mut db = self.db.lock().await;
+        let updated = toasty::sql::statement(
+            "INSERT INTO worktree_pool (id, project_id, path, state, task_id, leased_at, created_at, updated_at) \
+             SELECT ?1, id, ?3, ?4, NULLIF(?5, ''), ?6, ?7, ?8 FROM projects WHERE id = ?2 \
+             ON CONFLICT (id) DO UPDATE SET \
+                state = excluded.state, task_id = excluded.task_id, leased_at = excluded.leased_at, \
+                updated_at = excluded.updated_at",
+        )
+        .bind(record.id.as_str())
+        .bind(record.project_id.as_str())
+        .bind(record.path.to_string_lossy().as_ref())
+        .bind(record.state.as_str())
+        .bind(record.task_id.as_ref().map(TaskId::as_str).unwrap_or_default())
+        .bind(timestamp_or_missing(record.leased_at)?)
+        .bind(timestamp(record.created_at)?)
+        .bind(timestamp(record.updated_at)?)
+        .exec(&mut *db)
+        .await?;
+        if updated != 1 {
+            return Err(StoreError::WorktreePoolOwnerMissing {
+                project_id: record.project_id.clone(),
+            });
+        }
+        Ok(())
+    }
+
+    async fn remove_worktree_pool(&self, id: &WorktreePoolId) -> Result<(), StoreError> {
+        let mut db = self.db.lock().await;
+        toasty::sql::statement("DELETE FROM worktree_pool WHERE id = ?1")
+            .bind(id.as_str())
+            .exec(&mut *db)
+            .await?;
+        Ok(())
+    }
+
     async fn load_sessions(&self) -> Result<Vec<SessionRecord>, StoreError> {
         self.select_sessions().await
     }
@@ -3286,6 +3374,9 @@ fn parse_task(value: Value) -> Result<Task, StoreError> {
         worktree_last_used_at: required_u64(record.get(15))?,
         collection_pending: required_u64(record.get(16))? != 0,
         branch_tip_sha: optional_string(record.get(13))?,
+        model: optional_string(record.get(17))?,
+        mode: optional_string(record.get(18))?,
+        branch_error: optional_string(record.get(19))?,
     })
 }
 
@@ -3452,6 +3543,7 @@ pub struct MemoryStore {
     pool_quota_ledger: RwLock<Vec<PoolQuotaEntry>>,
     pool_selections: RwLock<BTreeMap<String, PoolSelectionRecord>>,
     pool_selection_lock: Mutex<()>,
+    worktree_pool: RwLock<BTreeMap<WorktreePoolId, WorktreePoolRecord>>,
 }
 
 impl MemoryStore {
@@ -3861,6 +3953,46 @@ impl Store for MemoryStore {
             .write()
             .await
             .insert(project_id.clone(), layout.clone());
+        Ok(())
+    }
+
+    async fn load_worktree_pool(&self) -> Result<Vec<WorktreePoolRecord>, StoreError> {
+        let mut records: Vec<_> = self.worktree_pool.read().await.values().cloned().collect();
+        records.sort_by(|left, right| {
+            left.project_id
+                .as_str()
+                .cmp(right.project_id.as_str())
+                .then_with(|| left.path.cmp(&right.path))
+                .then_with(|| left.id.cmp(&right.id))
+        });
+        Ok(records)
+    }
+
+    async fn save_worktree_pool(&self, record: &WorktreePoolRecord) -> Result<(), StoreError> {
+        if record.path.as_os_str().is_empty() {
+            return Err(StoreError::InvalidRow(
+                "worktree pool path is empty".to_string(),
+            ));
+        }
+        if !self
+            .projects
+            .read()
+            .await
+            .contains_key(record.project_id.as_str())
+        {
+            return Err(StoreError::WorktreePoolOwnerMissing {
+                project_id: record.project_id.clone(),
+            });
+        }
+        self.worktree_pool
+            .write()
+            .await
+            .insert(record.id.clone(), record.clone());
+        Ok(())
+    }
+
+    async fn remove_worktree_pool(&self, id: &WorktreePoolId) -> Result<(), StoreError> {
+        self.worktree_pool.write().await.remove(id);
         Ok(())
     }
 
@@ -4411,6 +4543,28 @@ impl Store for MemoryStore {
         }
         Ok(pool_catalog_outcome(advisory, seeds))
     }
+}
+
+fn parse_worktree_pool_record(value: Value) -> Result<WorktreePoolRecord, StoreError> {
+    let Value::Record(record) = value else {
+        return Err(StoreError::InvalidRow(
+            "expected a worktree pool record".to_string(),
+        ));
+    };
+    let state_name = required_string(record.get(3))?;
+    let state = WorktreePoolState::parse(&state_name).ok_or_else(|| {
+        StoreError::InvalidRow(format!("unknown worktree pool state: {state_name}"))
+    })?;
+    Ok(WorktreePoolRecord {
+        id: WorktreePoolId::new(required_string(record.first())?),
+        project_id: ProjectId::new(required_string(record.get(1))?),
+        path: PathBuf::from(required_string(record.get(2))?),
+        state,
+        task_id: optional_string(record.get(4))?.map(TaskId::new),
+        leased_at: optional_u64(record.get(5))?,
+        created_at: required_u64(record.get(6))?,
+        updated_at: required_u64(record.get(7))?,
+    })
 }
 
 fn parse_pool_slot(value: Value) -> Result<PoolSlot, StoreError> {
@@ -9012,7 +9166,7 @@ mod tests {
         }
         toasty::sql::statement("INSERT INTO projects (id, path, name, created_at) VALUES ('project', '/legacy', 'Legacy', 1)")
             .exec(&mut db).await?;
-        toasty::sql::statement("INSERT INTO tasks (id, project_id, title, state, tier, proposed_worktree_path, proposed_branch, created_at, updated_at, agent) VALUES ('task', 'project', 'Legacy task', 'draft', 'native', '/legacy/worktree', 'shepherd/legacy', 1, 42, 'codex')")
+        toasty::sql::statement("INSERT INTO tasks (id, project_id, title, state, tier, proposed_worktree_path, proposed_branch, worktree_path, branch, created_at, updated_at, agent) VALUES ('task', 'project', 'Legacy task', 'draft', 'native', '/legacy/worktree', 'shepherd/legacy', '/legacy/checkout', 'shepherd/legacy', 1, 42, 'codex')")
             .exec(&mut db).await?;
         toasty::sql::statement("INSERT INTO sessions (id, task_id, adapter, state, started_at) VALUES ('session', 'task', 'codex', 'ended', 1)")
             .exec(&mut db).await?;
@@ -9177,7 +9331,7 @@ mod tests {
         toasty::sql::statement("INSERT INTO projects (id, path, name, created_at) VALUES ('project', '/legacy', 'Legacy', 1)")
             .exec(&mut db)
             .await?;
-        toasty::sql::statement("INSERT INTO tasks (id, project_id, title, state, tier, proposed_worktree_path, proposed_branch, created_at, updated_at) VALUES ('task', 'project', 'Legacy task', 'draft', 'native', '/legacy/worktree', 'shepherd/legacy', 1, 1)")
+        toasty::sql::statement("INSERT INTO tasks (id, project_id, title, state, tier, proposed_worktree_path, proposed_branch, worktree_path, branch, created_at, updated_at) VALUES ('task', 'project', 'Legacy task', 'draft', 'native', '/legacy/worktree', 'shepherd/legacy', '/legacy/checkout', 'shepherd/legacy', 1, 1)")
             .exec(&mut db)
             .await?;
         let mut transcript = agent_harness::Transcript::default();
@@ -9278,6 +9432,142 @@ mod tests {
         assert_eq!(tasks[0].id, task.id);
         assert_eq!(tasks[0].state, TaskState::Draft);
         assert_eq!(TaskId::new(tasks[0].id.as_str()), task.id);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn the_turn_options_migration_removes_empty_drafts()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let driver = Turso::new("turso::memory:")?.experimental_index_method(true);
+        let mut db = toasty::Db::builder().build(driver).await?;
+        let boundary = MIGRATIONS
+            .iter()
+            .position(|migration| migration.name == "0024_task_turn_options.sql")
+            .ok_or("missing turn options migration")?;
+        apply_migration_set(&mut db, &MIGRATIONS[..boundary]).await?;
+
+        toasty::sql::statement(
+            "INSERT INTO projects (id, path, name, created_at, last_task_id) \
+             VALUES ('project', '/legacy', 'Legacy', 1, 'empty')",
+        )
+        .exec(&mut db)
+        .await?;
+        for (id, title, worktree, branch) in [
+            ("empty", "Empty", "", ""),
+            ("kept", "Kept", "/legacy/kept", "shepherd/kept"),
+            ("ready", "Ready", "/legacy/ready", "shepherd/ready"),
+        ] {
+            toasty::sql::statement(
+                "INSERT INTO tasks (id, project_id, title, state, tier, \
+                 proposed_worktree_path, proposed_branch, worktree_path, branch, \
+                 created_at, updated_at) \
+                 VALUES (?1, 'project', ?2, ?3, 'native', '/legacy/proposed', \
+                 'shepherd/proposed', NULLIF(?4, ''), NULLIF(?5, ''), 1, 1)",
+            )
+            .bind(id)
+            .bind(title)
+            .bind(if id == "ready" { "ready" } else { "draft" })
+            .bind(worktree)
+            .bind(branch)
+            .exec(&mut db)
+            .await?;
+        }
+        for id in ["empty", "kept"] {
+            toasty::sql::statement(
+                "INSERT INTO prompt_queues (task_id, prompts_json) VALUES (?1, '[]')",
+            )
+            .bind(id)
+            .exec(&mut db)
+            .await?;
+        }
+
+        apply_migrations(&mut db).await?;
+
+        let tasks = toasty::sql::query("SELECT id FROM tasks ORDER BY id")
+            .column_types([Type::String])
+            .exec(&mut db)
+            .await?;
+        let task_ids = tasks
+            .into_iter()
+            .map(|row| match row {
+                Value::Record(record) => required_string(record.first()),
+                _ => Err(StoreError::InvalidRow("expected a task id".into())),
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(task_ids, ["kept", "ready"]);
+
+        let queues = toasty::sql::query("SELECT task_id FROM prompt_queues ORDER BY task_id")
+            .column_types([Type::String])
+            .exec(&mut db)
+            .await?;
+        assert_eq!(queues.len(), 1);
+
+        let projects = toasty::sql::query("SELECT last_task_id FROM projects WHERE id = 'project'")
+            .column_types([Type::String])
+            .exec(&mut db)
+            .await?;
+        let Value::Record(record) = projects.first().ok_or("missing project")? else {
+            return Err("expected a project record".into());
+        };
+        assert!(matches!(record.first(), None | Some(Value::Null)));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn the_turn_options_migration_keeps_a_store_without_drafts()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let driver = Turso::new("turso::memory:")?.experimental_index_method(true);
+        let mut db = toasty::Db::builder().build(driver).await?;
+        let boundary = MIGRATIONS
+            .iter()
+            .position(|migration| migration.name == "0024_task_turn_options.sql")
+            .ok_or("missing turn options migration")?;
+        apply_migration_set(&mut db, &MIGRATIONS[..boundary]).await?;
+
+        toasty::sql::statement(
+            "INSERT INTO projects (id, path, name, created_at, last_task_id) \
+             VALUES ('project', '/legacy', 'Legacy', 1, 'ready')",
+        )
+        .exec(&mut db)
+        .await?;
+        toasty::sql::statement(
+            "INSERT INTO tasks (id, project_id, title, state, tier, \
+             proposed_worktree_path, proposed_branch, worktree_path, branch, \
+             created_at, updated_at) \
+             VALUES ('ready', 'project', 'Ready', 'ready', 'native', \
+             '/legacy/proposed', 'shepherd/ready', '/legacy/ready', \
+             'shepherd/ready', 1, 1)",
+        )
+        .exec(&mut db)
+        .await?;
+        toasty::sql::statement(
+            "INSERT INTO prompt_queues (task_id, prompts_json) VALUES ('ready', '[]')",
+        )
+        .exec(&mut db)
+        .await?;
+
+        apply_migrations(&mut db).await?;
+
+        let tasks = toasty::sql::query("SELECT id FROM tasks ORDER BY id")
+            .column_types([Type::String])
+            .exec(&mut db)
+            .await?;
+        assert_eq!(tasks.len(), 1);
+
+        let queues = toasty::sql::query("SELECT task_id FROM prompt_queues ORDER BY task_id")
+            .column_types([Type::String])
+            .exec(&mut db)
+            .await?;
+        assert_eq!(queues.len(), 1);
+
+        let projects = toasty::sql::query("SELECT last_task_id FROM projects WHERE id = 'project'")
+            .column_types([Type::String])
+            .exec(&mut db)
+            .await?;
+        let Value::Record(record) = projects.first().ok_or("missing project")? else {
+            return Err("expected a project record".into());
+        };
+        assert_eq!(optional_string(record.first())?, Some("ready".to_string()));
         Ok(())
     }
 }
