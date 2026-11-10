@@ -32,6 +32,14 @@ class BisectTests(unittest.TestCase):
         with patch.object(module.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, json.dumps(data))):
             self.assertEqual(module.main(["the_test"]), 125)
 
+    def test_package_limits_discovery_and_execution(self):
+        with patch.object(module.subprocess, "run", side_effect=[
+            subprocess.CompletedProcess([], 0, inventory()), subprocess.CompletedProcess([], 0),
+        ]) as run:
+            self.assertEqual(module.main(["--package", "core", "the_test"]), 0)
+        self.assertEqual(run.call_args_list[0].args[0][3:5], ["--package", "core"])
+        self.assertEqual(run.call_args_list[1].args[0][3:5], ["--package", "core"])
+
 
 if __name__ == "__main__":
     unittest.main()

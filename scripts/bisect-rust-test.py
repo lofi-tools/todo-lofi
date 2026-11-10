@@ -7,13 +7,16 @@ import sys
 
 
 def main(arguments):
-    if len(arguments) != 1:
-        print("usage: bisect-rust-test.py EXACT_TEST_NAME", file=sys.stderr)
+    if len(arguments) == 1:
+        selection, name = ["--workspace"], arguments[0]
+    elif len(arguments) == 3 and arguments[0] == "--package":
+        selection, name = ["--package", arguments[1]], arguments[2]
+    else:
+        print("usage: bisect-rust-test.py [--package PACKAGE] EXACT_TEST_NAME", file=sys.stderr)
         return 125
-    name = arguments[0]
     command = ["cargo", "nextest"]
     try:
-        result = subprocess.run([*command, "list", "--workspace", "--message-format", "json", "--", "--exact", name],
+        result = subprocess.run([*command, "list", *selection, "--message-format", "json", "--", "--exact", name],
                                 text=True, stdout=subprocess.PIPE, check=True)
         inventory = json.loads(result.stdout)
         matches = [suite["binary-id"]
@@ -26,7 +29,7 @@ def main(arguments):
         if len(matches) != 1:
             print("The test name matches multiple binaries; skipping this ambiguous revision.", file=sys.stderr)
             return 125
-        result = subprocess.run([*command, "run", "--workspace", "--", "--exact", name])
+        result = subprocess.run([*command, "run", *selection, "--", "--exact", name])
         if result.returncode == 0:
             return 0
         if result.returncode == 100:

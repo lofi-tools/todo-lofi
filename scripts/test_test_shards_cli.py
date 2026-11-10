@@ -45,6 +45,12 @@ class RunnerTests(unittest.TestCase):
         with self.assertRaises(Exception):
             shards_cli.parse_shard("9/8")
 
+    def test_exact_test_can_be_scoped_to_a_package(self):
+        with patch.object(shards_cli, "output", return_value="a"), patch.object(shards_cli, "execute") as execute:
+            shards_cli.main(["--package", "core", "--test", "module::test"])
+        self.assertEqual(execute.call_args.args[0],
+                         ["cargo", "nextest", "run", "--package", "core", "--", "--exact", "module::test"])
+
 
 if __name__ == "__main__":
     unittest.main()

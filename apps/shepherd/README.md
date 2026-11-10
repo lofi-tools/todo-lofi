@@ -272,7 +272,7 @@ direnv exec . python3 scripts/test-shards.py
 direnv exec . python3 scripts/test-shards.py --all
 direnv exec . python3 scripts/test-shards.py --shard 3/8
 direnv exec . python3 scripts/test-shards.py --seed HEAD~4 --dry-run
-direnv exec . python3 scripts/test-shards.py --test module::tests::example
+direnv exec . python3 scripts/test-shards.py --package shepherd-core --test module::tests::example
 direnv exec . python3 scripts/test-shards.py --last-ran 'rust:crate::module::tests::example'
 ```
 
@@ -311,7 +311,7 @@ checkout before starting, so it remains available at older commits:
 ```sh
 cp scripts/bisect-rust-test.py /tmp/shepherd-bisect-rust-test.py
 git bisect start HEAD <known-good-commit>
-git bisect run direnv exec . python3 /tmp/shepherd-bisect-rust-test.py module::tests::example
+git bisect run direnv exec . python3 /tmp/shepherd-bisect-rust-test.py --package shepherd-core module::tests::example
 git bisect reset
 ```
 

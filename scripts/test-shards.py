@@ -19,7 +19,7 @@ CONTEXT = None
 
 
 def playwright_suites():
-    patterns = ("apps/*/playwright.config.*", "apps/*/ui/playwright.config.*", "demos/*/playwright.config.*")
+    patterns = ("apps/*/playwright.config.*", "apps/*/ui/playwright.config.*", "libs/*/playwright.config.*", "demos/*/playwright.config.*")
     return sorted({config.parent for pattern in patterns for config in ROOT.glob(pattern)})
 
 
@@ -111,6 +111,7 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--all", action="store_true", help="run all default Rust and UI tests, including doctests")
     parser.add_argument("--test", help="run an exact Rust test name across the workspace")
+    parser.add_argument("--package", help="limit --test to a Rust workspace package")
     parser.add_argument("--last-ran", help="find the latest clean ancestor that ran an exact test identity")
     parser.add_argument("--seed", default="HEAD", help="revision used to select the shard (default: HEAD)")
     parser.add_argument("--shard", type=parse_shard, help="override the shard as INDEX/COUNT")
@@ -121,6 +122,8 @@ def main(argv=None):
         parser.error("--shards must be positive")
     if args.all and args.test:
         parser.error("--all and --test cannot be combined")
+    if args.package and not args.test:
+        parser.error("--package requires --test")
     if args.last_ran:
         ancestors = first_parent_ancestors(ROOT, "HEAD")
         record = last_test_run(read_runs(HISTORY), ancestors, args.last_ran)
@@ -135,7 +138,8 @@ def main(argv=None):
     CONTEXT = (head, revision, f"{index}/{count}")
     print(f"Selection seed {revision}; shard {index}/{count}", flush=True)
     if args.test:
-        execute(["cargo", "nextest", "run", "--workspace", "--", "--exact", args.test], dry_run=args.dry_run)
+        selection = ["--package", args.package] if args.package else ["--workspace"]
+        execute(["cargo", "nextest", "run", *selection, "--", "--exact", args.test], dry_run=args.dry_run)
         return
     if args.all:
         execute(["python3", "-m", "unittest", "discover", "-s", "scripts", "-p", "test_test_shard*.py"], dry_run=args.dry_run)
