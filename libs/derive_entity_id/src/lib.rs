@@ -128,8 +128,8 @@ mod tests {
 
         assert!(code.contains("impl MyId"));
         assert!(code.contains("pub const PREFIX : & 'static str = \"entity\" ;"));
-        assert!(code.contains("pub fn new () -> Self { let millis = std :: time :: SystemTime :: now () . duration_since (std :: time :: UNIX_EPOCH)"));
-        assert!(code.contains("pub fn unprefixed (& self) -> String {"));
+        assert!(code.contains("pub fn auto () -> Self { let millis = std :: time :: SystemTime :: now () . duration_since (std :: time :: UNIX_EPOCH)"));
+        assert!(code.contains("pub fn to_string_no_prefix (& self) -> String {"));
         assert!(code.contains("impl std :: fmt :: Display for MyId"));
         assert!(code.contains("impl std :: str :: FromStr for MyId"));
         assert!(code.contains("impl TryFrom < String > for MyId"));
