@@ -56,6 +56,7 @@ pub struct CaptureWriter {
     file: File,
     path: PathBuf,
     last_elapsed_micros: Option<u64>,
+    write_failed: bool,
 }
 
 impl CaptureWriter {
@@ -112,10 +113,17 @@ impl CaptureWriter {
             file,
             path,
             last_elapsed_micros: None,
+            write_failed: false,
         })
     }
 
     pub fn append(&mut self, record: &CaptureRecord) -> HarnessResult<()> {
+        if self.write_failed {
+            return Err(HarnessError::Protocol(format!(
+                "Freebuff capture at {} previously failed; recording cannot continue",
+                self.path.display()
+            )));
+        }
         validate_record(record)?;
         if self
             .last_elapsed_micros
@@ -129,15 +137,13 @@ impl CaptureWriter {
             HarnessError::Protocol(format!("could not encode Freebuff capture: {error}"))
         })?;
         line.push(b'\n');
-        self.file
-            .write_all(&line)
-            .and_then(|()| self.file.flush())
-            .map_err(|error| {
-                HarnessError::Protocol(format!(
-                    "could not write Freebuff capture at {}: {error}",
-                    self.path.display()
-                ))
-            })?;
+        if let Err(error) = self.file.write_all(&line).and_then(|()| self.file.flush()) {
+            self.write_failed = true;
+            return Err(HarnessError::Protocol(format!(
+                "could not write Freebuff capture at {}: {error}",
+                self.path.display()
+            )));
+        }
         self.last_elapsed_micros = Some(record.elapsed_micros);
         Ok(())
     }
@@ -235,6 +241,23 @@ fn validate_record(record: &CaptureRecord) -> HarnessResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_failed_capture_write_permanently_stops_recording() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let directory = tempfile::tempdir()?;
+        let mut writer = CaptureWriter::create(directory.path(), "failed-write")?;
+        writer.file = File::open(&writer.path)?;
+        let record = CaptureRecord {
+            elapsed_micros: 0,
+            event: CaptureEvent::Input { bytes: vec![1] },
+        };
+        assert!(writer.append(&record).is_err());
+        writer.file = OpenOptions::new().append(true).open(&writer.path)?;
+        assert!(writer.append(&record).is_err());
+        assert!(read_capture(&writer.path)?.is_empty());
+        Ok(())
+    }
 
     #[test]
     fn capture_round_trips_ordered_terminal_and_effect_records()

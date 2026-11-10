@@ -65,6 +65,9 @@ and login diagnostics are now implemented.
       connect recording and replay once the transport exists. The storage
       primitive compiles; its invalid-name and ordering fixture passed in shard
       8/8, while its round-trip fixture has not yet been selected.
+      A writer now refuses further records after an I/O failure; its failure
+      fixture was not selected in shard 2/8. The transport must stop live
+      submissions on that error.
     - [ ] Replay capture records in order through a streaming consumer. An
       offline synthetic capture replays split output and a resize through the
       shell's VT parser (Shepherd shard 8/8 passed); the consumer's own fixture
