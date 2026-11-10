@@ -136,10 +136,24 @@
               set -euo pipefail
               cd "${wd}"
               test_database_root="$PWD/.cache/test-db"
+              watch_shepherd() {
+                ${pkgs.watchexec}/bin/watchexec --restart --stop-timeout 10s --shell=none \
+                  --watch apps/shepherd/src-tauri/src \
+                  --watch apps/shepherd/src-tauri/Cargo.toml \
+                  --watch apps/shepherd/src-tauri/build.rs \
+                  --watch apps/shepherd/src-tauri/tauri.conf.json \
+                  --watch apps/shepherd/src-tauri/capabilities \
+                  --watch libs/shepherd-core \
+                  --watch libs/agent-harness \
+                  --watch libs/acp-client \
+                  --watch Cargo.toml --watch Cargo.lock \
+                  --exts rs,toml,json,sql,lock \
+                  -- pnpm dev:shepherd --no-watch "$@"
+              }
               case "$*" in
                 "")
                   export SHEPHERD_DEV_DATA_DIR="$test_database_root"
-                  exec pnpm dev:shepherd
+                  watch_shepherd
                   ;;
                 --test)
                   mkdir -p "$test_database_root"
@@ -147,7 +161,7 @@
                   trap 'rm -rf -- "$session_data_directory"' EXIT
                   export SHEPHERD_DEV_DATA_DIR="$session_data_directory"
                   export VITE_SHEPHERD_EPHEMERAL=1
-                  pnpm dev:shepherd --config '{"build":{"beforeDevCommand":"pnpm --dir ui run dev --port 1435","devUrl":"http://localhost:1435"}}'
+                  watch_shepherd --config '{"build":{"beforeDevCommand":"pnpm --dir ui run dev --port 1435","devUrl":"http://localhost:1435"}}'
                   ;;
                 *) printf '%s\n' 'Usage: shep [--test]' >&2; exit 2 ;;
               esac

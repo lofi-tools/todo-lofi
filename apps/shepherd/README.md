@@ -48,9 +48,11 @@ Open the **Command palette** from the icon rail or with Command-K on macOS
 and Ctrl-Shift-K on Linux. Search by command name or category. The palette
 shows each shortcut and explains unavailable actions.
 
-Tauri reloads the app when the shell, its local Rust dependencies, or the frontend
-changes. Vite keeps running during those reloads. Non-interactive runners can use
-`direnv exec . shep` or `direnv exec . shep --test`.
+`shep` restarts the development process group when the shell or its local Rust
+dependencies change, so the previous app releases its database before the next
+launch. Vite handles frontend changes; it also restarts with the app after a
+backend change. Non-interactive runners can use `direnv exec . shep` or
+`direnv exec . shep --test`.
 
 Set `SHEPHERD_DEV_DATA_DIR` to an absolute path when exercising the debug app
 with a separate project list and database. Set `SHEPHERD_DEV_PROJECT_ROOT`
