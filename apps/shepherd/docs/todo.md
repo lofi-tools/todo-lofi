@@ -120,6 +120,10 @@ and login diagnostics are now implemented.
       confirms terminal drain, collects effects before finalizing. Its combined
       capture/replay fixture was outside shepherd-core shard 1/8; connect the
       shared session to a runner that proves process termination and drain.
+      An ignored `approved_freebuff_capture` runner is feature-gated and
+      compile-checked, but needs an offline fake-CLI end-to-end check before
+      any approved live use. It waits for operator send/stop markers and does
+      not infer readiness or completion.
     - [ ] Replay capture records in order through a streaming consumer. An
       offline synthetic capture replays split output and a resize through the
       shell's VT parser (Shepherd shard 8/8 passed); the consumer's own fixture

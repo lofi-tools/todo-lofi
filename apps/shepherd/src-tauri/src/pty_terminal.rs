@@ -1484,6 +1484,139 @@ mod tests {
 
     use super::*;
 
+    #[cfg(all(feature = "live-freebuff", unix))]
+    #[tokio::test]
+    #[ignore = "requires an explicitly approved Freebuff prompt and disposable worktree"]
+    async fn approved_freebuff_capture() -> Result<(), Box<dyn std::error::Error>> {
+        use agent_harness::freebuff_capture::CaptureEvent;
+        use shepherd_core::harness::FreebuffLiveCapture;
+        use std::io::Write as _;
+        use std::path::PathBuf;
+
+        fn required(name: &str) -> Result<PathBuf, Box<dyn std::error::Error>> {
+            std::env::var_os(name)
+                .map(PathBuf::from)
+                .ok_or_else(|| format!("missing {name}").into())
+        }
+        fn runtime(
+            session: &agent_harness::freebuff_capture::CaptureSession,
+            directory: &std::path::Path,
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            let metadata = agent_harness::freebuff::read_runtime_metadata(directory)?;
+            session.record_and_apply(
+                CaptureEvent::Runtime {
+                    launcher_version: None,
+                    runtime_version: metadata.as_ref().map(|metadata| metadata.version.clone()),
+                    target: metadata.map(|metadata| metadata.target),
+                },
+                || Ok(((), Vec::new())),
+            )?;
+            Ok(())
+        }
+
+        let workspace = required("SHEPHERD_FREEBUFF_WORKSPACE")?;
+        let worktree = required("SHEPHERD_FREEBUFF_WORKTREE")?.canonicalize()?;
+        let markers = required("SHEPHERD_FREEBUFF_MARKERS")?.canonicalize()?;
+        let executable = required("SHEPHERD_FREEBUFF_EXECUTABLE")?;
+        let metadata = required("SHEPHERD_FREEBUFF_METADATA_DIR")?;
+        let prompt_path = required("SHEPHERD_FREEBUFF_PROMPT_FILE")?;
+        let scenario = std::env::var("SHEPHERD_FREEBUFF_SCENARIO")?;
+        if !executable.is_absolute() || markers.starts_with(&worktree) {
+            return Err("use an absolute executable and markers outside the worktree".into());
+        }
+        let send_marker = markers.join("send");
+        let stop_marker = markers.join("stop");
+        if send_marker.exists() || stop_marker.exists() {
+            return Err("capture marker files must not exist before launch".into());
+        }
+        let prompt = std::fs::read(prompt_path)?;
+        if prompt.is_empty() || prompt.len() >= MAX_WRITE_BYTES {
+            return Err("approved prompt must contain 1 to 65535 bytes".into());
+        }
+        std::str::from_utf8(&prompt)?;
+        let capture = FreebuffLiveCapture::begin(&workspace, worktree.clone(), &scenario)?;
+        let session = capture.session();
+        runtime(&session, &metadata)?;
+        let (error_sender, mut errors) = mpsc::unbounded_channel();
+        let recording = Arc::new(TerminalRecording::from_shared(
+            session.clone(),
+            100,
+            30,
+            error_sender,
+        )?);
+        let mut engine = PtyTerminals::new();
+        let (sender, mut output) = mpsc::channel(32);
+        let terminal_id = engine.spawn_recorded(
+            TerminalSpec {
+                id: TerminalId::new("approved-freebuff-capture"),
+                columns: 100,
+                rows: 30,
+                cwd: worktree,
+                command: executable
+                    .to_str()
+                    .ok_or("executable path is not UTF-8")?
+                    .into(),
+                args: Vec::new(),
+                environment: BTreeMap::new(),
+            },
+            sender,
+            recording,
+        )?;
+        eprintln!(
+            "Inspect the terminal output. Create the send marker only when the approved prompt can be submitted, then the stop marker after the response is complete."
+        );
+        let mut submitted = false;
+        let mut stopping = false;
+        let mut pending_write: Option<TerminalWrite> = None;
+        let deadline = tokio::time::sleep(Duration::from_secs(600));
+        tokio::pin!(deadline);
+        let mut tick = tokio::time::interval(Duration::from_millis(100));
+        loop {
+            tokio::select! {
+                _ = &mut deadline => return Err("capture timed out".into()),
+                error = errors.recv() => return Err(error.unwrap_or_else(|| "capture error channel closed".into()).into()),
+                result = async {
+                    match pending_write.as_mut() {
+                        Some(write) => write.await.map_err(|error| error.to_string()),
+                        None => Err("missing terminal input completion".into()),
+                    }
+                }, if pending_write.is_some() => {
+                    result??;
+                    pending_write = None;
+                },
+                event = output.recv() => match event {
+                    Some(TerminalEvent::Output(bytes)) => {
+                        let mut stdout = std::io::stdout().lock();
+                        stdout.write_all(&bytes)?;
+                        stdout.flush()?;
+                    }
+                    Some(TerminalEvent::Exited { .. }) => {
+                        if !submitted || !stopping || pending_write.is_some() { return Err("terminal exited before the operator confirmed completion".into()); }
+                        if let Ok(error) = errors.try_recv() { return Err(error.into()); }
+                        break;
+                    }
+                    None => return Err("terminal output closed without an exit event".into()),
+                },
+                _ = tick.tick() => {
+                    if !submitted && send_marker.exists() {
+                        if stop_marker.exists() { return Err("stop marker appeared before submission".into()); }
+                        let mut input = prompt.clone();
+                        input.push(b'\r');
+                        pending_write = Some(engine.write(&terminal_id, input)?);
+                        submitted = true;
+                    }
+                    if submitted && pending_write.is_none() && !stopping && stop_marker.exists() {
+                        engine.close(&terminal_id)?;
+                        stopping = true;
+                    }
+                }
+            }
+        }
+        runtime(&session, &metadata)?;
+        capture.finish_after_drain()?;
+        Ok(())
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn undrained_recorded_terminal_cannot_finish_capture()

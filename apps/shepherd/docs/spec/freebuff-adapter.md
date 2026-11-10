@@ -140,6 +140,21 @@ and report failures through Shepherd's normal diagnostics.
    persistence, and restart behavior. Use background native checks by default;
    run visible window checks only when the changed behavior needs them.
 
+### Opt-in capture runner
+
+The shell contains an ignored `approved_freebuff_capture` diagnostic behind
+the non-default `live-freebuff` feature. It has not yet been verified against
+an offline fake CLI and must not be used live until that verification is done.
+Before each live submission, obtain the user's approval of the exact prompt,
+project, disposable worktree and context. The runner reads the prompt from a
+file, displays PTY output, and waits for separate `send` and `stop` marker
+files outside the worktree. The operator creates `send` only after recognizing
+the ready prompt and `stop` only after recognizing the complete response. It
+records output, screens, input, runtime metadata and supported worktree effects;
+an error or missing drain leaves the capture incomplete. Marker files are local
+controls, not a substitute for user approval. This diagnostic does not yet
+classify the screen, test approval flows, or establish runtime compatibility.
+
 ## Acceptance criteria
 
 - Freebuff is available as an integrated task agent and the standalone terminal

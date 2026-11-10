@@ -15,6 +15,7 @@ path = "src/main.rs"
 [features]
 desktop-codex-smoke = ["agent-harness/live-test-support"]
 live-codex = ["desktop-codex-smoke", "agent-harness/live-codex"]
+live-freebuff = ["agent-harness/live-freebuff"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
