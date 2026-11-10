@@ -5163,6 +5163,68 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn recorded_task_terminal_is_visible_in_the_project_terminal_list()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use agent_harness::freebuff_capture::{CaptureSession, CaptureWriter};
+
+        let repository = TestRepository::new()?;
+        let cache = TestDirectory::new()?;
+        let state = state_with(Core::new());
+        let projects = state
+            .add_project(repository.path().display().to_string())
+            .await?;
+        let project = projects.projects.first().ok_or("missing project")?;
+        let task = state
+            .create_draft(project.id.clone(), "Recorded terminal".into(), Agent::Codex)
+            .await?;
+        let id = TerminalId::new("recorded-task-fixture");
+        let record = TerminalRecord::project_shared(
+            id.clone(),
+            ProjectId::new(project.id.clone()),
+            "Recorded terminal",
+            repository.path().to_path_buf(),
+            "/bin/sh",
+            now_millis(),
+        )
+        .for_task(TaskId::new(task.task.id.clone()));
+        let session = CaptureSession::new(CaptureWriter::create(cache.path(), "task-terminal")?);
+        let (error_sender, mut errors) = mpsc::unbounded_channel();
+        let (screen_sender, mut frames) = mpsc::channel(16);
+        let recording = Arc::new(
+            crate::pty_terminal::TerminalRecording::new(session, 80, 24, error_sender)?
+                .with_screen_observer(screen_sender),
+        );
+        state
+            .spawn_terminal_recording(
+                TerminalSpec {
+                    id: id.clone(),
+                    columns: 80,
+                    rows: 24,
+                    cwd: repository.path().to_path_buf(),
+                    command: "/bin/sh".into(),
+                    args: vec!["-c".into(), "printf ready; exec sleep 30".into()],
+                    environment: BTreeMap::new(),
+                },
+                Some(record),
+                Some(recording),
+            )
+            .await?;
+        tokio::time::timeout(Duration::from_secs(5), frames.recv())
+            .await?
+            .ok_or("missing recorded frame")?;
+        let list = state.terminal_list(project.id.clone()).await;
+        assert!(list.terminals.iter().any(|terminal| {
+            terminal.id == id.as_str()
+                && terminal.task_id.as_deref() == Some(task.task.id.as_str())
+        }));
+        assert!(state.screen_slot(id.as_str()).await.is_ok());
+        assert!(errors.try_recv().is_err());
+        state.close_terminal(id.as_str().to_owned()).await?;
+        Ok(())
+    }
+
     #[tokio::test]
     async fn a_standalone_pty_has_a_screen_but_no_project_terminal_record()
     -> Result<(), Box<dyn std::error::Error>> {
