@@ -1695,11 +1695,11 @@ mod tests {
         .await?;
         operator_result?;
         result?;
-        let records = read_complete_capture(
-            &workspace
-                .path()
-                .join(".cache/shepherd-live/freebuff/fake-runner.jsonl"),
-        )?;
+        let capture_path = workspace
+            .path()
+            .join(".cache/shepherd-live/freebuff/fake-runner.jsonl");
+        crate::terminal_screen::verify_recorded_screens(&capture_path)?;
+        let records = read_complete_capture(&capture_path)?;
         let input: Vec<u8> = records
             .iter()
             .filter_map(|record| match &record.event {

@@ -134,8 +134,11 @@ and login diagnostics are now implemented.
     - [ ] Replay capture records in order through a streaming consumer. An
       offline synthetic capture replays split output and a resize through the
       shell's VT parser (Shepherd shard 8/8 passed); the consumer's own fixture
-      was not selected in shard 6/8. Connect replay to versioned Freebuff screen
-      fixtures and safely restore recorded worktree effects.
+      was not selected in shard 6/8. A verifier now compares recorded frames
+      with screens reconstructed from captured bytes and resizes, and the fake
+      runner calls it. Its new fixture and the updated fake runner remain
+      unverified; the user requested no builds. Connect replay to versioned
+      Freebuff screen fixtures and safely restore recorded worktree effects.
     - [ ] Version the capture format and reject incompatible headers. The
       header rejection fixture passed in shard 4/8; the capture round-trip
       fixture has not yet been selected.

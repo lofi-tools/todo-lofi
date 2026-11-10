@@ -726,12 +726,125 @@ fn named_color(color: NamedColor, appearance: TerminalAppearance) -> u32 {
     }
 }
 
+#[allow(dead_code)]
+pub(crate) fn verify_recorded_screens(path: &std::path::Path) -> agent_harness::HarnessResult<()> {
+    use agent_harness::HarnessError;
+    use agent_harness::freebuff_capture::{CaptureEvent, visit_complete_capture};
+
+    let mut screen: Option<Screen> = None;
+    let mut awaiting_screen = false;
+    visit_complete_capture(path, |record| {
+        if awaiting_screen && !matches!(&record.event, CaptureEvent::Screen { .. }) {
+            return Err(HarnessError::Protocol(
+                "terminal capture is missing a screen frame".into(),
+            ));
+        }
+        match record.event {
+            CaptureEvent::Resize { columns, rows } => {
+                shepherd_core::terminal::validate_size(columns, rows).map_err(|error| {
+                    HarnessError::Protocol(format!("invalid captured terminal size: {error}"))
+                })?;
+                if let Some(screen) = &mut screen {
+                    screen.resize(usize::from(columns), usize::from(rows));
+                    awaiting_screen = true;
+                } else {
+                    screen = Some(Screen::with_scrollback(
+                        usize::from(columns),
+                        usize::from(rows),
+                        0,
+                    ));
+                }
+            }
+            CaptureEvent::Output { bytes } => {
+                screen
+                    .as_mut()
+                    .ok_or_else(|| {
+                        HarnessError::Protocol("terminal output precedes its initial size".into())
+                    })?
+                    .process(&bytes);
+                awaiting_screen = true;
+            }
+            CaptureEvent::Screen { state } => {
+                if !awaiting_screen {
+                    return Err(HarnessError::Protocol(
+                        "unexpected terminal screen frame".into(),
+                    ));
+                }
+                let expected = serde_json::to_value(
+                    screen
+                        .as_ref()
+                        .ok_or_else(|| {
+                            HarnessError::Protocol("terminal screen has no initial size".into())
+                        })?
+                        .frame(),
+                )
+                .map_err(|error| {
+                    HarnessError::Protocol(format!(
+                        "could not encode replayed terminal screen: {error}"
+                    ))
+                })?;
+                if state != expected {
+                    return Err(HarnessError::Protocol(
+                        "captured terminal screen does not match replayed output".into(),
+                    ));
+                }
+                awaiting_screen = false;
+            }
+            _ => {}
+        }
+        Ok(())
+    })?;
+    if screen.is_none() {
+        return Err(HarnessError::Protocol(
+            "terminal capture has no initial size".into(),
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use agent_harness::freebuff_capture::{
         CaptureEvent, CaptureRecord, CaptureWriter, visit_capture,
     };
+
+    #[test]
+    fn recorded_screens_must_match_replayed_terminal_output()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        for (name, tampered) in [("matching", false), ("tampered", true)] {
+            let mut writer = CaptureWriter::create(directory.path(), name)?;
+            let mut screen = Screen::with_scrollback(10, 2, 0);
+            let mut events = vec![CaptureEvent::Resize {
+                columns: 10,
+                rows: 2,
+            }];
+            for bytes in [b"hello".as_slice(), b"\rworld".as_slice()] {
+                screen.process(bytes);
+                events.push(CaptureEvent::Output {
+                    bytes: bytes.to_vec(),
+                });
+                let mut state = serde_json::to_value(screen.frame())?;
+                if tampered {
+                    state["cursorColumn"] = serde_json::json!(0);
+                }
+                events.push(CaptureEvent::Screen { state });
+            }
+            events.push(CaptureEvent::Complete);
+            for (elapsed_micros, event) in events.into_iter().enumerate() {
+                writer.append(&CaptureRecord {
+                    elapsed_micros: elapsed_micros as u64,
+                    event,
+                })?;
+            }
+            let path = directory
+                .path()
+                .join(format!(".cache/shepherd-live/freebuff/{name}.jsonl"));
+            assert_eq!(verify_recorded_screens(&path).is_err(), tampered);
+        }
+        Ok(())
+    }
 
     #[test]
     fn freebuff_capture_replays_split_terminal_output_and_resize()
