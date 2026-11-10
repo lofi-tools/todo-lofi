@@ -28,3 +28,4 @@ apps/providers-catalog-web/*.duckdb.wal
 /.cache/shepherd/
 /.cache/shepherd-live/
 /.cache/test-db/
+/.cache/test-shards/
