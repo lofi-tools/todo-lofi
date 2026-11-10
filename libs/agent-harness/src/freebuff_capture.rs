@@ -231,6 +231,38 @@ impl CaptureSession {
         Ok(())
     }
 
+    /// Run a nonblocking operation while serialized with capture. `None` means
+    /// no progress; callers wait outside the lock before trying again.
+    pub fn try_apply_and_record<T>(
+        &self,
+        apply: impl FnOnce() -> HarnessResult<Option<(T, CaptureEvent)>>,
+    ) -> HarnessResult<Option<T>> {
+        let mut state = self.state.lock().map_err(|_| {
+            HarnessError::Protocol("Freebuff capture session lock is poisoned".into())
+        })?;
+        if state.failed || state.finished {
+            return Err(HarnessError::Protocol(
+                "Freebuff capture session has failed or finished".into(),
+            ));
+        }
+        let outcome = (|| {
+            let Some((result, event)) = apply()? else {
+                return Ok(None);
+            };
+            if matches!(event, CaptureEvent::Complete) {
+                return Err(HarnessError::Protocol(
+                    "completion cannot be an operation event".into(),
+                ));
+            }
+            self.append_event(&mut state.writer, event)?;
+            Ok(Some(result))
+        })();
+        if outcome.is_err() {
+            state.failed = true;
+        }
+        outcome
+    }
+
     /// Call only after the PTY, screen, responses and effects are fully drained.
     pub fn finish(&self) -> HarnessResult<()> {
         let mut state = self.state.lock().map_err(|_| {
@@ -395,6 +427,40 @@ fn validate_record(record: &CaptureRecord) -> HarnessResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn nonblocking_attempts_record_only_progress_and_stop_after_failure()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let writer = CaptureWriter::create(directory.path(), "nonblocking")?;
+        let path = writer.path.clone();
+        let session = CaptureSession::new(writer);
+        let pending: Option<usize> = session.try_apply_and_record(|| Ok(None))?;
+        assert!(pending.is_none());
+        assert_eq!(
+            session.try_apply_and_record(|| Ok(Some((
+                2,
+                CaptureEvent::Input {
+                    bytes: b"hi".to_vec()
+                }
+            ))))?,
+            Some(2)
+        );
+        let failed: HarnessResult<Option<usize>> =
+            session.try_apply_and_record(|| Err(HarnessError::Protocol("failed".into())));
+        assert!(failed.is_err());
+        let mut ran = false;
+        let blocked: HarnessResult<Option<usize>> = session.try_apply_and_record(|| {
+            ran = true;
+            Ok(None)
+        });
+        assert!(blocked.is_err());
+        assert!(!ran);
+        let records = read_capture(&path)?;
+        assert_eq!(records.len(), 1);
+        assert!(matches!(&records[0].event, CaptureEvent::Input { bytes } if bytes == b"hi"));
+        Ok(())
+    }
 
     #[test]
     fn complete_capture_requires_a_final_marker_and_rejects_later_events()

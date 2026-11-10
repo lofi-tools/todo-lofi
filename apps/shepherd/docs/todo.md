@@ -46,11 +46,11 @@ and login diagnostics are now implemented.
       agent settings; wire it into the desktop factory and verify its fixtures
       when the selected shard includes them before marking this item complete.
       Missing and unusable-candidate fixtures passed in shard 6/8; configured
-      precedence and settings fixtures remain unverified.
+      precedence and settings fixtures passed in shard 4/8.
     - [ ] Inspect the installed launcher and runtime metadata without sending
       project data; record version provenance and the update lifecycle. A
       bounded metadata reader is implemented; its valid-metadata fixture passed
-      in shard 7/8, while its malformed/oversized fixture remains unverified.
+      in shard 7/8, and its malformed/oversized fixture passed in shard 4/8.
       Finish verification and wire it into update/restart handling; do not treat
       metadata as proof that the runtime is supported.
     - [ ] With user-approved live messages only, capture the terminal states
@@ -79,6 +79,9 @@ and login diagnostics are now implemented.
       output capture failure can occur after an input attempt was recorded and
       before its write completes. Close that race before enabling live capture.
       The backpressure fixture compiled but was not selected in shard 1/8.
+      A nonblocking operation primitive records only successful progress while
+      serialized with capture; connect it to PTY writes and wait for readiness
+      outside the lock. Its fixture was not selected in shard 4/8.
       An event recorded before
       a failed operation is an attempt, so failed sessions must never be treated
       as complete replay.
@@ -94,8 +97,8 @@ and login diagnostics are now implemented.
       was not selected in shard 6/8. Connect replay to versioned Freebuff screen
       fixtures and safely restore recorded worktree effects.
     - [ ] Version the capture format and reject incompatible headers. The
-      implementation compiles; shard 3/8 passed 21 tests but did not select
-      the new header fixture or the capture round-trip fixture.
+      header rejection fixture passed in shard 4/8; the capture round-trip
+      fixture has not yet been selected.
   - [ ] **P1 — Implement the integrated adapter:** launch the installed CLI in
     the task worktree with the existing login, forward input with normal CLI
     terminal interpretation, stream and reconcile text, map tool activity,
