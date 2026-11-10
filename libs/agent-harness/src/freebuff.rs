@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
-use crate::{HarnessError, HarnessResult};
+use crate::{HarnessError, HarnessResult, settings::AgentSettings};
 
 const MAX_METADATA_BYTES: u64 = 16 * 1024;
 
@@ -150,6 +150,14 @@ pub fn discover(configured: Option<&Path>, path: &OsStr) -> FreebuffDiscovery {
     discovery
 }
 
+pub fn discover_from_settings(
+    settings: &AgentSettings,
+    path: &OsStr,
+) -> HarnessResult<FreebuffDiscovery> {
+    let executable = settings.executable("agents.freebuff.executable")?;
+    Ok(discover(executable.as_deref(), path))
+}
+
 fn inspect(path: &Path, source: FreebuffInstallSource, discovery: &mut FreebuffDiscovery) -> bool {
     let metadata = match std::fs::metadata(path) {
         Ok(metadata) => metadata,
@@ -205,6 +213,29 @@ fn executable_permissions(_metadata: &std::fs::Metadata) -> bool {
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn discovery_reads_the_configured_executable_from_agent_settings()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let executable = directory.path().join("custom-freebuff");
+        std::fs::write(&executable, b"fixture")?;
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755))?;
+        let settings_path = directory.path().join("settings.json");
+        std::fs::write(
+            &settings_path,
+            serde_json::to_vec(&serde_json::json!({
+                "app": { "agents.freebuff.executable": executable }
+            }))?,
+        )?;
+        let settings = AgentSettings::read(&settings_path)?;
+        let discovery = discover_from_settings(&settings, OsStr::new(""))?;
+        assert_eq!(
+            discovery.install.map(|install| install.executable),
+            Some(executable)
+        );
+        Ok(())
+    }
 
     #[test]
     fn configured_executable_precedes_path_without_running_it()

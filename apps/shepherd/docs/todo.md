@@ -42,8 +42,9 @@ and login diagnostics are now implemented.
     versions or screen states that cannot be identified reliably.
     - [ ] Resolve a configured executable followed by PATH without launching
       Freebuff or triggering its updater; report missing or unusable candidates.
-      An offline discovery primitive is present in `agent-harness`; wire it into
-      the desktop factory and verify its fixtures when the selected shard
+      An offline discovery primitive reads `agents.freebuff.executable` from
+      agent settings; wire it into the desktop factory and verify its fixtures
+      (not selected in shard 8/8) when the selected shard
       includes them before marking this item complete.
     - [ ] Inspect the installed launcher and runtime metadata without sending
       project data; record version provenance and the update lifecycle. A
@@ -61,7 +62,8 @@ and login diagnostics are now implemented.
     - [ ] Implement and verify ordered, private capture storage for PTY input,
       output, screen states, runtime changes, responses and worktree effects;
       connect recording and replay once the transport exists. The storage
-      primitive compiles, but its fixtures were not in the selected shard.
+      primitive compiles; its invalid-name and ordering fixture passed in shard
+      8/8, while its round-trip fixture has not yet been selected.
     - [ ] Version the capture format and reject incompatible headers. The
       implementation compiles; shard 3/8 passed 21 tests but did not select
       the new header fixture or the capture round-trip fixture.
