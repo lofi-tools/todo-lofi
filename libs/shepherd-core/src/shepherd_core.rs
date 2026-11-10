@@ -1567,6 +1567,7 @@ impl Core {
                 .map(|session| session.capabilities().clone())
                 .or_else(|| record.and_then(|record| record.capabilities.clone())),
             modes: session.and_then(HarnessSession::modes),
+            models: session.and_then(HarnessSession::models),
             recovery,
         })
     }
@@ -2869,6 +2870,13 @@ impl Core {
         }
         if let Some(task) = self.tasks.get_mut(task_id) {
             task.error = task_error;
+        }
+
+        if events
+            .iter()
+            .any(|event| matches!(event, HarnessEvent::ModelsChanged { .. }))
+        {
+            self.emit(Event::TaskWorkspaceChanged(self.task_workspace(task_id)?));
         }
 
         Ok(())

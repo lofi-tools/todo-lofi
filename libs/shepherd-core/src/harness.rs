@@ -10,10 +10,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use agent_harness::{
-    AdapterTier, AgentDiagnostics, AgentHarness, AgentTerminal, ApprovalId, ApprovalRequest,
-    Capabilities, Decision, Entry, EntryKind, FailureKind, HarnessError, HarnessEvent,
-    ProjectApprovalPolicy, PromptInput, SessionApproval, SessionId, SpawnSpec, Transcript,
-    TranscriptChange,
+    AdapterTier, AgentDiagnostics, AgentHarness, AgentModels, AgentTerminal, ApprovalId,
+    ApprovalRequest, Capabilities, Decision, Entry, EntryKind, FailureKind, HarnessError,
+    HarnessEvent, ProjectApprovalPolicy, PromptInput, SessionApproval, SessionId, SpawnSpec,
+    Transcript, TranscriptChange,
 };
 use async_trait::async_trait;
 
@@ -213,6 +213,7 @@ impl HarnessSession {
         }
         self.session_id = Some(session_id.clone());
         self.capabilities.mode_picker = self.harness.modes().is_some();
+        self.capabilities.model_picker = self.harness.models().is_some();
         Ok(session_id)
     }
 
@@ -221,6 +222,13 @@ impl HarnessSession {
             return None;
         }
         self.harness.modes()
+    }
+
+    pub fn models(&self) -> Option<AgentModels> {
+        if self.closed {
+            return None;
+        }
+        self.harness.models()
     }
 
     pub async fn set_mode(&mut self, mode: &str) -> Result<Vec<HarnessEvent>, CoreError> {
@@ -423,11 +431,15 @@ impl HarnessSession {
             events.push(event);
         }
         if self.closed
-            || events
-                .iter()
-                .any(|event| matches!(event, HarnessEvent::ModeChanged { .. }))
+            || events.iter().any(|event| {
+                matches!(
+                    event,
+                    HarnessEvent::ModeChanged { .. } | HarnessEvent::ModelsChanged { .. }
+                )
+            })
         {
             self.capabilities.mode_picker = self.modes().is_some();
+            self.capabilities.model_picker = self.models().is_some();
         }
         events
     }

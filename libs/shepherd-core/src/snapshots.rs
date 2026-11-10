@@ -67,6 +67,8 @@ pub struct TaskWorkspace {
     pub capabilities: Option<Capabilities>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub modes: Option<agent_harness::AgentModes>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub models: Option<agent_harness::AgentModels>,
     pub recovery: Option<SessionRecovery>,
 }
 

@@ -24,7 +24,7 @@ use tokio::task::JoinHandle;
 use tokio::time::{Instant, sleep_until, timeout};
 
 use crate::{
-    AdapterTier, AgentDiagnostics, AgentHarness, AgentMode, AgentModes, ApprovalId,
+    AdapterTier, AgentDiagnostics, AgentHarness, AgentMode, AgentModels, AgentModes, ApprovalId,
     ApprovalRequest, ApprovalSource, Capabilities, Decision, DeltaKind, Entry, FailureKind,
     FileDiff, HarnessError, HarnessEvent, HarnessResult, ItemId, PlanRow, ProjectApprovalPolicy,
     PromptInput, SessionApproval, SessionId, SessionState, SpawnSpec, ToolCallId, ToolStatus,
@@ -159,6 +159,15 @@ impl AgentHarness for AcpHarness {
             .borrow()
             .as_ref()
             .map(|mode| mode.options.clone())
+    }
+
+    fn models(&self) -> Option<AgentModels> {
+        self.runtime
+            .as_ref()?
+            .models
+            .borrow()
+            .as_ref()
+            .map(|model| model.models.clone())
     }
 
     async fn set_mode(&mut self, mode: &str) -> HarnessResult<()> {
@@ -297,6 +306,7 @@ impl AgentHarness for AcpHarness {
         let events = connection.take_events();
         let modes =
             ModeControl::from_config(&config).or_else(|| modes.and_then(ModeControl::from_legacy));
+        let models = ModelControl::from_config(&config);
         let id = SessionId::new(session.0.to_string());
         self.runtime = Some(Runtime::start(
             connection.requester.clone(),
@@ -306,6 +316,7 @@ impl AgentHarness for AcpHarness {
             self.project_approvals.clone(),
             connection.close_terminals(),
             modes,
+            models,
         ));
         publish(
             &self.sender,
@@ -316,12 +327,16 @@ impl AgentHarness for AcpHarness {
         Ok(id)
     }
 
-    async fn prompt(&mut self, input: PromptInput) -> HarnessResult<()> {
+    async fn prompt(&mut self, mut input: PromptInput) -> HarnessResult<()> {
         let info = &self
             .connection
             .as_ref()
             .ok_or(HarnessError::NotStarted)?
             .info;
+        if let Some(model) = input.model.take() {
+            self.control(Control::SetModel(model.clone())).await?;
+            self.diagnostics.model = Some(model);
+        }
         let mut content = vec![ContentBlock::Text(schema::TextContent::new(input.text))];
         let mut readable_files = Vec::new();
         for attachment in input.attachments {
@@ -396,15 +411,46 @@ async fn session_request<T>(
 }
 
 fn configured_model(options: &[schema::SessionConfigOption]) -> Option<String> {
-    options.iter().find_map(|option| {
-        if option.category == Some(schema::SessionConfigOptionCategory::Model)
-            && let schema::SessionConfigKind::Select(select) = &option.kind
-        {
-            Some(select.current_value.0.to_string())
-        } else {
-            None
-        }
-    })
+    ModelControl::from_config(options).and_then(|control| control.models.current)
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct ModelControl {
+    config_id: schema::SessionConfigId,
+    models: AgentModels,
+}
+
+impl ModelControl {
+    fn from_config(config: &[schema::SessionConfigOption]) -> Option<Self> {
+        let option = config
+            .iter()
+            .find(|option| option.category == Some(schema::SessionConfigOptionCategory::Model))?;
+        let schema::SessionConfigKind::Select(select) = &option.kind else {
+            return None;
+        };
+        let choices: Vec<_> = match &select.options {
+            schema::SessionConfigSelectOptions::Ungrouped(options) => options.iter().collect(),
+            schema::SessionConfigSelectOptions::Grouped(groups) => {
+                groups.iter().flat_map(|group| &group.options).collect()
+            }
+            _ => return None,
+        };
+        let options: Vec<_> = choices
+            .into_iter()
+            .map(|choice| crate::AgentModel {
+                id: choice.value.0.to_string(),
+                name: choice.name.clone(),
+                description: choice.description.clone(),
+            })
+            .collect();
+        (!options.is_empty()).then(|| Self {
+            config_id: option.id.clone(),
+            models: AgentModels {
+                current: Some(select.current_value.0.to_string()),
+                options,
+            },
+        })
+    }
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -500,6 +546,58 @@ fn update_modes(modes: &watch::Sender<Option<ModeControl>>, update: &SessionUpda
     }
 }
 
+fn update_models(models: &watch::Sender<Option<ModelControl>>, update: &SessionUpdate) -> bool {
+    let SessionUpdate::ConfigOptionUpdate(config) = update else {
+        return false;
+    };
+    let next = ModelControl::from_config(&config.config_options);
+    models.send_if_modified(|current| {
+        if *current == next {
+            return false;
+        }
+        *current = next;
+        true
+    })
+}
+
+async fn set_session_model(
+    requester: &acp_client::Requester,
+    session: &schema::SessionId,
+    models: &watch::Sender<Option<ModelControl>>,
+    model: &str,
+) -> HarnessResult<bool> {
+    let control = models
+        .borrow()
+        .clone()
+        .ok_or(HarnessError::ModelUnavailable)?;
+    if control.models.current.as_deref() == Some(model) {
+        return Ok(false);
+    }
+    if !control
+        .models
+        .options
+        .iter()
+        .any(|option| option.id == model)
+    {
+        return Err(HarnessError::ModelUnavailable);
+    }
+    let config = session_request(
+        "session/set_config_option",
+        requester.set_config_option(
+            session,
+            control.config_id.clone(),
+            schema::SessionConfigOptionValue::value_id(model.to_owned()),
+        ),
+    )
+    .await?;
+    let next = ModelControl::from_config(&config).ok_or(HarnessError::ModelUnavailable)?;
+    if next.models.current.as_deref() != Some(model) {
+        return Err(HarnessError::ModelUnavailable);
+    }
+    models.send_replace(Some(next));
+    Ok(true)
+}
+
 async fn set_session_mode(
     requester: &acp_client::Requester,
     session: &schema::SessionId,
@@ -577,6 +675,7 @@ enum Control {
     },
     Cancel,
     SetMode(String),
+    SetModel(String),
     Respond(ApprovalId, Decision),
     ResetSessionApproval(String),
 }
@@ -590,11 +689,13 @@ struct Runtime {
     worker: JoinHandle<()>,
     grants: watch::Receiver<Vec<SessionApproval>>,
     modes: watch::Receiver<Option<ModeControl>>,
+    models: watch::Receiver<Option<ModelControl>>,
 }
 
 struct SessionChanges {
     grants: watch::Sender<Vec<SessionApproval>>,
     modes: watch::Sender<Option<ModeControl>>,
+    models: watch::Sender<Option<ModelControl>>,
 }
 
 impl Runtime {
@@ -606,10 +707,12 @@ impl Runtime {
         project_approvals: Option<Arc<dyn ProjectApprovalPolicy>>,
         close_terminals: impl Future<Output = Result<(), String>> + Send + 'static,
         mode: Option<ModeControl>,
+        model: Option<ModelControl>,
     ) -> Self {
         let (commands, incoming) = mpsc::channel(8);
         let (grant_changes, grants) = watch::channel(Vec::new());
         let (mode_changes, modes) = watch::channel(mode);
+        let (model_changes, models) = watch::channel(model);
         let worker = tokio::spawn(async move {
             let failure_sender = sender.clone();
             if let Err(error) = drive_session(
@@ -622,6 +725,7 @@ impl Runtime {
                 SessionChanges {
                     grants: grant_changes,
                     modes: mode_changes,
+                    models: model_changes,
                 },
             )
             .await
@@ -645,6 +749,7 @@ impl Runtime {
             worker,
             grants,
             modes,
+            models,
         }
     }
 }
@@ -686,6 +791,9 @@ async fn drive_session(
                     Some(AcpEvent::SessionUpdate(notification, permit)) if notification.session_id == session => {
                         if update_modes(&changes.modes, &notification.update) {
                             publish(&sender, HarnessEvent::ModeChanged { stream_permit: permit.clone() })?;
+                        }
+                        if update_models(&changes.models, &notification.update) {
+                            publish(&sender, HarnessEvent::ModelsChanged { stream_permit: permit.clone() })?;
                         }
                         if let Some(mut event) = updates.apply(&notification.update) {
                             match &mut event {
@@ -807,6 +915,14 @@ async fn drive_session(
                     Control::Cancel => Ok(()),
                     Control::SetMode(_) if prompt.is_some() || disconnect_deadline.is_some() => Err(HarnessError::ModeUnavailable),
                     Control::SetMode(mode) => set_session_mode(&requester, &session, &changes.modes, &mode).await,
+                    Control::SetModel(_) if prompt.is_some() || disconnect_deadline.is_some() => Err(HarnessError::ModelUnavailable),
+                    Control::SetModel(model) => {
+                        let changed = set_session_model(&requester, &session, &changes.models, &model).await?;
+                        if changed {
+                            publish(&sender, HarnessEvent::ModelsChanged { stream_permit: None })?;
+                        }
+                        Ok(())
+                    }
                     Control::Respond(id, decision) => {
                         respond(&sender, &mut approvals, &mut session_grants, project_approvals, id, decision).await
                     }
@@ -1981,6 +2097,59 @@ mod tests {
                 assert!(observed.config_changes.is_empty());
             }
         }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn selects_an_advertised_acp_model_before_the_next_turn()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (mut harness, _, observed) = fake(FakeScript::default()).await?;
+        timeout(Duration::from_secs(5), harness.open_session(None))
+            .await
+            .map_err(|_| "opening the ACP session timed out")??;
+        let models = harness.models().ok_or("missing models")?;
+        assert_eq!(models.current.as_deref(), Some("a"));
+        assert_eq!(
+            models
+                .options
+                .iter()
+                .map(|model| model.id.as_str())
+                .collect::<Vec<_>>(),
+            ["a", "b"]
+        );
+
+        timeout(
+            Duration::from_secs(5),
+            harness.prompt(PromptInput {
+                text: "Use the other model.".into(),
+                model: Some("b".into()),
+                ..PromptInput::default()
+            }),
+        )
+        .await
+        .map_err(|_| "switching the ACP model timed out")??;
+        timeout(
+            Duration::from_secs(5),
+            complete_attachment_turn(&mut harness),
+        )
+        .await
+        .map_err(|_| "finishing the ACP model turn timed out")??;
+
+        let observed = observed.lock().map_err(|_| "poisoned observations")?;
+        let [request] = observed.config_changes.as_slice() else {
+            return Err("expected one model config request".into());
+        };
+        assert_eq!(request["configId"], "model");
+        assert_eq!(request["value"], "b");
+        drop(observed);
+        assert_eq!(
+            harness
+                .models()
+                .ok_or("missing model after selection")?
+                .current
+                .as_deref(),
+            Some("b")
+        );
         Ok(())
     }
 

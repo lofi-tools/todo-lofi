@@ -66,6 +66,8 @@ pub enum HarnessError {
     ApprovalOptionUnavailable,
     #[error("This session did not offer the selected mode.")]
     ModeUnavailable,
+    #[error("This session did not offer the selected model.")]
+    ModelUnavailable,
     #[error("the harness has no scripted turn left")]
     ScriptExhausted,
     #[error("the harness event channel closed")]
@@ -403,6 +405,21 @@ pub struct AgentMode {
     pub description: Option<String>,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentModels {
+    pub current: Option<String>,
+    pub options: Vec<AgentModel>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentModel {
+    pub id: String,
+    pub name: String,
+    pub description: Option<String>,
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum AdapterTier {
     #[default]
@@ -433,6 +450,7 @@ pub struct PromptInput {
     pub attachments: Vec<PromptAttachment>,
     pub codex: CodexTurnOptions,
     pub mode: Option<String>,
+    pub model: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -700,6 +718,9 @@ pub enum HarnessEvent {
         text: String,
     },
     ModeChanged {
+        stream_permit: Option<Arc<tokio::sync::OwnedSemaphorePermit>>,
+    },
+    ModelsChanged {
         stream_permit: Option<Arc<tokio::sync::OwnedSemaphorePermit>>,
     },
     TurnError {
@@ -1344,6 +1365,10 @@ pub trait AgentHarness: Send {
     }
 
     fn modes(&self) -> Option<AgentModes> {
+        None
+    }
+
+    fn models(&self) -> Option<AgentModels> {
         None
     }
 
