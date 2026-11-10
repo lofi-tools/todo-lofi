@@ -65,9 +65,11 @@ and login diagnostics are now implemented.
       connect recording and replay once the transport exists. The storage
       primitive compiles; its invalid-name and ordering fixture passed in shard
       8/8, while its round-trip fixture has not yet been selected.
-    - [ ] Replay capture records in order through a streaming consumer; the
-      primitive compiles, but its fixture was not selected in shard 6/8. Connect
-      it to the terminal parser and safely restore recorded worktree effects.
+    - [ ] Replay capture records in order through a streaming consumer. An
+      offline synthetic capture replays split output and a resize through the
+      shell's VT parser (Shepherd shard 8/8 passed); the consumer's own fixture
+      was not selected in shard 6/8. Connect replay to versioned Freebuff screen
+      fixtures and safely restore recorded worktree effects.
     - [ ] Version the capture format and reject incompatible headers. The
       implementation compiles; shard 3/8 passed 21 tests but did not select
       the new header fixture or the capture round-trip fixture.

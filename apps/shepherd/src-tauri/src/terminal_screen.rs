@@ -729,6 +729,67 @@ fn named_color(color: NamedColor, appearance: TerminalAppearance) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use agent_harness::freebuff_capture::{
+        CaptureEvent, CaptureRecord, CaptureWriter, visit_capture,
+    };
+
+    #[test]
+    fn freebuff_capture_replays_split_terminal_output_and_resize()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let mut writer = CaptureWriter::create(directory.path(), "terminal-replay")?;
+        for (elapsed_micros, event) in [
+            (
+                0,
+                CaptureEvent::Output {
+                    bytes: b"hello\x1b[".to_vec(),
+                },
+            ),
+            (
+                1,
+                CaptureEvent::Output {
+                    bytes: b"2K\rworld".to_vec(),
+                },
+            ),
+            (
+                2,
+                CaptureEvent::Resize {
+                    columns: 12,
+                    rows: 3,
+                },
+            ),
+            (
+                3,
+                CaptureEvent::Output {
+                    bytes: b"!".to_vec(),
+                },
+            ),
+        ] {
+            writer.append(&CaptureRecord {
+                elapsed_micros,
+                event,
+            })?;
+        }
+
+        let path = directory
+            .path()
+            .join(".cache/shepherd-live/freebuff/terminal-replay.jsonl");
+        let mut screen = Screen::new(10, 2);
+        visit_capture(&path, |record| {
+            match record.event {
+                CaptureEvent::Output { bytes } => screen.process(&bytes),
+                CaptureEvent::Resize { columns, rows } => {
+                    screen.resize(usize::from(columns), usize::from(rows));
+                }
+                _ => {}
+            }
+            Ok(())
+        })?;
+        let frame = screen.frame();
+        assert_eq!((frame.columns, frame.rows), (12, 3));
+        assert_eq!(row(&frame, 0).trim_end(), "world!");
+        Ok(())
+    }
 
     fn row(frame: &TerminalFrame, row: usize) -> String {
         let start = row * frame.columns;
