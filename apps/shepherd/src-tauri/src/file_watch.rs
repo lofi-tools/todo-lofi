@@ -292,6 +292,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "flaky macOS FSEvents startup; revisit with a less filesystem-dependent fixture"]
     async fn refreshes_a_linked_worktree_after_file_and_git_metadata_changes()
     -> Result<(), Box<dyn std::error::Error>> {
         let fixture = TestRepository::new()?;

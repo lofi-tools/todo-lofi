@@ -70,6 +70,10 @@ and login diagnostics are now implemented.
   configurable test selection, run history, and agent instructions; agree on
   the shared and repository-specific boundaries before implementing extraction.
 
+- [ ] Rework the ignored linked-worktree file-watcher test to be less dependent
+  on filesystem state. It can block during macOS FSEvents registration before
+  its refresh timeouts start; restore it to the default suite once reliable.
+
 - [x] Import the primary folders of local Codex projects from the ChatGPT desktop
   app. Offer batch import in the sidebar when the Projects list is empty. A
   protocol fixture covers pagination, and the browser smoke covers batch import.
