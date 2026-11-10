@@ -133,7 +133,7 @@ struct Session {
 }
 
 pub struct TerminalRecording {
-    capture: CaptureSession,
+    capture: Arc<CaptureSession>,
     screen: Mutex<Screen>,
     errors: mpsc::UnboundedSender<String>,
     failure_signal: Mutex<Option<std::sync::mpsc::Sender<()>>>,
@@ -146,6 +146,16 @@ impl TerminalRecording {
     #[allow(dead_code)]
     pub fn new(
         capture: CaptureSession,
+        columns: u16,
+        rows: u16,
+        errors: mpsc::UnboundedSender<String>,
+    ) -> Result<Self, TerminalError> {
+        Self::from_shared(Arc::new(capture), columns, rows, errors)
+    }
+
+    #[allow(dead_code)]
+    pub fn from_shared(
+        capture: Arc<CaptureSession>,
         columns: u16,
         rows: u16,
         errors: mpsc::UnboundedSender<String>,

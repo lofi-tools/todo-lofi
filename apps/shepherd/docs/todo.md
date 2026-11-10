@@ -103,8 +103,9 @@ and login diagnostics are now implemented.
       and file modes without following symlinks, invalidating unsupported or
       oversized captures. Its fixtures were outside shepherd-core shard 7/8.
       Git status now supplies tracked, untracked and rename paths; staged or
-      ignored files are rejected rather than omitted. Discovery fixtures were
-      outside shepherd-core shard 6/8. Effect collection now compares HEAD,
+      ignored files are rejected rather than omitted. The unstaged/untracked
+      discovery fixture passed in shepherd-core shard 1/8; the staged/ignored
+      fixture remains unverified. Effect collection now compares HEAD,
       branch, index entries and index flags against a pre-run identity; its
       branch-change fixture was outside shard 5/8. Detect or reject other Git
       metadata changes and handle other effect types. Replay planning validates
@@ -115,6 +116,10 @@ and login diagnostics are now implemented.
       missing, duplicated or late identities; its updated fixture passed in
       shard 8/8. The application fixture was outside that shard. Report partial
       application failures and connect capture and replay before live use.
+      A capture lifecycle now records the clean base and, after the caller
+      confirms terminal drain, collects effects before finalizing. Its combined
+      capture/replay fixture was outside shepherd-core shard 1/8; connect the
+      shared session to a runner that proves process termination and drain.
     - [ ] Replay capture records in order through a streaming consumer. An
       offline synthetic capture replays split output and a resize through the
       shell's VT parser (Shepherd shard 8/8 passed); the consumer's own fixture

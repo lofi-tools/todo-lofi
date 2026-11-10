@@ -739,6 +739,53 @@ impl crate::Core {
     }
 }
 
+pub struct FreebuffLiveCapture {
+    worktree: PathBuf,
+    identity: crate::git::CaptureGitIdentity,
+    session: Arc<agent_harness::freebuff_capture::CaptureSession>,
+    complete: bool,
+}
+
+impl FreebuffLiveCapture {
+    pub fn begin(
+        workspace: &std::path::Path,
+        worktree: PathBuf,
+        scenario: &str,
+    ) -> Result<Self, CoreError> {
+        let writer = agent_harness::freebuff_capture::CaptureWriter::create(workspace, scenario)?;
+        let session = Arc::new(agent_harness::freebuff_capture::CaptureSession::new(writer));
+        let identity = begin_worktree_capture(&worktree, &session)?;
+        Ok(Self {
+            worktree,
+            identity,
+            session,
+            complete: false,
+        })
+    }
+
+    pub fn session(&self) -> Arc<agent_harness::freebuff_capture::CaptureSession> {
+        self.session.clone()
+    }
+
+    /// The caller must first stop the process and confirm that the PTY reader drained.
+    pub fn finish_after_drain(mut self) -> Result<(), CoreError> {
+        capture_git_worktree_effects(&self.worktree, &self.identity, &self.session)?;
+        self.session.finish()?;
+        self.complete = true;
+        Ok(())
+    }
+}
+
+impl Drop for FreebuffLiveCapture {
+    fn drop(&mut self) {
+        if !self.complete
+            && let Err(error) = self.session.fail()
+        {
+            tracing::error!(%error, "could not invalidate incomplete Freebuff capture");
+        }
+    }
+}
+
 #[allow(dead_code)]
 fn begin_worktree_capture(
     root: &std::path::Path,
@@ -1343,6 +1390,43 @@ mod tests {
     use crate::Project;
     use crate::store::TursoStore;
     use crate::test_support::{TestDatabase, TestDirectory};
+
+    #[cfg(unix)]
+    #[test]
+    fn capture_lifecycle_records_and_replays_worktree_effects()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use crate::test_support::TestRepository;
+        use agent_harness::freebuff_capture::{CaptureEvent, read_complete_capture};
+        let repository = TestRepository::new()?;
+        let cache = TestDirectory::new()?;
+        let abandoned =
+            FreebuffLiveCapture::begin(cache.path(), repository.path().to_path_buf(), "abandoned")?;
+        drop(abandoned);
+        assert!(
+            read_complete_capture(&cache.join(".cache/shepherd-live/freebuff/abandoned.jsonl"))
+                .is_err()
+        );
+        let capture =
+            FreebuffLiveCapture::begin(cache.path(), repository.path().to_path_buf(), "lifecycle")?;
+        capture.session().record_and_apply(
+            CaptureEvent::Output {
+                bytes: b"fixture reply".to_vec(),
+            },
+            || Ok(((), Vec::new())),
+        )?;
+        repository.write_file("README.md", "captured\n")?;
+        capture.finish_after_drain()?;
+        let path = cache.join(".cache/shepherd-live/freebuff/lifecycle.jsonl");
+        let records = read_complete_capture(&path)?;
+        assert!(records.iter().any(|record| matches!(&record.event, CaptureEvent::WorktreeFile { path, contents, .. } if path == std::path::Path::new("README.md") && contents == b"captured\n")));
+        repository.write_file("README.md", "initial\n")?;
+        replay_worktree_effects(repository.path(), &path)?;
+        assert_eq!(
+            std::fs::read(repository.path().join("README.md"))?,
+            b"captured\n"
+        );
+        Ok(())
+    }
 
     #[cfg(unix)]
     #[test]
