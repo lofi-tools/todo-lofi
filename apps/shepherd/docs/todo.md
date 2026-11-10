@@ -96,6 +96,11 @@ and login diagnostics are now implemented.
       fixture passed in agent-harness shard 5/8. The terminal host and
       replay callers still need to use this API; partial captures remain
       available for diagnostics.
+      A worktree-effect collector records specified regular files, deletion,
+      and file modes without following symlinks, invalidating unsupported or
+      oversized captures. Its fixtures were outside shepherd-core shard 7/8.
+      Discover every relevant changed path, handle or explicitly reject other
+      effect types, and implement confined replay before live use.
     - [ ] Replay capture records in order through a streaming consumer. An
       offline synthetic capture replays split output and a resize through the
       shell's VT parser (Shepherd shard 8/8 passed); the consumer's own fixture

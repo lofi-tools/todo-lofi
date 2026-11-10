@@ -46,6 +46,14 @@ pub enum CaptureEvent {
         path: PathBuf,
         contents: Option<Vec<u8>>,
     },
+    WorktreeFile {
+        path: PathBuf,
+        contents: Vec<u8>,
+        mode: Option<u32>,
+    },
+    WorktreeDeleted {
+        path: PathBuf,
+    },
     Complete,
 }
 
@@ -421,7 +429,13 @@ pub fn visit_capture(
 }
 
 fn validate_record(record: &CaptureRecord) -> HarnessResult<()> {
-    if let CaptureEvent::WorktreeEffect { path, .. } = &record.event
+    let path = match &record.event {
+        CaptureEvent::WorktreeEffect { path, .. }
+        | CaptureEvent::WorktreeFile { path, .. }
+        | CaptureEvent::WorktreeDeleted { path } => Some(path),
+        _ => None,
+    };
+    if let Some(path) = path
         && (path.as_os_str().is_empty()
             || path
                 .components()

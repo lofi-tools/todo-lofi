@@ -739,6 +739,127 @@ impl crate::Core {
     }
 }
 
+#[allow(dead_code)]
+pub(crate) fn capture_worktree_effects(
+    root: &std::path::Path,
+    paths: &[PathBuf],
+    capture: &agent_harness::freebuff_capture::CaptureSession,
+) -> Result<(), CoreError> {
+    let result = capture_worktree_effects_inner(root, paths, capture);
+    if let Err(error) = result {
+        if let Err(failure) = capture.fail() {
+            return Err(HarnessError::Protocol(format!(
+                "{error}; could not invalidate capture: {failure}"
+            ))
+            .into());
+        }
+        return Err(error);
+    }
+    Ok(())
+}
+
+fn capture_worktree_effects_inner(
+    root: &std::path::Path,
+    paths: &[PathBuf],
+    capture: &agent_harness::freebuff_capture::CaptureSession,
+) -> Result<(), CoreError> {
+    use agent_harness::freebuff_capture::CaptureEvent;
+    use std::io::Read;
+    use std::path::Component;
+    const MAX_FILE_BYTES: u64 = 16 * 1024 * 1024;
+    const MAX_TOTAL_BYTES: usize = 64 * 1024 * 1024;
+
+    let root_metadata = std::fs::symlink_metadata(root).map_err(|error| {
+        HarnessError::Protocol(format!("could not inspect capture worktree: {error}"))
+    })?;
+    if !root_metadata.is_dir() {
+        return Err(HarnessError::Protocol("capture worktree is not a directory".into()).into());
+    }
+    let mut total_bytes = 0usize;
+    let mut seen = BTreeSet::new();
+    for path in paths {
+        if path.as_os_str().is_empty()
+            || path.to_str().is_none()
+            || path
+                .components()
+                .any(|component| !matches!(component, Component::Normal(_)))
+            || !seen.insert(path.clone())
+        {
+            return Err(HarnessError::Protocol(
+                "invalid or duplicate captured worktree path".into(),
+            )
+            .into());
+        }
+        let file = match crate::files::open_file(root, path) {
+            Ok(file) => Some(file),
+            Err(crate::files::FileError::Io(error))
+                if error.kind() == std::io::ErrorKind::NotFound =>
+            {
+                None
+            }
+            Err(error) => {
+                return Err(HarnessError::Protocol(format!(
+                    "could not safely read captured worktree file {}: {error}",
+                    path.display()
+                ))
+                .into());
+            }
+        };
+        let event = if let Some(file) = file {
+            let metadata = file.metadata().map_err(|error| {
+                HarnessError::Protocol(format!(
+                    "could not inspect captured worktree file {}: {error}",
+                    path.display()
+                ))
+            })?;
+            if !metadata.is_file() || metadata.len() > MAX_FILE_BYTES {
+                return Err(HarnessError::Protocol(format!(
+                    "unsupported or oversized captured worktree file {}",
+                    path.display()
+                ))
+                .into());
+            }
+            #[cfg(unix)]
+            let mode = {
+                use std::os::unix::fs::PermissionsExt;
+                Some(metadata.permissions().mode() & 0o777)
+            };
+            #[cfg(not(unix))]
+            let mode = None;
+            let mut contents = Vec::new();
+            file.take(MAX_FILE_BYTES + 1)
+                .read_to_end(&mut contents)
+                .map_err(|error| {
+                    HarnessError::Protocol(format!(
+                        "could not read captured worktree file {}: {error}",
+                        path.display()
+                    ))
+                })?;
+            if contents.len() as u64 > MAX_FILE_BYTES {
+                return Err(HarnessError::Protocol(
+                    "captured worktree file grew beyond the limit".into(),
+                )
+                .into());
+            }
+            total_bytes = total_bytes
+                .checked_add(contents.len())
+                .filter(|total| *total <= MAX_TOTAL_BYTES)
+                .ok_or_else(|| {
+                    HarnessError::Protocol("captured worktree effects exceed the size limit".into())
+                })?;
+            CaptureEvent::WorktreeFile {
+                path: path.clone(),
+                contents,
+                mode,
+            }
+        } else {
+            CaptureEvent::WorktreeDeleted { path: path.clone() }
+        };
+        capture.record_and_apply(event, || Ok(((), Vec::new())))?;
+    }
+    Ok(())
+}
+
 pub(crate) struct TerminalSubmitGate {
     core: Arc<tokio::sync::Mutex<crate::Core>>,
     failed: tokio::sync::Mutex<bool>,
@@ -812,6 +933,47 @@ mod tests {
     use crate::Project;
     use crate::store::TursoStore;
     use crate::test_support::{TestDatabase, TestDirectory};
+
+    #[test]
+    fn worktree_effect_capture_records_files_and_deletions()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use agent_harness::freebuff_capture::{
+            CaptureEvent, CaptureSession, CaptureWriter, read_complete_capture,
+        };
+        let directory = TestDirectory::new()?;
+        std::fs::write(directory.join("created.txt"), b"created")?;
+        let capture = CaptureSession::new(CaptureWriter::create(directory.path(), "effects")?);
+        capture_worktree_effects(
+            directory.path(),
+            &[PathBuf::from("created.txt"), PathBuf::from("deleted.txt")],
+            &capture,
+        )?;
+        capture.finish()?;
+        let records =
+            read_complete_capture(&directory.join(".cache/shepherd-live/freebuff/effects.jsonl"))?;
+        assert!(records.iter().any(|record| matches!(&record.event, CaptureEvent::WorktreeFile { path, contents, .. } if path == std::path::Path::new("created.txt") && contents == b"created")));
+        assert!(records.iter().any(|record| matches!(&record.event, CaptureEvent::WorktreeDeleted { path } if path == std::path::Path::new("deleted.txt"))));
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unsafe_worktree_effect_invalidates_capture() -> Result<(), Box<dyn std::error::Error>> {
+        use agent_harness::freebuff_capture::{CaptureSession, CaptureWriter};
+        let directory = TestDirectory::new()?;
+        std::os::unix::fs::symlink("/", directory.join("outside"))?;
+        let capture = CaptureSession::new(CaptureWriter::create(directory.path(), "unsafe")?);
+        assert!(
+            capture_worktree_effects(
+                directory.path(),
+                &[PathBuf::from("outside/etc/passwd")],
+                &capture
+            )
+            .is_err()
+        );
+        assert!(capture.finish().is_err());
+        Ok(())
+    }
 
     #[tokio::test]
     async fn terminal_turn_admission_records_baseline_before_changes()
