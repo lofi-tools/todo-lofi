@@ -139,8 +139,10 @@ and login diagnostics are now implemented.
       runner verifies its saved frames before writing the completion marker, so
       a mismatch leaves an incomplete capture. Its new
       fixture and the updated fake runner remain unverified; the user requested
-      no builds. Make verification mandatory for every replay consumer and
-      connect replay to versioned Freebuff screen fixtures and worktree effects.
+      no builds. Verified screen replay now exposes each reconstructed frame in
+      order to a visitor, which must defer external effects until replay
+      succeeds. Connect it to versioned Freebuff screen fixtures, the screen
+      classifier and worktree effects; make verification mandatory for replay.
     - [ ] Version the capture format and reject incompatible headers. The
       header rejection fixture passed in shard 4/8; the capture round-trip
       fixture has not yet been selected.

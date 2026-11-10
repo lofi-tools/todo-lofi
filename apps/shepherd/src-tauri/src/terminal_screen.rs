@@ -728,15 +728,30 @@ fn named_color(color: NamedColor, appearance: TerminalAppearance) -> u32 {
 
 #[allow(dead_code)]
 pub(crate) fn verify_recorded_screens(path: &std::path::Path) -> agent_harness::HarnessResult<()> {
-    verify_screens(path, true)
+    visit_verified_screens(path, |_| Ok(()))
+}
+
+/// The visitor must defer external effects until replay succeeds.
+#[allow(dead_code)]
+pub(crate) fn visit_verified_screens(
+    path: &std::path::Path,
+    visit: impl FnMut(TerminalFrame) -> agent_harness::HarnessResult<()>,
+) -> agent_harness::HarnessResult<()> {
+    verify_screens(path, true, visit)
 }
 
 #[allow(dead_code)]
-pub(crate) fn verify_unfinished_screens(path: &std::path::Path) -> agent_harness::HarnessResult<()> {
-    verify_screens(path, false)
+pub(crate) fn verify_unfinished_screens(
+    path: &std::path::Path,
+) -> agent_harness::HarnessResult<()> {
+    verify_screens(path, false, |_| Ok(()))
 }
 
-fn verify_screens(path: &std::path::Path, complete: bool) -> agent_harness::HarnessResult<()> {
+fn verify_screens(
+    path: &std::path::Path,
+    complete: bool,
+    mut visit: impl FnMut(TerminalFrame) -> agent_harness::HarnessResult<()>,
+) -> agent_harness::HarnessResult<()> {
     use agent_harness::HarnessError;
     use agent_harness::freebuff_capture::{CaptureEvent, visit_capture, visit_complete_capture};
 
@@ -779,15 +794,13 @@ fn verify_screens(path: &std::path::Path, complete: bool) -> agent_harness::Harn
                         "unexpected terminal screen frame".into(),
                     ));
                 }
-                let expected = serde_json::to_value(
-                    screen
-                        .as_ref()
-                        .ok_or_else(|| {
-                            HarnessError::Protocol("terminal screen has no initial size".into())
-                        })?
-                        .frame(),
-                )
-                .map_err(|error| {
+                let frame = screen
+                    .as_ref()
+                    .ok_or_else(|| {
+                        HarnessError::Protocol("terminal screen has no initial size".into())
+                    })?
+                    .frame();
+                let expected = serde_json::to_value(&frame).map_err(|error| {
                     HarnessError::Protocol(format!(
                         "could not encode replayed terminal screen: {error}"
                     ))
@@ -798,6 +811,7 @@ fn verify_screens(path: &std::path::Path, complete: bool) -> agent_harness::Harn
                     ));
                 }
                 awaiting_screen = false;
+                visit(frame)?;
             }
             CaptureEvent::Complete if !complete => {
                 return Err(HarnessError::Protocol(
@@ -871,6 +885,16 @@ mod tests {
             })?;
             assert_eq!(verify_recorded_screens(&path).is_err(), tampered);
             assert!(verify_unfinished_screens(&path).is_err());
+            if !tampered {
+                let mut replayed = Vec::new();
+                visit_verified_screens(&path, |frame| {
+                    replayed.push(row(&frame, 0));
+                    Ok(())
+                })?;
+                assert_eq!(replayed.len(), 2);
+                assert_eq!(replayed[0].trim_end(), "hello");
+                assert_eq!(replayed[1].trim_end(), "world");
+            }
         }
         Ok(())
     }
