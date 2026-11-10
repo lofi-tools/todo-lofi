@@ -106,7 +106,7 @@ def main(argv=None):
     excluded = [item for name in sorted(selection.packages) for item in ("--exclude", name)]
     if selection.packages != frozenset(roots.values()):
         execute(["cargo", "nextest", "run", "--workspace", *excluded, "--partition", f"hash:{index}/{count}", "--no-tests=pass"], dry_run=args.dry_run)
-    ui_command = ["pnpm", "exec", "playwright", "test"]
+    ui_command = ["pnpm", "exec", "playwright", "test", "--pass-with-no-tests"]
     if not selection.ui and not selection.packages.intersection({"shepherd", "shepherd-core", "agent-harness"}):
         ui_command.extend(["--shard", f"{index}/{count}"])
     execute(ui_command, UI, args.dry_run)

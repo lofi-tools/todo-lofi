@@ -2,8 +2,9 @@ import { defineConfig, devices } from '@playwright/test'
 
 export default defineConfig({
   testDir: './tests',
-  // The suite shares one Vite server and drives one window at a time.
-  fullyParallel: false,
+  // Shard individual tests while keeping the shared server and window serial.
+  fullyParallel: true,
+  workers: 1,
   reporter: process.env.CI ? 'github' : 'list',
   use: {
     baseURL: 'http://localhost:1421',
