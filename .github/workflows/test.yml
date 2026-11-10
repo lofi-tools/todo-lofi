@@ -68,3 +68,9 @@ jobs:
       # failures are visible without a separate `nix log` step.
       - name: Test
         run: nix build --impure --print-build-logs .#checks.$(nix eval --impure --raw --expr builtins.currentSystem).taskstream-desktop-tests
+
+      - name: Install JavaScript dependencies
+        run: nix develop --impure -c pnpm install --frozen-lockfile
+
+      - name: Test the full default suite
+        run: nix develop --impure -c python3 scripts/test-shards.py --all
