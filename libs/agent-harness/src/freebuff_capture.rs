@@ -202,6 +202,14 @@ impl CaptureSession {
         outcome
     }
 
+    pub fn fail(&self) -> HarnessResult<()> {
+        let mut state = self.state.lock().map_err(|_| {
+            HarnessError::Protocol("Freebuff capture session lock is poisoned".into())
+        })?;
+        state.failed = true;
+        Ok(())
+    }
+
     fn append_event(&self, writer: &mut CaptureWriter, event: CaptureEvent) -> HarnessResult<()> {
         let elapsed_micros = u64::try_from(self.started.elapsed().as_micros()).map_err(|_| {
             HarnessError::Protocol("Freebuff capture duration exceeds its format limit".into())

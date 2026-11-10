@@ -74,9 +74,12 @@ and login diagnostics are now implemented.
       recording path for input, output, resize and screen frames; its fake
       interactive PTY fixture compiled but was not selected in Shepherd shard
       1/8. Connect this path to the Freebuff terminal host, handle its error
-      channel and stop the process on capture failure. Resolve potential PTY
-      backpressure deadlocks while recording holds the operation lock before
-      enabling this path. An event recorded before
+      channel and stop the process on capture failure. Input writes no longer
+      hold the recording lock while blocked, but this leaves a race where an
+      output capture failure can occur after an input attempt was recorded and
+      before its write completes. Close that race before enabling live capture.
+      The backpressure fixture compiled but was not selected in shard 1/8.
+      An event recorded before
       a failed operation is an attempt, so failed sessions must never be treated
       as complete replay.
     - [ ] Replay capture records in order through a streaming consumer. An

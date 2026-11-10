@@ -1012,19 +1012,22 @@ impl PtyTerminals {
                             CaptureEvent::Input {
                                 bytes: request.bytes.clone(),
                             },
-                            || {
-                                writer
-                                    .write_all(&request.bytes)
-                                    .and_then(|()| writer.flush())
-                                    .map_err(|error| {
-                                        HarnessError::Protocol(format!(
-                                            "terminal write failed: {error}"
-                                        ))
-                                    })?;
-                                Ok(((), Vec::new()))
-                            },
+                            || Ok(((), Vec::new())),
                         )
+                        .and_then(|()| {
+                            writer
+                                .write_all(&request.bytes)
+                                .and_then(|()| writer.flush())
+                                .map_err(|error| {
+                                    HarnessError::Protocol(format!(
+                                        "terminal write failed: {error}"
+                                    ))
+                                })
+                        })
                         .map_err(|error| {
+                            if let Err(failure) = recording.capture.fail() {
+                                recording.report_error(&failure);
+                            }
                             recording.report_error(&error);
                             TerminalError::Backend(error.to_string())
                         })
@@ -1206,6 +1209,56 @@ mod tests {
     use std::time::Instant;
 
     use super::*;
+
+    #[tokio::test]
+    async fn recorded_terminal_drains_output_while_input_waits_for_the_child()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use agent_harness::freebuff_capture::{CaptureSession, CaptureWriter};
+        let directory = tempfile::tempdir()?;
+        let capture = CaptureSession::new(CaptureWriter::create(directory.path(), "backpressure")?);
+        let (error_sender, mut errors) = mpsc::unbounded_channel();
+        let recording = Arc::new(TerminalRecording::new(capture, 20, 3, error_sender)?);
+        let mut engine = PtyTerminals::new();
+        let (sender, mut receiver) = mpsc::channel(32);
+        let id = engine.spawn_recorded(TerminalSpec {
+            id: TerminalId::new("backpressure"), columns: 20, rows: 3,
+            cwd: directory.path().to_path_buf(), command: "/bin/sh".into(),
+            args: vec!["-c".into(), "stty raw -echo; printf READY; head -c 131072 /dev/zero; head -c 65536 >/dev/null".into()],
+            environment: BTreeMap::new(),
+        }, sender, recording)?;
+        let mut first = Vec::new();
+        while first.len() < 5 {
+            let event = tokio::time::timeout(Duration::from_secs(10), receiver.recv())
+                .await?
+                .ok_or("terminal exited before readiness")?;
+            let TerminalEvent::Output(bytes) = event else {
+                return Err("terminal exited before readiness".into());
+            };
+            first.extend(bytes);
+        }
+        assert!(first.starts_with(b"READY"));
+        let write = engine.write(&id, vec![b'x'; MAX_WRITE_BYTES])?;
+        let reader = async {
+            let mut count = first.len();
+            while let Some(event) = receiver.recv().await {
+                match event {
+                    TerminalEvent::Output(bytes) => count += bytes.len(),
+                    TerminalEvent::Exited { exit_code, .. } => return (count, exit_code),
+                }
+            }
+            (count, None)
+        };
+        let (write_result, (count, exit_code)) =
+            tokio::time::timeout(Duration::from_secs(15), async {
+                tokio::join!(write, reader)
+            })
+            .await?;
+        write_result??;
+        assert_eq!(count, 131077);
+        assert_eq!(exit_code, Some(0));
+        assert!(errors.try_recv().is_err());
+        Ok(())
+    }
 
     #[tokio::test]
     async fn fake_cli_pty_stream_can_be_recorded_with_screen_states()
