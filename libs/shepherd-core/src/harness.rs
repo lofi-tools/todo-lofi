@@ -740,6 +740,37 @@ impl crate::Core {
 }
 
 #[allow(dead_code)]
+fn begin_worktree_capture(
+    root: &std::path::Path,
+    capture: &agent_harness::freebuff_capture::CaptureSession,
+) -> Result<crate::git::CaptureGitIdentity, CoreError> {
+    let result = (|| {
+        if !crate::git::GitService.status(root)?.is_empty() {
+            return Err(HarnessError::Protocol("capture worktree must start clean".into()).into());
+        }
+        reject_ignored_worktree_files(root)?;
+        let identity = crate::git::GitService.capture_git_identity(root)?;
+        let encoded = serde_json::to_value(&identity).map_err(|error| {
+            HarnessError::Protocol(format!("could not encode capture identity: {error}"))
+        })?;
+        capture.record_and_apply(
+            agent_harness::freebuff_capture::CaptureEvent::WorktreeBase { identity: encoded },
+            || Ok(((), Vec::new())),
+        )?;
+        Ok(identity)
+    })();
+    if result.is_err()
+        && let Err(error) = capture.fail()
+    {
+        return Err(HarnessError::Protocol(format!(
+            "could not invalidate failed capture: {error}"
+        ))
+        .into());
+    }
+    result
+}
+
+#[allow(dead_code)]
 pub(crate) fn capture_worktree_effects(
     root: &std::path::Path,
     paths: &[PathBuf],
@@ -995,18 +1026,45 @@ enum WorktreeReplayEffect {
 #[allow(dead_code)]
 fn plan_worktree_replay(
     capture_path: &std::path::Path,
-) -> Result<Vec<WorktreeReplayEffect>, CoreError> {
+) -> Result<(crate::git::CaptureGitIdentity, Vec<WorktreeReplayEffect>), CoreError> {
     use agent_harness::freebuff_capture::{CaptureEvent, visit_complete_capture};
     let mut effects = Vec::new();
     let mut paths = BTreeSet::new();
     let mut total_bytes = 0usize;
+    let mut identity = None;
+    let mut input_seen = false;
     visit_complete_capture(capture_path, |record| {
         let effect = match record.event {
+            CaptureEvent::WorktreeBase { identity: value } => {
+                if identity.is_some() || input_seen || !effects.is_empty() {
+                    return Err(HarnessError::Protocol(
+                        "capture base identity is duplicated or late".into(),
+                    ));
+                }
+                identity = Some(serde_json::from_value(value).map_err(|error| {
+                    HarnessError::Protocol(format!("invalid capture base identity: {error}"))
+                })?);
+                None
+            }
+            CaptureEvent::Input { .. } => {
+                if identity.is_none() {
+                    return Err(HarnessError::Protocol(
+                        "capture input precedes its base identity".into(),
+                    ));
+                }
+                input_seen = true;
+                None
+            }
             CaptureEvent::WorktreeFile {
                 path,
                 contents,
                 mode,
             } => {
+                if identity.is_none() {
+                    return Err(HarnessError::Protocol(
+                        "worktree effect precedes its base identity".into(),
+                    ));
+                }
                 let mode = mode.filter(|mode| *mode <= 0o777).ok_or_else(|| {
                     HarnessError::Protocol("captured file has no supported mode".into())
                 })?;
@@ -1033,6 +1091,11 @@ fn plan_worktree_replay(
                 })
             }
             CaptureEvent::WorktreeDeleted { path } => {
+                if identity.is_none() {
+                    return Err(HarnessError::Protocol(
+                        "worktree effect precedes its base identity".into(),
+                    ));
+                }
                 if !paths.insert(path.clone()) {
                     return Err(HarnessError::Protocol(
                         "duplicate captured worktree path".into(),
@@ -1057,14 +1120,15 @@ fn plan_worktree_replay(
         }
         Ok(())
     })?;
-    Ok(effects)
+    let identity = identity
+        .ok_or_else(|| HarnessError::Protocol("capture has no worktree base identity".into()))?;
+    Ok((identity, effects))
 }
 
 #[cfg(unix)]
 #[allow(dead_code)]
 fn replay_worktree_effects(
     root: &std::path::Path,
-    expected: &crate::git::CaptureGitIdentity,
     capture_path: &std::path::Path,
 ) -> Result<(), CoreError> {
     use rustix::fs::{
@@ -1077,8 +1141,8 @@ fn replay_worktree_effects(
         path: root.display().to_string(),
         source,
     };
-    let effects = plan_worktree_replay(capture_path)?;
-    if crate::git::GitService.capture_git_identity(root)? != *expected
+    let (expected, effects) = plan_worktree_replay(capture_path)?;
+    if crate::git::GitService.capture_git_identity(root)? != expected
         || !crate::git::GitService.status(root)?.is_empty()
     {
         return Err(HarnessError::Protocol(
@@ -1288,8 +1352,8 @@ mod tests {
         use agent_harness::freebuff_capture::{CaptureEvent, CaptureSession, CaptureWriter};
         let repository = TestRepository::new()?;
         let cache = TestDirectory::new()?;
-        let identity = crate::git::GitService.capture_git_identity(repository.path())?;
         let capture = CaptureSession::new(CaptureWriter::create(cache.path(), "replay")?);
+        begin_worktree_capture(repository.path(), &capture)?;
         capture.record_and_apply(
             CaptureEvent::WorktreeFile {
                 path: "nested/new.txt".into(),
@@ -1306,13 +1370,31 @@ mod tests {
         )?;
         capture.finish()?;
         let path = cache.join(".cache/shepherd-live/freebuff/replay.jsonl");
-        replay_worktree_effects(repository.path(), &identity, &path)?;
+        let switched = std::process::Command::new("git")
+            .arg("-C")
+            .arg(repository.path())
+            .args(["switch", "-c", "wrong-base"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()?;
+        assert!(switched.success());
+        assert!(replay_worktree_effects(repository.path(), &path).is_err());
+        assert!(!repository.path().join("nested/new.txt").exists());
+        let restored = std::process::Command::new("git")
+            .arg("-C")
+            .arg(repository.path())
+            .args(["switch", "main"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()?;
+        assert!(restored.success());
+        replay_worktree_effects(repository.path(), &path)?;
         assert_eq!(
             std::fs::read(repository.path().join("nested/new.txt"))?,
             b"hello"
         );
         assert!(!repository.path().join("README.md").exists());
-        assert!(replay_worktree_effects(repository.path(), &identity, &path).is_err());
+        assert!(replay_worktree_effects(repository.path(), &path).is_err());
         Ok(())
     }
 
@@ -1320,8 +1402,10 @@ mod tests {
     fn replay_planning_requires_a_complete_capture_without_duplicate_paths()
     -> Result<(), Box<dyn std::error::Error>> {
         use agent_harness::freebuff_capture::{CaptureEvent, CaptureSession, CaptureWriter};
+        let repository = crate::test_support::TestRepository::new()?;
         let directory = TestDirectory::new()?;
         let capture = CaptureSession::new(CaptureWriter::create(directory.path(), "plan")?);
+        begin_worktree_capture(repository.path(), &capture)?;
         let path = directory.join(".cache/shepherd-live/freebuff/plan.jsonl");
         capture.record_and_apply(
             CaptureEvent::WorktreeFile {
@@ -1341,6 +1425,7 @@ mod tests {
         capture.finish()?;
         assert!(plan_worktree_replay(&path).is_err());
         let valid = CaptureSession::new(CaptureWriter::create(directory.path(), "valid")?);
+        begin_worktree_capture(repository.path(), &valid)?;
         valid.record_and_apply(
             CaptureEvent::WorktreeFile {
                 path: "file".into(),
@@ -1350,7 +1435,7 @@ mod tests {
             || Ok(((), Vec::new())),
         )?;
         valid.finish()?;
-        let effects =
+        let (_, effects) =
             plan_worktree_replay(&directory.join(".cache/shepherd-live/freebuff/valid.jsonl"))?;
         assert_eq!(effects.len(), 1);
         Ok(())

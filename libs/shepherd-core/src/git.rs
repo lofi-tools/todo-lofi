@@ -1069,7 +1069,7 @@ pub struct TurnBaseline {
     untracked: Vec<[u8; 32]>,
 }
 
-#[derive(PartialEq, Eq)]
+#[derive(PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct CaptureGitIdentity {
     head: String,
     branch: String,

@@ -42,6 +42,9 @@ pub enum CaptureEvent {
         text: String,
         complete: bool,
     },
+    WorktreeBase {
+        identity: Value,
+    },
     WorktreeEffect {
         path: PathBuf,
         contents: Option<Vec<u8>>,
