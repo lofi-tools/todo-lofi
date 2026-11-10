@@ -276,18 +276,26 @@ mod tests {
 
     #[test]
     fn test_add_task() {
+        use dson::crdts::snapshot::ToValue;
+
         let id = Identifier::new(0, 0);
         let mut list = TodoList::new(id);
-        let _ = list.add_task("Test task".to_string());
-        let _ = list.add_task("Test task".to_string());
+        let first = list.add_task("First task".to_string());
+        let second = list.add_task("Second task".to_string());
+        let tasks = &list.store.store.get("tasks").expect("tasks map").map;
+        assert_eq!(tasks.len(), 2);
+        assert_ne!(first.id, second.id);
 
-        list.list_tasks();
-
-        // assert_eq!(task., 0);
-
-        // let task = list.get_task(task_id).expect("Task should exist");
-        // assert_eq!(task.title, "Test task");
-        // assert!(!task.done);
+        for task in [first, second] {
+            let stored = tasks.get(&String::from(task.id)).expect("stored task");
+            let title = &stored.map.get("title").expect("title").reg;
+            let done = &stored.map.get("done").expect("done").reg;
+            assert_eq!(
+                title.value().expect("title value"),
+                &MvRegValue::String(task.title)
+            );
+            assert_eq!(done.value().expect("done value"), &MvRegValue::Bool(false));
+        }
     }
 
     // #[test]
