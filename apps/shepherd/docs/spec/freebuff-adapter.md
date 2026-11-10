@@ -45,8 +45,10 @@ Never infer approval or submit an answer from an ambiguous screen.
 
 The current harness approval contract supports decision choices, not an
 open-ended answer, and no separate question control was found in the shell.
-The presentation and answer path for Freebuff questions are awaiting the
-user's choice; do not represent free-text questions as approval decisions.
+Add a question card with a text-answer control for Freebuff's open-ended
+questions. Relay the answer to the same terminal session and persist the
+question and answer in the transcript. Do not represent free-text questions
+as approval decisions; stop on an unrecognized question interaction.
 
 ## Executable, updates, and compatibility
 
