@@ -78,16 +78,18 @@ and login diagnostics are now implemented.
       this path and its error channel to the Freebuff terminal host. Recorded Unix PTYs now
       use nonblocking writes: each successful write and its recorded bytes are
       serialized with output capture, and readiness is polled outside the lock.
-      The backpressure fixture has not yet been selected; verify it before
-      enabling live capture. The capture
+      The backpressure fixture passed in Shepherd shard 3/8. The capture
       primitive's nonblocking fixture passed in agent-harness shard 5/8.
       Failed sessions must never be treated as complete replay.
     - [ ] Feed recorded screen frames to the integrated adapter. An opt-in
       bounded observer now publishes each frame after capture; the interactive
       fake-PTY fixture verified observer and capture order in Shepherd shard
-      4/8. The queue-full fixture was outside that shard. The shard's other
+      4/8; the queue-full fixture passed in shard 3/8. The earlier shard's other
       tests passed except `watcher_error_survives_later_file_events_and_is_reported_once`,
       which was interrupted after running for over a minute.
+      The terminal host can now prepare a recorded PTY; its host fixture was
+      outside shard 3/8. Connect the prepared terminal and error channel to
+      the integrated adapter and capture runner.
     - [ ] Finalize captures only after terminal output, responses, and worktree
       effects are drained; require a completion marker for successful replay.
       The capture API rejects missing or trailing records; its completion

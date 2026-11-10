@@ -379,15 +379,26 @@ impl TerminalHost {
         spec: TerminalSpec,
         scrollback: usize,
     ) -> Result<PreparedTerminal, BridgeError> {
+        self.prepare_recording(spec, scrollback, None).await
+    }
+
+    async fn prepare_recording(
+        &self,
+        spec: TerminalSpec,
+        scrollback: usize,
+        recording: Option<Arc<crate::pty_terminal::TerminalRecording>>,
+    ) -> Result<PreparedTerminal, BridgeError> {
         let (columns, rows) = (spec.columns, spec.rows);
         let (events, output) = mpsc::channel(32);
         let mut screens = self.screens.lock().await;
-        let id = self
-            .engine
-            .lock()
-            .await
-            .spawn(spec, events)
-            .map_err(|error| BridgeError::new("terminal", error.to_string()))?;
+        let id = {
+            let mut engine = self.engine.lock().await;
+            match recording {
+                Some(recording) => engine.spawn_recorded(spec, events, recording),
+                None => engine.spawn(spec, events),
+            }
+            .map_err(|error| BridgeError::new("terminal", error.to_string()))?
+        };
         let process = self
             .engine
             .lock()
@@ -5014,6 +5025,56 @@ mod tests {
             .await
             .expect_err("a mismatched approval must fail");
         assert!(error.to_string().contains("approval"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn terminal_host_prepares_a_recorded_pty_with_observable_screen()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use agent_harness::freebuff_capture::{CaptureSession, CaptureWriter};
+        let directory = TestDirectory::new()?;
+        let session =
+            CaptureSession::new(CaptureWriter::create(directory.path(), "host-fixture")?);
+        let (error_sender, mut errors) = mpsc::unbounded_channel();
+        let (screen_sender, mut screens) = mpsc::channel(16);
+        let recording = Arc::new(
+            crate::pty_terminal::TerminalRecording::new(session, 80, 24, error_sender)?
+                .with_screen_observer(screen_sender),
+        );
+        let host = TerminalHost::default();
+        let mut terminal = host
+            .prepare_recording(
+                TerminalSpec {
+                    id: TerminalId::new("recorded-host"),
+                    columns: 80,
+                    rows: 24,
+                    cwd: directory.path().to_path_buf(),
+                    command: "/bin/sh".into(),
+                    args: vec!["-c".into(), "printf host-ready".into()],
+                    environment: BTreeMap::new(),
+                },
+                100,
+                Some(recording),
+            )
+            .await?;
+        let frame = tokio::time::timeout(Duration::from_secs(5), screens.recv())
+            .await?
+            .ok_or("missing observed frame")?;
+        assert_eq!(
+            frame.get("columns").and_then(|value| value.as_u64()),
+            Some(80)
+        );
+        let mut output = Vec::new();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while let Some(event) = terminal.output.recv().await {
+                match event {
+                    TerminalEvent::Output(bytes) => output.extend(bytes),
+                    TerminalEvent::Exited { .. } => return,
+                }
+            }
+        }).await?;
+        assert!(output.windows(10).any(|bytes| bytes == b"host-ready"));
+        assert!(errors.try_recv().is_err());
         Ok(())
     }
 
