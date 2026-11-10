@@ -125,6 +125,10 @@ and login diagnostics are now implemented.
       task state, with failure preventing submission. Avoid echoing
       composer-origin prompts. A later event alone is insufficient because the
       CLI may have already changed files before the core handles it.
+      A session-level persistence step now saves a terminal prompt with a
+      working task and rolls back its in-memory transcript on save failure;
+      its fixture was not selected in shepherd-core shard 8/8. Connect it to
+      baseline preparation, the core lifecycle, and the terminal submit gate.
   - [ ] **P2 — Validate and document:** run offline fixture and fake-CLI
     coverage by default. Gate genuinely live probes with `live-freebuff`,
     disabled by default. Before each live submission, confirm the exact

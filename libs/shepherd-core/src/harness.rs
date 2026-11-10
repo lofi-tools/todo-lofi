@@ -12,8 +12,8 @@ use std::sync::Arc;
 use agent_harness::{
     AdapterTier, AgentDiagnostics, AgentHarness, AgentModels, AgentTerminal, ApprovalId,
     ApprovalRequest, Capabilities, Decision, Entry, EntryKind, FailureKind, HarnessError,
-    HarnessEvent, ProjectApprovalPolicy, PromptInput, SessionApproval, SessionId, SpawnSpec,
-    Transcript, TranscriptChange,
+    HarnessEvent, ItemId, ProjectApprovalPolicy, PromptInput, SessionApproval, SessionId,
+    SpawnSpec, Transcript, TranscriptChange,
 };
 use async_trait::async_trait;
 
@@ -527,6 +527,52 @@ impl HarnessSession {
         Ok(true)
     }
 
+    #[allow(dead_code)]
+    pub(crate) async fn persist_terminal_prompt(
+        &mut self,
+        store: &dyn Store,
+        record: &SessionRecord,
+        task: &Task,
+        item_id: ItemId,
+        text: String,
+    ) -> Result<(), CoreError> {
+        if self.closed || self.failed || self.cancelling || self.session_id.is_none() {
+            return Err(HarnessError::Protocol(
+                "terminal session is not ready for a prompt".into(),
+            )
+            .into());
+        }
+        if task.id != record.task_id
+            || task.state != crate::TaskState::Working
+            || text.trim().is_empty()
+        {
+            return Err(HarnessError::Protocol("invalid terminal prompt admission".into()).into());
+        }
+        if self.transcript.entries().iter().any(|entry| {
+            matches!(entry.kind, EntryKind::UserMessage { .. })
+                && entry.source_id.as_deref() == Some(item_id.as_str())
+        }) {
+            return Err(
+                HarnessError::Protocol("terminal prompt was already admitted".into()).into(),
+            );
+        }
+        let previous_entries = self.transcript.entries().to_vec();
+        let previous_dirty = self.dirty_entries.clone();
+        let change = self
+            .transcript
+            .apply(&HarnessEvent::TerminalPrompt { item_id, text });
+        self.track_entry(change);
+        if let Err(error) = self
+            .persist_transcript(store, record, false, Some(task))
+            .await
+        {
+            self.transcript.restore(previous_entries);
+            self.dirty_entries = previous_dirty;
+            return Err(error);
+        }
+        Ok(())
+    }
+
     pub fn agent_terminals(&self) -> &[AgentTerminal] {
         &self.agent_terminals
     }
@@ -629,6 +675,58 @@ mod tests {
     use crate::Project;
     use crate::store::TursoStore;
     use crate::test_support::{TestDatabase, TestDirectory};
+
+    #[tokio::test]
+    async fn terminal_prompt_admission_persists_once_and_rolls_back_on_failure()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database = TestDatabase::new()?;
+        let store = TursoStore::open(&database.uri()).await?;
+        let project = Project::new(database.path().join("project"));
+        store.save_project(&project).await?;
+        let mut task = Task::draft(project.id.clone(), "task", database.path());
+        task.state = crate::TaskState::Working;
+        store.save_task(&task).await?;
+        let record = SessionRecord::started(task.id.clone(), "fixture", None);
+        let mut session = HarnessSession::new(Box::new(FakeHarness::new(Vec::new())));
+        session.start(SpawnSpec::default()).await?;
+        session.open_session(None).await?;
+        let failed = session
+            .persist_terminal_prompt(
+                &store,
+                &record,
+                &task,
+                ItemId::new("prompt-1"),
+                "hello".into(),
+            )
+            .await;
+        assert!(failed.is_err());
+        assert!(session.transcript().is_empty());
+        store.save_session(&record).await?;
+        session
+            .persist_terminal_prompt(
+                &store,
+                &record,
+                &task,
+                ItemId::new("prompt-1"),
+                "hello".into(),
+            )
+            .await?;
+        assert_eq!(store.load_transcript(&task.id).await?.len(), 1);
+        assert!(
+            session
+                .persist_terminal_prompt(
+                    &store,
+                    &record,
+                    &task,
+                    ItemId::new("prompt-1"),
+                    "hello".into()
+                )
+                .await
+                .is_err()
+        );
+        assert_eq!(session.transcript().len(), 1);
+        Ok(())
+    }
 
     #[tokio::test]
     async fn configured_environment_hides_agent_diagnostic_output()
