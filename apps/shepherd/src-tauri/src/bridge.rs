@@ -2363,6 +2363,15 @@ impl ShellState {
         spec: TerminalSpec,
         record: Option<TerminalRecord>,
     ) -> Result<TerminalId, BridgeError> {
+        self.spawn_terminal_recording(spec, record, None).await
+    }
+
+    async fn spawn_terminal_recording(
+        &self,
+        spec: TerminalSpec,
+        record: Option<TerminalRecord>,
+        recording: Option<Arc<crate::pty_terminal::TerminalRecording>>,
+    ) -> Result<TerminalId, BridgeError> {
         let (state, project, process_store) = {
             let core = self.core.lock().await;
             let project = record
@@ -2384,7 +2393,10 @@ impl ShellState {
         } else {
             DEFAULT_SCROLLBACK
         };
-        let terminal = self.terminals.prepare(spec, scrollback).await?;
+        let terminal = self
+            .terminals
+            .prepare_recording(spec, scrollback, recording)
+            .await?;
         let terminal_id = terminal.id.clone();
         terminal.slot.lock().await.task_id =
             record.as_ref().and_then(|record| record.task_id.clone());

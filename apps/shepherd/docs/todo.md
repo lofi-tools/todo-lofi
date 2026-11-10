@@ -95,8 +95,10 @@ and login diagnostics are now implemented.
       tests passed except `watcher_error_survives_later_file_events_and_is_reported_once`,
       which was interrupted after running for over a minute.
       The terminal host can now prepare a recorded PTY; its host fixture was
-      outside shard 3/8. Connect the prepared terminal and error channel to
-      the integrated adapter and capture runner.
+      outside shard 3/8. The shell's task-terminal registration path now also
+      accepts a recording, preserving its existing process and terminal
+      lifecycle. This path has not been tested with a recording. Connect it and
+      its error channel to the integrated adapter and capture runner.
     - [ ] Finalize captures only after terminal output, responses, and worktree
       effects are drained; require a completion marker for successful replay.
       The capture API rejects missing or trailing records; its completion
