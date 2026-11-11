@@ -176,7 +176,9 @@ and login diagnostics are now implemented.
       consumers release events. Their fixtures have not yet run. Connect them
       to a verified classifier and adapter event stream.
       A shared publisher now serializes text and tool updates against one
-      capacity limit; its interleaving fixture has not run.
+      capacity limit and scopes item IDs to an explicit, unique turn identity
+      so repeated terminal IDs do not overwrite previous turns. Its
+      interleaving and multi-turn fixtures have not run.
   - [ ] **P1 — Implement the integrated adapter:** launch the installed CLI in
     the task worktree with the existing login, forward input with normal CLI
     terminal interpretation, stream and reconcile text, map tool activity,

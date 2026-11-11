@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -301,6 +301,8 @@ impl FreebuffTextPublisher {
 pub struct FreebuffEventPublisher {
     text: FreebuffTextPublisher,
     tools: FreebuffToolPublisher,
+    active_turn: Option<String>,
+    used_turns: BTreeSet<String>,
 }
 
 impl FreebuffEventPublisher {
@@ -317,20 +319,64 @@ impl FreebuffEventPublisher {
         Ok(Self {
             text: FreebuffTextPublisher::with_shared_capacity(sender.clone(), capacity.clone()),
             tools: FreebuffToolPublisher::with_shared_capacity(sender, capacity),
+            active_turn: None,
+            used_turns: BTreeSet::new(),
         })
     }
 
-    pub async fn text(&mut self, item_id: &str, text: &str) -> HarnessResult<()> {
-        self.text.update(item_id, text).await
+    /// `turn_id` must be unique across the persisted session, including resumes.
+    pub fn begin_turn(&mut self, turn_id: &str) -> HarnessResult<()> {
+        if self.active_turn.is_some() {
+            return Err(HarnessError::Protocol(
+                "Freebuff turn is already active".into(),
+            ));
+        }
+        if turn_id.is_empty() || turn_id.len() > 128 || self.used_turns.contains(turn_id) {
+            return Err(HarnessError::Protocol(
+                "invalid or reused Freebuff turn identity".into(),
+            ));
+        }
+        if self.used_turns.len() >= 16_384 {
+            return Err(HarnessError::Protocol(
+                "too many Freebuff turns in one session".into(),
+            ));
+        }
+        self.used_turns.insert(turn_id.to_owned());
+        self.active_turn = Some(turn_id.to_owned());
+        Ok(())
     }
 
-    pub async fn tool(&mut self, snapshot: FreebuffToolSnapshot) -> HarnessResult<()> {
+    fn scoped_id(&self, item_id: &str) -> HarnessResult<String> {
+        let turn_id = self
+            .active_turn
+            .as_ref()
+            .ok_or_else(|| HarnessError::Protocol("Freebuff has no active turn".into()))?;
+        let scoped = format!("{}:{turn_id}:{item_id}", turn_id.len());
+        if item_id.is_empty() || scoped.len() > 256 {
+            return Err(HarnessError::Protocol(
+                "invalid Freebuff item identity".into(),
+            ));
+        }
+        Ok(scoped)
+    }
+
+    pub async fn text(&mut self, item_id: &str, text: &str) -> HarnessResult<()> {
+        let item_id = self.scoped_id(item_id)?;
+        self.text.update(&item_id, text).await
+    }
+
+    pub async fn tool(&mut self, mut snapshot: FreebuffToolSnapshot) -> HarnessResult<()> {
+        snapshot.id = self.scoped_id(&snapshot.id)?;
         self.tools.update(snapshot).await
     }
 
-    pub fn clear(&mut self) {
+    pub fn finish_turn(&mut self) -> HarnessResult<()> {
+        if self.active_turn.take().is_none() {
+            return Err(HarnessError::Protocol("Freebuff has no active turn".into()));
+        }
         self.text.clear();
         self.tools.clear();
+        Ok(())
     }
 }
 
@@ -662,6 +708,7 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
         let mut publisher = FreebuffEventPublisher::new(sender, 1)?;
+        publisher.begin_turn("turn-1")?;
         let tool = FreebuffToolSnapshot {
             id: "tool-1".into(),
             title: "Read file".into(),
@@ -693,6 +740,32 @@ mod tests {
         assert!(
             matches!(receiver.recv().await, Some(HarnessEvent::Delta { text, .. }) if text == " done")
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn reused_terminal_item_ids_stay_distinct_across_turns()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let mut publisher = FreebuffEventPublisher::new(sender, 4)?;
+        let tool = FreebuffToolSnapshot {
+            id: "tool-1".into(),
+            title: "Read file".into(),
+            kind: "read".into(),
+            status: ToolStatus::Completed,
+            output: None,
+        };
+        let mut transcript = crate::Transcript::default();
+        for turn in ["turn-1", "turn-2"] {
+            publisher.begin_turn(turn)?;
+            publisher.tool(tool.clone()).await?;
+            let event = receiver.recv().await.ok_or("missing tool event")?;
+            transcript.apply(&event);
+            publisher.finish_turn()?;
+        }
+        assert_eq!(transcript.len(), 2);
+        assert!(publisher.begin_turn("turn-1").is_err());
+        assert!(publisher.tool(tool).await.is_err());
         Ok(())
     }
 
