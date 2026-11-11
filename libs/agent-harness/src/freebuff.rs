@@ -125,11 +125,21 @@ impl FreebuffToolPublisher {
                 "invalid Freebuff event capacity".into(),
             ));
         }
-        Ok(Self {
+        Ok(Self::with_shared_capacity(
+            sender,
+            Arc::new(tokio::sync::Semaphore::new(capacity)),
+        ))
+    }
+
+    fn with_shared_capacity(
+        sender: tokio::sync::mpsc::UnboundedSender<HarnessEvent>,
+        capacity: Arc<tokio::sync::Semaphore>,
+    ) -> Self {
+        Self {
             reconciler: FreebuffToolReconciler::default(),
             sender,
-            capacity: Arc::new(tokio::sync::Semaphore::new(capacity)),
-        })
+            capacity,
+        }
     }
 
     pub async fn update(&mut self, snapshot: FreebuffToolSnapshot) -> HarnessResult<()> {
@@ -241,11 +251,21 @@ impl FreebuffTextPublisher {
                 "invalid Freebuff event capacity".into(),
             ));
         }
-        Ok(Self {
+        Ok(Self::with_shared_capacity(
+            sender,
+            Arc::new(tokio::sync::Semaphore::new(capacity)),
+        ))
+    }
+
+    fn with_shared_capacity(
+        sender: tokio::sync::mpsc::UnboundedSender<HarnessEvent>,
+        capacity: Arc<tokio::sync::Semaphore>,
+    ) -> Self {
+        Self {
             reconciler: FreebuffTextReconciler::default(),
             sender,
-            capacity: Arc::new(tokio::sync::Semaphore::new(capacity)),
-        })
+            capacity,
+        }
     }
 
     pub async fn update(&mut self, item_id: &str, text: &str) -> HarnessResult<()> {
@@ -275,6 +295,42 @@ impl FreebuffTextPublisher {
 
     pub fn clear(&mut self) {
         self.reconciler.clear();
+    }
+}
+
+pub struct FreebuffEventPublisher {
+    text: FreebuffTextPublisher,
+    tools: FreebuffToolPublisher,
+}
+
+impl FreebuffEventPublisher {
+    pub fn new(
+        sender: tokio::sync::mpsc::UnboundedSender<HarnessEvent>,
+        capacity: usize,
+    ) -> HarnessResult<Self> {
+        if capacity == 0 || capacity > 256 {
+            return Err(HarnessError::Protocol(
+                "invalid Freebuff event capacity".into(),
+            ));
+        }
+        let capacity = Arc::new(tokio::sync::Semaphore::new(capacity));
+        Ok(Self {
+            text: FreebuffTextPublisher::with_shared_capacity(sender.clone(), capacity.clone()),
+            tools: FreebuffToolPublisher::with_shared_capacity(sender, capacity),
+        })
+    }
+
+    pub async fn text(&mut self, item_id: &str, text: &str) -> HarnessResult<()> {
+        self.text.update(item_id, text).await
+    }
+
+    pub async fn tool(&mut self, snapshot: FreebuffToolSnapshot) -> HarnessResult<()> {
+        self.tools.update(snapshot).await
+    }
+
+    pub fn clear(&mut self) {
+        self.text.clear();
+        self.tools.clear();
     }
 }
 
@@ -598,6 +654,45 @@ mod tests {
         );
         drop(receiver);
         assert!(publisher.update("message", "third").await.is_err());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn text_and_tool_updates_share_capacity_and_preserve_order()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let mut publisher = FreebuffEventPublisher::new(sender, 1)?;
+        let tool = FreebuffToolSnapshot {
+            id: "tool-1".into(),
+            title: "Read file".into(),
+            kind: "read".into(),
+            status: ToolStatus::Running,
+            output: None,
+        };
+        publisher.text("message-1", "checking").await?;
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(30),
+                publisher.tool(tool.clone())
+            )
+            .await
+            .is_err()
+        );
+        let first = receiver.recv().await.ok_or("missing message")?;
+        assert!(matches!(&first, HarnessEvent::Delta { text, .. } if text == "checking"));
+        drop(first);
+        publisher.tool(tool).await?;
+        assert!(matches!(
+            receiver.recv().await,
+            Some(HarnessEvent::ToolCall {
+                status: ToolStatus::Running,
+                ..
+            })
+        ));
+        publisher.text("message-1", "checking done").await?;
+        assert!(
+            matches!(receiver.recv().await, Some(HarnessEvent::Delta { text, .. }) if text == " done")
+        );
         Ok(())
     }
 
