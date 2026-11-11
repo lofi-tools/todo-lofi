@@ -233,7 +233,7 @@ test.beforeEach(async ({ context }) => {
         title: 'Ship it',
         state: options.has('agent-failed') || options.has('agent-auth-failed') ? 'failed'
           : options.has('interrupted-task') ? 'interrupted'
-          : ['approval-fixture', 'scoped-approval', 'project-approval'].some((name) => options.has(name)) ? 'waiting' : 'ready',
+          : ['approval-fixture', 'scoped-approval', 'project-approval', 'question-fixture'].some((name) => options.has(name)) ? 'waiting' : 'ready',
         agent: options.has('acp-fallback') || options.has('agent-models') ? 'opencode' : 'codex',
         tier: options.has('acp-fallback') ? 'acp' : 'native',
         branch: 'shepherd/ship-it',
@@ -320,6 +320,11 @@ test.beforeEach(async ({ context }) => {
           },
         },
       ],
+    }
+    if (options.has('question-fixture')) {
+      transcripts['task-1'] = [entry('question-1', 1, {
+        type: 'question', data: { questionId: 'question-1', text: 'Which target?', answer: null },
+      })]
     }
     if (options.has('agent-failed') || options.has('agent-auth-failed')) {
       const auth = options.has('agent-auth-failed')
@@ -1157,6 +1162,19 @@ test.beforeEach(async ({ context }) => {
               }))
             }
             return workspace(task.id)
+          }
+          case 'answer_question': {
+            const rows = transcripts[args.taskId]
+            const question = rows.find((row) => row.kind.type === 'question' && row.kind.data.questionId === args.questionId)
+            if (!question || question.kind.type !== 'question' || question.kind.data.answer !== null) {
+              throw new Error('No matching pending question')
+            }
+            transcripts[args.taskId] = rows.map((row) => row === question
+              ? entry(row.id, row.sequence, { type: 'question', data: { ...question.kind.data, answer: args.answer } })
+              : row)
+            const task = tasks.find((candidate) => candidate.id === args.taskId)
+            if (task) task.state = 'ready'
+            return workspace(args.taskId)
           }
           case 'resolve_approval': {
             const rows = transcripts[args.taskId]
@@ -2679,6 +2697,16 @@ test('shows an approval with its tool, arguments and diff', async ({ page }) => 
     .locator('.entry__permission')
     .filter({ hasText: 'Delete scratch file' })
   await expect(withoutDiff).toContainText('diff not available')
+})
+
+test('answers a question in the transcript', async ({ page }) => {
+  await page.goto('/?question-fixture')
+  const card = page.locator('.entry__permission').filter({ hasText: 'Which target?' })
+  await card.getByRole('textbox', { name: 'Answer question' }).fill('debug')
+  await card.getByRole('button', { name: 'Send answer' }).click()
+  await expect(card).toContainText('debug')
+  await expect(card.getByRole('textbox', { name: 'Answer question' })).toHaveCount(0)
+  await expect(page.locator('.chat__state')).toHaveText('ready')
 })
 
 test('reports the ACP tier and the reason the native adapter was skipped', async ({ page }) => {

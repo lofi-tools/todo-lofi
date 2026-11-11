@@ -194,9 +194,9 @@ and login diagnostics are now implemented.
     questions and approvals. A shell command now routes answers through that
     session and persists confirmed updates. The transcript now renders a
     question card with a text answer and routes submission to that command.
-    The fake harness can now pause on a question and resume on a matching answer,
-    with an offline fixture; it has not run. The routing and UI remain untested;
-    connect the adapter transport before use.
+    The fake harness can now pause on a question and resume on a matching answer.
+    Offline core and UI fixtures cover answering and transcript persistence;
+    they have not run. Connect the adapter transport before use.
   - [ ] **P1 — Integrate the picker:** expose the integrated agent separately
     from **Freebuff (terminal)**, preserve the terminal's existing behavior,
     and test task routing, persistence, diagnostics, and update status.
