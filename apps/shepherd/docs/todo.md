@@ -202,8 +202,10 @@ and login diagnostics are now implemented.
     answers. Add a question card with a text-answer control, persist questions
     and answers, and relay answers to the same Freebuff session.
     Static inspection also found an `ask_user` schema describing multiple
-    questions, options, multi-select, custom-text validation and skipping; the
-    presentation for those cases awaits the user's choice and live verification.
+    questions, options, multi-select, custom-text validation and skipping.
+    Show supplied choices and an **Other** text option, support multi-select
+    where available, and preserve validation and answer type. Verify the
+    terminal interaction before enabling those controls.
     The harness transcript now has question-request and answer events with
     restorable question rows and search text. Its fixture has not yet run;
     A session now tracks pending questions and prevents duplicate answer

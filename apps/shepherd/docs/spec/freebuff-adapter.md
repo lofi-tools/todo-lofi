@@ -97,8 +97,11 @@ questions, each with at least two options, optional multi-select, and optional
 validation for custom text. Its described answer format distinguishes selected
 options, custom text, and skipping. This is static evidence, not an observed
 terminal interaction. Shepherd's current text-only question contract cannot
-faithfully represent all of those cases; the user is choosing how they should
-appear before that contract is extended.
+faithfully represent all of those cases. For multiple-choice questions, show
+the supplied choices and an **Other** text option. Support multiple selections
+when the verified interaction permits them, apply its custom-text validation,
+and preserve whether the user selected options, entered text, or skipped.
+Verify the available actions and terminal interaction before enabling them.
 
 ## Session and transcript
 
