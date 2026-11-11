@@ -3051,6 +3051,7 @@ function QuestionCard(props: {
   match: () => string | undefined
 }) {
   const [answer, setAnswer] = createSignal('')
+  const tooLong = () => new TextEncoder().encode(answer()).length > 64 * 1024
   const disabled = () => !props.canAnswer() || props.awaiting()
   return <div class="entry__permission">
     <p class="entry__permission-title"><SearchMark text={props.question.text} match={props.match()} /></p>
@@ -3059,14 +3060,15 @@ function QuestionCard(props: {
     }>
       <form class="entry__question-form" onSubmit={(event) => {
         event.preventDefault()
-        if (disabled() || !answer().trim()) return
+        if (disabled() || !answer().trim() || tooLong()) return
         props.onAnswer(props.question.questionId, answer())
       }}>
         <textarea aria-label="Answer question" value={answer()} disabled={disabled()}
           onInput={(event) => setAnswer(event.currentTarget.value)} />
         <div class="entry__actions">
-          <button type="submit" disabled={disabled() || !answer().trim()}>Send answer</button>
+          <button type="submit" disabled={disabled() || !answer().trim() || tooLong()}>Send answer</button>
         </div>
+        <Show when={tooLong()}><span class="entry__permission-decision" role="status">Answer is limited to 64 KiB</span></Show>
         <Show when={props.awaiting()}><span class="entry__permission-decision">Waiting for answer confirmation</span></Show>
       </form>
     </Show>
