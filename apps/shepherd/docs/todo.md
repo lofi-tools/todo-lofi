@@ -30,6 +30,30 @@ published catalog. The catalog/agent-pool parent is otherwise implemented; its
 only unchecked part is the deferred snapshot refresh. The agent model pickers
 and login diagnostics are now implemented.
 
+## Build speed improvements
+
+- [ ] **P1 — Isolate the terminal renderer and measure the tradeoff.**
+  - [ ] Prototype a separate terminal-renderer crate, resolving its shared PTY
+    and replay interfaces without introducing a dependency cycle.
+  - [ ] Keep the renderer and `alacritty_terminal` optimized while building the
+    rest of the Shepherd shell at `opt-level = 0`.
+  - [ ] Compare repeated warm Shepherd rebuilds for representative shell and
+    renderer edits with the current configuration.
+  - [ ] Compare terminal parser, encoder, delivery and paint performance with
+    the existing 1 MiB burst and paced-marker measurements before adopting the
+    configuration. Use background native checks where they are applicable.
+- [ ] **P2 — Extract project discovery into a crate.** Move project scanning
+  out of `shepherd-core`, update consumers and tests, and verify project picker
+  behavior. Measure representative rebuilds before and after the extraction;
+  a disposable initial prototype reduced one rebuild from 19.8 s to 15.8 s.
+- [ ] **P2 — Avoid unnecessary test executables.** Update targeted-test
+  commands and the sharding workflow to select the library target when the
+  requested tests belong there, while retaining integration-test coverage when
+  those tests are requested or selected by the shard.
+- [ ] **P3 — Compare development debug-information settings.** Measure build
+  and rebuild times with reduced debug information, and check debugger and
+  backtrace usefulness before deciding whether to change the default.
+
 ## Next feature
 
 - [ ] **Freebuff interactive CLI adapter** — implement the agreed
