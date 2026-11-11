@@ -149,13 +149,42 @@ and login diagnostics are now implemented.
       confirms terminal drain, collects effects before finalizing. Its combined
       capture/replay fixture was outside shepherd-core shard 1/8; connect the
       shared session to a runner that proves process termination and drain.
-      An ignored `approved_freebuff_capture` runner is feature-gated and
-      compile-checked. Its new offline fake-CLI end-to-end fixture was outside
-      Shepherd shard 5/8 and must pass before any approved live use. The runner
+      An ignored `approved_freebuff_capture` runner is feature-gated. Its
+      targeted offline fake-CLI end-to-end fixture passed after fixing an
+      error-channel shutdown race. The runner
       waits for operator send/stop markers and does not infer readiness or
       completion. Before collecting worktree effects it also checks that no
-      processes remain in the terminal session; that check is unverified and
+      processes remain in the terminal session; the offline fixture exercises
+      the normal shutdown path, but the check
       does not detect a process that escaped into a different session.
+      - [x] Record terminal type, renderer identity, exit status or signal,
+        and whether the operator requested shutdown.
+      - [ ] Derive the recorded renderer revision from the dependency lockfile
+        or build metadata so it cannot drift when the dependency changes.
+      - [x] Check capture, reconstructed screens and worktree effects with the
+        targeted offline fake CLI.
+      - [x] Build the opt-in live recorder and inspect Freebuff's ready screen
+        and configured default before attempting the approved question.
+      - [ ] Record the one approved tools/ar3 question, its terminal stream,
+        response and supported effects in a disposable tools worktree.
+        The first attempt captured startup and prompt entry locally, but
+        Freebuff reported its servers unreachable and the prompt remained in
+        the composer. It reconnected just as the operator stopped the session;
+        no response or confirmed submission was observed. The incomplete
+        recording is `tools-ar3-question-20261111.jsonl` under the private
+        Freebuff cache. Do not count it as a successful live response.
+      - [ ] Investigate whether writing prompt text and Enter together submits
+        reliably in Freebuff, including disconnected and reconnected states;
+        reproduce offline from the capture before another live attempt.
+      - [ ] Confirm the active default model after reconnection: the startup
+        screen showed DeepSeek V4.1 Flash, while the later status displayed
+        `Fast • low` without an explicit model name.
+      - [ ] Verify the completed capture and replay its recorded screens and
+        worktree effects; investigate incomplete or mismatched captures.
+      - [ ] Detect processes that escape the terminal session and either wait
+        for them or report that effects cannot be captured reliably.
+      - [ ] Consider an asciicast export for inspection that never replaces the
+        byte-preserving native capture or silently loses unrepresentable data.
     - [ ] Replay capture records in order through a streaming consumer. An
       offline synthetic capture replays split output and a resize through the
       shell's VT parser (Shepherd shard 8/8 passed); the consumer's own fixture
@@ -163,8 +192,8 @@ and login diagnostics are now implemented.
       with screens reconstructed from captured bytes and resizes, and the fake
       runner verifies its saved frames before writing the completion marker, so
       a mismatch leaves an incomplete capture. Its new
-      fixture and the updated fake runner remain unverified; the user requested
-      no builds. Verified screen replay now exposes each reconstructed frame and
+      updated fake runner verified its captured screens in the targeted offline
+      check. Verified screen replay now exposes each reconstructed frame and
       its capture timestamp in order to a visitor, which must defer external
       effects until replay succeeds. Connect it to versioned Freebuff screen fixtures, the screen
       classifier and worktree effects; make verification mandatory for replay.

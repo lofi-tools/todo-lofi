@@ -192,8 +192,8 @@ an error or missing drain leaves the capture incomplete. Marker files are local
 controls, not a substitute for user approval. This diagnostic does not yet
 classify the screen, test approval flows, or establish runtime compatibility.
 
-For faithful replay, also record the terminal type and renderer version, and
-the process exit code or signal, distinguishing an operator-requested stop
+For faithful replay, the capture records the terminal type and renderer version,
+and the process exit code or signal, distinguishing an operator-requested stop
 from a natural exit. Keep the original byte stream: PTY reads can split UTF-8
 characters or contain non-text bytes. The [asciicast v3 format](https://docs.asciinema.org/manual/asciicast/v3/)
 provides a useful reference for timed input, output, resizing and exit events;

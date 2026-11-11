@@ -1630,6 +1630,17 @@ mod tests {
         let capture = FreebuffLiveCapture::begin(&workspace, worktree.clone(), &scenario)?;
         let session = capture.session();
         runtime(&session, &metadata)?;
+        session.record_and_apply(
+            CaptureEvent::Terminal {
+                term: "xterm-256color".into(),
+                color_term: "truecolor".into(),
+                renderer: format!(
+                    "shepherd {} alacritty_terminal@ede2ac144da4dec4c075bfa803aacf3b3739bce6",
+                    env!("CARGO_PKG_VERSION")
+                ),
+            },
+            || Ok(((), Vec::new())),
+        )?;
         let (error_sender, mut errors) = mpsc::unbounded_channel();
         let recording = Arc::new(TerminalRecording::from_shared(
             session.clone(),
@@ -1690,7 +1701,11 @@ mod tests {
                         stdout.write_all(&bytes)?;
                         stdout.flush()?;
                     }
-                    Some(TerminalEvent::Exited { .. }) => {
+                    Some(TerminalEvent::Exited { exit_code, signal }) => {
+                        session.record_and_apply(
+                            CaptureEvent::Exit { exit_code, signal, operator_stopped: stopping },
+                            || Ok(((), Vec::new())),
+                        )?;
                         if !submitted || !stopping || pending_write.is_some() { return Err("terminal exited before the operator confirmed completion".into()); }
                         if let Ok(error) = errors.try_recv() { return Err(error.into()); }
                         break;
@@ -1827,6 +1842,14 @@ mod tests {
                 .iter()
                 .any(|record| matches!(record.event, CaptureEvent::Screen { .. }))
         );
+        assert!(records.iter().any(|record| matches!(&record.event, CaptureEvent::Terminal { term, .. } if term == "xterm-256color")));
+        assert!(records.iter().any(|record| matches!(
+            record.event,
+            CaptureEvent::Exit {
+                operator_stopped: true,
+                ..
+            }
+        )));
         assert!(records.iter().any(|record| matches!(&record.event, CaptureEvent::WorktreeFile { path, contents, .. } if path == std::path::Path::new("README.md") && contents == b"changed\n")));
         Ok(())
     }

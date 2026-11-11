@@ -25,6 +25,16 @@ pub enum CaptureEvent {
         runtime_version: Option<String>,
         target: Option<String>,
     },
+    Terminal {
+        term: String,
+        color_term: String,
+        renderer: String,
+    },
+    Exit {
+        exit_code: Option<i32>,
+        signal: Option<String>,
+        operator_stopped: bool,
+    },
     Input {
         bytes: Vec<u8>,
     },
