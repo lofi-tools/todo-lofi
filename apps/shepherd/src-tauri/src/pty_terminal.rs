@@ -1630,13 +1630,17 @@ mod tests {
         let capture = FreebuffLiveCapture::begin(&workspace, worktree.clone(), &scenario)?;
         let session = capture.session();
         runtime(&session, &metadata)?;
+        let renderer_dependency = include_str!("../Cargo.toml")
+            .lines()
+            .find(|line| line.starts_with("alacritty_terminal = "))
+            .ok_or("terminal renderer dependency is missing from the manifest")?;
         session.record_and_apply(
             CaptureEvent::Terminal {
                 term: "xterm-256color".into(),
                 color_term: "truecolor".into(),
                 renderer: format!(
-                    "shepherd {} alacritty_terminal@ede2ac144da4dec4c075bfa803aacf3b3739bce6",
-                    env!("CARGO_PKG_VERSION")
+                    "shepherd {} {renderer_dependency}",
+                    env!("CARGO_PKG_VERSION"),
                 ),
             },
             || Ok(((), Vec::new())),

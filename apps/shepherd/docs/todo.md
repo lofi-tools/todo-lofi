@@ -159,8 +159,8 @@ and login diagnostics are now implemented.
       does not detect a process that escaped into a different session.
       - [x] Record terminal type, renderer identity, exit status or signal,
         and whether the operator requested shutdown.
-      - [ ] Derive the recorded renderer revision from the dependency lockfile
-        or build metadata so it cannot drift when the dependency changes.
+      - [x] Derive the recorded renderer revision from the build-embedded
+        dependency manifest so it changes with the pinned dependency.
       - [x] Check capture, reconstructed screens and worktree effects with the
         targeted offline fake CLI.
       - [x] Build the opt-in live recorder and inspect Freebuff's ready screen
