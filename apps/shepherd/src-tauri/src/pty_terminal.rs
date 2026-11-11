@@ -132,12 +132,34 @@ struct Session {
     recording: Option<Arc<TerminalRecording>>,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub enum RecordedScreenUpdate {
+    Output {
+        bytes: Vec<u8>,
+        state: serde_json::Value,
+    },
+    Resize {
+        columns: u16,
+        rows: u16,
+        state: serde_json::Value,
+    },
+}
+
+impl RecordedScreenUpdate {
+    #[allow(dead_code)]
+    pub fn state(&self) -> &serde_json::Value {
+        match self {
+            Self::Output { state, .. } | Self::Resize { state, .. } => state,
+        }
+    }
+}
+
 pub struct TerminalRecording {
     capture: Arc<CaptureSession>,
     screen: Mutex<Screen>,
     errors: mpsc::UnboundedSender<String>,
     failure_signal: Mutex<Option<std::sync::mpsc::Sender<()>>>,
-    screen_observer: Option<mpsc::Sender<serde_json::Value>>,
+    screen_observer: Option<mpsc::Sender<RecordedScreenUpdate>>,
     #[allow(dead_code)]
     initial_size: (u16, u16),
 }
@@ -180,7 +202,7 @@ impl TerminalRecording {
     }
 
     #[allow(dead_code)]
-    pub fn with_screen_observer(mut self, observer: mpsc::Sender<serde_json::Value>) -> Self {
+    pub fn with_screen_observer(mut self, observer: mpsc::Sender<RecordedScreenUpdate>) -> Self {
         self.screen_observer = Some(observer);
         self
     }
@@ -193,9 +215,9 @@ impl TerminalRecording {
         })
     }
 
-    fn publish_screen(&self, state: &serde_json::Value) -> HarnessResult<()> {
+    fn publish_screen(&self, update: RecordedScreenUpdate) -> HarnessResult<()> {
         if let Some(observer) = &self.screen_observer {
-            observer.try_send(state.clone()).map_err(|error| {
+            observer.try_send(update).map_err(|error| {
                 HarnessError::Protocol(format!("terminal screen observer unavailable: {error}"))
             })?;
         }
@@ -216,7 +238,12 @@ impl TerminalRecording {
                     let state = self.screen_state(&screen)?;
                     Ok((state.clone(), vec![CaptureEvent::Screen { state }]))
                 },
-                |state| self.publish_screen(state),
+                |state| {
+                    self.publish_screen(RecordedScreenUpdate::Output {
+                        bytes: bytes.to_vec(),
+                        state: state.clone(),
+                    })
+                },
             )
             .map(|_| ())
     }
@@ -1468,7 +1495,13 @@ impl TerminalService for PtyTerminals {
                         let state = recording.screen_state(&screen)?;
                         Ok((state.clone(), vec![CaptureEvent::Screen { state }]))
                     },
-                    |state| recording.publish_screen(state),
+                    |state| {
+                        recording.publish_screen(RecordedScreenUpdate::Resize {
+                            columns,
+                            rows,
+                            state: state.clone(),
+                        })
+                    },
                 )
                 .map(|_| ())
                 .map_err(|error| {
@@ -2056,19 +2089,36 @@ mod tests {
                 .path()
                 .join(".cache/shepherd-live/freebuff/fake-pty.jsonl"),
         )?;
-        let expected_screens: Vec<_> = records
-            .iter()
-            .filter_map(|record| match &record.event {
-                CaptureEvent::Screen { state } => Some(state.clone()),
-                _ => None,
+        let expected_updates: Vec<_> = records
+            .windows(2)
+            .filter_map(|records| {
+                let [first, second] = records else {
+                    return None;
+                };
+                match (&first.event, &second.event) {
+                    (CaptureEvent::Output { bytes }, CaptureEvent::Screen { state }) => {
+                        Some(RecordedScreenUpdate::Output {
+                            bytes: bytes.clone(),
+                            state: state.clone(),
+                        })
+                    }
+                    (CaptureEvent::Resize { columns, rows }, CaptureEvent::Screen { state }) => {
+                        Some(RecordedScreenUpdate::Resize {
+                            columns: *columns,
+                            rows: *rows,
+                            state: state.clone(),
+                        })
+                    }
+                    _ => None,
+                }
             })
             .collect();
-        let mut observed_screens = Vec::new();
-        while let Ok(screen) = screens.try_recv() {
-            observed_screens.push(screen);
+        let mut observed_updates = Vec::new();
+        while let Ok(update) = screens.try_recv() {
+            observed_updates.push(update);
         }
-        assert!(!observed_screens.is_empty());
-        assert_eq!(observed_screens, expected_screens);
+        assert!(!observed_updates.is_empty());
+        assert_eq!(observed_updates, expected_updates);
         assert!(
             records
                 .iter()

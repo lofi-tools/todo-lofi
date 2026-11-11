@@ -114,6 +114,9 @@ and login diagnostics are now implemented.
       appears in the project list and exposes a screen; it has not yet run.
       Connect it and its error channel to the integrated adapter and capture
       runner.
+      The observer now carries original PTY bytes and resize events alongside
+      each frame, so a classifier can replay intermediate screen changes that
+      occur within one read. This updated observer fixture has not run.
     - [ ] Finalize captures only after terminal output, responses, and worktree
       effects are drained; require a completion marker for successful replay.
       The capture API rejects missing or trailing records; its completion

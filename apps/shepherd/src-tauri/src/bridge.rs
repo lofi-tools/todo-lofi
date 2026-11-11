@@ -5173,7 +5173,7 @@ mod tests {
             .await?
             .ok_or("missing observed frame")?;
         assert_eq!(
-            frame.get("columns").and_then(|value| value.as_u64()),
+            frame.state().get("columns").and_then(|value| value.as_u64()),
             Some(80)
         );
         let mut output = Vec::new();
