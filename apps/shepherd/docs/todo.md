@@ -172,8 +172,9 @@ and login diagnostics are now implemented.
       screen classifier and the adapter event stream.
     - [ ] Translate recognized tool snapshots into stable, bounded tool-call
       updates. A reconciler suppresses repeated snapshots and rejects conflicting
-      identities or status regressions; its fixture has not yet run. Connect it
-      to a verified classifier and enforce backpressure on its events.
+      identities or status regressions; a bounded publisher holds capacity until
+      consumers release events. Their fixtures have not yet run. Connect them
+      to a verified classifier and adapter event stream.
   - [ ] **P1 — Implement the integrated adapter:** launch the installed CLI in
     the task worktree with the existing login, forward input with normal CLI
     terminal interpretation, stream and reconcile text, map tool activity,

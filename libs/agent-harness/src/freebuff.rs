@@ -109,6 +109,55 @@ impl FreebuffToolReconciler {
     }
 }
 
+pub struct FreebuffToolPublisher {
+    reconciler: FreebuffToolReconciler,
+    sender: tokio::sync::mpsc::UnboundedSender<HarnessEvent>,
+    capacity: Arc<tokio::sync::Semaphore>,
+}
+
+impl FreebuffToolPublisher {
+    pub fn new(
+        sender: tokio::sync::mpsc::UnboundedSender<HarnessEvent>,
+        capacity: usize,
+    ) -> HarnessResult<Self> {
+        if capacity == 0 || capacity > 256 {
+            return Err(HarnessError::Protocol(
+                "invalid Freebuff event capacity".into(),
+            ));
+        }
+        Ok(Self {
+            reconciler: FreebuffToolReconciler::default(),
+            sender,
+            capacity: Arc::new(tokio::sync::Semaphore::new(capacity)),
+        })
+    }
+
+    pub async fn update(&mut self, snapshot: FreebuffToolSnapshot) -> HarnessResult<()> {
+        let permit = tokio::select! {
+            _ = self.sender.closed() => return Err(HarnessError::TransportClosed("Freebuff event receiver closed".into())),
+            permit = self.capacity.clone().acquire_owned() => permit.map_err(|_| HarnessError::TransportClosed("Freebuff event capacity closed".into()))?,
+        };
+        let Some(mut event) = self.reconciler.update(snapshot)? else {
+            return Ok(());
+        };
+        if let HarnessEvent::ToolCall { stream_permit, .. } = &mut event {
+            *stream_permit = Some(Arc::new(permit));
+        } else {
+            return Err(HarnessError::Protocol(
+                "unexpected Freebuff tool event".into(),
+            ));
+        }
+        self.sender
+            .send(event)
+            .map_err(|_| HarnessError::TransportClosed("Freebuff event receiver closed".into()))?;
+        Ok(())
+    }
+
+    pub fn clear(&mut self) {
+        self.reconciler.clear();
+    }
+}
+
 #[derive(Default)]
 pub struct FreebuffTextReconciler {
     messages: BTreeMap<String, String>,
@@ -463,6 +512,43 @@ mod tests {
         assert!(reconciler.update(snapshot.clone()).is_err());
         snapshot.status = ToolStatus::Completed;
         assert!(reconciler.update(snapshot)?.is_none());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn tool_publisher_waits_for_consumption_and_stops_on_disconnect()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let mut publisher = FreebuffToolPublisher::new(sender, 1)?;
+        let mut snapshot = FreebuffToolSnapshot {
+            id: "tool-1".into(),
+            title: "Read file".into(),
+            kind: "read".into(),
+            status: ToolStatus::Running,
+            output: None,
+        };
+        publisher.update(snapshot.clone()).await?;
+        snapshot.status = ToolStatus::Completed;
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(30),
+                publisher.update(snapshot.clone())
+            )
+            .await
+            .is_err()
+        );
+        let first = receiver.recv().await.ok_or("missing tool update")?;
+        drop(first);
+        publisher.update(snapshot.clone()).await?;
+        assert!(matches!(
+            receiver.recv().await,
+            Some(HarnessEvent::ToolCall {
+                status: ToolStatus::Completed,
+                ..
+            })
+        ));
+        drop(receiver);
+        assert!(publisher.update(snapshot).await.is_err());
         Ok(())
     }
 
