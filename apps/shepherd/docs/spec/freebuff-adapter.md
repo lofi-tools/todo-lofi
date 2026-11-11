@@ -83,6 +83,15 @@ ensures the runtime is present, launches it, and schedules an update check
 shortly afterward. These are local observations, not a verified screen
 protocol or a guarantee that the runtime will remain at that version.
 
+Read-only inspection of that executable's bundled UI code found the default
+input placeholder “enter a coding task or / for commands” and help labels for
+Ctrl+J or Option+Enter to insert a newline. Its key-dispatch code appears to
+clear a non-whitespace input on Ctrl+C before checking for an interrupt; it
+checks `trim()` rather than merely the input length. The same key can stop or
+quit in other states, and streaming/queue state changes the placeholder. These
+are static code observations, not verified screen or input behavior: never use
+them alone to recognize readiness, clear a draft, or send an interrupt.
+
 ## Session and transcript
 
 Support multiple turns in the same running process. Investigate whether the

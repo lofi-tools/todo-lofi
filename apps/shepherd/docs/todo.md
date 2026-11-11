@@ -53,6 +53,9 @@ and login diagnostics are now implemented.
       in shard 7/8, and its malformed/oversized fixture passed in shard 4/8.
       Finish verification and wire it into update/restart handling; do not treat
       metadata as proof that the runtime is supported.
+      Static inspection of the bundled UI found a default input placeholder,
+      newline shortcuts, and a state-dependent Ctrl+C clear path; verify these
+      against captured terminal states before using them for input or cancel.
     - [ ] With user-approved live messages only, capture the terminal states
       needed to establish a version-specific interaction contract. Prefer
       question-only messages requiring tools from the user's ChatGPT “tools”
