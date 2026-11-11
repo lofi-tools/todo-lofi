@@ -7332,6 +7332,66 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn question_answer_resumes_the_turn_and_persists_the_transcript()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let repository = TestRepository::new()?;
+        let mut core = Core::with_services(
+            Box::new(MemoryStore::new()),
+            Box::new(FakeHarnessFactory::new(vec![vec![FakeTurn::new(vec![
+                FakeStep::Question {
+                    question_id: "question-1".into(),
+                    text: "Which target?".into(),
+                },
+                FakeStep::Message("Continuing".into()),
+            ])]])),
+        );
+        let project_id = add_project(&mut core, repository.path().to_path_buf()).await?;
+        let draft = workspace_of(
+            core.execute(Command::CreateDraft {
+                project_id,
+                agent: Agent::Codex,
+                title: "Question".into(),
+            })
+            .await?,
+        );
+        let task_id = TaskId::new(draft.task.id);
+        let waiting = workspace_of(
+            core.execute(Command::SendPrompt {
+                task_id: task_id.clone(),
+                input: PromptInput::text("go"),
+            })
+            .await?,
+        );
+        assert_eq!(waiting.task.state, TaskState::Waiting);
+        assert!(
+            core.execute(Command::AnswerQuestion {
+                task_id: task_id.clone(),
+                question_id: "wrong".into(),
+                answer: "debug".into(),
+            })
+            .await
+            .is_err()
+        );
+        let finished = workspace_of(
+            core.execute(Command::AnswerQuestion {
+                task_id: task_id.clone(),
+                question_id: "question-1".into(),
+                answer: "debug".into(),
+            })
+            .await?,
+        );
+        assert_eq!(finished.task.state, TaskState::Ready);
+        assert!(finished.transcript.iter().any(|entry| matches!(&entry.kind,
+            agent_harness::EntryKind::Question { question_id, answer: Some(answer), .. }
+                if question_id == "question-1" && answer == "debug")));
+        assert_eq!(
+            core.store.load_transcript(&task_id).await?,
+            finished.transcript
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn quitting_idle_work_is_immediate() {
         let mut core = Core::new();
         let result = core.execute(Command::Quit { force: false }).await;

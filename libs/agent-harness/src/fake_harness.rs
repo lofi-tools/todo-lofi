@@ -38,6 +38,10 @@ pub enum FakeStep {
         diffs: Vec<FileDiff>,
     },
     Approval(ApprovalRequest),
+    Question {
+        question_id: String,
+        text: String,
+    },
     Plan(Vec<PlanRow>),
     Usage {
         used: u64,
@@ -128,6 +132,13 @@ struct PendingApproval {
     finish: TurnFinishReason,
 }
 
+struct PendingQuestion {
+    question_id: String,
+    remaining: Vec<FakeStep>,
+    next_offset: usize,
+    finish: TurnFinishReason,
+}
+
 /// A scripted adapter. Start it, open a session, then prompt it.
 pub struct FakeHarness {
     turns: Vec<FakeTurn>,
@@ -140,6 +151,7 @@ pub struct FakeHarness {
     started: bool,
     turn_active: bool,
     pending: Option<PendingApproval>,
+    pending_question: Option<PendingQuestion>,
     capabilities: Capabilities,
     start_failure: Option<FakeFailure>,
     prompt_failure: Option<FakeFailure>,
@@ -159,6 +171,7 @@ impl FakeHarness {
             started: false,
             turn_active: false,
             pending: None,
+            pending_question: None,
             capabilities: Capabilities::fake(),
             start_failure: None,
             prompt_failure: None,
@@ -264,6 +277,19 @@ impl FakeHarness {
                     });
                     return Ok(());
                 }
+                FakeStep::Question { question_id, text } => {
+                    self.send(HarnessEvent::QuestionRequested {
+                        question_id: question_id.clone(),
+                        text: text.clone(),
+                    })?;
+                    self.pending_question = Some(PendingQuestion {
+                        question_id: question_id.clone(),
+                        remaining: steps[offset - offset_base + 1..].to_vec(),
+                        next_offset: offset + 1,
+                        finish,
+                    });
+                    return Ok(());
+                }
                 FakeStep::Plan(rows) => {
                     self.send(HarnessEvent::Plan {
                         rows: rows.clone(),
@@ -303,6 +329,7 @@ impl FakeHarness {
                 FakeStep::Exit { code, stderr } => {
                     self.turn_active = false;
                     self.pending = None;
+                    self.pending_question = None;
                     self.send(HarnessEvent::Exited {
                         code: Some(*code),
                         stderr: stderr.clone(),
@@ -363,7 +390,7 @@ impl AgentHarness for FakeHarness {
         if !self.started || self.session_id.is_none() {
             return Err(HarnessError::SessionMissing);
         }
-        if self.pending.is_some() {
+        if self.pending.is_some() || self.pending_question.is_some() {
             return Err(HarnessError::ApprovalPending);
         }
         if let Some(failure) = self.prompt_failure {
@@ -400,6 +427,7 @@ impl AgentHarness for FakeHarness {
                 source: crate::ApprovalSource::Agent,
             })?;
         }
+        self.pending_question = None;
         self.finish_turn(TurnFinishReason::Cancelled)
     }
 
@@ -428,6 +456,22 @@ impl AgentHarness for FakeHarness {
         }
     }
 
+    async fn answer_question(&mut self, question_id: &str, answer: &str) -> HarnessResult<()> {
+        let pending = self
+            .pending_question
+            .take()
+            .ok_or_else(|| HarnessError::Protocol("No question is awaiting an answer".into()))?;
+        if pending.question_id != question_id {
+            self.pending_question = Some(pending);
+            return Err(HarnessError::Protocol("Question does not match".into()));
+        }
+        self.send(HarnessEvent::QuestionAnswered {
+            question_id: question_id.to_owned(),
+            answer: answer.to_owned(),
+        })?;
+        self.emit_steps(&pending.remaining, pending.next_offset, pending.finish)
+    }
+
     async fn shutdown(&mut self) -> HarnessResult<()> {
         if !self.started {
             return Ok(());
@@ -435,6 +479,7 @@ impl AgentHarness for FakeHarness {
         self.started = false;
         self.turn_active = false;
         self.pending = None;
+        self.pending_question = None;
         self.send(HarnessEvent::Exited {
             code: Some(0),
             stderr: String::new(),
@@ -475,6 +520,38 @@ mod tests {
         assert!(session.is_ok());
         drain_events(&mut harness);
         harness
+    }
+
+    #[tokio::test]
+    async fn question_pauses_until_matching_answer_and_resumes_the_turn()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut harness = started_harness(vec![FakeTurn::new(vec![
+            FakeStep::Question {
+                question_id: "question-1".into(),
+                text: "Which target?".into(),
+            },
+            FakeStep::Message("Continuing".into()),
+        ])])
+        .await;
+        harness.prompt(PromptInput::text("start")).await?;
+        let before = drain_events(&mut harness);
+        assert!(before.iter().any(|event| matches!(event, HarnessEvent::QuestionRequested { question_id, .. } if question_id == "question-1")));
+        assert!(
+            !before
+                .iter()
+                .any(|event| matches!(event, HarnessEvent::TurnFinished { .. }))
+        );
+        assert!(harness.answer_question("wrong", "debug").await.is_err());
+        harness.answer_question("question-1", "debug").await?;
+        let after = drain_events(&mut harness);
+        assert!(after.iter().any(|event| matches!(event, HarnessEvent::QuestionAnswered { question_id, answer } if question_id == "question-1" && answer == "debug")));
+        assert!(after.iter().any(|event| matches!(
+            event,
+            HarnessEvent::TurnFinished {
+                reason: TurnFinishReason::Completed
+            }
+        )));
+        Ok(())
     }
 
     #[tokio::test]
