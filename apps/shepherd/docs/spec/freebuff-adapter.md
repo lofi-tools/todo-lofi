@@ -180,8 +180,8 @@ and report failures through Shepherd's normal diagnostics.
 ### Opt-in capture runner
 
 The shell contains an ignored `approved_freebuff_capture` diagnostic behind
-the non-default `live-freebuff` feature. It has not yet been verified against
-an offline fake CLI and must not be used live until that verification is done.
+the non-default `live-freebuff` feature. Its capture and worktree-effect path
+has passed an offline fake CLI check; Freebuff itself remains unverified.
 Before each live submission, obtain the user's approval of the exact prompt,
 project, disposable worktree and context. The runner reads the prompt from a
 file, displays PTY output, and waits for separate `send` and `stop` marker
@@ -191,6 +191,16 @@ records output, screens, input, runtime metadata and supported worktree effects;
 an error or missing drain leaves the capture incomplete. Marker files are local
 controls, not a substitute for user approval. This diagnostic does not yet
 classify the screen, test approval flows, or establish runtime compatibility.
+
+For faithful replay, also record the terminal type and renderer version, and
+the process exit code or signal, distinguishing an operator-requested stop
+from a natural exit. Keep the original byte stream: PTY reads can split UTF-8
+characters or contain non-text bytes. The [asciicast v3 format](https://docs.asciinema.org/manual/asciicast/v3/)
+provides a useful reference for timed input, output, resizing and exit events;
+consider an optional export for playback without replacing the native capture
+or silently losing bytes. [tlog's format](https://github.com/Scribery/tlog/blob/main/doc/log_format.md)
+is another reference for preserving non-text bytes. Captures may include
+sensitive input and output and must remain private.
 
 ## Acceptance criteria
 

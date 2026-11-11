@@ -1663,6 +1663,7 @@ mod tests {
         );
         let mut submitted = false;
         let mut stopping = false;
+        let mut errors_open = true;
         let mut pending_write: Option<TerminalWrite> = None;
         let deadline = tokio::time::sleep(Duration::from_secs(600));
         tokio::pin!(deadline);
@@ -1670,7 +1671,10 @@ mod tests {
         loop {
             tokio::select! {
                 _ = &mut deadline => return Err("capture timed out".into()),
-                error = errors.recv() => return Err(error.unwrap_or_else(|| "capture error channel closed".into()).into()),
+                error = errors.recv(), if errors_open => match error {
+                    Some(error) => return Err(error.into()),
+                    None => errors_open = false,
+                },
                 result = async {
                     match pending_write.as_mut() {
                         Some(write) => write.await.map_err(|error| error.to_string()),
