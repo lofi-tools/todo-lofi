@@ -60,10 +60,13 @@ and login diagnostics are now implemented.
       `/Users/me/src/me/tools`. Confirm each exact message and its context
       before submission; request examples if the ChatGPT project is inaccessible.
       Candidate supplied by the user: “give me the dotenv fragment to override /
-      ignore battery / wifi and run ar3 regardless”. It is not yet approved.
+      ignore battery / wifi and run ar3 regardless”. The user approved one live
+      submission of this exact message in the `tools` project once recording is
+      ready, using Freebuff's default model (DeepSeek 4.1). Other live messages
+      still require their own approval.
       The relevant `crates/ar3/docs/agent-api.md` is present in the committed
-      `tools` project. The checkout has unrelated uncommitted changes; disclose
-      that a disposable worktree uses the committed state when seeking approval.
+      `tools` project. The checkout has unrelated uncommitted changes; a
+      disposable worktree uses the committed state.
   - [ ] **P0 — Capture fixtures and define contracts:** create sanitized,
     versioned PTY/screen fixtures and a deterministic fake CLI. Map terminal
     states to harness events; identify necessary contract changes for
@@ -188,8 +191,9 @@ and login diagnostics are now implemented.
     restorable question rows and search text. Its fixture has not yet run;
     A session now tracks pending questions and prevents duplicate answer
     submissions until delivery is confirmed, and task state accounts for both
-    questions and approvals. This routing is untested; connect the command,
-    adapter transport and UI before use.
+    questions and approvals. A shell command now routes answers through that
+    session and persists confirmed updates. This routing is untested; connect
+    the adapter transport and UI before use.
   - [ ] **P1 — Integrate the picker:** expose the integrated agent separately
     from **Freebuff (terminal)**, preserve the terminal's existing behavior,
     and test task routing, persistence, diagnostics, and update status.

@@ -1271,6 +1271,11 @@ impl Core {
                 approval_id,
                 decision,
             } => self.resolve_approval(&task_id, approval_id, decision).await,
+            Command::AnswerQuestion {
+                task_id,
+                question_id,
+                answer,
+            } => self.answer_question(&task_id, &question_id, &answer).await,
             Command::CancelTask { task_id } => self.cancel_task(&task_id).await,
             Command::ResumeTask { task_id } => self.resume_task(&task_id).await,
             Command::ReviewTask { task_id, action } => self.review_task(&task_id, action).await,
@@ -2543,6 +2548,40 @@ impl Core {
         self.save_task(task_id).await?;
         let workspace = self.publish_task(task_id)?;
         Ok(CommandResult::TaskWorkspace(workspace))
+    }
+
+    async fn answer_question(
+        &mut self,
+        task_id: &TaskId,
+        question_id: &str,
+        answer: &str,
+    ) -> Result<CommandResult, CoreError> {
+        let session = self
+            .sessions
+            .get_mut(task_id)
+            .ok_or_else(|| CoreError::SessionMissing {
+                id: task_id.as_str().to_string(),
+            })?;
+        let outcome = session.answer_question(question_id, answer).await;
+        let events = match outcome {
+            Ok(events) => events,
+            Err(error) => {
+                let pending = self
+                    .sessions
+                    .get_mut(task_id)
+                    .map(HarnessSession::pump_existing)
+                    .unwrap_or_default();
+                if !pending.is_empty() {
+                    self.apply_events(task_id, &pending)?;
+                    self.save_task(task_id).await?;
+                    self.publish_task(task_id)?;
+                }
+                return Err(error);
+            }
+        };
+        self.apply_events(task_id, &events)?;
+        self.save_task(task_id).await?;
+        Ok(CommandResult::TaskWorkspace(self.publish_task(task_id)?))
     }
 
     /// Cancel stops the current turn but keeps the session and the worktree:

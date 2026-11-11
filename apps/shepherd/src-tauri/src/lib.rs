@@ -259,6 +259,7 @@ pub fn run() -> Result<(), tauri::Error> {
             bridge::commands::retry_task_branch,
             bridge::commands::set_session_mode,
             bridge::commands::resolve_approval,
+            bridge::commands::answer_question,
             bridge::commands::project_approvals,
             bridge::commands::reset_approval_grant,
             bridge::commands::cancel_task,

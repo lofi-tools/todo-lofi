@@ -60,6 +60,11 @@ pub enum Command {
         approval_id: ApprovalId,
         decision: Decision,
     },
+    AnswerQuestion {
+        task_id: TaskId,
+        question_id: String,
+        answer: String,
+    },
     CancelTask {
         task_id: TaskId,
     },

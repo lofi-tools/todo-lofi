@@ -1711,6 +1711,20 @@ impl ShellState {
         .await
     }
 
+    pub async fn answer_question(
+        &self,
+        task_id: String,
+        question_id: String,
+        answer: String,
+    ) -> Result<TaskWorkspace, BridgeError> {
+        self.workspace(Command::AnswerQuestion {
+            task_id: TaskId::new(task_id),
+            question_id,
+            answer,
+        })
+        .await
+    }
+
     pub async fn project_approvals(
         &self,
         project_id: String,
@@ -3134,6 +3148,19 @@ pub mod commands {
         state
             .inner()
             .resolve_approval(task_id, approval_id, decision)
+            .await
+    }
+
+    #[tauri::command]
+    pub async fn answer_question(
+        state: State<'_, ShellState>,
+        task_id: String,
+        question_id: String,
+        answer: String,
+    ) -> Result<TaskWorkspace, BridgeError> {
+        state
+            .inner()
+            .answer_question(task_id, question_id, answer)
             .await
     }
 

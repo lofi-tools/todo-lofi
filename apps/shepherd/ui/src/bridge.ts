@@ -701,6 +701,10 @@ export function resolveApproval(
   return invoke<TaskWorkspace>('resolve_approval', { taskId, approvalId, decision })
 }
 
+export function answerQuestion(taskId: string, questionId: string, answer: string): Promise<TaskWorkspace> {
+  return invoke<TaskWorkspace>('answer_question', { taskId, questionId, answer })
+}
+
 export interface ProjectApproval {
   id: string
   agent: Agent
