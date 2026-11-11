@@ -727,6 +727,102 @@ fn named_color(color: NamedColor, appearance: TerminalAppearance) -> u32 {
 }
 
 #[allow(dead_code)]
+pub(crate) struct RecordedScreenReplayer {
+    verifier: Screen,
+    replay: Screen,
+    previous: TerminalFrame,
+    failed: bool,
+}
+
+#[allow(dead_code)]
+impl RecordedScreenReplayer {
+    pub fn new(columns: u16, rows: u16) -> agent_harness::HarnessResult<Self> {
+        shepherd_core::terminal::validate_size(columns, rows).map_err(|error| {
+            agent_harness::HarnessError::Protocol(format!("invalid terminal size: {error}"))
+        })?;
+        let verifier = Screen::with_scrollback(usize::from(columns), usize::from(rows), 0);
+        let replay = Screen::with_scrollback(usize::from(columns), usize::from(rows), 0);
+        let previous = replay.frame();
+        Ok(Self {
+            verifier,
+            replay,
+            previous,
+            failed: false,
+        })
+    }
+
+    pub fn apply(
+        &mut self,
+        update: &crate::pty_terminal::RecordedScreenUpdate,
+        mut visit: impl FnMut(&TerminalFrame) -> agent_harness::HarnessResult<()>,
+    ) -> agent_harness::HarnessResult<()> {
+        use crate::pty_terminal::RecordedScreenUpdate;
+        use agent_harness::HarnessError;
+        if self.failed {
+            return Err(HarnessError::Protocol(
+                "terminal screen replay has failed".into(),
+            ));
+        }
+        self.failed = true;
+        match update {
+            RecordedScreenUpdate::Output { bytes, state } => {
+                self.verifier.process(bytes);
+                Self::verify_frame(&self.verifier, state)?;
+                // A read may scroll earlier output away before its final frame.
+                for byte in bytes {
+                    self.replay.process(std::slice::from_ref(byte));
+                    let frame = self.replay.frame();
+                    if frame != self.previous {
+                        visit(&frame)?;
+                        self.previous = frame;
+                    }
+                }
+                Self::verify_frame(&self.replay, state)?;
+            }
+            RecordedScreenUpdate::Resize {
+                columns,
+                rows,
+                state,
+            } => {
+                shepherd_core::terminal::validate_size(*columns, *rows).map_err(|error| {
+                    HarnessError::Protocol(format!("invalid terminal size: {error}"))
+                })?;
+                self.verifier
+                    .resize(usize::from(*columns), usize::from(*rows));
+                Self::verify_frame(&self.verifier, state)?;
+                self.replay
+                    .resize(usize::from(*columns), usize::from(*rows));
+                let frame = self.replay.frame();
+                if frame != self.previous {
+                    visit(&frame)?;
+                    self.previous = frame;
+                }
+                Self::verify_frame(&self.replay, state)?;
+            }
+        }
+        self.failed = false;
+        Ok(())
+    }
+
+    fn verify_frame(
+        screen: &Screen,
+        expected: &serde_json::Value,
+    ) -> agent_harness::HarnessResult<()> {
+        let actual = serde_json::to_value(screen.frame()).map_err(|error| {
+            agent_harness::HarnessError::Protocol(format!(
+                "could not encode terminal screen: {error}"
+            ))
+        })?;
+        if &actual != expected {
+            return Err(agent_harness::HarnessError::Protocol(
+                "captured terminal screen does not match replayed output".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[allow(dead_code)]
 pub(crate) fn verify_recorded_screens(path: &std::path::Path) -> agent_harness::HarnessResult<()> {
     visit_verified_screens(path, |_, _| Ok(()))
 }
@@ -846,6 +942,51 @@ mod tests {
     use agent_harness::freebuff_capture::{
         CaptureEvent, CaptureRecord, CaptureWriter, visit_capture,
     };
+
+    #[test]
+    fn recorded_read_replays_text_that_scrolls_out_before_its_final_frame()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use crate::pty_terminal::RecordedScreenUpdate;
+        let bytes = b"first\r\nsecond\r\nthird".to_vec();
+        let mut source = Screen::with_scrollback(10, 2, 0);
+        source.process(&bytes);
+        let state = serde_json::to_value(source.frame())?;
+        let mut replay = RecordedScreenReplayer::new(10, 2)?;
+        let mut saw_first = false;
+        replay.apply(
+            &RecordedScreenUpdate::Output {
+                bytes: bytes.clone(),
+                state: state.clone(),
+            },
+            |frame| {
+                saw_first |= row(frame, 0).contains("first");
+                Ok(())
+            },
+        )?;
+        assert!(saw_first);
+        assert!(!row(&source.frame(), 0).contains("first"));
+
+        let mut rejected = RecordedScreenReplayer::new(10, 2)?;
+        let mut invalid = state;
+        invalid["columns"] = serde_json::json!(9);
+        let mut called = false;
+        assert!(
+            rejected
+                .apply(
+                    &RecordedScreenUpdate::Output {
+                        bytes,
+                        state: invalid
+                    },
+                    |_| {
+                        called = true;
+                        Ok(())
+                    }
+                )
+                .is_err()
+        );
+        assert!(!called);
+        Ok(())
+    }
 
     #[test]
     fn recorded_screens_must_match_replayed_terminal_output()

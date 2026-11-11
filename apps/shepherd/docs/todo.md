@@ -117,6 +117,9 @@ and login diagnostics are now implemented.
       The observer now carries original PTY bytes and resize events alongside
       each frame, so a classifier can replay intermediate screen changes that
       occur within one read. This updated observer fixture has not run.
+      An intermediate-frame replayer validates each recorded update before
+      exposing changes within it, including text scrolled out before the final
+      frame; its fixture has not run. Connect it to the screen classifier.
     - [ ] Finalize captures only after terminal output, responses, and worktree
       effects are drained; require a completion marker for successful replay.
       The capture API rejects missing or trailing records; its completion
