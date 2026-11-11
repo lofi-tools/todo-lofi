@@ -92,6 +92,14 @@ quit in other states, and streaming/queue state changes the placeholder. These
 are static code observations, not verified screen or input behavior: never use
 them alone to recognize readiness, clear a draft, or send an interrupt.
 
+The same bundled code describes an `ask_user` tool that accepts a list of
+questions, each with at least two options, optional multi-select, and optional
+validation for custom text. Its described answer format distinguishes selected
+options, custom text, and skipping. This is static evidence, not an observed
+terminal interaction. Shepherd's current text-only question contract cannot
+faithfully represent all of those cases; the user is choosing how they should
+appear before that contract is extended.
+
 ## Session and transcript
 
 Support multiple turns in the same running process. Investigate whether the
