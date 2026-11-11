@@ -5145,8 +5145,7 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         use agent_harness::freebuff_capture::{CaptureSession, CaptureWriter};
         let directory = TestDirectory::new()?;
-        let session =
-            CaptureSession::new(CaptureWriter::create(directory.path(), "host-fixture")?);
+        let session = CaptureSession::new(CaptureWriter::create(directory.path(), "host-fixture")?);
         let (error_sender, mut errors) = mpsc::unbounded_channel();
         let (screen_sender, mut screens) = mpsc::channel(16);
         let recording = Arc::new(
@@ -5173,7 +5172,10 @@ mod tests {
             .await?
             .ok_or("missing observed frame")?;
         assert_eq!(
-            frame.state().get("columns").and_then(|value| value.as_u64()),
+            frame
+                .state()
+                .get("columns")
+                .and_then(|value| value.as_u64()),
             Some(80)
         );
         let mut output = Vec::new();
@@ -5184,7 +5186,8 @@ mod tests {
                     TerminalEvent::Exited { .. } => return,
                 }
             }
-        }).await?;
+        })
+        .await?;
         assert!(output.windows(10).any(|bytes| bytes == b"host-ready"));
         assert!(errors.try_recv().is_err());
         Ok(())
@@ -5243,8 +5246,7 @@ mod tests {
             .ok_or("missing recorded frame")?;
         let list = state.terminal_list(project.id.clone()).await;
         assert!(list.terminals.iter().any(|terminal| {
-            terminal.id == id.as_str()
-                && terminal.task_id.as_deref() == Some(task.task.id.as_str())
+            terminal.id == id.as_str() && terminal.task_id.as_deref() == Some(task.task.id.as_str())
         }));
         assert!(state.screen_slot(id.as_str()).await.is_ok());
         assert!(errors.try_recv().is_err());

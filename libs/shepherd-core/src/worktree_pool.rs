@@ -125,9 +125,7 @@ pub fn next_slot_path(
 ) -> Option<PathBuf> {
     for index in 1..=MAX_SLOT_INDEX {
         let path = slot_path(root, index);
-        if path.exists()
-            || used.contains(&path)
-            || records.iter().any(|record| record.path == path)
+        if path.exists() || used.contains(&path) || records.iter().any(|record| record.path == path)
         {
             continue;
         }
