@@ -35,6 +35,7 @@ pub enum Agent {
     OpenCode,
     Pi,
     Claude,
+    Freebuff,
 }
 
 impl Agent {
@@ -44,6 +45,7 @@ impl Agent {
             "opencode" => Some(Self::OpenCode),
             "pi" => Some(Self::Pi),
             "claude" => Some(Self::Claude),
+            "freebuff" => Some(Self::Freebuff),
             _ => None,
         }
     }
@@ -54,12 +56,14 @@ impl Agent {
             Self::OpenCode => "opencode",
             Self::Pi => "pi",
             Self::Claude => "claude",
+            Self::Freebuff => "freebuff",
         }
     }
 
     pub fn default_tier(self) -> AgentTier {
         match self {
             Self::Claude => AgentTier::Acp,
+            Self::Freebuff => AgentTier::TerminalWrapper,
             Self::Codex | Self::OpenCode | Self::Pi => AgentTier::Native,
         }
     }
@@ -352,5 +356,21 @@ fn slugify(title: &str) -> String {
         "task".to_string()
     } else {
         slug
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn freebuff_is_a_terminal_wrapper_agent() {
+        assert_eq!(Agent::parse("freebuff"), Some(Agent::Freebuff));
+        assert_eq!(Agent::Freebuff.as_str(), "freebuff");
+        assert_eq!(Agent::Freebuff.default_tier(), AgentTier::TerminalWrapper);
+        assert_eq!(
+            AgentTier::parse(Agent::Freebuff.default_tier().as_str()),
+            Some(AgentTier::TerminalWrapper)
+        );
     }
 }

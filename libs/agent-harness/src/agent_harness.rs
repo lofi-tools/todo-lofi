@@ -427,6 +427,7 @@ pub enum AdapterTier {
     #[default]
     Native,
     Acp,
+    TerminalWrapper,
 }
 
 impl Capabilities {

@@ -4,11 +4,15 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use serde::Deserialize;
+use tokio::sync::mpsc;
 
+use crate::acp::{TerminalBackend, TerminalLaunch, TerminalProcessEvent};
 use crate::{
-    DeltaKind, HarnessError, HarnessEvent, HarnessResult, ItemId, ToolCallId, ToolStatus,
-    settings::AgentSettings,
+    AdapterTier, AgentDiagnostics, AgentHarness, ApprovalId, Capabilities, Decision, DeltaKind,
+    HarnessError, HarnessEvent, HarnessResult, ItemId, PromptInput, SessionId, SpawnSpec,
+    ToolCallId, ToolStatus, command_line, settings::AgentSettings,
 };
 
 const MAX_METADATA_BYTES: u64 = 16 * 1024;
@@ -581,10 +585,235 @@ fn executable_permissions(_metadata: &std::fs::Metadata) -> bool {
     true
 }
 
+/// A terminal-tier adapter for Freebuff's interactive CLI.
+///
+/// Freebuff has no machine protocol; it is a TUI. This wrapper launches it in
+/// the task worktree and keeps its terminal visible, but advertises only what
+/// it can prove. Screen recognition is not connected yet, so composer prompts
+/// fail visibly instead of being submitted into an unrecognized screen.
+pub struct FreebuffHarness {
+    events: mpsc::UnboundedReceiver<HarnessEvent>,
+    sender: mpsc::UnboundedSender<HarnessEvent>,
+    terminals: Option<Arc<dyn TerminalBackend>>,
+    terminal_id: Option<String>,
+    diagnostics: AgentDiagnostics,
+    watcher: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl FreebuffHarness {
+    pub fn new() -> Self {
+        let (sender, events) = mpsc::unbounded_channel();
+        Self {
+            events,
+            sender,
+            terminals: None,
+            terminal_id: None,
+            diagnostics: AgentDiagnostics::default(),
+            watcher: None,
+        }
+    }
+
+    pub fn with_terminals(mut self, terminals: Arc<dyn TerminalBackend>) -> Self {
+        self.terminals = Some(terminals);
+        self
+    }
+
+    async fn stop_terminal(&mut self) -> HarnessResult<()> {
+        let (Some(terminals), Some(id)) = (self.terminals.clone(), self.terminal_id.take()) else {
+            return Ok(());
+        };
+        terminals.stop(&id).await.map_err(|error| {
+            HarnessError::Protocol(format!("could not stop the Freebuff terminal: {error}"))
+        })
+    }
+}
+
+#[async_trait]
+impl AgentHarness for FreebuffHarness {
+    fn events(&mut self) -> &mut mpsc::UnboundedReceiver<HarnessEvent> {
+        &mut self.events
+    }
+
+    fn diagnostics(&self) -> AgentDiagnostics {
+        self.diagnostics.clone()
+    }
+
+    fn tier(&self) -> AdapterTier {
+        AdapterTier::TerminalWrapper
+    }
+
+    async fn start(&mut self, spec: SpawnSpec) -> HarnessResult<Capabilities> {
+        let terminals = self.terminals.clone().ok_or_else(|| {
+            HarnessError::Protocol("Freebuff terminal backend is unavailable".into())
+        })?;
+        let terminal_id = format!("freebuff-{}", uuid::Uuid::new_v4());
+        let (process_sender, mut process_events) = mpsc::channel(64);
+        terminals
+            .spawn(
+                TerminalLaunch {
+                    id: terminal_id.clone(),
+                    cwd: spec.cwd.clone(),
+                    command: spec.program.clone(),
+                    args: spec.args.clone(),
+                    environment: spec.environment.clone(),
+                },
+                process_sender,
+            )
+            .await
+            .map_err(|error| {
+                HarnessError::Protocol(format!("could not start Freebuff: {error}"))
+            })?;
+        self.diagnostics = AgentDiagnostics {
+            command: command_line(&spec),
+            protocol: "terminal wrapper (Freebuff)".into(),
+            fallback_reason: Some("Freebuff screen interaction is not connected".into()),
+            ..AgentDiagnostics::default()
+        };
+        self.terminal_id = Some(terminal_id.clone());
+        let events = self.sender.clone();
+        let exited_id = terminal_id.clone();
+        self.watcher = Some(tokio::spawn(async move {
+            while let Some(event) = process_events.recv().await {
+                if let TerminalProcessEvent::Exited(status) = event {
+                    let _ = events.send(HarnessEvent::AgentTerminalExited {
+                        id: exited_id,
+                        exit_code: status.exit_code,
+                        stream_permit: None,
+                    });
+                    break;
+                }
+            }
+        }));
+        let _ = self.sender.send(HarnessEvent::AgentTerminalStarted {
+            id: terminal_id,
+            title: "Freebuff".into(),
+            stream_permit: None,
+        });
+        Ok(Capabilities {
+            cancel: true,
+            agent_terminals: true,
+            ..Capabilities::default()
+        })
+    }
+
+    async fn open_session(&mut self, resume: Option<SessionId>) -> HarnessResult<SessionId> {
+        if resume.is_some() {
+            return Err(HarnessError::Protocol(
+                "Freebuff terminal sessions cannot be resumed".into(),
+            ));
+        }
+        Ok(SessionId::new(uuid::Uuid::new_v4().to_string()))
+    }
+
+    async fn prompt(&mut self, _input: PromptInput) -> HarnessResult<()> {
+        Err(HarnessError::Protocol(
+            "Freebuff composer prompts are not supported yet: screen interaction is not verified. Use Freebuff (terminal) in the meantime."
+                .into(),
+        ))
+    }
+
+    async fn cancel(&mut self) -> HarnessResult<()> {
+        self.stop_terminal().await
+    }
+
+    async fn respond(
+        &mut self,
+        _approval_id: ApprovalId,
+        _decision: Decision,
+    ) -> HarnessResult<()> {
+        Err(HarnessError::Protocol(
+            "Freebuff does not support approval responses".into(),
+        ))
+    }
+
+    async fn shutdown(&mut self) -> HarnessResult<()> {
+        if let Some(watcher) = self.watcher.take() {
+            watcher.abort();
+        }
+        self.stop_terminal().await
+    }
+}
+
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+
+    struct TerminalFixture {
+        spawned: std::sync::Mutex<Vec<TerminalLaunch>>,
+        stopped: std::sync::Mutex<Vec<String>>,
+    }
+
+    #[async_trait]
+    impl TerminalBackend for TerminalFixture {
+        async fn spawn(
+            &self,
+            launch: TerminalLaunch,
+            _events: mpsc::Sender<TerminalProcessEvent>,
+        ) -> Result<(), String> {
+            self.spawned
+                .lock()
+                .map_err(|_| "spawn lock poisoned".to_string())?
+                .push(launch);
+            Ok(())
+        }
+
+        async fn stop(&self, id: &str) -> Result<(), String> {
+            self.stopped
+                .lock()
+                .map_err(|_| "stop lock poisoned".to_string())?
+                .push(id.to_string());
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn terminal_wrapper_launches_freebuff_and_rejects_unverified_prompts()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let backend = Arc::new(TerminalFixture {
+            spawned: Default::default(),
+            stopped: Default::default(),
+        });
+        let mut harness = FreebuffHarness::new().with_terminals(backend.clone());
+        assert_eq!(harness.tier(), AdapterTier::TerminalWrapper);
+        let capabilities = harness
+            .start(SpawnSpec {
+                program: "freebuff".into(),
+                cwd: PathBuf::from("/worktree"),
+                ..SpawnSpec::default()
+            })
+            .await?;
+        assert!(capabilities.cancel && capabilities.agent_terminals);
+        assert!(!capabilities.streaming);
+        assert!(!capabilities.approvals);
+        assert!(!capabilities.resume);
+        assert!(!capabilities.model_picker);
+        assert!(harness.diagnostics().protocol.contains("terminal wrapper"));
+        match harness.events().recv().await {
+            Some(HarnessEvent::AgentTerminalStarted { id, title, .. }) => {
+                assert_eq!(title, "Freebuff");
+                assert!(id.starts_with("freebuff-"));
+            }
+            other => return Err(format!("unexpected event: {other:?}").into()),
+        }
+        {
+            let spawned = backend.spawned.lock().map_err(|_| "spawn lock poisoned")?;
+            assert_eq!(spawned.len(), 1);
+            assert_eq!(spawned[0].command, "freebuff");
+            assert_eq!(spawned[0].cwd, PathBuf::from("/worktree"));
+        }
+        assert!(harness.prompt(PromptInput::text("hello")).await.is_err());
+        harness.shutdown().await?;
+        assert_eq!(
+            backend
+                .stopped
+                .lock()
+                .map_err(|_| "stop lock poisoned")?
+                .len(),
+            1
+        );
+        Ok(())
+    }
 
     #[test]
     fn tool_redraws_update_one_call_and_reject_conflicting_states()

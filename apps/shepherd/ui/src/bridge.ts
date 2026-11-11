@@ -29,8 +29,8 @@ export type TaskState =
   | 'interrupted'
 
 export type AgentTier = 'native' | 'acp' | 'terminal-wrapper' | 'plain-pane'
-export type Agent = 'codex' | 'opencode' | 'pi' | 'claude'
-export const AGENT_LABELS: Record<Agent, string> = { codex: 'Codex', opencode: 'OpenCode', pi: 'Pi', claude: 'Claude Code' }
+export type Agent = 'codex' | 'opencode' | 'pi' | 'claude' | 'freebuff'
+export const AGENT_LABELS: Record<Agent, string> = { codex: 'Codex', opencode: 'OpenCode', pi: 'Pi', claude: 'Claude Code', freebuff: 'Freebuff' }
 
 export type ShutdownState = 'running' | 'draining' | 'terminating' | 'closed'
 

@@ -195,6 +195,19 @@ pub fn run() -> Result<(), tauri::Error> {
                     if let Err(error) = &claude {
                         tracing::warn!(%error, "could not load Claude Code configuration");
                     }
+                    let freebuff = match &agents {
+                        Ok(settings) => agent_harness::freebuff::discover_from_settings(
+                            settings,
+                            std::env::var_os("PATH")
+                                .as_deref()
+                                .unwrap_or_else(|| std::ffi::OsStr::new("")),
+                        )
+                        .map(|discovery| discovery.install.map(|install| install.executable)),
+                        Err(error) => Err(agent_harness::HarnessError::Protocol(error.to_string())),
+                    };
+                    if let Err(error) = &freebuff {
+                        tracing::warn!(%error, "could not load Freebuff configuration");
+                    }
                     let opencode_launch = opencode.as_ref().ok().cloned().flatten();
                     let pi_configured = matches!(&pi, Ok(Some(_)));
                     let claude_configured = matches!(&claude, Ok(Some(_)));
@@ -204,6 +217,7 @@ pub fn run() -> Result<(), tauri::Error> {
                             opencode,
                             pi,
                             claude,
+                            freebuff,
                             settings: agents.as_ref().cloned().map_err(ToString::to_string),
                             terminals: std::sync::Arc::new(terminals.clone()),
                         }),

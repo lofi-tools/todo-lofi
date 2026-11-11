@@ -43,9 +43,9 @@ impl PoolResetPolicy {
         let windows = match agent {
             Agent::Codex => CODEX_WINDOWS,
             Agent::Claude => CLAUDE_WINDOWS,
-            // OpenCode and Pi borrow another provider's quota, so no window
-            // belongs to the harness itself.
-            Agent::OpenCode | Agent::Pi => &[],
+            // OpenCode and Pi borrow another provider's quota, and Freebuff is
+            // a terminal wrapper, so no window belongs to their harness.
+            Agent::OpenCode | Agent::Pi | Agent::Freebuff => &[],
         };
         Self { windows }
     }

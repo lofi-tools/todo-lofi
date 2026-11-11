@@ -118,6 +118,9 @@ pub trait HarnessFactory: Send + Sync {
             Agent::Claude => Err(CoreError::HarnessMissing {
                 report: "Claude Code ACP executable is unavailable".into(),
             }),
+            Agent::Freebuff => Err(CoreError::HarnessMissing {
+                report: "Freebuff executable is unavailable".into(),
+            }),
         }
     }
 
@@ -700,6 +703,7 @@ impl HarnessSession {
         match self.harness.tier() {
             AdapterTier::Native => AgentTier::Native,
             AdapterTier::Acp => AgentTier::Acp,
+            AdapterTier::TerminalWrapper => AgentTier::TerminalWrapper,
         }
     }
 

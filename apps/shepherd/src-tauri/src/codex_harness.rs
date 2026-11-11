@@ -10,6 +10,7 @@ use std::sync::Arc;
 
 use agent_harness::acp::{AcpHarness, TerminalBackend};
 use agent_harness::codex::{CodexHarness, CodexInstall, CodexTier, ExecHarness};
+use agent_harness::freebuff::FreebuffHarness;
 use agent_harness::opencode::OpenCodeHarness;
 use agent_harness::pi::PiHarness;
 use agent_harness::settings::{AgentSettings, ConfiguredCommand};
@@ -24,6 +25,7 @@ pub struct DesktopHarnessFactory {
     pub opencode: Result<Option<SpawnSpec>, HarnessError>,
     pub pi: Result<Option<ConfiguredCommand>, HarnessError>,
     pub claude: Result<Option<ConfiguredCommand>, HarnessError>,
+    pub freebuff: Result<Option<PathBuf>, HarnessError>,
     pub settings: Result<AgentSettings, String>,
     pub terminals: Arc<crate::bridge::TerminalHost>,
 }
@@ -124,6 +126,14 @@ impl DesktopHarnessFactory {
                     Box::new(AcpHarness::default().with_terminals(terminals)),
                     &command.executable,
                     command.args.clone(),
+                )
+            }
+            Agent::Freebuff => {
+                let executable = require_configured(&self.freebuff, "agents.freebuff.executable")?;
+                (
+                    Box::new(FreebuffHarness::new().with_terminals(terminals)),
+                    executable,
+                    Vec::new(),
                 )
             }
         };
@@ -313,6 +323,7 @@ mod tests {
             claude: Ok(None),
             settings: Ok(settings),
             terminals: Arc::new(crate::bridge::TerminalHost::default()),
+            freebuff: Ok(None),
         };
         assert_eq!(
             factory
@@ -355,6 +366,7 @@ mod tests {
             claude: Ok(None),
             settings: Ok(settings),
             terminals: Arc::new(crate::bridge::TerminalHost::default()),
+            freebuff: Ok(None),
         };
         let cwd = PathBuf::from("/tmp/worktree");
         let (_harness, spec) = factory.launch(Agent::OpenCode, cwd.clone())?;
@@ -384,6 +396,7 @@ mod tests {
             })),
             settings: Ok(AgentSettings::default()),
             terminals: Arc::new(crate::bridge::TerminalHost::default()),
+            freebuff: Ok(None),
         };
         let cwd = PathBuf::from("/tmp/worktree");
         let (harness, spec) = factory.launch(Agent::Claude, cwd.clone())?;

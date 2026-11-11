@@ -246,6 +246,11 @@ and login diagnostics are now implemented.
     terminal interpretation, stream and reconcile text, map tool activity,
     completion and errors, and persist normalized transcript events. Bound
     buffers, clean up the PTY/process tree, and fail visibly on uncertainty.
+    An `Agent::Freebuff` terminal-wrapper harness now discovers the configured
+    or PATH executable, launches it in the task worktree through the terminal
+    host, exposes its terminal, and advertises only cancel/terminal support.
+    Composer prompts fail with a clear reason until the verified screen
+    classifier is connected, so the adapter does not guess at readiness.
   - [ ] **P1 — Bridge interactions and lifecycle:** connect approvals and
     questions to existing Shepherd controls, implement normal interruption and
     prompt-readiness confirmation, support multi-turn sessions, and implement
