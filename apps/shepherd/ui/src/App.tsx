@@ -203,6 +203,7 @@ export function App() {
   const [composingProjectId, setComposingProjectId] = createSignal<string>()
   const [selectedProjectId, setSelectedProjectId] = createSignal<string | null>(null)
   const [freebuffProjectId, setFreebuffProjectId] = createSignal<string>()
+  const [answeringQuestions, setAnsweringQuestions] = createSignal(new Set<string>())
   const selectedProject = () => projects().find((project) => project.id === selectedProjectId())
   const [projectModel] = createResource(
     () => {
@@ -1734,6 +1735,20 @@ export function App() {
     })
   }
 
+  function answerQuestion(questionId: string, answer: string) {
+    const current = workspace()
+    if (!current || current.task.state !== 'waiting' || cancellingTurn() || pending()) return
+    const key = JSON.stringify([current.task.id, questionId])
+    if (answeringQuestions().has(key)) return
+    setAnsweringQuestions((previous) => new Set(previous).add(key))
+    void run(async () => {
+      const updated = await bridge.answerQuestion(current.task.id, questionId, answer)
+      if (selectedTaskId() === current.task.id) setWorkspace(updated)
+      const projectId = selectedProjectId()
+      if (projectId) await loadTasks(projectId)
+    })
+  }
+
   function cancelTurn() {
     const current = workspace()
     if (!current || !canCancel() || current.cancelling || cancelRequestTaskId()) return
@@ -2255,7 +2270,9 @@ export function App() {
                         }
                         return <li class="entry" classList={{ 'entry--search-hit': !!target() }}
                           data-entry-id={entry.id} tabIndex={-1}>
-                          {entryBody(entry, decide, cancellingTurn, canApprove,
+                          {entryBody(entry, decide, answerQuestion, cancellingTurn, canApprove,
+                            () => current().task.state === 'waiting' && !pending() && !cancellingTurn(),
+                            (questionId) => answeringQuestions().has(JSON.stringify([current().task.id, questionId])),
                             () => target()?.snippet.field === 'entry' ? target()?.snippet.matched : undefined)}
                         </li>
                       }}
@@ -3026,11 +3043,44 @@ function authFailureSummary(text: string, detail: string | null | undefined) {
   return 'Sign in to the model provider and check its API key, then retry.'
 }
 
+function QuestionCard(props: {
+  question: Extract<bridge.EntryKind, { type: 'question' }>['data']
+  canAnswer: () => boolean
+  awaiting: () => boolean
+  onAnswer: (questionId: string, answer: string) => void
+  match: () => string | undefined
+}) {
+  const [answer, setAnswer] = createSignal('')
+  const disabled = () => !props.canAnswer() || props.awaiting()
+  return <div class="entry__permission">
+    <p class="entry__permission-title"><SearchMark text={props.question.text} match={props.match()} /></p>
+    <Show when={props.question.answer === null} fallback={
+      <p class="entry__question-answer"><SearchMark text={props.question.answer ?? ''} match={props.match()} /></p>
+    }>
+      <form class="entry__question-form" onSubmit={(event) => {
+        event.preventDefault()
+        if (disabled() || !answer().trim()) return
+        props.onAnswer(props.question.questionId, answer())
+      }}>
+        <textarea aria-label="Answer question" value={answer()} disabled={disabled()}
+          onInput={(event) => setAnswer(event.currentTarget.value)} />
+        <div class="entry__actions">
+          <button type="submit" disabled={disabled() || !answer().trim()}>Send answer</button>
+        </div>
+        <Show when={props.awaiting()}><span class="entry__permission-decision">Waiting for answer confirmation</span></Show>
+      </form>
+    </Show>
+  </div>
+}
+
 function entryBody(
   entry: bridge.Entry,
   decide: (approvalId: string, decision: bridge.Decision) => void,
+  answerQuestion: (questionId: string, answer: string) => void,
   cancelling: () => boolean,
   canApprove: () => boolean,
+  canAnswer: () => boolean,
+  awaitingAnswer: (questionId: string) => boolean,
   match: () => string | undefined,
 ) {
   const kind = entry.kind
@@ -3050,6 +3100,8 @@ function entryBody(
       return <p class="entry__agent">{text(kind.data.text)}</p>
     case 'thought':
       return <p class="entry__thought">{text(kind.data.text)}</p>
+    case 'question':
+      return <QuestionCard question={kind.data} canAnswer={canAnswer} awaiting={() => awaitingAnswer(kind.data.questionId)} onAnswer={answerQuestion} match={match} />
     case 'toolCall':
       return (
         <div class="entry__tool">

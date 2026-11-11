@@ -403,6 +403,7 @@ export type EntryKind =
   | { type: 'userMessage'; data: { text: string } }
   | { type: 'agentText'; data: { text: string } }
   | { type: 'thought'; data: { text: string } }
+  | { type: 'question'; data: { questionId: string; text: string; answer: string | null } }
   | { type: 'toolCall'; data: ToolCallEntry }
   | { type: 'plan'; data: { rows: PlanRow[] } }
   | { type: 'permission'; data: PermissionEntry }

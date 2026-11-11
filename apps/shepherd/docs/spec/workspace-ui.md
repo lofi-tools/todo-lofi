@@ -304,6 +304,9 @@ current layout and give future changes a point of comparison.
   saved approvals and live session approvals in separate lists. Label each
   session grant with its task, remove it when its session ends, and show a
   reset action for each grant.
+- Show an agent's open-ended question in an inline card with a text answer and
+  **Send answer**. Keep the submitted answer visible in the transcript, and
+  disable the card while an answer is awaiting confirmation.
 - For interrupted or failed tasks with a worktree, show **Resume** when the
   saved session can resume, **Reconnect** for legacy records with a session
   handle, or **Start new session** when a fresh session is needed. Enable the

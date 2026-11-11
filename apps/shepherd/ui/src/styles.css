@@ -1570,6 +1570,24 @@ textarea {
   font-weight: 600;
 }
 
+.entry__question-form textarea {
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 64px;
+  margin-top: 8px;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+  resize: vertical;
+}
+
+.entry__question-answer {
+  margin: 8px 0 0;
+  white-space: pre-wrap;
+}
+
 .entry__permission-paths {
   margin: 4px 0 0;
   color: var(--text-muted);

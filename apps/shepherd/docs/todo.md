@@ -192,8 +192,9 @@ and login diagnostics are now implemented.
     A session now tracks pending questions and prevents duplicate answer
     submissions until delivery is confirmed, and task state accounts for both
     questions and approvals. A shell command now routes answers through that
-    session and persists confirmed updates. This routing is untested; connect
-    the adapter transport and UI before use.
+    session and persists confirmed updates. The transcript now renders a
+    question card with a text answer and routes submission to that command.
+    This routing and UI are untested; connect the adapter transport before use.
   - [ ] **P1 — Integrate the picker:** expose the integrated agent separately
     from **Freebuff (terminal)**, preserve the terminal's existing behavior,
     and test task routing, persistence, diagnostics, and update status.
