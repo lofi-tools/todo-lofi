@@ -196,8 +196,8 @@ and login diagnostics are now implemented.
     session and persists confirmed updates. The transcript now renders a
     question card with a text answer and routes submission to that command.
     The fake harness can now pause on a question and resume on a matching answer.
-    Offline core and UI fixtures cover answering and transcript persistence;
-    they have not run. Connect the adapter transport before use.
+    The question-card UI fixture passed in Playwright shard 3/8; the offline
+    core persistence fixture has not run. Connect the adapter transport before use.
   - [ ] **P1 — Integrate the picker:** expose the integrated agent separately
     from **Freebuff (terminal)**, preserve the terminal's existing behavior,
     and test task routing, persistence, diagnostics, and update status.
