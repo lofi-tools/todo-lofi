@@ -827,6 +827,24 @@ pub(crate) fn verify_recorded_screens(path: &std::path::Path) -> agent_harness::
     visit_verified_screens(path, |_, _| Ok(()))
 }
 
+/// Replay a complete capture in order. Every recorded screen frame is
+/// reconstructed and verified before `visit` sees it, and worktree effects are
+/// applied only after all frames and the visitor succeed.
+#[cfg(unix)]
+#[allow(dead_code)]
+pub(crate) fn replay_freebuff_capture(
+    capture_path: &std::path::Path,
+    worktree: &std::path::Path,
+    visit: impl FnMut(u64, TerminalFrame) -> agent_harness::HarnessResult<()>,
+) -> agent_harness::HarnessResult<()> {
+    visit_verified_screens(capture_path, visit)?;
+    shepherd_core::harness::replay_worktree_effects(worktree, capture_path).map_err(|error| {
+        agent_harness::HarnessError::Protocol(format!(
+            "could not replay captured worktree effects: {error}"
+        ))
+    })
+}
+
 /// The visitor must defer external effects until replay succeeds.
 #[allow(dead_code)]
 pub(crate) fn visit_verified_screens(
@@ -1097,6 +1115,115 @@ mod tests {
         let frame = screen.frame();
         assert_eq!((frame.columns, frame.rows), (12, 3));
         assert_eq!(row(&frame, 0).trim_end(), "world!");
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn verified_replay_streams_screens_before_applying_worktree_effects()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use agent_harness::freebuff_capture::{CaptureEvent, read_complete_capture};
+        use shepherd_core::harness::FreebuffLiveCapture;
+        use shepherd_core::test_support::TestRepository;
+
+        fn record(
+            cache: &std::path::Path,
+            repository: &TestRepository,
+            scenario: &str,
+            tamper: bool,
+        ) -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
+            let capture =
+                FreebuffLiveCapture::begin(cache, repository.path().to_path_buf(), scenario)?;
+            capture.session().record_and_apply(
+                CaptureEvent::Resize {
+                    columns: 10,
+                    rows: 2,
+                },
+                || Ok(((), Vec::new())),
+            )?;
+            let bytes = b"hello\r\nworld".to_vec();
+            let mut screen = Screen::with_scrollback(10, 2, 0);
+            screen.process(&bytes);
+            let mut state = serde_json::to_value(screen.frame())?;
+            if tamper {
+                state["columns"] = serde_json::json!(9);
+            }
+            capture
+                .session()
+                .record_and_apply(CaptureEvent::Output { bytes }, || {
+                    Ok(((), vec![CaptureEvent::Screen { state }]))
+                })?;
+            repository.write_file("README.md", "replayed\n")?;
+            capture.finish_after_drain()?;
+            Ok(cache.join(format!(".cache/shepherd-live/freebuff/{scenario}.jsonl")))
+        }
+
+        let repository = TestRepository::new()?;
+        let cache = tempfile::tempdir()?;
+        let path = record(cache.path(), &repository, "terminal-replay-v1", false)?;
+        let records = read_complete_capture(&path)?;
+        assert!(
+            records
+                .iter()
+                .any(|record| matches!(record.event, CaptureEvent::Screen { .. }))
+        );
+
+        repository.write_file("README.md", "initial\n")?;
+        let mut frames = Vec::new();
+        replay_freebuff_capture(&path, repository.path(), |elapsed_micros, frame| {
+            frames.push((elapsed_micros, row(&frame, 1).trim_end().to_string()));
+            Ok(())
+        })?;
+        assert_eq!(frames.len(), 1, "one recorded screen is replayed once");
+        assert_eq!(frames.first().map(|(_, row)| row.as_str()), Some("world"));
+        assert_eq!(
+            std::fs::read_to_string(repository.path().join("README.md"))?,
+            "replayed\n"
+        );
+
+        repository.write_file("README.md", "initial\n")?;
+        let tampered = record(
+            cache.path(),
+            &repository,
+            "terminal-replay-v1-tampered",
+            true,
+        )?;
+        repository.write_file("README.md", "initial\n")?;
+        let mut visited = false;
+        assert!(
+            replay_freebuff_capture(&tampered, repository.path(), |_, _| {
+                visited = true;
+                Ok(())
+            })
+            .is_err()
+        );
+        assert!(!visited, "a tampered screen must not reach the consumer");
+        assert_eq!(
+            std::fs::read_to_string(repository.path().join("README.md"))?,
+            "initial\n",
+            "worktree effects must not be applied before screen verification"
+        );
+
+        let stopped = record(
+            cache.path(),
+            &repository,
+            "terminal-replay-v1-stopped",
+            false,
+        )?;
+        repository.write_file("README.md", "initial\n")?;
+        assert!(
+            replay_freebuff_capture(&stopped, repository.path(), |_, _| {
+                Err(agent_harness::HarnessError::Protocol(
+                    "consumer stopped".into(),
+                ))
+            })
+            .is_err()
+        );
+        assert_eq!(
+            std::fs::read_to_string(repository.path().join("README.md"))?,
+            "initial\n",
+            "a consumer error must defer worktree effects"
+        );
         Ok(())
     }
 

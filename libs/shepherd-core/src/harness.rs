@@ -1227,8 +1227,7 @@ fn plan_worktree_replay(
 }
 
 #[cfg(unix)]
-#[allow(dead_code)]
-fn replay_worktree_effects(
+pub fn replay_worktree_effects(
     root: &std::path::Path,
     capture_path: &std::path::Path,
 ) -> Result<(), CoreError> {
