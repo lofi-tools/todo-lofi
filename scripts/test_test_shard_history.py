@@ -24,12 +24,14 @@ class HistoryTests(unittest.TestCase):
         self.assertIsNone(last_test_run(records, ["c", "b"], "rust:pkg::case"))
         self.assertIsNone(last_test_run(records, ["a"], "case"))
 
-    def test_full_suite_remains_due_until_a_clean_success(self):
-        ancestors = [str(index) for index in range(12)]
-        records = [{"revision": "8", "success": True, "clean": True, "full": True},
+    def test_full_suite_cadence_counts_successful_dirty_runs(self):
+        ancestors = [str(index) for index in range(20)]
+        records = [{"revision": "16", "success": True, "clean": True, "full": True},
                    {"revision": "1", "success": True, "clean": False, "full": True}]
+        self.assertFalse(full_suite_due(records, ancestors))
+        records[1]["success"] = False
         self.assertTrue(full_suite_due(records, ancestors))
-        self.assertFalse(full_suite_due(records, ancestors[:7]))
+        self.assertFalse(full_suite_due(records, ancestors[:15]))
         records.append({"revision": "2", "success": True, "clean": True, "full": True})
         self.assertFalse(full_suite_due(records, ancestors))
 

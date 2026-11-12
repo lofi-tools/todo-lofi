@@ -115,6 +115,32 @@ def execute(command, directory=ROOT, dry_run=False):
         RECORDER.run(command, directory)
 
 
+def library_test_name(test, package=None, features=None):
+    """The fully qualified name of a unique matching library test."""
+    selection = ["--package", package] if package else ["--workspace"]
+    if features:
+        selection.extend(["--features", features])
+    completed = subprocess.run(
+        ["cargo", "nextest", "list", *selection, "--lib", "--message-format", "json"],
+        cwd=ROOT, capture_output=True, text=True,
+    )
+    if completed.returncode != 0:
+        return None
+    try:
+        suites = json.loads(completed.stdout).get("rust-suites", {})
+    except json.JSONDecodeError:
+        return None
+    matches = [
+        name
+        for suite in suites.values()
+        for name in suite.get("testcases", {})
+        if name == test or name.endswith(f"::{test}")
+    ]
+    if test in matches:
+        return test
+    return matches[0] if len(matches) == 1 else None
+
+
 def parse_shard(value):
     try:
         index, count = map(int, value.split("/"))
@@ -130,7 +156,9 @@ def main(argv=None):
     RECORDER = None
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--all", action="store_true", help="run all default Rust and UI tests, including doctests")
-    parser.add_argument("--test", help="run an exact Rust test name across the workspace")
+    parser.add_argument("--browser", action="store_true", help="include browser suites with --all")
+    parser.add_argument("--pre-commit", action="store_true", help="run one shard of workspace unit tests")
+    parser.add_argument("--test", help="run an exact Rust test name, preferring its library target")
     parser.add_argument("--package", help="limit --test to a Rust workspace package")
     parser.add_argument("--last-ran", help="find the latest clean ancestor that ran an exact test identity")
     parser.add_argument("--seed", default="HEAD", help="revision used to select the shard (default: HEAD)")
@@ -140,8 +168,10 @@ def main(argv=None):
     args = parser.parse_args(argv)
     if args.shards < 1:
         parser.error("--shards must be positive")
-    if args.all and args.test:
-        parser.error("--all and --test cannot be combined")
+    if sum((args.all, args.pre_commit, bool(args.test))) > 1:
+        parser.error("--all, --pre-commit and --test cannot be combined")
+    if args.browser and not args.all:
+        parser.error("--browser requires --all")
     if args.package and not args.test:
         parser.error("--package requires --test")
     if args.last_ran:
@@ -159,19 +189,37 @@ def main(argv=None):
     print(f"Selection seed {revision}; shard {index}/{count}", flush=True)
     if args.test:
         selection = ["--package", args.package] if args.package else ["--workspace"]
-        execute(["cargo", "nextest", "run", *selection, "--", "--exact", args.test], dry_run=args.dry_run)
+        # A matching library test needs only the library target; integration
+        # targets are still built when the test lives there instead.
+        library_test = library_test_name(args.test, args.package)
+        if library_test is not None:
+            selection.append("--lib")
+        execute(
+            ["cargo", "nextest", "run", *selection, "--", "--exact", library_test or args.test],
+            dry_run=args.dry_run,
+        )
         return
     roots, dependents = workspace()
     omitted = excluded_packages(roots, dependents)
     excluded = [item for name in sorted(omitted) for item in ("--exclude", name)]
     if args.all:
         execute(["python3", "-m", "unittest", "discover", "-s", "scripts", "-p", "test_test_shard*.py"], dry_run=args.dry_run)
-        execute(["cargo", "nextest", "run", "--workspace", *excluded, "--no-fail-fast"], dry_run=args.dry_run)
+        execute(["cargo", "nextest", "run", "--workspace", *excluded, "--features", "shepherd/git,shepherd-core/git", "--no-fail-fast"], dry_run=args.dry_run)
         execute(["cargo", "test", "--workspace", *excluded, "--doc"], dry_run=args.dry_run)
         run_web_unit_tests(dry_run=args.dry_run)
-        run_playwright(dry_run=args.dry_run)
+        if args.browser:
+            run_playwright(dry_run=args.dry_run)
         if RECORDER is not None:
             RECORDER.save([], full=True)
+        return
+    if args.pre_commit:
+        web_suites = list(web_test_suites())
+        unsupported = [str(directory.relative_to(ROOT)) for directory, script in web_suites if script.strip() != "vitest run"]
+        if unsupported:
+            parser.error("cannot shard test scripts in: " + ", ".join(unsupported))
+        execute(["cargo", "nextest", "run", "--workspace", *excluded, "--partition", f"hash:{index}/{count}", "--no-tests=pass", "--no-fail-fast"], dry_run=args.dry_run)
+        execute(["python3", "scripts/python-unit-shard.py", "--shard", f"{index}/{count}"], dry_run=args.dry_run)
+        run_web_unit_tests(index, count, dry_run=args.dry_run)
         return
     if full_suite_due(read_runs(HISTORY), first_parent_ancestors(ROOT, head)):
         print("A full default-suite run is due: use --all.", file=sys.stderr)
@@ -179,14 +227,10 @@ def main(argv=None):
     web_roots, web_dependents, _ = web_workspace()
     selection = affected_tests(paths, roots, dependents, web_roots, web_dependents)
     if selection.all_tests:
-        print("Unknown or shared paths changed; running the full default suite.", flush=True)
+        print("Unknown or shared paths changed; running default unit tests.", flush=True)
         execute(["python3", "-m", "unittest", "discover", "-s", "scripts", "-p", "test_test_shard*.py"], dry_run=args.dry_run)
         execute(["cargo", "nextest", "run", "--workspace", *excluded, "--no-fail-fast"], dry_run=args.dry_run)
-        execute(["cargo", "test", "--workspace", *excluded, "--doc"], dry_run=args.dry_run)
         run_web_unit_tests(dry_run=args.dry_run)
-        run_playwright(dry_run=args.dry_run)
-        if RECORDER is not None:
-            RECORDER.save([], full=True)
         return
     affected = selection.packages - omitted
     if "shepherd-app" in selection.web_packages and "shepherd" in roots.values():
@@ -203,7 +247,6 @@ def main(argv=None):
     if "shepherd-app" in selection.web_packages or affected.intersection({"shepherd", "shepherd-core", "agent-harness"}):
         affected_directories.add(UI)
     run_web_unit_tests(index, count, affected_directories, args.dry_run)
-    run_playwright(index, count, affected_directories, args.dry_run)
 
 
 if __name__ == "__main__":

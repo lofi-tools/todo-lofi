@@ -23,16 +23,22 @@
       aiSkills.agentsMd.fragments.test-sharding = ''
         ## Routine test selection
 
-        For routine validation of small changes, run
-        `direnv exec . python3 scripts/test-shards.py` to cover affected packages
-        and rotating test shards. Reuse successful checks for unchanged code;
-        rerun the relevant checks after changes that can affect them. Run
-        additional focused tests when the change needs them. When the command
-        reports that a full run is due, run
-        `direnv exec . python3 scripts/test-shards.py --all` before completing
-        the work. Follow an explicit user request for different checks, and
-        preserve the documented gates for live agents and native window tests.
-        See `apps/shepherd/README.md` for selection, history, and bisect usage.
+        For routine tests, use only `direnv exec . shepherd-test`. It runs
+        default unit tests for directly changed crates and web packages. Shared or
+        unknown paths select all supported workspace unit suites.
+        For Git-backed Shepherd changes, pass `--git` to the same command to
+        include the selected crates' opt-in Git tests.
+        Before every commit, run `direnv exec . shepherd-test --pre-commit`;
+        it runs one pseudo-randomly rotating shard of the workspace's default-enabled
+        unit tests, without doctests or browser suites.
+        Run `direnv exec . python3 scripts/test-shards.py --all` every 16 commits,
+        before a push, and in CI; this includes doctests. Browser suites are opt-in
+        with `--all --browser`.
+        If a pre-commit or comprehensive run fails, bisect only the failing tests from a
+        known-good revision in an isolated checkout, then apply or propose a fix.
+        If no reliable good revision is available, report that limit.
+        Follow explicit requests for different checks and preserve live-agent
+        and native-window gates. See `apps/shepherd/README.md` for details.
       '';
       perSystem = { pkgs, config, lib, ... }:
         let
@@ -190,6 +196,7 @@
 
             mig = '' set -ex; cd libs/storage; cargo run --bin migrate -- migration "$@" '';
             testdbg = ''RUST_LOG=debug cargo test -p storage -- --nocapture --show-output'';
+            shepherd-test = with bash; ''exec python3 "${wd}/scripts/shepherd-focused-tests.py" "$@"'';
 
             # Dev loop: run the raw binary under cargo-watch so logs stream to
             # this terminal and file access keeps the shell's TCC identity

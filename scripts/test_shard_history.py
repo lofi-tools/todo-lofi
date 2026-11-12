@@ -37,9 +37,9 @@ def first_parent_ancestors(root: Path, revision: str) -> list[str]:
     return output.splitlines()
 
 
-def full_suite_due(records: list[dict], ancestors: list[str], interval: int = 8) -> bool:
+def full_suite_due(records: list[dict], ancestors: list[str], interval: int = 16) -> bool:
     successful_full = {record["revision"] for record in records
-                       if record.get("clean") and record.get("success") and record.get("full")}
+                       if record.get("success") and record.get("full")}
     for distance, ancestor in enumerate(ancestors):
         if ancestor in successful_full:
             return distance >= interval

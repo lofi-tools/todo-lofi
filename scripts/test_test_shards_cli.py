@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import runpy
 import subprocess
 import tempfile
 import unittest
@@ -12,6 +13,14 @@ spec.loader.exec_module(shards_cli)
 
 
 class RunnerTests(unittest.TestCase):
+    def test_cli_returns_failure_when_runner_cannot_start(self):
+        with patch("sys.argv", ["test-shards.py"]), \
+             patch("subprocess.check_output", side_effect=OSError("fixture failure")), \
+             patch("sys.stderr"):
+            with self.assertRaises(SystemExit) as error:
+                runpy.run_path(str(Path(__file__).with_name("test-shards.py")), run_name="__main__")
+        self.assertEqual(error.exception.code, 1)
+
     def test_demo_only_web_library_suites_are_excluded(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -83,7 +92,7 @@ class RunnerTests(unittest.TestCase):
             with patch.object(shards_cli, "ROOT", root):
                 self.assertEqual(set(shards_cli.changed_paths()), {"committed", "deleted", "modified", "untracked"})
 
-    def test_explicit_full_includes_doctests_and_ui(self):
+    def test_explicit_full_includes_doctests_and_unit_ui(self):
         with patch.object(shards_cli, "output", return_value="a"), \
              patch.object(shards_cli, "workspace", return_value=({}, {})), \
              patch.object(shards_cli, "playwright_suites", return_value=[shards_cli.UI]), \
@@ -92,11 +101,46 @@ class RunnerTests(unittest.TestCase):
             shards_cli.main(["--all"])
         commands = [call.args[0] for call in execute.call_args_list]
         self.assertEqual(commands, [["python3", "-m", "unittest", "discover", "-s", "scripts", "-p", "test_test_shard*.py"],
-                                    ["cargo", "nextest", "run", "--workspace", "--no-fail-fast"],
+                                    ["cargo", "nextest", "run", "--workspace", "--features", "shepherd/git,shepherd-core/git", "--no-fail-fast"],
                                     ["cargo", "test", "--workspace", "--doc"],
                                     ["pnpm", "exec", "vitest", "run"],
-                                    ["pnpm", "exec", "vitest", "run"],
-                                    ["pnpm", "exec", "playwright", "test"]])
+                                    ["pnpm", "exec", "vitest", "run"]])
+
+    def test_browser_suites_require_explicit_opt_in(self):
+        with patch.object(shards_cli, "output", return_value="a"), \
+             patch.object(shards_cli, "workspace", return_value=({}, {})), \
+             patch.object(shards_cli, "playwright_suites", return_value=[shards_cli.UI]), \
+             patch.object(shards_cli, "web_test_suites", return_value=[]), \
+             patch.object(shards_cli, "execute") as execute:
+            shards_cli.main(["--all", "--browser"])
+        self.assertIn(["pnpm", "exec", "playwright", "test"], [call.args[0] for call in execute.call_args_list])
+        with self.assertRaises(SystemExit):
+            shards_cli.main(["--browser"])
+
+    def test_unknown_path_runs_unit_tests_without_doctests_or_browsers(self):
+        with patch.object(shards_cli, "output", return_value="a"), \
+             patch.object(shards_cli, "first_parent_ancestors", return_value=[]), \
+             patch.object(shards_cli, "workspace", return_value=({"libs/core": "core"}, {})), \
+             patch.object(shards_cli, "web_workspace", return_value=({}, {}, [])), \
+             patch.object(shards_cli, "changed_paths", return_value=["shared.conf"]), \
+             patch.object(shards_cli, "web_test_suites", return_value=[]), \
+             patch.object(shards_cli, "execute") as execute:
+            shards_cli.main([])
+        commands = [call.args[0] for call in execute.call_args_list]
+        self.assertTrue(any(command[:3] == ["cargo", "nextest", "run"] for command in commands))
+        self.assertFalse(any("--doc" in command or "playwright" in command for command in commands))
+
+    def test_pre_commit_runs_one_workspace_unit_shard(self):
+        with patch.object(shards_cli, "output", return_value="a"), \
+             patch.object(shards_cli, "workspace", return_value=({"libs/core": "core"}, {})), \
+             patch.object(shards_cli, "web_test_suites", return_value=[(shards_cli.ROOT, "vitest run")]), \
+             patch.object(shards_cli, "execute") as execute:
+            shards_cli.main(["--pre-commit", "--shard", "3/8"])
+        commands = [call.args[0] for call in execute.call_args_list]
+        self.assertEqual(commands[0], ["cargo", "nextest", "run", "--workspace", "--partition", "hash:3/8", "--no-tests=pass", "--no-fail-fast"])
+        self.assertEqual(commands[1], ["python3", "scripts/python-unit-shard.py", "--shard", "3/8"])
+        self.assertEqual(commands[2], ["pnpm", "exec", "vitest", "run", "--passWithNoTests", "--shard", "3/8"])
+        self.assertFalse(any("--doc" in command or "playwright" in command for command in commands))
 
     def test_affected_packages_and_remaining_shard(self):
         def output(*command):
@@ -115,8 +159,8 @@ class RunnerTests(unittest.TestCase):
         self.assertIn("hash:3/8", commands[1])
         self.assertIn("--passWithNoTests", commands[2])
         self.assertEqual(commands[2][-2:], ["--shard", "3/8"])
-        self.assertIn("--pass-with-no-tests", commands[-1])
-        self.assertEqual(commands[-1][-2:], ["--shard", "3/8"])
+        self.assertFalse(any("playwright" in command for command in commands))
+        self.assertFalse(any("--doc" in command for command in commands))
 
     def test_demo_and_prototype_changes_are_excluded(self):
         packages = {"demos/example": "demo", "libs/dson_freeform_task": "dson_freeform_task",
@@ -149,7 +193,7 @@ class RunnerTests(unittest.TestCase):
         commands = [call.args[0] for call in execute.call_args_list]
         self.assertIn("hash:3/8", commands[0])
         self.assertEqual(commands[1], ["pnpm", "exec", "vitest", "run"])
-        self.assertEqual(commands[2], ["pnpm", "exec", "playwright", "test"])
+        self.assertEqual(len(commands), 2)
 
     def test_full_run_excludes_demo_and_prototype_packages(self):
         roots = {"demos/example": "demo", "libs/dson_freeform_task": "dson_freeform_task", "libs/core": "core"}
@@ -161,7 +205,7 @@ class RunnerTests(unittest.TestCase):
             shards_cli.main(["--all"])
         commands = [call.args[0] for call in execute.call_args_list]
         self.assertEqual(commands[1], ["cargo", "nextest", "run", "--workspace", "--exclude", "demo",
-                                       "--exclude", "dson_freeform_task", "--no-fail-fast"])
+                                       "--exclude", "dson_freeform_task", "--features", "shepherd/git,shepherd-core/git", "--no-fail-fast"])
         self.assertEqual(commands[2], ["cargo", "test", "--workspace", "--exclude", "demo",
                                        "--exclude", "dson_freeform_task", "--doc"])
 
@@ -169,11 +213,21 @@ class RunnerTests(unittest.TestCase):
         with self.assertRaises(Exception):
             shards_cli.parse_shard("9/8")
 
-    def test_exact_test_can_be_scoped_to_a_package(self):
-        with patch.object(shards_cli, "output", return_value="a"), patch.object(shards_cli, "execute") as execute:
-            shards_cli.main(["--package", "core", "--test", "module::test"])
+    def test_exact_test_uses_the_library_target_when_it_contains_the_test(self):
+        with patch.object(shards_cli, "output", return_value="a"), \
+             patch.object(shards_cli, "library_test_name", return_value="module::test"), \
+             patch.object(shards_cli, "execute") as execute:
+            shards_cli.main(["--package", "core", "--test", "test"])
         self.assertEqual(execute.call_args.args[0],
-                         ["cargo", "nextest", "run", "--package", "core", "--", "--exact", "module::test"])
+                         ["cargo", "nextest", "run", "--package", "core", "--lib", "--", "--exact", "module::test"])
+
+    def test_exact_integration_test_keeps_all_targets(self):
+        with patch.object(shards_cli, "output", return_value="a"), \
+             patch.object(shards_cli, "library_test_name", return_value=None), \
+             patch.object(shards_cli, "execute") as execute:
+            shards_cli.main(["--package", "core", "--test", "shell::test"])
+        self.assertEqual(execute.call_args.args[0],
+                         ["cargo", "nextest", "run", "--package", "core", "--", "--exact", "shell::test"])
 
 
 if __name__ == "__main__":

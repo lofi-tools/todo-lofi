@@ -33,6 +33,31 @@ and Ubuntu bundles on clean runners without launching the app. Follow
 macOS 13+ and Ubuntu 24.04+ release gate, including the artifact checks and
 human-gated agent walkthroughs.
 
+### Gatekeeper on local macOS builds
+
+A Rust test binary is an unsigned Mach-O file, and macOS can make each launch
+wait on Gatekeeper assessment. After building, clear quarantine and ad-hoc sign
+the Cargo debug executables with:
+
+```sh
+scripts/disable-gatekeeper.sh
+```
+
+It covers `target/debug` and `target/<triple>/debug`, skips the root-owned Nix
+and kache scratch trees under `target/package-check`, and signs with `-` by
+default. Set `SHEPHERD_CODESIGN_IDENTITY=taskstream-dev` to use the machine's
+self-signed identity when it exists.
+
+The sweep only touches binaries that exist when it runs; every rebuild produces
+a new file, so it must be rerun after a build. There is no per-directory
+Gatekeeper exclusion and no launch-time hook that suppresses assessment: a
+newly built binary is still assessed when it runs. `sudo spctl --global-disable`
+turns assessment off for every application, but macOS then requires choosing
+**Anywhere** under **System Settings → Privacy & Security → Security**, which
+also weakens protection for every app. Use the target-scoped sweep when only
+the already-built debug binaries need to run; use the system setting only when
+future binaries must never be assessed.
+
 Choose the Send button color under **Settings → Appearance**. The choice is
 saved between launches for `shep` and lasts for the window session in
 `shep --test`.
@@ -266,27 +291,46 @@ session.
 
 ## Split test runs
 
+For routine tests, `direnv exec . shepherd-test` selects changed Rust crates
+and web packages with supported unit suites. It considers the last
+commit and staged, unstaged and untracked files; it does not select dependent
+crates automatically. Shared or unknown paths select all supported workspace
+crates and web unit suites. Pass `--dry-run` to inspect the selection, or `--git` to include the
+selected crates' opt-in Git-backed tests. UI changes are reported but do not
+start browser tests during routine runs.
+For a failed Rust test, `shepherd-test --package PACKAGE --test FULL_TEST_NAME`
+runs just that test; add `--git` when it is feature-gated.
+
 From the repository root, run the explicit sharding command in the Nix
 environment:
 
 ```sh
+direnv exec . shepherd-test --pre-commit
 direnv exec . python3 scripts/test-shards.py
 direnv exec . python3 scripts/test-shards.py --all
+direnv exec . python3 scripts/test-shards.py --all --browser
 direnv exec . python3 scripts/test-shards.py --shard 3/8
 direnv exec . python3 scripts/test-shards.py --seed HEAD~4 --dry-run
 direnv exec . python3 scripts/test-shards.py --package shepherd-core --test module::tests::example
 direnv exec . python3 scripts/test-shards.py --last-ran 'rust:crate::module::tests::example'
 ```
 
+Before every commit, `shepherd-test --pre-commit` runs one of eight shards of
+the default-enabled Rust, test-runner Python, and Vitest unit tests across the
+workspace. The current HEAD hash selects the shard pseudo-randomly, so
+consecutive commits may select the same shard. It excludes doctests and browser
+suites. An unsupported web test
+script causes an error instead of silently running an unsharded suite.
+
 The default run selects all tests in changed Rust and web packages and their
-workspace dependents, plus a shard of the remaining workspace tests. Rust uses
-nextest's hash partitions; Playwright and Vitest use their own sharding. A
-Shepherd Rust change also selects the Shepherd UI suite.
+workspace dependents, plus a shard of the remaining workspace unit tests. Rust
+uses nextest's hash partitions; Vitest uses its own sharding. Doctests and
+browser suites run only when explicitly enabled with `--all --browser`.
 Workspace packages with a different `test` script run that script in full;
 the runner does not assume that an unfamiliar test command supports sharding.
 Changes include the latest first-parent commit and staged, unstaged and
 untracked files. Paths under `demos/` are ignored. Shared and unknown paths
-cause a full run. The seed is a
+select all default unit tests. The seed is a
 revision hash modulo the shard count, so consecutive commits can repeat a
 shard. `--seed` reuses only the shard selection; it does not check out that
 revision or reproduce its affected files. `--shard` overrides that selection.
@@ -295,19 +339,31 @@ Switching branches uses the selected branch's revision and first-parent run
 history. Rebasing or amending changes revision hashes and can therefore change
 the chosen shard; records for commits outside the new history are not treated
 as evidence for it.
-Shepherd's Playwright suite partitions individual tests with one worker.
-Playwright and Vitest membership can change when tests are added or reordered,
-unlike nextest's hash partitions. Some shards can be empty.
+Vitest membership can change when tests are added or reordered, unlike
+nextest's hash partitions. Some shards can be empty.
 
-The command reminds you when a clean full run is at least eight first-parent
-commits old or no recent full run is recorded. `--all` includes default Rust
-tests, doctests, Vitest and the included Playwright suites; CI runs this suite
-for pull requests. It excludes `demos/`, libraries only used by demos, and the
+The command reminds you when a successful full run is at least 16 first-parent
+commits old or no recent full run is recorded. A successful run on a dirty
+checkout resets this cadence but does not establish a clean bisect baseline.
+Run `--all` at that interval and
+before pushing; CI also runs it for pull requests. It includes default Rust
+tests including the Git-backed feature-gated cases, doctests and Vitest.
+Playwright suites run only with `--all --browser`. It excludes
+`demos/`, libraries only used by demos, and the
 `dson_freeform_task`, `dson_typed_task`, `test_dson` and `op_crdt` prototypes.
 The runner derives demo-only library exclusions from workspace dependencies;
 currently there are none. Native desktop smokes and gated live-agent probes
 remain separate. Ordinary tests retain their existing harness and live-agent
 cache rules.
+
+Many `shepherd-core` and `shepherd` tests that create Git repositories use
+their non-default `git` features. Run them explicitly when working on those
+behaviors with:
+
+```sh
+direnv exec . cargo test -p shepherd-core --features git
+direnv exec . cargo test -p shepherd --features git
+```
 
 The prototype crates and Rust demos are also gated behind the non-default
 `prototype` Cargo feature, so `cargo test --workspace` does not run their
