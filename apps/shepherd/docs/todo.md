@@ -240,6 +240,10 @@ Tasks:
       Future captures also record a bounded SHA-256 fingerprint of the cached
       runtime before and after the session. This is a file observation, not
       proof of the executing child; the existing live captures predate it.
+      Offline replay warns when recorded launcher or cached-runtime
+      observations differ, including changes that later return to their initial
+      value. An unchanged observation does not rule out a child restart or an
+      update between samples, and the live adapter is not connected yet.
       Read-only inspection on 2026-11-12 confirmed that the launcher can stop
       and replace its child during a background update without exiting itself;
       metadata can briefly lag the binary replacement. Update detection must

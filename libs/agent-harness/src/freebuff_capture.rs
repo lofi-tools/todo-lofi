@@ -78,6 +78,52 @@ pub struct CaptureRecord {
     pub event: CaptureEvent,
 }
 
+#[derive(Default)]
+pub struct RuntimeChangeTracker {
+    previous: Option<RuntimeObservation>,
+    changed: bool,
+}
+
+#[derive(PartialEq, Eq)]
+struct RuntimeObservation {
+    launcher_version: Option<String>,
+    runtime_version: Option<String>,
+    target: Option<String>,
+    cached_runtime_sha256: Option<String>,
+}
+
+impl RuntimeChangeTracker {
+    pub fn observe(&mut self, event: &CaptureEvent) {
+        let CaptureEvent::Runtime {
+            launcher_version,
+            runtime_version,
+            target,
+            cached_runtime_sha256,
+        } = event
+        else {
+            return;
+        };
+        let current = RuntimeObservation {
+            launcher_version: launcher_version.clone(),
+            runtime_version: runtime_version.clone(),
+            target: target.clone(),
+            cached_runtime_sha256: cached_runtime_sha256.clone(),
+        };
+        if self
+            .previous
+            .as_ref()
+            .is_some_and(|previous| previous != &current)
+        {
+            self.changed = true;
+        }
+        self.previous = Some(current);
+    }
+
+    pub fn changed(&self) -> bool {
+        self.changed
+    }
+}
+
 pub struct CaptureWriter {
     file: File,
     path: PathBuf,
@@ -480,6 +526,23 @@ fn validate_record(record: &CaptureRecord) -> HarnessResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn runtime_changes_remain_flagged_after_metadata_returns_to_its_original_value() {
+        let runtime = |version: &str, hash: Option<&str>| CaptureEvent::Runtime {
+            launcher_version: Some("0.0.171".into()),
+            runtime_version: Some(version.into()),
+            target: Some("darwin-arm64".into()),
+            cached_runtime_sha256: hash.map(str::to_owned),
+        };
+        let mut tracker = RuntimeChangeTracker::default();
+        tracker.observe(&runtime("0.2.36", Some("first")));
+        tracker.observe(&runtime("0.2.36", Some("first")));
+        assert!(!tracker.changed());
+        tracker.observe(&runtime("0.2.36", Some("second")));
+        tracker.observe(&runtime("0.2.36", Some("first")));
+        assert!(tracker.changed());
+    }
 
     #[test]
     fn nonblocking_attempts_record_only_progress_and_stop_after_failure()

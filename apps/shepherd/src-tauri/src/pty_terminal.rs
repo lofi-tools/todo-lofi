@@ -1782,6 +1782,16 @@ mod tests {
         let worktree = std::env::var_os("SHEPHERD_FREEBUFF_WORKTREE")
             .map(std::path::PathBuf::from)
             .ok_or("missing SHEPHERD_FREEBUFF_WORKTREE")?;
+        let mut runtime_changes = agent_harness::freebuff_capture::RuntimeChangeTracker::default();
+        agent_harness::freebuff_capture::visit_complete_capture(&capture, |record| {
+            runtime_changes.observe(&record.event);
+            Ok(())
+        })?;
+        if runtime_changes.changed() {
+            eprintln!(
+                "Cached Freebuff launcher or runtime metadata changed during capture; the running child's identity is not established."
+            );
+        }
         let mut frames = 0usize;
         let mut warnings = terminal_replay::FreebuffWarningTracker::default();
         terminal_replay::replay_freebuff_capture_changes(&capture, &worktree, |_, frame| {
