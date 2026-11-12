@@ -1781,12 +1781,19 @@ mod tests {
             .map(std::path::PathBuf::from)
             .ok_or("missing SHEPHERD_FREEBUFF_WORKTREE")?;
         let mut frames = 0usize;
-        terminal_replay::replay_freebuff_capture(&capture, &worktree, |_, _| {
+        let mut warning = None;
+        terminal_replay::replay_freebuff_capture(&capture, &worktree, |_, frame| {
             frames += 1;
+            if let Some(observed) = terminal_replay::freebuff_screen_warning(&frame)? {
+                warning = Some(observed);
+            }
             Ok(())
         })?;
         if frames == 0 {
             return Err("capture contains no screen frames".into());
+        }
+        if let Some(warning) = warning {
+            eprintln!("Freebuff screen warning observed: {warning:?}");
         }
         eprintln!(
             "Recorded worktree effects may be incomplete: escaped processes may not have been detected."

@@ -1,5 +1,40 @@
 use terminal_renderer::{Screen, TerminalFrame};
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FreebuffScreenWarning {
+    Disconnected,
+    LauncherRestart,
+}
+
+/// These observations can invalidate an interaction; their absence never
+/// establishes readiness, compatibility, or a successful reconnection.
+pub fn freebuff_screen_warning(
+    frame: &TerminalFrame,
+) -> agent_harness::HarnessResult<Option<FreebuffScreenWarning>> {
+    use agent_harness::HarnessError;
+    if frame.columns == 0
+        || frame.rows == 0
+        || frame.columns.checked_mul(frame.rows) != Some(frame.cells.len())
+    {
+        return Err(HarnessError::Protocol(
+            "invalid Freebuff terminal frame".into(),
+        ));
+    }
+    for cells in frame.cells.chunks(frame.columns) {
+        let row: String = cells.iter().map(|cell| cell.text.as_str()).collect();
+        let row = row.trim();
+        if row == "Can't reach Freebuff's servers. Retrying… Try another network." {
+            return Ok(Some(FreebuffScreenWarning::Disconnected));
+        }
+        if row.starts_with("Update available: ") && row.contains(" → ")
+            || row.starts_with("Update failed; restarting freebuff ")
+        {
+            return Ok(Some(FreebuffScreenWarning::LauncherRestart));
+        }
+    }
+    Ok(None)
+}
+
 #[allow(dead_code)]
 pub struct RecordedScreenReplayer {
     verifier: Screen,
@@ -232,6 +267,27 @@ mod tests {
     use agent_harness::freebuff_capture::{
         CaptureEvent, CaptureRecord, CaptureWriter, visit_capture,
     };
+
+    #[test]
+    fn freebuff_warnings_come_from_rendered_rows_and_never_imply_readiness()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut screen = Screen::with_scrollback(100, 3, 0);
+        screen.process(b"Can't reach Freebuff's servers. Retrying");
+        screen.process("… Try another network.".as_bytes());
+        assert_eq!(
+            freebuff_screen_warning(&screen.frame())?,
+            Some(FreebuffScreenWarning::Disconnected)
+        );
+        screen.process(b"\x1b[2J\x1b[HReconnected");
+        assert_eq!(freebuff_screen_warning(&screen.frame())?, None);
+        screen.process(b"\x1b[2J\x1b[HUpdate available: 0.2.36 ");
+        screen.process("→ 0.2.37".as_bytes());
+        assert_eq!(
+            freebuff_screen_warning(&screen.frame())?,
+            Some(FreebuffScreenWarning::LauncherRestart)
+        );
+        Ok(())
+    }
 
     #[test]
     fn recorded_read_replays_text_that_scrolls_out_before_its_final_frame()

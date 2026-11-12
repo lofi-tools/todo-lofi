@@ -420,7 +420,11 @@ Tasks:
       runner verifies its saved frames before writing the completion marker, so
       a mismatch leaves an incomplete capture. Its new
       updated fake runner verified its captured screens in the targeted offline
-      check. Verified screen replay now exposes each reconstructed frame and
+      check. A conservative rendered-frame warning recognizes the captured
+      disconnect notice and launcher update/restart notices during replay; a
+      warning can invalidate confidence, but its absence never establishes
+      readiness or compatibility. It is not yet connected to the live adapter.
+      Verified screen replay now exposes each reconstructed frame and
       its capture timestamp in order to a visitor, which must defer external
       effects until replay succeeds. Connect it to versioned Freebuff screen fixtures, the screen
       classifier and worktree effects; make verification mandatory for replay.
