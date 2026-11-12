@@ -383,9 +383,9 @@ Tasks:
       its capture timestamp in order to a visitor, which must defer external
       effects until replay succeeds. Connect it to versioned Freebuff screen fixtures, the screen
       classifier and worktree effects; make verification mandatory for replay.
-    - [ ] Version the capture format and reject incompatible headers. The
-      header rejection fixture passed in shard 4/8; the capture round-trip
-      fixture has not yet been selected.
+    - [x] Version the capture format and reject incompatible headers. The
+      format version, incompatible-header and ordered round-trip fixtures passed
+      in the comprehensive suite on 2026-11-12.
     - [ ] Translate verified redraws into transcript text replacements. The
       harness now supports replacing an existing streamed row, with its fixture
       passing in agent-harness shard 5/8. A bounded Freebuff text reconciler
