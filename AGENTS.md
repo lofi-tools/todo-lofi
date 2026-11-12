@@ -107,6 +107,19 @@ exercises or the user requests it. Keep test windows at the
 normal desktop level. The [Shepherd README](apps/shepherd/README.md) lists
 the flags for window, visibility and IME checks.
 
+## Routine verification
+
+Verify only the affected area. For a change confined to one module, run that
+module's tests with a filter, the single web or browser test that covers it, or
+a typecheck of the touched package. A whole-crate `cargo test -p <crate>`, a
+chain of several crates' suites, or a whole browser suite is not routine
+verification: it is slow, it reports failures unrelated to the change, and it
+buries the result that matters.
+
+Widen the check when the change genuinely spans those areas, when a focused
+check fails and the surrounding suites are needed to explain it, when a commit
+or push gate requires it, or when the user asks.
+
 <!-- my-nix:agents-fragment:start commit-messages -->
 ## Commit messages
 
