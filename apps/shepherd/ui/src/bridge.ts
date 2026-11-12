@@ -365,6 +365,7 @@ export interface ToolCallEntry {
 
 export interface PermissionEntry {
   approvalId: string
+  toolCallId: string
   title: string
   arguments: unknown
   paths: string[]
@@ -400,6 +401,7 @@ export interface Entry {
   sequence: number
   kind: EntryKind
   attachments?: Array<{ id: string; relativePath: string; mime: string; bytes: number }>
+  sourceId?: string | null
 }
 
 export interface AgentDiagnostics {

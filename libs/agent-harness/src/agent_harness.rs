@@ -845,6 +845,11 @@ pub enum EntryKind {
     },
     Permission {
         approval_id: String,
+        /// The tool call this approval gates, so a row can carry both the
+        /// question and its result. Empty for approvals recorded before the
+        /// field existed.
+        #[serde(default)]
+        tool_call_id: String,
         title: String,
         arguments: Value,
         paths: Vec<String>,
@@ -1475,6 +1480,7 @@ impl Transcript {
         let key = request.approval_id.as_str().to_string();
         let kind = EntryKind::Permission {
             approval_id: key.clone(),
+            tool_call_id: request.tool_call_id.as_str().to_owned(),
             title: request.title,
             arguments: request.arguments,
             paths: request

@@ -312,6 +312,22 @@ current layout and give future changes a point of comparison.
   handle, or **Start new session** when a fresh session is needed. Enable the
   composer when the core reports the task is ready.
 
+## Conversation transcript
+
+- Render an agent's replies as plain text at the full transcript width, without
+  a card per message.
+- Thinking segments stream open with the live output. Collapse a segment to a
+  one-line **Thinking · N words** summary once it has scrolled above the visible
+  transcript, and let the user expand or collapse it again.
+- Show each prompt sent from the composer in a card on the raised neutral
+  surface, aligned to the trailing edge and no wider than 80% of the pane. Text
+  typed into the agent's terminal keeps the plain transcript row.
+- Reads, searches and listings share one row with a file-and-magnifier icon. It
+  carries the tool's title and, while an approval is open, its allow choices in
+  place of a separate approval card. Once answered, it reports the decision, the
+  paths it touched and a line count, with the captured output behind **Show
+  contents**.
+
 ## Conversation composer
 
 - The text area and its controls share one card at the bottom of the chat.

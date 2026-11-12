@@ -62,6 +62,8 @@ const APPROVAL_LABELS: Record<bridge.Decision, string> = {
   deny: 'Deny',
 }
 const DEFAULT_APPROVAL_CHOICES: bridge.Decision[] = ['allow', 'deny']
+const READ_TOOL_KINDS = new Set(['read', 'search', 'fetch', 'list', 'glob', 'grep', 'ls'])
+const isReadToolCall = (toolCall: bridge.ToolCallEntry) => READ_TOOL_KINDS.has(toolCall.kind.toLowerCase())
 const AGENT_OPTIONS: PickerOption[] = [
   { id: 'codex', name: bridge.AGENT_LABELS.codex },
   { id: 'opencode', name: bridge.AGENT_LABELS.opencode },
@@ -203,6 +205,8 @@ export function App() {
   const [loadedTasksFor, setLoadedTasksFor] = createSignal<string>()
   const [selectedTaskId, setSelectedTaskId] = createSignal<string | null>(null)
   const [workspace, setWorkspace] = createSignal<bridge.TaskWorkspace | null>(null)
+  const [collapsedThoughts, setCollapsedThoughts] = createSignal<ReadonlySet<string>>(new Set())
+  const [openReads, setOpenReads] = createSignal<ReadonlySet<string>>(new Set())
   const [deleteRequest, setDeleteRequest] = createSignal<bridge.TaskDetail>()
   const [searchOpen, setSearchOpen] = createSignal(false)
   const [palette, setPalette] = createSignal<PaletteKind>()
@@ -1714,7 +1718,32 @@ export function App() {
     if (!current || pending()) return
     void run(async () => {
       const updated = await bridge.retryTaskBranch(current.task.id)
+      console.log('DEBUG updated answer', JSON.stringify(updated.transcript[0]?.kind), 'selected', selectedTaskId(), current.task.id)
       if (selectedTaskId() === current.task.id) setWorkspace(updated)
+    })
+  }
+
+  // Collapsing and expanding live in the shell, not in a row: transcript rows are
+  // rebuilt whenever the workspace changes, so a row-local signal would forget.
+  function toggleThought(entryId: string) {
+    setCollapsedThoughts((previous) => {
+      const next = new Set(previous)
+      if (next.has(entryId)) next.delete(entryId)
+      else next.add(entryId)
+      return next
+    })
+  }
+
+  function collapseThought(entryId: string) {
+    setCollapsedThoughts((previous) => previous.has(entryId) ? previous : new Set(previous).add(entryId))
+  }
+
+  function toggleRead(toolCallId: string) {
+    setOpenReads((previous) => {
+      const next = new Set(previous)
+      if (next.has(toolCallId)) next.delete(toolCallId)
+      else next.add(toolCallId)
+      return next
     })
   }
 
@@ -2210,31 +2239,65 @@ export function App() {
                 </Show>
               }
             >
-              {(current) => (
-                <Show
-                  when={current().transcript.length > 0}
-                  fallback={<p class="empty">Send a prompt to start this task.</p>}
-                >
-                  <ol class="transcript">
-                    <For each={current().transcript}>
-                      {(entry) => {
-                        const target = () => {
-                          const jump = searchJump()
-                          return jump?.taskId === selectedTaskId() && jump?.entryId === entry.id ? jump : undefined
-                        }
-                        return <li class="entry" classList={{ 'entry--search-hit': !!target() }}
-                          data-entry-id={entry.id} tabIndex={-1}>
-                          {entryBody(entry, decide, answerQuestion, cancellingTurn, canApprove,
-                            () => current().task.state === 'waiting' && !pending() && !cancellingTurn(),
-                            (questionId) => answeringQuestions().has(JSON.stringify([current().task.id, questionId])),
-                            () => target()?.snippet.field === 'entry' ? target()?.snippet.matched : undefined,
-                            bridge.AGENT_LABELS[current().task.agent])}
-                        </li>
-                      }}
-                    </For>
-                  </ol>
-                </Show>
-              )}
+              {(current) => {
+                const entries = () => current().transcript
+                const readCalls = createMemo(() => {
+                  const calls = new Set<string>()
+                  for (const entry of entries()) {
+                    if (entry.kind.type === 'toolCall' && isReadToolCall(entry.kind.data)) calls.add(entry.kind.data.toolCallId)
+                  }
+                  return calls
+                })
+                // A read and its approval are two rows in the transcript; the
+                // shell merges them so the question becomes the read's result.
+                const readApprovals = createMemo(() => {
+                  const approvals = new Map<string, bridge.Entry>()
+                  for (const entry of entries()) {
+                    if (entry.kind.type !== 'permission') continue
+                    if (readCalls().has(entry.kind.data.toolCallId)) approvals.set(entry.kind.data.toolCallId, entry)
+                  }
+                  return approvals
+                })
+                const context: EntryContext = {
+                  decide,
+                  answerQuestion,
+                  cancelling: cancellingTurn,
+                  canApprove,
+                  canAnswer: () => current().task.state === 'waiting' && !pending() && !cancellingTurn(),
+                  awaitingAnswer: (questionId) => answeringQuestions().has(JSON.stringify([current().task.id, questionId])),
+                  agentLabel: () => bridge.AGENT_LABELS[current().task.agent],
+                  thoughtOpen: (entryId) => !collapsedThoughts().has(entryId),
+                  toggleThought,
+                  collapseThought,
+                  readOpen: (toolCallId) => openReads().has(toolCallId),
+                  toggleRead,
+                }
+                return (
+                  <Show
+                    when={entries().length > 0}
+                    fallback={<p class="empty">Send a prompt to start this task.</p>}
+                  >
+                    <ol class="transcript">
+                      <For each={entries()}>
+                        {(entry) => {
+                          if (entry.kind.type === 'permission' && readCalls().has(entry.kind.data.toolCallId)) return null
+                          const target = () => {
+                            const jump = searchJump()
+                            return jump?.taskId === selectedTaskId() && jump?.entryId === entry.id ? jump : undefined
+                          }
+                          const match = () => target()?.snippet.field === 'entry' ? target()?.snippet.matched : undefined
+                          return <li class="entry" classList={{ 'entry--search-hit': !!target() }}
+                            data-entry-id={entry.id} tabIndex={-1}>
+                            {entry.kind.type === 'toolCall' && readCalls().has(entry.kind.data.toolCallId)
+                              ? <ReadRow toolCall={entry.kind.data} permission={readApprovals().get(entry.kind.data.toolCallId)} context={context} match={match} />
+                              : entryBody(entry, context, match)}
+                          </li>
+                        }}
+                      </For>
+                    </ol>
+                  </Show>
+                )
+              }}
             </Show>
           </div>
 
@@ -3159,17 +3222,157 @@ function QuestionCard(props: {
   </div>
 }
 
-function entryBody(
-  entry: bridge.Entry,
-  decide: (approvalId: string, decision: bridge.Decision) => void,
-  answerQuestion: (questionId: string, answer: string) => void,
-  cancelling: () => boolean,
-  canApprove: () => boolean,
-  canAnswer: () => boolean,
-  awaitingAnswer: (questionId: string) => boolean,
-  match: () => string | undefined,
-  agentLabel: string,
-) {
+interface EntryContext {
+  decide: (approvalId: string, decision: bridge.Decision) => void
+  answerQuestion: (questionId: string, answer: string) => void
+  cancelling: () => boolean
+  canApprove: () => boolean
+  canAnswer: () => boolean
+  awaitingAnswer: (questionId: string) => boolean
+  agentLabel: () => string
+  thoughtOpen: (entryId: string) => boolean
+  toggleThought: (entryId: string) => void
+  collapseThought: (entryId: string) => void
+  readOpen: (toolCallId: string) => boolean
+  toggleRead: (toolCallId: string) => void
+}
+
+function FileReadIcon() {
+  return (
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h4" />
+      <path d="M14 3v5h5v3" />
+      <circle cx="16.5" cy="16.5" r="3.2" />
+      <path d="m19 19 2.2 2.2" />
+    </svg>
+  )
+}
+
+/**
+ * A thinking segment stays open and scrolls with the live output; once it has
+ * scrolled above the transcript it collapses to a one-line summary.
+ */
+function ThoughtRow(props: {
+  text: string
+  open: () => boolean
+  onToggle: () => void
+  onCollapse: () => void
+  match: () => string | undefined
+}) {
+  let row: HTMLDivElement | undefined
+  onMount(() => {
+    const element = row
+    if (!element || typeof IntersectionObserver === 'undefined') return
+    const scroller = element.closest('.chat__transcript')
+    if (!(scroller instanceof HTMLElement)) return
+    const observer = new IntersectionObserver((records) => {
+      for (const record of records) {
+        if (record.isIntersecting) continue
+        if (record.boundingClientRect.bottom <= scroller.getBoundingClientRect().top) props.onCollapse()
+      }
+    }, { root: scroller, threshold: 0 })
+    observer.observe(element)
+    onCleanup(() => observer.disconnect())
+  })
+  const words = () => props.text.trim().split(/\s+/).filter((word) => word.length > 0).length
+  const preview = () => {
+    const line = props.text.trim().split('\n').find((line) => line.trim().length > 0) ?? ''
+    return line.length > 140 ? `${line.slice(0, 140)}…` : line
+  }
+  return (
+    <div class="entry__thought" ref={row}>
+      <button type="button" class="entry__thought-toggle" aria-expanded={props.open()} onClick={props.onToggle}>
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M12 3a6 6 0 0 0-3.6 10.8c.5.4.8 1 .9 1.6l.1.6h5.2l.1-.6c.1-.6.4-1.2.9-1.6A6 6 0 0 0 12 3Z" />
+          <path d="M10 19h4" />
+        </svg>
+        <span>{props.open() ? 'Thinking' : `Thinking · ${words()} words`}</span>
+        <span class="entry__thought-caret" aria-hidden="true">{props.open() ? '▾' : '▸'}</span>
+      </button>
+      <Show when={props.open()} fallback={<p class="entry__thought-preview">{preview()}</p>}>
+        <p class="entry__thought-text"><SearchMark text={props.text} match={props.match()} /></p>
+      </Show>
+    </div>
+  )
+}
+
+/**
+ * Reads, searches and listings share one row that starts as its approval
+ * question, then reports the files and line count it touched.
+ */
+function ReadRow(props: {
+  toolCall: bridge.ToolCallEntry
+  permission: bridge.Entry | undefined
+  context: EntryContext
+  match: () => string | undefined
+}) {
+  const text = (value: string) => <SearchMark text={value} match={props.match()} />
+  const permission = () => props.permission?.kind.type === 'permission' ? props.permission.kind.data : undefined
+  const pending = () => {
+    const current = permission()
+    return !!current && current.decision === null && !current.withdrawn
+  }
+  const lines = () => {
+    const output = props.toolCall.output
+    if (!output) return 0
+    const body = output.endsWith('\n') ? output.slice(0, -1) : output
+    return body.length === 0 ? 0 : body.split('\n').length
+  }
+  const state = () => {
+    const current = permission()
+    if (!current) return props.toolCall.status
+    if (current.withdrawn) return 'withdrawn'
+    if (current.source === 'sessionGrant') return 'allowed by session grant'
+    if (current.source === 'projectGrant') return 'allowed by project grant'
+    if (current.decision === 'allowSession') return 'allowed for session'
+    if (current.decision === 'allowProject') return 'allowed for project'
+    if (current.decision === 'deny') return 'denied'
+    if (current.decision === 'allow') return 'allowed'
+    return 'awaiting approval'
+  }
+  const open = () => props.context.readOpen(props.toolCall.toolCallId)
+  return (
+    <div class="entry__read">
+      <span class="entry__read-icon" role="img" aria-label="Read files"><FileReadIcon /></span>
+      <span class="entry__read-title">{text(props.toolCall.title)}</span>
+      <span class="entry__tool-status">{state()}</span>
+      <Show when={permission()?.paths.length}>
+        <p class="entry__read-paths">{(permission()?.paths ?? []).join(', ')}</p>
+      </Show>
+      <Show when={pending() && props.context.canApprove()}>
+        <div class="entry__actions">
+          <For each={permission()?.choices ?? DEFAULT_APPROVAL_CHOICES}>
+            {(choice) => (
+              <button type="button" data-decision={choice} disabled={props.context.cancelling()}
+                onClick={() => {
+                  const current = permission()
+                  if (current) props.context.decide(current.approvalId, choice)
+                }}>
+                {choice === 'allow' && !permission()?.choices ? 'Allow' : APPROVAL_LABELS[choice]}
+              </button>
+            )}
+          </For>
+        </div>
+      </Show>
+      <Show when={props.toolCall.output}>
+        {(output) => (
+          <div class="entry__read-result">
+            <span class="entry__read-meta">{`${lines()} ${lines() === 1 ? 'line' : 'lines'}`}</span>
+            <button type="button" class="entry__read-toggle" aria-expanded={open()}
+              onClick={() => props.context.toggleRead(props.toolCall.toolCallId)}>
+              {open() ? 'Hide contents' : 'Show contents'}
+            </button>
+            <Show when={open()}>
+              <pre class="entry__output">{text(output())}</pre>
+            </Show>
+          </div>
+        )}
+      </Show>
+    </div>
+  )
+}
+
+function entryBody(entry: bridge.Entry, context: EntryContext, match: () => string | undefined) {
   const kind = entry.kind
   const text = (value: string) => <SearchMark text={value} match={match()} />
   const failureLabels: Record<string, string> = {
@@ -3182,13 +3385,19 @@ function entryBody(
   }
   switch (kind.type) {
     case 'userMessage':
-      return <p class="entry__user">{text(kind.data.text)}</p>
+      // Terminal prompts are the agent's terminal typing, not something the
+      // user wrote in the composer, so only composer prompts become cards.
+      return entry.sourceId
+        ? <p class="entry__user">{text(kind.data.text)}</p>
+        : <div class="entry__user-card"><p class="entry__user">{text(kind.data.text)}</p></div>
     case 'agentText':
       return <p class="entry__agent">{text(kind.data.text)}</p>
     case 'thought':
-      return <p class="entry__thought">{text(kind.data.text)}</p>
+      return <ThoughtRow text={kind.data.text} open={() => context.thoughtOpen(entry.id)}
+        onToggle={() => context.toggleThought(entry.id)}
+        onCollapse={() => context.collapseThought(entry.id)} match={match} />
     case 'question':
-      return <QuestionCard question={kind.data} canAnswer={canAnswer} awaiting={() => awaitingAnswer(kind.data.questionId)} onAnswer={answerQuestion} match={match} />
+      return <QuestionCard question={kind.data} canAnswer={context.canAnswer} awaiting={() => context.awaitingAnswer(kind.data.questionId)} onAnswer={context.answerQuestion} match={match} />
     case 'toolCall':
       return (
         <div class="entry__tool">
@@ -3240,7 +3449,7 @@ function entryBody(
             {(patch) => <DiffBlock patch={patch()} />}
           </Show>
           <Show
-            when={canApprove() && !permission.withdrawn && permission.decision === null}
+            when={context.canApprove() && !permission.withdrawn && permission.decision === null}
             fallback={<span class="entry__permission-decision">{decisionText ?? 'approval unavailable'}</span>}
           >
             <div class="entry__actions">
@@ -3249,8 +3458,8 @@ function entryBody(
                   <button
                     type="button"
                     data-decision={choice}
-                    disabled={cancelling()}
-                    onClick={() => decide(permission.approvalId, choice)}
+                    disabled={context.cancelling()}
+                    onClick={() => context.decide(permission.approvalId, choice)}
                   >
                     {choice === 'allow' && !permission.choices ? 'Allow' : APPROVAL_LABELS[choice]}
                   </button>
@@ -3265,7 +3474,7 @@ function entryBody(
       return <p class={kind.data.isError ? 'entry__notice--error' : 'entry__notice'}>{text(kind.data.text)}</p>
     case 'failure': {
       const authSummary = kind.data.kind === 'authRequired'
-        ? authFailureSummary(kind.data.text, kind.data.detail, agentLabel, kind.data.model, kind.data.protocol) : null
+        ? authFailureSummary(kind.data.text, kind.data.detail, context.agentLabel(), kind.data.model, kind.data.protocol) : null
       return (
         <div class="entry__failure">
           <p class="entry__failure-title">

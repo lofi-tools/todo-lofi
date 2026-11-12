@@ -1557,6 +1557,15 @@ textarea {
   font-weight: 600;
 }
 
+.entry__user-card {
+  width: fit-content;
+  max-width: 80%;
+  margin-left: auto;
+  padding: 8px 12px;
+  border-radius: 10px;
+  background: var(--surface-raised);
+}
+
 .entry__agent {
   margin: 0;
   line-height: 1.55;
@@ -1565,7 +1574,100 @@ textarea {
 .entry__thought {
   margin: 0;
   color: var(--text-muted);
+  font-size: 12px;
+}
+
+.entry__thought-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
   font-style: italic;
+  cursor: pointer;
+}
+
+.entry__thought-caret {
+  font-style: normal;
+}
+
+.entry__thought-text {
+  margin: 4px 0 0 19px;
+  font-style: italic;
+  line-height: 1.5;
+  white-space: pre-wrap;
+}
+
+.entry__thought-preview {
+  margin: 2px 0 0 19px;
+  overflow: hidden;
+  font-style: italic;
+  opacity: 0.75;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.entry__read {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.entry__read-icon {
+  display: inline-flex;
+  color: var(--text-muted);
+}
+
+.entry__read-title {
+  font-size: 13px;
+}
+
+.entry__read-paths {
+  flex-basis: 100%;
+  margin: 0;
+  color: var(--text-muted);
+  font-family: monospace;
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.entry__read-result {
+  display: flex;
+  flex-basis: 100%;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 2px;
+}
+
+.entry__read-meta {
+  color: var(--text-muted);
+  font-size: 11px;
+  text-transform: uppercase;
+}
+
+.entry__read-toggle {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--accent);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.entry__read .entry__output {
+  flex-basis: 100%;
+  width: 100%;
 }
 
 .entry__tool {

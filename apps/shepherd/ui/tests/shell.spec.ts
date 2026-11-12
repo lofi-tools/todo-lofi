@@ -233,7 +233,7 @@ test.beforeEach(async ({ context }) => {
         title: 'Ship it',
         state: options.has('agent-failed') || options.has('agent-auth-failed') ? 'failed'
           : options.has('interrupted-task') ? 'interrupted'
-          : ['approval-fixture', 'scoped-approval', 'project-approval', 'question-fixture'].some((name) => options.has(name)) ? 'waiting' : 'ready',
+          : ['approval-fixture', 'scoped-approval', 'project-approval', 'question-fixture', 'read-fixture'].some((name) => options.has(name)) ? 'waiting' : 'ready',
         agent: options.has('acp-fallback') || options.has('agent-models') ? 'opencode' : 'codex',
         tier: options.has('acp-fallback') ? 'acp' : 'native',
         branch: 'shepherd/ship-it',
@@ -325,6 +325,25 @@ test.beforeEach(async ({ context }) => {
       transcripts['task-1'] = [entry('question-1', 1, {
         type: 'question', data: { questionId: 'question-1', text: 'Which target?', answer: null },
       })]
+    }
+    if (options.has('read-fixture')) {
+      transcripts['task-1'] = [
+        entry('read-tool', 1, {
+          type: 'toolCall',
+          data: {
+            toolCallId: 'read-tool', title: 'Read src/main.rs', kind: 'read', status: 'pending',
+            output: null, diffs: [], terminalId: null,
+          },
+        }),
+        entry('read-approval', 2, {
+          type: 'permission',
+          data: {
+            approvalId: 'read-approval', toolCallId: 'read-tool', title: 'Read src/main.rs',
+            arguments: { path: 'src/main.rs' }, paths: ['src/main.rs'], patch: null,
+            decision: null, withdrawn: false,
+          },
+        }),
+      ]
     }
     if (options.has('agent-failed') || options.has('agent-auth-failed')) {
       const auth = options.has('agent-auth-failed')
@@ -1156,6 +1175,27 @@ test.beforeEach(async ({ context }) => {
             return workspace(args.taskId)
           }
           case 'resolve_approval': {
+            if (options.has('read-fixture')) {
+              const readRows = transcripts[args.taskId]
+              const readRequest = readRows.find((row) => row.kind.type === 'permission' && row.kind.data.approvalId === args.approvalId)
+              if (!readRequest || readRequest.kind.type !== 'permission') throw new Error('Expected a read approval')
+              transcripts[args.taskId] = readRows.map((row) => {
+                if (row === readRequest) {
+                  return entry(row.id, row.sequence, {
+                    type: 'permission',
+                    data: { ...readRequest.kind.data, decision: args.decision, source: 'user' },
+                  })
+                }
+                if (row.kind.type === 'toolCall' && row.kind.data.toolCallId === 'read-tool') {
+                  return entry(row.id, row.sequence, {
+                    type: 'toolCall',
+                    data: { ...row.kind.data, status: 'completed', output: 'fn main() {}\nlet answer = 42;\n' },
+                  })
+                }
+                return row
+              })
+              return workspace(args.taskId)
+            }
             const rows = transcripts[args.taskId]
             const request = rows.find((row) => row.kind.type === 'permission' && row.kind.data.approvalId === args.approvalId)
             const projectGrant = options.has('project-approval')
@@ -2657,6 +2697,24 @@ test('answers a question in the transcript', async ({ page }) => {
   await expect(card).toContainText('debug')
   await expect(card.getByRole('textbox', { name: 'Answer question' })).toHaveCount(0)
   await expect(page.locator('.chat__state')).toHaveText('ready')
+})
+
+test('merges a read approval and its result into one row', async ({ page }) => {
+  await page.goto('/?read-fixture')
+  const chat = page.getByRole('region', { name: 'Task chat' })
+  const row = chat.locator('.entry__read')
+  await expect(row).toContainText('Read src/main.rs')
+  await expect(row).toContainText('src/main.rs')
+  await expect(row).toContainText('awaiting approval')
+  await expect(chat.locator('.entry__permission')).toHaveCount(0)
+
+  await row.getByRole('button', { name: 'Allow' }).click()
+  await expect(row).toContainText('allowed')
+  await expect(row).toContainText('2 lines')
+  await expect(row.locator('.entry__output')).toHaveCount(0)
+
+  await row.getByRole('button', { name: 'Show contents' }).click()
+  await expect(row.locator('.entry__output')).toContainText('let answer = 42;')
 })
 
 test('reports the reason the native adapter was skipped', async ({ page }) => {
