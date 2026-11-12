@@ -359,6 +359,18 @@ Tasks:
         no response or confirmed submission was observed. The incomplete
         recording is `tools-ar3-question-20261111.jsonl` under the private
         Freebuff cache. Do not count it as a successful live response.
+        On 2026-11-12, one approved retry used a clean disposable worktree.
+        The operator confirmed a ready composer, entered the exact approved
+        question, verified it appeared in the input field, and then sent Enter
+        separately. Freebuff read the relevant ar3 source and docs, answered,
+        and returned to its ready composer. The private recording
+        `tools-ar3-question-20261112-retry.jsonl` preserves the input, output,
+        screen transitions, runtime metadata and exit; screen verification
+        succeeded. Finalization failed because Freebuff created the ignored
+        `.freebuff/project-id`, which the effect collector rejects. The capture
+        remains incomplete and must not be replayed as a successful run until
+        those effects can be accounted for safely. Do not submit another live
+        message without separate approval.
       - [ ] Investigate whether writing prompt text and Enter together submits
         reliably in Freebuff, including disconnected and reconnected states;
         reproduce offline from the capture before another live attempt.
@@ -366,7 +378,9 @@ Tasks:
         one write and that the prompt remained visible afterward; it does not
         establish successful submission. The recorder now separates entry and
         Enter with an operator inspection step, exercised by an offline fake
-        CLI. Real disconnected and reconnected behavior remains unverified.
+        CLI. The approved connected live retry accepted the separately entered
+        prompt and Enter. Disconnected and reconnected behavior remains
+        unverified; do not infer it from this successful connected run.
       - [ ] Confirm the active default model after reconnection: the startup
         screen showed DeepSeek V4.1 Flash, while the later status displayed
         `Fast • low` without an explicit model name.
