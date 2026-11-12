@@ -20,7 +20,7 @@ mod preview_annotations;
 mod preview_server;
 mod pty_terminal;
 mod settings;
-mod terminal_screen;
+pub use terminal_renderer as terminal_screen;
 
 use std::path::PathBuf;
 
@@ -167,8 +167,10 @@ pub fn run() -> Result<(), tauri::Error> {
                 opencode_launch,
                 pi_configured,
                 claude_configured,
-            ): (Box<dyn HarnessFactory>, _, _, _, _, _) = match dev_factory {
-                Some(factory) => (factory, None, false, None, false, false),
+                freebuff_configured,
+                freebuff_reason,
+            ): (Box<dyn HarnessFactory>, _, _, _, _, _, _, _) = match dev_factory {
+                Some(factory) => (factory, None, false, None, false, false, false, None),
                 None => {
                     let (codex, codex_program, codex_detected) = codex_factory(&data_directory);
                     let (opencode, pi, claude) = match &agents {
@@ -195,15 +197,39 @@ pub fn run() -> Result<(), tauri::Error> {
                     if let Err(error) = &claude {
                         tracing::warn!(%error, "could not load Claude Code configuration");
                     }
-                    let freebuff = match &agents {
-                        Ok(settings) => agent_harness::freebuff::discover_from_settings(
+                    let (freebuff, freebuff_configured, freebuff_reason) = match &agents {
+                        Ok(settings) => match agent_harness::freebuff::discover_from_settings(
                             settings,
                             std::env::var_os("PATH")
                                 .as_deref()
                                 .unwrap_or_else(|| std::ffi::OsStr::new("")),
-                        )
-                        .map(|discovery| discovery.install.map(|install| install.executable)),
-                        Err(error) => Err(agent_harness::HarnessError::Protocol(error.to_string())),
+                        ) {
+                            Ok(discovery) => {
+                                let configured = discovery.install.is_some();
+                                let reason = if configured {
+                                    None
+                                } else {
+                                    Some(discovery.summary())
+                                };
+                                (
+                                    Ok(discovery.install.map(|install| install.executable)),
+                                    configured,
+                                    reason,
+                                )
+                            }
+                            Err(error) => {
+                                let reason = error.to_string();
+                                (Err(error), false, Some(reason))
+                            }
+                        },
+                        Err(error) => {
+                            let reason = error.to_string();
+                            (
+                                Err(agent_harness::HarnessError::Protocol(reason.clone())),
+                                false,
+                                Some(reason),
+                            )
+                        }
                     };
                     if let Err(error) = &freebuff {
                         tracing::warn!(%error, "could not load Freebuff configuration");
@@ -226,6 +252,8 @@ pub fn run() -> Result<(), tauri::Error> {
                         opencode_launch,
                         pi_configured,
                         claude_configured,
+                        freebuff_configured,
+                        freebuff_reason,
                     )
                 }
             };
@@ -240,6 +268,8 @@ pub fn run() -> Result<(), tauri::Error> {
             state.opencode_launch = opencode_launch;
             state.pi_configured = pi_configured;
             state.claude_configured = claude_configured;
+            state.freebuff_configured = freebuff_configured;
+            state.freebuff_reason = freebuff_reason;
             state.start_event_pump();
             app.manage(state);
             app.manage(keybindings::KeybindingSettings::new(
@@ -267,6 +297,7 @@ pub fn run() -> Result<(), tauri::Error> {
             bridge::commands::opencode_configured,
             bridge::commands::pi_configured,
             bridge::commands::claude_configured,
+            bridge::commands::freebuff_availability,
             bridge::commands::delete_task,
             bridge::commands::send_prompt,
             bridge::commands::set_task_options,
@@ -277,7 +308,6 @@ pub fn run() -> Result<(), tauri::Error> {
             bridge::commands::project_approvals,
             bridge::commands::reset_approval_grant,
             bridge::commands::cancel_task,
-            bridge::commands::resume_task,
             bridge::commands::quit,
             bridge::commands::project_list,
             bridge::commands::project_remote,

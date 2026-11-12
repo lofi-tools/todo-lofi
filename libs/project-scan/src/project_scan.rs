@@ -336,7 +336,73 @@ fn collapse(mut node: RawNode) -> ProjectNode {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{TestDirectory, TestRepository};
+
+    struct TestDirectory {
+        directory: tempfile::TempDir,
+    }
+
+    impl TestDirectory {
+        fn new() -> std::io::Result<Self> {
+            Ok(Self {
+                directory: tempfile::tempdir()?,
+            })
+        }
+
+        fn path(&self) -> &Path {
+            self.directory.path()
+        }
+
+        fn join(&self, path: impl AsRef<Path>) -> PathBuf {
+            self.path().join(path)
+        }
+    }
+
+    struct TestRepository(TestDirectory);
+
+    impl TestRepository {
+        fn new() -> Result<Self, Box<dyn std::error::Error>> {
+            let directory = TestDirectory::new()?;
+            let git = |arguments: &[&str]| -> Result<(), Box<dyn std::error::Error>> {
+                let status = std::process::Command::new("git")
+                    .arg("-C")
+                    .arg(directory.path())
+                    .args(arguments)
+                    .status()?;
+                if !status.success() {
+                    return Err(format!("git {arguments:?} failed").into());
+                }
+                Ok(())
+            };
+            git(&["init", "-b", "main"])?;
+            std::fs::write(directory.join("README.md"), "initial\n")?;
+            git(&[
+                "-c",
+                "commit.gpgsign=false",
+                "-c",
+                "user.name=Shepherd Test",
+                "-c",
+                "user.email=shepherd@example.com",
+                "add",
+                "README.md",
+            ])?;
+            git(&[
+                "-c",
+                "commit.gpgsign=false",
+                "-c",
+                "user.name=Shepherd Test",
+                "-c",
+                "user.email=shepherd@example.com",
+                "commit",
+                "-m",
+                "initial",
+            ])?;
+            Ok(Self(directory))
+        }
+
+        fn path(&self) -> &Path {
+            self.0.path()
+        }
+    }
 
     #[test]
     fn scan_reports_an_unavailable_root() -> Result<(), Box<dyn std::error::Error>> {

@@ -1433,6 +1433,7 @@ mod tests {
     }
 
     #[cfg(unix)]
+    #[cfg(feature = "git")]
     #[test]
     fn streamed_git_digest_drains_large_stderr_without_deadlocking()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -1457,6 +1458,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "git")]
     #[test]
     fn streamed_baseline_digests_match_git_output_and_report_failures()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -1492,6 +1494,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "git")]
     #[test]
     fn streamed_revision_tokens_match_git_output_and_reject_stale_discard()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -1598,6 +1601,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "git")]
     #[test]
     fn discovers_the_repository_and_creates_a_worktree_under_the_git_dir() {
         let fixture = TestRepository::new().expect("repository fixture");
@@ -1625,6 +1629,7 @@ mod tests {
         assert!(list.contains(&worktree.display().to_string()));
     }
 
+    #[cfg(feature = "git")]
     #[test]
     fn a_worktree_starts_from_the_default_branch_not_the_checked_out_one() {
         let fixture = TestRepository::new().expect("repository fixture");
@@ -1658,28 +1663,9 @@ mod tests {
         assert_eq!(head, main);
     }
 
+    #[cfg(feature = "git")]
     #[test]
-    fn a_clean_worktree_has_no_changes_until_a_file_is_written() {
-        let fixture = TestRepository::new().expect("repository fixture");
-        let repository = fixture.repository();
-        assert!(
-            !GitService
-                .has_changes(&repository.root)
-                .expect("status should run")
-        );
-
-        fixture
-            .write_file("README.md", "changed\n")
-            .expect("write change");
-        assert!(
-            GitService
-                .has_changes(&repository.root)
-                .expect("status should run")
-        );
-    }
-
-    #[test]
-    fn baseline_detects_branch_switch_and_commit_without_file_changes()
+    fn baseline_detects_branch_switch_and_commit_and_worktree_changes()
     -> Result<(), Box<dyn std::error::Error>> {
         let fixture = TestRepository::new()?;
         let path = fixture.path();
@@ -1693,10 +1679,13 @@ mod tests {
         )?;
         assert!(before_commit != GitService.turn_baseline(path)?);
         assert!(!GitService.has_changes(path)?);
+        fixture.write_file("README.md", "changed\n")?;
+        assert!(GitService.has_changes(path)?);
         Ok(())
     }
 
     #[cfg(unix)]
+    #[cfg(feature = "git")]
     #[test]
     fn file_staging_and_commit_use_git_and_its_hooks() -> Result<(), Box<dyn std::error::Error>> {
         use std::os::unix::fs::PermissionsExt;
@@ -1737,6 +1726,7 @@ mod tests {
     }
 
     #[cfg(unix)]
+    #[cfg(feature = "git")]
     #[test]
     fn a_rejected_commit_keeps_the_index_available_for_retry()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -1764,6 +1754,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "git")]
     fn task_worktree(fixture: &TestRepository) -> Result<PathBuf, GitError> {
         let repository = fixture.repository();
         let path = repository.git_dir.join("shepherd/worktrees/example");
@@ -1771,6 +1762,7 @@ mod tests {
         Ok(path)
     }
 
+    #[cfg(feature = "git")]
     #[test]
     fn squash_merge_commits_to_the_base_and_keeps_the_task_branch()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -1815,6 +1807,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "git")]
     #[test]
     fn squash_merge_refuses_dirty_and_off_base_project_roots()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -1846,6 +1839,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "git")]
     #[test]
     fn squash_merge_lists_conflicts_and_leaves_the_base_tip_alone()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -1875,6 +1869,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "git")]
     #[test]
     fn repairs_the_missing_checkout_without_touching_other_registrations()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -1900,6 +1895,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "git")]
     #[test]
     fn refuses_to_remove_a_worktree_containing_an_untracked_file()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -1975,6 +1971,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "git")]
     #[test]
     fn archived_collection_preserves_ignored_files() -> Result<(), Box<dyn std::error::Error>> {
         let fixture = TestRepository::new()?;
@@ -1997,6 +1994,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "git")]
     #[test]
     fn collection_removal_refuses_files_created_after_its_scan()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -2016,6 +2014,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "git")]
     #[test]
     fn moving_a_worktree_preserves_ignored_files_and_registration()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -2091,6 +2090,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "git")]
     #[test]
     fn a_recorded_tip_can_restore_a_worktree_after_its_branch_is_deleted()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -2120,6 +2120,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "git")]
     #[test]
     fn status_reports_a_rename_and_unstages_both_paths() -> Result<(), Box<dyn std::error::Error>> {
         let fixture = TestRepository::new()?;

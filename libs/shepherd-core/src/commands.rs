@@ -68,9 +68,6 @@ pub enum Command {
     CancelTask {
         task_id: TaskId,
     },
-    ResumeTask {
-        task_id: TaskId,
-    },
     ReviewTask {
         task_id: TaskId,
         action: ReviewAction,

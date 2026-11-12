@@ -11,7 +11,7 @@ pub mod git;
 pub mod harness;
 pub mod input;
 pub mod pool_reset;
-pub mod project_scan;
+pub use shepherd_project_scan as project_scan;
 pub mod projects;
 pub mod search;
 pub mod session;
@@ -38,8 +38,8 @@ use tokio::sync::mpsc;
 pub use commands::{Command, CommandResult, QuitSummary, ReviewAction};
 pub use events::{Event, ShutdownState};
 pub use input::{Focus, InputMode};
-pub use project_scan::{ProjectNode, ProjectScan};
 pub use projects::{Project, ProjectId, ProjectSnapshot};
+pub use shepherd_project_scan::{ProjectNode, ProjectScan};
 pub use snapshots::{
     ProjectApprovalsSnapshot, ProjectList, TaskList, TaskWorkspace, WorkspaceLayout,
 };
@@ -48,7 +48,7 @@ pub use tasks::{Agent, AgentTier, Task, TaskDetail, TaskId, TaskState, TaskSumma
 use crate::git::{GitError, GitService, TurnBaseline};
 use crate::harness::{HarnessFactory, HarnessSession, ProjectApprovals, UnavailableHarnessFactory};
 use crate::session::SessionRecord;
-use crate::snapshots::{SessionRecovery, TaskApproval};
+use crate::snapshots::TaskApproval;
 use crate::store::{
     MemoryStore, PoolCatalogAdvisory, PoolCatalogOutcome, PoolCooldownClearRequest,
     PoolQuotaCorrectionOutcome, PoolQuotaCorrectionRequest, PoolReorderOutcome, PoolReorderRequest,
@@ -122,8 +122,6 @@ pub enum CoreError {
     TaskDeletionBusy { id: String, state: &'static str },
     #[error("task {id} is {state}; it cannot accept a prompt")]
     TaskNotReady { id: String, state: &'static str },
-    #[error("task {id} is {state}; it has nothing to resume")]
-    TaskNotResumable { id: String, state: &'static str },
     #[error("task {id} is {state}; only archived tasks can be reopened")]
     TaskNotArchived { id: String, state: &'static str },
     #[error("task {id} has no recorded branch for worktree collection")]
@@ -142,11 +140,14 @@ pub enum CoreError {
     ReviewNoteAlreadyQueued { id: String },
     #[error("task {id} has no queued review note")]
     ReviewNoteNotQueued { id: String },
-    #[error("cannot transition task {id} from {from} to {to}")]
+    #[error(
+        "task {id} cannot move from {from} to {to}; from {from} Shepherd allows {allowed}. Nothing was changed."
+    )]
     InvalidTransition {
         id: String,
         from: &'static str,
         to: &'static str,
+        allowed: &'static str,
     },
     #[error("quit requires confirmation: {live_tasks} live task(s); retry with force to stop them")]
     QuitConfirmationRequired {
@@ -1277,7 +1278,6 @@ impl Core {
                 answer,
             } => self.answer_question(&task_id, &question_id, &answer).await,
             Command::CancelTask { task_id } => self.cancel_task(&task_id).await,
-            Command::ResumeTask { task_id } => self.resume_task(&task_id).await,
             Command::ReviewTask { task_id, action } => self.review_task(&task_id, action).await,
             Command::ArchiveReviewed { task_ids } => self.archive_reviewed(task_ids).await,
             Command::Quit { force } => self.quit(force).await,
@@ -1557,19 +1557,6 @@ impl Core {
                 })?;
         let session = self.sessions.get(task_id);
         let record = self.session_records.get(task_id);
-        let recovery = if matches!(task.state, TaskState::Interrupted | TaskState::Failed)
-            && task.worktree_path.is_some()
-        {
-            Some(
-                match record.filter(|record| record.resume_handle().is_some()) {
-                    Some(record) if record.capabilities.is_some() => SessionRecovery::Resume,
-                    Some(_) => SessionRecovery::Reconnect,
-                    None => SessionRecovery::StartNew,
-                },
-            )
-        } else {
-            None
-        };
         Ok(TaskWorkspace {
             project: self.project_snapshot(project),
             task: TaskDetail::from(task),
@@ -1596,7 +1583,6 @@ impl Core {
                 .or_else(|| record.and_then(|record| record.capabilities.clone())),
             modes: session.and_then(HarnessSession::modes),
             models: session.and_then(HarnessSession::models),
-            recovery,
         })
     }
 
@@ -2304,7 +2290,9 @@ impl Core {
         }
         match state {
             TaskState::Draft => self.create_worktree(task_id).await?,
-            TaskState::Ready | TaskState::Review => self.repair_worktree(task_id).await?,
+            TaskState::Ready | TaskState::Review | TaskState::Interrupted | TaskState::Failed => {
+                self.repair_worktree(task_id).await?
+            }
             state => {
                 return Err(CoreError::TaskNotReady {
                     id: task_id.as_str().to_string(),
@@ -2361,21 +2349,31 @@ impl Core {
         if let Some(task) = self.tasks.get_mut(task_id) {
             task.error = None;
         }
+        // The next prompt is what reattaches a task; opening its conversation
+        // never starts a process. A recorded session is picked up here when the
+        // adapter still supports it, and a fresh one starts when it does not.
         let stored = self
-            .sessions
+            .session_records
             .get(task_id)
-            .filter(|session| session.is_closed())
-            .and_then(|_| self.session_records.get(task_id))
             .and_then(SessionRecord::resume_handle)
             .map(SessionId::new);
         let opened = self.ensure_session(task_id, stored).await;
-        if let Ok(SessionOpened::ResumeFailed(reason)) = &opened
+        if let Ok(opened) = &opened
             && let Some(session) = self.sessions.get_mut(task_id)
         {
-            session.note(
-                format!("Could not resume the previous session: {reason}. Started a new session."),
-                true,
-            );
+            match opened {
+                SessionOpened::Resumed(session_id) => session.note(
+                    format!("resumed the previous agent session {session_id}"),
+                    false,
+                ),
+                SessionOpened::ResumeFailed(reason) => session.note(
+                    format!(
+                        "Could not resume the previous session: {reason}. Started a new session."
+                    ),
+                    true,
+                ),
+                SessionOpened::Fresh => {}
+            }
         }
         if let Err(error) = opened {
             // A session that never started leaves the task ready to retry; the
@@ -2395,6 +2393,7 @@ impl Core {
         {
             session.note(note, false);
         }
+        self.fallback_model(task_id, &mut input);
 
         let outcome = {
             let session =
@@ -2611,72 +2610,6 @@ impl Core {
 
     /// Resume an interrupted task with the agent session the previous process
     /// left behind, and say plainly when that session is gone.
-    async fn resume_task(&mut self, task_id: &TaskId) -> Result<CommandResult, CoreError> {
-        let task = self.task(task_id)?;
-        let state = task.state;
-        if !matches!(state, TaskState::Interrupted | TaskState::Failed)
-            || task.worktree_path.is_none()
-        {
-            return Err(CoreError::TaskNotResumable {
-                id: task_id.as_str().to_string(),
-                state: state.as_str(),
-            });
-        }
-
-        self.repair_worktree(task_id).await?;
-        self.set_task_state(task_id, TaskState::Starting)?;
-        if let Some(session) = self.sessions.remove(task_id) {
-            let mut transcript = Transcript::default();
-            transcript.restore(session.transcript().entries().iter().cloned());
-            self.detached_transcripts
-                .insert(task_id.clone(), transcript);
-            self.emit(Event::ProjectApprovalsChanged {
-                project_id: self.task(task_id)?.project_id.clone(),
-            });
-        }
-        let stored_session_id = self
-            .session_records
-            .get(task_id)
-            .and_then(SessionRecord::resume_handle)
-            .map(SessionId::new);
-        let opened = match self.ensure_session(task_id, stored_session_id).await {
-            Ok(opened) => opened,
-            Err(error) => {
-                // Stay resumable: the user can install or update the agent and
-                // try again.
-                self.set_task_state(task_id, state)?;
-                if let Some(task) = self.tasks.get_mut(task_id) {
-                    task.error = Some(error.to_string());
-                }
-                self.save_task(task_id).await?;
-                self.publish_task(task_id)?;
-                return Err(error);
-            }
-        };
-        if let Some(session) = self.sessions.get_mut(task_id) {
-            match opened {
-                SessionOpened::Resumed(session_id) => session.note(
-                    format!("resumed the previous agent session {session_id}"),
-                    false,
-                ),
-                SessionOpened::ResumeFailed(error) => session.note(
-                    format!(
-                        "the adapter cannot resume the previous session ({error}). Shepherd started a new session"
-                    ),
-                    true,
-                ),
-                SessionOpened::Fresh => session.note("started a new agent session", false),
-            }
-        }
-        self.set_task_state(task_id, TaskState::Ready)?;
-        if let Some(task) = self.tasks.get_mut(task_id) {
-            task.error = None;
-        }
-        self.save_task(task_id).await?;
-        let workspace = self.publish_task(task_id)?;
-        Ok(CommandResult::TaskWorkspace(workspace))
-    }
-
     async fn repair_worktree(&mut self, task_id: &TaskId) -> Result<(), CoreError> {
         let task = self.task(task_id)?.clone();
         if let (Some(path), Some(branch)) = (&task.worktree_path, &task.branch) {
@@ -3066,16 +2999,38 @@ impl Core {
         };
 
         let task = self.task(task_id)?.clone();
+        let project_path = self.project_path(&task.project_id)?;
         let cwd = match task.worktree_path.clone() {
             Some(worktree_path) => worktree_path,
-            None => self.project_path(&task.project_id)?,
+            None => project_path.clone(),
         };
-        let (harness, mut spec) = match self
-            .harness_factory
-            .launch_for_task(task_id, task.agent, cwd)
-        {
-            Ok(launch) => launch,
-            Err(error) => {
+        let mut candidates = vec![task.agent];
+        for agent in self.harness_factory.fallback_agents(task.agent) {
+            if !candidates.contains(&agent) {
+                candidates.push(agent);
+            }
+        }
+        let mut launched = None;
+        let mut launch_error = None;
+        for agent in candidates {
+            match self
+                .harness_factory
+                .launch_for_task(task_id, agent, cwd.clone())
+            {
+                Ok((harness, spec)) => {
+                    launched = Some((harness, spec, agent));
+                    break;
+                }
+                Err(error) => {
+                    tracing::warn!(%error, agent = agent.as_str(), "agent could not launch");
+                    launch_error = Some(error);
+                }
+            }
+        }
+        let (harness, mut spec, launched_agent) = match launched {
+            Some(launch) => launch,
+            None => {
+                let error = launch_error.unwrap_or(CoreError::HarnessUnavailable);
                 let mut transcript = Transcript::default();
                 transcript.restore(carried);
                 if let Some(kind) = adapter_failure_kind(&error) {
@@ -3086,12 +3041,31 @@ impl Core {
                 return Err(error);
             }
         };
-        let project_path = self.project_path(&task.project_id)?;
         let environment = self
             .harness_factory
-            .environment_for_project(task.agent, &project_path);
+            .environment_for_project(launched_agent, &project_path);
         let mut session = HarnessSession::new(harness);
         session.restore_transcript(carried);
+        if launched_agent != task.agent {
+            session.note(
+                format!(
+                    "{} is unavailable; continuing with {}.",
+                    task.agent.label(),
+                    launched_agent.label()
+                ),
+                false,
+            );
+            if let Some(task) = self.tasks.get_mut(task_id) {
+                task.agent = launched_agent;
+            }
+        }
+        match self
+            .harness_factory
+            .default_model_for_project(launched_agent, &project_path)
+        {
+            Ok(model) => session.set_default_model(model),
+            Err(error) => return Err(self.fail_session_start(task_id, session, error)),
+        }
         match environment {
             Ok(environment) => spec.environment.extend(environment),
             Err(error) => return Err(self.fail_session_start(task_id, session, error)),
@@ -3099,7 +3073,7 @@ impl Core {
         let policy = ProjectApprovals::new(
             self.store.clone(),
             task.project_id.clone(),
-            task.agent,
+            launched_agent,
             &spec,
         )?;
         session.set_project_approval_policy(Arc::new(policy));
@@ -3114,13 +3088,22 @@ impl Core {
         };
         let opened_session = match resume {
             Some(_)
-                if task.tier != session.tier() && self.session_records.contains_key(task_id) =>
+                if (launched_agent != task.agent || task.tier != session.tier())
+                    && self.session_records.contains_key(task_id) =>
             {
-                let reason = format!(
-                    "the adapter changed from {} to {}",
-                    task.tier.as_str(),
-                    session.tier().as_str()
-                );
+                let reason = if launched_agent != task.agent {
+                    format!(
+                        "the agent changed from {} to {}",
+                        task.agent.as_str(),
+                        launched_agent.as_str()
+                    )
+                } else {
+                    format!(
+                        "the adapter changed from {} to {}",
+                        task.tier.as_str(),
+                        session.tier().as_str()
+                    )
+                };
                 session
                     .open_session(None)
                     .await
@@ -3165,7 +3148,7 @@ impl Core {
 
         let mut record = SessionRecord::started(
             task_id.clone(),
-            task.agent.as_str(),
+            launched_agent.as_str(),
             Some(session_id.as_str().to_string()),
         );
         record.capabilities = Some(session.capabilities().clone());
@@ -3588,6 +3571,15 @@ impl Core {
         Ok((path, environment))
     }
 
+    pub fn project_default_model(
+        &self,
+        project_id: &ProjectId,
+        agent: Agent,
+    ) -> Result<Option<String>, CoreError> {
+        let path = self.project_path(project_id)?;
+        self.harness_factory.default_model_for_project(agent, &path)
+    }
+
     pub fn task_project_path(&self, task_id: &TaskId) -> Result<PathBuf, CoreError> {
         self.project_path(&self.task(task_id)?.project_id)
     }
@@ -3605,6 +3597,48 @@ impl Core {
             .ok_or_else(|| CoreError::ProjectNotFound {
                 id: project_id.as_str().to_string(),
             })
+    }
+
+    /// A conversation keeps its recorded model. When the adapter no longer
+    /// offers it, continue on the adapter's current model and say so once.
+    fn fallback_model(&mut self, task_id: &TaskId, input: &mut PromptInput) {
+        let Some(requested) = input.model.clone() else {
+            return;
+        };
+        let Some(models) = self.sessions.get(task_id).and_then(HarnessSession::models) else {
+            return;
+        };
+        let Some(replacement) = Self::model_fallback(&requested, &models) else {
+            return;
+        };
+        input.model = replacement.clone();
+        let used = replacement
+            .clone()
+            .unwrap_or_else(|| "the adapter's default model".to_string());
+        if let Some(task) = self.tasks.get_mut(task_id) {
+            task.model = replacement;
+        }
+        if let Some(session) = self.sessions.get_mut(task_id) {
+            session.note(
+                format!("Model {requested} is no longer available; continuing with {used}."),
+                false,
+            );
+        }
+    }
+
+    /// The replacement for a requested model the adapter does not list, or
+    /// `None` when the request can stand.
+    fn model_fallback(
+        requested: &str,
+        models: &agent_harness::AgentModels,
+    ) -> Option<Option<String>> {
+        if models.options.is_empty()
+            || models.options.iter().any(|option| option.id == requested)
+            || models.current.as_deref() == Some(requested)
+        {
+            return None;
+        }
+        Some(models.current.clone())
     }
 
     fn set_task_state(&mut self, task_id: &TaskId, state: TaskState) -> Result<(), CoreError> {
@@ -4007,14 +4041,14 @@ mod live_restart {
         );
 
         let CommandResult::TaskWorkspace(resumed) = restarted
-            .execute(Command::ResumeTask {
+            .execute(Command::SendPrompt {
                 task_id: task_id.clone(),
+                input: PromptInput::text("Reply with the single word: resumed."),
             })
             .await?
         else {
             return Err("expected a workspace".into());
         };
-        assert_eq!(resumed.task.state, TaskState::Ready);
         let rows: Vec<String> = resumed
             .transcript
             .iter()
@@ -4022,13 +4056,6 @@ mod live_restart {
             .collect();
         let note = format!("resumed the previous agent session {recorded}");
         assert!(rows.iter().any(|row| row.contains(&note)), "rows: {rows:?}");
-
-        restarted
-            .execute(Command::SendPrompt {
-                task_id: task_id.clone(),
-                input: PromptInput::text("Reply with the single word: resumed."),
-            })
-            .await?;
 
         let mut finished = None;
         for _ in 0..900 {
@@ -4057,30 +4084,40 @@ mod live_restart {
 
 #[cfg(test)]
 mod streaming {
-    use std::sync::{Arc, Mutex};
+    use std::sync::Arc;
+    #[cfg(feature = "git")]
+    use std::sync::Mutex;
     use std::time::Duration;
 
     use agent_harness::{
-        AgentHarness, ApprovalId, Capabilities, Decision, DeltaKind, Entry, HarnessEvent,
-        HarnessResult, ItemId, PromptInput, SessionApproval, SessionId, SpawnSpec,
-        TurnFinishReason,
+        AgentHarness, ApprovalId, Capabilities, Decision, DeltaKind, HarnessEvent, HarnessResult,
+        ItemId, PromptInput, SessionApproval, SessionId, SpawnSpec,
     };
+    #[cfg(feature = "git")]
+    use agent_harness::{Entry, TurnFinishReason};
     use async_trait::async_trait;
     use tokio::sync::mpsc;
 
-    use crate::harness::{HarnessFactory, HarnessSession};
+    #[cfg(feature = "git")]
+    use crate::harness::HarnessFactory;
+    use crate::harness::HarnessSession;
+    #[cfg(feature = "git")]
     use crate::store::{Store, TursoStore};
+    #[cfg(feature = "git")]
     use crate::test_support::{TestDatabase, TestRepository};
+    #[cfg(feature = "git")]
     use crate::{
-        Agent, Command, CommandResult, Core, CoreError, Event, Project, ProjectId, Task, TaskId,
-        TaskState,
+        Agent, Command, CommandResult, CoreError, Event, Project, ProjectId, Task, TaskState,
     };
+    use crate::{Core, TaskId};
 
+    #[cfg(feature = "git")]
     pub(crate) struct LateHarnessFactory {
         pub(crate) receiver: Mutex<Option<mpsc::UnboundedReceiver<HarnessEvent>>>,
         pub(crate) prompts: mpsc::UnboundedSender<(Option<String>, PromptInput)>,
     }
 
+    #[cfg(feature = "git")]
     impl HarnessFactory for LateHarnessFactory {
         fn create(&self) -> Result<Box<dyn AgentHarness>, CoreError> {
             let receiver = self
@@ -4365,6 +4402,7 @@ mod streaming {
         }
     }
 
+    #[cfg(feature = "git")]
     #[tokio::test]
     async fn live_grants_are_listed_and_reset_by_project_and_task()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -4449,6 +4487,7 @@ mod streaming {
         Ok(())
     }
 
+    #[cfg(feature = "git")]
     #[tokio::test]
     async fn pumping_folds_a_streaming_turn_into_the_workspace()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -4655,13 +4694,16 @@ async fn pause_worktree_deletion_fixture(phase: &str, task_id: &TaskId) -> Resul
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
+    #[cfg(feature = "git")]
     use std::sync::Mutex;
 
-    use agent_harness::fake_harness::{FakeHarness, FakeStep, FakeTurn};
-    use agent_harness::{
-        AgentHarness, ApprovalId, Capabilities, Decision, Entry, HarnessError, HarnessResult,
-        SpawnSpec,
-    };
+    #[cfg(feature = "git")]
+    use agent_harness::fake_harness::FakeHarness;
+    use agent_harness::fake_harness::{FakeStep, FakeTurn};
+    #[cfg(feature = "git")]
+    use agent_harness::{AgentHarness, Capabilities, HarnessError, HarnessResult, SpawnSpec};
+    use agent_harness::{ApprovalId, Decision, Entry};
+    #[cfg(feature = "git")]
     use async_trait::async_trait;
 
     use super::*;
@@ -4670,10 +4712,13 @@ mod tests {
         PoolCooldownClearRequest, PoolQuotaCorrectionRequest, PoolQuotaEntry, PoolQuotaSource,
         PoolSlot, PoolSlotId, TursoStore,
     };
+    #[cfg(feature = "git")]
     use crate::streaming::LateHarnessFactory;
-    use crate::test_support::{
-        FakeHarnessFactory, TestCore, TestDatabase, TestDirectory, TestRepository,
-    };
+    #[cfg(feature = "git")]
+    use crate::test_support::TestRepository;
+    #[cfg(feature = "git")]
+    use crate::test_support::{FakeHarnessFactory, TestCore};
+    use crate::test_support::{TestDatabase, TestDirectory};
 
     async fn add_project(
         core: &mut Core,
@@ -5349,6 +5394,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "git")]
     #[tokio::test]
     async fn a_turn_selects_a_pool_slot_and_records_it() -> Result<(), Box<dyn std::error::Error>> {
         let repository = TestRepository::new()?;
@@ -5399,6 +5445,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "git")]
     #[tokio::test]
     async fn a_turn_refuses_to_start_when_no_slot_can_serve_it()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -5446,6 +5493,102 @@ mod tests {
         );
         assert!(!core.sessions.contains_key(&task_id));
         Ok(())
+    }
+
+    #[cfg(feature = "git")]
+    struct FallingBackFactory {
+        inner: FakeHarnessFactory,
+        failed: Agent,
+        fallback: Agent,
+    }
+
+    #[cfg(feature = "git")]
+    impl HarnessFactory for FallingBackFactory {
+        fn create(&self) -> Result<Box<dyn AgentHarness>, CoreError> {
+            self.inner.create()
+        }
+
+        fn launch_for_task(
+            &self,
+            _task_id: &TaskId,
+            agent: Agent,
+            cwd: PathBuf,
+        ) -> Result<(Box<dyn AgentHarness>, agent_harness::SpawnSpec), CoreError> {
+            if agent == self.failed {
+                return Err(CoreError::HarnessMissing {
+                    report: format!("{} is not installed", agent.as_str()),
+                });
+            }
+            Ok((self.inner.create()?, self.inner.spawn_spec(cwd)))
+        }
+
+        fn fallback_agents(&self, _agent: Agent) -> Vec<Agent> {
+            vec![self.fallback]
+        }
+    }
+
+    #[cfg(feature = "git")]
+    #[tokio::test]
+    async fn a_conversation_falls_back_to_an_available_agent()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let repository = TestRepository::new()?;
+        let mut core = Core::with_services(
+            Box::new(MemoryStore::new()),
+            Box::new(FallingBackFactory {
+                inner: FakeHarnessFactory::new(vec![vec![FakeTurn::new(vec![FakeStep::Message(
+                    "fallback answer".into(),
+                )])]]),
+                failed: Agent::Codex,
+                fallback: Agent::OpenCode,
+            }),
+        );
+        let project_id = add_project(&mut core, repository.path().to_path_buf()).await?;
+        let draft = workspace_of(
+            core.execute(Command::CreateDraft {
+                agent: Agent::Codex,
+                project_id,
+                title: "Fallback".into(),
+            })
+            .await?,
+        );
+        let task_id = TaskId::new(draft.task.id.clone());
+        let workspace = workspace_of(
+            core.execute(Command::SendPrompt {
+                task_id: task_id.clone(),
+                input: PromptInput::text("continue"),
+            })
+            .await?,
+        );
+        assert_eq!(workspace.task.agent, Agent::OpenCode);
+        assert!(
+            workspace.transcript.iter().any(|entry| entry
+                .summary()
+                .contains("Codex is unavailable; continuing with OpenCode")),
+            "rows: {:?}",
+            summaries(&workspace)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_missing_model_falls_back_to_the_adapters_current_model() {
+        let models = agent_harness::AgentModels {
+            current: Some("acme/default".into()),
+            options: vec![agent_harness::AgentModel {
+                id: "acme/default".into(),
+                name: "Default".into(),
+                description: None,
+            }],
+        };
+        assert_eq!(
+            Core::model_fallback("acme/gone", &models),
+            Some(Some("acme/default".into()))
+        );
+        assert_eq!(Core::model_fallback("acme/default", &models), None);
+        assert_eq!(
+            Core::model_fallback("acme/gone", &agent_harness::AgentModels::default()),
+            None
+        );
     }
 
     struct NamedAgentFactory;
@@ -5558,6 +5701,7 @@ mod tests {
     }
 
     #[cfg(unix)]
+    #[cfg(feature = "git")]
     #[tokio::test]
     async fn launch_environment_reaches_process_without_persisting_secret()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -5674,6 +5818,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "git")]
     #[tokio::test]
     async fn cancelled_admission_failure_is_persisted_and_cleanup_runs()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -5914,6 +6059,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "git")]
     #[tokio::test]
     async fn two_agents_in_one_project_keep_approvals_and_grants_separate()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -5971,6 +6117,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "git")]
     #[tokio::test]
     async fn a_same_title_task_reports_a_worktree_conflict_without_touching_the_first()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -6024,6 +6171,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "git")]
     #[tokio::test]
     async fn three_agent_sessions_keep_projects_approvals_and_worktrees_isolated()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -6191,6 +6339,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "git")]
     fn git_in(repository: &TestRepository, args: &[&str]) -> String {
         let output = std::process::Command::new("git")
             .arg("-C")
@@ -6206,6 +6355,7 @@ mod tests {
         String::from_utf8_lossy(&output.stdout).trim().to_string()
     }
 
+    #[cfg(feature = "git")]
     fn worktree_count(repository: &TestRepository) -> usize {
         git_in(repository, &["worktree", "list", "--porcelain"])
             .lines()
@@ -6252,6 +6402,7 @@ mod tests {
         assert!(matches!(second, Err(CoreError::DuplicateProject { .. })));
     }
 
+    #[cfg(feature = "git")]
     #[tokio::test]
     async fn a_draft_has_no_worktree_or_branch() {
         let repository = TestRepository::new().expect("temp repository");
@@ -6297,6 +6448,7 @@ mod tests {
         assert_eq!(workspace.project.unfinished_task_count, 1);
     }
 
+    #[cfg(feature = "git")]
     #[tokio::test]
     async fn discarding_a_draft_removes_it_without_git_state() {
         let repository = TestRepository::new().expect("temp repository");
@@ -6337,6 +6489,7 @@ mod tests {
         assert_eq!(git_in(&repository, &["status", "--porcelain"]), "");
     }
 
+    #[cfg(feature = "git")]
     #[tokio::test]
     async fn discarding_draft_removes_ended_terminals_from_layout()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -6409,6 +6562,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "git")]
     #[tokio::test]
     async fn deleting_a_saved_task_preserves_its_worktree_and_branch()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -6473,6 +6627,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "git")]
     #[tokio::test]
     async fn deleting_a_task_with_an_active_turn_is_rejected()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -6516,6 +6671,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "git")]
     #[tokio::test]
     async fn deleting_a_task_can_remove_a_clean_worktree_without_removing_its_branch()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -6553,6 +6709,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "git")]
     #[tokio::test]
     async fn failed_task_deletion_restores_checkout_and_ignored_files()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -6616,6 +6773,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "git")]
     #[tokio::test]
     async fn committed_task_deletion_recovers_if_journal_cleanup_fails()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -6753,6 +6911,7 @@ mod tests {
         ));
     }
 
+    #[cfg(feature = "git")]
     #[tokio::test]
     async fn failed_session_record_save_stops_agent_and_allows_retry()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -6811,6 +6970,7 @@ mod tests {
     }
 
     #[cfg(unix)]
+    #[cfg(feature = "git")]
     #[tokio::test]
     async fn killed_deletion_recovers_worktree_before_and_after_commit()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -6930,6 +7090,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "git")]
     #[tokio::test]
     async fn startup_recovers_staged_worktree_deletions_conservatively()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -7055,6 +7216,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "git")]
     #[tokio::test]
     async fn failed_unrecorded_session_cleanup_is_retried_before_new_agent()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -7260,6 +7422,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "git")]
     #[tokio::test]
     async fn failed_shutdown_persistence_keeps_the_session_for_retry()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -7331,6 +7494,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "git")]
     #[tokio::test]
     async fn question_answer_resumes_the_turn_and_persists_the_transcript()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -7402,6 +7566,7 @@ mod tests {
         assert_eq!(core.shutdown_state(), ShutdownState::Closed);
     }
 
+    #[cfg(feature = "git")]
     #[tokio::test]
     async fn a_task_left_waiting_is_interrupted_by_the_next_load()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -7454,6 +7619,7 @@ mod tests {
     }
 
     #[cfg(unix)]
+    #[cfg(feature = "git")]
     #[tokio::test]
     async fn abrupt_process_death_recovers_the_waiting_task()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -7553,11 +7719,6 @@ mod tests {
         assert!(workspace.transcript.iter().any(|entry| matches!(&entry.kind, agent_harness::EntryKind::Notice { text, is_error: true } if text.contains("missing exit status"))));
         assert!(!text.contains("unfinished answer"));
         assert!(!recovered.sessions.contains_key(&task_id));
-        recovered
-            .execute(Command::ResumeTask {
-                task_id: task_id.clone(),
-            })
-            .await?;
         let workspace = workspace_of(
             recovered
                 .execute(Command::SendPrompt {
@@ -7598,6 +7759,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "git")]
     #[tokio::test]
     async fn a_fake_task_runs_through_approval_quit_and_resume()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -7753,10 +7915,6 @@ mod tests {
 
         let workspace = scenario.core_mut().open_task_workspace(&task_id).await?;
         assert_eq!(workspace.task.state, TaskState::Interrupted);
-        assert_eq!(
-            workspace.recovery,
-            Some(crate::snapshots::SessionRecovery::Resume)
-        );
         assert!(
             workspace
                 .capabilities
@@ -7779,21 +7937,6 @@ mod tests {
 
         let workspace = workspace_of(
             scenario
-                .execute(Command::ResumeTask {
-                    task_id: task_id.clone(),
-                })
-                .await?,
-        );
-        assert_eq!(workspace.task.state, TaskState::Ready);
-        assert!(workspace.transcript.starts_with(&saved));
-        assert!(workspace.transcript.last().is_some_and(|entry| {
-            entry
-                .summary()
-                .contains("resumed the previous agent session")
-        }));
-
-        let workspace = workspace_of(
-            scenario
                 .execute(Command::SendPrompt {
                     task_id: task_id.clone(),
                     input: PromptInput::text("continue"),
@@ -7802,6 +7945,11 @@ mod tests {
         );
         assert_eq!(workspace.task.state, TaskState::Ready);
         assert!(workspace.transcript.starts_with(&saved));
+        assert!(workspace.transcript.iter().any(|entry| {
+            entry
+                .summary()
+                .contains("resumed the previous agent session")
+        }));
         assert_eq!(
             workspace.transcript.last().map(Entry::summary),
             Some("agent: resumed answer".to_string())
@@ -7811,6 +7959,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "git")]
     #[tokio::test]
     async fn approval_errors_fold_queued_disconnect_and_superseding_request()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -8042,6 +8191,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "git")]
     #[tokio::test]
     async fn denying_an_approval_ends_the_turn() -> Result<(), Box<dyn std::error::Error>> {
         let repository = TestRepository::new()?;
@@ -8090,6 +8240,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "git")]
     #[tokio::test]
     async fn cancelling_keeps_the_worktree_and_the_session()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -8155,43 +8306,7 @@ mod tests {
         Ok(())
     }
 
-    #[tokio::test]
-    async fn editing_then_restoring_a_file_does_not_enter_review()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let repository = TestRepository::new()?;
-        let mut core = Core::with_services(
-            Box::new(MemoryStore::new()),
-            Box::new(FakeHarnessFactory::new(vec![vec![FakeTurn::new(vec![
-                FakeStep::WriteFile {
-                    path: "README.md".into(),
-                    contents: "temporary\n".into(),
-                },
-                FakeStep::WriteFile {
-                    path: "README.md".into(),
-                    contents: "initial\n".into(),
-                },
-            ])]])),
-        );
-        let project_id = add_project(&mut core, repository.path().to_path_buf()).await?;
-        let draft = workspace_of(
-            core.execute(Command::CreateDraft {
-                agent: Agent::Codex,
-                project_id,
-                title: "Try an edit".into(),
-            })
-            .await?,
-        );
-        let workspace = workspace_of(
-            core.execute(Command::SendPrompt {
-                task_id: TaskId::new(draft.task.id),
-                input: PromptInput::text("Try an edit and restore it"),
-            })
-            .await?,
-        );
-        assert_eq!(workspace.task.state, TaskState::Ready);
-        Ok(())
-    }
-
+    #[cfg(feature = "git")]
     #[tokio::test]
     async fn later_turns_compare_content_in_an_already_dirty_worktree()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -8205,6 +8320,16 @@ mod tests {
         let mut core = Core::with_services(
             Box::new(MemoryStore::new()),
             Box::new(FakeHarnessFactory::new(vec![vec![
+                FakeTurn::new(vec![
+                    FakeStep::WriteFile {
+                        path: "README.md".into(),
+                        contents: "temporary\n".into(),
+                    },
+                    FakeStep::WriteFile {
+                        path: "README.md".into(),
+                        contents: "initial\n".into(),
+                    },
+                ]),
                 edit("first edit\n"),
                 FakeTurn::new(vec![]),
                 edit("second edit\n"),
@@ -8221,6 +8346,7 @@ mod tests {
         );
         let task_id = TaskId::new(draft.task.id);
         for (text, expected) in [
+            ("Try an edit and restore it", TaskState::Ready),
             ("Edit", TaskState::Review),
             ("Explain", TaskState::Ready),
             ("Edit again", TaskState::Review),
@@ -8237,6 +8363,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "git")]
     #[tokio::test]
     async fn a_queued_review_note_waits_for_the_current_turn()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -8321,6 +8448,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "git")]
     #[tokio::test]
     async fn a_completed_turn_with_changes_enters_review() -> Result<(), Box<dyn std::error::Error>>
     {
@@ -8365,6 +8493,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "git")]
     #[tokio::test]
     async fn batch_archives_review_tasks_across_projects_and_rejects_a_stale_selection()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -8587,6 +8716,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "git")]
     #[tokio::test]
     async fn live_turn_errors_are_saved_while_unfinished_text_is_not()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -8643,6 +8773,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "git")]
     #[tokio::test]
     async fn terminal_error_notice_survives_task_reopen() -> Result<(), Box<dyn std::error::Error>>
     {
@@ -8685,6 +8816,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "git")]
     #[tokio::test]
     async fn large_transcript_and_git_diff_survive_restart()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -8775,6 +8907,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "git")]
     #[tokio::test]
     async fn missing_worktree_is_repaired_before_the_next_turn()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -8835,6 +8968,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "git")]
     #[tokio::test]
     async fn archived_collection_keeps_ignored_files_and_clears_its_intent()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -8887,6 +9021,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "git")]
     #[tokio::test]
     async fn touching_an_interrupted_collection_preserves_and_recovers_its_intent()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -8958,6 +9093,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "git")]
     #[tokio::test]
     async fn startup_reconciles_recent_pending_collections_without_removing_live_worktrees()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -9008,6 +9144,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "git")]
     #[tokio::test]
     async fn startup_keeps_dirty_and_recent_archived_worktrees()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -9064,6 +9201,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "git")]
     #[tokio::test]
     async fn retry_task_branch_clears_a_branch_creation_failure()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -9114,6 +9252,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "git")]
     #[tokio::test]
     async fn start_task_persists_the_title_and_turn_options_across_reload()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -9167,6 +9306,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "git")]
     #[tokio::test]
     async fn a_rejected_first_prompt_removes_the_task_and_worktree()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -9199,11 +9339,13 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "git")]
     struct DirtyRejectingHarness {
         inner: FakeHarness,
         cwd: Option<PathBuf>,
     }
 
+    #[cfg(feature = "git")]
     #[async_trait]
     impl AgentHarness for DirtyRejectingHarness {
         fn events(&mut self) -> &mut tokio::sync::mpsc::UnboundedReceiver<HarnessEvent> {
@@ -9246,8 +9388,10 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "git")]
     struct DirtyRejectingFactory;
 
+    #[cfg(feature = "git")]
     impl HarnessFactory for DirtyRejectingFactory {
         fn create(&self) -> Result<Box<dyn AgentHarness>, CoreError> {
             Ok(Box::new(DirtyRejectingHarness {
@@ -9257,6 +9401,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "git")]
     #[tokio::test]
     async fn a_rejected_first_prompt_removes_records_when_worktree_removal_fails()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -9312,6 +9457,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "git")]
     #[tokio::test]
     async fn worktree_pool_persists_leases_reuses_idle_slots_and_retires_dirty_checkouts()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -9459,6 +9605,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "git")]
     #[tokio::test]
     async fn deleting_a_task_reclaims_only_its_worktree_pool_record()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -9518,6 +9665,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "git")]
     #[tokio::test]
     async fn review_commit_merge_archive_and_reopen_a_task()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -9666,6 +9814,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "git")]
     #[tokio::test]
     async fn the_walking_skeleton_runs_from_project_to_restart()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -9779,13 +9928,19 @@ mod tests {
             Some("shepherd/ship-the-skeleton")
         );
 
-        let workspace = workspace_of(scenario.execute(Command::ResumeTask { task_id }).await?);
-        assert_eq!(workspace.task.state, TaskState::Ready);
+        let workspace = workspace_of(
+            scenario
+                .execute(Command::SendPrompt {
+                    task_id,
+                    input: PromptInput::text("continue"),
+                })
+                .await?,
+        );
         assert_eq!(
             workspace.transcript.first().map(Entry::summary).as_deref(),
             Some("you: start")
         );
-        assert!(workspace.transcript.last().is_some_and(|entry| {
+        assert!(workspace.transcript.iter().any(|entry| {
             entry
                 .summary()
                 .contains("resumed the previous agent session")
@@ -10035,6 +10190,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "git")]
     #[tokio::test]
     async fn the_agent_session_survives_a_restart() -> Result<(), Box<dyn std::error::Error>> {
         let repository = TestRepository::new()?;
@@ -10084,13 +10240,13 @@ mod tests {
 
         let workspace = workspace_of(
             scenario
-                .execute(Command::ResumeTask {
+                .execute(Command::SendPrompt {
                     task_id: task_id.clone(),
+                    input: PromptInput::text("continue"),
                 })
                 .await?,
         );
-        assert_eq!(workspace.task.state, TaskState::Ready);
-        assert!(workspace.transcript.last().is_some_and(|entry| {
+        assert!(workspace.transcript.iter().any(|entry| {
             entry
                 .summary()
                 .contains("resumed the previous agent session fake-session-1")
@@ -10107,6 +10263,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "git")]
     #[tokio::test]
     async fn a_gone_agent_session_falls_back_with_a_clear_note()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -10152,21 +10309,28 @@ mod tests {
         .await?;
         let mut scenario = TestCore::with_core(reopened);
 
-        let workspace = workspace_of(scenario.execute(Command::ResumeTask { task_id }).await?);
-        assert_eq!(workspace.task.state, TaskState::Ready);
+        let workspace = workspace_of(
+            scenario
+                .execute(Command::SendPrompt {
+                    task_id,
+                    input: PromptInput::text("continue"),
+                })
+                .await?,
+        );
         let note = workspace
             .transcript
-            .last()
-            .ok_or("missing resume note")?
-            .summary();
-        assert!(note.contains("cannot resume"), "unexpected note: {note}");
+            .iter()
+            .map(Entry::summary)
+            .find(|summary| summary.contains("cannot resume"))
+            .ok_or("missing resume note")?;
         assert!(
-            note.contains("started a new session"),
+            note.contains("Started a new session"),
             "unexpected note: {note}"
         );
         Ok(())
     }
 
+    #[cfg(feature = "git")]
     #[tokio::test]
     async fn an_unconfigured_adapter_reports_why_it_could_not_launch()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -10206,6 +10370,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "git")]
     #[tokio::test]
     async fn a_missing_binary_leaves_a_failure_row_and_a_ready_task()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -10253,6 +10418,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "git")]
     #[tokio::test]
     async fn a_rejected_prompt_shows_a_sign_in_failure() -> Result<(), Box<dyn std::error::Error>> {
         let repository = TestRepository::new()?;
@@ -10303,6 +10469,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "git")]
     #[tokio::test]
     async fn a_mid_turn_exit_is_a_failure_row_and_a_failed_task()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -10352,6 +10519,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "git")]
     #[tokio::test]
     async fn diagnostics_name_the_command_and_protocol() -> Result<(), Box<dyn std::error::Error>> {
         let repository = TestRepository::new()?;
@@ -10396,51 +10564,7 @@ mod tests {
         Ok(())
     }
 
-    #[tokio::test]
-    async fn recovery_distinguishes_known_non_resumable_and_legacy_sessions()
-    -> Result<(), Box<dyn std::error::Error>> {
-        use crate::Task;
-        use crate::session::SessionRecord;
-        use crate::snapshots::SessionRecovery;
-        use agent_harness::Capabilities;
-
-        let repository = TestRepository::new()?;
-        let mut core = Core::new();
-        let project_id = add_project(&mut core, repository.path().to_path_buf()).await?;
-        let mut task = Task::draft(project_id, "Interrupted", repository.path());
-        task.worktree_path = Some(repository.path().to_path_buf());
-        task.state = TaskState::Interrupted;
-        let task_id = task.id.clone();
-        core.tasks.insert(task_id.clone(), task);
-        assert_eq!(
-            core.task_workspace(&task_id)?.recovery,
-            Some(SessionRecovery::StartNew)
-        );
-
-        let mut record =
-            SessionRecord::started(task_id.clone(), "codex", Some("previous-handle".into()));
-        core.session_records.insert(task_id.clone(), record.clone());
-        assert_eq!(
-            core.task_workspace(&task_id)?.recovery,
-            Some(SessionRecovery::Reconnect)
-        );
-
-        record.capabilities = Some(Capabilities {
-            cancel: true,
-            ..Capabilities::default()
-        });
-        assert!(record.resume_handle().is_none());
-        core.session_records.insert(task_id.clone(), record);
-        let workspace = core.task_workspace(&task_id)?;
-        assert_eq!(workspace.recovery, Some(SessionRecovery::StartNew));
-        assert!(
-            workspace
-                .capabilities
-                .is_some_and(|capabilities| capabilities.cancel && !capabilities.resume)
-        );
-        Ok(())
-    }
-
+    #[cfg(feature = "git")]
     #[tokio::test]
     async fn prompts_queue_in_order_until_the_live_turn_finishes()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -10515,6 +10639,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "git")]
     #[tokio::test]
     async fn queued_prompts_survive_reload_and_deliver_once()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -10610,21 +10735,30 @@ mod tests {
             [second_batch]
         );
 
-        let resumed = workspace_of(
+        let continued = workspace_of(
             reloaded
-                .execute(Command::ResumeTask {
+                .execute(Command::SendPrompt {
                     task_id: task_id.clone(),
+                    input: PromptInput::text("continue"),
                 })
                 .await?,
         );
-        assert_eq!(resumed.task.state, TaskState::Ready);
+        assert_eq!(continued.task.state, TaskState::Working);
+        assert_eq!(sent.try_recv()?.1.text, "continue");
         assert!(sent.try_recv().is_err());
+        assert_eq!(
+            reloaded.store.load_prompt_queues().await?.len(),
+            1,
+            "the queued batch waits for the current turn to finish"
+        );
+
+        sender.send(HarnessEvent::TurnFinished {
+            reason: TurnFinishReason::Completed,
+        })?;
         assert!(reloaded.pump().await?);
         assert_eq!(sent.try_recv()?.1.text, second_batch);
         assert!(sent.try_recv().is_err());
         assert!(reloaded.store.load_prompt_queues().await?.is_empty());
-        let _ = reloaded.pump().await?;
-        assert!(sent.try_recv().is_err());
 
         sender.send(HarnessEvent::TurnFinished {
             reason: TurnFinishReason::Completed,

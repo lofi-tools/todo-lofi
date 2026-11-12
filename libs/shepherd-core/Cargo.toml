@@ -8,11 +8,13 @@ description = "Headless Shepherd core: commands, events, snapshots, task lifecyc
 path = "src/shepherd_core.rs"
 
 [features]
+git = []
 test-support = ["dep:tempfile"]
 live-codex = ["agent-harness/live-codex"]
 
 [dependencies]
 agent-harness = { path = "../agent-harness" }
+shepherd-project-scan = { path = "../project-scan" }
 async-trait.workspace = true
 ignore = "0.4"
 serde.workspace = true

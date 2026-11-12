@@ -60,6 +60,16 @@ impl Agent {
         }
     }
 
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Codex => "Codex",
+            Self::OpenCode => "OpenCode",
+            Self::Pi => "Pi",
+            Self::Claude => "Claude Code",
+            Self::Freebuff => "Freebuff",
+        }
+    }
+
     pub fn default_tier(self) -> AgentTier {
         match self {
             Self::Claude => AgentTier::Acp,
@@ -163,10 +173,27 @@ impl TaskState {
             (Queued, Working | Cancelled | Interrupted) => true,
             (Review, Working | Done | Failed | Interrupted) => true,
             (Done, Review) => true,
-            (Failed, Starting | Ready | Cancelled) => true,
-            (Interrupted, Starting | Ready | Cancelled) => true,
+            (Failed, Starting | Ready | Working | Cancelled) => true,
+            (Interrupted, Starting | Ready | Working | Cancelled) => true,
             (Cancelled, _) => false,
             _ => false,
+        }
+    }
+
+    /// The transitions this state allows, for diagnostics.
+    pub fn allowed_next(self) -> &'static str {
+        match self {
+            Self::Draft => "starting, cancelled",
+            Self::Starting => "ready, failed, cancelled, interrupted",
+            Self::Ready => "starting, working, cancelled, interrupted",
+            Self::Working => "waiting, review, ready, failed, cancelled, interrupted",
+            Self::Waiting => "ready, working, review, failed, cancelled, interrupted",
+            Self::Queued => "working, cancelled, interrupted",
+            Self::Review => "working, done, failed, interrupted",
+            Self::Done => "review",
+            Self::Failed => "starting, ready, working, cancelled",
+            Self::Interrupted => "starting, ready, working, cancelled",
+            Self::Cancelled => "none",
         }
     }
 
@@ -238,6 +265,7 @@ impl Task {
                 id: self.id.as_str().to_string(),
                 from: self.state.as_str(),
                 to: next.as_str(),
+                allowed: self.state.allowed_next(),
             });
         }
         self.state = next;

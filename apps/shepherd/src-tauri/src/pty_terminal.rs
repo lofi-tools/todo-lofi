@@ -18,7 +18,7 @@ use shepherd_core::terminal::{
 };
 use tokio::sync::{mpsc, oneshot};
 
-use crate::terminal_screen::Screen;
+use terminal_renderer::{RecordedScreenUpdate, Screen};
 
 const MAX_WRITE_BYTES: usize = 64 * 1024;
 
@@ -130,28 +130,6 @@ struct Session {
     session_id: Option<libc::pid_t>,
     process: Option<ProcessRecord>,
     recording: Option<Arc<TerminalRecording>>,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub enum RecordedScreenUpdate {
-    Output {
-        bytes: Vec<u8>,
-        state: serde_json::Value,
-    },
-    Resize {
-        columns: u16,
-        rows: u16,
-        state: serde_json::Value,
-    },
-}
-
-impl RecordedScreenUpdate {
-    #[allow(dead_code)]
-    pub fn state(&self) -> &serde_json::Value {
-        match self {
-            Self::Output { state, .. } | Self::Resize { state, .. } => state,
-        }
-    }
 }
 
 pub struct TerminalRecording {
@@ -1531,6 +1509,9 @@ impl TerminalService for PtyTerminals {
 mod tests {
     use std::time::Instant;
 
+    #[cfg(unix)]
+    use terminal_replay::{verify_recorded_screens, verify_unfinished_screens};
+
     use super::*;
 
     #[cfg(unix)]
@@ -1630,7 +1611,7 @@ mod tests {
         let capture = FreebuffLiveCapture::begin(&workspace, worktree.clone(), &scenario)?;
         let session = capture.session();
         runtime(&session, &metadata)?;
-        let renderer_dependency = include_str!("../Cargo.toml")
+        let renderer_dependency = include_str!("../../../../libs/terminal-renderer/Cargo.toml")
             .lines()
             .find(|line| line.starts_with("alacritty_terminal = "))
             .ok_or("terminal renderer dependency is missing from the manifest")?;
@@ -1733,10 +1714,10 @@ mod tests {
         }
         wait_for_capture_session_exit(&process).await?;
         runtime(&session, &metadata)?;
-        let capture_path = workspace
+        let recorded_capture_path = workspace
             .join(".cache/shepherd-live/freebuff")
             .join(format!("{scenario}.jsonl"));
-        crate::terminal_screen::verify_unfinished_screens(&capture_path)?;
+        verify_unfinished_screens(&recorded_capture_path)?;
         capture.finish_after_drain()?;
         Ok(())
     }
@@ -1812,11 +1793,11 @@ mod tests {
         .await?;
         operator_result?;
         result?;
-        let capture_path = workspace
+        let completed_capture_path = workspace
             .path()
             .join(".cache/shepherd-live/freebuff/fake-runner.jsonl");
-        crate::terminal_screen::verify_recorded_screens(&capture_path)?;
-        let records = read_complete_capture(&capture_path)?;
+        verify_recorded_screens(&completed_capture_path)?;
+        let records = read_complete_capture(&completed_capture_path)?;
         let input: Vec<u8> = records
             .iter()
             .filter_map(|record| match &record.event {
@@ -1876,26 +1857,21 @@ mod tests {
                 rows: 24,
                 cwd: directory.path().to_path_buf(),
                 command: "/bin/sh".into(),
-                args: vec!["-c".into(), "sleep 3 & exit 0".into()],
+                args: vec!["-c".into(), "printf 'undrained output'; exit 0".into()],
                 environment: BTreeMap::new(),
             },
             sender,
             recording.clone(),
         )?;
+        // macOS closes the PTY as soon as the shell exits, so a background
+        // descendant cannot keep the slave open. Closing the receiver while the
+        // child still writes exercises the same undrained-capture failure.
+        drop(receiver);
         let error = tokio::time::timeout(Duration::from_secs(5), errors.recv())
             .await?
             .ok_or("missing drain error")?;
         assert!(error.contains("drain"));
         assert!(recording.capture.finish().is_err());
-        tokio::time::timeout(Duration::from_secs(5), async {
-            while let Some(event) = receiver.recv().await {
-                if matches!(event, TerminalEvent::Exited { .. }) {
-                    return Ok::<(), String>(());
-                }
-            }
-            Err("missing terminal exit".into())
-        })
-        .await??;
         Ok(())
     }
 

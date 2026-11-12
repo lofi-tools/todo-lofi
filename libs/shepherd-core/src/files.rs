@@ -911,8 +911,10 @@ fn highlight(path: &Path, content: &str, focus_line: Option<usize>) -> TextFile 
 mod tests {
     use super::*;
     use crate::git::run_git;
+    #[cfg(feature = "git")]
     use crate::test_support::TestRepository;
 
+    #[cfg(feature = "git")]
     #[test]
     fn classifies_git_status_and_excludes_ignored_deletions()
     -> Result<(), Box<dyn std::error::Error>> {

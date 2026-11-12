@@ -838,6 +838,10 @@ pub enum EntryKind {
         kind: FailureKind,
         text: String,
         detail: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        protocol: Option<String>,
     },
     Usage {
         used: u64,
@@ -1032,7 +1036,29 @@ impl Transcript {
             kind,
             text: text.into(),
             detail,
+            model: None,
+            protocol: None,
         })
+    }
+
+    /// Bind the launch context to a failure row. The row keeps it, so changing
+    /// the model later cannot rewrite what the message reports.
+    pub fn set_failure_context(
+        &mut self,
+        index: usize,
+        model: Option<String>,
+        protocol: Option<String>,
+    ) {
+        if let Some(entry) = self.entries.get_mut(index)
+            && let EntryKind::Failure {
+                model: entry_model,
+                protocol: entry_protocol,
+                ..
+            } = &mut entry.kind
+        {
+            *entry_model = model;
+            *entry_protocol = protocol;
+        }
     }
 
     /// Fold one adapter event into the transcript. Events that are not
@@ -1525,6 +1551,10 @@ pub trait AgentHarness: Send {
     fn models(&self) -> Option<AgentModels> {
         None
     }
+
+    /// The app-selected default model, which overrides the CLI's own choice.
+    /// Adapters that cannot select a model ignore it.
+    fn set_default_model(&mut self, _model: Option<String>) {}
 
     async fn set_mode(&mut self, _mode: &str) -> HarnessResult<()> {
         Err(HarnessError::ModeUnavailable)

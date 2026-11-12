@@ -13,6 +13,7 @@ name = "shepherd"
 path = "src/main.rs"
 
 [features]
+git = ["shepherd-core/git"]
 desktop-codex-smoke = ["agent-harness/live-test-support"]
 live-codex = ["desktop-codex-smoke", "agent-harness/live-codex"]
 live-freebuff = ["agent-harness/live-freebuff"]
@@ -23,9 +24,6 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 agent-harness = { path = "../../../libs/agent-harness" }
 async-trait.workspace = true
-# Keep the upstream per-cell combining-mark cap until a release includes it.
-alacritty_terminal = { git = "https://github.com/alacritty/alacritty", rev = "ede2ac144da4dec4c075bfa803aacf3b3739bce6" }
-compact_str = { version = "0.8", features = ["serde"] }
 notify = "8.2"
 mime_guess = "2"
 percent-encoding = "2"
@@ -34,6 +32,7 @@ serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 shepherd-core = { path = "../../../libs/shepherd-core" }
+terminal-renderer = { path = "../../../libs/terminal-renderer" }
 tauri = { version = "2", features = [] }
 tempfile = "3"
 thiserror.workspace = true
@@ -54,5 +53,6 @@ notify-rust = { version = "4.18", features = ["preview-macos-un"] }
 [dev-dependencies]
 acp-client = { path = "../../../libs/acp-client", features = ["test-support"] }
 shepherd-core = { path = "../../../libs/shepherd-core", features = ["test-support"] }
+terminal-replay = { path = "../../../libs/terminal-replay" }
 toasty = { version = "0.7", features = ["turso"] }
 toasty-driver-turso = "0.7"

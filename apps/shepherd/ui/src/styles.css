@@ -1505,6 +1505,43 @@ textarea {
   outline-offset: -2px;
 }
 
+.picker-menu__search {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: block;
+  padding: 4px;
+  background: var(--surface);
+}
+
+.picker-menu__filter {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 4px 6px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--surface-raised);
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+}
+
+.picker-menu__filter:focus-visible {
+  outline: 1px solid var(--focus);
+  outline-offset: -1px;
+}
+
+.picker-menu__empty {
+  margin: 0;
+  padding: 6px 8px;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.picker-menu .nav-item.picker-menu__option--active {
+  background: var(--surface-raised);
+}
+
 .transcript {
   display: flex;
   flex-direction: column;

@@ -11048,9 +11048,7 @@ version = "0.1.0"
 dependencies = [
  "acp-client",
  "agent-harness",
- "alacritty_terminal",
  "async-trait",
- "compact_str",
  "gio",
  "libc",
  "mime_guess",
@@ -11065,6 +11063,8 @@ dependencies = [
  "tauri",
  "tauri-build",
  "tempfile",
+ "terminal-renderer",
+ "terminal-replay",
  "thiserror 1.0.69",
  "toasty",
  "toasty-driver-turso",
@@ -11084,6 +11084,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.11.0",
+ "shepherd-project-scan",
  "syntect",
  "tempfile",
  "thiserror 1.0.69",
@@ -11094,6 +11095,15 @@ dependencies = [
  "turso_parser",
  "url",
  "uuid",
+]
+
+[[package]]
+name = "shepherd-project-scan"
+version = "0.1.0"
+dependencies = [
+ "rustix 1.1.4",
+ "serde",
+ "tempfile",
 ]
 
 [[package]]
@@ -12988,6 +12998,27 @@ dependencies = [
  "serde",
  "thiserror 1.0.69",
  "unicode-width 0.1.14",
+]
+
+[[package]]
+name = "terminal-renderer"
+version = "0.1.0"
+dependencies = [
+ "alacritty_terminal",
+ "compact_str",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "terminal-replay"
+version = "0.1.0"
+dependencies = [
+ "agent-harness",
+ "serde_json",
+ "shepherd-core",
+ "tempfile",
+ "terminal-renderer",
 ]
 
 [[package]]

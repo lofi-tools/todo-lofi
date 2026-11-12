@@ -1,0 +1,18 @@
+[package]
+name = "terminal-replay"
+version.workspace = true
+edition.workspace = true
+description = "Verification and replay of captured Shepherd terminal sessions."
+
+[lib]
+path = "src/terminal_replay.rs"
+
+[dependencies]
+agent-harness = { path = "../agent-harness" }
+serde_json.workspace = true
+shepherd-core = { path = "../shepherd-core" }
+terminal-renderer = { path = "../terminal-renderer" }
+
+[dev-dependencies]
+shepherd-core = { path = "../shepherd-core", features = ["test-support"] }
+tempfile = "3"

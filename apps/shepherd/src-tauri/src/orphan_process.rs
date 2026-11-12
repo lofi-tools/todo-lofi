@@ -433,6 +433,44 @@ fn verified_members(record: &ProcessRecord, token: Option<&str>) -> io::Result<V
     Ok(verified)
 }
 
+pub(crate) struct CleanupOutcome {
+    pub(crate) removed: Vec<String>,
+    pub(crate) remaining: Vec<ProcessRecord>,
+}
+
+/// Stop what a previous instance left behind without asking the user. A
+/// retained lease that no running instance holds is what authorizes a stop;
+/// records that cannot be attributed are kept quietly for a later launch.
+pub(crate) fn cleanup(leases: &ProcessLeases, records: Vec<ProcessRecord>) -> CleanupOutcome {
+    let mut removed = Vec::new();
+    let mut remaining = Vec::new();
+    for record in records {
+        let status = inspect(vec![record.clone()])
+            .into_iter()
+            .next()
+            .map(|inspection| inspection.status)
+            .unwrap_or(ProcessStatus::Unknown);
+        let outcome = match status {
+            ProcessStatus::Gone => Ok(()),
+            ProcessStatus::Matching | ProcessStatus::GroupUnverified => stop(leases, &record),
+            ProcessStatus::Reused | ProcessStatus::Changed | ProcessStatus::Unknown => {
+                Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "the recorded process cannot be identified with confidence",
+                ))
+            }
+        };
+        match outcome {
+            Ok(()) => removed.push(record.id),
+            Err(error) => {
+                tracing::info!(%error, id = %record.id, "kept a recorded process for a later launch");
+                remaining.push(record);
+            }
+        }
+    }
+    CleanupOutcome { removed, remaining }
+}
+
 #[cfg(not(unix))]
 pub(crate) fn stop(_leases: &ProcessLeases, _record: &ProcessRecord) -> io::Result<()> {
     Err(io::Error::new(
@@ -553,6 +591,65 @@ mod tests {
         let link = root.path().join("lease-link");
         symlink(&directory, &link)?;
         assert!(ProcessLeases::new(link).is_err());
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cleanup_stops_unowned_records_and_keeps_records_another_instance_owns()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::process::{CommandExt as _, ExitStatusExt as _};
+        if crate::pty_terminal::boot_id().is_none() {
+            eprintln!("Skipping process cleanup check: the OS boot identifier is unavailable");
+            return Ok(());
+        }
+        let root = tempfile::tempdir()?;
+        let directory = root.path().join("leases");
+        let leases = ProcessLeases::new(directory.clone())?;
+        let spawn =
+            || -> Result<(std::process::Child, ProcessRecord), Box<dyn std::error::Error>> {
+                let mut command = std::process::Command::new("/bin/sh");
+                command
+                    .args(["-c", "exec sleep 30"])
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null());
+                unsafe {
+                    command.pre_exec(|| {
+                        if libc::setsid() < 0 {
+                            return Err(std::io::Error::last_os_error());
+                        }
+                        Ok(())
+                    });
+                }
+                let child = command.spawn()?;
+                let pid = libc::pid_t::try_from(child.id())?;
+                let record = crate::pty_terminal::capture_process_record(
+                    pid,
+                    "agent",
+                    "fixture",
+                    "fixture-token",
+                )
+                .ok_or("could not capture the fixture process")?;
+                Ok((child, record))
+            };
+
+        let (mut child, record) = spawn()?;
+        drop(ProcessLease::create(&directory, &record.id)?);
+        let outcome = cleanup(&leases, vec![record.clone()]);
+        assert_eq!(outcome.removed, vec![record.id.clone()]);
+        assert!(outcome.remaining.is_empty());
+        assert!(child.wait()?.signal().is_some());
+
+        let (mut child, owned) = spawn()?;
+        let held = ProcessLease::create(&directory, &owned.id)?;
+        let outcome = cleanup(&leases, vec![owned.clone()]);
+        assert!(outcome.removed.is_empty());
+        assert_eq!(outcome.remaining, vec![owned]);
+        assert!(alive(libc::pid_t::try_from(child.id())?));
+        drop(held);
+        unsafe { libc::kill(libc::pid_t::try_from(child.id())?, libc::SIGKILL) };
+        child.wait()?;
         Ok(())
     }
 

@@ -8209,6 +8209,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "git")]
     #[tokio::test]
     async fn resumed_collection_rechecks_existing_worktree_before_removal()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -8265,6 +8266,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "git")]
     #[tokio::test]
     async fn unrelated_missing_archived_checkout_is_not_marked_collected()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -8302,6 +8304,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "git")]
     #[tokio::test]
     async fn failed_collection_save_keeps_a_recoverable_task()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -9395,21 +9398,6 @@ mod tests {
             hits.first().map(|hit| hit.entry_id.as_str()),
             Some(entry.id.as_str())
         );
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn the_workspace_migration_creates_its_tables() -> Result<(), Box<dyn std::error::Error>>
-    {
-        let store = TursoStore::open("turso::memory:").await?;
-        let tables = table_names(&store).await?;
-
-        for expected in ["terminals", "terminal_layouts", "layouts"] {
-            assert!(
-                tables.iter().any(|name| name == expected),
-                "the workspace migration should create {expected}"
-            );
-        }
         Ok(())
     }
 

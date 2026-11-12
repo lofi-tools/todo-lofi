@@ -125,10 +125,10 @@ unicode-segmentation = "1.12"
 # cersei-skills = { path = "crates/cersei-skills", version = "0.1.9" }
 # cersei-vms = { path = "crates/cersei-vms", version = "0.1.9" }
 
-# The terminal parser is generic over Shepherd's screen events, so its hot path
-# is compiled in both crates. Keep it responsive in shep's debug build.
-[profile.dev.package.shepherd]
-opt-level = 1
+# The extracted renderer keeps the parser hot path optimized, while edits to the
+# shell rebuild at the default unoptimized level.
+[profile.dev.package.terminal-renderer]
+opt-level = 2
 
 [profile.dev.package.alacritty_terminal]
 opt-level = 2

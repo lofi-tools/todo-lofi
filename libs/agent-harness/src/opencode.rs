@@ -36,6 +36,8 @@ const STREAM_BUFFER_CHUNKS: usize = 64;
 const MAX_STREAM_ERROR_BYTES: usize = 64 * 1024;
 const STREAM_ERROR_OMITTED: &str = "\n[… error details omitted …]";
 const MAX_PENDING_APPROVALS: usize = 64;
+const MODEL_CATALOG_SETTLE_ATTEMPTS: usize = 8;
+const MODEL_CATALOG_SETTLE_DELAY: Duration = Duration::from_millis(250);
 const USERNAME: &str = "opencode";
 const SERVER_ARGS: [&str; 5] = ["serve", "--hostname", "127.0.0.1", "--port", "0"];
 
@@ -66,7 +68,10 @@ pub fn configured_launch(settings: &AgentSettings) -> HarnessResult<Option<Spawn
     Ok(Some(spec))
 }
 
-pub async fn project_models(spec: &SpawnSpec) -> HarnessResult<AgentModels> {
+pub async fn project_models(
+    spec: &SpawnSpec,
+    default_model: Option<&str>,
+) -> HarnessResult<AgentModels> {
     let hide_diagnostics = spec
         .environment
         .keys()
@@ -79,6 +84,7 @@ pub async fn project_models(spec: &SpawnSpec) -> HarnessResult<AgentModels> {
     } else {
         Ok(AgentModels::default())
     };
+    let models = models.map(|models| preferred_models(models, default_model));
     let shutdown = server.shutdown().await;
     startup_group.disarm();
     finish_model_discovery(models, shutdown, hide_diagnostics)
@@ -282,6 +288,33 @@ impl OpenCodeModelRef {
     }
 }
 
+fn preferred_models(mut models: AgentModels, default_model: Option<&str>) -> AgentModels {
+    if let Some(model) = default_model {
+        models.current = Some(model.to_owned());
+    }
+    models
+}
+
+/// The reference for `id`, accepting a catalog selection ID or a
+/// `provider/model` pair that OpenCode does not list as enabled.
+fn model_reference(
+    id: &str,
+    refs: &BTreeMap<String, OpenCodeModelRef>,
+) -> Option<OpenCodeModelRef> {
+    if let Some(reference) = refs.get(id) {
+        return Some(reference.clone());
+    }
+    let (provider_id, model_id) = id.split_once('/')?;
+    if provider_id.is_empty() || model_id.is_empty() {
+        return None;
+    }
+    Some(OpenCodeModelRef {
+        id: model_id.to_owned(),
+        provider_id: provider_id.to_owned(),
+        variant: None,
+    })
+}
+
 fn catalog_models(models: Vec<OpenCodeModel>, default: Option<OpenCodeModel>) -> OpenCodeCatalog {
     let default_id = default.as_ref().map(OpenCodeModel::selection_id);
     let mut refs = BTreeMap::new();
@@ -354,6 +387,7 @@ pub struct OpenCodeHarness {
     modes: Option<AgentModes>,
     models: Option<AgentModels>,
     model_refs: BTreeMap<String, OpenCodeModelRef>,
+    default_model: Option<String>,
     turn: Option<ActiveTurn>,
     sender: mpsc::UnboundedSender<HarnessEvent>,
     receiver: mpsc::UnboundedReceiver<HarnessEvent>,
@@ -375,6 +409,7 @@ impl Default for OpenCodeHarness {
             modes: None,
             models: None,
             model_refs: BTreeMap::new(),
+            default_model: None,
             turn: None,
             sender,
             receiver,
@@ -519,6 +554,10 @@ impl AgentHarness for OpenCodeHarness {
             .as_ref()
             .and_then(AgentHarness::models)
             .or_else(|| self.models.clone())
+    }
+
+    fn set_default_model(&mut self, model: Option<String>) {
+        self.default_model = model;
     }
 
     fn modes(&self) -> Option<AgentModes> {
@@ -695,6 +734,15 @@ impl AgentHarness for OpenCodeHarness {
                             catalog.models.current = Some(id);
                         }
                     }
+                    if let Some(model) = &self.default_model {
+                        let reference = model_reference(model, &catalog.refs)
+                            .ok_or(HarnessError::ModelUnavailable)?;
+                        server.set_session_model(&session, &reference).await?;
+                        catalog.models.current = Some(model.clone());
+                    }
+                    // The catalog's current entry is the model the server will
+                    // actually run, including its own default when none is picked.
+                    self.diagnostics.model = catalog.models.current.clone();
                     self.models = Some(catalog.models);
                     self.model_refs = catalog.refs;
                 }
@@ -2021,22 +2069,35 @@ impl OpenCodeServer {
     }
 
     async fn model_catalog(&self) -> HarnessResult<OpenCodeCatalog> {
-        let models: OpenCodeModelsResponse = response_json(
-            self.request(Method::GET, "/api/model")
-                .query(&[("location[directory]", self.directory.as_str())]),
-        )
-        .await?;
-        if models.location.directory != Path::new(&self.directory) {
-            return Err(HarnessError::Protocol(
-                "OpenCode returned models outside the task directory".into(),
-            ));
+        let mut catalog = None;
+        for attempt in 0..MODEL_CATALOG_SETTLE_ATTEMPTS {
+            if attempt > 0 {
+                tokio::time::sleep(MODEL_CATALOG_SETTLE_DELAY).await;
+            }
+            let models: OpenCodeModelsResponse = response_json(
+                self.request(Method::GET, "/api/model")
+                    .query(&[("location[directory]", self.directory.as_str())]),
+            )
+            .await?;
+            if models.location.directory != Path::new(&self.directory) {
+                return Err(HarnessError::Protocol(
+                    "OpenCode returned models outside the task directory".into(),
+                ));
+            }
+            let default: ResponseData<Option<OpenCodeModel>> = response_json(
+                self.request(Method::GET, "/api/model/default")
+                    .query(&[("location[directory]", self.directory.as_str())]),
+            )
+            .await?;
+            // A freshly started server answers before its provider plugins
+            // settle, so an empty snapshot is not yet the real catalog.
+            let settled = !models.data.is_empty();
+            catalog = Some(catalog_models(models.data, default.data));
+            if settled {
+                break;
+            }
         }
-        let default: ResponseData<Option<OpenCodeModel>> = response_json(
-            self.request(Method::GET, "/api/model/default")
-                .query(&[("location[directory]", self.directory.as_str())]),
-        )
-        .await?;
-        Ok(catalog_models(models.data, default.data))
+        catalog.ok_or_else(|| HarnessError::Protocol("OpenCode returned no model catalog".into()))
     }
 
     async fn set_session_model(
@@ -3374,6 +3435,54 @@ mod tests {
         assert_eq!(fallback.models.options.len(), 1);
         assert!(fallback.refs.contains_key("acme/d"));
         Ok(())
+    }
+
+    #[test]
+    fn a_configured_model_overrides_the_catalog_default() {
+        let models = AgentModels {
+            current: Some("acme/default".into()),
+            options: vec![crate::AgentModel {
+                id: "acme/default".into(),
+                name: "Default".into(),
+                description: None,
+            }],
+        };
+        assert_eq!(
+            preferred_models(models.clone(), None).current.as_deref(),
+            Some("acme/default")
+        );
+        assert_eq!(
+            preferred_models(models, Some("acme/chosen"))
+                .current
+                .as_deref(),
+            Some("acme/chosen")
+        );
+    }
+
+    #[test]
+    fn model_references_fall_back_to_the_provider_and_model_pair() {
+        let refs = BTreeMap::from([(
+            "acme/listed".to_string(),
+            OpenCodeModelRef {
+                id: "listed".into(),
+                provider_id: "acme".into(),
+                variant: Some("fast".into()),
+            },
+        )]);
+        assert_eq!(
+            model_reference("acme/listed", &refs),
+            refs.get("acme/listed").cloned()
+        );
+        assert_eq!(
+            model_reference("orcarouter/orcarouter/free", &refs),
+            Some(OpenCodeModelRef {
+                id: "orcarouter/free".into(),
+                provider_id: "orcarouter".into(),
+                variant: None,
+            })
+        );
+        assert_eq!(model_reference("unqualified", &refs), None);
+        assert_eq!(model_reference("acme/", &refs), None);
     }
 
     #[test]

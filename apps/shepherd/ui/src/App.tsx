@@ -38,11 +38,6 @@ const TIER_LABELS: Record<bridge.AgentTier, string> = {
   'terminal-wrapper': 'Terminal wrapper',
   'plain-pane': 'Plain terminal',
 }
-const RECOVERY_LABELS: Record<bridge.SessionRecovery, string> = {
-  resume: 'Resume',
-  reconnect: 'Reconnect',
-  startNew: 'Start new session',
-}
 const CAPABILITY_LABELS: Record<Exclude<keyof bridge.AgentCapabilities, 'unreviewedTools'>, string> = {
   streaming: 'Streaming deltas',
   thoughts: 'Thoughts',
@@ -72,7 +67,8 @@ const AGENT_OPTIONS: PickerOption[] = [
   { id: 'opencode', name: bridge.AGENT_LABELS.opencode },
   { id: 'pi', name: bridge.AGENT_LABELS.pi },
   { id: 'claude', name: bridge.AGENT_LABELS.claude },
-  { id: 'freebuff', name: 'Freebuff (terminal)' },
+  { id: 'freebuff', name: bridge.AGENT_LABELS.freebuff },
+  { id: 'freebuff-terminal', name: 'Freebuff (terminal)' },
 ]
 
 function appearanceStorage() {
@@ -165,40 +161,15 @@ function formatPreviewAnnotations(review: bridge.PreviewAnnotationBatch) {
 
 export function App() {
   const [projects, setProjects] = createSignal<bridge.ProjectSnapshot[]>([])
-  const [previousProcesses, setPreviousProcesses] = createSignal<bridge.PreviousProcess[]>([])
   const [worktreeIssues, setWorktreeIssues] = createSignal<bridge.ArchivedWorktreeIssue[]>([])
   const [worktreeNoticeDismissed, setWorktreeNoticeDismissed] = createSignal(false)
-  const [checkingProcesses, setCheckingProcesses] = createSignal(false)
-  const [processNoticeDismissed, setProcessNoticeDismissed] = createSignal(false)
-  const processesNeedingReview = () => previousProcesses().filter((process) =>
-    process.status === 'matching' || process.status === 'unknown' || process.status === 'changed' || process.status === 'groupUnverified')
-  async function inspectPreviousProcesses() {
-    setCheckingProcesses(true)
-    try {
-      setPreviousProcesses(await bridge.inspectPreviousProcesses())
-    } catch (failure) {
-      setError(describe(failure))
-    } finally {
-      setCheckingProcesses(false)
-    }
-  }
-  const [stoppingProcess, setStoppingProcess] = createSignal<string>()
-  async function stopPreviousProcess(id: string) {
-    setStoppingProcess(id)
-    try {
-      setPreviousProcesses(await bridge.stopPreviousProcess(id))
-    } catch (failure) {
-      setError(describe(failure))
-    } finally {
-      setStoppingProcess()
-    }
-  }
   const [homeDirectory, setHomeDirectory] = createSignal<string>()
   const [projectsLoaded, setProjectsLoaded] = createSignal(false)
   const [codexAvailable, setCodexAvailable] = createSignal(false)
   const [opencodeConfigured, setOpencodeConfigured] = createSignal(false)
   const [piConfigured, setPiConfigured] = createSignal(false)
   const [claudeConfigured, setClaudeConfigured] = createSignal(false)
+  const [freebuffAvailability, setFreebuffAvailability] = createSignal<bridge.FreebuffAvailability>({ available: false, reason: null })
   const [newTaskAgent, setNewTaskAgent] = createSignal<bridge.Agent>('codex')
   const [composingProjectId, setComposingProjectId] = createSignal<string>()
   const [selectedProjectId, setSelectedProjectId] = createSignal<string | null>(null)
@@ -486,7 +457,7 @@ export function App() {
   const composerModels = (): bridge.AgentModels | undefined => {
     const current = workspace()
     const selected = turnOptions()?.model ?? current?.task.model ?? undefined
-    if (currentAgent() === 'codex') return
+    if (currentAgent() === 'codex' || currentAgent() === 'freebuff') return
     if (current?.models) return selected ? { ...current.models, current: selected } : current.models
     const catalog = projectModels()
     const models = catalog && catalog.projectId === selectedProjectId()
@@ -578,7 +549,8 @@ export function App() {
     if (agent === 'codex') return true
     if (agent === 'opencode') return opencodeConfigured()
     if (agent === 'pi') return piConfigured()
-    return claudeConfigured()
+    if (agent === 'claude') return claudeConfigured()
+    return freebuffAvailability().available
   }
 
   const agentOptions = () => {
@@ -587,12 +559,22 @@ export function App() {
     const canOpen = project && !project.missing && !pending()
     const canChange = canOpen && (!task || task.state === 'draft')
     return AGENT_OPTIONS.map((agent) => {
-      if (agent.id === 'freebuff') return { ...agent, disabled: !canOpen }
+      if (agent.id === 'freebuff-terminal') return { ...agent, disabled: !canOpen }
       if (agent.id === 'codex') return { ...agent, disabled: !canChange }
       if (agent.id === 'opencode' || agent.id === 'pi' || agent.id === 'claude') return {
         ...agent,
         disabled: !canChange || !agentConfigured(agent.id),
         detail: agentConfigured(agent.id) ? undefined : 'Set the executable in settings.json',
+      }
+      if (agent.id === 'freebuff') {
+        const availability = freebuffAvailability()
+        return {
+          ...agent,
+          disabled: !canChange || !availability.available,
+          detail: availability.available
+            ? 'Terminal only: composer prompts are not verified yet'
+            : availability.reason ?? 'Set agents.freebuff.executable or add Freebuff to PATH',
+        }
       }
       return agent
     })
@@ -601,11 +583,11 @@ export function App() {
   function chooseAgent(agent: string) {
     const project = selectedProject()
     if (!project || project.missing || pending()) return
-    if (agent === 'freebuff') {
+    if (agent === 'freebuff-terminal') {
       setFreebuffProjectId(project.id)
       return
     }
-    if (agent !== 'codex' && agent !== 'opencode' && agent !== 'pi' && agent !== 'claude') return
+    if (agent !== 'codex' && agent !== 'opencode' && agent !== 'pi' && agent !== 'claude' && agent !== 'freebuff') return
     if (!agentConfigured(agent)) return
     const task = workspace()?.task
     if (!task) {
@@ -728,7 +710,7 @@ export function App() {
   const canCompose = () => {
     if (selectedProject()?.missing) return false
     const state = workspace()?.task.state
-    return state === 'ready' || canStartTask()
+    return state === 'ready' || state === 'failed' || state === 'interrupted' || canStartTask()
   }
   const showsChatTitle = () => !!workspace()
   const canQueuePrompt = () => {
@@ -747,16 +729,10 @@ export function App() {
   const canAddPreviewNote = () => !!workspace() && (canCompose() || canQueuePrompt()) && !pending() && !settingsOpen() && !freebuffProjectId()
   const canCancel = () => {
     const current = workspace()
-    return !!current?.capabilities?.cancel && LIVE_STATES.includes(current.task.state)
+    return !!current && LIVE_STATES.includes(current.task.state)
   }
-  const canApprove = () => {
-    const current = workspace()
-    return !!current?.capabilities?.approvals && current.task.state === 'waiting'
-  }
-  const showShellApprovals = () => {
-    const current = workspace()
-    return current ? current.task.state === 'draft' || current.capabilities?.approvals === true : !selectedTaskId()
-  }
+  const canApprove = () => workspace()?.task.state === 'waiting'
+  const showShellApprovals = () => !!workspace() || !selectedTaskId()
   const cancellingTurn = () => {
     const current = workspace()
     return !!current && (current.cancelling || cancelRequestTaskId() === current.task.id)
@@ -1416,13 +1392,13 @@ export function App() {
   }
 
   onMount(() => {
-    void inspectPreviousProcesses()
     void bridge.archivedWorktreeIssues().then(setWorktreeIssues).catch((failure) => setError(describe(failure)))
     void homeDir().then(setHomeDirectory).catch((error) => console.warn('Could not resolve the home directory', error))
     void reloadKeybindings().catch((failure) => setError(describe(failure)))
     void bridge.opencodeConfigured().then(setOpencodeConfigured).catch((error) => console.warn('Could not read OpenCode availability', error))
     void bridge.piConfigured().then(setPiConfigured).catch((error) => console.warn('Could not read Pi availability', error))
     void bridge.claudeConfigured().then(setClaudeConfigured).catch((error) => console.warn('Could not read Claude Code availability', error))
+    void bridge.freebuffAvailability().then(setFreebuffAvailability).catch((error) => console.warn('Could not read Freebuff availability', error))
     void run(async () => {
       await reloadPreferences().catch((failure) => setError(describe(failure)))
       await bridge.subscribeToEvents(handleEvent)
@@ -1795,17 +1771,6 @@ export function App() {
     tabs[next]?.focus()
   }
 
-  function resumeTask() {
-    const current = workspace()
-    if (!current?.recovery || pending()) return
-    const task = current.task
-    void run(async () => {
-      const resumed = await bridge.resumeTask(task.id)
-      if (selectedTaskId() === task.id) setWorkspace(resumed)
-      await loadTasks(task.projectId)
-    })
-  }
-
   function quit() {
     void run(async () => {
       try {
@@ -1894,26 +1859,6 @@ export function App() {
               </ul>
             </details>
             <button type="button" class="banner__quiet" onClick={() => setWorktreeNoticeDismissed(true)}>Dismiss</button>
-          </div>
-        </Show>
-        <Show when={!processNoticeDismissed() && processesNeedingReview().length > 0}>
-          <div class="banner" role="status">
-            <details class="process-notice__details">
-              <summary>Previously recorded processes need review ({processesNeedingReview().length})</summary>
-              <p>A matching process may belong to another running Shepherd instance. Shepherd stops one only when no running instance owns its lease and its identity still matches.</p>
-              <ul>
-                <For each={processesNeedingReview()}>{(process) =>
-                  <li>
-                    {process.kind === 'agent' ? 'Agent' : process.kind === 'acp_terminal' ? 'Agent terminal' : 'Terminal'} · PID {process.pid} · {process.status === 'matching' ? 'identity matches' : process.status === 'changed' ? 'process group or session is unsafe' : process.status === 'groupUnverified' ? 'leader exited; process group may still be active' : 'identity could not be verified'}
-                    <Show when={process.status === 'matching'}>
-                      <button type="button" disabled={stoppingProcess() === process.id} onClick={() => void stopPreviousProcess(process.id)}>Stop</button>
-                    </Show>
-                  </li>
-                }</For>
-              </ul>
-            </details>
-            <button type="button" disabled={checkingProcesses()} onClick={() => void inspectPreviousProcesses()}>Recheck</button>
-            <button type="button" class="banner__quiet" onClick={() => setProcessNoticeDismissed(true)}>Dismiss</button>
           </div>
         </Show>
         <Show when={preferences()?.warning}>
@@ -2144,9 +2089,6 @@ export function App() {
                   <span class="chat__title"><SearchMark text={current().task.title}
                     match={searchJump()?.taskId === current().task.id && searchJump()?.snippet.field === 'task' ? searchJump()?.snippet.matched : undefined} /></span>
                 </Show>
-                <Show when={current().adapterTier}>
-                  {(tier) => <span class="chat__adapter">{TIER_LABELS[tier()]}{current().diagnostics?.fallbackReason && ' · fallback'}</span>}
-                </Show>
                 <Show when={current().capabilities?.unreviewedTools}>
                   <span class="chat__adapter" title="Pi's tools run under Pi's configuration; Shepherd cannot approve them">unreviewed tools</span>
                 </Show>
@@ -2165,11 +2107,6 @@ export function App() {
                     disabled={cancellingTurn() || !!cancelRequestTaskId()}>
                     {cancellingTurn() ? 'Cancelling…' : 'Cancel turn'}
                   </button>
-                </Show>
-                <Show when={current().recovery}>
-                  {(recovery) => <button type="button" class="project-action" onClick={resumeTask} disabled={pending()}>
-                    {RECOVERY_LABELS[recovery()]}
-                  </button>}
                 </Show>
               </header>
             )}
@@ -2273,7 +2210,8 @@ export function App() {
                           {entryBody(entry, decide, answerQuestion, cancellingTurn, canApprove,
                             () => current().task.state === 'waiting' && !pending() && !cancellingTurn(),
                             (questionId) => answeringQuestions().has(JSON.stringify([current().task.id, questionId])),
-                            () => target()?.snippet.field === 'entry' ? target()?.snippet.matched : undefined)}
+                            () => target()?.snippet.field === 'entry' ? target()?.snippet.matched : undefined,
+                            bridge.AGENT_LABELS[current().task.agent])}
                         </li>
                       }}
                     </For>
@@ -2322,17 +2260,17 @@ export function App() {
                 <Show when={composerModes()}>
                   {(modes) => <ComposerModePicker modes={modes()} onChange={chooseMode}
                     defaultOption={workspace()?.modes ? pendingMode() ? 'Use session mode' : undefined : 'Default mode'}
-                    disabled={pending() || cancellingTurn() || workspace()?.capabilities?.modePicker === false}
+                    disabled={pending() || cancellingTurn()}
                     unavailable={modeCatalogError()} onRetry={() => void refetchProjectModes()} />}
                 </Show>
                 <Show when={currentAgent() === 'codex'}>
                   <ComposerModelPicker model={composerModel()} effort={composerEffort()} models={codexCatalog()?.models ?? []}
-                    disabled={pending() || cancellingTurn() || workspace()?.capabilities?.modelPicker === false}
+                    disabled={pending() || cancellingTurn()}
                     options={codexOptions()} onChange={(codex) => patchTurnOptions({ codex })} />
                 </Show>
                 <Show when={currentAgent() !== 'codex' ? composerModels() : undefined}>
                   {(models) => <ComposerAgentModelPicker models={models()}
-                    disabled={pending() || cancellingTurn() || workspace()?.capabilities?.modelPicker === false}
+                    disabled={pending() || cancellingTurn()}
                     unavailable={modelCatalogError()} onRetry={() => void refetchProjectModels()}
                     onChange={chooseModel} />}
                 </Show>
@@ -2617,13 +2555,20 @@ interface PickerOption {
   disabled?: boolean
 }
 
+interface PickerGroup {
+  label?: string
+  value?: string
+  options: PickerOption[]
+}
+
 interface PickerMenuProps {
   label: string
   text?: string
   value?: string
   options?: PickerOption[]
-  groups?: Array<{ label: string; value: string; options: PickerOption[] }>
+  groups?: PickerGroup[]
   onChange?: (value: string) => void
+  filterable?: boolean
 }
 
 const DEFAULT_APPROVAL = { id: 'ask', name: 'Ask me' }
@@ -2706,7 +2651,7 @@ function ComposerAgentModelPicker(props: {
   return (
     <Show when={available()} fallback={<ComposerPickerFallback label="No model available" detail={props.unavailable} onRetry={props.onRetry} />}>
       <PickerMenu label="Model" text={label()} value={`model:${props.models.current ?? ''}`} options={options()}
-        onChange={choose} triggerClass="composer__picker" above>
+        onChange={choose} triggerClass="composer__picker" above filterable>
         <span class="composer__picker-label">{label()}</span>
         <PickerCaret />
       </PickerMenu>
@@ -2799,13 +2744,49 @@ function PickerCaret() {
   )
 }
 
+function fuzzyScore(query: string, text: string): number | null {
+  const needle = query.toLowerCase()
+  const haystack = text.toLowerCase()
+  let score = 0
+  let cursor = 0
+  let previous = -2
+  for (const character of needle) {
+    const found = haystack.indexOf(character, cursor)
+    if (found < 0) return null
+    score += found === previous + 1 ? 2 : 1
+    if (found === 0 || /[\s/_\-.:]/.test(haystack.charAt(found - 1))) score += 3
+    previous = found
+    cursor = found + 1
+  }
+  return score
+}
+
 function PickerMenu(props: PickerMenuProps & { triggerClass: string; above?: boolean; children: JSX.Element }) {
   const menuId = createUniqueId()
   const [open, setOpen] = createSignal(false)
+  const [filterQuery, setFilterQuery] = createSignal('')
+  const [activeId, setActiveId] = createSignal<string | null>(null)
   const triggerLabel = () => props.text ? `${props.label}: ${props.text}` : props.label
   let trigger!: HTMLButtonElement
   let menu!: HTMLSpanElement
-  const groups = () => props.groups ?? [{ label: undefined, value: props.value, options: props.options ?? [] }]
+  let filter!: HTMLInputElement
+  const sourceGroups = (): PickerGroup[] => props.groups ?? [{ value: props.value, options: props.options ?? [] }]
+  const visibleGroups = () => {
+    const query = filterQuery().trim()
+    if (!props.filterable || !query) return sourceGroups()
+    return sourceGroups()
+      .map((group) => ({
+        ...group,
+        options: group.options
+          .map((option) => ({ option, score: fuzzyScore(query, `${option.name} ${option.detail ?? ''}`) }))
+          .filter((entry): entry is { option: PickerOption; score: number } => entry.score !== null)
+          .sort((left, right) => right.score - left.score)
+          .map((entry) => entry.option),
+      }))
+      .filter((group) => group.options.length > 0)
+  }
+  const choices = () => visibleGroups().flatMap((group) =>
+    group.options.filter((option) => !option.disabled).map((option) => ({ group, option })))
 
   function positionMenu() {
     const bounds = trigger.getBoundingClientRect()
@@ -2825,6 +2806,19 @@ function PickerMenu(props: PickerMenuProps & { triggerClass: string; above?: boo
     menu.hidePopover()
     trigger.focus({ preventScroll: true })
   }
+
+  function chooseOption(group: PickerGroup, option: PickerOption) {
+    closeMenu()
+    if (option.id !== group.value) props.onChange?.(option.id)
+  }
+
+  createEffect(() => {
+    if (!props.filterable || !open()) return
+    const available = choices()
+    if (available.some((choice) => choice.option.id === activeId())) return
+    const checked = available.find((choice) => choice.group.value === choice.option.id)
+    setActiveId(checked?.option.id ?? available[0]?.option.id ?? null)
+  })
 
   createEffect(() => {
     if (!open()) return
@@ -2864,8 +2858,16 @@ function PickerMenu(props: PickerMenuProps & { triggerClass: string; above?: boo
         on:toggle={(event) => {
           const isOpen = event.newState === 'open'
           setOpen(isOpen)
-          if (!isOpen) return
+          if (!isOpen) {
+            setFilterQuery('')
+            setActiveId(null)
+            return
+          }
           positionMenu()
+          if (props.filterable) {
+            filter?.focus({ preventScroll: true })
+            return
+          }
           const current = menu.querySelector<HTMLButtonElement>('button[aria-checked="true"]:enabled')
             ?? menu.querySelector<HTMLButtonElement>('button:enabled')
             ?? menu
@@ -2881,6 +2883,28 @@ function PickerMenu(props: PickerMenuProps & { triggerClass: string; above?: boo
             closeMenu()
             return
           }
+          if (props.filterable) {
+            const available = choices()
+            if (event.key === 'Enter') {
+              event.preventDefault()
+              const choice = available.find((candidate) => candidate.option.id === activeId()) ?? available[0]
+              if (choice) chooseOption(choice.group, choice.option)
+              return
+            }
+            if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key) || available.length === 0) return
+            event.preventDefault()
+            const current = available.findIndex((candidate) => candidate.option.id === activeId())
+            const step = event.key === 'ArrowUp' ? -1 : 1
+            const next = event.key === 'Home'
+              ? 0
+              : event.key === 'End'
+                ? available.length - 1
+                : current < 0
+                  ? (step > 0 ? 0 : available.length - 1)
+                  : (current + step + available.length) % available.length
+            setActiveId(available[next]?.option.id ?? null)
+            return
+          }
           if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return
           event.preventDefault()
           const items = Array.from(menu.querySelectorAll<HTMLButtonElement>('button:enabled'))
@@ -2893,7 +2917,35 @@ function PickerMenu(props: PickerMenuProps & { triggerClass: string; above?: boo
           items[next]?.focus()
         }}
       >
-        <For each={groups()}>{(group) =>
+        <Show when={props.filterable}>
+          <span class="picker-menu__search">
+            <input
+              ref={filter}
+              class="picker-menu__filter"
+              type="text"
+              role="searchbox"
+              aria-label={`Filter ${props.label.toLowerCase()}`}
+              aria-controls={menuId}
+              autocomplete="off"
+              spellcheck={false}
+              placeholder="Filter models"
+              value={filterQuery()}
+              onInput={(event) => {
+                if (event.isComposing) return
+                setFilterQuery(event.currentTarget.value)
+                setActiveId(null)
+              }}
+              onCompositionEnd={(event) => {
+                setFilterQuery(event.currentTarget.value)
+                setActiveId(null)
+              }}
+            />
+          </span>
+          <Show when={choices().length === 0}>
+            <p class="picker-menu__empty" role="status">No matches.</p>
+          </Show>
+        </Show>
+        <For each={visibleGroups()}>{(group) =>
           <span class="picker-menu__group" role={group.label ? 'group' : undefined} aria-label={group.label}>
             <Show when={group.label}><span class="picker-menu__label" aria-hidden="true">{group.label}</span></Show>
             <For each={group.options}>{(option) => (
@@ -2905,10 +2957,8 @@ function PickerMenu(props: PickerMenuProps & { triggerClass: string; above?: boo
                 aria-checked={group.value === undefined ? undefined : group.value === option.id}
                 title={option.detail}
                 disabled={option.disabled}
-                onClick={() => {
-                  closeMenu()
-                  if (option.id !== group.value) props.onChange?.(option.id)
-                }}
+                classList={{ 'picker-menu__option--active': props.filterable && activeId() === option.id }}
+                onClick={() => chooseOption(group, option)}
               >
                 <span>{option.name}</span>
                 <Show when={group.value === option.id}>
@@ -3033,14 +3083,30 @@ function SearchMark(props: { text: string; match?: string }) {
   </Show>
 }
 
-function authFailureSummary(text: string, detail: string | null | undefined) {
+function authFailureSummary(
+  text: string,
+  detail: string | null | undefined,
+  agentLabel: string,
+  model: string | null | undefined,
+  protocol: string | null | undefined,
+) {
   const haystack = `${text}\n${detail ?? ''}`.toLowerCase()
-  if (/turso|libsql/.test(haystack)) return 'Sign in to Turso and check its database token, then retry.'
-  if (/openrouter/.test(haystack)) return 'Sign in to OpenRouter and check its API key, then retry.'
-  if (/anthropic|claude/.test(haystack)) return 'Sign in to Anthropic and check its access token, then retry.'
-  if (/openai|codex/.test(haystack)) return 'Sign in to OpenAI and check its access token, then retry.'
-  if (/\bopencode\b/.test(haystack)) return 'Sign in to OpenCode and check its access token, then retry.'
-  return 'Sign in to the model provider and check its API key, then retry.'
+  const summary = /turso|libsql/.test(haystack) ? 'Sign in to Turso and check its database token, then retry.'
+    : /openrouter/.test(haystack) ? 'Sign in to OpenRouter and check its API key, then retry.'
+    : /anthropic|claude/.test(haystack) ? 'Sign in to Anthropic and check its access token, then retry.'
+    : /openai|codex/.test(haystack) ? 'Sign in to OpenAI and check its access token, then retry.'
+    : /\bopencode\b/.test(haystack) ? 'Sign in to OpenCode and check its access token, then retry.'
+    : 'Sign in to the model provider and check its API key, then retry.'
+  // Only the row's own recorded context is used: the model may have changed since.
+  if (!model && !protocol) return summary
+  const harness = protocol ? `${agentLabel} (${protocol})` : agentLabel
+  const separator = model ? model.indexOf('/') : -1
+  const target = !model
+    ? 'its default model'
+    : separator > 0
+      ? `model ${model} from provider ${model.slice(0, separator)}`
+      : `model ${model}`
+  return `${summary} Tried ${harness} with ${target}.`
 }
 
 function QuestionCard(props: {
@@ -3084,6 +3150,7 @@ function entryBody(
   canAnswer: () => boolean,
   awaitingAnswer: (questionId: string) => boolean,
   match: () => string | undefined,
+  agentLabel: string,
 ) {
   const kind = entry.kind
   const text = (value: string) => <SearchMark text={value} match={match()} />
@@ -3180,7 +3247,7 @@ function entryBody(
       return <p class={kind.data.isError ? 'entry__notice--error' : 'entry__notice'}>{text(kind.data.text)}</p>
     case 'failure': {
       const authSummary = kind.data.kind === 'authRequired'
-        ? authFailureSummary(kind.data.text, kind.data.detail) : null
+        ? authFailureSummary(kind.data.text, kind.data.detail, agentLabel, kind.data.model, kind.data.protocol) : null
       return (
         <div class="entry__failure">
           <p class="entry__failure-title">

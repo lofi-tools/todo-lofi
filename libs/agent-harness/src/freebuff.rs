@@ -147,6 +147,11 @@ impl FreebuffToolPublisher {
     }
 
     pub async fn update(&mut self, snapshot: FreebuffToolSnapshot) -> HarnessResult<()> {
+        if self.sender.is_closed() {
+            return Err(HarnessError::TransportClosed(
+                "Freebuff event receiver closed".into(),
+            ));
+        }
         let permit = tokio::select! {
             _ = self.sender.closed() => return Err(HarnessError::TransportClosed("Freebuff event receiver closed".into())),
             permit = self.capacity.clone().acquire_owned() => permit.map_err(|_| HarnessError::TransportClosed("Freebuff event capacity closed".into()))?,
@@ -273,6 +278,11 @@ impl FreebuffTextPublisher {
     }
 
     pub async fn update(&mut self, item_id: &str, text: &str) -> HarnessResult<()> {
+        if self.sender.is_closed() {
+            return Err(HarnessError::TransportClosed(
+                "Freebuff event receiver closed".into(),
+            ));
+        }
         let permit = tokio::select! {
             _ = self.sender.closed() => return Err(HarnessError::TransportClosed("Freebuff event receiver closed".into())),
             permit = self.capacity.clone().acquire_owned() => permit.map_err(|_| HarnessError::TransportClosed("Freebuff event capacity closed".into()))?,
@@ -1075,10 +1085,29 @@ mod tests {
     }
 
     #[test]
+    fn path_lookup_finds_freebuff_without_configuration() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let directory = tempfile::tempdir()?;
+        let executable = directory.path().join("freebuff");
+        std::fs::write(&executable, b"fixture")?;
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755))?;
+        let result = discover(None, directory.path().as_os_str());
+        assert_eq!(
+            result.install,
+            Some(FreebuffInstall {
+                executable,
+                source: FreebuffInstallSource::Path,
+            })
+        );
+        Ok(())
+    }
+
+    #[test]
     fn missing_executable_has_actionable_diagnostics() {
         let result = discover(None, OsStr::new(""));
         assert!(result.install.is_none());
         assert!(result.summary().contains("configure its path"));
+        assert!(result.summary().contains("PATH"));
     }
 
     #[test]

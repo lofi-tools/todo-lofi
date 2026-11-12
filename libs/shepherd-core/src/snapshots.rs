@@ -69,13 +69,4 @@ pub struct TaskWorkspace {
     pub modes: Option<agent_harness::AgentModes>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub models: Option<agent_harness::AgentModels>,
-    pub recovery: Option<SessionRecovery>,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub enum SessionRecovery {
-    Resume,
-    Reconnect,
-    StartNew,
 }

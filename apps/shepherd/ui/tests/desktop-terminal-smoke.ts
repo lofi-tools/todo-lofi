@@ -1103,11 +1103,9 @@ async function resumeCodexAfterRestart() {
   if (interrupted?.state !== 'interrupted' || !interrupted.worktreePath || !interrupted.branch) {
     throw new Error('The interrupted task and worktree were not restored')
   }
-  const resume = await enabledButton('Resume')
-  resume.click()
-  await waitFor('resumed Codex thread', () => chatState() === 'ready' &&
-    document.querySelector('.entry__notice')?.textContent?.includes('resumed the previous agent session'), CODEX_WAIT)
   await sendPrompt('Reply with the single word: resumed.')
+  await waitFor('resumed Codex thread after sending', () => chatState() === 'ready' &&
+    document.querySelector('.entry__notice')?.textContent?.includes('resumed the previous agent session'), CODEX_WAIT)
   await waitFor('Codex reply after restart', () => chatState() === 'ready' &&
     document.querySelector('.entry__agent')?.textContent?.trim() === 'resumed', CODEX_WAIT)
   const { task } = await bridge.taskWorkspace(interrupted.id)
@@ -1301,10 +1299,6 @@ async function restore() {
   })
   await selectTask(INTERRUPTED_TASK)
   await waitFor('interrupted task after relaunch', () => chatState() === 'interrupted')
-  const resume = await enabledButton('Resume')
-  resume.click()
-  await waitFor('resumed session in the native transcript', () => chatState() === 'ready' &&
-    document.querySelector('.entry__notice')?.textContent?.includes('resumed the previous agent session'))
 
   const search = await waitFor('header search after restart', () =>
     document.querySelector<HTMLInputElement>('.shell__header input[role="combobox"]:enabled'))

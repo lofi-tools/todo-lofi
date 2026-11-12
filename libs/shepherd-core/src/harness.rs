@@ -25,6 +25,10 @@ pub(crate) const MAX_EVENTS_PER_PUMP: usize = 256;
 const HIDDEN_DIAGNOSTIC: &str =
     "Agent diagnostic output is hidden because launch environment values are configured.";
 
+fn present(value: String) -> Option<String> {
+    (!value.is_empty()).then_some(value)
+}
+
 pub(crate) struct ProjectApprovals {
     store: Arc<dyn Store>,
     project: ProjectId,
@@ -91,6 +95,20 @@ pub trait HarnessFactory: Send + Sync {
         _project: &std::path::Path,
     ) -> Result<BTreeMap<String, String>, CoreError> {
         Ok(BTreeMap::new())
+    }
+
+    /// The app-selected default model for `agent` in `project`, if any.
+    fn default_model_for_project(
+        &self,
+        _agent: Agent,
+        _project: &std::path::Path,
+    ) -> Result<Option<String>, CoreError> {
+        Ok(None)
+    }
+
+    /// Agents to try, in order, when `agent` cannot launch.
+    fn fallback_agents(&self, _agent: Agent) -> Vec<Agent> {
+        Vec::new()
     }
 
     fn launch_for_task(
@@ -188,6 +206,10 @@ impl HarnessSession {
 
     pub(crate) fn set_project_approval_policy(&mut self, policy: Arc<dyn ProjectApprovalPolicy>) {
         self.harness.set_project_approval_policy(policy);
+    }
+
+    pub(crate) fn set_default_model(&mut self, model: Option<String>) {
+        self.harness.set_default_model(model);
     }
 
     pub async fn start(&mut self, spec: SpawnSpec) -> Result<Capabilities, CoreError> {
@@ -480,6 +502,20 @@ impl HarnessSession {
                 _ => {}
             }
             let change = self.transcript.apply(&event);
+            if change.appended
+                && matches!(
+                    event,
+                    HarnessEvent::TurnError { .. } | HarnessEvent::ConnectionFailed { .. }
+                )
+                && let Some(index) = change.changed
+            {
+                let diagnostics = self.harness.diagnostics();
+                self.transcript.set_failure_context(
+                    index,
+                    diagnostics.model,
+                    present(diagnostics.protocol),
+                );
+            }
             self.track_entry(change);
             events.push(event);
         }
@@ -654,6 +690,14 @@ impl HarnessSession {
     ) {
         self.failed = true;
         let change = self.transcript.push_failure(kind, text, detail);
+        if let Some(index) = change.changed {
+            let diagnostics = self.harness.diagnostics();
+            self.transcript.set_failure_context(
+                index,
+                diagnostics.model,
+                present(diagnostics.protocol),
+            );
+        }
         self.track_entry(change);
     }
 
@@ -1466,6 +1510,7 @@ mod tests {
     use crate::test_support::{TestDatabase, TestDirectory};
 
     #[cfg(unix)]
+    #[cfg(feature = "git")]
     #[test]
     fn capture_lifecycle_records_and_replays_worktree_effects()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -1503,6 +1548,7 @@ mod tests {
     }
 
     #[cfg(unix)]
+    #[cfg(feature = "git")]
     #[test]
     fn replay_applies_effects_only_to_a_clean_matching_worktree()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -1557,6 +1603,7 @@ mod tests {
     }
 
     #[cfg(unix)]
+    #[cfg(feature = "git")]
     #[test]
     fn replay_reports_partial_application_on_failure() -> Result<(), Box<dyn std::error::Error>> {
         use agent_harness::freebuff_capture::{CaptureEvent, CaptureSession, CaptureWriter};
@@ -1592,6 +1639,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "git")]
     #[test]
     fn replay_planning_requires_a_complete_capture_without_duplicate_paths()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -1635,6 +1683,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "git")]
     #[test]
     fn discovers_unstaged_and_untracked_worktree_effects() -> Result<(), Box<dyn std::error::Error>>
     {
@@ -1655,6 +1704,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "git")]
     #[test]
     fn rejects_staged_and_ignored_worktree_effects() -> Result<(), Box<dyn std::error::Error>> {
         use crate::test_support::TestRepository;
@@ -1687,6 +1737,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "git")]
     #[test]
     fn rejects_branch_changes_during_effect_capture() -> Result<(), Box<dyn std::error::Error>> {
         use crate::test_support::TestRepository;
@@ -1749,6 +1800,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "git")]
     #[tokio::test]
     async fn terminal_turn_admission_records_baseline_before_changes()
     -> Result<(), Box<dyn std::error::Error>> {

@@ -45,22 +45,6 @@ export function archivedWorktreeIssues(): Promise<ArchivedWorktreeIssue[]> {
   return invoke('archived_worktree_issues')
 }
 
-export interface PreviousProcess {
-  id: string
-  kind: string
-  ownerId: string
-  pid: number
-  status: 'matching' | 'gone' | 'reused' | 'changed' | 'unknown' | 'groupUnverified'
-}
-
-export function inspectPreviousProcesses(): Promise<PreviousProcess[]> {
-  return invoke('inspect_previous_processes')
-}
-
-export function stopPreviousProcess(id: string): Promise<PreviousProcess[]> {
-  return invoke('stop_previous_process', { id })
-}
-
 export type Decision = 'allow' | 'allowSession' | 'allowProject' | 'deny'
 
 export type ShortcutScope = 'window' | 'composer' | 'workspaceTerminal' | 'commitForm'
@@ -408,7 +392,7 @@ export type EntryKind =
   | { type: 'plan'; data: { rows: PlanRow[] } }
   | { type: 'permission'; data: PermissionEntry }
   | { type: 'notice'; data: { text: string; isError: boolean } }
-  | { type: 'failure'; data: { kind: FailureKind; text: string; detail: string | null } }
+  | { type: 'failure'; data: { kind: FailureKind; text: string; detail: string | null; model?: string | null; protocol?: string | null } }
   | { type: 'usage'; data: { used: number; size: number; cost: number | null } }
 
 export interface Entry {
@@ -444,8 +428,6 @@ export interface AgentCapabilities {
   patchesInApprovals: boolean
 }
 
-export type SessionRecovery = 'resume' | 'reconnect' | 'startNew'
-
 export interface AgentModes {
   current: string | null
   options: Array<{ id: string; name: string; description: string | null }>
@@ -479,7 +461,6 @@ export interface TaskWorkspace {
   capabilities: AgentCapabilities | null
   modes?: AgentModes
   models?: AgentModels
-  recovery: SessionRecovery | null
 }
 
 export interface AgentTerminal {
@@ -655,6 +636,15 @@ export function claudeConfigured(): Promise<boolean> {
   return invoke<boolean>('claude_configured')
 }
 
+export interface FreebuffAvailability {
+  available: boolean
+  reason: string | null
+}
+
+export function freebuffAvailability(): Promise<FreebuffAvailability> {
+  return invoke<FreebuffAvailability>('freebuff_availability')
+}
+
 export function deleteTask(taskId: string, removeWorktree: boolean): Promise<void> {
   return invoke<void>('delete_task', { taskId, removeWorktree })
 }
@@ -734,10 +724,6 @@ export function resetApprovalGrant(projectId: string, approvalId: string, taskId
 
 export function cancelTask(taskId: string): Promise<TaskWorkspace> {
   return invoke<TaskWorkspace>('cancel_task', { taskId })
-}
-
-export function resumeTask(taskId: string): Promise<TaskWorkspace> {
-  return invoke<TaskWorkspace>('resume_task', { taskId })
 }
 
 export function quit(force: boolean): Promise<QuitSummary> {

@@ -233,6 +233,15 @@ impl AgentSettings {
         Ok(Some(ConfiguredCommand { executable, args }))
     }
 
+    /// The model Shepherd selects by default for `agent`, preferring a project
+    /// entry over the app-wide one.
+    pub fn default_model(&self, project: &Path, agent: &str) -> HarnessResult<Option<String>> {
+        let key = format!("agents.{agent}.default_model");
+        Ok(self
+            .project_value::<String>(project, &key)?
+            .filter(|model| !model.trim().is_empty()))
+    }
+
     fn value<T: DeserializeOwned>(&self, key: &str) -> HarnessResult<Option<T>> {
         Self::decode(key, self.app.get(key))
     }
@@ -469,6 +478,36 @@ mod tests {
                 .project_value::<u64>(Path::new("/invalid"), "limit")
                 .is_err()
         );
+        Ok(())
+    }
+
+    #[test]
+    fn default_model_prefers_the_project_and_ignores_blank_values()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let settings: AgentSettings = serde_json::from_value(serde_json::json!({
+            "app": {"agents.opencode.default_model": "orcarouter/orcarouter/free"},
+            "projects": {
+                "/project": {"agents.opencode.default_model": "lmstudio/lmstudio-qwen3-coder"},
+                "/blank": {"agents.opencode.default_model": "   "}
+            }
+        }))?;
+        assert_eq!(
+            settings
+                .default_model(Path::new("/project"), "opencode")?
+                .as_deref(),
+            Some("lmstudio/lmstudio-qwen3-coder")
+        );
+        assert_eq!(
+            settings
+                .default_model(Path::new("/other"), "opencode")?
+                .as_deref(),
+            Some("orcarouter/orcarouter/free")
+        );
+        assert_eq!(
+            settings.default_model(Path::new("/blank"), "opencode")?,
+            None
+        );
+        assert_eq!(settings.default_model(Path::new("/other"), "claude")?, None);
         Ok(())
     }
 

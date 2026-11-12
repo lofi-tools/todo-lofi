@@ -750,6 +750,8 @@ pub struct ShellState {
     pub(crate) opencode_launch: Option<SpawnSpec>,
     pub(crate) pi_configured: bool,
     pub(crate) claude_configured: bool,
+    pub(crate) freebuff_configured: bool,
+    pub(crate) freebuff_reason: Option<String>,
     events: broadcast::Sender<Event>,
     terminal_subscriptions: Arc<Mutex<BTreeMap<String, TerminalSubscription>>>,
     terminal_lifecycle: Mutex<()>,
@@ -915,6 +917,8 @@ impl ShellState {
             opencode_launch: None,
             pi_configured: false,
             claude_configured: false,
+            freebuff_configured: false,
+            freebuff_reason: None,
             events,
             terminal_subscriptions: Arc::new(Mutex::new(BTreeMap::new())),
             terminal_lifecycle: Mutex::new(()),
@@ -947,17 +951,18 @@ impl ShellState {
                 ),
             )
         })?;
-        let leases =
+        let leases = Arc::new(
             crate::orphan_process::ProcessLeases::new(data_directory.join(".agent-process-leases"))
                 .map_err(|error| {
                     BridgeError::new(
                         "storage",
                         format!("could not initialize agent process leases: {error}"),
                     )
-                })?;
+                })?,
+        );
         terminals
             .process_leases
-            .set(Arc::new(leases))
+            .set(leases.clone())
             .map_err(|_| BridgeError::new("storage", "agent process leases already initialized"))?;
         let attachment_lock = attachments::lock_deletions(data_directory).map_err(|error| {
             BridgeError::new(
@@ -998,9 +1003,30 @@ impl ShellState {
                 format!("Could not recover staged attachments: {error}"),
             )
         })?;
+        // A crashed instance leaves agent processes behind. Anything a
+        // surviving lease still attributes to its launch is stopped here, so
+        // the user never has to review process records by hand.
         let previous_processes = core.recorded_processes().await.map_err(BridgeError::from)?;
+        let outcome = if previous_processes.is_empty() {
+            crate::orphan_process::CleanupOutcome {
+                removed: Vec::new(),
+                remaining: Vec::new(),
+            }
+        } else {
+            let leases = leases.clone();
+            tokio::task::spawn_blocking(move || {
+                crate::orphan_process::cleanup(&leases, previous_processes)
+            })
+            .await
+            .map_err(|error| BridgeError::new("process_inspection", error.to_string()))?
+        };
+        for id in outcome.removed {
+            if let Err(error) = core.remove_process(&id).await {
+                tracing::warn!(%error, id, "could not forget a cleaned-up process record");
+            }
+        }
         let mut state = Self::with_terminals(core, terminals);
-        state.previous_processes = Mutex::new(previous_processes);
+        state.previous_processes = Mutex::new(outcome.remaining);
         state.attachment_root = Some(data_directory.join("attachments"));
 
         // Walking the home directory can take seconds, so the scan starts with
@@ -1605,7 +1631,7 @@ impl ShellState {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, any(feature = "git", feature = "live-codex")))]
     async fn send_prompt(
         &self,
         task_id: String,
@@ -1615,7 +1641,7 @@ impl ShellState {
             .await
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, any(feature = "git", feature = "live-codex")))]
     pub async fn send_prompt_with_files(
         &self,
         task_id: String,
@@ -1762,13 +1788,6 @@ impl ShellState {
         .await
     }
 
-    pub async fn resume_task(&self, task_id: String) -> Result<TaskWorkspace, BridgeError> {
-        self.workspace(Command::ResumeTask {
-            task_id: TaskId::new(task_id),
-        })
-        .await
-    }
-
     pub async fn quit(&self, force: bool) -> Result<QuitSummary, BridgeError> {
         let engine = self.terminals.engine.clone();
         let preview_server = self.preview_server.clone();
@@ -1872,10 +1891,15 @@ impl ShellState {
         let Some(launch) = &self.opencode_launch else {
             return Ok(AgentModels::default());
         };
+        let default_model = self
+            .core
+            .lock()
+            .await
+            .project_default_model(&ProjectId::new(project_id.clone()), Agent::OpenCode)?;
         let spec = self
             .discovery_spec(project_id, Agent::OpenCode, launch.clone())
             .await?;
-        agent_harness::opencode::project_models(&spec)
+        agent_harness::opencode::project_models(&spec, default_model.as_deref())
             .await
             .map_err(|error| BridgeError::new("opencode_models", error.to_string()))
     }
@@ -2903,6 +2927,7 @@ pub mod commands {
             ("opencode", state.opencode_launch.is_some()),
             ("pi", state.pi_configured),
             ("claude", state.claude_configured),
+            ("freebuff", state.freebuff_configured),
         ])
     }
 
@@ -3087,9 +3112,24 @@ pub mod commands {
         state.pi_configured
     }
 
+    #[derive(serde::Serialize)]
+    #[serde(rename_all = "camelCase")]
+    pub struct FreebuffAvailability {
+        pub available: bool,
+        pub reason: Option<String>,
+    }
+
     #[tauri::command]
     pub fn claude_configured(state: State<'_, ShellState>) -> bool {
         state.claude_configured
+    }
+
+    #[tauri::command]
+    pub fn freebuff_availability(state: State<'_, ShellState>) -> FreebuffAvailability {
+        FreebuffAvailability {
+            available: state.freebuff_configured,
+            reason: state.freebuff_reason.clone(),
+        }
     }
 
     #[tauri::command]
@@ -3191,14 +3231,6 @@ pub mod commands {
         task_id: String,
     ) -> Result<TaskWorkspace, BridgeError> {
         state.inner().cancel_task(task_id).await
-    }
-
-    #[tauri::command]
-    pub async fn resume_task(
-        state: State<'_, ShellState>,
-        task_id: String,
-    ) -> Result<TaskWorkspace, BridgeError> {
-        state.inner().resume_task(task_id).await
     }
 
     #[tauri::command]
@@ -3934,7 +3966,9 @@ mod tests {
             Some(shepherd_core::events::Event::TaskNeedsInput { task_id }) if task_id == "new"));
     }
     use shepherd_core::store::MemoryStore;
-    use shepherd_core::test_support::{TestDirectory, TestRepository};
+    use shepherd_core::test_support::TestDirectory;
+    #[cfg(any(feature = "git", feature = "live-codex"))]
+    use shepherd_core::test_support::TestRepository;
     use shepherd_core::{TaskState, TaskSummary};
 
     use super::*;
@@ -4433,17 +4467,15 @@ mod tests {
             .max_by_key(|session| session.started_at)
             .and_then(|session| session.adapter_session_id)
             .ok_or("missing persisted agent session")?;
-        let resumed = state.resume_task(task_id.clone()).await?;
-        assert_eq!(resumed.task.state, TaskState::Ready);
+        let resumed = state
+            .send_prompt(task_id.clone(), "Reply with exactly: resumed".into())
+            .await?;
         assert!(
             resumed.transcript.iter().any(|entry| entry
                 .summary()
                 .contains(&format!("resumed the previous agent session {recorded}"))),
             "resume did not use the recorded agent session"
         );
-        state
-            .send_prompt(task_id.clone(), "Reply with exactly: resumed".into())
-            .await?;
         let finished = tokio::time::timeout(Duration::from_secs(90), async {
             loop {
                 let workspace = state.task_workspace(task_id.clone()).await?;
@@ -4587,6 +4619,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "git")]
     #[tokio::test]
     async fn agent_events_reach_subscribers_without_a_followup_command()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -4772,6 +4805,7 @@ mod tests {
         ShellState::new(core)
     }
 
+    #[cfg(feature = "git")]
     #[tokio::test]
     async fn workspace_watch_continues_after_a_notification_error()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -4816,6 +4850,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "git")]
     #[tokio::test]
     async fn large_git_read_does_not_block_agent_events() -> Result<(), Box<dyn std::error::Error>>
     {
@@ -4927,6 +4962,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "git")]
     #[tokio::test]
     async fn project_remote_uses_origin_and_hides_credentials()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -4980,6 +5016,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "git")]
     #[tokio::test]
     async fn commands_return_typed_snapshots_and_broadcast_events()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -5111,6 +5148,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "git")]
     #[tokio::test]
     async fn an_unknown_approval_is_a_bridge_error() -> Result<(), Box<dyn std::error::Error>> {
         let repository = TestRepository::new()?;
@@ -5194,6 +5232,7 @@ mod tests {
     }
 
     #[cfg(unix)]
+    #[cfg(feature = "git")]
     #[tokio::test]
     async fn recorded_task_terminal_is_visible_in_the_project_terminal_list()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -5572,6 +5611,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "git")]
     #[tokio::test]
     async fn archived_task_terminal_activity_refreshes_worktree_usage()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -5997,6 +6037,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "git")]
     #[tokio::test]
     async fn terminal_process_identity_is_durable_until_exit()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -6219,6 +6260,7 @@ mod tests {
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[cfg(feature = "git")]
     #[tokio::test]
     async fn abrupt_shell_death_leaves_a_verifiable_terminal_record()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -6393,6 +6435,7 @@ mod tests {
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[cfg(feature = "git")]
     #[tokio::test]
     async fn terminal_exit_records_a_surviving_background_job()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -6460,6 +6503,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "git")]
     #[tokio::test]
     async fn discarding_draft_stops_only_its_terminal() -> Result<(), Box<dyn std::error::Error>> {
         let repository = TestRepository::new()?;
@@ -6509,6 +6553,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "git")]
     #[tokio::test]
     async fn restarting_a_task_terminal_reuses_its_record_and_worktree()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -6601,6 +6646,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "git")]
     #[tokio::test]
     async fn deleting_saved_task_removes_its_cache_and_preserves_other_work()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -6682,6 +6728,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "git")]
     #[tokio::test]
     async fn committed_deletion_cleanup_error_does_not_restore_attachments()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -6760,6 +6807,7 @@ mod tests {
     }
 
     #[cfg(unix)]
+    #[cfg(feature = "git")]
     #[tokio::test]
     async fn killed_attachment_deletion_recovers_before_and_after_commit()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -6871,6 +6919,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "git")]
     #[tokio::test]
     async fn startup_recovers_staged_attachments_from_task_state()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -6929,6 +6978,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "git")]
     #[tokio::test]
     async fn attachment_writes_respect_deletion_lock_and_durable_task_state()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -6977,6 +7027,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "git")]
     #[tokio::test]
     async fn screenshots_are_task_scoped_and_removed_with_a_discarded_draft()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -7056,6 +7107,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "git")]
     #[tokio::test]
     async fn project_attachment_limit_applies_to_uploads_screenshots_and_cached_files()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -7167,6 +7219,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "git")]
     #[tokio::test]
     async fn prompt_attachments_are_resolved_and_restored_for_the_selected_task()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -7265,7 +7318,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn startup_snapshots_only_previously_recorded_processes()
+    async fn startup_prunes_records_that_can_no_longer_be_identified()
     -> Result<(), Box<dyn std::error::Error>> {
         let directory = TestDirectory::new()?;
         let state = ShellState::load(
@@ -7295,7 +7348,12 @@ mod tests {
             TerminalHost::default(),
         )
         .await?;
-        assert_eq!(*reopened.previous_processes.lock().await, vec![record]);
+        assert!(
+            reopened.previous_processes.lock().await.is_empty(),
+            "a record from an earlier boot is pruned without asking"
+        );
+        let mut core = reopened.core.lock().await;
+        assert!(core.recorded_processes().await?.is_empty());
         Ok(())
     }
 

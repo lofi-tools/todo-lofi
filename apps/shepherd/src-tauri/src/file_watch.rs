@@ -58,7 +58,7 @@ struct WatchPaths {
 }
 
 impl WorkspaceWatch {
-    #[cfg(test)]
+    #[cfg(all(test, feature = "git"))]
     pub(crate) fn inject_error(&self, message: &str) {
         record_notification(&self.changed, Some(message.into()));
     }

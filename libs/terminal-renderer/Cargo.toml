@@ -1,0 +1,15 @@
+[package]
+name = "terminal-renderer"
+version.workspace = true
+edition.workspace = true
+description = "Shepherd's VT parser, terminal screen and frame encoder."
+
+[lib]
+name = "terminal_renderer"
+path = "src/terminal_renderer.rs"
+
+[dependencies]
+alacritty_terminal = { git = "https://github.com/alacritty/alacritty", rev = "ede2ac144da4dec4c075bfa803aacf3b3739bce6" }
+compact_str = { version = "0.8", features = ["serde"] }
+serde.workspace = true
+serde_json.workspace = true

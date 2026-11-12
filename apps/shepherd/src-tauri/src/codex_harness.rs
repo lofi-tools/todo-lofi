@@ -65,6 +65,40 @@ impl HarnessFactory for DesktopHarnessFactory {
         Ok(values)
     }
 
+    fn default_model_for_project(
+        &self,
+        agent: Agent,
+        project: &Path,
+    ) -> Result<Option<String>, CoreError> {
+        let settings = self
+            .settings
+            .as_ref()
+            .map_err(|error| HarnessError::Protocol(error.clone()))?;
+        settings
+            .default_model(project, agent.as_str())
+            .map_err(CoreError::from)
+    }
+
+    fn fallback_agents(&self, failed: Agent) -> Vec<Agent> {
+        [
+            Agent::Codex,
+            Agent::OpenCode,
+            Agent::Pi,
+            Agent::Claude,
+            Agent::Freebuff,
+        ]
+        .into_iter()
+        .filter(|agent| *agent != failed)
+        .filter(|agent| match agent {
+            Agent::Codex => true,
+            Agent::OpenCode => matches!(&self.opencode, Ok(Some(_))),
+            Agent::Pi => matches!(&self.pi, Ok(Some(_))),
+            Agent::Claude => matches!(&self.claude, Ok(Some(_))),
+            Agent::Freebuff => matches!(&self.freebuff, Ok(Some(_))),
+        })
+        .collect()
+    }
+
     fn spawn_spec(&self, cwd: PathBuf) -> SpawnSpec {
         self.codex.spawn_spec(cwd)
     }
@@ -377,6 +411,29 @@ mod tests {
         );
         assert_eq!(spec.cwd, cwd);
         assert!(factory.launch(Agent::Codex, cwd).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn launches_freebuff_through_the_terminal_wrapper() -> Result<(), CoreError> {
+        let executable = PathBuf::from("/tmp/freebuff");
+        let factory = DesktopHarnessFactory {
+            codex: Box::new(MissingCodexFactory::new(
+                "fixture".into(),
+                FailureKind::MissingBinary,
+            )),
+            opencode: Ok(None),
+            pi: Ok(None),
+            claude: Ok(None),
+            freebuff: Ok(Some(executable.clone())),
+            settings: Ok(AgentSettings::default()),
+            terminals: Arc::new(crate::bridge::TerminalHost::default()),
+        };
+        let cwd = PathBuf::from("/tmp/worktree");
+        let (harness, spec) = factory.launch(Agent::Freebuff, cwd.clone())?;
+        assert_eq!(harness.tier(), agent_harness::AdapterTier::TerminalWrapper);
+        assert_eq!(Path::new(&spec.program), executable);
+        assert_eq!(spec.cwd, cwd);
         Ok(())
     }
 

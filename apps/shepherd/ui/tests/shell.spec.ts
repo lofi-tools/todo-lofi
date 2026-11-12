@@ -328,11 +328,15 @@ test.beforeEach(async ({ context }) => {
     }
     if (options.has('agent-failed') || options.has('agent-auth-failed')) {
       const auth = options.has('agent-auth-failed')
+      const acp = options.has('acp-fallback')
+      const opencode = acp || options.has('agent-models')
       transcripts['task-1'] = options.has('reopened') ? [] : [entry('failure-1', 1, {
         type: 'failure',
         data: {
           kind: auth ? 'authRequired' : 'midTurnExit', text: tasks[0].error,
           detail: auth ? 'Turso login required for workspace acme.' : 'Agent stderr fixture',
+          model: opencode ? (acp ? 'acme/qwen' : 'acme/deepseek') : 'gpt-6.1-terra',
+          protocol: acp ? 'ACP v1 OpenCode 2.0.14' : opencode ? 'OpenCode 2.0.14 native HTTP' : 'app-server',
         },
       })]
     }
@@ -469,10 +473,13 @@ test.beforeEach(async ({ context }) => {
           current: sessionModels.get(taskId) ?? advertisedModels[0].id,
           options: advertisedModels,
         } : undefined,
-        recovery: ['failed', 'interrupted'].includes(task.state) ? limited ? 'startNew' : capabilities ? 'resume' : 'reconnect' : null,
         diagnostics: options.has('acp-fallback') ? {
           command: '/existing/opencode acp', protocol: 'ACP v1 OpenCode 2.0.14',
-          fallbackReason: 'OpenCode native server unavailable: no loopback server', stderrTail: 'agent stderr',
+          fallbackReason: 'OpenCode native server unavailable: no loopback server',
+          model: 'acme/qwen', stderrTail: 'agent stderr',
+        } : options.has('agent-models') && options.has('agent-auth-failed') ? {
+          command: '/existing/opencode serve', protocol: 'OpenCode 2.0.14 native HTTP',
+          model: 'acme/qwen', stderrTail: '',
         } : task.state === 'waiting' ? {
           command: 'codex app-server', protocol: 'app-server',
           model: codexTurns.findLast((turn) => turn.taskId === task.id && turn.model)?.model ?? 'session-model',
@@ -505,14 +512,6 @@ test.beforeEach(async ({ context }) => {
         switch (command) {
           case 'archived_worktree_issues':
             return options.has('worktree-issues') ? [{ taskId: 'task-1', title: 'Old task', path: '/tmp/worktree', reason: 'worktree has untracked changes' }] : []
-          case 'inspect_previous_processes':
-            return options.has('recovery') ? [
-              { id: 'one', kind: 'terminal', ownerId: 'terminal-1', pid: 321, status: 'matching' },
-              { id: 'two', kind: 'acp_terminal', ownerId: 'terminal-2', pid: 456, status: 'unknown' },
-              { id: 'three', kind: 'terminal', ownerId: 'terminal-3', pid: 789, status: 'gone' },
-              { id: 'four', kind: 'agent', ownerId: 'task-1', pid: 654, status: 'matching' },
-              { id: 'five', kind: 'agent', ownerId: 'task-2', pid: 987, status: 'groupUnverified' },
-            ] : []
           case 'command_registry':
             return commandSnapshot(args.platform, readKeybindings())
           case 'set_keybinding': {
@@ -806,10 +805,11 @@ test.beforeEach(async ({ context }) => {
             return options.has('agent-models') ? { current: advertisedModels[0].id, options: advertisedModels } : { current: null, options: [] }
           case 'claude_configured':
             return options.has('configured-claude')
+          case 'freebuff_availability':
+            return options.has('configured-freebuff')
+              ? { available: true, reason: null }
+              : { available: false, reason: 'Freebuff executable not found; configure its path or add it to PATH' }
           case 'project_remote':
-            if (options.has('hugging-face-remote')) {
-              return { label: 'datasets/example/data', forge: 'huggingface' }
-            }
             return args.projectId === 'project-alpha'
               ? { label: 'demo/alpha-a-repository-with-a-long-name-that-still-fits-on-one-line', forge: 'gitlab' }
               : { label: 'example/demo', forge: 'github' }
@@ -936,11 +936,6 @@ test.beforeEach(async ({ context }) => {
             if (options.has('slow-folder') && args.path === 'src') {
               await new Promise<void>((resolve) => window.addEventListener('release-folder-listing', () => resolve(), { once: true }))
             }
-            if (options.has('ignored-files')) return { entries: args.path === '' ? [
-              { name: 'build', path: 'build', directory: true, ignored: true },
-              { name: 'ignored.rs', path: 'ignored.rs', directory: false, ignored: true },
-              { name: 'tracked.rs', path: 'tracked.rs', directory: false, ignored: false },
-            ] : [{ name: 'output.txt', path: 'build/output.txt', directory: false, ignored: true }], incomplete: false }
             if (options.has('many-files')) return {
               entries: Array.from({ length: 80 }, (_, index) => ({ name: `file-${index}.txt`, path: `file-${index}.txt`, directory: false })),
               incomplete: false,
@@ -1028,22 +1023,6 @@ test.beforeEach(async ({ context }) => {
               })
             }, { once: true })
             return { ...workspace(task.id), cancelling: true }
-          }
-          case 'resume_task': {
-            const task = tasks.find((candidate) => candidate.id === args.taskId)
-            if (!task || task.state !== 'interrupted') throw new Error('Task cannot be resumed')
-            task.state = 'ready'
-            legacySession = false
-            transcripts[task.id] = [
-              entry('resumed', 1, {
-                type: 'notice',
-                data: {
-                  text: options.has('limited-adapter') ? 'started a new agent session' : 'resumed the previous agent session',
-                  isError: false,
-                },
-              }),
-            ]
-            return workspace(task.id)
           }
           case 'create_draft': {
             const id = `task-${nextTask}`
@@ -1470,23 +1449,6 @@ test('lists archived worktrees kept at startup with their reasons', async ({ pag
   const notice = page.getByRole('status').filter({ hasText: 'Archived worktree collection needs attention' })
   await notice.locator('summary').click()
   await expect(notice).toContainText('Old task · /tmp/worktree · worktree has untracked changes')
-  await notice.getByRole('button', { name: 'Dismiss' }).click()
-  await expect(notice).toHaveCount(0)
-})
-
-test('shows previous processes that need review without reporting ended processes', async ({ page }) => {
-  await page.goto('/?recovery')
-  const notice = page.getByRole('status').filter({ hasText: 'Previously recorded processes need review' })
-  await expect(notice).toContainText('(4)')
-  await notice.locator('summary').click()
-  await expect(notice).toContainText('PID 321 · identity matches')
-  await expect(notice).toContainText('PID 456 · identity could not be verified')
-  await expect(notice).toContainText('Agent · PID 654 · identity matches')
-  await expect(notice).toContainText('Agent · PID 987 · leader exited; process group may still be active')
-  await expect(notice).not.toContainText('789')
-  await expect(notice).toContainText('another running Shepherd instance')
-  await notice.getByRole('button', { name: 'Recheck' }).click()
-  await expect(notice).toContainText('(4)')
   await notice.getByRole('button', { name: 'Dismiss' }).click()
   await expect(notice).toHaveCount(0)
 })
@@ -2229,19 +2191,6 @@ test('uses the inspector height and scrolls to the end of a long file tree', asy
   await expect(tree.getByRole('button', { name: 'file-79.txt' })).toBeInViewport()
 })
 
-test('shows ignored entries with dim monochrome icons', async ({ page }) => {
-  await page.goto('/?ignored-files')
-  await page.getByRole('tab', { name: 'Files' }).click()
-  const files = page.getByRole('region', { name: 'Workspace files' })
-  const ignored = files.getByRole('button', { name: 'ignored.rs' })
-  await expect(ignored).toHaveCSS('color', 'rgb(77, 70, 110)')
-  await expect(ignored.locator('.files-tree__icon--ignored')).toHaveCSS('background-color', 'rgb(77, 70, 110)')
-  await expect(files.getByRole('button', { name: 'tracked.rs' }).locator('img')).toHaveAttribute('src', /rust\.svg$/)
-  const folder = files.getByRole('button', { name: 'build' })
-  await folder.click()
-  await expect(files.getByRole('button', { name: 'output.txt' })).toHaveCSS('color', 'rgb(77, 70, 110)')
-})
-
 test('shows file errors as temporary toasts and keeps diagnostic history', async ({ page }) => {
   await page.goto('/?file-list-error')
   await page.getByRole('tab', { name: 'Files' }).click()
@@ -2646,18 +2595,19 @@ test('dispatches external actions for the selected root and shows opener errors'
   ])
 })
 
-test('resumes an interrupted task from its conversation header', async ({ page }) => {
+test('continues an interrupted task from the prompt, not a recovery button', async ({ page }) => {
   await page.goto('/?interrupted-task')
-
   const chat = page.getByRole('region', { name: 'Task chat' })
-  const resume = chat.getByRole('button', { name: 'Resume' })
   await expect(chat.locator('.chat__state')).toHaveText('interrupted')
-  await expect(chat.getByLabel('Prompt')).toBeDisabled()
-  await resume.click()
-  await expect(chat.locator('.chat__state')).toHaveText('ready')
-  await expect(chat.getByText('resumed the previous agent session')).toBeVisible()
-  await expect(chat.getByLabel('Prompt')).toBeEnabled()
-  await expect(resume).toHaveCount(0)
+  for (const label of ['Resume', 'Reconnect', 'Start new session']) {
+    await expect(chat.getByRole('button', { name: label, exact: true })).toHaveCount(0)
+  }
+  const prompt = chat.getByLabel('Prompt')
+  await expect(prompt).toBeEnabled()
+  await prompt.fill('continue where we left off')
+  await chat.getByRole('button', { name: 'Send' }).click()
+  await expect(chat.locator('.chat__state')).toHaveText('waiting')
+  await expect(chat.getByText('working on it')).toBeVisible()
 })
 
 test('cancels an active turn and waits for the settled workspace', async ({ page }) => {
@@ -2709,27 +2659,26 @@ test('answers a question in the transcript', async ({ page }) => {
   await expect(page.locator('.chat__state')).toHaveText('ready')
 })
 
-test('reports the ACP tier and the reason the native adapter was skipped', async ({ page }) => {
+test('reports the reason the native adapter was skipped', async ({ page }) => {
   await page.goto('/?acp-fallback')
   const chat = page.getByRole('region', { name: 'Task chat' })
-  await expect(chat.getByText('ACP · fallback')).toBeVisible()
+  await expect(chat.locator('.chat__adapter')).toHaveCount(0)
   await expect(chat.getByText('OpenCode native server unavailable: no loopback server')).toBeVisible()
   await chat.getByText('Diagnostics', { exact: true }).click()
   await expect(chat.getByText('ACP v1 OpenCode 2.0.14')).toBeVisible()
+  await expect(chat.getByText('ACP', { exact: true })).toBeVisible()
   await expect(chat.getByText('/existing/opencode acp')).toBeVisible()
   await expect(chat.getByText(/Tool approvals, Resume, Cancel turn/)).toBeVisible()
   await expect(chat.getByText('agent stderr')).toBeVisible()
 })
 
-test('hides actions the connected adapter cannot perform', async ({ page }) => {
+test('keeps chat controls available for an adapter that reports no support', async ({ page }) => {
   await page.goto('/?approval-fixture&limited-adapter')
   const chat = page.getByRole('region', { name: 'Task chat' })
   await expect(chat.locator('.chat__state')).toHaveText('waiting')
-  await expect(chat.getByRole('button', { name: 'Cancel turn' })).toHaveCount(0)
-  await expect(chat.locator('.entry__permission').getByRole('button')).toHaveCount(0)
-  await expect(chat.getByRole('button', { name: 'Shell approvals: Ask me' })).toHaveCount(0)
-  await page.keyboard.press('ControlOrMeta+.')
-  expect(await page.evaluate(() => window.__cancelRequests())).toBe(0)
+  await expect(chat.getByRole('button', { name: 'Cancel turn' })).toBeEnabled()
+  await expect(chat.locator('.entry__permission').getByRole('button', { name: 'Allow', exact: true }).first()).toBeEnabled()
+  await expect(chat.getByRole('button', { name: 'Shell approvals: Ask me' })).toBeVisible()
 
   await page.evaluate(() => window.__setAgentTerminals('task-1', [
     { id: 'agent-unsupported', title: 'Unsupported terminal', live: true, exitCode: null },
@@ -2738,25 +2687,6 @@ test('hides actions the connected adapter cannot perform', async ({ page }) => {
   await expect(inspector.getByLabel('Terminal output').first()).toBeVisible()
   await expect(inspector.getByText('agent: Unsupported terminal')).toHaveCount(0)
   expect(await page.evaluate(() => window.__subscriptions)).not.toContain('agent-unsupported')
-})
-
-test('shows shell approvals only after a legacy session reconnects and reports support', async ({ page }) => {
-  await page.goto('/?interrupted-task&legacy-session')
-  const chat = page.getByRole('region', { name: 'Task chat' })
-  const approvals = chat.getByRole('button', { name: 'Shell approvals: Ask me' })
-  await expect(chat.locator('.chat__state')).toHaveText('interrupted')
-  await expect(approvals).toHaveCount(0)
-  await chat.getByRole('button', { name: 'Reconnect', exact: true }).click()
-  await expect(approvals).toBeVisible()
-})
-
-test('opens a fresh session when the last adapter could not resume', async ({ page }) => {
-  await page.goto('/?interrupted-task&limited-adapter')
-  const chat = page.getByRole('region', { name: 'Task chat' })
-  await expect(chat.getByRole('button', { name: 'Resume', exact: true })).toHaveCount(0)
-  await chat.getByRole('button', { name: 'Start new session' }).click()
-  await expect(chat.getByText('started a new agent session')).toBeVisible()
-  await expect(chat.getByLabel('Prompt')).toBeEnabled()
 })
 
 test('sends a scoped approval and identifies an automatic session grant', async ({ page }) => {
@@ -2884,6 +2814,34 @@ test('selects a configured Claude Code ACP agent for a new composer', async ({ p
   await page.getByLabel('Prompt').fill('Review the code')
   const composer = page.locator('.composer')
   await expect(composer.getByRole('button', { name: 'Agent: Claude Code' })).toBeVisible()
+  await expect(composer.getByRole('button', { name: /Model \/ effort/ })).toHaveCount(0)
+})
+
+test('lists Freebuff with its availability in the agent picker', async ({ page }) => {
+  await page.goto('/?two-projects')
+  await page.getByRole('button', { name: 'notes', exact: true }).click()
+  const welcome = page.getByRole('heading', { name: 'What should Codex build in notes?' })
+  await welcome.getByRole('button', { name: 'Agent: Codex' }).click()
+  const agentMenu = welcome.getByRole('menu', { name: 'Agent' })
+  const freebuff = agentMenu.getByRole('menuitemradio', { name: 'Freebuff', exact: true })
+  await expect(freebuff).toBeDisabled()
+  await expect(freebuff).toHaveAttribute('title', 'Freebuff executable not found; configure its path or add it to PATH')
+  await expect(agentMenu.getByRole('menuitemradio', { name: 'Freebuff (terminal)' })).toBeEnabled()
+})
+
+test('selects an available Freebuff agent for a new composer', async ({ page }) => {
+  await page.goto('/?two-projects&configured-freebuff')
+  await page.getByRole('button', { name: 'notes', exact: true }).click()
+  const welcome = page.getByRole('heading', { name: 'What should Codex build in notes?' })
+  await welcome.getByRole('button', { name: 'Agent: Codex' }).click()
+  const freebuff = welcome.getByRole('menuitemradio', { name: 'Freebuff', exact: true })
+  await expect(freebuff).toBeEnabled()
+  await expect(freebuff).toHaveAttribute('title', 'Terminal only: composer prompts are not verified yet')
+  await freebuff.click()
+  await expect(page.getByRole('heading', { name: 'What should Freebuff build in notes?' })).toBeVisible()
+  await page.getByLabel('Prompt').fill('Inspect the code')
+  const composer = page.locator('.composer')
+  await expect(composer.getByRole('button', { name: 'Agent: Freebuff' })).toBeVisible()
   await expect(composer.getByRole('button', { name: /Model \/ effort/ })).toHaveCount(0)
 })
 
@@ -3335,14 +3293,6 @@ test('opens the project picker, filters, and adds a project', async ({ page }) =
   const chat = page.getByRole('region', { name: 'Task chat' })
   await expect(page.locator('.task')).toHaveCount(0)
   await expect(chat.locator('.chat__title')).toHaveCount(0)
-})
-
-test('shows a Hugging Face icon beside its project remote', async ({ page }) => {
-  await page.goto('/?hugging-face-remote')
-  await page.getByRole('button', { name: 'demo', exact: true }).hover()
-  const card = page.getByRole('menu', { name: 'demo' })
-  await expect(card.getByText('datasets/example/data')).toBeVisible()
-  await expect(card.getByRole('img', { name: 'Hugging Face' })).toBeVisible()
 })
 
 test('shows project icons, opens archive controls on hover, and composes in another project', async ({ page }) => {
@@ -3881,6 +3831,21 @@ test('passes a generic model pick from the composer to the next turn', async ({ 
   await expect(composer.getByRole('button', { name: 'Model: Qwen Coder' })).toBeVisible()
 })
 
+test('filters the model picker from a focused search field', async ({ page }) => {
+  await page.goto('/?agent-models&configured-opencode')
+  const composer = page.locator('.composer')
+  await composer.getByRole('button', { name: 'Model: DeepSeek V3' }).click()
+  const menu = composer.getByRole('menu', { name: 'Model' })
+  const filter = menu.getByRole('searchbox', { name: 'Filter model' })
+  await expect(filter).toBeFocused()
+  await expect(menu.getByRole('menuitemradio', { name: 'Qwen Coder' })).toBeVisible()
+  await filter.fill('qwn')
+  await expect(menu.getByRole('menuitemradio', { name: 'Qwen Coder' })).toBeVisible()
+  await expect(menu.getByRole('menuitemradio', { name: 'DeepSeek V3' })).toHaveCount(0)
+  await filter.press('Enter')
+  await expect(composer.getByRole('button', { name: 'Model: Qwen Coder' })).toBeVisible()
+})
+
 test('keeps composer text per project and starts exactly one task on send', async ({ page }) => {
   await page.goto('/?two-projects')
   const demo = page.getByRole('button', { name: 'demo', exact: true })
@@ -3986,12 +3951,34 @@ test('summarizes an auth failure and keeps the raw error behind details', async 
   const chat = page.getByRole('region', { name: 'Task chat' })
   const failure = chat.locator('.entry__failure')
   await expect(failure).toContainText('Sign-in required')
-  await expect(failure.locator('.entry__failure-text')).toHaveText('Sign in to Turso and check its database token, then retry.')
+  await expect(failure.locator('.entry__failure-text')).toHaveText(
+    'Sign in to Turso and check its database token, then retry. Tried Codex (app-server) with model gpt-6.1-terra.',
+  )
   const details = failure.locator('details')
   await expect(details).not.toHaveAttribute('open', '')
   await details.locator('summary').click()
   await expect(details).toContainText('Turso rejected the database token: HTTP 401 Unauthorized')
   await expect(details).toContainText('Turso login required for workspace acme.')
+})
+
+test('names the harness and protocol that hit an auth failure', async ({ page }) => {
+  await page.goto('/?agent-auth-failed&acp-fallback')
+  const failure = page.getByRole('region', { name: 'Task chat' }).locator('.entry__failure')
+  await expect(failure.locator('.entry__failure-text')).toHaveText(
+    'Sign in to Turso and check its database token, then retry. Tried OpenCode (ACP v1 OpenCode 2.0.14) with model acme/qwen from provider acme.',
+  )
+})
+
+test('keeps a failure message bound to the model that failed', async ({ page }) => {
+  await page.goto('/?agent-auth-failed&agent-models&configured-opencode')
+  const composer = page.locator('.composer')
+  const failure = page.getByRole('region', { name: 'Task chat' }).locator('.entry__failure')
+  const recorded = 'Sign in to Turso and check its database token, then retry. Tried OpenCode (OpenCode 2.0.14 native HTTP) with model acme/deepseek from provider acme.'
+  await expect(failure.locator('.entry__failure-text')).toHaveText(recorded)
+  await composer.getByRole('button', { name: 'Model: DeepSeek V3' }).click()
+  await composer.getByRole('menu', { name: 'Model' }).getByRole('menuitemradio', { name: 'Qwen Coder' }).click()
+  await expect(composer.getByRole('button', { name: 'Model: Qwen Coder' })).toBeVisible()
+  await expect(failure.locator('.entry__failure-text')).toHaveText(recorded)
 })
 
 test('keeps advertised session modes changeable during a turn for the next prompt', async ({ page }) => {
@@ -4154,15 +4141,15 @@ test('mentions a workspace file with the keyboard and cancels an outdated search
   await expect(prompt).toHaveValue('@')
 })
 
-test('shows the agent exit and resume action, including after reopening', async ({ page }) => {
+test('shows the agent exit and keeps the prompt available after reopening', async ({ page }) => {
   await page.goto('/?agent-failed')
   await expect(page.getByText('Agent exited mid-turn', { exact: true })).toBeVisible()
   await expect(page.getByText('Agent stderr fixture')).toBeVisible()
-  await expect(page.getByRole('button', { name: 'Resume', exact: true })).toBeVisible()
+  await expect(page.getByLabel('Prompt')).toBeEnabled()
 
   await page.goto('/?agent-failed&reopened')
   await expect(page.getByRole('alert')).toContainText('The agent exited with code 23')
-  await expect(page.getByRole('button', { name: 'Resume', exact: true })).toBeVisible()
+  await expect(page.getByLabel('Prompt')).toBeEnabled()
 })
 
 test('shows a live terminal and an ended one with a restart action', async ({ page }) => {
