@@ -479,6 +479,9 @@ Tasks:
     host, exposes its terminal, and advertises only cancel/terminal support.
     Composer prompts fail with a clear reason until the verified screen
     classifier is connected, so the adapter does not guess at readiness.
+    Direct user input to this integrated terminal is also blocked with an
+    explanation until the terminal submit gate and screen recognition are
+    connected; the separate Freebuff (terminal) path remains interactive.
   - [ ] **P1 — Bridge interactions and lifecycle:** connect approvals and
     questions to existing Shepherd controls, implement normal interruption and
     prompt-readiness confirmation, support multi-turn sessions, and implement

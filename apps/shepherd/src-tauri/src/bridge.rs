@@ -205,6 +205,7 @@ struct ScreenSlot {
     frames: watch::Sender<Arc<TerminalFrame>>,
     task_id: Option<TaskId>,
     last_worktree_touch: Option<Instant>,
+    block_user_input: bool,
 }
 
 impl ScreenSlot {
@@ -415,6 +416,7 @@ impl TerminalHost {
             frames,
             task_id: None,
             last_worktree_touch: None,
+            block_user_input: false,
         }));
         screens.insert(id.as_str().to_string(), slot.clone());
         Ok(PreparedTerminal {
@@ -664,6 +666,7 @@ impl TerminalHost {
         task_id: Option<TaskId>,
     ) -> Result<(), String> {
         let observe_screen = launch.observe_screen;
+        let block_user_input = launch.block_user_input;
         let terminal = self
             .prepare(
                 TerminalSpec {
@@ -679,7 +682,11 @@ impl TerminalHost {
             )
             .await
             .map_err(|error| error.to_string())?;
-        terminal.slot.lock().await.task_id = task_id;
+        {
+            let mut slot = terminal.slot.lock().await;
+            slot.task_id = task_id;
+            slot.block_user_input = block_user_input;
+        }
         let store = self
             .process_store
             .get()
@@ -2608,6 +2615,12 @@ impl ShellState {
         let slot = self.screen_slot(&terminal_id).await?;
         let task_id = {
             let slot = slot.lock().await;
+            if slot.block_user_input {
+                return Err(BridgeError::new(
+                    "terminal",
+                    "Freebuff terminal input is unavailable until prompt recognition is verified. Use Freebuff (terminal) for direct interaction.",
+                ));
+            }
             slot.task_id.clone().filter(|_| {
                 slot.last_worktree_touch
                     .is_none_or(|last| last.elapsed() >= Duration::from_secs(60))
@@ -5127,6 +5140,7 @@ mod tests {
             frames,
             task_id: None,
             last_worktree_touch: None,
+            block_user_input: false,
         };
         let mut receiver = slot.subscribe();
         let old = receiver.borrow_and_update().revision;
@@ -5469,6 +5483,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn unverified_freebuff_terminal_rejects_raw_user_input()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = TestDirectory::new()?;
+        let state = state_with(Core::new());
+        let (events, _output) = mpsc::channel(32);
+        state
+            .terminals
+            .spawn(
+                TerminalLaunch {
+                    id: "unverified-freebuff-fixture".into(),
+                    cwd: directory.path().to_path_buf(),
+                    command: "/bin/sh".into(),
+                    args: vec!["-c".into(), "read line".into()],
+                    environment: BTreeMap::new(),
+                    observe_screen: true,
+                    block_user_input: true,
+                },
+                events,
+            )
+            .await
+            .map_err(std::io::Error::other)?;
+        for input in [
+            TerminalInput::Text("hello\r".into()),
+            TerminalInput::Bytes(b"\x1b[13u".to_vec()),
+        ] {
+            let result = state
+                .terminal_write("unverified-freebuff-fixture".into(), input, true)
+                .await;
+            assert!(
+                matches!(result, Err(error) if error.message.contains("prompt recognition is verified"))
+            );
+        }
+        state
+            .terminals
+            .stop("unverified-freebuff-fixture")
+            .await
+            .map_err(std::io::Error::other)?;
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn terminal_host_sends_opted_in_rendered_screen_rows()
     -> Result<(), Box<dyn std::error::Error>> {
         let directory = TestDirectory::new()?;
@@ -5484,6 +5539,7 @@ mod tests {
                     args: vec!["-c".into(), "printf 'visible warning'; sleep 30".into()],
                     environment: BTreeMap::new(),
                     observe_screen: true,
+                    block_user_input: false,
                 },
                 events,
             )
@@ -5530,6 +5586,7 @@ mod tests {
                     args: vec!["-c".into(), "read line".into()],
                     environment: BTreeMap::new(),
                     observe_screen: false,
+                    block_user_input: false,
                 },
                 events,
             ),
@@ -5747,6 +5804,7 @@ mod tests {
                     args: vec!["-c".into(), "printf ready; sleep 30".into()],
                     environment: BTreeMap::new(),
                     observe_screen: false,
+                    block_user_input: false,
                 },
                 events,
             )

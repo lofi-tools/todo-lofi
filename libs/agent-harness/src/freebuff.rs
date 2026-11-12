@@ -848,6 +848,7 @@ impl AgentHarness for FreebuffHarness {
                     args: spec.args.clone(),
                     environment: spec.environment.clone(),
                     observe_screen: true,
+                    block_user_input: true,
                 },
                 process_sender,
             )
@@ -1048,6 +1049,15 @@ mod tests {
                 .first()
                 .ok_or("missing terminal launch")?
                 .observe_screen
+        );
+        assert!(
+            backend
+                .spawned
+                .lock()
+                .map_err(|_| "spawn lock poisoned")?
+                .first()
+                .ok_or("missing terminal launch")?
+                .block_user_input
         );
         let events = backend
             .events

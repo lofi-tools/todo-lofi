@@ -38,6 +38,7 @@ pub struct TerminalLaunch {
     pub args: Vec<String>,
     pub environment: BTreeMap<String, String>,
     pub observe_screen: bool,
+    pub block_user_input: bool,
 }
 
 pub enum TerminalProcessEvent {
@@ -263,6 +264,7 @@ impl TerminalRegistry {
                     .chain(request.env.into_iter().map(|var| (var.name, var.value)))
                     .collect(),
                 observe_screen: false,
+                block_user_input: false,
             };
             let (events, receiver) = tokio::sync::mpsc::channel(32);
             backend.spawn(launch, events).await?;
