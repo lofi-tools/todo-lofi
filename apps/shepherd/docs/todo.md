@@ -350,11 +350,11 @@ Tasks:
       An ignored `approved_freebuff_capture` runner is feature-gated. Its
       targeted offline fake-CLI end-to-end fixture passed after fixing an
       error-channel shutdown race. The runner
-      waits for operator send/stop markers and does not infer readiness or
+      waits for operator send/stop markers and does       not infer readiness or
       completion. Before collecting worktree effects it also checks that no
-      processes remain in the terminal session; the offline fixture exercises
-      the normal shutdown path, but the check
-      does not detect a process that escaped into a different session.
+      processes remain in the terminal session, and that no same-user process
+      outside it still carries the launch token; a process that clears that
+      variable is not detected.
       - [x] Record terminal type, renderer identity, exit status or signal,
         and whether the operator requested shutdown.
       - [x] Derive the recorded renderer revision from the build-embedded
@@ -415,10 +415,16 @@ Tasks:
         passed verification and its project ID was replayed into a separate
         clean disposable worktree and matched the original file. Earlier failed
         captures remain incomplete and are not accepted as complete replays.
-      - [ ] Detect processes that escape the terminal session and wait for
-        them or fail capture. The live recorder and replay diagnostic now warn
-        that escaped processes may leave effects incomplete; the warning does
-        not detect or stop those processes.
+      - [x] Detect processes that escape the terminal session and wait for
+        them or fail capture. Before collecting effects the runner now scans
+        every process for the launch token (`SHEPHERD_PROCESS_TOKEN`) in its
+        environment and refuses to finalize while a same-user process started
+        after the session still carries it, whether or not it stayed in the
+        terminal session. A process that clears the variable, or one the scan
+        cannot read, still escapes this check: unreadable processes are counted
+        and reported as "could not inspect N processes". Its escaped-session
+        fixture passed; the scan now also gates the live recorder rather than
+        only warning.
       - [ ] Consider an asciicast export for inspection that never replaces the
         byte-preserving native capture or silently loses unrepresentable data.
     - [ ] Replay capture records in order through a streaming consumer. An

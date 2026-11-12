@@ -1528,10 +1528,118 @@ mod tests {
         scenario: String,
     }
 
+    #[cfg(all(target_os = "macos", any(feature = "git", feature = "live-freebuff")))]
+    fn process_owner_and_start(pid: libc::pid_t) -> std::io::Result<(libc::uid_t, u64)> {
+        let mut info = std::mem::MaybeUninit::<libc::proc_bsdinfo>::uninit();
+        let size = std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
+        let read = unsafe {
+            libc::proc_pidinfo(
+                pid,
+                libc::PROC_PIDTBSDINFO,
+                0,
+                info.as_mut_ptr().cast(),
+                size,
+            )
+        };
+        if read != size {
+            return Err(std::io::Error::other(format!(
+                "could not inspect process {pid}"
+            )));
+        }
+        let info = unsafe { info.assume_init() };
+        Ok((
+            info.pbi_uid,
+            info.pbi_start_tvsec * 1_000_000 + info.pbi_start_tvusec,
+        ))
+    }
+
+    #[cfg(all(target_os = "linux", any(feature = "git", feature = "live-freebuff")))]
+    fn process_owner_and_start(pid: libc::pid_t) -> std::io::Result<(libc::uid_t, u64)> {
+        use std::os::unix::fs::MetadataExt;
+        let uid = std::fs::metadata(format!("/proc/{pid}"))?.uid();
+        let started = process_start_time(pid)
+            .ok_or_else(|| std::io::Error::other(format!("could not inspect process {pid}")))?;
+        Ok((uid, started))
+    }
+
+    #[cfg(all(
+        unix,
+        not(any(target_os = "linux", target_os = "macos")),
+        any(feature = "git", feature = "live-freebuff")
+    ))]
+    fn process_owner_and_start(_: libc::pid_t) -> std::io::Result<(libc::uid_t, u64)> {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "process ownership inspection is unavailable",
+        ))
+    }
+
+    #[cfg(all(unix, any(feature = "git", feature = "live-freebuff")))]
+    struct CaptureTokenScan {
+        matching: Vec<libc::pid_t>,
+        unverified: usize,
+    }
+
+    #[cfg(all(unix, any(feature = "git", feature = "live-freebuff")))]
+    fn processes_with_capture_token(
+        processes: impl IntoIterator<Item = libc::pid_t>,
+        token: &str,
+        started_at: u64,
+    ) -> std::io::Result<CaptureTokenScan> {
+        if token.is_empty() {
+            return Err(std::io::Error::other("capture has no process token"));
+        }
+        let needle = format!("{}={token}", agent_harness::PROCESS_TOKEN_ENV);
+        let mut matches = Vec::new();
+        let mut unverified = 0usize;
+        for pid in processes {
+            if pid <= 1 || pid == unsafe { libc::getpid() } {
+                continue;
+            }
+            let (owner, started) = match process_owner_and_start(pid) {
+                Ok(info) => info,
+                Err(error) => {
+                    if unsafe { libc::kill(pid, 0) } != 0 {
+                        let probe = std::io::Error::last_os_error();
+                        if probe.raw_os_error() == Some(libc::ESRCH) {
+                            continue;
+                        }
+                    }
+                    tracing::debug!(%error, "could not inspect a process during capture token scan");
+                    unverified += 1;
+                    continue;
+                }
+            };
+            if owner != unsafe { libc::geteuid() } || started < started_at {
+                continue;
+            }
+            match process_environment_contains(pid, needle.as_bytes()) {
+                Ok(true) if process_start_time(pid) == Some(started) => matches.push(pid),
+                Ok(_) => {}
+                Err(error) => {
+                    let current = process_start_time(pid);
+                    if current.is_some_and(|current| current != started)
+                        || (unsafe { libc::kill(pid, 0) } != 0
+                            && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH))
+                    {
+                        tracing::debug!(%error, "process exited during capture token inspection");
+                    } else {
+                        tracing::debug!(%error, "could not read a process environment during capture token scan");
+                        unverified += 1;
+                    }
+                }
+            }
+        }
+        Ok(CaptureTokenScan {
+            matching: matches,
+            unverified,
+        })
+    }
+
     #[cfg(all(unix, any(feature = "git", feature = "live-freebuff")))]
     async fn wait_for_capture_session_exit(
         record: &ProcessRecord,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<usize, Box<dyn std::error::Error>> {
         let session = libc::pid_t::try_from(record.session_id)?;
         if session <= 1 {
             return Err("invalid recorded terminal session".into());
@@ -1539,7 +1647,8 @@ mod tests {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
         loop {
             let mut alive = false;
-            for pid in list_processes()? {
+            let processes = list_processes()?;
+            for &pid in &processes {
                 if pid <= 1 {
                     continue;
                 }
@@ -1555,11 +1664,16 @@ mod tests {
                     }
                 }
             }
-            if !alive {
-                return Ok(());
+            let scan = processes_with_capture_token(processes, &record.token, record.started_at)?;
+            if !alive && scan.matching.is_empty() {
+                return Ok(scan.unverified);
             }
             if tokio::time::Instant::now() >= deadline {
-                return Err("terminal session still has running processes after shutdown".into());
+                return Err(if scan.matching.is_empty() {
+                    "terminal session still has running processes after shutdown"
+                } else {
+                    "a process with the capture launch token is still running; worktree effects cannot be finalized"
+                }.into());
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
@@ -1736,9 +1850,14 @@ mod tests {
                 }
             }
         }
-        wait_for_capture_session_exit(&process).await?;
+        let unverified = wait_for_capture_session_exit(&process).await?;
+        if unverified > 0 {
+            eprintln!(
+                "Could not inspect {unverified} processes for the capture token; worktree effects may be incomplete."
+            );
+        }
         eprintln!(
-            "Worktree effects may be incomplete: processes that escaped the terminal session are not detected."
+            "Worktree effects may be incomplete if a process escaped the terminal session and removed its launch token."
         );
         runtime(&session, &metadata, &executable)?;
         let recorded_capture_path = workspace
@@ -1831,6 +1950,53 @@ mod tests {
             "Verified {frames} incomplete-capture screen changes; warning: {:?}",
             warnings.warning()
         );
+        Ok(())
+    }
+
+    #[cfg(all(unix, feature = "git"))]
+    #[tokio::test]
+    async fn capture_token_scan_finds_a_process_in_another_session()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::process::CommandExt;
+        struct ChildGuard(std::process::Child);
+        impl Drop for ChildGuard {
+            fn drop(&mut self) {
+                if let Err(error) = self.0.kill() {
+                    eprintln!("could not stop capture-token fixture: {error}");
+                }
+                if let Err(error) = self.0.wait() {
+                    eprintln!("could not reap capture-token fixture: {error}");
+                }
+            }
+        }
+        let token = uuid::Uuid::new_v4().to_string();
+        let mut command = std::process::Command::new("/bin/sh");
+        command
+            .args(["-c", "exec sleep 30"])
+            .env(agent_harness::PROCESS_TOKEN_ENV, &token);
+        unsafe {
+            command.pre_exec(|| {
+                if libc::setsid() < 0 {
+                    Err(std::io::Error::last_os_error())
+                } else {
+                    Ok(())
+                }
+            });
+        }
+        let child = ChildGuard(command.spawn()?);
+        let pid = libc::pid_t::try_from(child.0.id())?;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+        loop {
+            let scan = processes_with_capture_token([pid], &token, 0)?;
+            if scan.matching.contains(&pid) {
+                assert_eq!(unsafe { libc::getsid(pid) }, pid);
+                break;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Err("escaped process token was not found".into());
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
         Ok(())
     }
 
