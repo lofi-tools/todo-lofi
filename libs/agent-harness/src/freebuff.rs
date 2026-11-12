@@ -400,6 +400,78 @@ pub struct FreebuffRuntimeMetadata {
     pub target: String,
 }
 
+#[derive(Deserialize)]
+struct FreebuffLauncherPackage {
+    name: String,
+    version: String,
+}
+
+/// Reads package metadata without running the launcher. This does not verify
+/// that the executable uses the package or that its screen protocol is supported.
+pub fn read_launcher_version(executable: &Path) -> HarnessResult<Option<String>> {
+    let executable = std::fs::canonicalize(executable).map_err(|error| {
+        HarnessError::Protocol(format!(
+            "could not inspect Freebuff executable {}: {error}",
+            executable.display()
+        ))
+    })?;
+    let Some(parent) = executable.parent() else {
+        return Ok(None);
+    };
+    let package = if executable.file_name() == Some(OsStr::new("index.js"))
+        && parent.file_name() == Some(OsStr::new("freebuff"))
+    {
+        parent.join("package.json")
+    } else if executable.file_name() == Some(OsStr::new("freebuff"))
+        && parent.file_name() == Some(OsStr::new("bin"))
+    {
+        let Some(root) = parent.parent() else {
+            return Ok(None);
+        };
+        root.join("lib/node_modules/freebuff/package.json")
+    } else {
+        return Ok(None);
+    };
+    let file = match std::fs::File::open(&package) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(HarnessError::Protocol(format!(
+                "could not open Freebuff launcher metadata at {}: {error}",
+                package.display()
+            )));
+        }
+    };
+    let mut bytes = Vec::new();
+    file.take(MAX_METADATA_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| {
+            HarnessError::Protocol(format!(
+                "could not read Freebuff launcher metadata at {}: {error}",
+                package.display()
+            ))
+        })?;
+    if bytes.len() as u64 > MAX_METADATA_BYTES {
+        return Err(HarnessError::Protocol(format!(
+            "Freebuff launcher metadata at {} exceeds {MAX_METADATA_BYTES} bytes",
+            package.display()
+        )));
+    }
+    let metadata: FreebuffLauncherPackage = serde_json::from_slice(&bytes).map_err(|error| {
+        HarnessError::Protocol(format!(
+            "invalid Freebuff launcher metadata at {}: {error}",
+            package.display()
+        ))
+    })?;
+    if metadata.name != "freebuff" || metadata.version.trim().is_empty() {
+        return Err(HarnessError::Protocol(format!(
+            "invalid Freebuff launcher package identity at {}",
+            package.display()
+        )));
+    }
+    Ok(Some(metadata.version))
+}
+
 pub fn read_runtime_metadata(directory: &Path) -> HarnessResult<Option<FreebuffRuntimeMetadata>> {
     let path = directory.join("freebuff-metadata.json");
     let file = match std::fs::File::open(&path) {
@@ -1108,6 +1180,27 @@ mod tests {
         assert!(result.install.is_none());
         assert!(result.summary().contains("configure its path"));
         assert!(result.summary().contains("PATH"));
+    }
+
+    #[test]
+    fn launcher_version_is_read_without_executing_the_wrapper()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let binary = directory.path().join("bin/freebuff");
+        let package = directory
+            .path()
+            .join("lib/node_modules/freebuff/package.json");
+        std::fs::create_dir_all(binary.parent().ok_or("missing binary parent")?)?;
+        std::fs::create_dir_all(package.parent().ok_or("missing package parent")?)?;
+        std::fs::write(&binary, b"not an executable program")?;
+        assert_eq!(read_launcher_version(&binary)?, None);
+        std::fs::write(&package, br#"{"name":"freebuff","version":"0.0.171"}"#)?;
+        assert_eq!(read_launcher_version(&binary)?.as_deref(), Some("0.0.171"));
+        std::fs::write(&package, br#"{"name":"other","version":"0.0.171"}"#)?;
+        assert!(read_launcher_version(&binary).is_err());
+        std::fs::write(&package, vec![b' '; MAX_METADATA_BYTES as usize + 1])?;
+        assert!(read_launcher_version(&binary).is_err());
+        Ok(())
     }
 
     #[test]

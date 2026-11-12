@@ -1573,11 +1573,13 @@ mod tests {
         fn runtime(
             session: &agent_harness::freebuff_capture::CaptureSession,
             directory: &std::path::Path,
+            executable: &std::path::Path,
         ) -> Result<(), Box<dyn std::error::Error>> {
             let metadata = agent_harness::freebuff::read_runtime_metadata(directory)?;
+            let launcher_version = agent_harness::freebuff::read_launcher_version(executable)?;
             session.record_and_apply(
                 CaptureEvent::Runtime {
-                    launcher_version: None,
+                    launcher_version,
                     runtime_version: metadata.as_ref().map(|metadata| metadata.version.clone()),
                     target: metadata.map(|metadata| metadata.target),
                 },
@@ -1617,7 +1619,7 @@ mod tests {
         std::str::from_utf8(&prompt)?;
         let capture = FreebuffLiveCapture::begin(&workspace, worktree.clone(), &scenario)?;
         let session = capture.session();
-        runtime(&session, &metadata)?;
+        runtime(&session, &metadata, &executable)?;
         let renderer_dependency = include_str!("../../../../libs/terminal-renderer/Cargo.toml")
             .lines()
             .find(|line| line.starts_with("alacritty_terminal = "))
@@ -1736,7 +1738,7 @@ mod tests {
         eprintln!(
             "Worktree effects may be incomplete: processes that escaped the terminal session are not detected."
         );
-        runtime(&session, &metadata)?;
+        runtime(&session, &metadata, &executable)?;
         let recorded_capture_path = workspace
             .join(".cache/shepherd-live/freebuff")
             .join(format!("{scenario}.jsonl"));

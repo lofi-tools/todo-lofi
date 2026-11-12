@@ -233,6 +233,10 @@ Tasks:
       in shard 7/8, and its malformed/oversized fixture passed in shard 4/8.
       Finish verification and wire it into update/restart handling; do not treat
       metadata as proof that the runtime is supported.
+      The recorder now reads the launcher package version without executing
+      it, and records launcher and runtime metadata before and after capture.
+      A bounded fixture covers missing, invalid and oversized launcher metadata;
+      this does not identify a running child or detect intermediate restarts.
       Read-only inspection on 2026-11-12 confirmed that the launcher can stop
       and replace its child during a background update without exiting itself;
       metadata can briefly lag the binary replacement. Update detection must
