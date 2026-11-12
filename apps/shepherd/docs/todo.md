@@ -286,9 +286,10 @@ Tasks:
       output, screen states, runtime changes, responses and worktree effects;
       connect recording and replay once the transport exists. The storage
       primitive compiles; its invalid-name and ordering fixture passed in shard
-      8/8, while its round-trip fixture has not yet been selected.
-      A writer now refuses further records after an I/O failure; its failure
-      fixture was not selected in shard 2/8. The transport must stop live
+      8/8, and its round-trip fixture passed in the full agent-harness suite on
+      2026-11-12.
+      A writer now refuses further records after an I/O failure; that failure
+      fixture passed in the same suite. The transport must stop live
       submissions on that error.
     - [ ] Serialize PTY operations and resulting screen records with the
       capture session. A fake-process fixture passed in agent-harness shard
@@ -440,7 +441,7 @@ Tasks:
     - [ ] Replay capture records in order through a streaming consumer. An
       offline synthetic capture replays split output and a resize through the
       shell's VT parser (Shepherd shard 8/8 passed); the consumer's own fixture
-      was not selected in shard 6/8. A verifier now compares recorded frames
+      passed in the full agent-harness suite on 2026-11-12. A verifier now compares recorded frames
       with screens reconstructed from captured bytes and resizes, and the fake
       runner verifies its saved frames before writing the completion marker, so
       a mismatch leaves an incomplete capture. Its new
@@ -473,18 +474,19 @@ Tasks:
       passing in agent-harness shard 5/8. A bounded Freebuff text reconciler
       emits deltas, replacements and no events for repeated snapshots; its
       fixture passed in agent-harness shard 7/8. Its publisher bounds queued
-      events and releases blocked producers when the receiver closes; the
-      publisher fixture was not selected in shard 7/8. Connect it to a verified
-      screen classifier and the adapter event stream.
+      events and releases blocked producers when the receiver closes; its
+      backpressure fixture passed in the full agent-harness suite on 2026-11-12.
+      Connect it to a verified screen classifier and the adapter event stream.
     - [ ] Translate recognized tool snapshots into stable, bounded tool-call
       updates. A reconciler suppresses repeated snapshots and rejects conflicting
       identities or status regressions; a bounded publisher holds capacity until
-      consumers release events. Their fixtures have not yet run. Connect them
-      to a verified classifier and adapter event stream.
+      consumers release events. Their fixtures passed in the full agent-harness
+      suite on 2026-11-12. Connect them to a verified classifier and adapter
+      event stream.
       A shared publisher now serializes text and tool updates against one
       capacity limit and scopes item IDs to an explicit, unique turn identity
       so repeated terminal IDs do not overwrite previous turns. Its
-      interleaving and multi-turn fixtures have not run.
+      interleaving and multi-turn fixtures passed in the same suite.
   - [ ] **P1 — Implement the integrated adapter:** launch the installed CLI in
     the task worktree with the existing login, forward input with normal CLI
     terminal interpretation, stream and reconcile text, map tool activity,
