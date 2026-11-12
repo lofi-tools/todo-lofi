@@ -83,6 +83,19 @@ ensures the runtime is present, launches it, and schedules an update check
 shortly afterward. These are local observations, not a verified screen
 protocol or a guarantee that the runtime will remain at that version.
 
+Read-only inspection on 2026-11-12 of the same 0.0.171 launcher found that
+startup repairs a missing or outdated cached runtime before starting it. It
+then schedules an update check after 100 ms. For a newer release it stages the
+download, stops the running child, prints an update notice, replaces the
+runtime and metadata, and starts a new child under the same launcher process.
+If installation fails after the child stops, it attempts to restart the cached
+runtime; a staging failure leaves the old child running. The binary is replaced
+before the metadata file, so a metadata read during an update can describe a
+different executable. Metadata identifies a cached release, not the running
+process or a supported screen contract. A launcher child can restart without
+the terminal process exiting, so terminal-exit notifications alone cannot
+establish continuity or detect every update.
+
 Read-only inspection of that executable's bundled UI code found the default
 input placeholder “enter a coding task or / for commands” and help labels for
 Ctrl+J or Option+Enter to insert a newline. Its key-dispatch code appears to

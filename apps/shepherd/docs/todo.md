@@ -233,6 +233,12 @@ Tasks:
       in shard 7/8, and its malformed/oversized fixture passed in shard 4/8.
       Finish verification and wire it into update/restart handling; do not treat
       metadata as proof that the runtime is supported.
+      Read-only inspection on 2026-11-12 confirmed that the launcher can stop
+      and replace its child during a background update without exiting itself;
+      metadata can briefly lag the binary replacement. Update detection must
+      therefore invalidate screen recognition rather than trust terminal exit
+      or a metadata read as proof of the running version. See the spec for the
+      observed startup, update and rollback sequence.
       Static inspection of the bundled UI found a default input placeholder,
       newline shortcuts, and a state-dependent Ctrl+C clear path; verify these
       against captured terminal states before using them for input or cancel.
