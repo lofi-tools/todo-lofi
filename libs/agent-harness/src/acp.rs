@@ -980,7 +980,7 @@ async fn finish_turn(
             format!("The ACP agent stopped the turn ({reason:?})"),
             None,
         ),
-                Err(error) => {
+        Err(error) => {
             let error = acp_error(error);
             let kind = FailureKind::classify(&error).unwrap_or(FailureKind::Protocol);
             // The chat shows the agent's own words; the adapter wrappers stay in
