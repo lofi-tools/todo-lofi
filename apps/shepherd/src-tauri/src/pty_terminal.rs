@@ -1765,6 +1765,27 @@ mod tests {
         .await
     }
 
+    #[cfg(all(feature = "live-freebuff", unix))]
+    #[test]
+    #[ignore = "requires a complete private capture and a clean disposable worktree"]
+    fn replay_approved_freebuff_capture() -> Result<(), Box<dyn std::error::Error>> {
+        let capture = std::env::var_os("SHEPHERD_FREEBUFF_CAPTURE")
+            .map(std::path::PathBuf::from)
+            .ok_or("missing SHEPHERD_FREEBUFF_CAPTURE")?;
+        let worktree = std::env::var_os("SHEPHERD_FREEBUFF_WORKTREE")
+            .map(std::path::PathBuf::from)
+            .ok_or("missing SHEPHERD_FREEBUFF_WORKTREE")?;
+        let mut frames = 0usize;
+        terminal_replay::replay_freebuff_capture(&capture, &worktree, |_, _| {
+            frames += 1;
+            Ok(())
+        })?;
+        if frames == 0 {
+            return Err("capture contains no screen frames".into());
+        }
+        Ok(())
+    }
+
     #[cfg(all(unix, feature = "git"))]
     #[tokio::test]
     async fn capture_runner_records_fake_cli_and_worktree_effects()

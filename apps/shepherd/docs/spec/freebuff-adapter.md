@@ -194,7 +194,8 @@ and report failures through Shepherd's normal diagnostics.
 
 The shell contains an ignored `approved_freebuff_capture` diagnostic behind
 the non-default `live-freebuff` feature. Its capture and worktree-effect path
-has passed an offline fake CLI check; Freebuff itself remains unverified.
+has passed an offline fake CLI check and a limited live capture; the full
+Freebuff interaction contract remains unverified.
 Before each live submission, obtain the user's approval of the exact prompt,
 project, disposable worktree and context. The runner reads the prompt from a
 file, displays PTY output, and uses marker files outside the worktree. The
@@ -204,11 +205,15 @@ its write completes. The operator verifies the text in the composer, then
 creates `submit` to send Enter, and creates `stop` only after recognizing the
 complete response. Separate writes do not by themselves prove Freebuff accepted
 the submission; an unrecognized or disconnected state leaves the capture
-incomplete. It
-records output, screens, input, runtime metadata and supported worktree effects;
+incomplete. It records output, screens, input, runtime metadata and supported worktree effects;
 an error or missing drain leaves the capture incomplete. Marker files are local
 controls, not a substitute for user approval. This diagnostic does not yet
 classify the screen, test approval flows, or establish runtime compatibility.
+The ignored `replay_approved_freebuff_capture` diagnostic accepts
+`SHEPHERD_FREEBUFF_CAPTURE` and a clean disposable `SHEPHERD_FREEBUFF_WORKTREE`;
+it verifies the complete recording before applying its supported worktree
+effects. It makes no live agent call. Escaped descendant processes are not yet
+ruled out, so capture completeness remains limited by that check.
 
 For faithful replay, the capture records the terminal type and renderer version,
 and the process exit code or signal, distinguishing an operator-requested stop

@@ -352,8 +352,13 @@ Tasks:
         targeted offline fake CLI.
       - [x] Build the opt-in live recorder and inspect Freebuff's ready screen
         and configured default before attempting the approved question.
-      - [ ] Record the one approved tools/ar3 question, its terminal stream,
+      - [x] Record an approved tools/ar3 question, its terminal stream,
         response and supported effects in a disposable tools worktree.
+        A separately approved second submission on 2026-11-12 produced the
+        private complete capture `tools-ar3-question-20261112-complete.jsonl`.
+        The recorded composer showed DeepSeek V4.1 Flash; the response and
+        screen transitions were recorded, and the ignored Freebuff project ID
+        was captured. Session-escaping descendants remain an explicit limitation.
         The first attempt captured startup and prompt entry locally, but
         Freebuff reported its servers unreachable and the prompt remained in
         the composer. It reconnected just as the operator stopped the session;
@@ -390,8 +395,11 @@ Tasks:
       - [ ] Confirm the active default model after reconnection: the startup
         screen showed DeepSeek V4.1 Flash, while the later status displayed
         `Fast • low` without an explicit model name.
-      - [ ] Verify the completed capture and replay its recorded screens and
-        worktree effects; investigate incomplete or mismatched captures.
+      - [x] Verify the completed capture and replay its recorded screens and
+        worktree effects. The approved capture's 178 recorded screen frames
+        passed verification and its project ID was replayed into a separate
+        clean disposable worktree and matched the original file. Earlier failed
+        captures remain incomplete and are not accepted as complete replays.
       - [ ] Detect processes that escape the terminal session and either wait
         for them or report that effects cannot be captured reliably.
       - [ ] Consider an asciicast export for inspection that never replaces the
