@@ -172,6 +172,21 @@ pub fn replay_freebuff_capture(
     })
 }
 
+/// Replay verified intermediate frames before applying recorded worktree effects.
+#[cfg(unix)]
+pub fn replay_freebuff_capture_changes(
+    capture_path: &std::path::Path,
+    worktree: &std::path::Path,
+    visit: impl FnMut(u64, &TerminalFrame) -> agent_harness::HarnessResult<()>,
+) -> agent_harness::HarnessResult<()> {
+    visit_verified_screen_changes(capture_path, visit)?;
+    shepherd_core::harness::replay_worktree_effects(worktree, capture_path).map_err(|error| {
+        agent_harness::HarnessError::Protocol(format!(
+            "could not replay captured worktree effects: {error}"
+        ))
+    })
+}
+
 /// The visitor must defer external effects until replay succeeds.
 #[allow(dead_code)]
 pub fn visit_verified_screens(
@@ -704,6 +719,18 @@ mod tests {
         );
 
         repository.write_file("README.md", "initial\n")?;
+        let mut saw_intermediate = false;
+        replay_freebuff_capture_changes(&path, repository.path(), |_, frame| {
+            saw_intermediate |= row(frame, 0).contains("hello");
+            Ok(())
+        })?;
+        assert!(saw_intermediate);
+        assert_eq!(
+            std::fs::read_to_string(repository.path().join("README.md"))?,
+            "replayed\n"
+        );
+
+        repository.write_file("README.md", "initial\n")?;
         let tampered = record(
             cache.path(),
             &repository,
@@ -734,7 +761,7 @@ mod tests {
         )?;
         repository.write_file("README.md", "initial\n")?;
         assert!(
-            replay_freebuff_capture(&stopped, repository.path(), |_, _| {
+            replay_freebuff_capture_changes(&stopped, repository.path(), |_, _| {
                 Err(agent_harness::HarnessError::Protocol(
                     "consumer stopped".into(),
                 ))

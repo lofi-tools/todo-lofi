@@ -1782,9 +1782,9 @@ mod tests {
             .ok_or("missing SHEPHERD_FREEBUFF_WORKTREE")?;
         let mut frames = 0usize;
         let mut warnings = terminal_replay::FreebuffWarningTracker::default();
-        terminal_replay::replay_freebuff_capture(&capture, &worktree, |_, frame| {
+        terminal_replay::replay_freebuff_capture_changes(&capture, &worktree, |_, frame| {
             frames += 1;
-            warnings.observe(&frame)?;
+            warnings.observe(frame)?;
             Ok(())
         })?;
         if frames == 0 {

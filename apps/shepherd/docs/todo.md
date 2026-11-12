@@ -431,8 +431,10 @@ Tasks:
       no worktree effects are applied and the capture remains incomplete. A
       synthetic fixture also covers a warning erased within one PTY read.
       Both completed and incomplete recordings can expose verified intermediate
-      frames; completed replay requires a completion marker and callers must
-      defer effects until the whole verification succeeds.
+      frames. The opt-in replay diagnostic uses those frames and applies effects
+      only after the complete recording and the visitor succeed. Per-byte
+      inspection is slower than final-frame replay; it is not used in routine
+      unit tests.
       Verified screen replay now exposes each reconstructed frame and
       its capture timestamp in order to a visitor, which must defer external
       effects until replay succeeds. Connect it to versioned Freebuff screen fixtures, the screen
