@@ -7,6 +7,9 @@ description = "Verification and replay of captured Shepherd terminal sessions."
 [lib]
 path = "src/terminal_replay.rs"
 
+[features]
+git = ["shepherd-core/git"]
+
 [dependencies]
 agent-harness = { path = "../agent-harness" }
 serde_json.workspace = true

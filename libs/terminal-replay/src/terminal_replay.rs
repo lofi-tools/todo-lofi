@@ -640,7 +640,7 @@ mod tests {
         Ok(())
     }
 
-    #[cfg(unix)]
+    #[cfg(all(unix, feature = "git"))]
     #[test]
     fn verified_replay_streams_screens_before_applying_worktree_effects()
     -> Result<(), Box<dyn std::error::Error>> {

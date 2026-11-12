@@ -383,7 +383,9 @@ Tasks:
         captures and replays that one ignored regular file, while still rejecting
         other ignored files; offline Git-backed fixtures verify both the effect
         collector and the complete fake-CLI recorder. The repository-creating
-        recorder fixture is gated by the default-off `git` feature.
+        recorder fixture and terminal-replay's Git-backed integration fixture
+      are gated by default-off `git` features; explicit Git and comprehensive
+      runs include them.
         This does not retroactively complete the failed recording. Do not submit
         another live message without separate approval.
       - [ ] Investigate whether writing prompt text and Enter together submits

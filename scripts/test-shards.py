@@ -204,7 +204,7 @@ def main(argv=None):
     excluded = [item for name in sorted(omitted) for item in ("--exclude", name)]
     if args.all:
         execute(["python3", "-m", "unittest", "discover", "-s", "scripts", "-p", "test_test_shard*.py"], dry_run=args.dry_run)
-        execute(["cargo", "nextest", "run", "--workspace", *excluded, "--features", "shepherd/git,shepherd-core/git", "--no-fail-fast"], dry_run=args.dry_run)
+        execute(["cargo", "nextest", "run", "--workspace", *excluded, "--features", "shepherd/git,shepherd-core/git,terminal-replay/git", "--no-fail-fast"], dry_run=args.dry_run)
         execute(["cargo", "test", "--workspace", *excluded, "--doc"], dry_run=args.dry_run)
         run_web_unit_tests(dry_run=args.dry_run)
         if args.browser:

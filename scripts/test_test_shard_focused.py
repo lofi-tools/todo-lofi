@@ -90,6 +90,22 @@ class FocusedSelectionTests(unittest.TestCase):
             FOCUSED.main()
             self.assertEqual(run.call_args.args[0][-2:], ["--features", "git"])
 
+    def test_git_flag_enables_replay_git_tests_for_changed_replay_crate(self):
+        roots = self.roots | {"libs/terminal-replay": "terminal-replay"}
+        with (
+            patch.object(FOCUSED.SHARDS, "workspace", return_value=(roots, {})),
+            patch.object(FOCUSED.SHARDS, "web_workspace", return_value=({}, {}, [])),
+            patch.object(FOCUSED.SHARDS, "web_test_suites", return_value=[]),
+            patch.object(FOCUSED.SHARDS, "excluded_packages", return_value=self.omitted),
+            patch.object(FOCUSED.SHARDS, "changed_paths", return_value=["libs/terminal-replay/src/terminal_replay.rs"]),
+            patch.object(FOCUSED, "full_due", return_value=False),
+            patch.object(FOCUSED.sys, "argv", ["shepherd-focused-tests.py", "--git"]),
+            patch.object(FOCUSED.subprocess, "run") as run,
+        ):
+            run.return_value = FOCUSED.subprocess.CompletedProcess([], 0)
+            FOCUSED.main()
+            self.assertEqual(run.call_args.args[0][-2:], ["--features", "git"])
+
     def test_web_change_runs_its_unit_suite(self):
         with (
             patch.object(FOCUSED.SHARDS, "workspace", return_value=(self.roots, {})),

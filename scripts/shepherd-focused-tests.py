@@ -103,7 +103,7 @@ def main():
         commands.append(["python3", "-m", "unittest", "discover", "-s", "scripts", "-p", "test_test_shard*.py"])
     if packages:
         command = ["cargo", "nextest", "run", *[argument for package in packages for argument in ("-p", package)], "--no-fail-fast"]
-        if args.git and {"shepherd", "shepherd-core"}.intersection(packages):
+        if args.git and {"shepherd", "shepherd-core", "terminal-replay"}.intersection(packages):
             command.extend(["--features", "git"])
         commands.append(command)
     web_suites = {str(directory.relative_to(ROOT)): script for directory, script in SHARDS.web_test_suites()}
