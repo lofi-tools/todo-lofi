@@ -57,6 +57,7 @@ export function FreebuffPane(props: { projectId: string; shown: boolean }) {
 interface TerminalPaneProps {
   projectId: string
   taskId: string | null
+  agent?: bridge.Agent
   taskHasWorktree: boolean
   transcript: bridge.Entry[] | undefined
   agentTerminals?: bridge.AgentTerminal[]
@@ -350,7 +351,7 @@ export function TerminalPane(props: TerminalPaneProps) {
       </details>
       <Show when={props.taskId} keyed>
         <Show when={commands().size > 0}>
-          <CommandTerminals commands={commands()} shown={props.shown} />
+          <CommandTerminals commands={commands()} shown={props.shown} agent={props.agent} />
         </Show>
       </Show>
       <For each={agentTerminalIds()}>
@@ -387,7 +388,8 @@ export function TerminalPane(props: TerminalPaneProps) {
   )
 }
 
-function CommandTerminals(props: { commands: ReadonlyMap<string, bridge.ToolCallEntry>; shown: boolean }) {
+function CommandTerminals(props: { commands: ReadonlyMap<string, bridge.ToolCallEntry>; shown: boolean; agent?: bridge.Agent }) {
+  const agentName = () => props.agent ? bridge.AGENT_LABELS[props.agent] : 'Agent'
   const [selection, setSelection] = createSignal<string>()
   const ids = createMemo(() => Array.from(props.commands.keys()))
   const selectedId = () => {
@@ -396,12 +398,12 @@ function CommandTerminals(props: { commands: ReadonlyMap<string, bridge.ToolCall
   }
 
   return (
-    <section class="terminal-tile terminal-tile--commands" aria-label="Codex command terminals">
+    <section class="terminal-tile terminal-tile--commands" aria-label={`${agentName()} command terminals`}>
       <div class="terminal-pane__bar">
-        <span>Codex commands</span>
+        <span>{agentName()} commands</span>
         <span class="terminal-list__state">Read-only</span>
       </div>
-      <ul class="terminal-list" aria-label="Codex commands">
+      <ul class="terminal-list" aria-label={`${agentName()} commands`}>
         <For each={ids()}>
           {(id) => (
             <li>

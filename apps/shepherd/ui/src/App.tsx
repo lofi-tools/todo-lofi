@@ -2318,7 +2318,8 @@ export function App() {
             <InspectorPanel id="terminals" active={inspectorTab()}>
               <Show when={selectedProjectId()} keyed fallback={<p class="empty">No terminals yet.</p>}>
                 {(projectId) => <TerminalPane
-                  projectId={projectId} taskId={selectedTaskId()} taskHasWorktree={!!workspace()?.task.worktreePath}
+                  projectId={projectId} taskId={selectedTaskId()} agent={workspace()?.task.agent}
+                  taskHasWorktree={!!workspace()?.task.worktreePath}
                   transcript={workspace()?.transcript}
                   agentTerminals={workspace()?.task.id === selectedTaskId() && workspace()?.capabilities?.agentTerminals ? workspace()?.agentTerminals : undefined}
                   listEvent={terminalListEvent()} shown={inspectorTab() === 'terminals'}
