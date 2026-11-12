@@ -372,7 +372,9 @@ Tasks:
         remains incomplete and must not be replayed as a successful run until
         those effects can be accounted for safely. The effect collector now
         captures and replays that one ignored regular file, while still rejecting
-        other ignored files; an offline Git-backed fixture verifies the behavior.
+        other ignored files; offline Git-backed fixtures verify both the effect
+        collector and the complete fake-CLI recorder. The repository-creating
+        recorder fixture is gated by the default-off `git` feature.
         This does not retroactively complete the failed recording. Do not submit
         another live message without separate approval.
       - [ ] Investigate whether writing prompt text and Enter together submits

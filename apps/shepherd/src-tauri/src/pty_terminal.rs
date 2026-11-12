@@ -1509,12 +1509,14 @@ impl TerminalService for PtyTerminals {
 mod tests {
     use std::time::Instant;
 
-    #[cfg(unix)]
-    use terminal_replay::{verify_recorded_screens, verify_unfinished_screens};
+    #[cfg(all(unix, feature = "git"))]
+    use terminal_replay::verify_recorded_screens;
+    #[cfg(all(unix, any(feature = "git", feature = "live-freebuff")))]
+    use terminal_replay::verify_unfinished_screens;
 
     use super::*;
 
-    #[cfg(unix)]
+    #[cfg(all(unix, any(feature = "git", feature = "live-freebuff")))]
     struct CaptureRunnerConfig {
         workspace: std::path::PathBuf,
         worktree: std::path::PathBuf,
@@ -1526,7 +1528,7 @@ mod tests {
         scenario: String,
     }
 
-    #[cfg(unix)]
+    #[cfg(all(unix, any(feature = "git", feature = "live-freebuff")))]
     async fn wait_for_capture_session_exit(
         record: &ProcessRecord,
     ) -> Result<(), Box<dyn std::error::Error>> {
@@ -1563,7 +1565,7 @@ mod tests {
         }
     }
 
-    #[cfg(unix)]
+    #[cfg(all(unix, any(feature = "git", feature = "live-freebuff")))]
     async fn run_capture(config: CaptureRunnerConfig) -> Result<(), Box<dyn std::error::Error>> {
         use agent_harness::freebuff_capture::CaptureEvent;
         use shepherd_core::harness::FreebuffLiveCapture;
@@ -1763,7 +1765,7 @@ mod tests {
         .await
     }
 
-    #[cfg(unix)]
+    #[cfg(all(unix, feature = "git"))]
     #[tokio::test]
     async fn capture_runner_records_fake_cli_and_worktree_effects()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -1781,6 +1783,19 @@ mod tests {
         }
 
         let repository = TestRepository::new()?;
+        repository.write_file(".gitignore", ".freebuff/\n")?;
+        for arguments in [
+            ["add", ".gitignore"].as_slice(),
+            ["commit", "-m", "ignore"].as_slice(),
+        ] {
+            let status = std::process::Command::new("git")
+                .arg("-C")
+                .arg(repository.path())
+                .args(arguments)
+                .stdout(std::process::Stdio::null())
+                .status()?;
+            assert!(status.success());
+        }
         let workspace = tempfile::tempdir()?;
         let markers = tempfile::tempdir()?;
         std::fs::write(
@@ -1793,7 +1808,7 @@ mod tests {
             worktree: repository.path().to_path_buf(),
             markers: marker_path.clone(),
             executable: "/bin/sh".into(),
-            args: vec!["-c".into(), "printf ready > \"$1/ready\"; IFS= read -r prompt; printf 'fake:%s\\n' \"$prompt\"; printf 'changed\\n' > README.md; printf done > \"$1/replied\"; exec sleep 30".into(), "fixture".into(), marker_path.to_str().ok_or("non-UTF-8 marker path")?.into()],
+            args: vec!["-c".into(), "printf ready > \"$1/ready\"; IFS= read -r prompt; printf 'fake:%s\\n' \"$prompt\"; printf 'changed\\n' > README.md; mkdir .freebuff; printf 'fixture-id\\n' > .freebuff/project-id; printf done > \"$1/replied\"; exec sleep 30".into(), "fixture".into(), marker_path.to_str().ok_or("non-UTF-8 marker path")?.into()],
             metadata: marker_path.clone(),
             prompt: b"inspect README".to_vec(),
             scenario: "fake-runner".into(),
@@ -1867,6 +1882,7 @@ mod tests {
             }
         )));
         assert!(records.iter().any(|record| matches!(&record.event, CaptureEvent::WorktreeFile { path, contents, .. } if path == std::path::Path::new("README.md") && contents == b"changed\n")));
+        assert!(records.iter().any(|record| matches!(&record.event, CaptureEvent::WorktreeFile { path, contents, .. } if path == std::path::Path::new(".freebuff/project-id") && contents == b"fixture-id\n")));
         Ok(())
     }
 
