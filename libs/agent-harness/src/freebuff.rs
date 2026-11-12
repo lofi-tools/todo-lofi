@@ -22,6 +22,30 @@ const MAX_MESSAGE_BYTES: usize = 1024 * 1024;
 const MAX_MESSAGE_ITEMS: usize = 256;
 const MAX_TRANSCRIPT_BYTES: usize = 4 * 1024 * 1024;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FreebuffScreenWarning {
+    Disconnected,
+    LauncherRestart,
+}
+
+/// Observations can invalidate an interaction but never establish readiness.
+pub fn screen_warning_from_rows<'a>(
+    rows: impl IntoIterator<Item = &'a str>,
+) -> Option<FreebuffScreenWarning> {
+    for row in rows {
+        let row = row.trim();
+        if row == "Can't reach Freebuff's servers. Retrying… Try another network." {
+            return Some(FreebuffScreenWarning::Disconnected);
+        }
+        if row.starts_with("Update available: ") && row.contains(" → ")
+            || row.starts_with("Update failed; restarting freebuff ")
+        {
+            return Some(FreebuffScreenWarning::LauncherRestart);
+        }
+    }
+    None
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FreebuffToolSnapshot {
     pub id: String,
@@ -823,6 +847,7 @@ impl AgentHarness for FreebuffHarness {
                     command: spec.program.clone(),
                     args: spec.args.clone(),
                     environment: spec.environment.clone(),
+                    observe_screen: true,
                 },
                 process_sender,
             )
@@ -837,25 +862,69 @@ impl AgentHarness for FreebuffHarness {
             ..AgentDiagnostics::default()
         };
         self.terminal_id = Some(terminal_id.clone());
+        if self
+            .sender
+            .send(HarnessEvent::AgentTerminalStarted {
+                id: terminal_id.clone(),
+                title: "Freebuff".into(),
+                stream_permit: None,
+            })
+            .is_err()
+        {
+            self.stop_terminal().await?;
+            return Err(HarnessError::TransportClosed(
+                "Freebuff terminal event listener closed".into(),
+            ));
+        }
         let events = self.sender.clone();
         let exited_id = terminal_id.clone();
         self.watcher = Some(tokio::spawn(async move {
+            let mut last_warning = None;
             while let Some(event) = process_events.recv().await {
-                if let TerminalProcessEvent::Exited(status) = event {
-                    let _ = events.send(HarnessEvent::AgentTerminalExited {
-                        id: exited_id,
-                        exit_code: status.exit_code,
-                        stream_permit: None,
-                    });
-                    break;
+                match event {
+                    TerminalProcessEvent::ScreenRows(rows) => {
+                        let warning = screen_warning_from_rows(rows.iter().map(String::as_str));
+                        if let Some(warning) =
+                            warning.filter(|warning| Some(*warning) != last_warning)
+                        {
+                            let text = match warning {
+                                FreebuffScreenWarning::Disconnected => {
+                                    "Freebuff reported a connection failure; its current prompt and session state are not verified."
+                                }
+                                FreebuffScreenWarning::LauncherRestart => {
+                                    "Freebuff reported a launcher update or restart; its runtime and session state must be verified again."
+                                }
+                            };
+                            if events
+                                .send(HarnessEvent::AgentTerminalError {
+                                    id: exited_id.clone(),
+                                    text: text.into(),
+                                    stream_permit: None,
+                                })
+                                .is_err()
+                            {
+                                break;
+                            }
+                            last_warning = Some(warning);
+                        }
+                    }
+                    TerminalProcessEvent::Exited(status) => {
+                        if events
+                            .send(HarnessEvent::AgentTerminalExited {
+                                id: exited_id,
+                                exit_code: status.exit_code,
+                                stream_permit: None,
+                            })
+                            .is_err()
+                        {
+                            tracing::debug!("Freebuff terminal event listener closed before exit");
+                        }
+                        break;
+                    }
+                    TerminalProcessEvent::Output(_) => {}
                 }
             }
         }));
-        let _ = self.sender.send(HarnessEvent::AgentTerminalStarted {
-            id: terminal_id,
-            title: "Freebuff".into(),
-            stream_permit: None,
-        });
         Ok(Capabilities {
             cancel: true,
             agent_terminals: true,
@@ -909,6 +978,7 @@ mod tests {
     struct TerminalFixture {
         spawned: std::sync::Mutex<Vec<TerminalLaunch>>,
         stopped: std::sync::Mutex<Vec<String>>,
+        events: std::sync::Mutex<Option<mpsc::Sender<TerminalProcessEvent>>>,
     }
 
     #[async_trait]
@@ -916,8 +986,14 @@ mod tests {
         async fn spawn(
             &self,
             launch: TerminalLaunch,
-            _events: mpsc::Sender<TerminalProcessEvent>,
+            events: mpsc::Sender<TerminalProcessEvent>,
         ) -> Result<(), String> {
+            events
+                .try_send(TerminalProcessEvent::ScreenRows(vec![
+                    "Can't reach Freebuff's servers. Retrying… Try another network.".into(),
+                ]))
+                .map_err(|error| error.to_string())?;
+            *self.events.lock().map_err(|_| "event lock poisoned")? = Some(events);
             self.spawned
                 .lock()
                 .map_err(|_| "spawn lock poisoned".to_string())?
@@ -940,6 +1016,7 @@ mod tests {
         let backend = Arc::new(TerminalFixture {
             spawned: Default::default(),
             stopped: Default::default(),
+            events: Default::default(),
         });
         let mut harness = FreebuffHarness::new().with_terminals(backend.clone());
         assert_eq!(harness.tier(), AdapterTier::TerminalWrapper);
@@ -963,6 +1040,35 @@ mod tests {
             }
             other => return Err(format!("unexpected event: {other:?}").into()),
         }
+        assert!(
+            backend
+                .spawned
+                .lock()
+                .map_err(|_| "spawn lock poisoned")?
+                .first()
+                .ok_or("missing terminal launch")?
+                .observe_screen
+        );
+        let events = backend
+            .events
+            .lock()
+            .map_err(|_| "event lock poisoned")?
+            .clone()
+            .ok_or("missing terminal events")?;
+        assert!(
+            matches!(harness.events().recv().await, Some(HarnessEvent::AgentTerminalError { text, .. }) if text.contains("connection failure"))
+        );
+        events
+            .send(TerminalProcessEvent::ScreenRows(vec!["Reconnected".into()]))
+            .await?;
+        events
+            .send(TerminalProcessEvent::ScreenRows(vec![
+                "Update available: 0.2.36 → 0.2.37".into(),
+            ]))
+            .await?;
+        assert!(
+            matches!(harness.events().recv().await, Some(HarnessEvent::AgentTerminalError { text, .. }) if text.contains("launcher update"))
+        );
         {
             let spawned = backend.spawned.lock().map_err(|_| "spawn lock poisoned")?;
             assert_eq!(spawned.len(), 1);

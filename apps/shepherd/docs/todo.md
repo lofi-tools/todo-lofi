@@ -432,8 +432,11 @@ Tasks:
       check. A conservative rendered-frame warning recognizes the captured
       disconnect notice and launcher update/restart notices during replay; a
       warning remains recorded after a later reconnect screen, but its absence
-      never establishes readiness or compatibility. It is not yet connected to
-      the live adapter. Offline inspection of the prior incomplete live capture
+      never establishes readiness or compatibility. The integrated Freebuff
+      terminal now forwards rendered rows to the wrapper, which reports observed
+      disconnect or launcher-restart warnings. Live row updates currently show
+      the final frame of each output batch, so transient warnings within a batch
+      may still be missed; input remains unverified. Offline inspection of the prior incomplete live capture
       verifies intermediate screen changes and detects the actual disconnect;
       no worktree effects are applied and the capture remains incomplete. A
       synthetic fixture also covers a warning erased within one PTY read.

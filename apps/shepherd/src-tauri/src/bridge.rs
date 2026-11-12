@@ -442,6 +442,7 @@ impl TerminalHost {
         recorded: Option<RecordedTerminal>,
         protocol: Option<mpsc::Sender<TerminalProcessEvent>>,
         tracked: Option<TrackedProcess>,
+        observe_screen: bool,
     ) {
         let engine = self.engine.clone();
         let screens = self.screens.clone();
@@ -561,7 +562,7 @@ impl TerminalHost {
                         }
                     });
                 }
-                let (replies, bell) = {
+                let (replies, bell, screen_rows) = {
                     let mut slot = slot.lock().await;
                     if batch.is_empty() {
                         slot.screen.finish_sync();
@@ -572,7 +573,28 @@ impl TerminalHost {
                     }
                     deadline = slot.screen.sync_deadline();
                     slot.publish();
-                    (slot.screen.take_replies(), slot.screen.take_bell())
+                    let screen_rows = if observe_screen && !batch.is_empty() {
+                        let frame = slot.screen.frame();
+                        Some(
+                            frame
+                                .cells
+                                .chunks(frame.columns)
+                                .map(|cells| {
+                                    cells
+                                        .iter()
+                                        .map(|cell| cell.text.as_str())
+                                        .collect::<String>()
+                                })
+                                .collect::<Vec<_>>(),
+                        )
+                    } else {
+                        None
+                    };
+                    (
+                        slot.screen.take_replies(),
+                        slot.screen.take_bell(),
+                        screen_rows,
+                    )
                 };
                 if let Some(sender) = &protocol {
                     for bytes in batch {
@@ -585,6 +607,15 @@ impl TerminalHost {
                             break;
                         }
                     }
+                }
+                if let (Some(sender), Some(rows)) = (&protocol, screen_rows)
+                    && sender
+                        .send(TerminalProcessEvent::ScreenRows(rows))
+                        .await
+                        .is_err()
+                {
+                    tracing::debug!("terminal screen listener closed");
+                    protocol = None;
                 }
                 if bell
                     && let Some(recorded) = &recorded
@@ -632,6 +663,7 @@ impl TerminalHost {
         events: mpsc::Sender<TerminalProcessEvent>,
         task_id: Option<TaskId>,
     ) -> Result<(), String> {
+        let observe_screen = launch.observe_screen;
         let terminal = self
             .prepare(
                 TerminalSpec {
@@ -687,7 +719,7 @@ impl TerminalHost {
                 return Err(error);
             }
         };
-        self.observe(terminal, None, Some(events), Some(tracked));
+        self.observe(terminal, None, Some(events), Some(tracked), observe_screen);
         Ok(())
     }
 }
@@ -2488,7 +2520,7 @@ impl ShellState {
                     store: process_store.clone(),
                 };
                 self.terminals
-                    .observe(terminal, Some(recorded), None, Some(tracked));
+                    .observe(terminal, Some(recorded), None, Some(tracked), false);
                 if let Err(close_error) = close {
                     return Err(BridgeError::new(
                         "terminal",
@@ -2510,7 +2542,8 @@ impl ShellState {
             id: recorded.process_id.clone(),
             store: process_store,
         });
-        self.terminals.observe(terminal, recorded, None, tracked);
+        self.terminals
+            .observe(terminal, recorded, None, tracked, false);
         Ok(terminal_id)
     }
 
@@ -5436,6 +5469,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn terminal_host_sends_opted_in_rendered_screen_rows()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = TestDirectory::new()?;
+        let state = state_with(Core::new());
+        let (events, mut output) = mpsc::channel(32);
+        state
+            .terminals
+            .spawn(
+                TerminalLaunch {
+                    id: "screen-warning-fixture".into(),
+                    cwd: directory.path().to_path_buf(),
+                    command: "/bin/sh".into(),
+                    args: vec!["-c".into(), "printf 'visible warning'; sleep 30".into()],
+                    environment: BTreeMap::new(),
+                    observe_screen: true,
+                },
+                events,
+            )
+            .await
+            .map_err(std::io::Error::other)?;
+        let found = tokio::time::timeout(Duration::from_secs(4), async {
+            while let Some(event) = output.recv().await {
+                if let TerminalProcessEvent::ScreenRows(rows) = event
+                    && rows.iter().any(|row| row.trim() == "visible warning")
+                {
+                    return true;
+                }
+            }
+            false
+        })
+        .await?;
+        state
+            .terminals
+            .stop("screen-warning-fixture")
+            .await
+            .map_err(std::io::Error::other)?;
+        assert!(found);
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn acp_terminal_identity_is_recorded_and_removed_on_exit()
     -> Result<(), Box<dyn std::error::Error>> {
         if crate::pty_terminal::boot_id().is_none() {
@@ -5455,6 +5529,7 @@ mod tests {
                     command: "/bin/sh".into(),
                     args: vec!["-c".into(), "read line".into()],
                     environment: BTreeMap::new(),
+                    observe_screen: false,
                 },
                 events,
             ),
@@ -5671,6 +5746,7 @@ mod tests {
                     command: "/bin/sh".into(),
                     args: vec!["-c".into(), "printf ready; sleep 30".into()],
                     environment: BTreeMap::new(),
+                    observe_screen: false,
                 },
                 events,
             )

@@ -37,10 +37,12 @@ pub struct TerminalLaunch {
     pub command: String,
     pub args: Vec<String>,
     pub environment: BTreeMap<String, String>,
+    pub observe_screen: bool,
 }
 
 pub enum TerminalProcessEvent {
     Output(Vec<u8>),
+    ScreenRows(Vec<String>),
     Exited(TerminalExitStatus),
 }
 
@@ -260,6 +262,7 @@ impl TerminalRegistry {
                     .into_iter()
                     .chain(request.env.into_iter().map(|var| (var.name, var.value)))
                     .collect(),
+                observe_screen: false,
             };
             let (events, receiver) = tokio::sync::mpsc::channel(32);
             backend.spawn(launch, events).await?;
@@ -600,6 +603,7 @@ impl TerminalRegistry {
                         return;
                     }
                 }
+                TerminalProcessEvent::ScreenRows(_) => {}
                 TerminalProcessEvent::Exited(exit) => {
                     status = Some(exit);
                     break;

@@ -1,10 +1,5 @@
+pub use agent_harness::freebuff::FreebuffScreenWarning;
 use terminal_renderer::{Screen, TerminalFrame};
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum FreebuffScreenWarning {
-    Disconnected,
-    LauncherRestart,
-}
 
 #[derive(Default)]
 pub struct FreebuffWarningTracker {
@@ -38,19 +33,14 @@ pub fn freebuff_screen_warning(
             "invalid Freebuff terminal frame".into(),
         ));
     }
-    for cells in frame.cells.chunks(frame.columns) {
-        let row: String = cells.iter().map(|cell| cell.text.as_str()).collect();
-        let row = row.trim();
-        if row == "Can't reach Freebuff's servers. Retrying… Try another network." {
-            return Ok(Some(FreebuffScreenWarning::Disconnected));
-        }
-        if row.starts_with("Update available: ") && row.contains(" → ")
-            || row.starts_with("Update failed; restarting freebuff ")
-        {
-            return Ok(Some(FreebuffScreenWarning::LauncherRestart));
-        }
-    }
-    Ok(None)
+    let rows: Vec<String> = frame
+        .cells
+        .chunks(frame.columns)
+        .map(|cells| cells.iter().map(|cell| cell.text.as_str()).collect())
+        .collect();
+    Ok(agent_harness::freebuff::screen_warning_from_rows(
+        rows.iter().map(String::as_str),
+    ))
 }
 
 #[allow(dead_code)]
