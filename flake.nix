@@ -303,6 +303,7 @@
             # RUST_LIB_BACKTRACE = 1;
             # RUST_BACKTRACE = "1";
             RUST_LOG = "mini_gpui=debug,info"; # "toasty=debug";
+            CARGO_LOG = "cargo::core::compiler::fingerprint=info";
           };
 
           # checks = {
