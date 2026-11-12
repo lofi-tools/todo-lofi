@@ -392,9 +392,11 @@ Tasks:
         CLI. The approved connected live retry accepted the separately entered
         prompt and Enter. Disconnected and reconnected behavior remains
         unverified; do not infer it from this successful connected run.
-      - [ ] Confirm the active default model after reconnection: the startup
-        screen showed DeepSeek V4.1 Flash, while the later status displayed
-        `Fast • low` without an explicit model name.
+      - [ ] Confirm the active default model after reconnection. Replaying the
+        earlier disconnected capture shows the visible status still named
+        DeepSeek V4.1 Flash at reconnection and on the later `Fast • low` screen;
+        no response was submitted in that session, so the model actually used
+        after reconnection remains unverified.
       - [x] Verify the completed capture and replay its recorded screens and
         worktree effects. The approved capture's 178 recorded screen frames
         passed verification and its project ID was replayed into a separate

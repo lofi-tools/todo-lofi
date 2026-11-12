@@ -83,6 +83,16 @@ ensures the runtime is present, launches it, and schedules an update check
 shortly afterward. These are local observations, not a verified screen
 protocol or a guarantee that the runtime will remain at that version.
 
+A separately approved live capture on 2026-11-12 observed runtime metadata
+`0.2.36` / `darwin-arm64` and the composer label `DeepSeek V4.1 Flash Fast •
+low`. In a connected new chat, the operator entered the approved text into the
+visible composer, inspected it, and sent Enter in a second write. Freebuff then
+showed working and tool activity, produced an answer, and returned to the
+ready composer. The recorded PTY bytes and all 178 screen frames replayed
+successfully. This establishes only that connected sequence for this capture;
+it does not identify disconnected, approval, cancellation, resume, or update
+states, and metadata alone is not a version compatibility check.
+
 Read-only inspection on 2026-11-12 of the same 0.0.171 launcher found that
 startup repairs a missing or outdated cached runtime before starting it. It
 then schedules an update check after 100 ms. For a newer release it stages the
