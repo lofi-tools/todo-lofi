@@ -501,6 +501,20 @@ Tasks:
     placeholder or typed text followed by the `▍` cursor in the last box) and
     returns nothing for other screens; its fixtures pass. It is not yet wired
     into prompt submission.
+    The wrapper now also classifies the areas the captures record: both
+    composer placeholders, the tool transcript rows (only the recorded `Glob`,
+    `Search` and `Read` actions) and the `• Thinking`/`thinking...`/`working...`
+    status. Any other `•` row, a bullet inside the composer box, two cursors, a
+    missing border, an oversized tool list or an empty screen classifies as
+    unknown rather than being interpreted. Question and approval screens appear
+    in none of the three private captures (447 frames), so no row is read as
+    one; a submit gate refuses unknown, running and typing screens and also
+    refuses a ready composer, because an unrecorded overlay cannot be ruled
+    out. `prompt()` now reports the gate's reason, and raw terminal input stays
+    blocked. Recorded-row fixtures cover each accepted shape and each rejected
+    one, including an unrecorded approval-looking row, which is ignored as text
+    and still refused. Composer prompts stay disabled until a question and
+    approval probe is approved and recorded.
     Direct user input to this integrated terminal is also blocked with an
     explanation until the terminal submit gate and screen recognition are
     connected; the separate Freebuff (terminal) path remains interactive.

@@ -47,12 +47,27 @@ pub fn screen_warning_from_rows<'a>(
 }
 
 const COMPOSER_CURSOR: char = '▍';
-const COMPOSER_PLACEHOLDER: &str = "Enter a coding task or / for commands";
+const COMPOSER_PLACEHOLDERS: [&str; 2] = [
+    "Enter a coding task or / for commands",
+    "Add to the current task (/ for commands)",
+];
+const MAX_SCREEN_ROWS: usize = 512;
+const MAX_SCREEN_TOOLS: usize = 64;
+const MAX_TOOL_DETAIL_BYTES: usize = 4 * 1024;
+const RECORDED_TOOL_ACTIONS: [&str; 3] = ["Glob", "Search", "Read"];
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FreebuffComposer {
     pub text: String,
     pub empty: bool,
+}
+
+/// The composer is the last bordered box on the recorded screens; every other
+/// box above it is setup or advertising chrome.
+fn composer_box(rows: &[&str]) -> Option<std::ops::RangeInclusive<usize>> {
+    let start = rows.iter().rposition(|row| row.contains('╭'))?;
+    let end = start + rows.iter().skip(start).position(|row| row.contains('╰'))?;
+    Some(start..=end)
 }
 
 /// Recognizes the input box of the recorded ready screen. Anything that does
@@ -61,10 +76,13 @@ pub struct FreebuffComposer {
 /// prompt.
 pub fn composer_from_rows<'a>(rows: impl IntoIterator<Item = &'a str>) -> Option<FreebuffComposer> {
     let rows = rows.into_iter().collect::<Vec<_>>();
-    let start = rows.iter().rposition(|row| row.contains('╭'))?;
-    let end = start + rows.iter().skip(start).position(|row| row.contains('╰'))?;
+    composer_from_slice(&rows)
+}
+
+fn composer_from_slice(rows: &[&str]) -> Option<FreebuffComposer> {
+    let range = composer_box(rows)?;
     let mut entry = None;
-    for row in &rows[start..end] {
+    for row in &rows[*range.start()..*range.end()] {
         if !row.contains(COMPOSER_CURSOR) {
             continue;
         }
@@ -83,14 +101,154 @@ pub fn composer_from_rows<'a>(rows: impl IntoIterator<Item = &'a str>) -> Option
             empty: false,
         });
     }
-    after
-        .trim_start()
-        .strip_prefix(COMPOSER_PLACEHOLDER)
-        .map(|rest| FreebuffComposer {
+    let shown = after.trim_start();
+    COMPOSER_PLACEHOLDERS.iter().find_map(|placeholder| {
+        let rest = shown.strip_prefix(placeholder)?;
+        rest.trim().is_empty().then(|| FreebuffComposer {
             text: String::new(),
-            empty: rest.trim().is_empty(),
+            empty: true,
         })
-        .filter(|composer| composer.empty)
+    })
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FreebuffToolRow {
+    pub action: String,
+    pub detail: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FreebuffScreenState {
+    Ready,
+    Typed,
+    Busy,
+    Unknown,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FreebuffScreen {
+    pub state: FreebuffScreenState,
+    pub composer: Option<FreebuffComposer>,
+    pub tools: Vec<FreebuffToolRow>,
+}
+
+enum RecordedToolRow {
+    Recorded(FreebuffToolRow),
+    Unrecorded,
+}
+
+fn classify_tool_row(row: &str) -> RecordedToolRow {
+    let Some((action, detail)) = row.strip_prefix("• ").and_then(|rest| rest.split_once(' '))
+    else {
+        return RecordedToolRow::Unrecorded;
+    };
+    let detail = detail.trim();
+    if !RECORDED_TOOL_ACTIONS.contains(&action)
+        || detail.is_empty()
+        || detail.len() > MAX_TOOL_DETAIL_BYTES
+    {
+        return RecordedToolRow::Unrecorded;
+    }
+    RecordedToolRow::Recorded(FreebuffToolRow {
+        action: action.to_owned(),
+        detail: detail.to_owned(),
+    })
+}
+
+/// Classifies the areas the captures record: the composer, the tool transcript
+/// and the running-turn status. Question and approval screens were never
+/// recorded, so they have no shape here and no row is read as one.
+pub fn classify_screen<'a>(rows: impl IntoIterator<Item = &'a str>) -> FreebuffScreen {
+    let rows = rows.into_iter().collect::<Vec<_>>();
+    let unknown = FreebuffScreen {
+        state: FreebuffScreenState::Unknown,
+        composer: None,
+        tools: Vec::new(),
+    };
+    if rows.is_empty() || rows.len() > MAX_SCREEN_ROWS {
+        return unknown;
+    }
+    let range = composer_box(&rows);
+    let composer = composer_from_slice(&rows);
+    let mut busy = false;
+    let mut tools = Vec::new();
+    for (index, row) in rows.iter().enumerate() {
+        let row = row.trim();
+        let bullet = row.starts_with("• ");
+        if bullet && range.as_ref().is_some_and(|range| range.contains(&index)) {
+            return unknown;
+        }
+        if row == "• Thinking"
+            || (row.starts_with("thinking...") || row.starts_with("working..."))
+                && row.ends_with("■ Esc")
+        {
+            busy = true;
+            continue;
+        }
+        if !bullet {
+            continue;
+        }
+        if tools.len() >= MAX_SCREEN_TOOLS {
+            return unknown;
+        }
+        match classify_tool_row(row) {
+            RecordedToolRow::Recorded(tool) => tools.push(tool),
+            RecordedToolRow::Unrecorded => return unknown,
+        }
+    }
+    let state = if busy {
+        FreebuffScreenState::Busy
+    } else {
+        match &composer {
+            Some(composer) if composer.empty => FreebuffScreenState::Ready,
+            Some(_) => FreebuffScreenState::Typed,
+            None => FreebuffScreenState::Unknown,
+        }
+    };
+    FreebuffScreen {
+        state,
+        composer,
+        tools,
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FreebuffSubmitRefusal {
+    ScreenUnknown,
+    TurnRunning,
+    ComposerNotEmpty,
+    InteractionsUnverified,
+}
+
+impl FreebuffSubmitRefusal {
+    pub fn reason(self) -> &'static str {
+        match self {
+            Self::ScreenUnknown => "the screen does not match a recorded Freebuff shape",
+            Self::TurnRunning => "Freebuff is still running a turn",
+            Self::ComposerNotEmpty => "the Freebuff composer already holds text",
+            Self::InteractionsUnverified => {
+                "no recorded Freebuff question or approval screen exists, so one cannot be ruled out"
+            }
+        }
+    }
+}
+
+/// The only path to submission, and it stays closed: question and approval
+/// screens were never recorded, so a ready composer cannot be told apart from
+/// one under an unrecorded overlay.
+pub struct FreebuffSubmitGate;
+
+impl FreebuffSubmitGate {
+    pub fn authorize<'a>(
+        rows: impl IntoIterator<Item = &'a str>,
+    ) -> Result<(), FreebuffSubmitRefusal> {
+        match classify_screen(rows).state {
+            FreebuffScreenState::Unknown => Err(FreebuffSubmitRefusal::ScreenUnknown),
+            FreebuffScreenState::Busy => Err(FreebuffSubmitRefusal::TurnRunning),
+            FreebuffScreenState::Typed => Err(FreebuffSubmitRefusal::ComposerNotEmpty),
+            FreebuffScreenState::Ready => Err(FreebuffSubmitRefusal::InteractionsUnverified),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -836,6 +994,7 @@ pub struct FreebuffHarness {
     terminal_id: Option<String>,
     diagnostics: AgentDiagnostics,
     watcher: Option<tokio::task::JoinHandle<()>>,
+    screen: Arc<std::sync::Mutex<Vec<String>>>,
 }
 
 impl FreebuffHarness {
@@ -848,6 +1007,7 @@ impl FreebuffHarness {
             terminal_id: None,
             diagnostics: AgentDiagnostics::default(),
             watcher: None,
+            screen: Arc::new(std::sync::Mutex::new(Vec::new())),
         }
     }
 
@@ -926,11 +1086,15 @@ impl AgentHarness for FreebuffHarness {
         }
         let events = self.sender.clone();
         let exited_id = terminal_id.clone();
+        let screen = self.screen.clone();
         self.watcher = Some(tokio::spawn(async move {
             let mut last_warning = None;
             while let Some(event) = process_events.recv().await {
                 match event {
                     TerminalProcessEvent::ScreenRows(rows) => {
+                        *screen
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner()) = rows.clone();
                         let warning = screen_warning_from_rows(rows.iter().map(String::as_str));
                         if let Some(warning) =
                             warning.filter(|warning| Some(*warning) != last_warning)
@@ -990,9 +1154,19 @@ impl AgentHarness for FreebuffHarness {
     }
 
     async fn prompt(&mut self, _input: PromptInput) -> HarnessResult<()> {
+        let rows = self
+            .screen
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        FreebuffSubmitGate::authorize(rows.iter().map(String::as_str)).map_err(|refusal| {
+            HarnessError::Protocol(format!(
+                "Freebuff composer prompts are disabled: {}. Use Freebuff (terminal) in the meantime.",
+                refusal.reason()
+            ))
+        })?;
         Err(HarnessError::Protocol(
-            "Freebuff composer prompts are not supported yet: screen interaction is not verified. Use Freebuff (terminal) in the meantime."
-                .into(),
+            "Freebuff prompt submission is not connected".into(),
         ))
     }
 
@@ -1132,7 +1306,10 @@ mod tests {
             assert_eq!(spawned[0].command, "freebuff");
             assert_eq!(spawned[0].cwd, PathBuf::from("/worktree"));
         }
-        assert!(harness.prompt(PromptInput::text("hello")).await.is_err());
+        assert!(matches!(
+            harness.prompt(PromptInput::text("hello")).await,
+            Err(HarnessError::Protocol(text)) if text.contains("Freebuff composer prompts are disabled")
+        ));
         harness.shutdown().await?;
         assert_eq!(
             backend
@@ -1207,6 +1384,169 @@ mod tests {
                 "│  no cursor here             │"
             ])
             .is_none()
+        );
+    }
+
+    fn recorded_ready_rows() -> Vec<&'static str> {
+        vec![
+            "╭──────────────────────────────────────────────────────────────────────────────────────────────────╮",
+            "│                                                                                                  │",
+            "│  ▍Enter a coding task or / for commands                                                          │",
+            "│                                                                                                  │",
+            "╰──────────────────────────────────────────────────────────────────────────────────────────────────╯",
+        ]
+    }
+
+    fn recorded_typed_rows() -> Vec<&'static str> {
+        vec![
+            "╭──────────────────────────────────────────────────────────────────────────────────────────────────╮",
+            "│                                                                                                  │",
+            "│  give me the dotenv fragment to override / ignore battery / wifi and run ar3 regardless▍         │",
+            "│                                                                                                  │",
+            "╰──────────────────────────────────────────────────────────────────────────────────────────────────╯",
+        ]
+    }
+
+    /// Rows copied from the complete capture at 38.015 s: two searches, a glob,
+    /// a read, two thinking markers and the running-turn status.
+    fn recorded_tool_rows() -> Vec<&'static str> {
+        vec![
+            "   [09:40 AM]",
+            "   give me the dotenv fragment to override / ignore battery / wifi and run ar3 regardless ⎘",
+            "  • Thinking",
+            "    Let me find how ar3 handles battery/wifi checks and config env vars.",
+            "  • Search BATTERY|battery|WIFI|wifi|Wifi in crates/ar3 (19 results)",
+            "  • Search AR3_[A-Z_]+ (85 results)",
+            "  • Glob **/{.env.example,.env.sample,*.env,env.example,README.md,AGENTS.md}",
+            "  • Thinking",
+            "    Let me read the relevant docs section.",
+            "  • Read crates/ar3/docs/agent-api.md, libs/host-conditions/README.md, crates/ar3/src/main.rs",
+            " working...                                                                              8s  ■ Esc",
+            "╭──────────────────────────────────────────────────────────────────────────────────────────────────╮",
+            "│                                                                                                  │",
+            "│  ▍Add to the current task (/ for commands)                                                       │",
+            "│                                                                                                  │",
+            "╰──────────────────────────────────────────────────────────────────────────────────────────────────╯",
+        ]
+    }
+
+    #[test]
+    fn classifier_reads_the_recorded_ready_and_typed_screens() {
+        let ready = classify_screen(recorded_ready_rows());
+        assert_eq!(ready.state, FreebuffScreenState::Ready);
+        assert_eq!(
+            ready.composer,
+            Some(FreebuffComposer {
+                text: String::new(),
+                empty: true,
+            })
+        );
+        assert!(ready.tools.is_empty());
+        assert_eq!(
+            classify_screen(recorded_typed_rows()).state,
+            FreebuffScreenState::Typed
+        );
+    }
+
+    #[test]
+    fn classifier_reads_the_recorded_tool_rows_and_running_status() {
+        let screen = classify_screen(recorded_tool_rows());
+        assert_eq!(screen.state, FreebuffScreenState::Busy);
+        assert_eq!(
+            screen.composer,
+            Some(FreebuffComposer {
+                text: String::new(),
+                empty: true,
+            })
+        );
+        assert_eq!(
+            screen.tools,
+            [
+                FreebuffToolRow {
+                    action: "Search".into(),
+                    detail: "BATTERY|battery|WIFI|wifi|Wifi in crates/ar3 (19 results)".into(),
+                },
+                FreebuffToolRow {
+                    action: "Search".into(),
+                    detail: "AR3_[A-Z_]+ (85 results)".into(),
+                },
+                FreebuffToolRow {
+                    action: "Glob".into(),
+                    detail: "**/{.env.example,.env.sample,*.env,env.example,README.md,AGENTS.md}"
+                        .into(),
+                },
+                FreebuffToolRow {
+                    action: "Read".into(),
+                    detail: "crates/ar3/docs/agent-api.md, libs/host-conditions/README.md, crates/ar3/src/main.rs"
+                        .into(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn classifier_rejects_unrecorded_screens() {
+        assert_eq!(
+            classify_screen(std::iter::empty::<&str>()).state,
+            FreebuffScreenState::Unknown
+        );
+        assert_eq!(
+            classify_screen(["", "   "]).state,
+            FreebuffScreenState::Unknown
+        );
+        assert_eq!(
+            classify_screen([
+                "╭──────────────────────────────────────────────╮",
+                "│  ▍Enter a coding task or / for commands      │",
+            ])
+            .state,
+            FreebuffScreenState::Unknown
+        );
+        let mut unrecorded_tool = recorded_ready_rows();
+        unrecorded_tool.insert(0, "  • Write src/main.rs");
+        assert_eq!(
+            classify_screen(unrecorded_tool).state,
+            FreebuffScreenState::Unknown
+        );
+        let overlapping = [
+            "╭──────────────────────────────────────────────╮",
+            "│  • Read src/main.rs                          │",
+            "│                                              │",
+            "╰──────────────────────────────────────────────╯",
+        ];
+        assert_eq!(
+            classify_screen(overlapping).state,
+            FreebuffScreenState::Unknown
+        );
+    }
+
+    #[test]
+    fn submit_gate_refuses_every_unverified_screen() {
+        assert_eq!(
+            FreebuffSubmitGate::authorize(recorded_ready_rows()),
+            Err(FreebuffSubmitRefusal::InteractionsUnverified)
+        );
+        assert_eq!(
+            FreebuffSubmitGate::authorize(recorded_typed_rows()),
+            Err(FreebuffSubmitRefusal::ComposerNotEmpty)
+        );
+        assert_eq!(
+            FreebuffSubmitGate::authorize(recorded_tool_rows()),
+            Err(FreebuffSubmitRefusal::TurnRunning)
+        );
+        assert_eq!(
+            FreebuffSubmitGate::authorize(std::iter::empty::<&str>()),
+            Err(FreebuffSubmitRefusal::ScreenUnknown)
+        );
+        let mut beside_an_approval = recorded_ready_rows();
+        beside_an_approval.insert(0, "  Allow this command? (y/n)");
+        assert_eq!(
+            classify_screen(beside_an_approval.clone()).state,
+            FreebuffScreenState::Ready
+        );
+        assert_eq!(
+            FreebuffSubmitGate::authorize(beside_an_approval),
+            Err(FreebuffSubmitRefusal::InteractionsUnverified)
         );
     }
 
