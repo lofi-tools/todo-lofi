@@ -46,6 +46,53 @@ pub fn screen_warning_from_rows<'a>(
     None
 }
 
+const COMPOSER_CURSOR: char = '▍';
+const COMPOSER_PLACEHOLDER: &str = "Enter a coding task or / for commands";
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FreebuffComposer {
+    pub text: String,
+    pub empty: bool,
+}
+
+/// Recognizes the input box of the recorded ready screen. Anything that does
+/// not match the recorded shape returns `None`: the caller must not guess at
+/// the entry state, because a wrong guess types into the transcript or loses a
+/// prompt.
+pub fn composer_from_rows<'a>(rows: impl IntoIterator<Item = &'a str>) -> Option<FreebuffComposer> {
+    let rows = rows.into_iter().collect::<Vec<_>>();
+    let start = rows.iter().rposition(|row| row.contains('╭'))?;
+    let end = start + rows.iter().skip(start).position(|row| row.contains('╰'))?;
+    let mut entry = None;
+    for row in &rows[start..end] {
+        if !row.contains(COMPOSER_CURSOR) {
+            continue;
+        }
+        if entry.is_some() {
+            return None;
+        }
+        entry = Some((*row).trim_start().strip_prefix('│')?.strip_suffix('│')?);
+    }
+    let (before, after) = entry?.strip_prefix("  ")?.split_once(COMPOSER_CURSOR)?;
+    if before.len() > MAX_MESSAGE_BYTES {
+        return None;
+    }
+    if !before.trim_end().is_empty() {
+        return after.trim_start().is_empty().then(|| FreebuffComposer {
+            text: before.to_owned(),
+            empty: false,
+        });
+    }
+    after
+        .trim_start()
+        .strip_prefix(COMPOSER_PLACEHOLDER)
+        .map(|rest| FreebuffComposer {
+            text: String::new(),
+            empty: rest.trim().is_empty(),
+        })
+        .filter(|composer| composer.empty)
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FreebuffToolSnapshot {
     pub id: String,
@@ -1096,6 +1143,71 @@ mod tests {
             1
         );
         Ok(())
+    }
+
+    #[test]
+    fn composer_recognition_reads_the_recorded_ready_entry() {
+        let ready = [
+            " ┌──────────────────────────────────────────────┐",
+            " │ May use data for AI training                 │",
+            " └──────────────────────────────────────────────┘",
+            "╭──────────────────────────────────────────────╮",
+            "│                                              │",
+            "│  ▍Enter a coding task or / for commands      │",
+            "│                                              │",
+            "╰──────────────────────────────────────────────╯",
+            " DeepSeek V4.1 Flash Fast • low · chat: New chat",
+        ];
+        assert_eq!(
+            composer_from_rows(ready),
+            Some(FreebuffComposer {
+                text: String::new(),
+                empty: true,
+            })
+        );
+        let typed = [
+            "╭──────────────────────────────────────────────╮",
+            "│                                              │",
+            "│  give me the dotenv fragment to override▍    │",
+            "│                                              │",
+            "╰──────────────────────────────────────────────╯",
+        ];
+        assert_eq!(
+            composer_from_rows(typed),
+            Some(FreebuffComposer {
+                text: "give me the dotenv fragment to override".into(),
+                empty: false,
+            })
+        );
+    }
+
+    #[test]
+    fn composer_recognition_rejects_unrecorded_entries() {
+        assert!(composer_from_rows(["no composer here"]).is_none());
+        assert!(
+            composer_from_rows([
+                "╭──────────────────────────────╮",
+                "│  ▍                           │",
+                "╰──────────────────────────────╯",
+            ])
+            .is_none()
+        );
+        assert!(
+            composer_from_rows([
+                "╭──────────────────────────────╮",
+                "│  ▍one                          │",
+                "│  ▍two                          │",
+                "╰──────────────────────────────╯",
+            ])
+            .is_none()
+        );
+        assert!(
+            composer_from_rows([
+                "╭──────────────────────────────╮",
+                "│  no cursor here             │"
+            ])
+            .is_none()
+        );
     }
 
     #[test]

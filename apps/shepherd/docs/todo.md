@@ -495,6 +495,10 @@ Tasks:
     host, exposes its terminal, and advertises only cancel/terminal support.
     Composer prompts fail with a clear reason until the verified screen
     classifier is connected, so the adapter does not guess at readiness.
+    A composer recognizer now accepts only the recorded ready entry shape (the
+    placeholder or typed text followed by the `▍` cursor in the last box) and
+    returns nothing for other screens; its fixtures pass. It is not yet wired
+    into prompt submission.
     Direct user input to this integrated terminal is also blocked with an
     explanation until the terminal submit gate and screen recognition are
     connected; the separate Freebuff (terminal) path remains interactive.
