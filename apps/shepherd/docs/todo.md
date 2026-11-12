@@ -425,8 +425,9 @@ Tasks:
       warning remains recorded after a later reconnect screen, but its absence
       never establishes readiness or compatibility. It is not yet connected to
       the live adapter. Offline inspection of the prior incomplete live capture
-      verified its 16 screen frames and detected the actual disconnect; no
-      worktree effects were applied and the capture remains incomplete.
+      verifies intermediate screen changes and detects the actual disconnect;
+      no worktree effects are applied and the capture remains incomplete. A
+      synthetic fixture also covers a warning erased within one PTY read.
       Verified screen replay now exposes each reconstructed frame and
       its capture timestamp in order to a visitor, which must defer external
       effects until replay succeeds. Connect it to versioned Freebuff screen fixtures, the screen

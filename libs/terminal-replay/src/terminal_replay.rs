@@ -194,6 +194,87 @@ pub fn visit_unfinished_screens(
     verify_screens(path, false, visit)
 }
 
+/// Inspect intermediate frames from an incomplete capture without applying effects.
+pub fn visit_unfinished_screen_changes(
+    path: &std::path::Path,
+    visit: impl FnMut(u64, &TerminalFrame) -> agent_harness::HarnessResult<()>,
+) -> agent_harness::HarnessResult<()> {
+    use agent_harness::freebuff_capture::{CaptureEvent, visit_capture};
+    use agent_harness::{HarnessError, HarnessResult};
+    use terminal_renderer::RecordedScreenUpdate;
+
+    enum Pending {
+        Output(Vec<u8>),
+        Resize(u16, u16),
+    }
+
+    let mut replayer = None::<RecordedScreenReplayer>;
+    let mut pending = None::<Pending>;
+    let mut visit = visit;
+    visit_capture(path, |record| -> HarnessResult<()> {
+        if pending.is_some() && !matches!(&record.event, CaptureEvent::Screen { .. }) {
+            return Err(HarnessError::Protocol(
+                "terminal capture is missing a screen frame".into(),
+            ));
+        }
+        match record.event {
+            CaptureEvent::Resize { columns, rows } if replayer.is_none() => {
+                replayer = Some(RecordedScreenReplayer::new(columns, rows)?);
+            }
+            CaptureEvent::Resize { columns, rows } => {
+                pending = Some(Pending::Resize(columns, rows));
+            }
+            CaptureEvent::Output { bytes } if replayer.is_some() => {
+                pending = Some(Pending::Output(bytes));
+            }
+            CaptureEvent::Output { .. } => {
+                return Err(HarnessError::Protocol(
+                    "terminal output has no initial size".into(),
+                ));
+            }
+            CaptureEvent::Screen { state } => {
+                let update = match pending.take() {
+                    Some(Pending::Output(bytes)) => RecordedScreenUpdate::Output { bytes, state },
+                    Some(Pending::Resize(columns, rows)) => RecordedScreenUpdate::Resize {
+                        columns,
+                        rows,
+                        state,
+                    },
+                    None => {
+                        return Err(HarnessError::Protocol(
+                            "unexpected terminal screen frame".into(),
+                        ));
+                    }
+                };
+                replayer
+                    .as_mut()
+                    .ok_or_else(|| {
+                        HarnessError::Protocol("terminal screen has no initial size".into())
+                    })?
+                    .apply(&update, |frame| visit(record.elapsed_micros, frame))?;
+            }
+            CaptureEvent::Complete => {
+                return Err(HarnessError::Protocol(
+                    "terminal capture was already completed".into(),
+                ));
+            }
+            _ => {}
+        }
+        Ok(())
+    })?;
+    if pending.is_some() {
+        return Err(HarnessError::Protocol(
+            "terminal capture is missing a screen frame".into(),
+        ));
+    }
+    if replayer.is_none() {
+        return Err(HarnessError::Protocol(
+            "terminal capture has no initial size".into(),
+        ));
+    }
+    Ok(())
+}
+
 fn verify_screens(
     path: &std::path::Path,
     complete: bool,
@@ -324,6 +405,50 @@ mod tests {
             warnings.warning(),
             Some(FreebuffScreenWarning::LauncherRestart)
         );
+        Ok(())
+    }
+
+    #[test]
+    fn unfinished_capture_exposes_warnings_erased_within_one_read()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let mut writer = CaptureWriter::create(directory.path(), "transient-warning")?;
+        let bytes = "Can't reach Freebuff's servers. Retrying… Try another network.\x1b[2J\x1b[HReconnected".as_bytes().to_vec();
+        let mut screen = Screen::with_scrollback(100, 3, 0);
+        screen.process(&bytes);
+        for (elapsed_micros, event) in [
+            CaptureEvent::Resize {
+                columns: 100,
+                rows: 3,
+            },
+            CaptureEvent::Output { bytes },
+            CaptureEvent::Screen {
+                state: serde_json::to_value(screen.frame())?,
+            },
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            writer.append(&CaptureRecord {
+                elapsed_micros: elapsed_micros as u64,
+                event,
+            })?;
+        }
+        let path = directory
+            .path()
+            .join(".cache/shepherd-live/freebuff/transient-warning.jsonl");
+        assert_eq!(freebuff_screen_warning(&screen.frame())?, None);
+        let mut warnings = FreebuffWarningTracker::default();
+        visit_unfinished_screen_changes(&path, |_, frame| warnings.observe(frame))?;
+        assert_eq!(
+            warnings.warning(),
+            Some(FreebuffScreenWarning::Disconnected)
+        );
+        writer.append(&CaptureRecord {
+            elapsed_micros: 100,
+            event: CaptureEvent::Complete,
+        })?;
+        assert!(visit_unfinished_screen_changes(&path, |_, _| Ok(())).is_err());
         Ok(())
     }
 

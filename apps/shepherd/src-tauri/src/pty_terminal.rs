@@ -1808,15 +1808,15 @@ mod tests {
             .ok_or("missing SHEPHERD_FREEBUFF_CAPTURE")?;
         let mut frames = 0usize;
         let mut warnings = terminal_replay::FreebuffWarningTracker::default();
-        terminal_replay::visit_unfinished_screens(&capture, |_, frame| {
+        terminal_replay::visit_unfinished_screen_changes(&capture, |_, frame| {
             frames += 1;
-            warnings.observe(&frame)
+            warnings.observe(frame)
         })?;
         if frames == 0 {
             return Err("capture contains no screen frames".into());
         }
         eprintln!(
-            "Verified {frames} incomplete-capture frames; warning: {:?}",
+            "Verified {frames} incomplete-capture screen changes; warning: {:?}",
             warnings.warning()
         );
         Ok(())
