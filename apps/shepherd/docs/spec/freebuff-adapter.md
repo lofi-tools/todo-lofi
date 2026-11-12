@@ -91,7 +91,10 @@ showed working and tool activity, produced an answer, and returned to the
 ready composer. The recorded PTY bytes and all 178 screen frames replayed
 successfully. This establishes only that connected sequence for this capture;
 it does not identify disconnected, approval, cancellation, resume, or update
-states, and metadata alone is not a version compatibility check.
+states, and metadata alone is not a version compatibility check. Future captures also
+record the cached runtime file's SHA-256 before and after the session. The
+fingerprint does not prove which executable a running child used, and the
+2026-11-12 capture does not contain it.
 
 Read-only inspection on 2026-11-12 of the same 0.0.171 launcher found that
 startup repairs a missing or outdated cached runtime before starting it. It

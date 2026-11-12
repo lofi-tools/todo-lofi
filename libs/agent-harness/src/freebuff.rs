@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 use tokio::sync::mpsc;
 
 use crate::acp::{TerminalBackend, TerminalLaunch, TerminalProcessEvent};
@@ -16,6 +17,7 @@ use crate::{
 };
 
 const MAX_METADATA_BYTES: u64 = 16 * 1024;
+const MAX_RUNTIME_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_MESSAGE_BYTES: usize = 1024 * 1024;
 const MAX_MESSAGE_ITEMS: usize = 256;
 const MAX_TRANSCRIPT_BYTES: usize = 4 * 1024 * 1024;
@@ -512,6 +514,89 @@ pub fn read_runtime_metadata(directory: &Path) -> HarnessResult<Option<FreebuffR
         )));
     }
     Ok(Some(metadata))
+}
+
+/// Fingerprints the cached file, without asserting that it is the running child.
+pub fn cached_runtime_sha256(directory: &Path) -> HarnessResult<Option<String>> {
+    let path = directory.join(format!("freebuff{}", std::env::consts::EXE_SUFFIX));
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NONBLOCK);
+    }
+    let mut file = match options.open(&path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(HarnessError::Protocol(format!(
+                "could not open cached Freebuff runtime at {}: {error}",
+                path.display()
+            )));
+        }
+    };
+    let metadata = file.metadata().map_err(|error| {
+        HarnessError::Protocol(format!(
+            "could not inspect cached Freebuff runtime at {}: {error}",
+            path.display()
+        ))
+    })?;
+    if !metadata.is_file() || metadata.len() > MAX_RUNTIME_BYTES {
+        return Err(HarnessError::Protocol(format!(
+            "cached Freebuff runtime at {} is not a supported regular file",
+            path.display()
+        )));
+    }
+    let mut digest = Sha256::new();
+    let mut buffer = [0u8; 64 * 1024];
+    let mut total = 0u64;
+    loop {
+        let count = file.read(&mut buffer).map_err(|error| {
+            HarnessError::Protocol(format!(
+                "could not read cached Freebuff runtime at {}: {error}",
+                path.display()
+            ))
+        })?;
+        if count == 0 {
+            break;
+        }
+        total = total
+            .checked_add(count as u64)
+            .filter(|size| *size <= MAX_RUNTIME_BYTES)
+            .ok_or_else(|| {
+                HarnessError::Protocol("cached Freebuff runtime exceeds the supported size".into())
+            })?;
+        digest.update(&buffer[..count]);
+    }
+    let after = file.metadata().map_err(|error| {
+        HarnessError::Protocol(format!(
+            "could not recheck cached Freebuff runtime at {}: {error}",
+            path.display()
+        ))
+    })?;
+    let modified = metadata.modified().map_err(|error| {
+        HarnessError::Protocol(format!(
+            "could not read cached Freebuff runtime modification time: {error}"
+        ))
+    })?;
+    let after_modified = after.modified().map_err(|error| {
+        HarnessError::Protocol(format!(
+            "could not recheck cached Freebuff runtime modification time: {error}"
+        ))
+    })?;
+    if total != metadata.len() || after.len() != metadata.len() || modified != after_modified {
+        return Err(HarnessError::Protocol(
+            "cached Freebuff runtime changed while fingerprinting".into(),
+        ));
+    }
+    Ok(Some(
+        digest
+            .finalize()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect(),
+    ))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1200,6 +1285,32 @@ mod tests {
         assert!(read_launcher_version(&binary).is_err());
         std::fs::write(&package, vec![b' '; MAX_METADATA_BYTES as usize + 1])?;
         assert!(read_launcher_version(&binary).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn cached_runtime_fingerprint_reads_the_file_without_running_it()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        assert_eq!(cached_runtime_sha256(directory.path())?, None);
+        let path = directory
+            .path()
+            .join(format!("freebuff{}", std::env::consts::EXE_SUFFIX));
+        std::fs::write(&path, b"abc")?;
+        assert_eq!(
+            cached_runtime_sha256(directory.path())?.as_deref(),
+            Some("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            std::fs::remove_file(&path)?;
+            let name = std::ffi::CString::new(path.as_os_str().as_bytes())?;
+            if unsafe { libc::mkfifo(name.as_ptr(), 0o600) } != 0 {
+                return Err(std::io::Error::last_os_error().into());
+            }
+            assert!(cached_runtime_sha256(directory.path()).is_err());
+        }
         Ok(())
     }
 

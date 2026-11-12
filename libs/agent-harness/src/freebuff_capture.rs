@@ -24,6 +24,8 @@ pub enum CaptureEvent {
         launcher_version: Option<String>,
         runtime_version: Option<String>,
         target: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cached_runtime_sha256: Option<String>,
     },
     Terminal {
         term: String,
@@ -639,6 +641,7 @@ mod tests {
                     launcher_version: Some("0.0.171".into()),
                     runtime_version: Some("0.2.36".into()),
                     target: Some("darwin-arm64".into()),
+                    cached_runtime_sha256: None,
                 },
             },
             CaptureRecord {

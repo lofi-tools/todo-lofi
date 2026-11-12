@@ -1577,11 +1577,13 @@ mod tests {
         ) -> Result<(), Box<dyn std::error::Error>> {
             let metadata = agent_harness::freebuff::read_runtime_metadata(directory)?;
             let launcher_version = agent_harness::freebuff::read_launcher_version(executable)?;
+            let cached_runtime_sha256 = agent_harness::freebuff::cached_runtime_sha256(directory)?;
             session.record_and_apply(
                 CaptureEvent::Runtime {
                     launcher_version,
                     runtime_version: metadata.as_ref().map(|metadata| metadata.version.clone()),
                     target: metadata.map(|metadata| metadata.target),
+                    cached_runtime_sha256,
                 },
                 || Ok(((), Vec::new())),
             )?;
@@ -1859,6 +1861,7 @@ mod tests {
             markers.path().join("freebuff-metadata.json"),
             br#"{"version":"fixture","target":"local"}"#,
         )?;
+        std::fs::write(markers.path().join("freebuff"), b"abc")?;
         let marker_path = markers.path().to_path_buf();
         let config = CaptureRunnerConfig {
             workspace: workspace.path().to_path_buf(),
@@ -1890,6 +1893,7 @@ mod tests {
             .join(".cache/shepherd-live/freebuff/fake-runner.jsonl");
         verify_recorded_screens(&completed_capture_path)?;
         let records = read_complete_capture(&completed_capture_path)?;
+        assert!(records.iter().any(|record| matches!(&record.event, CaptureEvent::Runtime { cached_runtime_sha256: Some(hash), .. } if hash == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")));
         let input: Vec<u8> = records
             .iter()
             .filter_map(|record| match &record.event {

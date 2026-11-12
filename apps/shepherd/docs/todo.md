@@ -237,6 +237,9 @@ Tasks:
       it, and records launcher and runtime metadata before and after capture.
       A bounded fixture covers missing, invalid and oversized launcher metadata;
       this does not identify a running child or detect intermediate restarts.
+      Future captures also record a bounded SHA-256 fingerprint of the cached
+      runtime before and after the session. This is a file observation, not
+      proof of the executing child; the existing live captures predate it.
       Read-only inspection on 2026-11-12 confirmed that the launcher can stop
       and replace its child during a background update without exiting itself;
       metadata can briefly lag the binary replacement. Update detection must
