@@ -402,8 +402,10 @@ Tasks:
         passed verification and its project ID was replayed into a separate
         clean disposable worktree and matched the original file. Earlier failed
         captures remain incomplete and are not accepted as complete replays.
-      - [ ] Detect processes that escape the terminal session and either wait
-        for them or report that effects cannot be captured reliably.
+      - [ ] Detect processes that escape the terminal session and wait for
+        them or fail capture. The live recorder and replay diagnostic now warn
+        that escaped processes may leave effects incomplete; the warning does
+        not detect or stop those processes.
       - [ ] Consider an asciicast export for inspection that never replaces the
         byte-preserving native capture or silently loses unrepresentable data.
     - [ ] Replay capture records in order through a streaming consumer. An

@@ -1733,6 +1733,9 @@ mod tests {
             }
         }
         wait_for_capture_session_exit(&process).await?;
+        eprintln!(
+            "Worktree effects may be incomplete: processes that escaped the terminal session are not detected."
+        );
         runtime(&session, &metadata)?;
         let recorded_capture_path = workspace
             .join(".cache/shepherd-live/freebuff")
@@ -1783,6 +1786,9 @@ mod tests {
         if frames == 0 {
             return Err("capture contains no screen frames".into());
         }
+        eprintln!(
+            "Recorded worktree effects may be incomplete: escaped processes may not have been detected."
+        );
         Ok(())
     }
 
