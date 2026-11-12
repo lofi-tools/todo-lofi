@@ -309,8 +309,10 @@ events onto GPUI's foreground. Workspace rules apply: no `mod.rs`, no
 2. The core's tokio tasks call the adapter, PTY service or Git service.
 3. The core emits `Event` values on one bus; a shell applies them and coalesces
    per frame at most (GPUI: `cx.notify()` once per frame).
-4. Settled transcript entries, state transitions and terminal metadata are
-   persisted in batches by the store's writer task; token deltas stay in memory.
+4. Transcript entries are persisted in batches by the store's writer task. A
+   live turn's agent text and tool calls are written when a tool call stops
+   changing, when the task settles and on quit, so a restart keeps what the
+   transcript already showed; token deltas stay in memory.
 
 The core owns the command registry: IDs, labels, default chords, enabled state and
 the effective per-platform map. Key events arrive normalized from the shell; the

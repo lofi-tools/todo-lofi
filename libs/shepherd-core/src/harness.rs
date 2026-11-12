@@ -13,7 +13,7 @@ use agent_harness::{
     AdapterTier, AgentDiagnostics, AgentHarness, AgentModels, AgentTerminal, ApprovalId,
     ApprovalRequest, Capabilities, Decision, Entry, EntryKind, FailureKind, HarnessError,
     HarnessEvent, ItemId, ProjectApprovalPolicy, PromptInput, SessionApproval, SessionId,
-    SpawnSpec, Transcript, TranscriptChange,
+    SpawnSpec, ToolStatus, Transcript, TranscriptChange,
 };
 use async_trait::async_trait;
 
@@ -169,6 +169,9 @@ pub struct HarnessSession {
     session_id: Option<SessionId>,
     transcript: Transcript,
     dirty_entries: BTreeSet<usize>,
+    /// Set when a tool call stopped changing, so the next persist keeps the
+    /// partial agent output instead of waiting for the turn to settle.
+    flush_pending: bool,
     agent_terminals: Vec<AgentTerminal>,
     pending_approval: Option<ApprovalId>,
     pending_questions: BTreeSet<String>,
@@ -188,6 +191,7 @@ impl HarnessSession {
             session_id: None,
             transcript: Transcript::default(),
             dirty_entries: BTreeSet::new(),
+            flush_pending: false,
             agent_terminals: Vec::new(),
             pending_approval: None,
             pending_questions: BTreeSet::new(),
@@ -505,24 +509,47 @@ impl HarnessSession {
     fn track_entry(&mut self, change: TranscriptChange) {
         if let Some(index) = change.changed {
             self.dirty_entries.insert(index);
+            self.track_tool_call_boundary(index);
         }
         if change.appended
             && let Some(index) = self.transcript.len().checked_sub(1)
         {
             self.dirty_entries.insert(index);
+            self.track_tool_call_boundary(index);
         }
     }
 
+    fn track_tool_call_boundary(&mut self, index: usize) {
+        let closed = self.transcript.entry(index).is_some_and(|entry| {
+            matches!(
+                entry.kind,
+                EntryKind::ToolCall {
+                    status: ToolStatus::Completed | ToolStatus::Failed | ToolStatus::Stopped,
+                    ..
+                }
+            )
+        });
+        if closed {
+            self.flush_pending = true;
+        }
+    }
+
+    /// `flush` saves everything dirty, including the agent output of a turn
+    /// that has not settled, so a quit or a tool-call boundary keeps what the
+    /// transcript already showed.
     pub(crate) async fn persist_transcript(
         &mut self,
         store: &dyn Store,
         record: &SessionRecord,
         settled: bool,
+        flush: bool,
         task: Option<&Task>,
     ) -> Result<bool, CoreError> {
+        let flush = flush || self.flush_pending;
         let transcript = &self.transcript;
         let can_save = |entry: &Entry| {
             settled
+                || flush
                 || matches!(
                     entry.kind,
                     EntryKind::UserMessage { .. }
@@ -545,6 +572,7 @@ impl HarnessSession {
             .filter(|entry| can_save(entry))
             .collect();
         if entries.is_empty() {
+            self.flush_pending = false;
             if let Some(task) = task {
                 store.save_task(task).await?;
             }
@@ -562,6 +590,7 @@ impl HarnessSession {
                 .entry(*index)
                 .is_some_and(|entry| !can_save(entry))
         });
+        self.flush_pending = false;
         Ok(true)
     }
 
@@ -601,7 +630,7 @@ impl HarnessSession {
             .apply(&HarnessEvent::TerminalPrompt { item_id, text });
         self.track_entry(change);
         if let Err(error) = self
-            .persist_transcript(store, record, false, Some(task))
+            .persist_transcript(store, record, false, false, Some(task))
             .await
         {
             self.transcript.restore(previous_entries);

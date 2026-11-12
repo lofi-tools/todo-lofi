@@ -1311,7 +1311,7 @@ impl Core {
                 None => continue,
             };
             if events.is_empty() {
-                if self.persist_task_transcript(&task_id).await? {
+                if self.persist_task_transcript(&task_id, false).await? {
                     self.publish_task(&task_id)?;
                     changed = true;
                 }
@@ -1325,7 +1325,7 @@ impl Core {
             if (task.state, &task.error) != (before.0, &before.1) {
                 self.save_task(&task_id).await?;
             } else {
-                self.persist_task_transcript(&task_id).await?;
+                self.persist_task_transcript(&task_id, false).await?;
             }
             self.publish_task(&task_id)?;
             changed = true;
@@ -2133,7 +2133,7 @@ impl Core {
                 Vec::new()
             };
             self.end_session_record(&task.id, &events).await?;
-            self.persist_task_transcript(&task.id).await?;
+            self.persist_task_transcript(&task.id, false).await?;
         }
         self.store.archive_tasks(&archived).await?;
         let mut projects = BTreeSet::new();
@@ -3500,7 +3500,13 @@ impl Core {
                             id: task_id.to_string(),
                         })?;
                 session
-                    .persist_transcript(&*self.store, record, settled, was_live.then_some(&task))
+                    .persist_transcript(
+                        &*self.store,
+                        record,
+                        settled,
+                        true,
+                        was_live.then_some(&task),
+                    )
                     .await?;
             } else if was_live {
                 self.store.save_task(&task).await?;
@@ -3666,7 +3672,13 @@ impl Core {
             self.session_records.get(task_id),
         ) {
             session
-                .persist_transcript(&*self.store, record, !task.state.is_live(), Some(&task))
+                .persist_transcript(
+                    &*self.store,
+                    record,
+                    !task.state.is_live(),
+                    false,
+                    Some(&task),
+                )
                 .await?;
         } else {
             self.store.save_task(&task).await?;
@@ -3674,7 +3686,11 @@ impl Core {
         Ok(())
     }
 
-    async fn persist_task_transcript(&mut self, task_id: &TaskId) -> Result<bool, CoreError> {
+    async fn persist_task_transcript(
+        &mut self,
+        task_id: &TaskId,
+        flush: bool,
+    ) -> Result<bool, CoreError> {
         let settled = !self.task(task_id)?.state.is_live();
         let (Some(session), Some(record)) = (
             self.sessions.get_mut(task_id),
@@ -3683,7 +3699,7 @@ impl Core {
             return Ok(false);
         };
         session
-            .persist_transcript(&*self.store, record, settled, None)
+            .persist_transcript(&*self.store, record, settled, flush, None)
             .await
     }
 
@@ -9932,6 +9948,16 @@ mod tests {
             workspace.task.branch.as_deref(),
             Some("shepherd/ship-the-skeleton")
         );
+        // Quitting mid-turn keeps the agent output the transcript showed.
+        let restored = scenario.core_mut().open_task_workspace(&task_id).await?;
+        assert_eq!(
+            summaries(&restored),
+            vec![
+                "you: start".to_string(),
+                "agent: streaming text".to_string(),
+                "approval: Run tests (pending)".to_string(),
+            ]
+        );
 
         let workspace = workspace_of(
             scenario
@@ -9950,6 +9976,62 @@ mod tests {
                 .summary()
                 .contains("resumed the previous agent session")
         }));
+        Ok(())
+    }
+
+    #[cfg(feature = "git")]
+    #[tokio::test]
+    async fn a_completed_tool_call_persists_the_live_turn() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let repository = TestRepository::new()?;
+        let database = TestDatabase::new()?;
+        let uri = database.uri();
+        let core = Core::with_services(
+            Box::new(TursoStore::open(&uri).await?),
+            Box::new(FakeHarnessFactory::new(vec![vec![FakeTurn::new(vec![
+                FakeStep::Message("reading the file".to_string()),
+                FakeStep::ToolCall {
+                    tool_call_id: "call-1".to_string(),
+                    title: "read".to_string(),
+                    kind: "read".to_string(),
+                    status: agent_harness::ToolStatus::Completed,
+                    output: Some("contents".to_string()),
+                    diffs: Vec::new(),
+                },
+                FakeStep::approval("approval-1", "Read src/main.rs"),
+            ])]])),
+        );
+        let mut scenario = TestCore::with_core(core);
+        let project_id = add_project(scenario.core_mut(), repository.path().to_path_buf()).await?;
+        let draft = workspace_of(
+            scenario
+                .execute(Command::CreateDraft {
+                    agent: Agent::Codex,
+                    project_id,
+                    title: "Read the manifest".to_string(),
+                })
+                .await?,
+        );
+        let task_id = TaskId::new(draft.task.id.clone());
+        scenario
+            .execute(Command::SendPrompt {
+                task_id: task_id.clone(),
+                input: PromptInput::text("read it"),
+            })
+            .await?;
+
+        let observer = TursoStore::open(&uri).await?;
+        let persisted = observer.load_transcript(&task_id).await?;
+        let summaries: Vec<String> = persisted.iter().map(Entry::summary).collect();
+        assert_eq!(
+            summaries,
+            vec![
+                "you: read it".to_string(),
+                "agent: reading the file".to_string(),
+                "read (Completed)".to_string(),
+                "approval: Read src/main.rs (pending)".to_string(),
+            ]
+        );
         Ok(())
     }
 
