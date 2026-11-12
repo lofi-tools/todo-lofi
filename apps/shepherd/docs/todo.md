@@ -362,6 +362,11 @@ Tasks:
       - [ ] Investigate whether writing prompt text and Enter together submits
         reliably in Freebuff, including disconnected and reconnected states;
         reproduce offline from the capture before another live attempt.
+        The existing capture confirms that the prompt and Enter were sent in
+        one write and that the prompt remained visible afterward; it does not
+        establish successful submission. The recorder now separates entry and
+        Enter with an operator inspection step, exercised by an offline fake
+        CLI. Real disconnected and reconnected behavior remains unverified.
       - [ ] Confirm the active default model after reconnection: the startup
         screen showed DeepSeek V4.1 Flash, while the later status displayed
         `Fast • low` without an explicit model name.

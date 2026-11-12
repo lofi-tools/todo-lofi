@@ -197,9 +197,14 @@ the non-default `live-freebuff` feature. Its capture and worktree-effect path
 has passed an offline fake CLI check; Freebuff itself remains unverified.
 Before each live submission, obtain the user's approval of the exact prompt,
 project, disposable worktree and context. The runner reads the prompt from a
-file, displays PTY output, and waits for separate `send` and `stop` marker
-files outside the worktree. The operator creates `send` only after recognizing
-the ready prompt and `stop` only after recognizing the complete response. It
+file, displays PTY output, and uses marker files outside the worktree. The
+operator creates `send` only after recognizing a connected, ready composer.
+The runner enters the approved text without Enter and creates `entered` after
+its write completes. The operator verifies the text in the composer, then
+creates `submit` to send Enter, and creates `stop` only after recognizing the
+complete response. Separate writes do not by themselves prove Freebuff accepted
+the submission; an unrecognized or disconnected state leaves the capture
+incomplete. It
 records output, screens, input, runtime metadata and supported worktree effects;
 an error or missing drain leaves the capture incomplete. Marker files are local
 controls, not a substitute for user approval. This diagnostic does not yet

@@ -1600,8 +1600,13 @@ mod tests {
             return Err("use an absolute executable and markers outside the worktree".into());
         }
         let send_marker = markers.join("send");
+        let entered_marker = markers.join("entered");
+        let submit_marker = markers.join("submit");
         let stop_marker = markers.join("stop");
-        if send_marker.exists() || stop_marker.exists() {
+        if [&send_marker, &entered_marker, &submit_marker, &stop_marker]
+            .iter()
+            .any(|marker| marker.exists())
+        {
             return Err("capture marker files must not exist before launch".into());
         }
         if prompt.is_empty() || prompt.len() >= MAX_WRITE_BYTES {
@@ -1655,8 +1660,10 @@ mod tests {
             .process_record(&terminal_id)?
             .ok_or("could not establish terminal process identity for capture")?;
         eprintln!(
-            "Inspect the terminal output. Create the send marker only when the approved prompt can be submitted, then the stop marker after the response is complete."
+            "Inspect the terminal output. When the composer is ready, create send to enter the approved prompt. After entered appears, inspect the composer and create submit to press Enter. Create stop only after the response is complete."
         );
+        let mut entering = false;
+        let mut entered = false;
         let mut submitted = false;
         let mut stopping = false;
         let mut errors_open = true;
@@ -1679,6 +1686,10 @@ mod tests {
                 }, if pending_write.is_some() => {
                     result??;
                     pending_write = None;
+                    if entering && !entered {
+                        entered = true;
+                        std::fs::write(&entered_marker, b"")?;
+                    }
                 },
                 event = output.recv() => match event {
                     Some(TerminalEvent::Output(bytes)) => {
@@ -1698,11 +1709,18 @@ mod tests {
                     None => return Err("terminal output closed without an exit event".into()),
                 },
                 _ = tick.tick() => {
-                    if !submitted && send_marker.exists() {
-                        if stop_marker.exists() { return Err("stop marker appeared before submission".into()); }
-                        let mut input = prompt.clone();
-                        input.push(b'\r');
-                        pending_write = Some(engine.write(&terminal_id, input)?);
+                    if !submitted && stop_marker.exists() {
+                        return Err("stop marker appeared before submission".into());
+                    }
+                    if !entered && submit_marker.exists() {
+                        return Err("submit marker appeared before prompt entry completed".into());
+                    }
+                    if !entering && send_marker.exists() {
+                        pending_write = Some(engine.write(&terminal_id, prompt.clone())?);
+                        entering = true;
+                    }
+                    if entered && !submitted && pending_write.is_none() && submit_marker.exists() {
+                        pending_write = Some(engine.write(&terminal_id, vec![b'\r'])?);
                         submitted = true;
                     }
                     if submitted && pending_write.is_none() && !stopping && stop_marker.exists() {
@@ -1783,6 +1801,8 @@ mod tests {
         let operator = async {
             wait_for(&marker_path.join("ready")).await?;
             std::fs::write(marker_path.join("send"), b"")?;
+            wait_for(&marker_path.join("entered")).await?;
+            std::fs::write(marker_path.join("submit"), b"")?;
             wait_for(&marker_path.join("replied")).await?;
             std::fs::write(marker_path.join("stop"), b"")?;
             Ok::<(), Box<dyn std::error::Error>>(())
@@ -1817,6 +1837,17 @@ mod tests {
             .copied()
             .collect();
         assert_eq!(input, b"inspect README\r");
+        let input_events: Vec<&[u8]> = records
+            .iter()
+            .filter_map(|record| match &record.event {
+                CaptureEvent::Input { bytes } => Some(bytes.as_slice()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            input_events,
+            [b"inspect README".as_slice(), b"\r".as_slice()]
+        );
         assert!(
             output
                 .windows(b"fake:inspect README".len())
