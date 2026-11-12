@@ -1781,18 +1781,16 @@ mod tests {
             .map(std::path::PathBuf::from)
             .ok_or("missing SHEPHERD_FREEBUFF_WORKTREE")?;
         let mut frames = 0usize;
-        let mut warning = None;
+        let mut warnings = terminal_replay::FreebuffWarningTracker::default();
         terminal_replay::replay_freebuff_capture(&capture, &worktree, |_, frame| {
             frames += 1;
-            if let Some(observed) = terminal_replay::freebuff_screen_warning(&frame)? {
-                warning = Some(observed);
-            }
+            warnings.observe(&frame)?;
             Ok(())
         })?;
         if frames == 0 {
             return Err("capture contains no screen frames".into());
         }
-        if let Some(warning) = warning {
+        if let Some(warning) = warnings.warning() {
             eprintln!("Freebuff screen warning observed: {warning:?}");
         }
         eprintln!(

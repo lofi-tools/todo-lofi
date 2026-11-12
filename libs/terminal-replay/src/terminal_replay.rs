@@ -6,6 +6,24 @@ pub enum FreebuffScreenWarning {
     LauncherRestart,
 }
 
+#[derive(Default)]
+pub struct FreebuffWarningTracker {
+    warning: Option<FreebuffScreenWarning>,
+}
+
+impl FreebuffWarningTracker {
+    pub fn observe(&mut self, frame: &TerminalFrame) -> agent_harness::HarnessResult<()> {
+        if let Some(warning) = freebuff_screen_warning(frame)? {
+            self.warning = Some(warning);
+        }
+        Ok(())
+    }
+
+    pub fn warning(&self) -> Option<FreebuffScreenWarning> {
+        self.warning
+    }
+}
+
 /// These observations can invalidate an interaction; their absence never
 /// establishes readiness, compatibility, or a successful reconnection.
 pub fn freebuff_screen_warning(
@@ -272,18 +290,30 @@ mod tests {
     fn freebuff_warnings_come_from_rendered_rows_and_never_imply_readiness()
     -> Result<(), Box<dyn std::error::Error>> {
         let mut screen = Screen::with_scrollback(100, 3, 0);
+        let mut warnings = FreebuffWarningTracker::default();
         screen.process(b"Can't reach Freebuff's servers. Retrying");
         screen.process("… Try another network.".as_bytes());
         assert_eq!(
             freebuff_screen_warning(&screen.frame())?,
             Some(FreebuffScreenWarning::Disconnected)
         );
+        warnings.observe(&screen.frame())?;
         screen.process(b"\x1b[2J\x1b[HReconnected");
         assert_eq!(freebuff_screen_warning(&screen.frame())?, None);
+        warnings.observe(&screen.frame())?;
+        assert_eq!(
+            warnings.warning(),
+            Some(FreebuffScreenWarning::Disconnected)
+        );
         screen.process(b"\x1b[2J\x1b[HUpdate available: 0.2.36 ");
         screen.process("→ 0.2.37".as_bytes());
         assert_eq!(
             freebuff_screen_warning(&screen.frame())?,
+            Some(FreebuffScreenWarning::LauncherRestart)
+        );
+        warnings.observe(&screen.frame())?;
+        assert_eq!(
+            warnings.warning(),
             Some(FreebuffScreenWarning::LauncherRestart)
         );
         Ok(())
