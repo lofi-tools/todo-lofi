@@ -222,13 +222,11 @@ Tasks:
     streaming, tool, approval, question, interrupt and resume interactions.
     Do not install Freebuff. Surface detectable launcher updates and reject
     versions or screen states that cannot be identified reliably.
-    - [ ] Resolve a configured executable followed by PATH without launching
+    - [x] Resolve a configured executable followed by PATH without launching
       Freebuff or triggering its updater; report missing or unusable candidates.
-      An offline discovery primitive reads `agents.freebuff.executable` from
-      agent settings; wire it into the desktop factory and verify its fixtures
-      when the selected shard includes them before marking this item complete.
-      Missing and unusable-candidate fixtures passed in shard 6/8; configured
-      precedence and settings fixtures passed in shard 4/8.
+      The desktop factory uses offline discovery from `agents.freebuff.executable`
+      and PATH. Its configured precedence, fallback, settings and diagnostics
+      fixtures passed in the comprehensive suite on 2026-11-12.
     - [ ] Inspect the installed launcher and runtime metadata without sending
       project data; record version provenance and the update lifecycle. A
       bounded metadata reader is implemented; its valid-metadata fixture passed
