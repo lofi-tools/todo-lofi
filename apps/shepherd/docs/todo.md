@@ -482,7 +482,13 @@ Tasks:
       identities or status regressions; a bounded publisher holds capacity until
       consumers release events. Their fixtures passed in the full agent-harness
       suite on 2026-11-12. Connect them to a verified classifier and adapter
-      event stream.
+      event stream. The classifier now supplies tool rows, but the recorded
+      rows carry no status: one row changes from `(0 results)` to
+      `(19 results)` in place (frames 80-85, 35.2-35.4 s) and rows leave the
+      screen by scrolling at 39.970 s instead of by completing. Any status
+      mapping would be invented, and the reconciler rejects the title change
+      those transitions imply, so this connection waits on an agreed status
+      rule or a capture that shows a tool finishing.
       A shared publisher now serializes text and tool updates against one
       capacity limit and scopes item IDs to an explicit, unique turn identity
       so repeated terminal IDs do not overwrite previous turns. Its
@@ -511,10 +517,12 @@ Tasks:
     one; a submit gate refuses unknown, running and typing screens and also
     refuses a ready composer, because an unrecorded overlay cannot be ruled
     out. `prompt()` now reports the gate's reason, and raw terminal input stays
-    blocked. Recorded-row fixtures cover each accepted shape and each rejected
-    one, including an unrecorded approval-looking row, which is ignored as text
-    and still refused. Composer prompts stay disabled until a question and
-    approval probe is approved and recorded.
+    blocked. Recorded-row fixtures cover the accepted shapes and each rejected
+    category, including an unrecorded approval-looking row, which is ignored as
+    text and still refused. Tool and transcript classification is
+    fixture-proven; question and approval classification is blocked on a live,
+    user-approved capture rather than verified, so composer prompts stay
+    disabled until that probe is recorded.
     Direct user input to this integrated terminal is also blocked with an
     explanation until the terminal submit gate and screen recognition are
     connected; the separate Freebuff (terminal) path remains interactive.
