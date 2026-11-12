@@ -253,6 +253,16 @@ Tasks:
       Static inspection of the bundled UI found a default input placeholder,
       newline shortcuts, and a state-dependent Ctrl+C clear path; verify these
       against captured terminal states before using them for input or cancel.
+      The complete capture `tools-ar3-question-20261112-complete.jsonl` holds
+      exactly two input records: the prompt bytes with no newline, then a lone
+      `\r` 11.8 s later. Its ready screen shows the placeholder
+      `Enter a coding task or / for commands` behind a two-space indent and a
+      `▍` cursor; once text is typed, the placeholder is replaced by the text
+      and the cursor sits at its end. The status row named
+      `DeepSeek V4.1 Flash`, `Fast • low` and the worktree path. No capture
+      contains a `\x03` byte, so the state-dependent Ctrl+C clear path and the
+      newline shortcuts remain unverified and must not drive cancel or submit;
+      they need their own probe.
     - [ ] With user-approved live messages only, capture the terminal states
       needed to establish a version-specific interaction contract. Prefer
       question-only messages requiring tools from the user's ChatGPT “tools”
