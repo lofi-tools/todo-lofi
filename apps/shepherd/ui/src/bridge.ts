@@ -392,7 +392,7 @@ export type EntryKind =
   | { type: 'plan'; data: { rows: PlanRow[] } }
   | { type: 'permission'; data: PermissionEntry }
   | { type: 'notice'; data: { text: string; isError: boolean } }
-  | { type: 'failure'; data: { kind: FailureKind; text: string; detail: string | null; model?: string | null; protocol?: string | null } }
+  | { type: 'failure'; data: { kind: FailureKind; text: string; detail: string | null; context?: string | null; model?: string | null; protocol?: string | null } }
   | { type: 'usage'; data: { used: number; size: number; cost: number | null } }
 
 export interface Entry {

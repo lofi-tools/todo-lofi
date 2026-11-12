@@ -51,6 +51,25 @@ fn command_output_tail_start(output: &str) -> usize {
     output.ceil_char_boundary(start)
 }
 
+pub(crate) const MAX_TURN_ERROR_BYTES: usize = 64 * 1024;
+pub(crate) const TURN_ERROR_OMITTED: &str = "\n[… error details omitted …]";
+
+/// Agent failures can include a whole response; the UI shows a bounded tail.
+pub(crate) fn truncate_turn_error(text: &mut String) {
+    if text.len() > MAX_TURN_ERROR_BYTES {
+        let end = text.floor_char_boundary(MAX_TURN_ERROR_BYTES - TURN_ERROR_OMITTED.len());
+        text.truncate(end);
+        text.push_str(TURN_ERROR_OMITTED);
+    }
+}
+
+pub(crate) fn publish(
+    sender: &mpsc::UnboundedSender<HarnessEvent>,
+    event: HarnessEvent,
+) -> HarnessResult<()> {
+    sender.send(event).map_err(|_| HarnessError::ChannelClosed)
+}
+
 /// Errors an adapter may report to the core.
 #[derive(Debug, thiserror::Error)]
 pub enum HarnessError {
@@ -90,6 +109,10 @@ pub enum HarnessError {
     },
     #[error("adapter protocol error: {0}")]
     Protocol(String),
+    /// The agent named the cause itself. `message` is what the user should read;
+    /// `context` keeps the adapter's framing for the diagnostic log.
+    #[error("adapter protocol error: {context}")]
+    AgentReported { message: String, context: String },
     #[error("{message}")]
     Reported { kind: FailureKind, message: String },
     #[error("{0}")]
@@ -98,14 +121,13 @@ pub enum HarnessError {
 
 pub type HarnessResult<T> = Result<T, HarnessError>;
 
-pub(crate) fn protect_discovery_error(error: HarnessError, hide: bool) -> HarnessError {
-    if hide {
-        HarnessError::Reported {
-            kind: FailureKind::classify(&error).unwrap_or(FailureKind::Protocol),
-            message: "Agent discovery details are hidden because launch environment values are configured.".into(),
+impl HarnessError {
+    /// The agent's own explanation, without the adapter wrappers around it.
+    pub fn agent_message(&self) -> Option<&str> {
+        match self {
+            Self::AgentReported { message, .. } => Some(message),
+            _ => None,
         }
-    } else {
-        error
     }
 }
 
@@ -133,6 +155,9 @@ impl FailureKind {
                 Some(Self::MissingBinary)
             }
             HarnessError::Reported { kind, .. } => Some(*kind),
+            HarnessError::AgentReported { message, .. } => {
+                Some(Self::from_message(message, Self::AgentRejected))
+            }
             HarnessError::Protocol(message) => Some(Self::from_message(message, Self::Protocol)),
             HarnessError::Spawn { .. }
             | HarnessError::WriteFile { .. }
@@ -749,6 +774,8 @@ pub enum HarnessEvent {
     TurnError {
         kind: FailureKind,
         text: String,
+        /// The adapter's framing of an agent-reported failure, kept for diagnostics.
+        context: Option<String>,
         stream_permit: Option<Arc<tokio::sync::OwnedSemaphorePermit>>,
     },
     ConnectionFailed {
@@ -838,6 +865,9 @@ pub enum EntryKind {
         kind: FailureKind,
         text: String,
         detail: Option<String>,
+        /// The adapter's framing, shown in the diagnostic history rather than the chat.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        context: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         model: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1031,11 +1061,13 @@ impl Transcript {
         kind: FailureKind,
         text: impl Into<String>,
         detail: Option<String>,
+        context: Option<String>,
     ) -> TranscriptChange {
         self.append(EntryKind::Failure {
             kind,
             text: text.into(),
             detail,
+            context,
             model: None,
             protocol: None,
         })
@@ -1133,12 +1165,20 @@ impl Transcript {
             }
             HarnessEvent::ApprovalPolicyError { text }
             | HarnessEvent::AgentTerminalError { text, .. } => self.push_notice(text, true),
-            HarnessEvent::TurnError { kind, text, .. }
-            | HarnessEvent::ConnectionFailed { kind, text } => {
-                if matches!(event, HarnessEvent::ConnectionFailed { .. }) {
-                    self.stop_unfinished_commands();
-                }
-                self.push_failure(*kind, text.clone(), Some(kind.hint().to_string()))
+            HarnessEvent::TurnError {
+                kind,
+                text,
+                context,
+                ..
+            } => self.push_failure(
+                *kind,
+                text.clone(),
+                Some(kind.hint().to_string()),
+                context.clone(),
+            ),
+            HarnessEvent::ConnectionFailed { kind, text } => {
+                self.stop_unfinished_commands();
+                self.push_failure(*kind, text.clone(), Some(kind.hint().to_string()), None)
             }
             _ => TranscriptChange::default(),
         }

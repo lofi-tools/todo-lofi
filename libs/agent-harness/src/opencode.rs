@@ -1,4 +1,5 @@
-//! OpenCode's private HTTP server and session control.
+//! OpenCode's harnesses: its ACP entry point (the default), its private HTTP
+//! server, and the router that selects between them.
 
 use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
@@ -25,7 +26,7 @@ use crate::{
     AdapterTier, AgentDiagnostics, AgentHarness, AgentMode, AgentModel, AgentModels, AgentModes,
     ApprovalId, ApprovalRequest, Capabilities, Decision, DeltaKind, Entry, FailureKind,
     HarnessError, HarnessEvent, HarnessResult, ItemId, PromptInput, SessionId, SessionState,
-    SpawnSpec, ToolCallId, ToolStatus, TurnFinishReason, TurnId, command_line,
+    SpawnSpec, ToolCallId, ToolStatus, TurnFinishReason, TurnId, command_line, publish,
 };
 
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(20);
@@ -33,9 +34,8 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 const STREAM_CHUNK_BYTES: usize = 8 * 1024;
 const STREAM_BUFFER_CHUNKS: usize = 64;
-const MAX_STREAM_ERROR_BYTES: usize = 64 * 1024;
-const STREAM_ERROR_OMITTED: &str = "\n[… error details omitted …]";
 const MAX_PENDING_APPROVALS: usize = 64;
+const ACP_ARG: &str = "acp";
 const MODEL_CATALOG_SETTLE_ATTEMPTS: usize = 8;
 const MODEL_CATALOG_SETTLE_DELAY: Duration = Duration::from_millis(250);
 const USERNAME: &str = "opencode";
@@ -72,13 +72,7 @@ pub async fn project_models(
     spec: &SpawnSpec,
     default_model: Option<&str>,
 ) -> HarnessResult<AgentModels> {
-    let hide_diagnostics = spec
-        .environment
-        .keys()
-        .any(|key| key != crate::PROCESS_TOKEN_ENV);
-    let (server, mut startup_group) = OpenCodeServer::start_guarded(spec, None)
-        .await
-        .map_err(|error| crate::protect_discovery_error(error, hide_diagnostics))?;
+    let (server, mut startup_group) = OpenCodeServer::start_guarded(spec, None).await?;
     let models = if server.probe.models {
         server.model_catalog().await.map(|catalog| catalog.models)
     } else {
@@ -87,37 +81,24 @@ pub async fn project_models(
     let models = models.map(|models| preferred_models(models, default_model));
     let shutdown = server.shutdown().await;
     startup_group.disarm();
-    finish_model_discovery(models, shutdown, hide_diagnostics)
+    finish_model_discovery(models, shutdown)
 }
 
 fn finish_model_discovery(
     models: HarnessResult<AgentModels>,
     shutdown: HarnessResult<()>,
-    hide_diagnostics: bool,
 ) -> HarnessResult<AgentModels> {
     match (models, shutdown) {
         (Ok(models), Ok(())) => Ok(models),
-        (Err(error), Ok(())) | (Ok(_), Err(error)) => {
-            Err(crate::protect_discovery_error(error, hide_diagnostics))
-        }
-        (Err(discovery), Err(cleanup)) => {
-            let discovery = crate::protect_discovery_error(discovery, hide_diagnostics);
-            let cleanup = crate::protect_discovery_error(cleanup, hide_diagnostics);
-            Err(HarnessError::Protocol(format!(
-                "OpenCode model discovery failed: {discovery}; cleanup failed: {cleanup}"
-            )))
-        }
+        (Err(error), Ok(())) | (Ok(_), Err(error)) => Err(error),
+        (Err(discovery), Err(cleanup)) => Err(HarnessError::Protocol(format!(
+            "OpenCode model discovery failed: {discovery}; cleanup failed: {cleanup}"
+        ))),
     }
 }
 
 pub async fn project_modes(spec: &SpawnSpec) -> HarnessResult<Vec<AgentMode>> {
-    let hide_diagnostics = spec
-        .environment
-        .keys()
-        .any(|key| key != crate::PROCESS_TOKEN_ENV);
-    let (server, mut startup_group) = OpenCodeServer::start_guarded(spec, None)
-        .await
-        .map_err(|error| crate::protect_discovery_error(error, hide_diagnostics))?;
+    let (server, mut startup_group) = OpenCodeServer::start_guarded(spec, None).await?;
     let modes = if server.probe.modes {
         server.mode_catalog().await
     } else {
@@ -125,26 +106,19 @@ pub async fn project_modes(spec: &SpawnSpec) -> HarnessResult<Vec<AgentMode>> {
     };
     let shutdown = server.shutdown().await;
     startup_group.disarm();
-    finish_mode_discovery(modes, shutdown, hide_diagnostics)
+    finish_mode_discovery(modes, shutdown)
 }
 
 fn finish_mode_discovery(
     modes: HarnessResult<Vec<AgentMode>>,
     shutdown: HarnessResult<()>,
-    hide_diagnostics: bool,
 ) -> HarnessResult<Vec<AgentMode>> {
     match (modes, shutdown) {
         (Ok(modes), Ok(())) => Ok(modes),
-        (Err(error), Ok(())) | (Ok(_), Err(error)) => {
-            Err(crate::protect_discovery_error(error, hide_diagnostics))
-        }
-        (Err(discovery), Err(cleanup)) => {
-            let discovery = crate::protect_discovery_error(discovery, hide_diagnostics);
-            let cleanup = crate::protect_discovery_error(cleanup, hide_diagnostics);
-            Err(HarnessError::Protocol(format!(
-                "OpenCode mode discovery failed: {discovery}; cleanup failed: {cleanup}"
-            )))
-        }
+        (Err(error), Ok(())) | (Ok(_), Err(error)) => Err(error),
+        (Err(discovery), Err(cleanup)) => Err(HarnessError::Protocol(format!(
+            "OpenCode mode discovery failed: {discovery}; cleanup failed: {cleanup}"
+        ))),
     }
 }
 
@@ -381,7 +355,7 @@ struct InterruptResponse {
     interrupted: bool,
 }
 
-pub struct OpenCodeHarness {
+pub struct OpenCodeNativeHarness {
     server: Option<OpenCodeServer>,
     session: Option<SessionId>,
     modes: Option<AgentModes>,
@@ -393,14 +367,11 @@ pub struct OpenCodeHarness {
     receiver: mpsc::UnboundedReceiver<HarnessEvent>,
     stream_capacity: Arc<Semaphore>,
     diagnostics: AgentDiagnostics,
-    fallback: Option<AcpHarness>,
-    project_approvals: Option<Arc<dyn crate::ProjectApprovalPolicy>>,
-    terminals: Option<Arc<dyn TerminalBackend>>,
     process_tracker: Option<Arc<dyn crate::AgentProcessTracker>>,
     cleanup_required: bool,
 }
 
-impl Default for OpenCodeHarness {
+impl Default for OpenCodeNativeHarness {
     fn default() -> Self {
         let (sender, receiver) = mpsc::unbounded_channel();
         Self {
@@ -415,19 +386,9 @@ impl Default for OpenCodeHarness {
             receiver,
             stream_capacity: Arc::new(Semaphore::new(STREAM_BUFFER_CHUNKS)),
             diagnostics: AgentDiagnostics::default(),
-            fallback: None,
-            project_approvals: None,
-            terminals: None,
             process_tracker: None,
             cleanup_required: false,
         }
-    }
-}
-
-impl OpenCodeHarness {
-    pub fn with_terminals(mut self, terminals: Arc<dyn TerminalBackend>) -> Self {
-        self.terminals = Some(terminals);
-        self
     }
 }
 
@@ -513,47 +474,29 @@ impl Drop for ActiveTurn {
 }
 
 #[async_trait]
-impl AgentHarness for OpenCodeHarness {
+impl AgentHarness for OpenCodeNativeHarness {
     fn set_process_tracker(&mut self, tracker: Arc<dyn crate::AgentProcessTracker>) {
         self.process_tracker = Some(tracker);
     }
 
     fn events(&mut self) -> &mut mpsc::UnboundedReceiver<HarnessEvent> {
-        match &mut self.fallback {
-            Some(fallback) => fallback.events(),
-            None => &mut self.receiver,
-        }
+        &mut self.receiver
     }
 
     fn diagnostics(&self) -> AgentDiagnostics {
-        if let Some(fallback) = &self.fallback {
-            let mut diagnostics = fallback.diagnostics();
-            diagnostics
-                .fallback_reason
-                .clone_from(&self.diagnostics.fallback_reason);
-            diagnostics
-        } else {
-            let mut diagnostics = self.diagnostics.clone();
-            if let Some(server) = &self.server {
-                diagnostics.stderr_tail = server.stderr_tail();
-            }
-            diagnostics
+        let mut diagnostics = self.diagnostics.clone();
+        if let Some(server) = &self.server {
+            diagnostics.stderr_tail = server.stderr_tail();
         }
+        diagnostics
     }
 
     fn tier(&self) -> AdapterTier {
-        if self.fallback.is_some() {
-            AdapterTier::Acp
-        } else {
-            AdapterTier::Native
-        }
+        AdapterTier::Native
     }
 
     fn models(&self) -> Option<AgentModels> {
-        self.fallback
-            .as_ref()
-            .and_then(AgentHarness::models)
-            .or_else(|| self.models.clone())
+        self.models.clone()
     }
 
     fn set_default_model(&mut self, model: Option<String>) {
@@ -561,16 +504,10 @@ impl AgentHarness for OpenCodeHarness {
     }
 
     fn modes(&self) -> Option<AgentModes> {
-        match &self.fallback {
-            Some(fallback) => fallback.modes(),
-            None => self.modes.clone(),
-        }
+        self.modes.clone()
     }
 
     async fn set_mode(&mut self, mode: &str) -> HarnessResult<()> {
-        if let Some(fallback) = &mut self.fallback {
-            return fallback.set_mode(mode).await;
-        }
         if self
             .turn
             .as_ref()
@@ -598,85 +535,29 @@ impl AgentHarness for OpenCodeHarness {
         Ok(())
     }
 
-    fn take_replayed_transcript(&mut self) -> Vec<Entry> {
-        self.fallback
-            .as_mut()
-            .map_or_else(Vec::new, AgentHarness::take_replayed_transcript)
-    }
-
-    fn set_project_approval_policy(&mut self, policy: Arc<dyn crate::ProjectApprovalPolicy>) {
-        self.project_approvals = Some(policy);
-    }
-
-    fn session_approvals(&self) -> Vec<crate::SessionApproval> {
-        self.fallback
-            .as_ref()
-            .map_or_else(Vec::new, AgentHarness::session_approvals)
-    }
-
-    async fn reset_session_approval(&mut self, id: &str) -> HarnessResult<()> {
-        if let Some(fallback) = &mut self.fallback {
-            fallback.reset_session_approval(id).await?;
-        }
-        Ok(())
-    }
-
     async fn start(&mut self, mut spec: SpawnSpec) -> HarnessResult<Capabilities> {
-        if self.server.is_some() || self.fallback.is_some() {
+        if self.server.is_some() {
             return Err(HarnessError::Protocol(
-                "OpenCode harness is already started".into(),
+                "OpenCode native harness is already started".into(),
             ));
         }
         require_absolute_executable(Path::new(&spec.program))?;
-        let native = async {
-            let (server, mut startup_group) =
-                OpenCodeServer::start_guarded(&spec, self.process_tracker.clone()).await?;
-            if let Err(error) = server.subscribe().await {
-                let cleanup = server.shutdown().await;
-                startup_group.disarm();
-                if let Err(cleanup) = cleanup {
-                    return Err(HarnessError::Reported {
-                        kind: FailureKind::Protocol,
-                        message: format!(
-                            "OpenCode subscription failed: {error}; cleanup failed: {cleanup}"
-                        ),
-                    });
-                }
-                return Err(error);
-            }
+        let (server, mut startup_group) =
+            OpenCodeServer::start_guarded(&spec, self.process_tracker.clone()).await?;
+        if let Err(error) = server.subscribe().await {
+            let cleanup = server.shutdown().await;
             startup_group.disarm();
-            Ok::<_, HarnessError>(server)
-        };
-        let server = match native.await {
-            Ok(server) => server,
-            Err(HarnessError::Protocol(reason) | HarnessError::TransportClosed(reason)) => {
-                spec.args.push("acp".into());
-                spec.environment
-                    .insert("OPENCODE_DISABLE_AUTOUPDATE".into(), "1".into());
-                let mut fallback = AcpHarness::default();
-                if let Some(tracker) = &self.process_tracker {
-                    fallback.set_process_tracker(tracker.clone());
-                }
-                if let Some(terminals) = self.terminals.take() {
-                    fallback = fallback.with_terminals(terminals);
-                }
-                if let Some(policy) = self.project_approvals.take() {
-                    fallback.set_project_approval_policy(policy);
-                }
-                self.diagnostics.command = command_line(&spec);
-                self.diagnostics.fallback_reason =
-                    Some(format!("OpenCode native server unavailable: {reason}"));
-                let capabilities = fallback.start(spec).await.map_err(|error| {
-                    HarnessError::Reported {
-                        kind: FailureKind::classify(&error).unwrap_or(FailureKind::Protocol),
-                        message: format!("OpenCode native server unavailable: {reason}. ACP fallback failed: {error}"),
-                    }
-                })?;
-                self.fallback = Some(fallback);
-                return Ok(capabilities);
+            if let Err(cleanup) = cleanup {
+                return Err(HarnessError::Reported {
+                    kind: FailureKind::Protocol,
+                    message: format!(
+                        "OpenCode subscription failed: {error}; cleanup failed: {cleanup}"
+                    ),
+                });
             }
-            Err(error) => return Err(error),
-        };
+            return Err(error);
+        }
+        startup_group.disarm();
         let probe = server.probe();
         let capabilities = Capabilities {
             streaming: true,
@@ -701,9 +582,6 @@ impl AgentHarness for OpenCodeHarness {
     }
 
     async fn open_session(&mut self, resume: Option<SessionId>) -> HarnessResult<SessionId> {
-        if let Some(fallback) = &mut self.fallback {
-            return fallback.open_session(resume).await;
-        }
         if self.session.is_some() {
             return Err(HarnessError::Protocol(
                 "OpenCode session is already open".into(),
@@ -760,9 +638,6 @@ impl AgentHarness for OpenCodeHarness {
     }
 
     async fn prompt(&mut self, mut input: PromptInput) -> HarnessResult<()> {
-        if let Some(fallback) = &mut self.fallback {
-            return fallback.prompt(input).await;
-        }
         if self.cleanup_required {
             return Err(HarnessError::Protocol(
                 "OpenCode needs cleanup before another prompt".into(),
@@ -925,9 +800,6 @@ impl AgentHarness for OpenCodeHarness {
     }
 
     async fn cancel(&mut self) -> HarnessResult<()> {
-        if let Some(fallback) = &mut self.fallback {
-            return fallback.cancel().await;
-        }
         if self.cleanup_required {
             return Err(HarnessError::Protocol(
                 "OpenCode needs cleanup before cancellation".into(),
@@ -975,9 +847,6 @@ impl AgentHarness for OpenCodeHarness {
     }
 
     async fn respond(&mut self, approval_id: ApprovalId, decision: Decision) -> HarnessResult<()> {
-        if let Some(fallback) = &mut self.fallback {
-            return fallback.respond(approval_id, decision).await;
-        }
         if self.cleanup_required {
             return Err(HarnessError::Protocol(
                 "OpenCode needs cleanup before answering an approval".into(),
@@ -1049,9 +918,6 @@ impl AgentHarness for OpenCodeHarness {
     }
 
     async fn shutdown(&mut self) -> HarnessResult<()> {
-        if let Some(fallback) = &mut self.fallback {
-            return fallback.shutdown().await;
-        }
         self.turn = None;
         if let Some(server) = &self.server {
             self.diagnostics.stderr_tail = server.stderr_tail();
@@ -1072,8 +938,250 @@ impl AgentHarness for OpenCodeHarness {
     }
 }
 
-fn publish(sender: &mpsc::UnboundedSender<HarnessEvent>, event: HarnessEvent) -> HarnessResult<()> {
-    sender.send(event).map_err(|_| HarnessError::ChannelClosed)
+/// OpenCode's ACP entry point, `opencode acp`.
+#[derive(Default)]
+pub struct OpenCodeAcpHarness {
+    inner: AcpHarness,
+}
+
+impl OpenCodeAcpHarness {
+    pub fn with_terminals(mut self, terminals: Arc<dyn TerminalBackend>) -> Self {
+        self.inner = self.inner.with_terminals(terminals);
+        self
+    }
+}
+
+#[async_trait]
+impl AgentHarness for OpenCodeAcpHarness {
+    fn set_process_tracker(&mut self, tracker: Arc<dyn crate::AgentProcessTracker>) {
+        self.inner.set_process_tracker(tracker);
+    }
+
+    fn events(&mut self) -> &mut mpsc::UnboundedReceiver<HarnessEvent> {
+        self.inner.events()
+    }
+
+    fn diagnostics(&self) -> AgentDiagnostics {
+        self.inner.diagnostics()
+    }
+
+    fn tier(&self) -> AdapterTier {
+        AdapterTier::Acp
+    }
+
+    fn models(&self) -> Option<AgentModels> {
+        self.inner.models()
+    }
+
+    fn modes(&self) -> Option<AgentModes> {
+        self.inner.modes()
+    }
+
+    async fn set_mode(&mut self, mode: &str) -> HarnessResult<()> {
+        self.inner.set_mode(mode).await
+    }
+
+    fn set_project_approval_policy(&mut self, policy: Arc<dyn crate::ProjectApprovalPolicy>) {
+        self.inner.set_project_approval_policy(policy);
+    }
+
+    fn session_approvals(&self) -> Vec<crate::SessionApproval> {
+        self.inner.session_approvals()
+    }
+
+    async fn reset_session_approval(&mut self, id: &str) -> HarnessResult<()> {
+        self.inner.reset_session_approval(id).await
+    }
+
+    fn take_replayed_transcript(&mut self) -> Vec<Entry> {
+        self.inner.take_replayed_transcript()
+    }
+
+    async fn start(&mut self, mut spec: SpawnSpec) -> HarnessResult<Capabilities> {
+        spec.args.push(ACP_ARG.into());
+        // A self-update mid-session would replace the binary this process owns.
+        spec.environment
+            .entry("OPENCODE_DISABLE_AUTOUPDATE".into())
+            .or_insert_with(|| "1".into());
+        self.inner.start(spec).await
+    }
+
+    async fn open_session(&mut self, resume: Option<SessionId>) -> HarnessResult<SessionId> {
+        self.inner.open_session(resume).await
+    }
+
+    async fn prompt(&mut self, input: PromptInput) -> HarnessResult<()> {
+        self.inner.prompt(input).await
+    }
+
+    async fn cancel(&mut self) -> HarnessResult<()> {
+        self.inner.cancel().await
+    }
+
+    async fn respond(&mut self, approval_id: ApprovalId, decision: Decision) -> HarnessResult<()> {
+        self.inner.respond(approval_id, decision).await
+    }
+
+    async fn shutdown(&mut self) -> HarnessResult<()> {
+        self.inner.shutdown().await
+    }
+}
+
+/// Routes each OpenCode task to one of the two integrations. ACP is the
+/// default; [`OpenCodeHarness::native`] opts into the private HTTP server.
+pub enum OpenCodeHarness {
+    Acp(OpenCodeAcpHarness),
+    Native(OpenCodeNativeHarness),
+}
+
+impl Default for OpenCodeHarness {
+    fn default() -> Self {
+        Self::Acp(OpenCodeAcpHarness::default())
+    }
+}
+
+impl OpenCodeHarness {
+    pub fn native() -> Self {
+        Self::Native(OpenCodeNativeHarness::default())
+    }
+
+    /// The native server runs OpenCode's tools itself, so it never asks the
+    /// app for a terminal and ignores the backend.
+    pub fn with_terminals(self, terminals: Arc<dyn TerminalBackend>) -> Self {
+        match self {
+            Self::Acp(harness) => Self::Acp(harness.with_terminals(terminals)),
+            Self::Native(harness) => Self::Native(harness),
+        }
+    }
+}
+
+#[async_trait]
+impl AgentHarness for OpenCodeHarness {
+    fn set_process_tracker(&mut self, tracker: Arc<dyn crate::AgentProcessTracker>) {
+        match self {
+            Self::Acp(harness) => harness.set_process_tracker(tracker),
+            Self::Native(harness) => harness.set_process_tracker(tracker),
+        }
+    }
+
+    fn events(&mut self) -> &mut mpsc::UnboundedReceiver<HarnessEvent> {
+        match self {
+            Self::Acp(harness) => harness.events(),
+            Self::Native(harness) => harness.events(),
+        }
+    }
+
+    fn diagnostics(&self) -> AgentDiagnostics {
+        match self {
+            Self::Acp(harness) => harness.diagnostics(),
+            Self::Native(harness) => harness.diagnostics(),
+        }
+    }
+
+    fn tier(&self) -> AdapterTier {
+        match self {
+            Self::Acp(harness) => harness.tier(),
+            Self::Native(harness) => harness.tier(),
+        }
+    }
+
+    fn models(&self) -> Option<AgentModels> {
+        match self {
+            Self::Acp(harness) => harness.models(),
+            Self::Native(harness) => harness.models(),
+        }
+    }
+
+    fn set_default_model(&mut self, model: Option<String>) {
+        match self {
+            Self::Acp(harness) => harness.set_default_model(model),
+            Self::Native(harness) => harness.set_default_model(model),
+        }
+    }
+
+    fn modes(&self) -> Option<AgentModes> {
+        match self {
+            Self::Acp(harness) => harness.modes(),
+            Self::Native(harness) => harness.modes(),
+        }
+    }
+
+    async fn set_mode(&mut self, mode: &str) -> HarnessResult<()> {
+        match self {
+            Self::Acp(harness) => harness.set_mode(mode).await,
+            Self::Native(harness) => harness.set_mode(mode).await,
+        }
+    }
+
+    fn set_project_approval_policy(&mut self, policy: Arc<dyn crate::ProjectApprovalPolicy>) {
+        match self {
+            Self::Acp(harness) => harness.set_project_approval_policy(policy),
+            Self::Native(harness) => harness.set_project_approval_policy(policy),
+        }
+    }
+
+    fn session_approvals(&self) -> Vec<crate::SessionApproval> {
+        match self {
+            Self::Acp(harness) => harness.session_approvals(),
+            Self::Native(harness) => harness.session_approvals(),
+        }
+    }
+
+    async fn reset_session_approval(&mut self, id: &str) -> HarnessResult<()> {
+        match self {
+            Self::Acp(harness) => harness.reset_session_approval(id).await,
+            Self::Native(harness) => harness.reset_session_approval(id).await,
+        }
+    }
+
+    fn take_replayed_transcript(&mut self) -> Vec<Entry> {
+        match self {
+            Self::Acp(harness) => harness.take_replayed_transcript(),
+            Self::Native(harness) => harness.take_replayed_transcript(),
+        }
+    }
+
+    async fn start(&mut self, spec: SpawnSpec) -> HarnessResult<Capabilities> {
+        match self {
+            Self::Acp(harness) => harness.start(spec).await,
+            Self::Native(harness) => harness.start(spec).await,
+        }
+    }
+
+    async fn open_session(&mut self, resume: Option<SessionId>) -> HarnessResult<SessionId> {
+        match self {
+            Self::Acp(harness) => harness.open_session(resume).await,
+            Self::Native(harness) => harness.open_session(resume).await,
+        }
+    }
+
+    async fn prompt(&mut self, input: PromptInput) -> HarnessResult<()> {
+        match self {
+            Self::Acp(harness) => harness.prompt(input).await,
+            Self::Native(harness) => harness.prompt(input).await,
+        }
+    }
+
+    async fn cancel(&mut self) -> HarnessResult<()> {
+        match self {
+            Self::Acp(harness) => harness.cancel().await,
+            Self::Native(harness) => harness.cancel().await,
+        }
+    }
+
+    async fn respond(&mut self, approval_id: ApprovalId, decision: Decision) -> HarnessResult<()> {
+        match self {
+            Self::Acp(harness) => harness.respond(approval_id, decision).await,
+            Self::Native(harness) => harness.respond(approval_id, decision).await,
+        }
+    }
+
+    async fn shutdown(&mut self) -> HarnessResult<()> {
+        match self {
+            Self::Acp(harness) => harness.shutdown().await,
+            Self::Native(harness) => harness.shutdown().await,
+        }
+    }
 }
 
 async fn read_turn(
@@ -1141,6 +1249,7 @@ async fn read_turn(
                     HarnessEvent::TurnError {
                         kind,
                         text: message.to_owned(),
+                        context: None,
                         stream_permit: None,
                     },
                 )
@@ -1285,11 +1394,7 @@ async fn publish_stream_event(
         ..
     } = &mut event
     {
-        if text.len() > MAX_STREAM_ERROR_BYTES {
-            let end = text.floor_char_boundary(MAX_STREAM_ERROR_BYTES - STREAM_ERROR_OMITTED.len());
-            text.truncate(end);
-            text.push_str(STREAM_ERROR_OMITTED);
-        }
+        crate::truncate_turn_error(text);
         let units = u32::try_from(text.len().div_ceil(STREAM_CHUNK_BYTES).max(1))
             .map_err(|_| HarnessError::Protocol("OpenCode error exceeds queue capacity".into()))?;
         let permit = capacity
@@ -2338,7 +2443,7 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn failed_native_record_cleanup_prevents_fallback()
+    async fn failed_native_record_cleanup_reports_the_cleanup_error()
     -> Result<(), Box<dyn std::error::Error>> {
         struct Tracker;
         #[async_trait]
@@ -2351,31 +2456,25 @@ mod tests {
             }
         }
         let directory = tempfile::tempdir()?;
-        let program = fixture_launcher(
-            directory.path(),
-            "#!/bin/sh\nif [ \"$1\" = acp ]; then printf fallback > fallback; fi\nexit 78\n",
-        )?;
+        let program = fixture_launcher(directory.path(), "#!/bin/sh\nexit 78\n")?;
         let spec = SpawnSpec {
             program,
             cwd: directory.path().to_path_buf(),
             ..Default::default()
         };
-        let mut harness = OpenCodeHarness::default();
+        let mut harness = OpenCodeNativeHarness::default();
         harness.set_process_tracker(Arc::new(Tracker));
         let error = harness
             .start(spec)
             .await
-            .expect_err("failed record cleanup must block fallback");
+            .expect_err("failed record cleanup must be reported");
         assert!(error.to_string().contains("fixture cleanup failure"));
-        assert!(harness.fallback.is_none());
-        assert!(!directory.path().join("fallback").exists());
         Ok(())
     }
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn process_record_failure_does_not_start_acp_fallback()
-    -> Result<(), Box<dyn std::error::Error>> {
+    async fn process_record_failure_stops_startup() -> Result<(), Box<dyn std::error::Error>> {
         struct FailingTracker;
         #[async_trait]
         impl crate::AgentProcessTracker for FailingTracker {
@@ -2387,25 +2486,26 @@ mod tests {
             }
         }
         let directory = tempfile::tempdir()?;
-        let program = fixture_launcher(
-            directory.path(),
-            "#!/bin/sh\nif [ \"$1\" = acp ]; then printf fallback > fallback; fi\nsleep 30\n",
-        )?;
+        let program = fixture_launcher(directory.path(), "#!/bin/sh\nsleep 30\n")?;
         let spec = SpawnSpec {
             program,
             cwd: directory.path().to_path_buf(),
             ..Default::default()
         };
-        let mut harness = OpenCodeHarness::default();
+        let mut harness = OpenCodeNativeHarness::default();
         harness.set_process_tracker(Arc::new(FailingTracker));
         let error = harness
             .start(spec)
             .await
             .expect_err("tracking failure must stop startup");
         assert!(error.to_string().contains("fixture save failure"));
-        assert!(harness.fallback.is_none());
-        assert!(!directory.path().join("fallback").exists());
         Ok(())
+    }
+
+    #[test]
+    fn acp_is_the_default_route_and_native_is_opt_in() {
+        assert_eq!(OpenCodeHarness::default().tier(), AdapterTier::Acp);
+        assert_eq!(OpenCodeHarness::native().tier(), AdapterTier::Native);
     }
 
     #[cfg(unix)]
@@ -2660,7 +2760,7 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn mode_discovery_hides_agent_failure_with_environment()
+    async fn mode_discovery_reports_agent_failure_in_detail()
     -> Result<(), Box<dyn std::error::Error>> {
         use std::os::unix::fs::PermissionsExt;
         let directory = tempfile::tempdir()?;
@@ -2680,8 +2780,8 @@ mod tests {
             Ok(_) => return Err("expected discovery failure".into()),
             Err(error) => error,
         };
-        assert!(!error.to_string().contains("fixture-private-value"));
-        assert!(error.to_string().contains("hidden"));
+        assert!(error.to_string().contains("invalid listener address"));
+        assert!(!error.to_string().contains("hidden"));
         Ok(())
     }
 
@@ -3026,6 +3126,7 @@ mod tests {
         let error = || HarnessEvent::TurnError {
             kind: FailureKind::Protocol,
             text: "failure".into(),
+            context: None,
             stream_permit: None,
         };
         publish_stream_event(&sender, &capacity, error()).await?;
@@ -3056,7 +3157,8 @@ mod tests {
             &capacity,
             HarnessEvent::TurnError {
                 kind: FailureKind::AgentRejected,
-                text: "界".repeat(MAX_STREAM_ERROR_BYTES),
+                text: "界".repeat(crate::MAX_TURN_ERROR_BYTES),
+                context: None,
                 stream_permit: None,
             },
         )
@@ -3064,14 +3166,15 @@ mod tests {
         let error = receiver.recv().await.ok_or("missing error")?;
         let HarnessEvent::TurnError {
             text,
+            context: None,
             stream_permit: Some(_),
             ..
         } = &error
         else {
             return Err("unexpected event".into());
         };
-        assert!(text.len() <= MAX_STREAM_ERROR_BYTES);
-        assert!(text.ends_with(STREAM_ERROR_OMITTED));
+        assert!(text.len() <= crate::MAX_TURN_ERROR_BYTES);
+        assert!(text.ends_with(crate::TURN_ERROR_OMITTED));
         assert_eq!(capacity.available_permits(), STREAM_BUFFER_CHUNKS - 8);
         drop(error);
         assert_eq!(capacity.available_permits(), STREAM_BUFFER_CHUNKS);
@@ -3258,22 +3361,14 @@ mod tests {
     }
 
     #[test]
-    fn mode_discovery_reports_both_failures_without_exposing_environment() {
-        let failures = || {
-            (
-                Err(HarnessError::Protocol("discovery secret".into())),
-                Err(HarnessError::Protocol("cleanup secret".into())),
-            )
-        };
-        let (modes, shutdown) = failures();
-        let error =
-            finish_mode_discovery(modes, shutdown, false).expect_err("both operations fail");
-        assert!(error.to_string().contains("discovery secret"));
-        assert!(error.to_string().contains("cleanup secret"));
-        let (modes, shutdown) = failures();
-        let error = finish_mode_discovery(modes, shutdown, true).expect_err("both operations fail");
-        assert!(!error.to_string().contains("secret"));
-        assert!(error.to_string().contains("cleanup failed"));
+    fn mode_discovery_reports_both_failures_in_detail() {
+        let (modes, shutdown) = (
+            Err(HarnessError::Protocol("discovery detail".into())),
+            Err(HarnessError::Protocol("cleanup detail".into())),
+        );
+        let error = finish_mode_discovery(modes, shutdown).expect_err("both operations fail");
+        assert!(error.to_string().contains("discovery detail"));
+        assert!(error.to_string().contains("cleanup detail"));
     }
 
     #[cfg(unix)]
@@ -3315,7 +3410,7 @@ mod tests {
             std::future::pending::<()>().await;
             Ok::<_, Box<dyn std::error::Error + Send + Sync>>(())
         });
-        let start = tokio::spawn(async move { OpenCodeHarness::default().start(spec).await });
+        let start = tokio::spawn(async move { OpenCodeNativeHarness::default().start(spec).await });
         timeout(Duration::from_secs(5), wait_for_subscription).await??;
         start.abort();
         assert!(start.await.is_err_and(|error| error.is_cancelled()));
@@ -3559,7 +3654,7 @@ exec sleep 60
         };
         let fixture = serve_native_fixture(listener, &directory, false, None, None, 0);
         let client = async {
-            let mut harness = OpenCodeHarness::default();
+            let mut harness = OpenCodeNativeHarness::default();
             let tracker = Arc::new(Tracker {
                 pid: Mutex::new(None),
                 fail_clear: AtomicBool::new(true),
@@ -3642,7 +3737,7 @@ exec sleep 60
         };
         let fixture = serve_native_fixture(listener, &directory, true, None, None, 0);
         let client = async {
-            let mut harness = OpenCodeHarness::default();
+            let mut harness = OpenCodeNativeHarness::default();
             harness.set_process_tracker(Arc::new(Tracker(AtomicBool::new(true))));
             harness.start(spec).await?;
             harness.open_session(None).await?;
@@ -3717,7 +3812,7 @@ exec sleep 60
             0,
         );
         let client = async {
-            let mut harness = OpenCodeHarness::default();
+            let mut harness = OpenCodeNativeHarness::default();
             harness.start(spec).await?;
             harness.open_session(None).await?;
             let mut prompt =
@@ -3789,7 +3884,7 @@ exec sleep 60
             0,
         );
         let client = async {
-            let mut harness = OpenCodeHarness::default();
+            let mut harness = OpenCodeNativeHarness::default();
             harness.start(spec).await?;
             harness.open_session(None).await?;
             harness
@@ -3877,7 +3972,7 @@ exec sleep 60
             0,
         );
         let client = async {
-            let mut harness = OpenCodeHarness::default();
+            let mut harness = OpenCodeNativeHarness::default();
             harness.start(spec).await?;
             harness.open_session(None).await?;
             harness
@@ -3965,7 +4060,7 @@ exec sleep 60
             0,
         );
         let client = async {
-            let mut harness = OpenCodeHarness::default();
+            let mut harness = OpenCodeNativeHarness::default();
             harness.set_process_tracker(Arc::new(Tracker(AtomicBool::new(true))));
             harness.start(spec).await?;
             harness.open_session(None).await?;
@@ -4036,7 +4131,7 @@ exec sleep 60
         };
         let fixture = serve_native_fixture(listener, &directory, false, None, None, 1);
         let client = async {
-            let mut harness = OpenCodeHarness::default();
+            let mut harness = OpenCodeNativeHarness::default();
             harness.start(spec).await?;
             harness.open_session(None).await?;
             harness
@@ -4136,7 +4231,7 @@ exec sleep 60
             let gate = (mode == 3).then_some((started, released));
             let fixture = serve_native_fixture(listener, &directory, false, gate, None, mode);
             let client = async {
-                let mut harness = OpenCodeHarness::default();
+                let mut harness = OpenCodeNativeHarness::default();
                 if mode == 2 {
                     harness.set_process_tracker(Arc::new(Tracker(AtomicBool::new(true))));
                 }
@@ -4721,7 +4816,7 @@ exec sleep 60
             .iter()
             .find(|option| option.id == "plan")
             .ok_or("expected Plan before creating a session")?;
-        let mut harness = OpenCodeHarness::default();
+        let mut harness = OpenCodeNativeHarness::default();
         harness.start(spec.clone()).await?;
         assert_eq!(harness.tier(), AdapterTier::Native);
         let session = harness.open_session(None).await?;
@@ -4749,7 +4844,7 @@ exec sleep 60
         );
         harness.shutdown().await?;
 
-        let mut reopened = OpenCodeHarness::default();
+        let mut reopened = OpenCodeNativeHarness::default();
         reopened.start(spec).await?;
         assert_eq!(reopened.open_session(Some(session.clone())).await?, session);
         assert_eq!(
@@ -4784,7 +4879,7 @@ exec sleep 60
         std::fs::write(&path, STANDARD.decode(FIXTURE_PNG)?)?;
         let provider = tokio::spawn(serve_fixture_model(listener, FixtureModel::Image));
         let outcome = async {
-            let mut harness = OpenCodeHarness::default();
+            let mut harness = OpenCodeNativeHarness::default();
             assert!(harness.start(spec).await?.images);
             assert_eq!(harness.tier(), AdapterTier::Native);
             harness.open_session(None).await?;
@@ -4870,7 +4965,7 @@ exec sleep 60
         let provider = tokio::spawn(serve_fixture_model(listener, model));
         let unauthorized = matches!(model, FixtureModel::Unauthorized);
         let outcome = async {
-            let mut harness = OpenCodeHarness::default();
+            let mut harness = OpenCodeNativeHarness::default();
             harness.start(spec).await?;
             assert_eq!(harness.tier(), AdapterTier::Native);
             harness.open_session(None).await?;
@@ -4920,12 +5015,12 @@ exec sleep 60
         let spec = installed_provider_spec(root.path(), &listener)?;
         let provider = tokio::spawn(serve_fixture_model(listener, FixtureModel::Shell));
         let outcome = async {
-            let mut first = OpenCodeHarness::default();
+            let mut first = OpenCodeNativeHarness::default();
             assert!(first.start(spec.clone()).await?.resume);
             let session = first.open_session(None).await?;
             first.shutdown().await?;
 
-            let mut reopened = OpenCodeHarness::default();
+            let mut reopened = OpenCodeNativeHarness::default();
             let capabilities = reopened.start(spec).await?;
             assert_eq!(reopened.tier(), AdapterTier::Native);
             assert!(capabilities.approvals && capabilities.cancel);
@@ -4990,7 +5085,7 @@ exec sleep 60
     }
 
     #[cfg(feature = "live-opencode")]
-    async fn fixture_approval(harness: &mut OpenCodeHarness) -> HarnessResult<ApprovalId> {
+    async fn fixture_approval(harness: &mut OpenCodeNativeHarness) -> HarnessResult<ApprovalId> {
         timeout(REQUEST_TIMEOUT, async {
             while let Some(event) = harness.events().recv().await {
                 match event {
@@ -5023,7 +5118,7 @@ exec sleep 60
 
     #[cfg(feature = "live-opencode")]
     async fn fixture_outcome(
-        harness: &mut OpenCodeHarness,
+        harness: &mut OpenCodeNativeHarness,
         expected: TurnFinishReason,
     ) -> HarnessResult<Vec<HarnessEvent>> {
         let mut events = Vec::new();
@@ -5051,7 +5146,7 @@ exec sleep 60
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn falls_back_to_acp_and_streams_a_turn() -> Result<(), Box<dyn std::error::Error>> {
+    async fn acp_is_the_default_and_streams_a_turn() -> Result<(), Box<dyn std::error::Error>> {
         struct Tracker {
             starts: std::sync::atomic::AtomicUsize,
             stops: std::sync::atomic::AtomicUsize,
@@ -5103,14 +5198,7 @@ done
         harness.set_process_tracker(tracker.clone());
         harness.start(spec).await?;
         assert_eq!(harness.tier(), AdapterTier::Acp);
-        let diagnostics = harness.diagnostics();
-        assert!(diagnostics.command.ends_with(" acp"));
-        assert!(
-            diagnostics
-                .fallback_reason
-                .as_deref()
-                .is_some_and(|reason| reason.contains("native server unavailable"))
-        );
+        assert!(harness.diagnostics().command.ends_with(" acp"));
         assert_eq!(harness.open_session(None).await?.as_str(), "fixture");
         let transcript = fixture_reply(&mut harness).await?;
         assert_eq!(
@@ -5118,15 +5206,14 @@ done
             Some("agent: ACP fixture reply")
         );
         harness.shutdown().await?;
-        assert_eq!(tracker.starts.load(Ordering::SeqCst), 2);
-        assert_eq!(tracker.stops.load(Ordering::SeqCst), 2);
+        assert_eq!(tracker.starts.load(Ordering::SeqCst), 1);
+        assert_eq!(tracker.stops.load(Ordering::SeqCst), 1);
         Ok(())
     }
 
     #[cfg(all(unix, feature = "live-opencode"))]
     #[tokio::test]
-    async fn installed_harness_falls_back_to_acp_and_loads_a_session()
-    -> Result<(), Box<dyn std::error::Error>> {
+    async fn installed_harness_loads_an_acp_session() -> Result<(), Box<dyn std::error::Error>> {
         let root = tempfile::tempdir()?;
         let mut spec = installed_fixture_spec(root.path())?;
         let launcher = fixture_launcher(
@@ -5148,7 +5235,7 @@ done
         Ok(())
     }
 
-    async fn fixture_reply(harness: &mut OpenCodeHarness) -> HarnessResult<crate::Transcript> {
+    async fn fixture_reply(harness: &mut dyn AgentHarness) -> HarnessResult<crate::Transcript> {
         harness
             .prompt(PromptInput::text("Reply with local fixture text only"))
             .await?;

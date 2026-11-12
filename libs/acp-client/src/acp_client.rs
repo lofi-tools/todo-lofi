@@ -61,8 +61,22 @@ pub enum AcpError {
     TransportClosed(String),
     #[error("agent protocol error: {0}")]
     Protocol(String),
+    /// The agent rejected the request and named the cause itself. `message` is
+    /// the agent's own text; `context` is the JSON-RPC message that framed it.
+    #[error("agent protocol error: {context}: {message}")]
+    AgentReported { message: String, context: String },
     #[error("the agent process exited{code}: {stderr}")]
     Exited { code: String, stderr: String },
+}
+
+impl AcpError {
+    /// The agent's own explanation, when the failure carries one.
+    pub fn agent_message(&self) -> Option<&str> {
+        match self {
+            Self::AgentReported { message, .. } => Some(message),
+            _ => None,
+        }
+    }
 }
 
 impl From<acp::Error> for AcpError {
@@ -72,9 +86,39 @@ impl From<acp::Error> for AcpError {
         } else if acp::is_incoming_transport_closed(&error) {
             AcpError::TransportClosed(error.message)
         } else {
-            AcpError::Protocol(error.message)
+            match agent_message(&error) {
+                Some(message) => AcpError::AgentReported {
+                    message,
+                    context: error.message,
+                },
+                None => AcpError::Protocol(error.message),
+            }
         }
     }
+}
+
+/// Agents such as opencode report the useful cause in the JSON-RPC `data`
+/// payload and leave `message` as a generic "Internal error".
+fn agent_message(error: &acp::Error) -> Option<String> {
+    fn find(value: &serde_json::Value) -> Option<&str> {
+        match value {
+            serde_json::Value::String(text) => Some(text),
+            serde_json::Value::Object(fields) => ["message", "error", "detail", "reason"]
+                .iter()
+                .find_map(|key| fields.get(*key).and_then(find)),
+            serde_json::Value::Array(items) => items.iter().find_map(find),
+            _ => None,
+        }
+    }
+    let message = match &error.data {
+        Some(data) => find(data)?,
+        None => return None,
+    };
+    let message = message.trim();
+    if message.is_empty() || message == error.message {
+        return None;
+    }
+    Some(message.to_owned())
 }
 
 /// Everything the UI learns from a running agent, in one stream so ordering is
@@ -281,5 +325,29 @@ impl SessionSpec {
         let cwd = existing.next()?;
         let additional = existing.collect();
         Some((cwd, additional))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn json_rpc_data_carries_the_agent_message() {
+        let error = acp::Error::new(-32603, "Internal error")
+            .data(serde_json::json!({ "message": "Insufficient credits." }));
+        let error = AcpError::from(error);
+        assert_eq!(error.agent_message(), Some("Insufficient credits."));
+        assert_eq!(
+            error.to_string(),
+            "agent protocol error: Internal error: Insufficient credits."
+        );
+    }
+
+    #[test]
+    fn a_json_rpc_error_without_agent_detail_keeps_the_protocol_message() {
+        let error = AcpError::from(acp::Error::new(-32601, "Method not found"));
+        assert_eq!(error.agent_message(), None);
+        assert_eq!(error.to_string(), "agent protocol error: Method not found");
     }
 }

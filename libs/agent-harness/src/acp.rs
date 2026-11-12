@@ -29,13 +29,11 @@ use crate::{
     FileDiff, HarnessError, HarnessEvent, HarnessResult, ItemId, PlanRow, ProjectApprovalPolicy,
     PromptInput, SessionApproval, SessionId, SessionState, SpawnSpec, ToolCallId, ToolStatus,
     Transcript, TurnFinishReason, TurnId, bounded_command_output, command_line,
-    limit_command_output,
+    limit_command_output, publish, truncate_turn_error,
 };
 
 const SESSION_TIMEOUT: Duration = Duration::from_secs(15);
 const ERROR_QUEUE_CAPACITY: usize = 64;
-const MAX_TURN_ERROR_BYTES: usize = 64 * 1024;
-const ERROR_OMITTED: &str = "\n[… error details omitted …]";
 const MAX_EARLY_TERMINAL_BUFFERS: usize = 64;
 const MAX_RELEASED_TERMINALS: usize = 256;
 
@@ -645,6 +643,7 @@ async fn set_session_mode(
 }
 
 fn acp_error(error: AcpError) -> HarnessError {
+    let display = error.to_string();
     match error {
         AcpError::AgentNotFound { program } => HarnessError::MissingProgram { program },
         AcpError::AuthRequired(message) => HarnessError::Reported {
@@ -653,19 +652,19 @@ fn acp_error(error: AcpError) -> HarnessError {
         },
         AcpError::UnsupportedVersion { .. } => HarnessError::Reported {
             kind: FailureKind::UnsupportedVersion,
-            message: error.to_string(),
+            message: display,
         },
         AcpError::TransportClosed(message) => HarnessError::TransportClosed(message),
+        AcpError::AgentReported { message, .. } => HarnessError::AgentReported {
+            message,
+            context: display,
+        },
         other => protocol(other.to_string()),
     }
 }
 
 fn protocol(message: impl Into<String>) -> HarnessError {
     HarnessError::Protocol(message.into())
-}
-
-fn publish(sender: &mpsc::UnboundedSender<HarnessEvent>, event: HarnessEvent) -> HarnessResult<()> {
-    sender.send(event).map_err(|_| HarnessError::ChannelClosed)
 }
 
 enum Control {
@@ -958,37 +957,43 @@ async fn finish_turn(
     capacity: &Arc<Semaphore>,
     outcome: Result<StopReason, AcpError>,
 ) -> HarnessResult<TurnFinishReason> {
-    let (kind, mut text) = match outcome {
+    let (kind, mut text, mut context) = match outcome {
         Ok(StopReason::EndTurn) => return Ok(TurnFinishReason::Completed),
         Ok(StopReason::Cancelled) => return Ok(TurnFinishReason::Cancelled),
         Ok(StopReason::MaxTokens) => (
             FailureKind::AgentRejected,
             "The ACP agent reached its token limit".into(),
+            None,
         ),
         Ok(StopReason::MaxTurnRequests) => (
             FailureKind::AgentRejected,
             "The ACP agent reached its turn request limit".into(),
+            None,
         ),
         Ok(StopReason::Refusal) => (
             FailureKind::AgentRejected,
             "The ACP agent refused to continue".into(),
+            None,
         ),
         Ok(reason) => (
             FailureKind::AgentRejected,
             format!("The ACP agent stopped the turn ({reason:?})"),
+            None,
         ),
-        Err(error) => {
+                Err(error) => {
             let error = acp_error(error);
-            (
-                FailureKind::classify(&error).unwrap_or(FailureKind::Protocol),
-                error.to_string(),
-            )
+            let kind = FailureKind::classify(&error).unwrap_or(FailureKind::Protocol);
+            // The chat shows the agent's own words; the adapter wrappers stay in
+            // the diagnostic history.
+            match error.agent_message() {
+                Some(message) => (kind, message.to_owned(), Some(error.to_string())),
+                None => (kind, error.to_string(), None),
+            }
         }
     };
-    if text.len() > MAX_TURN_ERROR_BYTES {
-        let end = text.floor_char_boundary(MAX_TURN_ERROR_BYTES - ERROR_OMITTED.len());
-        text.truncate(end);
-        text.push_str(ERROR_OMITTED);
+    truncate_turn_error(&mut text);
+    if let Some(context) = &mut context {
+        truncate_turn_error(context);
     }
     let permit = capacity
         .clone()
@@ -1000,6 +1005,7 @@ async fn finish_turn(
         HarnessEvent::TurnError {
             kind,
             text,
+            context,
             stream_permit: Some(Arc::new(permit)),
         },
     )?;
@@ -1617,6 +1623,44 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn agent_reported_errors_keep_the_agent_message_and_the_adapter_context()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (sender, mut events) = mpsc::unbounded_channel();
+        let capacity = Arc::new(Semaphore::new(4));
+        let message = "Insufficient credits. This account never purchased credits.";
+        let result = finish_turn(
+            &sender,
+            &capacity,
+            Err(AcpError::AgentReported {
+                message: message.into(),
+                context: "Internal error".into(),
+            }),
+        )
+        .await?;
+        assert_eq!(result, TurnFinishReason::Failed);
+        let HarnessEvent::TurnError {
+            kind,
+            text,
+            context,
+            stream_permit: Some(_),
+            ..
+        } = events.recv().await.ok_or("missing error")?
+        else {
+            return Err("unexpected event".into());
+        };
+        assert_eq!(kind, FailureKind::AgentRejected);
+        assert_eq!(text, message);
+        assert_eq!(
+            context.as_deref(),
+            Some(
+                format!("adapter protocol error: agent protocol error: Internal error: {message}")
+                    .as_str()
+            )
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn turn_errors_are_bounded_and_wait_for_consumption()
     -> Result<(), Box<dyn std::error::Error>> {
         let (sender, mut events) = mpsc::unbounded_channel();
@@ -1624,7 +1668,9 @@ mod tests {
         let result = finish_turn(
             &sender,
             &capacity,
-            Err(AcpError::AuthRequired("界".repeat(MAX_TURN_ERROR_BYTES))),
+            Err(AcpError::AuthRequired(
+                "界".repeat(crate::MAX_TURN_ERROR_BYTES),
+            )),
         )
         .await?;
         assert_eq!(result, TurnFinishReason::Failed);
@@ -1632,6 +1678,7 @@ mod tests {
         let HarnessEvent::TurnError {
             kind,
             text,
+            context: None,
             stream_permit: Some(_),
             ..
         } = &first
@@ -1639,8 +1686,8 @@ mod tests {
             return Err("unexpected event".into());
         };
         assert_eq!(*kind, FailureKind::AuthRequired);
-        assert!(text.len() <= MAX_TURN_ERROR_BYTES);
-        assert!(text.ends_with(ERROR_OMITTED));
+        assert!(text.len() <= crate::MAX_TURN_ERROR_BYTES);
+        assert!(text.ends_with(crate::TURN_ERROR_OMITTED));
         let next = finish_turn(&sender, &capacity, Ok(StopReason::Refusal));
         tokio::pin!(next);
         assert!(
@@ -2557,6 +2604,7 @@ done
                     HarnessEvent::TurnError {
                         kind: FailureKind::AuthRequired,
                         text,
+                        context: None,
                         stream_permit: Some(_),
                     },
                 ) => {

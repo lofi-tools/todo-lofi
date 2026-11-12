@@ -3034,7 +3034,12 @@ impl Core {
                 let mut transcript = Transcript::default();
                 transcript.restore(carried);
                 if let Some(kind) = adapter_failure_kind(&error) {
-                    transcript.push_failure(kind, error.to_string(), Some(kind.hint().to_string()));
+                    transcript.push_failure(
+                        kind,
+                        error.to_string(),
+                        Some(kind.hint().to_string()),
+                        None,
+                    );
                 }
                 self.detached_transcripts
                     .insert(task_id.clone(), transcript);

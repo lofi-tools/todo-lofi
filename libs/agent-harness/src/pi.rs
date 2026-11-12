@@ -755,6 +755,7 @@ async fn pump_events(
                             "Pi exited while a turn was running ({code:?}): {}",
                             stderr.trim()
                         ),
+                        context: None,
                         stream_permit: None,
                     });
                 }
@@ -974,6 +975,7 @@ fn translate_record(
             outputs.push(HarnessEvent::TurnError {
                 kind: FailureKind::Protocol,
                 text,
+                context: None,
                 stream_permit: None,
             });
         }

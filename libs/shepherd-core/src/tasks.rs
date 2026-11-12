@@ -72,9 +72,9 @@ impl Agent {
 
     pub fn default_tier(self) -> AgentTier {
         match self {
-            Self::Claude => AgentTier::Acp,
+            Self::Claude | Self::OpenCode => AgentTier::Acp,
             Self::Freebuff => AgentTier::TerminalWrapper,
-            Self::Codex | Self::OpenCode | Self::Pi => AgentTier::Native,
+            Self::Codex | Self::Pi => AgentTier::Native,
         }
     }
 }

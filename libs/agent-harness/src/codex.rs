@@ -808,16 +808,15 @@ struct CodexEffort {
 }
 
 pub async fn project_models(spec: SpawnSpec) -> HarnessResult<CodexProjectModels> {
-    let hide_diagnostics = spec
-        .environment
-        .keys()
-        .any(|key| key != crate::PROCESS_TOKEN_ENV);
     let mut harness = CodexHarness::new();
     let mut discovery_group = None;
     let result = async {
         let directory = spec.cwd.display().to_string();
         let capabilities = harness.start(spec).await?;
-        discovery_group = harness.child.as_ref().map(|child| AppServerStartupGroup(Some(Arc::downgrade(child))));
+        discovery_group = harness
+            .child
+            .as_ref()
+            .map(|child| AppServerStartupGroup(Some(Arc::downgrade(child))));
         let config = harness
             .request("config/read", json!({ "cwd": directory }))
             .await;
@@ -833,12 +832,12 @@ pub async fn project_models(spec: SpawnSpec) -> HarnessResult<CodexProjectModels
                     .and_then(Value::as_str)
                     .map(str::to_owned);
             }
-            Err(error) => tracing::debug!(error = %crate::protect_discovery_error(error, hide_diagnostics), "could not read Codex project defaults"),
+            Err(error) => tracing::debug!(%error, "could not read Codex project defaults"),
         }
         if capabilities.model_picker {
             match harness.model_catalog().await {
                 Ok(models) => settings.models = models,
-                Err(error) => tracing::warn!(error = %crate::protect_discovery_error(error, hide_diagnostics), "could not list Codex models"),
+                Err(error) => tracing::warn!(%error, "could not list Codex models"),
             }
         }
         if settings.model.is_none() {
@@ -856,9 +855,8 @@ pub async fn project_models(spec: SpawnSpec) -> HarnessResult<CodexProjectModels
     if let Some(group) = &mut discovery_group {
         group.disarm();
     }
-    let settings =
-        result.map_err(|error| crate::protect_discovery_error(error, hide_diagnostics))?;
-    shutdown.map_err(|error| crate::protect_discovery_error(error, hide_diagnostics))?;
+    let settings = result?;
+    shutdown?;
     Ok(settings)
 }
 
@@ -2112,7 +2110,7 @@ fn spawn_exec_waiter(
                     Ok(status) => break status,
                     Err(error) => {
                         let text = format!("Could not wait for Codex exec to exit: {error}");
-                        if sender.send(HarnessEvent::TurnError { kind: FailureKind::Protocol, text: text.clone(), stream_permit: None }).is_err() {
+                        if sender.send(HarnessEvent::TurnError { kind: FailureKind::Protocol, text: text.clone(), context: None, stream_permit: None }).is_err() {
                             tracing::debug!("the core stopped listening to codex errors");
                         }
                         if wait_errors.send(text).is_err() {
@@ -2158,7 +2156,7 @@ fn spawn_exec_waiter(
                         protocol_error = Some(error);
                         if let Err(error) = stop(&mut child) {
                             let text = format!("Could not stop Codex exec after an output failure: {error}");
-                            if sender.send(HarnessEvent::TurnError { kind: FailureKind::Protocol, text, stream_permit: None }).is_err() {
+                            if sender.send(HarnessEvent::TurnError { kind: FailureKind::Protocol, text, context: None, stream_permit: None }).is_err() {
                                 tracing::debug!("the core stopped listening to codex errors");
                             }
                         } else {
@@ -2229,6 +2227,7 @@ fn spawn_exec_waiter(
                 .send(HarnessEvent::TurnError {
                     kind,
                     text,
+                    context: None,
                     stream_permit: None,
                 })
                 .is_err()
@@ -2241,6 +2240,7 @@ fn spawn_exec_waiter(
                 .send(HarnessEvent::TurnError {
                     kind: FailureKind::Protocol,
                     text: error.to_string(),
+                    context: None,
                     stream_permit: None,
                 })
                 .is_err()
@@ -3436,6 +3436,7 @@ async fn handle_notification(
                 events.push(HarnessEvent::TurnError {
                     kind: FailureKind::Protocol,
                     text: "Codex completed the turn without a recognized status.".into(),
+                    context: None,
                     stream_permit: None,
                 });
                 TurnFinishReason::Failed
@@ -3590,6 +3591,7 @@ fn codex_turn_error(error: &Value) -> Option<HarnessEvent> {
     Some(HarnessEvent::TurnError {
         kind,
         text,
+        context: None,
         stream_permit: None,
     })
 }
@@ -3794,6 +3796,7 @@ mod tests {
         assert!(matches!(
             &error,
             HarnessEvent::TurnError {
+                context: None,
                 stream_permit: Some(_),
                 ..
             }
@@ -3880,6 +3883,7 @@ mod tests {
             state.turn_error = Some(HarnessEvent::TurnError {
                 kind: FailureKind::Protocol,
                 text: "original failure".into(),
+                context: None,
                 stream_permit: None,
             });
         }
@@ -5860,7 +5864,7 @@ esac
     }
 
     #[tokio::test]
-    async fn model_discovery_hides_agent_failure_with_environment()
+    async fn model_discovery_reports_agent_failure_in_detail()
     -> Result<(), Box<dyn std::error::Error>> {
         let directory = TempDir::new()?;
         let stub = write_stub(
@@ -5876,8 +5880,7 @@ esac
             Ok(_) => return Err("expected discovery failure".into()),
             Err(error) => error,
         };
-        assert!(!error.to_string().contains("fixture-private-value"));
-        assert!(error.to_string().contains("hidden"));
+        assert!(error.to_string().contains("fixture-private-value"));
         Ok(())
     }
 

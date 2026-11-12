@@ -24,7 +24,7 @@ import { FreebuffPane, TerminalPane, type TerminalCommands } from './TerminalPan
 import { TaskSearch } from './TaskSearch'
 import { DeleteTaskDialog, ReviewArchiveDialog, TaskRows } from './TaskRows'
 import { ErrorNotifications } from './ErrorNotifications'
-import { reportError } from './diagnostics'
+import { recordDiagnostic, reportError } from './diagnostics'
 
 type CoreEvent = bridge.Event
 type TerminalBell = Extract<CoreEvent, { type: 'terminalBell' }>['data']
@@ -1322,6 +1322,22 @@ export function App() {
     }
   }
 
+  const recordedFailures = new Set<string>()
+
+  // The chat shows the agent's own words; the adapter's framing of the same
+  // failure belongs in the diagnostic history.
+  function recordFailureContexts(taskWorkspace: bridge.TaskWorkspace) {
+    for (const entry of taskWorkspace.transcript) {
+      if (entry.kind.type !== 'failure') continue
+      const { context, text } = entry.kind.data
+      if (!context) continue
+      const key = `${taskWorkspace.task.id}:${entry.id}`
+      if (recordedFailures.has(key)) continue
+      recordedFailures.add(key)
+      recordDiagnostic('agent turn', text, context)
+    }
+  }
+
   function handleEvent(event: CoreEvent) {
     if (resyncUpdates) {
       switch (event.type) {
@@ -1361,6 +1377,7 @@ export function App() {
         break
       }
       case 'taskWorkspaceChanged':
+        recordFailureContexts(event.data)
         if (event.data.task.id === selectedTaskId()) setWorkspace(event.data)
         break
       case 'taskNeedsInput': {

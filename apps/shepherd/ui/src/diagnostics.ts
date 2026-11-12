@@ -61,6 +61,13 @@ export function reportError(operation: string, error: unknown) {
   void nativeInvoke('record_diagnostic', { record }).catch((failure) => console.error('Could not persist diagnostic', failure))
 }
 
+export function recordDiagnostic(operation: string, message: string, details: string) {
+  const record: Diagnostic = {
+    id: crypto.randomUUID(), time: new Date().toISOString(), operation, message, details,
+  }
+  void nativeInvoke('record_diagnostic', { record }).catch((failure) => console.error('Could not persist diagnostic', failure))
+}
+
 export function diagnosticHistory(): Promise<Diagnostic[]> {
   return nativeInvoke('diagnostic_history')
 }

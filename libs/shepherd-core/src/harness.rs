@@ -22,8 +22,6 @@ use crate::store::{ProjectApproval, Store, checksum};
 use crate::{Agent, AgentTier, CoreError, ProjectId, Task};
 
 pub(crate) const MAX_EVENTS_PER_PUMP: usize = 256;
-const HIDDEN_DIAGNOSTIC: &str =
-    "Agent diagnostic output is hidden because launch environment values are configured.";
 
 fn present(value: String) -> Option<String> {
     (!value.is_empty()).then_some(value)
@@ -180,7 +178,6 @@ pub struct HarnessSession {
     closed: bool,
     cleanup_complete: bool,
     pending_event: Option<HarnessEvent>,
-    hide_diagnostics: bool,
 }
 
 impl HarnessSession {
@@ -200,7 +197,6 @@ impl HarnessSession {
             closed: false,
             cleanup_complete: false,
             pending_event: None,
-            hide_diagnostics: false,
         }
     }
 
@@ -213,12 +209,7 @@ impl HarnessSession {
     }
 
     pub async fn start(&mut self, spec: SpawnSpec) -> Result<Capabilities, CoreError> {
-        self.hide_diagnostics = !spec.environment.is_empty();
-        self.capabilities = self
-            .harness
-            .start(spec)
-            .await
-            .map_err(|error| self.safe_error(error))?;
+        self.capabilities = self.harness.start(spec).await?;
         Ok(self.capabilities.clone())
     }
 
@@ -227,11 +218,7 @@ impl HarnessSession {
         resume: Option<SessionId>,
     ) -> Result<SessionId, CoreError> {
         let fresh = resume.is_none();
-        let session_id = self
-            .harness
-            .open_session(resume)
-            .await
-            .map_err(|error| self.safe_error(error))?;
+        let session_id = self.harness.open_session(resume).await?;
         let replay = self.harness.take_replayed_transcript();
         if fresh {
             // An adapter can reuse item IDs in a fresh session.
@@ -264,10 +251,7 @@ impl HarnessSession {
         if self.closed {
             return Err(HarnessError::ModeUnavailable.into());
         }
-        self.harness
-            .set_mode(mode)
-            .await
-            .map_err(|error| self.safe_error(error))?;
+        self.harness.set_mode(mode).await?;
         self.capabilities.mode_picker = self.modes().is_some();
         Ok(self.pump())
     }
@@ -275,10 +259,7 @@ impl HarnessSession {
     /// Record the user's prompt, ask the adapter, then fold an available event batch.
     pub async fn prompt(&mut self, mut input: PromptInput) -> Result<Vec<HarnessEvent>, CoreError> {
         if let Some(mode) = input.mode.take() {
-            self.harness
-                .set_mode(&mode)
-                .await
-                .map_err(|error| self.safe_error(error))?;
+            self.harness.set_mode(&mode).await?;
             self.capabilities.mode_picker = self.modes().is_some();
         }
         // Completed messages stay separate even if the adapter reuses an item ID.
@@ -292,10 +273,7 @@ impl HarnessSession {
             .transcript
             .push_user_message_with_attachments(input.text.clone(), attachments);
         self.track_entry(change);
-        self.harness
-            .prompt(input)
-            .await
-            .map_err(|error| self.safe_error(error))?;
+        self.harness.prompt(input).await?;
         Ok(self.pump())
     }
 
@@ -304,10 +282,7 @@ impl HarnessSession {
             return Err(HarnessError::CancelUnavailable.into());
         }
         if !self.failed && !self.closed && !self.cancelling {
-            self.harness
-                .cancel()
-                .await
-                .map_err(|error| self.safe_error(error))?;
+            self.harness.cancel().await?;
             self.cancelling = true;
         }
         Ok(self.pump())
@@ -318,10 +293,7 @@ impl HarnessSession {
         approval_id: ApprovalId,
         decision: Decision,
     ) -> Result<Vec<HarnessEvent>, CoreError> {
-        self.harness
-            .respond(approval_id, decision)
-            .await
-            .map_err(|error| self.safe_error(error))?;
+        self.harness.respond(approval_id, decision).await?;
         Ok(self.pump())
     }
 
@@ -351,10 +323,7 @@ impl HarnessSession {
             .into());
         }
         self.answering_questions.insert(question_id.to_owned());
-        self.harness
-            .answer_question(question_id, answer)
-            .await
-            .map_err(|error| self.safe_error(error))?;
+        self.harness.answer_question(question_id, answer).await?;
         Ok(self.pump())
     }
 
@@ -367,10 +336,7 @@ impl HarnessSession {
 
     pub async fn reset_session_approval(&mut self, id: &str) -> Result<(), CoreError> {
         if !self.closed {
-            self.harness
-                .reset_session_approval(id)
-                .await
-                .map_err(|error| self.safe_error(error))?;
+            self.harness.reset_session_approval(id).await?;
         }
         Ok(())
     }
@@ -379,10 +345,7 @@ impl HarnessSession {
         if self.cleanup_complete {
             return Ok(Vec::new());
         }
-        self.harness
-            .shutdown()
-            .await
-            .map_err(|error| self.safe_error(error))?;
+        self.harness.shutdown().await?;
         self.cleanup_complete = true;
         self.closed = true;
         self.pending_approval = None;
@@ -406,27 +369,13 @@ impl HarnessSession {
     fn pump_with_limit(&mut self, limit: usize) -> Vec<HarnessEvent> {
         let mut events = Vec::new();
         while events.len() < limit {
-            let Some(mut event) = self
+            let Some(event) = self
                 .pending_event
                 .take()
                 .or_else(|| self.harness.events().try_recv().ok())
             else {
                 break;
             };
-            if self.hide_diagnostics {
-                match &mut event {
-                    HarnessEvent::Exited { stderr, .. } if !stderr.is_empty() => {
-                        *stderr = HIDDEN_DIAGNOSTIC.into()
-                    }
-                    HarnessEvent::ConnectionFailed { text, .. }
-                    | HarnessEvent::TurnError { text, .. }
-                    | HarnessEvent::ApprovalPolicyError { text }
-                    | HarnessEvent::AgentTerminalError { text, .. } => {
-                        *text = HIDDEN_DIAGNOSTIC.into()
-                    }
-                    _ => {}
-                }
-            }
             match &event {
                 HarnessEvent::AgentTerminalStarted { id, title, .. } => {
                     self.capabilities.agent_terminals = true;
@@ -689,7 +638,7 @@ impl HarnessSession {
         detail: Option<String>,
     ) {
         self.failed = true;
-        let change = self.transcript.push_failure(kind, text, detail);
+        let change = self.transcript.push_failure(kind, text, detail, None);
         if let Some(index) = change.changed {
             let diagnostics = self.harness.diagnostics();
             self.transcript.set_failure_context(
@@ -718,29 +667,7 @@ impl HarnessSession {
     }
 
     pub fn diagnostics(&self) -> AgentDiagnostics {
-        let mut diagnostics = self.harness.diagnostics();
-        if self.hide_diagnostics {
-            if !diagnostics.stderr_tail.is_empty() {
-                diagnostics.stderr_tail = HIDDEN_DIAGNOSTIC.into();
-            }
-            if diagnostics.fallback_reason.is_some() {
-                diagnostics.fallback_reason = Some(HIDDEN_DIAGNOSTIC.into());
-            }
-        }
-        diagnostics
-    }
-
-    fn safe_error(&self, error: HarnessError) -> HarnessError {
-        if self.hide_diagnostics
-            && let Some(kind) = FailureKind::classify(&error)
-        {
-            HarnessError::Reported {
-                kind,
-                message: HIDDEN_DIAGNOSTIC.into(),
-            }
-        } else {
-            error
-        }
+        self.harness.diagnostics()
     }
 
     pub fn tier(&self) -> AgentTier {
@@ -2018,7 +1945,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn configured_environment_hides_agent_diagnostic_output()
+    async fn configured_environment_keeps_agent_diagnostic_output()
     -> Result<(), Box<dyn std::error::Error>> {
         let directory = TestDirectory::new()?;
         let turn = FakeTurn::new(vec![
@@ -2046,15 +1973,15 @@ mod tests {
             .await?;
         session.open_session(None).await?;
         let events = session.prompt(PromptInput::text("go")).await?;
-        assert!(events.iter().any(|event| matches!(event, HarnessEvent::TurnError { text, .. } if text == HIDDEN_DIAGNOSTIC)));
-        assert!(events.iter().any(|event| matches!(event, HarnessEvent::Exited { stderr, .. } if stderr == HIDDEN_DIAGNOSTIC)));
-        assert!(events.iter().any(|event| matches!(event, HarnessEvent::AgentTerminalError { text, .. } if text == HIDDEN_DIAGNOSTIC)));
-        assert!(!format!("{events:?}").contains("fixture-private-value"));
-        let error = session.safe_error(HarnessError::TransportClosed(
-            "fixture-private-value".into(),
+        assert!(events.iter().any(
+            |event| matches!(event, HarnessEvent::TurnError { text, .. } if text == "fixture-private-value")
         ));
-        assert!(!error.to_string().contains("fixture-private-value"));
-        assert_eq!(FailureKind::classify(&error), Some(FailureKind::Protocol));
+        assert!(events.iter().any(
+            |event| matches!(event, HarnessEvent::Exited { stderr, .. } if stderr == "fixture-private-value")
+        ));
+        assert!(events.iter().any(
+            |event| matches!(event, HarnessEvent::AgentTerminalError { text, .. } if text == "fixture-private-value")
+        ));
         Ok(())
     }
 

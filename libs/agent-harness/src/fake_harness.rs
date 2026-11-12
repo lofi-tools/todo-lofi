@@ -220,6 +220,7 @@ impl FakeHarness {
                     self.send(HarnessEvent::TurnError {
                         kind: *kind,
                         text: text.clone(),
+                        context: None,
                         stream_permit: None,
                     })?;
                 }
@@ -747,6 +748,7 @@ mod tests {
             FailureKind::MissingBinary,
             "the `codex` program was not found",
             Some(FailureKind::MissingBinary.hint().to_string()),
+            None,
         );
         assert_eq!(
             transcript.entry(0).map(Entry::summary),
