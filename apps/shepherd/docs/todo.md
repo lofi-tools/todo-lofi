@@ -424,7 +424,9 @@ Tasks:
       disconnect notice and launcher update/restart notices during replay; a
       warning remains recorded after a later reconnect screen, but its absence
       never establishes readiness or compatibility. It is not yet connected to
-      the live adapter.
+      the live adapter. Offline inspection of the prior incomplete live capture
+      verified its 16 screen frames and detected the actual disconnect; no
+      worktree effects were applied and the capture remains incomplete.
       Verified screen replay now exposes each reconstructed frame and
       its capture timestamp in order to a visitor, which must defer external
       effects until replay succeeds. Connect it to versioned Freebuff screen fixtures, the screen

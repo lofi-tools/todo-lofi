@@ -183,7 +183,15 @@ pub fn visit_verified_screens(
 
 #[allow(dead_code)]
 pub fn verify_unfinished_screens(path: &std::path::Path) -> agent_harness::HarnessResult<()> {
-    verify_screens(path, false, |_, _| Ok(()))
+    visit_unfinished_screens(path, |_, _| Ok(()))
+}
+
+/// Inspect verified frames from an incomplete capture without applying effects.
+pub fn visit_unfinished_screens(
+    path: &std::path::Path,
+    visit: impl FnMut(u64, TerminalFrame) -> agent_harness::HarnessResult<()>,
+) -> agent_harness::HarnessResult<()> {
+    verify_screens(path, false, visit)
 }
 
 fn verify_screens(

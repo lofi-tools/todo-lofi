@@ -223,7 +223,10 @@ The ignored `replay_approved_freebuff_capture` diagnostic accepts
 `SHEPHERD_FREEBUFF_CAPTURE` and a clean disposable `SHEPHERD_FREEBUFF_WORKTREE`;
 it verifies the complete recording before applying its supported worktree
 effects. It makes no live agent call. Escaped descendant processes are not yet
-ruled out, so capture completeness remains limited by that check.
+ruled out, so capture completeness remains limited by that check. The ignored
+`inspect_unfinished_freebuff_capture` diagnostic uses
+`SHEPHERD_FREEBUFF_CAPTURE` to verify and inspect available frames without
+applying worktree effects or treating an incomplete recording as complete.
 
 For faithful replay, the capture records the terminal type and renderer version,
 and the process exit code or signal, distinguishing an operator-requested stop

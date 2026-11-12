@@ -1799,6 +1799,29 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(all(feature = "live-freebuff", unix))]
+    #[test]
+    #[ignore = "requires a private incomplete capture"]
+    fn inspect_unfinished_freebuff_capture() -> Result<(), Box<dyn std::error::Error>> {
+        let capture = std::env::var_os("SHEPHERD_FREEBUFF_CAPTURE")
+            .map(std::path::PathBuf::from)
+            .ok_or("missing SHEPHERD_FREEBUFF_CAPTURE")?;
+        let mut frames = 0usize;
+        let mut warnings = terminal_replay::FreebuffWarningTracker::default();
+        terminal_replay::visit_unfinished_screens(&capture, |_, frame| {
+            frames += 1;
+            warnings.observe(&frame)
+        })?;
+        if frames == 0 {
+            return Err("capture contains no screen frames".into());
+        }
+        eprintln!(
+            "Verified {frames} incomplete-capture frames; warning: {:?}",
+            warnings.warning()
+        );
+        Ok(())
+    }
+
     #[cfg(all(unix, feature = "git"))]
     #[tokio::test]
     async fn capture_runner_records_fake_cli_and_worktree_effects()
