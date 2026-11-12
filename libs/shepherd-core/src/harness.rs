@@ -951,7 +951,7 @@ pub(crate) fn capture_git_worktree_effects(
             )
             .into());
         }
-        reject_ignored_worktree_files(root)?;
+        inspect_ignored_worktree_files(root, true)?;
         let mut paths = BTreeSet::new();
         for entry in crate::git::GitService.status(root)? {
             if !entry.actionable {
@@ -968,6 +968,41 @@ pub(crate) fn capture_git_worktree_effects(
             paths.insert(PathBuf::from(entry.path));
             if let Some(original) = entry.original_path {
                 paths.insert(PathBuf::from(original));
+            }
+        }
+        let project_id = std::path::Path::new(".freebuff/project-id");
+        match std::fs::symlink_metadata(root.join(project_id)) {
+            Ok(_) => {
+                let status = std::process::Command::new("git")
+                    .arg("-C")
+                    .arg(root)
+                    .args(["--no-optional-locks", "check-ignore", "--quiet", "--"])
+                    .arg(project_id)
+                    .status()
+                    .map_err(|error| {
+                        HarnessError::Protocol(format!(
+                            "could not check Freebuff project metadata: {error}"
+                        ))
+                    })?;
+                match status.code() {
+                    Some(0) => {
+                        paths.insert(project_id.to_path_buf());
+                    }
+                    Some(1) => {}
+                    _ => {
+                        return Err(HarnessError::Protocol(format!(
+                            "could not check Freebuff project metadata: {status}"
+                        ))
+                        .into());
+                    }
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(HarnessError::Protocol(format!(
+                    "could not inspect Freebuff project metadata: {error}"
+                ))
+                .into());
             }
         }
         capture_worktree_effects_inner(root, &paths.into_iter().collect::<Vec<_>>(), capture)?;
@@ -992,20 +1027,30 @@ pub(crate) fn capture_git_worktree_effects(
 }
 
 fn reject_ignored_worktree_files(root: &std::path::Path) -> Result<(), CoreError> {
+    inspect_ignored_worktree_files(root, false)
+}
+
+fn inspect_ignored_worktree_files(
+    root: &std::path::Path,
+    allow_project_id: bool,
+) -> Result<(), CoreError> {
     use std::io::Read;
     use std::process::{Command, Stdio};
-    let mut child = Command::new("git")
-        .arg("-C")
-        .arg(root)
-        .args([
-            "--no-optional-locks",
-            "ls-files",
-            "--others",
-            "--ignored",
-            "--exclude-standard",
-            "--directory",
-            "-z",
-        ])
+    let mut command = Command::new("git");
+    command.arg("-C").arg(root).args([
+        "--no-optional-locks",
+        "ls-files",
+        "--others",
+        "--ignored",
+        "--exclude-standard",
+        "-z",
+    ]);
+    if allow_project_id {
+        command.args(["--", ".", ":(exclude).freebuff/project-id"]);
+    } else {
+        command.arg("--directory");
+    }
+    let mut child = command
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
@@ -1701,6 +1746,46 @@ mod tests {
         let records = read_capture(&cache.join(".cache/shepherd-live/freebuff/git-effects.jsonl"))?;
         assert!(records.iter().any(|record| matches!(&record.event, CaptureEvent::WorktreeFile { path, contents, .. } if path == std::path::Path::new("README.md") && contents == b"changed\n")));
         assert!(records.iter().any(|record| matches!(&record.event, CaptureEvent::WorktreeFile { path, contents, .. } if path == std::path::Path::new("new.txt") && contents == b"new\n")));
+        Ok(())
+    }
+
+    #[cfg(feature = "git")]
+    #[test]
+    #[cfg(unix)]
+    fn captures_and_replays_freebuff_project_id_without_other_ignored_files()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use crate::test_support::TestRepository;
+        let repository = TestRepository::new()?;
+        let cache = TestDirectory::new()?;
+        repository.write_file(".gitignore", ".freebuff/\n")?;
+        for arguments in [
+            ["add", ".gitignore"].as_slice(),
+            ["commit", "-m", "ignore"].as_slice(),
+        ] {
+            let status = std::process::Command::new("git")
+                .arg("-C")
+                .arg(repository.path())
+                .args(arguments)
+                .stdout(std::process::Stdio::null())
+                .status()?;
+            assert!(status.success());
+        }
+        let capture =
+            FreebuffLiveCapture::begin(cache.path(), repository.path().into(), "project-id")?;
+        repository.write_file(".freebuff/project-id", "fixture-id\n")?;
+        capture.finish_after_drain()?;
+        std::fs::remove_dir_all(repository.path().join(".freebuff"))?;
+        replay_worktree_effects(
+            repository.path(),
+            &cache.join(".cache/shepherd-live/freebuff/project-id.jsonl"),
+        )?;
+        assert_eq!(
+            std::fs::read(repository.path().join(".freebuff/project-id"))?,
+            b"fixture-id\n"
+        );
+
+        repository.write_file(".freebuff/other", "ignored secret")?;
+        assert!(inspect_ignored_worktree_files(repository.path(), true).is_err());
         Ok(())
     }
 

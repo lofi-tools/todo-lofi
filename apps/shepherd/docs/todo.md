@@ -316,7 +316,8 @@ Tasks:
       and file modes without following symlinks, invalidating unsupported or
       oversized captures. Its fixtures were outside shepherd-core shard 7/8.
       Git status now supplies tracked, untracked and rename paths; staged or
-      ignored files are rejected rather than omitted. The unstaged/untracked
+      ignored files other than Freebuff's project ID are rejected rather than
+      omitted. The unstaged/untracked
       discovery fixture passed in shepherd-core shard 1/8; the staged/ignored
       fixture remains unverified. Effect collection now compares HEAD,
       branch, index entries and index flags against a pre-run identity; its
@@ -369,8 +370,11 @@ Tasks:
         succeeded. Finalization failed because Freebuff created the ignored
         `.freebuff/project-id`, which the effect collector rejects. The capture
         remains incomplete and must not be replayed as a successful run until
-        those effects can be accounted for safely. Do not submit another live
-        message without separate approval.
+        those effects can be accounted for safely. The effect collector now
+        captures and replays that one ignored regular file, while still rejecting
+        other ignored files; an offline Git-backed fixture verifies the behavior.
+        This does not retroactively complete the failed recording. Do not submit
+        another live message without separate approval.
       - [ ] Investigate whether writing prompt text and Enter together submits
         reliably in Freebuff, including disconnected and reconnected states;
         reproduce offline from the capture before another live attempt.
