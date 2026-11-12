@@ -199,7 +199,23 @@ pub fn visit_unfinished_screen_changes(
     path: &std::path::Path,
     visit: impl FnMut(u64, &TerminalFrame) -> agent_harness::HarnessResult<()>,
 ) -> agent_harness::HarnessResult<()> {
-    use agent_harness::freebuff_capture::{CaptureEvent, visit_capture};
+    visit_screen_changes(path, false, visit)
+}
+
+/// The visitor must defer external effects until complete verification succeeds.
+pub fn visit_verified_screen_changes(
+    path: &std::path::Path,
+    visit: impl FnMut(u64, &TerminalFrame) -> agent_harness::HarnessResult<()>,
+) -> agent_harness::HarnessResult<()> {
+    visit_screen_changes(path, true, visit)
+}
+
+fn visit_screen_changes(
+    path: &std::path::Path,
+    complete: bool,
+    visit: impl FnMut(u64, &TerminalFrame) -> agent_harness::HarnessResult<()>,
+) -> agent_harness::HarnessResult<()> {
+    use agent_harness::freebuff_capture::{CaptureEvent, visit_capture, visit_complete_capture};
     use agent_harness::{HarnessError, HarnessResult};
     use terminal_renderer::RecordedScreenUpdate;
 
@@ -211,57 +227,65 @@ pub fn visit_unfinished_screen_changes(
     let mut replayer = None::<RecordedScreenReplayer>;
     let mut pending = None::<Pending>;
     let mut visit = visit;
-    visit_capture(path, |record| -> HarnessResult<()> {
-        if pending.is_some() && !matches!(&record.event, CaptureEvent::Screen { .. }) {
-            return Err(HarnessError::Protocol(
-                "terminal capture is missing a screen frame".into(),
-            ));
-        }
-        match record.event {
-            CaptureEvent::Resize { columns, rows } if replayer.is_none() => {
-                replayer = Some(RecordedScreenReplayer::new(columns, rows)?);
-            }
-            CaptureEvent::Resize { columns, rows } => {
-                pending = Some(Pending::Resize(columns, rows));
-            }
-            CaptureEvent::Output { bytes } if replayer.is_some() => {
-                pending = Some(Pending::Output(bytes));
-            }
-            CaptureEvent::Output { .. } => {
+    let mut process =
+        |record: agent_harness::freebuff_capture::CaptureRecord| -> HarnessResult<()> {
+            if pending.is_some() && !matches!(&record.event, CaptureEvent::Screen { .. }) {
                 return Err(HarnessError::Protocol(
-                    "terminal output has no initial size".into(),
+                    "terminal capture is missing a screen frame".into(),
                 ));
             }
-            CaptureEvent::Screen { state } => {
-                let update = match pending.take() {
-                    Some(Pending::Output(bytes)) => RecordedScreenUpdate::Output { bytes, state },
-                    Some(Pending::Resize(columns, rows)) => RecordedScreenUpdate::Resize {
-                        columns,
-                        rows,
-                        state,
-                    },
-                    None => {
-                        return Err(HarnessError::Protocol(
-                            "unexpected terminal screen frame".into(),
-                        ));
-                    }
-                };
-                replayer
-                    .as_mut()
-                    .ok_or_else(|| {
-                        HarnessError::Protocol("terminal screen has no initial size".into())
-                    })?
-                    .apply(&update, |frame| visit(record.elapsed_micros, frame))?;
+            match record.event {
+                CaptureEvent::Resize { columns, rows } if replayer.is_none() => {
+                    replayer = Some(RecordedScreenReplayer::new(columns, rows)?);
+                }
+                CaptureEvent::Resize { columns, rows } => {
+                    pending = Some(Pending::Resize(columns, rows));
+                }
+                CaptureEvent::Output { bytes } if replayer.is_some() => {
+                    pending = Some(Pending::Output(bytes));
+                }
+                CaptureEvent::Output { .. } => {
+                    return Err(HarnessError::Protocol(
+                        "terminal output has no initial size".into(),
+                    ));
+                }
+                CaptureEvent::Screen { state } => {
+                    let update = match pending.take() {
+                        Some(Pending::Output(bytes)) => {
+                            RecordedScreenUpdate::Output { bytes, state }
+                        }
+                        Some(Pending::Resize(columns, rows)) => RecordedScreenUpdate::Resize {
+                            columns,
+                            rows,
+                            state,
+                        },
+                        None => {
+                            return Err(HarnessError::Protocol(
+                                "unexpected terminal screen frame".into(),
+                            ));
+                        }
+                    };
+                    replayer
+                        .as_mut()
+                        .ok_or_else(|| {
+                            HarnessError::Protocol("terminal screen has no initial size".into())
+                        })?
+                        .apply(&update, |frame| visit(record.elapsed_micros, frame))?;
+                }
+                CaptureEvent::Complete if !complete => {
+                    return Err(HarnessError::Protocol(
+                        "terminal capture was already completed".into(),
+                    ));
+                }
+                _ => {}
             }
-            CaptureEvent::Complete => {
-                return Err(HarnessError::Protocol(
-                    "terminal capture was already completed".into(),
-                ));
-            }
-            _ => {}
-        }
-        Ok(())
-    })?;
+            Ok(())
+        };
+    if complete {
+        visit_complete_capture(path, &mut process)?;
+    } else {
+        visit_capture(path, &mut process)?;
+    }
     if pending.is_some() {
         return Err(HarnessError::Protocol(
             "terminal capture is missing a screen frame".into(),
@@ -444,11 +468,18 @@ mod tests {
             warnings.warning(),
             Some(FreebuffScreenWarning::Disconnected)
         );
+        assert!(visit_verified_screen_changes(&path, |_, _| Ok(())).is_err());
         writer.append(&CaptureRecord {
             elapsed_micros: 100,
             event: CaptureEvent::Complete,
         })?;
         assert!(visit_unfinished_screen_changes(&path, |_, _| Ok(())).is_err());
+        let mut warnings = FreebuffWarningTracker::default();
+        visit_verified_screen_changes(&path, |_, frame| warnings.observe(frame))?;
+        assert_eq!(
+            warnings.warning(),
+            Some(FreebuffScreenWarning::Disconnected)
+        );
         Ok(())
     }
 
