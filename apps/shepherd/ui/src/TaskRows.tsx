@@ -1,6 +1,7 @@
 import { For, Show, createSignal, onCleanup, onMount } from 'solid-js'
 
 import type { TaskSummary } from './bridge'
+import { WaitingIcon } from './ProjectRow'
 
 export function TaskRows(props: {
   tasks: TaskSummary[]
@@ -9,6 +10,7 @@ export function TaskRows(props: {
   disabled?: boolean
   mac: boolean
   needsTerminalAttention: (taskId: string) => boolean
+  isOutputUnread: (taskId: string) => boolean
   onOpen: (task: TaskSummary) => void
   onSelect: (taskId: string, extend: boolean) => void
 }) {
@@ -38,9 +40,13 @@ export function TaskRows(props: {
                 <Show when={props.needsTerminalAttention(task.id)}>
                   <span class="terminal-attention" role="img" aria-label="Terminal needs attention" />
                 </Show>
-                <Show when={task.state === 'review' || task.state === 'waiting'}
-                  fallback={<span class="task__state-label">{task.state}</span>}>
-                  <span class="task__attention-badge">{task.state === 'review' ? 'Needs review' : 'Needs input'}</span>
+                <Show when={props.isOutputUnread(task.id)}>
+                  <span class="task__unread" role="img" aria-label="Unread output" />
+                </Show>
+                <Show when={task.state === 'review' || task.state === 'waiting'}>
+                  <Show when={task.state === 'review'} fallback={<WaitingIcon />}>
+                    <span class="task__attention-badge">Needs review</span>
+                  </Show>
                 </Show>
               </button>
             </li>

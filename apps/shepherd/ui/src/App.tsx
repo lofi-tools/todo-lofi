@@ -14,6 +14,7 @@ import { CommandPalette, type PaletteEntry } from './CommandPalette'
 import { displayChord, normalizeChord } from './keybindings'
 import { ComposerInput } from './ComposerInput'
 import { FilesPane } from './FilesPane'
+import { Markdown } from './Markdown'
 import { ProjectImportSources, ProjectPicker } from './ProjectPicker'
 import { ProjectRow } from './ProjectRow'
 import { PreviewPane, type PreviewAnnotation } from './PreviewPane'
@@ -38,7 +39,7 @@ const TIER_LABELS: Record<bridge.AgentTier, string> = {
   'terminal-wrapper': 'Terminal wrapper',
   'plain-pane': 'Plain terminal',
 }
-const CAPABILITY_LABELS: Record<Exclude<keyof bridge.AgentCapabilities, 'unreviewedTools'>, string> = {
+const CAPABILITY_LABELS: Record<Exclude<keyof bridge.AgentCapabilities, 'unreviewedTools' | 'compactThreshold'>, string> = {
   streaming: 'Streaming deltas',
   thoughts: 'Thoughts',
   toolCalls: 'Tool activity',
@@ -52,7 +53,9 @@ const CAPABILITY_LABELS: Record<Exclude<keyof bridge.AgentCapabilities, 'unrevie
   usage: 'Usage',
   agentTerminals: 'Agent terminals',
   patchesInApprovals: 'Approval patches',
+  compact: 'Context compaction',
 }
+const DEFAULT_COMPACT_THRESHOLD = 90
 const SEND_ACCENT_KEY = 'shepherd.sendAccent'
 const COMPOSER_KEY_PREFIX = 'shepherd.composer.v1.'
 const APPROVAL_LABELS: Record<bridge.Decision, string> = {
@@ -176,6 +179,11 @@ export function App() {
   const [composingProjectId, setComposingProjectId] = createSignal<string>()
   const [selectedProjectId, setSelectedProjectId] = createSignal<string | null>(null)
   const [freebuffProjectId, setFreebuffProjectId] = createSignal<string>()
+  const [freebuffTerminal, setFreebuffTerminal] = createSignal<bridge.TerminalSnapshot>()
+  const [freebuffStarting, setFreebuffStarting] = createSignal(false)
+  const [freebuffPending, setFreebuffPending] = createSignal(false)
+  const [freebuffFailure, setFreebuffFailure] = createSignal<string | null>(null)
+  const [freebuffEndedSeen, setFreebuffEndedSeen] = createSignal(new Set<string>())
   const [answeringQuestions, setAnsweringQuestions] = createSignal(new Set<string>())
   const selectedProject = () => projects().find((project) => project.id === selectedProjectId())
   const [projectModel] = createResource(
@@ -197,6 +205,25 @@ export function App() {
   const [reviewLists, setReviewLists] = createSignal(new Map<string, bridge.TaskSummary[]>())
   const [loadingReview, setLoadingReview] = createSignal(false)
   const [reviewSelection, setReviewSelection] = createSignal(new Set<string>())
+  const [unreadTaskIds, setUnreadTaskIds] = createSignal<ReadonlySet<string>>(new Set())
+  const [openingTaskId, setOpeningTaskId] = createSignal<string | null>(null)
+  const [taskOpenFailure, setTaskOpenFailure] = createSignal<{ taskId: string; message: string } | null>(null)
+  const selectedTaskOpenFailure = () => {
+    const failure = taskOpenFailure()
+    return failure && failure.taskId === selectedTaskId() ? failure : undefined
+  }
+  // Transcript lengths the user has seen, so later background output can raise a dot.
+  const seenEntryCounts = new Map<string, number>()
+
+  function setTaskUnread(taskId: string, unread: boolean) {
+    setUnreadTaskIds((current) => {
+      if (current.has(taskId) === unread) return current
+      const next = new Set(current)
+      if (unread) next.add(taskId)
+      else next.delete(taskId)
+      return next
+    })
+  }
   const [archiveConfirmation, setArchiveConfirmation] = createSignal<string[]>()
   let reviewLoad: Map<string, bridge.TaskSummary[]> | undefined
   let reviewAnchor: string | undefined
@@ -207,7 +234,11 @@ export function App() {
   const [workspace, setWorkspace] = createSignal<bridge.TaskWorkspace | null>(null)
   const [collapsedThoughts, setCollapsedThoughts] = createSignal<ReadonlySet<string>>(new Set())
   const [openReads, setOpenReads] = createSignal<ReadonlySet<string>>(new Set())
+  const [openOutputs, setOpenOutputs] = createSignal<ReadonlyMap<string, boolean>>(new Map())
   const [deleteRequest, setDeleteRequest] = createSignal<bridge.TaskDetail>()
+  const [headerMenu, setHeaderMenu] = createSignal<'actions' | 'context'>()
+  const [diagnosticsOpen, setDiagnosticsOpen] = createSignal(false)
+  const [compactingTaskId, setCompactingTaskId] = createSignal<string>()
   const [searchOpen, setSearchOpen] = createSignal(false)
   const [palette, setPalette] = createSignal<PaletteKind>()
   const [commandRegistry, setCommandRegistry] = createSignal<bridge.CommandRegistry>()
@@ -219,11 +250,14 @@ export function App() {
   let forwardNextKeyTo: HTMLElement | undefined
   let forwardedKey: string | undefined
   let sidebar: HTMLElement | undefined
-  let diagnostics: HTMLDetailsElement | undefined
+  let diagnosticsClose: HTMLButtonElement | undefined
+  let headerActions: HTMLDivElement | undefined
   const [searchJump, setSearchJump] = createSignal<bridge.TaskSearchHit>()
   let searchInput: HTMLInputElement | undefined
   let searchOpener: HTMLElement | undefined
   let transcript: HTMLDivElement | undefined
+  let followTranscript = true
+  let lastOpenTaskId: string | undefined
   const currentAgent = () => workspace()?.task.agent ?? newTaskAgent()
   const currentAgentName = () => bridge.AGENT_LABELS[currentAgent()]
   const codexCatalog = () => {
@@ -584,15 +618,84 @@ export function App() {
     })
   }
 
+  const freebuffAttention = () => {
+    const entry = freebuffTerminal()
+    return !!entry && entry.endedAt !== null && !freebuffProjectId() && !freebuffEndedSeen().has(entry.id)
+  }
+
+  const composerAgentOptions = () => {
+    const options = agentOptions()
+    if (!freebuffProjectId()) return options
+    const current = currentAgent()
+    return options.map((option) => option.id === 'freebuff-terminal' || option.id === current
+      ? { ...option, disabled: false }
+      : option)
+  }
+
+  function applyFreebuffList(list: bridge.TerminalList) {
+    if (list.projectId !== selectedProjectId()) return
+    const entry = list.terminals.find((terminal) => terminal.scope === 'freebuff')
+    setFreebuffTerminal(entry)
+    // An exit watched from the front needs no attention dot once left behind.
+    if (entry && entry.endedAt !== null && freebuffProjectId() === list.projectId) {
+      setFreebuffEndedSeen((seen) => new Set(seen).add(entry.id))
+    }
+  }
+
+  async function openFreebuff(projectId: string) {
+    setFreebuffStarting(true)
+    setFreebuffFailure(null)
+    try {
+      const list = await bridge.startFreebuffTerminal(projectId)
+      if (selectedProjectId() !== projectId) return
+      applyFreebuffList(list)
+      const entry = list.terminals.find((terminal) => terminal.scope === 'freebuff')
+      if (entry) setFreebuffEndedSeen((seen) => new Set(seen).add(entry.id))
+      setFreebuffProjectId(projectId)
+    } catch (failure) {
+      if (selectedProjectId() !== projectId) return
+      setFreebuffFailure(describe(failure))
+      setFreebuffProjectId(projectId)
+      reportError('start_freebuff_terminal', failure)
+    } finally {
+      setFreebuffStarting(false)
+    }
+  }
+
+  function restartFreebuff() {
+    const entry = freebuffTerminal()
+    if (!entry || freebuffPending()) return
+    setFreebuffPending(true)
+    setFreebuffFailure(null)
+    void bridge.restartTerminal(entry.id, 80, 24).then((list) => {
+      applyFreebuffList(list)
+      setFreebuffEndedSeen((seen) => new Set(seen).add(entry.id))
+    }).catch((failure) => {
+      setFreebuffFailure(describe(failure))
+      reportError('restart_terminal', failure)
+    }).finally(() => setFreebuffPending(false))
+  }
+
+  function stopFreebuff() {
+    const entry = freebuffTerminal()
+    if (!entry || freebuffPending()) return
+    setFreebuffPending(true)
+    void bridge.closeTerminal(entry.id).catch((failure) => {
+      setFreebuffFailure(describe(failure))
+      reportError('close_terminal', failure)
+    }).finally(() => setFreebuffPending(false))
+  }
+
   function chooseAgent(agent: string) {
     const project = selectedProject()
     if (!project || project.missing || pending()) return
     if (agent === 'freebuff-terminal') {
-      setFreebuffProjectId(project.id)
+      if (!freebuffProjectId()) void openFreebuff(project.id)
       return
     }
     if (agent !== 'codex' && agent !== 'opencode' && agent !== 'pi' && agent !== 'claude' && agent !== 'freebuff') return
     if (!agentConfigured(agent)) return
+    if (freebuffProjectId()) setFreebuffProjectId(undefined)
     const task = workspace()?.task
     if (!task) {
       setNewTaskAgent(agent)
@@ -726,7 +829,7 @@ export function App() {
     const project = selectedProject()
     if (!project) return 'Add a project to start.'
     if (project.missing) return 'The project folder is unavailable.'
-    if (selectedTaskId()) return pending() ? 'Opening task…' : 'This task could not be opened.'
+    if (selectedTaskId()) return openingTaskId() === selectedTaskId() ? 'Opening task…' : 'This task could not be opened.'
     if (loadedTasksFor() !== project.id) return pending() ? 'Loading project tasks…' : 'Project tasks are unavailable.'
     return 'Choose a task from Projects or use Compose to start a new one.'
   }
@@ -736,6 +839,29 @@ export function App() {
     return !!current && LIVE_STATES.includes(current.task.state)
   }
   const canApprove = () => workspace()?.task.state === 'waiting'
+  // The last usage row describes the context the agent will send next.
+  const contextUsage = createMemo(() => {
+    const entries = workspace()?.transcript ?? []
+    for (let index = entries.length - 1; index >= 0; index -= 1) {
+      const entry = entries[index]
+      if (entry.kind.type === 'usage') return entry.kind.data
+    }
+  })
+  const compactAt = createMemo(() => {
+    const usage = contextUsage()
+    if (!usage) return 0
+    const threshold = workspace()?.capabilities?.compactThreshold ?? DEFAULT_COMPACT_THRESHOLD
+    return Math.round(usage.size * threshold / 100)
+  })
+  const contextPercent = () => {
+    const usage = contextUsage()
+    return usage && usage.size > 0 ? Math.min(100, Math.max(0, (usage.used / usage.size) * 100)) : 0
+  }
+  const canCompact = () => {
+    const current = workspace()
+    return !!current && !!current.capabilities?.compact
+      && !LIVE_STATES.includes(current.task.state) && !compactingTaskId()
+  }
   const showShellApprovals = () => !!workspace() || !selectedTaskId()
   const cancellingTurn = () => {
     const current = workspace()
@@ -928,10 +1054,8 @@ export function App() {
         break
       case 'diagnostics':
         setSettingsOpen(false)
-        if (diagnostics) {
-          diagnostics.open = true
-          diagnostics.querySelector('summary')?.focus()
-        }
+        setDiagnosticsOpen(true)
+        queueMicrotask(() => diagnosticsClose?.focus())
         break
       case 'checkAgents':
         void bridge.agentAvailability().then((available) => {
@@ -990,9 +1114,11 @@ export function App() {
   })
 
   async function run(action: () => Promise<void>) {
-    setPending(true)
-    setError(null)
+    // The pending flag is set inside the try so a throw from any of these
+    // writes still reaches the finally and cannot strand the shell.
     try {
+      setPending(true)
+      setError(null)
       await action()
     } catch (failure) {
       setError(describe(failure))
@@ -1089,12 +1215,33 @@ export function App() {
     })
   }
 
+  function abbreviateHome(path: string) {
+    const home = homeDirectory()?.replace(/[\\/]+$/, '')
+    if (!home) return path
+    if (path === home) return '~'
+    return path.startsWith(`${home}/`) || path.startsWith(`${home}\\`) ? `~/${path.slice(home.length + 1)}` : path
+  }
+
   async function selectTask(taskId: string) {
     setSearchJump(undefined)
     setSelectedTaskId(taskId)
+    setTaskUnread(taskId, false)
+    setTaskOpenFailure(null)
+    setOpeningTaskId(taskId)
     setWorkspace(null)
-    const next = await bridge.taskWorkspace(taskId)
-    if (selectedTaskId() === taskId) setWorkspace(next)
+    try {
+      const next = await bridge.taskWorkspace(taskId)
+      if (selectedTaskId() === taskId) setWorkspace(next)
+    } catch (failure) {
+      if (selectedTaskId() === taskId) setTaskOpenFailure({ taskId, message: describe(failure) })
+    } finally {
+      if (selectedTaskId() === taskId) setOpeningTaskId(null)
+    }
+  }
+
+  function retryOpenTask() {
+    const taskId = selectedTaskId()
+    if (taskId) void run(() => selectTask(taskId))
   }
 
   async function selectProject(project: bridge.ProjectSnapshot, taskId?: string) {
@@ -1103,13 +1250,20 @@ export function App() {
     setSearchJump(undefined)
     if (selectedProjectId() !== project.id) setPrompt('')
     setTerminalListEvent(undefined)
-    setSelectedProjectId(project.id)
-    setSelectedTaskId(null)
-    setWorkspace(null)
-    setTasks([])
-    setLoadedTasksFor(undefined)
+    // Separate writes re-render the keyed panes with the new project while the
+    // previous project's task and workspace are still selected.
+    batch(() => {
+      setSelectedProjectId(project.id)
+      setSelectedTaskId(null)
+      setWorkspace(null)
+      setTasks([])
+      setLoadedTasksFor(undefined)
+      setFreebuffTerminal(undefined)
+    })
     const listed = await loadTasks(project.id)
     if (selectedProjectId() !== project.id) return
+    void bridge.terminalList(project.id).then(applyFreebuffList)
+      .catch((failure) => console.warn('Could not read the Freebuff terminal', failure))
     if (taskId) {
       if (!listed.some((task) => task.id === taskId)) throw new Error('This task is no longer available.')
       await selectTask(taskId)
@@ -1182,6 +1336,51 @@ export function App() {
       entry?.scrollIntoView({ block: 'center' })
       entry?.focus({ preventScroll: true })
     })
+  })
+
+  const openTaskId = createMemo(() => workspace()?.task.id)
+  createEffect(() => {
+    // Another conversation, or returning to this one, starts at the latest row
+    // with its settled tool output collapsed.
+    const taskId = openTaskId()
+    if (!taskId || settingsOpen() || freebuffProjectId()) return
+    if (lastOpenTaskId !== taskId) setOpenOutputs(new Map())
+    lastOpenTaskId = taskId
+    setHeaderMenu(undefined)
+    setDiagnosticsOpen(false)
+    followTranscript = true
+    queueMicrotask(() => {
+      if (followTranscript && transcript) transcript.scrollTop = transcript.scrollHeight
+    })
+  })
+
+  createEffect(() => {
+    if (!headerMenu()) return
+    const dismiss = (event: PointerEvent) => {
+      if (!headerActions?.contains(event.target as Node)) setHeaderMenu(undefined)
+    }
+    const escape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setHeaderMenu(undefined)
+    }
+    document.addEventListener('pointerdown', dismiss)
+    document.addEventListener('keydown', escape)
+    onCleanup(() => {
+      document.removeEventListener('pointerdown', dismiss)
+      document.removeEventListener('keydown', escape)
+    })
+  })
+
+  createEffect(() => {
+    // Read the entries so streamed text and new rows keep the view at the bottom.
+    if (!workspace()?.transcript || !transcript || searchJump() || !followTranscript) return
+    transcript.scrollTop = transcript.scrollHeight
+  })
+
+  createEffect(() => {
+    const current = workspace()
+    if (!current || current.task.id !== selectedTaskId()) return
+    seenEntryCounts.set(current.task.id, current.transcript.length)
+    setTaskUnread(current.task.id, false)
   })
 
   createEffect(() => {
@@ -1380,10 +1579,16 @@ export function App() {
         }
         break
       }
-      case 'taskWorkspaceChanged':
+      case 'taskWorkspaceChanged': {
         recordFailureContexts(event.data)
-        if (event.data.task.id === selectedTaskId()) setWorkspace(event.data)
+        const { task, transcript: entries } = event.data
+        if (task.id === selectedTaskId()) {
+          setWorkspace(event.data)
+        } else if (entries.length > (seenEntryCounts.get(task.id) ?? 0)) {
+          setTaskUnread(task.id, true)
+        }
         break
+      }
       case 'taskNeedsInput': {
         const { taskId } = event.data
         const focused = taskId === selectedTaskId() && document.hasFocus()
@@ -1401,6 +1606,7 @@ export function App() {
         if (event.data.projectId === selectedProjectId()) {
           setTerminalListEvent((current) => current?.projectId === event.data.projectId &&
             current.revision >= event.data.revision ? current : event.data)
+          applyFreebuffList(event.data)
         }
         break
       case 'error':
@@ -1516,14 +1722,16 @@ export function App() {
     setSettingsOpen(false)
     setComposingProjectId(projectId)
     void run(async () => {
-      if (selectedProjectId() !== projectId) {
-        setTerminalListEvent(undefined)
-        setSelectedProjectId(projectId)
-        setTasks([])
-        setLoadedTasksFor(undefined)
-      }
-      setSelectedTaskId(null)
-      setWorkspace(null)
+      batch(() => {
+        if (selectedProjectId() !== projectId) {
+          setTerminalListEvent(undefined)
+          setSelectedProjectId(projectId)
+          setTasks([])
+          setLoadedTasksFor(undefined)
+        }
+        setSelectedTaskId(null)
+        setWorkspace(null)
+      })
       await loadTasks(projectId)
     }).then(() => {
       if (selectedProjectId() === projectId && !selectedTaskId()) promptInput?.focus()
@@ -1747,6 +1955,16 @@ export function App() {
     })
   }
 
+  function outputOpen(toolCall: bridge.ToolCallEntry) {
+    const choice = openOutputs().get(toolCall.toolCallId)
+    if (choice !== undefined) return choice
+    return toolCall.status === 'pending' || toolCall.status === 'running'
+  }
+
+  function toggleOutput(toolCall: bridge.ToolCallEntry) {
+    setOpenOutputs((previous) => new Map(previous).set(toolCall.toolCallId, !outputOpen(toolCall)))
+  }
+
   function decide(approvalId: string, decision: bridge.Decision) {
     const current = workspace()
     if (!current || !canApprove() || cancellingTurn()) return
@@ -1768,6 +1986,20 @@ export function App() {
       if (selectedTaskId() === current.task.id) setWorkspace(updated)
       const projectId = selectedProjectId()
       if (projectId) await loadTasks(projectId)
+    })
+  }
+
+  function compactSession() {
+    const current = workspace()
+    if (!current || !canCompact()) return
+    setHeaderMenu(undefined)
+    setCompactingTaskId(current.task.id)
+    void bridge.compactTask(current.task.id).then((updated) => {
+      setWorkspace((previous) => previous?.task.id === updated.task.id ? updated : previous)
+    }).catch((failure) => {
+      setError(describe(failure))
+    }).finally(() => {
+      setCompactingTaskId(undefined)
     })
   }
 
@@ -1987,8 +2219,7 @@ export function App() {
           onBlur={() => { setSearchOpen(false); searchOpener = undefined }}
           onEscape={() => closeTaskSearch(true)} onSelect={openSearchHit} />}
         sidebarHidden={sidebarHidden()} onCommands={() => openPalette('commands')} paletteShortcut={chordFor('commandPalette')}
-        footer={workspaceFooter}
-        onBackToChat={freebuffProjectId() && !settingsOpen() ? () => setFreebuffProjectId(undefined) : undefined}>
+        footer={workspaceFooter}>
         <aside ref={sidebar} class="sidebar" aria-label="Workspace navigation" hidden={sidebarHidden()}>
           <header class="sidebar__header">
             <h2 class="sidebar__title">Projects</h2>
@@ -2055,6 +2286,7 @@ export function App() {
 
                     <Show when={listed().length}>
                       <TaskRows tasks={listed()} currentTaskId={selectedTaskId()} mac={mac} disabled={pending()}
+                        isOutputUnread={(id) => unreadTaskIds().has(id)}
                         selection={sidebarSelection}
                         needsTerminalAttention={(id) => terminalAttention().some((bell) => bell.taskId === id)}
                         onOpen={openTaskRow} onSelect={selectReviewTask} />
@@ -2121,13 +2353,7 @@ export function App() {
           />
         </Show>
 
-        <Show when={freebuffProjectId()} keyed>
-          {(projectId) => (
-            <FreebuffPane projectId={projectId} shown={!settingsOpen()} />
-          )}
-        </Show>
-
-        <section class="chat" aria-label="Task chat" hidden={settingsOpen() || !!freebuffProjectId()}>
+        <section class="chat" aria-label="Task chat" data-task-state={workspace()?.task.state} hidden={settingsOpen()}>
           <Show when={workspace()}>
             {(current) => (
               <header class="pane-header">
@@ -2135,18 +2361,21 @@ export function App() {
                   <span class="chat__title"><SearchMark text={current().task.title}
                     match={searchJump()?.taskId === current().task.id && searchJump()?.snippet.field === 'task' ? searchJump()?.snippet.matched : undefined} /></span>
                 </Show>
+                <Show when={current().task.branch}>
+                  {(branch) => <span class="chat__branch" title={`Branch ${branch()}`}>{branch()}</span>}
+                </Show>
+                <Show when={current().task.worktreePath}>
+                  {(path) => <span class="chat__worktree" title={`Worktree ${path()}`}>{abbreviateHome(path())}</span>}
+                </Show>
                 <Show when={current().capabilities?.unreviewedTools}>
                   <span class="chat__adapter" title="Pi's tools run under Pi's configuration; Shepherd cannot approve them">unreviewed tools</span>
                 </Show>
-                <span class="chat__state">{current().task.state}</span>
                 <Show when={current().task.branchError}>
                   {(error) => <button type="button" class="branch-error" title={error()}
                     aria-label="Branch creation failed. Retry" disabled={pending()} onClick={retryBranch}>
                     Branch creation failed · Retry
                   </button>}
                 </Show>
-                <button type="button" class="project-action" disabled={pending() || LIVE_STATES.includes(current().task.state)}
-                  onClick={() => setDeleteRequest(current().task)}>Delete task…</button>
                 <Show when={canCancel()}>
                   <button type="button" class="project-action" onClick={cancelTurn}
                     aria-keyshortcuts={chordFor('cancelTurn')}
@@ -2154,6 +2383,57 @@ export function App() {
                     {cancellingTurn() ? 'Cancelling…' : 'Cancel turn'}
                   </button>
                 </Show>
+                <div class="chat__header-actions" ref={headerActions}>
+                  <Show when={contextUsage()}>
+                    {(usage) => (
+                      <button type="button" class="chat__gauge" aria-haspopup="dialog"
+                        aria-expanded={headerMenu() === 'context'}
+                        aria-label={`Context window: ${Math.round(contextPercent())}% used`}
+                        title={`${formatTokens(usage().used)} of ${formatTokens(usage().size)} tokens`}
+                        onClick={() => setHeaderMenu((open) => open === 'context' ? undefined : 'context')}>
+                        <ContextRing fraction={contextPercent() / 100} />
+                      </button>
+                    )}
+                  </Show>
+                  <button type="button" class="project-action project-action--icon" aria-label="Task actions"
+                    aria-haspopup="menu" aria-expanded={headerMenu() === 'actions'}
+                    onClick={() => setHeaderMenu((open) => open === 'actions' ? undefined : 'actions')}>
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                      <circle cx="5" cy="12" r="1.7" />
+                      <circle cx="12" cy="12" r="1.7" />
+                      <circle cx="19" cy="12" r="1.7" />
+                    </svg>
+                  </button>
+                  <Show when={headerMenu() === 'actions'}>
+                    <div class="chat__menu-card" role="menu" aria-label="Task actions">
+                      <button type="button" class="nav-item" role="menuitemcheckbox" aria-checked={diagnosticsOpen()}
+                        disabled={!current().diagnostics}
+                        onClick={() => { setHeaderMenu(undefined); setDiagnosticsOpen((open) => !open) }}>
+                        Show diagnostics
+                      </button>
+                      <button type="button" class="nav-item" role="menuitem"
+                        disabled={pending() || LIVE_STATES.includes(current().task.state)}
+                        onClick={() => { setHeaderMenu(undefined); setDeleteRequest(current().task) }}>
+                        Delete task…
+                      </button>
+                    </div>
+                  </Show>
+                  <Show when={headerMenu() === 'context'}>
+                    <div class="chat__menu-card chat__context-card" role="dialog" aria-label="Context window">
+                      <div class="context-bar" role="progressbar" aria-label="Context used" aria-valuemin={0}
+                        aria-valuemax={100} aria-valuenow={Math.round(contextPercent())}>
+                        <div class="context-bar__fill" style={{ width: `${contextPercent()}%` }} />
+                      </div>
+                      <Show when={current().capabilities?.compact}
+                        fallback={<p class="context-card__note">This agent cannot compact the conversation.</p>}>
+                        <p class="context-card__note">{`Auto-compacts at ${formatTokens(compactAt())} tokens`}</p>
+                      </Show>
+                      <button type="button" class="project-action" disabled={!canCompact()} onClick={compactSession}>
+                        {compactingTaskId() === current().task.id ? 'Compacting…' : 'Compact now'}
+                      </button>
+                    </div>
+                  </Show>
+                </div>
               </header>
             )}
           </Show>
@@ -2162,10 +2442,17 @@ export function App() {
             {(reason) => <p class="chat__adapter-note">{reason()}</p>}
           </Show>
 
-          <Show when={workspace()?.diagnostics}>
+          <Show when={diagnosticsOpen() && workspace()?.diagnostics}>
             {(diagnostics) => (
-              <details class="diagnostics" ref={diagnostics}>
-                <summary>Diagnostics</summary>
+              <section class="diagnostics diagnostics--card" aria-label="Diagnostics">
+                <header class="diagnostics__header">
+                  <h3>Diagnostics</h3>
+                  <button type="button" class="project-action project-action--icon" aria-label="Close diagnostics"
+                    ref={diagnosticsClose} onClick={() => setDiagnosticsOpen(false)}>
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                      stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18" /></svg>
+                  </button>
+                </header>
                 <dl>
                   <dt>Command</dt>
                   <dd>
@@ -2199,11 +2486,16 @@ export function App() {
                     </dd>
                   </Show>
                 </dl>
-              </details>
+              </section>
             )}
           </Show>
 
-          <div class="chat__transcript" ref={transcript} tabIndex={-1} role="region" aria-label="Transcript">
+          <div class="chat__transcript" ref={transcript} tabIndex={-1} role="region" aria-label="Transcript"
+            hidden={!!freebuffProjectId()}
+            onScroll={(event) => {
+              const element = event.currentTarget
+              followTranscript = element.scrollHeight - element.scrollTop - element.clientHeight <= 24
+            }}>
             <Show when={workspace() && selectedProject()?.missing}>
               <p class="empty" role="status">The project folder is unavailable.</p>
             </Show>
@@ -2214,7 +2506,16 @@ export function App() {
               when={workspace()}
               fallback={
                 <Show when={canStartTask() && selectedProject()} fallback={
-                  <div class="chat__welcome"><p class="empty" role="status">{emptyChatMessage()}</p></div>
+                  <Show when={selectedTaskOpenFailure()} fallback={
+                    <div class="chat__welcome"><p class="empty" role="status">{emptyChatMessage()}</p></div>
+                  }>
+                    {(failure) => (
+                      <div class="chat__welcome chat__welcome--failure">
+                        <p class="empty" role="alert">This task could not be opened. {failure().message}</p>
+                        <button type="button" class="project-action" onClick={retryOpenTask}>Retry</button>
+                      </div>
+                    )}
+                  </Show>
                 }>
                   {(project) => (
                     <div class="chat__welcome">
@@ -2271,6 +2572,8 @@ export function App() {
                   collapseThought,
                   readOpen: (toolCallId) => openReads().has(toolCallId),
                   toggleRead,
+                  outputOpen,
+                  toggleOutput,
                 }
                 return (
                   <Show
@@ -2301,6 +2604,23 @@ export function App() {
             </Show>
           </div>
 
+          <Show when={freebuffProjectId()} keyed>
+            {(projectId) => (
+              <FreebuffPane
+                projectName={projects().find((project) => project.id === projectId)?.name ?? 'this project'}
+                entry={freebuffTerminal()}
+                front={!settingsOpen()}
+                starting={freebuffStarting()}
+                failure={freebuffFailure()}
+                pending={freebuffPending()}
+                onBackToChat={() => setFreebuffProjectId(undefined)}
+                onStart={() => void openFreebuff(projectId)}
+                onRestart={restartFreebuff}
+                onStop={stopFreebuff}
+              />
+            )}
+          </Show>
+
           <div class="composer">
             <Show when={workspace()?.task.state === 'waiting'}>
               <span class="terminal-attention composer__attention" role="img" aria-label="Task needs input" />
@@ -2323,9 +2643,10 @@ export function App() {
               inputRef={(element) => { promptInput = element }}
               projectId={selectedProjectId()}
               taskId={workspace()?.task.worktreePath ? selectedTaskId() : null}
-              placeholder={canCompose() || canQueuePrompt() ? 'Send a prompt' : 'Select a draft or ready task'}
+              placeholder={freebuffProjectId() ? 'Freebuff terminal is open — choose another agent to chat'
+                : canCompose() || canQueuePrompt() ? 'Send a prompt' : 'Select a draft or ready task'}
               value={prompt()}
-              disabled={pending() || (!canCompose() && !canQueuePrompt())}
+              disabled={pending() || !!freebuffProjectId() || (!canCompose() && !canQueuePrompt())}
               onInput={(text, composing) => {
                 if (composing) setPrompt(text)
                 else updatePrompt(text)
@@ -2333,24 +2654,29 @@ export function App() {
               onSend={sendPrompt}
             />
             <div class="composer__actions">
-              <ComposerPickers agent={currentAgent()} agentName={currentAgentName()} agents={agentOptions()} onAgentChange={chooseAgent}
-                showShellApprovals={showShellApprovals()} canAttach={(canCompose() || canQueuePrompt()) && !pending() && !!attachmentLimit()}
+              <ComposerPickers
+                agent={freebuffProjectId() ? 'freebuff-terminal' : currentAgent()}
+                agentName={freebuffProjectId() ? 'Freebuff (terminal)' : currentAgentName()}
+                agents={composerAgentOptions()} onAgentChange={chooseAgent}
+                freebuffLive={!!freebuffProjectId()} locked={!!freebuffProjectId()}
+                showShellApprovals={showShellApprovals() && !freebuffProjectId()}
+                canAttach={(canCompose() || canQueuePrompt()) && !pending() && !!attachmentLimit() && !freebuffProjectId()}
                 onAttach={() => fileInput?.click()} />
               <div class="composer__send-actions">
                 <Show when={composerModes()}>
-                  {(modes) => <ComposerModePicker modes={modes()} onChange={chooseMode}
+                  {                  (modes) => <ComposerModePicker modes={modes()} onChange={chooseMode}
                     defaultOption={workspace()?.modes ? pendingMode() ? 'Use session mode' : undefined : 'Default mode'}
-                    disabled={pending() || cancellingTurn()}
+                    disabled={pending() || cancellingTurn() || !!freebuffProjectId()}
                     unavailable={modeCatalogError()} onRetry={() => void refetchProjectModes()} />}
                 </Show>
                 <Show when={currentAgent() === 'codex'}>
                   <ComposerModelPicker model={composerModel()} effort={composerEffort()} models={codexCatalog()?.models ?? []}
-                    disabled={pending() || cancellingTurn()}
+                    disabled={pending() || cancellingTurn() || !!freebuffProjectId()}
                     options={codexOptions()} onChange={(codex) => patchTurnOptions({ codex })} />
                 </Show>
                 <Show when={currentAgent() !== 'codex' ? composerModels() : undefined}>
                   {(models) => <ComposerAgentModelPicker models={models()}
-                    disabled={pending() || cancellingTurn()}
+                    disabled={pending() || cancellingTurn() || !!freebuffProjectId()}
                     unavailable={modelCatalogError()} onRetry={() => void refetchProjectModels()}
                     onChange={chooseModel} />}
                 </Show>
@@ -2362,7 +2688,7 @@ export function App() {
                   aria-keyshortcuts={chordFor('sendPrompt')}
                   title="Send"
                   onClick={sendPrompt}
-                  disabled={!canSend()}
+                  disabled={!canSend() || !!freebuffProjectId()}
                 >
                   <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                     <path d="M3 4.5 21 12 3 19.5l3.6-7.5L3 4.5Z M6.6 12H14" />
@@ -2386,6 +2712,11 @@ export function App() {
                   transcript={workspace()?.transcript}
                   agentTerminals={workspace()?.task.id === selectedTaskId() && workspace()?.capabilities?.agentTerminals ? workspace()?.agentTerminals : undefined}
                   listEvent={terminalListEvent()} shown={inspectorTab() === 'terminals'}
+                  freebuffFront={!!freebuffProjectId()} freebuffAttention={freebuffAttention()}
+                  onOpenFreebuff={() => {
+                    const projectId = selectedProjectId()
+                    if (projectId) void openFreebuff(projectId)
+                  }}
                   onCommands={setTerminalCommands} taskTerminalShortcut={chordFor('newTaskTerminal')}
                   onShow={() => setInspectorTab('terminals')}
                   onLayoutLoaded={(layout) => restoreInspectorTab(projectId, layout.inspectorTab)}
@@ -2430,7 +2761,7 @@ export function App() {
               <Show when={selectedProject()?.missing === false && selectedProjectId()} keyed
                 fallback={<p class="empty">Select an available project to browse its files.</p>}>
                 {(projectId) => <FilesPane projectId={projectId} initialFile={fileRequest()}
-                  worktreeTaskId={workspace()?.task.worktreePath && workspace()?.task.id === selectedTaskId() ? selectedTaskId() : null}
+                  worktreeTaskId={workspace()?.task.worktreePath && workspace()?.task.id === selectedTaskId() && workspace()?.task.projectId === selectedProjectId() ? selectedTaskId() : null}
                   showDotfiles={preferences()?.app['files.show_dotfiles'] ?? preferences()?.defaults['files.show_dotfiles'] ?? true}
                   settingsDisabled={!preferencesEditable() || savingPreference()}
                   onShowDotfilesChange={(value) => void requestPreference('files.show_dotfiles', value)} />}
@@ -2491,7 +2822,6 @@ function WorkspaceFrame(props: {
   sidebarHidden: boolean
   onCommands: () => void
   paletteShortcut?: string
-  onBackToChat?: () => void
 }) {
   const macWindow = isTauri() && navigator.platform.startsWith('Mac')
   const [metrics, setMetrics] = createSignal({ width: 360, limit: INSPECTOR_MAX_WIDTH })
@@ -2548,10 +2878,7 @@ function WorkspaceFrame(props: {
             <div class="shell__window-controls" data-tauri-drag-region="" aria-hidden="true" />
           </Show>
           <div class="shell__history" role="group" aria-label="Navigation history" data-tauri-drag-region={dragRegion}>
-            <button class="shell__icon-button" type="button"
-              aria-label={props.onBackToChat ? 'Back to chat' : 'Previous'}
-              title={props.onBackToChat ? 'Back to chat' : 'Previous'}
-              disabled={!props.onBackToChat} onClick={() => props.onBackToChat?.()}>
+            <button class="shell__icon-button" type="button" aria-label="Previous" title="Previous" disabled>
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                 <path d="m14 6-6 6 6 6" />
               </svg>
@@ -2650,6 +2977,7 @@ interface PickerMenuProps {
   groups?: PickerGroup[]
   onChange?: (value: string) => void
   filterable?: boolean
+  disabled?: boolean
 }
 
 const DEFAULT_APPROVAL = { id: 'ask', name: 'Ask me' }
@@ -2658,13 +2986,13 @@ const APPROVAL_OPTIONS: PickerOption[] = [
   { id: 'automatic', name: 'Approve for me (coming soon)', disabled: true },
 ]
 
-function ComposerPickers(props: { agent: bridge.Agent; agentName: string; agents: PickerOption[]; onAgentChange: (value: string) => void; showShellApprovals: boolean; canAttach: boolean; onAttach: () => void }) {
+function ComposerPickers(props: { agent: string; agentName: string; agents: PickerOption[]; onAgentChange: (value: string) => void; freebuffLive?: boolean; locked?: boolean; showShellApprovals: boolean; canAttach: boolean; onAttach: () => void }) {
   return (
     <>
       <PickerMenu label="Attachments and commands" options={[
         { id: 'attach', name: 'Attach files', disabled: !props.canAttach },
         { id: 'commands', name: 'Commands (coming soon)', disabled: true },
-      ]} onChange={(value) => { if (value === 'attach') props.onAttach() }} triggerClass="composer__picker" above>
+      ]} onChange={(value) => { if (value === 'attach') props.onAttach() }} triggerClass="composer__picker" disabled={props.locked} above>
         <PlusIcon />
       </PickerMenu>
       <Show when={props.showShellApprovals}>
@@ -2680,6 +3008,9 @@ function ComposerPickers(props: { agent: bridge.Agent; agentName: string; agents
         </div>
       </Show>
       <PickerMenu label="Agent" text={props.agentName} value={props.agent} options={props.agents} onChange={props.onAgentChange} triggerClass="composer__picker" above>
+        <Show when={props.freebuffLive}>
+          <span class="terminal-attention" role="img" aria-label="Freebuff terminal is live" />
+        </Show>
         <span class="composer__picker-label">{props.agentName}</span>
         <PickerCaret />
       </PickerMenu>
@@ -2700,7 +3031,7 @@ function ComposerModePicker(props: { modes: bridge.AgentModes; disabled: boolean
   return (
     <Show when={available()} fallback={<ComposerPickerFallback label="No mode available" detail={props.unavailable} onRetry={props.onRetry} />}>
       <PickerMenu label="Mode" text={label()} value={props.modes.current ?? ''} options={options()}
-        onChange={props.onChange} triggerClass="composer__picker" above>
+        onChange={props.onChange} triggerClass="composer__picker" disabled={props.disabled} above>
         <span class="composer__picker-label">{label()}</span>
         <PickerCaret />
       </PickerMenu>
@@ -2732,7 +3063,7 @@ function ComposerAgentModelPicker(props: {
   return (
     <Show when={available()} fallback={<ComposerPickerFallback label="No model available" detail={props.unavailable} onRetry={props.onRetry} />}>
       <PickerMenu label="Model" text={label()} value={`model:${props.models.current ?? ''}`} options={options()}
-        onChange={choose} triggerClass="composer__picker" above filterable>
+        onChange={choose} triggerClass="composer__picker" disabled={props.disabled} above filterable>
         <span class="composer__picker-label">{label()}</span>
         <PickerCaret />
       </PickerMenu>
@@ -2801,7 +3132,7 @@ function ComposerModelPicker(props: {
     }
   }
   return (
-    <PickerMenu label="Model / effort" text={modelLabel()} groups={groups()} onChange={choose} triggerClass="composer__picker" above>
+    <PickerMenu label="Model / effort" text={modelLabel()} groups={groups()} onChange={choose} triggerClass="composer__picker" disabled={props.disabled} above>
       <span class="composer__picker-label">{modelLabel()}</span>
       <PickerCaret />
     </PickerMenu>
@@ -2919,6 +3250,7 @@ function PickerMenu(props: PickerMenuProps & { triggerClass: string; above?: boo
         ref={trigger}
         class={props.triggerClass}
         type="button"
+        disabled={props.disabled}
         aria-label={triggerLabel()}
         title={props.above ? triggerLabel() : undefined}
         aria-haspopup="menu"
@@ -3235,6 +3567,8 @@ interface EntryContext {
   collapseThought: (entryId: string) => void
   readOpen: (toolCallId: string) => boolean
   toggleRead: (toolCallId: string) => void
+  outputOpen: (toolCall: bridge.ToolCallEntry) => boolean
+  toggleOutput: (toolCall: bridge.ToolCallEntry) => void
 }
 
 function FileReadIcon() {
@@ -3372,6 +3706,47 @@ function ReadRow(props: {
   )
 }
 
+function ContextRing(props: { fraction: number }) {
+  const radius = 7
+  const circumference = 2 * Math.PI * radius
+  const fraction = () => Math.min(1, Math.max(0, props.fraction))
+  return (
+    <svg width="16" height="16" viewBox="0 0 18 18" aria-hidden="true">
+      <circle class="chat__gauge-track" cx="9" cy="9" r={radius} />
+      <circle class="chat__gauge-value" cx="9" cy="9" r={radius} transform="rotate(-90 9 9)"
+        stroke-dasharray={`${circumference}`}
+        stroke-dashoffset={`${circumference * (1 - fraction())}`} />
+    </svg>
+  )
+}
+
+function formatTokens(value: number) {
+  return value.toLocaleString('en-US')
+}
+
+function ToolCallRow(props: { toolCall: bridge.ToolCallEntry; context: EntryContext; text: (value: string) => JSX.Element }) {
+  const open = () => props.context.outputOpen(props.toolCall)
+  return (
+    <div class="entry__tool">
+      <span class="entry__tool-title">{props.text(props.toolCall.title)}</span>
+      <span class="entry__tool-status">{props.toolCall.status}</span>
+      <Show when={props.toolCall.output}>
+        {(output) => (
+          <>
+            <button type="button" class="entry__read-toggle entry__tool-toggle" aria-expanded={open()}
+              onClick={() => props.context.toggleOutput(props.toolCall)}>
+              {open() ? 'Hide contents' : 'Show contents'}
+            </button>
+            <Show when={open()}>
+              <pre class="entry__output">{props.text(output())}</pre>
+            </Show>
+          </>
+        )}
+      </Show>
+    </div>
+  )
+}
+
 function entryBody(entry: bridge.Entry, context: EntryContext, match: () => string | undefined) {
   const kind = entry.kind
   const text = (value: string) => <SearchMark text={value} match={match()} />
@@ -3391,7 +3766,7 @@ function entryBody(entry: bridge.Entry, context: EntryContext, match: () => stri
         ? <p class="entry__user">{text(kind.data.text)}</p>
         : <div class="entry__user-card"><p class="entry__user">{text(kind.data.text)}</p></div>
     case 'agentText':
-      return <p class="entry__agent">{text(kind.data.text)}</p>
+      return <div class="entry__agent"><Markdown source={kind.data.text} renderText={text} /></div>
     case 'thought':
       return <ThoughtRow text={kind.data.text} open={() => context.thoughtOpen(entry.id)}
         onToggle={() => context.toggleThought(entry.id)}
@@ -3399,15 +3774,7 @@ function entryBody(entry: bridge.Entry, context: EntryContext, match: () => stri
     case 'question':
       return <QuestionCard question={kind.data} canAnswer={context.canAnswer} awaiting={() => context.awaitingAnswer(kind.data.questionId)} onAnswer={context.answerQuestion} match={match} />
     case 'toolCall':
-      return (
-        <div class="entry__tool">
-          <span class="entry__tool-title">{text(kind.data.title)}</span>
-          <span class="entry__tool-status">{kind.data.status}</span>
-          <Show when={kind.data.output}>
-            {(output) => <pre class="entry__output">{text(output())}</pre>}
-          </Show>
-        </div>
-      )
+      return <ToolCallRow toolCall={kind.data} context={context} text={text} />
     case 'plan':
       return (
         <ul class="entry__plan">
@@ -3505,6 +3872,7 @@ function entryBody(entry: bridge.Entry, context: EntryContext, match: () => stri
       )
     }
     case 'usage':
-      return <p class="entry__usage">{`${kind.data.used} of ${kind.data.size} tokens`}</p>
+      // The header's context gauge carries usage; the transcript stays chat.
+      return null
   }
 }

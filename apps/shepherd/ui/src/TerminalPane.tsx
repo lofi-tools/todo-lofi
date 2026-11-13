@@ -17,38 +17,73 @@ interface TerminalSize {
 
 const DEFAULT_TERMINAL_SIZE: TerminalSize = { columns: 80, rows: 24 }
 
-export function FreebuffPane(props: { projectId: string; shown: boolean }) {
-  const [terminalId, setTerminalId] = createSignal<string>()
-  const [failed, setFailed] = createSignal(false)
-  let disposed = false
-
-  function close(id: string) {
-    void bridge.closeTerminal(id).catch((failure) => console.warn('Could not close the Freebuff terminal', failure))
-  }
-
-  onMount(() => {
-    void bridge.startFreebuffTerminal(props.projectId).then((id) => {
-      if (disposed) close(id)
-      else setTerminalId(id)
-    }).catch((failure) => {
-      if (!disposed) { setFailed(true); reportError('start_freebuff_terminal', failure) }
-    })
+export function FreebuffPane(props: {
+  projectName: string
+  entry: bridge.TerminalSnapshot | undefined
+  front: boolean
+  starting: boolean
+  failure: string | null
+  pending: boolean
+  onBackToChat: () => void
+  onStart: () => void
+  onRestart: () => void
+  onStop: () => void
+}) {
+  let section: HTMLElement | undefined
+  let restart: HTMLButtonElement | undefined
+  const live = () => props.entry !== undefined && props.entry.endedAt === null
+  const focusRequest = createMemo(() => {
+    const entry = props.entry
+    return entry && props.front && entry.endedAt === null ? { id: entry.id } : undefined
   })
 
-  onCleanup(() => {
-    disposed = true
-    const id = terminalId()
-    if (id) close(id)
+  createEffect(() => {
+    if (props.entry?.endedAt == null || !props.front) return
+    // The canvas unmounts with its process, so move focus to the one action
+    // that still works unless the user is busy elsewhere in the window.
+    const active = document.activeElement
+    if (active && active !== document.body && section && !section.contains(active)) return
+    queueMicrotask(() => restart?.focus({ preventScroll: true }))
   })
 
   return (
-    <section class="chat chat--terminal" aria-label="Freebuff terminal" hidden={!props.shown}>
-      <Show when={terminalId()} keyed fallback={
-        <Show when={failed()} fallback={<p class="empty">Opening Freebuff terminal…</p>}>
-          <p class="empty">Freebuff terminal unavailable.</p>
+    <section ref={section} class="chat__terminal" aria-label="Freebuff terminal" hidden={!props.front}>
+      <div class="terminal-pane__bar chat__terminal-bar">
+        <span>Freebuff · {props.projectName}</span>
+        <span class="terminal-list__state">{props.entry
+          ? props.entry.endedAt === null ? 'live' : `ended${formatExit(props.entry.exitCode)}`
+          : props.starting ? 'opening' : 'closed'}</span>
+        <button type="button" onClick={props.onBackToChat}>Back to chat</button>
+        <Show when={live()}>
+          <button type="button" onClick={props.onStop} disabled={props.pending}>Stop process</button>
         </Show>
+      </div>
+      <Show when={live() ? props.entry : undefined} keyed fallback={
+        <div class="chat__terminal-state">
+          <Show when={props.failure} fallback={
+            <Show when={props.entry} fallback={
+              <Show when={props.starting} fallback={
+                <p class="empty">Freebuff is closed. Choose Freebuff (terminal) from the agent picker to open it.</p>
+              }>
+                <p class="empty" role="status">Opening Freebuff terminal…</p>
+              </Show>
+            }>
+              {(entry) => <div class="terminal-ended">
+                <p>Freebuff ended{formatExit(entry().exitCode)}</p>
+                <p><code>{entry().command}</code> in <code>{entry().cwd}</code></p>
+                <button type="button" ref={restart} onClick={props.onRestart} disabled={props.pending}>Restart</button>
+              </div>}
+            </Show>
+          }>
+            {(failure) => <div class="terminal-ended">
+              <p>Freebuff terminal unavailable.</p>
+              <p>{failure()}</p>
+              <button type="button" onClick={props.onStart} disabled={props.pending}>Retry</button>
+            </div>}
+          </Show>
+        </div>
       }>
-        {(id) => <TerminalCanvas terminalId={id} shown={props.shown} focusRequest={props.shown ? { id } : undefined} />}
+        {(entry) => <TerminalCanvas terminalId={entry.id} shown={props.front} focusRequest={focusRequest()} />}
       </Show>
     </section>
   )
@@ -69,6 +104,9 @@ interface TerminalPaneProps {
   attention: string[]
   onTerminalFocus: (id: string | null) => void
   listEvent: bridge.TerminalList | undefined
+  freebuffFront: boolean
+  freebuffAttention: boolean
+  onOpenFreebuff: () => void
 }
 
 type TerminalAction = 'newSharedTerminal' | 'newTaskTerminal' | 'splitRight' | 'splitDown' | 'hideTerminal'
@@ -113,8 +151,9 @@ export function TerminalPane(props: TerminalPaneProps) {
     return commands
   })
 
+  const freebuff = () => terminals().find((terminal) => terminal.scope === 'freebuff')
   const visible = () => terminals().filter((terminal) =>
-    terminal.scope === 'project' || terminal.taskId === props.taskId)
+    terminal.scope !== 'freebuff' && (terminal.scope === 'project' || terminal.taskId === props.taskId))
   const terminal = (id: string) => visible().find((entry) => entry.id === id)
   const paneVisible = (id: string) => !terminals().some((entry) =>
     entry.id === id && entry.scope === 'task' && entry.taskId !== props.taskId)
@@ -245,6 +284,12 @@ export function TerminalPane(props: TerminalPaneProps) {
     })
   }
 
+  function restartFreebuff(id: string) {
+    void run(async () => {
+      applyTerminalList(await bridge.restartTerminal(id, 80, 24))
+    })
+  }
+
   function splitActive(axis: bridge.SplitAxis) {
     const id = active()
     const entry = id && terminal(id)
@@ -334,6 +379,23 @@ export function TerminalPane(props: TerminalPaneProps) {
             </li>
           )}
         </For>
+        <Show when={freebuff()}>
+          {(entry) => (
+            <li class="terminal-list__row">
+              <button type="button" class="terminal-list__item" aria-current={props.freebuffFront ? 'true' : undefined}
+                onClick={props.onOpenFreebuff}>
+                <span>Freebuff</span>
+                <Show when={props.freebuffAttention}>
+                  <span class="terminal-attention" role="img" aria-label="Freebuff terminal needs attention" />
+                </Show>
+                <span class="terminal-list__state">freebuff · {entry().endedAt === null ? 'live' : 'ended'}{props.freebuffFront ? ' · in front' : ''}</span>
+              </button>
+              <Show when={entry().endedAt !== null}>
+                <button type="button" onClick={() => restartFreebuff(entry().id)} disabled={pending()}>Restart</button>
+              </Show>
+            </li>
+          )}
+        </Show>
         <For each={props.agentTerminals}>
           {(entry) => (
             <li>

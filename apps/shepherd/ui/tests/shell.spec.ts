@@ -27,6 +27,7 @@ test.beforeEach(async ({ context }) => {
     let eventChannel
     let eventIndex = 0
     let cancelRequests = 0
+    const compactRequests: string[] = []
     let screenshotSaves = 0
     const notifications: string[] = []
     const annotationWrapperOpens: string[] = []
@@ -64,6 +65,7 @@ test.beforeEach(async ({ context }) => {
       { id: 'acme/qwen', name: 'Qwen Coder', description: 'acme' },
     ]
     const fileListings: string[] = []
+    const fileRequests: Array<{ command: string; projectId: string; taskId: string | null; projectMatches: boolean }> = []
     const fileActions: Array<{ projectId: string; taskId: string | null; path: string; action: string }> = []
     const fileSearches: Array<{ id: string; taskId: string | null; mode: string }> = []
     const cancelledFileSearches: string[] = []
@@ -79,6 +81,7 @@ test.beforeEach(async ({ context }) => {
     let pauseNextWorkspaceRead = false
     let pausedWorkspaceRead = false
     let failPausedWorkspaceRead = false
+    let failNextWorkspaceRead = false
     let failNextTerminalList = false
     let workspaceReads = 0
     let releaseTerminalWrite: (() => void) | undefined
@@ -271,12 +274,21 @@ test.beforeEach(async ({ context }) => {
     }
 
     const taskList = (projectId: string) => ({ projectId, tasks: tasks.filter((task) => task.projectId === projectId) })
+    // Mirrors the core: a workspace request whose task belongs to another
+    // project fails with "task not found".
+    function recordFileRequest(command: string, args: { projectId: string; taskId: string | null }) {
+      const task = args.taskId ? tasks.find((candidate) => candidate.id === args.taskId) : undefined
+      const projectMatches = !args.taskId || task?.projectId === args.projectId
+      fileRequests.push({ command, projectId: args.projectId, taskId: args.taskId, projectMatches })
+      if (!projectMatches) throw { message: `task not found: ${args.taskId}`, code: 'core' }
+    }
     const projectList = () => ({ projects: projects.map((project) => {
       const projectTasks = taskList(project.id).tasks
       return {
         ...project,
         reviewTaskCount: projectTasks.filter((task) => task.state === 'review').length,
         runningTaskCount: projectTasks.filter((task) => ['starting', 'queued', 'working', 'waiting'].includes(task.state)).length,
+        waitingTaskCount: projectTasks.filter((task) => task.state === 'waiting').length,
       }
     }) })
 
@@ -395,6 +407,7 @@ test.beforeEach(async ({ context }) => {
     const otherInspectorTabs = new Map<string, InspectorTab>()
     const workspaceLayouts = new Map<string, WorkspaceLayout>()
     const subscriptions: string[] = []
+    let terminalRevision = 0
     if (options.has('missing-terminal')) {
       terminalLayout = {
         ...terminalLayout,
@@ -474,6 +487,7 @@ test.beforeEach(async ({ context }) => {
         streaming: true, thoughts: true, toolCalls: true, approvals: !limited, resume: !limited,
         cancel: !limited, modelPicker: !limited && (task.agent === 'codex' || (task.agent === 'opencode' && options.has('agent-models'))), modePicker: hasModes, images: false, resourceLinks: false,
         usage: true, agentTerminals: !limited, patchesInApprovals: !limited,
+        compact: task.agent === 'codex', compactThreshold: null,
       }
       return {
         project: projects.find((candidate) => candidate.id === task.projectId),
@@ -893,6 +907,10 @@ test.beforeEach(async ({ context }) => {
           }
           case 'task_workspace': {
             workspaceReads += 1
+            if (failNextWorkspaceRead) {
+              failNextWorkspaceRead = false
+              throw new Error('Fixture workspace read failed')
+            }
             const snapshot = workspace(args.taskId)
             if (pauseNextWorkspaceRead) {
               pauseNextWorkspaceRead = false
@@ -954,6 +972,7 @@ test.beforeEach(async ({ context }) => {
             }
             return 'fixture diff'
           case 'list_files': {
+            recordFileRequest('list_files', args)
             fileListings.push(args.path)
             if (options.has('file-list-error')) throw { message: 'Unknown error', cause: { message: 'Permission denied opening workspace' }, code: 'files' }
             if (options.has('slow-folder') && args.path === 'src') {
@@ -996,6 +1015,7 @@ test.beforeEach(async ({ context }) => {
             }
             return null
           case 'watch_workspace_files': {
+            recordFileRequest('watch_workspace_files', args)
             const id = `file-watch-${fileWatchers.size + 1}`
             fileWatchers.set(id, { taskId: args.taskId, channel: args.channel.id, index: 0 })
             window.__publishFileChanges(id, [])
@@ -1109,6 +1129,10 @@ test.beforeEach(async ({ context }) => {
             if (!task) throw new Error('Task not found')
             task.branch = `shepherd/${task.id}`
             task.branchError = null
+            return workspace(args.taskId)
+          }
+          case 'compact_task': {
+            compactRequests.push(args.taskId)
             return workspace(args.taskId)
           }
           case 'delete_task': {
@@ -1251,6 +1275,15 @@ test.beforeEach(async ({ context }) => {
             return { projectId: args.projectId, revision: 0, terminals: [...terminals] }
           case 'start_terminal':
           case 'restart_terminal': {
+            if (args.terminalId === 'freebuff-fixture') {
+              const index = terminals.findIndex((terminal) => terminal.id === 'freebuff-fixture')
+              if (index >= 0) terminals[index] = { ...terminals[index], endedAt: null, exitCode: null }
+              window.__emitCoreEvent({
+                type: 'terminalListChanged',
+                data: { projectId: project.id, revision: terminalRevision += 1, terminals: [...terminals] },
+              })
+              return { projectId: project.id, revision: terminalRevision, terminals: [...terminals] }
+            }
             if (options.has('early-terminal-exit')) {
               const id = args.terminalId ?? 'terminal-early-exit'
               const running = { ...terminals[0], id, title: 'Short-lived shell' }
@@ -1270,8 +1303,28 @@ test.beforeEach(async ({ context }) => {
             }
             return { projectId: args.projectId ?? project.id, revision: 0, terminals: [...terminals] }
           }
-          case 'start_freebuff_terminal':
-            return 'freebuff-fixture'
+          case 'start_freebuff_terminal': {
+            const existing = terminals.find((terminal) => terminal.scope === 'freebuff' && terminal.projectId === project.id)
+            const freebuff = existing ?? {
+              id: 'freebuff-fixture', projectId: project.id, taskId: null, scope: 'freebuff' as const,
+              title: 'Freebuff', cwd: '/tmp/demo', command: 'freebuff',
+              createdAt: 1_760_000_400_000, endedAt: null, exitCode: null,
+            }
+            if (!existing) terminals.push(freebuff)
+            window.__emitCoreEvent({
+              type: 'terminalListChanged',
+              data: { projectId: project.id, revision: terminalRevision += 1, terminals: [...terminals] },
+            })
+            ;(window as unknown as { __endFreebuff: () => void }).__endFreebuff = () => {
+              const index = terminals.findIndex((terminal) => terminal.id === freebuff.id)
+              if (index >= 0) terminals[index] = { ...terminals[index], endedAt: 1_760_000_500_000, exitCode: 130 }
+              window.__emitCoreEvent({
+                type: 'terminalListChanged',
+                data: { projectId: project.id, revision: terminalRevision += 1, terminals: [...terminals] },
+              })
+            }
+            return { projectId: project.id, revision: 0, terminals: [...terminals] }
+          }
           case 'subscribe_terminal': {
             subscriptions.push(args.terminalId)
             const subscriptionId = `subscription-${args.terminalId}-${subscriptions.length}`
@@ -1349,6 +1402,11 @@ test.beforeEach(async ({ context }) => {
             return null
           case 'terminal_write':
             writes.push(args.data)
+            const freebuffWrite = args.terminalId === 'freebuff-fixture'
+              ? terminals.find((terminal) => terminal.id === 'freebuff-fixture') : undefined
+            if (freebuffWrite && freebuffWrite.endedAt !== null) {
+              throw { message: 'no live terminal freebuff-fixture', code: 'terminal' }
+            }
             if (options.has('interrupted-terminal-paste') && writes.length === 2) {
               throw { message: 'The terminal stopped accepting the paste.' }
             }
@@ -1380,6 +1438,7 @@ test.beforeEach(async ({ context }) => {
     window.__closedTerminals = closedTerminals
     window.__subscriptions = subscriptions
     window.__fileListings = fileListings
+    Object.assign(window, { __fileRequests: fileRequests })
     ;(window as unknown as { __deletions: typeof deletions }).__deletions = deletions
     window.__fileActions = fileActions
     window.__unwatchedFiles = unwatchedFiles
@@ -1412,6 +1471,7 @@ test.beforeEach(async ({ context }) => {
     window.__cancelledFileSearches = cancelledFileSearches
     window.__finishFileSearch = (id: string) => pendingFileSearches.get(id)?.()
     window.__cancelRequests = () => cancelRequests
+    window.__compactRequests = () => compactRequests
     window.__terminalLayout = () => terminalLayout
     window.__notifications = notifications
     window.__annotationWrapperOpens = annotationWrapperOpens
@@ -1435,6 +1495,7 @@ test.beforeEach(async ({ context }) => {
       __workspaceReadPaused: () => pausedWorkspaceRead,
       __releaseWorkspaceRead: () => releaseWorkspaceRead?.(),
       __failWorkspaceRead: () => { failPausedWorkspaceRead = true; releaseWorkspaceRead?.() },
+      __failNextWorkspaceRead: () => { failNextWorkspaceRead = true },
       __failTerminalList: () => { failNextTerminalList = true },
       __workspaceReads: () => workspaceReads,
     })
@@ -1780,7 +1841,8 @@ test('opts in to notifications for unfocused waits and shows waiting attention',
     Object.defineProperty(document, 'hasFocus', { value: () => true, configurable: true })
     window.__setTaskState('task-1', 'waiting')
   })
-  await expect(navigation.getByRole('button', { name: /Ship it Needs input/ })).toBeVisible()
+  await expect(navigation.getByRole('button', { name: /Ship it/ })
+    .getByRole('img', { name: 'Waiting for you' })).toBeVisible()
   await expect(page.getByRole('img', { name: 'Task needs input', exact: true })).toBeVisible()
   expect(await page.evaluate(() => window.__notifications)).toEqual([])
 
@@ -2432,21 +2494,130 @@ test('reports Review loading failures and permits refresh', async ({ page }) => 
 
 test('confirms saved task deletion and keeps its worktree by default', async ({ page }) => {
   await page.goto('/')
-  await page.getByRole('button', { name: 'Delete task…' }).click()
+  await page.getByRole('button', { name: 'Task actions' }).click()
+  await page.getByRole('menuitem', { name: 'Delete task…' }).click()
   const dialog = page.getByRole('dialog', { name: 'Delete task' })
   await expect(dialog.getByRole('button', { name: 'Cancel' })).toBeFocused()
   await expect(dialog.getByRole('checkbox')).not.toBeChecked()
   await dialog.getByRole('button', { name: 'Cancel' }).click()
   expect(await page.evaluate(() => (window as unknown as { __deletions: unknown[] }).__deletions)).toEqual([])
-  await page.getByRole('button', { name: 'Delete task…' }).click()
+  await page.getByRole('button', { name: 'Task actions' }).click()
+  await page.getByRole('menuitem', { name: 'Delete task…' }).click()
   await dialog.getByRole('button', { name: 'Delete task', exact: true }).click()
   await expect(dialog).toHaveCount(0)
   expect(await page.evaluate(() => (window as unknown as { __deletions: unknown[] }).__deletions)).toEqual([{ taskId: 'task-1', removeWorktree: false }])
 })
 
+test('moves task actions and diagnostics into the header menu', async ({ page }) => {
+  await page.goto('/?acp-fallback')
+  const chat = page.getByRole('region', { name: 'Task chat' })
+  const trigger = chat.getByRole('button', { name: 'Task actions' })
+  await trigger.click()
+  const menu = chat.getByRole('menu', { name: 'Task actions' })
+  await expect(menu).toBeVisible()
+  await trigger.click()
+  await expect(menu).toHaveCount(0)
+
+  await trigger.click()
+  await menu.getByRole('menuitemcheckbox', { name: 'Show diagnostics' }).click()
+  const diagnostics = chat.getByRole('region', { name: 'Diagnostics' })
+  await expect(diagnostics).toBeVisible()
+  await expect(menu).toHaveCount(0)
+  await trigger.click()
+  await menu.getByRole('menuitemcheckbox', { name: 'Show diagnostics' }).click()
+  await expect(diagnostics).toHaveCount(0)
+
+  await trigger.click()
+  await menu.getByRole('menuitem', { name: 'Delete task…' }).click()
+  await expect(page.getByRole('dialog', { name: 'Delete task' })).toBeVisible()
+})
+
+test('shows context usage in the header and compacts from its card', async ({ page }) => {
+  await page.goto('/')
+  const chat = page.getByRole('region', { name: 'Task chat' })
+  const gauge = chat.getByRole('button', { name: /Context window/ })
+  await expect(gauge).toHaveCount(0)
+
+  await page.evaluate(() => {
+    const entries: Entry[] = [
+      { id: 'note', sequence: 1, kind: { type: 'agentText', data: { text: 'Working on it' } } },
+      { id: 'usage', sequence: 2, kind: { type: 'usage', data: { used: 250_000, size: 1_000_000, cost: null } } },
+    ]
+    ;(window as unknown as { __setTranscript: (taskId: string, entries: Entry[]) => void }).__setTranscript('task-1', entries)
+  })
+
+  await expect(gauge).toHaveAttribute('aria-label', 'Context window: 25% used')
+  await expect(chat.getByText('250000 of 1000000 tokens')).toHaveCount(0)
+  await gauge.click()
+  const card = chat.getByRole('dialog', { name: 'Context window' })
+  await expect(card.getByRole('progressbar')).toHaveAttribute('aria-valuenow', '25')
+  await expect(card.getByText('Auto-compacts at 900,000 tokens')).toBeVisible()
+  await gauge.click()
+  await expect(card).toHaveCount(0)
+
+  await gauge.click()
+  await card.getByRole('button', { name: 'Compact now' }).click()
+  await expect(card).toHaveCount(0)
+  expect(await page.evaluate(() => (window as unknown as { __compactRequests: () => string[] }).__compactRequests())).toEqual(['task-1'])
+})
+
+test('reports a failed task open and retries instead of staying on Opening task', async ({ page }) => {
+  await page.goto('/?two-tasks')
+  const chat = page.getByRole('region', { name: 'Task chat' })
+  await expect(chat.getByText('ready to go')).toBeVisible()
+
+  await page.evaluate(() => (window as unknown as { __failNextWorkspaceRead: () => void }).__failNextWorkspaceRead())
+  await page.getByRole('button', { name: /Second chat/ }).click()
+  const failure = chat.getByRole('alert')
+  await expect(failure).toContainText('This task could not be opened. Fixture workspace read failed')
+  await expect(chat.getByText('Opening task…')).toHaveCount(0)
+  await expect(page.getByRole('button', { name: /Second chat/ })).toHaveAttribute('aria-current', 'true')
+
+  await chat.getByRole('button', { name: 'Retry' }).click()
+  await expect(chat.getByRole('alert')).toHaveCount(0)
+  await expect(chat.locator('.chat__title')).toHaveText('Second chat')
+  await expect(page.getByRole('button', { name: /Second chat/ })).toHaveAttribute('aria-current', 'true')
+})
+
+test('labels the header with the task branch and worktree and marks unread output', async ({ page }) => {
+  await page.goto('/?two-tasks')
+  const chat = page.getByRole('region', { name: 'Task chat' })
+  await expect(chat.getByTitle('Branch shepherd/ship-it')).toHaveText('shepherd/ship-it')
+  await expect(chat.getByTitle('Worktree /tmp/demo/.git/shepherd/worktrees/ship-it'))
+    .toHaveText('/tmp/demo/.git/shepherd/worktrees/ship-it')
+
+  const second = page.getByRole('button', { name: /Second chat/ })
+  const unread = () => second.getByRole('img', { name: 'Unread output' })
+  await expect(page.locator('.task__state-label')).toHaveCount(0)
+  await expect(unread()).toHaveCount(0)
+
+  await page.evaluate(() => {
+    const entries: Entry[] = [
+      { id: 'second-1', sequence: 1, kind: { type: 'agentText', data: { text: 'Fresh background answer' } } },
+    ]
+    ;(window as unknown as { __setTranscript: (taskId: string, entries: Entry[]) => void }).__setTranscript('task-second', entries)
+  })
+  await expect(unread()).toBeVisible()
+
+  await second.click()
+  await expect(chat.getByText('Fresh background answer')).toBeVisible()
+  await expect(unread()).toHaveCount(0)
+
+  await page.evaluate(() => {
+    const entries: Entry[] = [
+      { id: 'second-1', sequence: 1, kind: { type: 'agentText', data: { text: 'Fresh background answer' } } },
+      { id: 'second-2', sequence: 2, kind: { type: 'agentText', data: { text: 'Streaming while open' } } },
+    ]
+    ;(window as unknown as { __setTranscript: (taskId: string, entries: Entry[]) => void }).__setTranscript('task-second', entries)
+  })
+  await expect(chat.getByText('Streaming while open')).toBeVisible()
+  await expect(unread()).toHaveCount(0)
+})
+
 test('keeps the task and confirmation open when a dirty worktree cannot be removed', async ({ page }) => {
   await page.goto('/?dirty-delete')
-  await page.getByRole('button', { name: 'Delete task…' }).click()
+  await page.getByRole('button', { name: 'Task actions' }).click()
+  await page.getByRole('menuitem', { name: 'Delete task…' }).click()
   const dialog = page.getByRole('dialog', { name: 'Delete task' })
   await dialog.getByRole('checkbox').check()
   await dialog.getByRole('button', { name: 'Delete task', exact: true }).click()
@@ -2588,6 +2759,42 @@ test('updates the native title and clears worktree status when switching project
   await expect.poll(() => page.evaluate(() => window.__unwatchedFiles)).toContain('file-watch-1')
 })
 
+test('keeps the files pane on the selected project when switching project rows', async ({ page }) => {
+  await page.goto('/?review-fixture')
+  const files = page.getByRole('region', { name: 'Workspace files' })
+  const root = files.getByLabel('File root')
+  const crossProjectRequests = () => page.evaluate(() => (window as unknown as {
+    __fileRequests: Array<{ projectMatches: boolean }>
+  }).__fileRequests.filter((request) => !request.projectMatches))
+
+  await page.getByRole('tab', { name: 'Files', exact: true }).click()
+  await expect(root).toHaveValue('worktree')
+  await expect(files.getByRole('button', { name: /worktree\.txt/ })).toBeVisible()
+
+  await page.getByRole('button', { name: 'notes', exact: true }).click()
+  await page.getByRole('tab', { name: 'Files', exact: true }).click()
+  await expect(root).toHaveValue('project')
+  await expect(files.getByRole('button', { name: /README\.md/ })).toBeVisible()
+  await page.getByRole('button', { name: /Read notes/ }).click()
+  await expect(root).toHaveValue('worktree')
+
+  await page.getByRole('button', { name: 'demo', exact: true }).click()
+  await expect(root).toHaveValue('worktree')
+  await page.getByRole('button', { name: 'notes', exact: true }).click()
+  await page.getByRole('button', { name: /Read notes/ }).click()
+  await expect(root).toHaveValue('worktree')
+  await expect(files.getByRole('button', { name: /worktree\.txt/ })).toBeVisible()
+
+  expect(await crossProjectRequests()).toEqual([])
+  await expect(page.getByRole('alert')).toHaveCount(0)
+
+  await page.getByRole('button', { name: 'demo', exact: true }).click()
+  await root.selectOption('project')
+  await page.getByRole('button', { name: /Add tests/ }).click()
+  await expect(root).toHaveValue('project')
+  expect(await crossProjectRequests()).toEqual([])
+})
+
 test('distinguishes unavailable projects from a missing saved task', async ({ page }) => {
   await page.goto('/?missing-project')
   const chat = page.getByRole('region', { name: 'Task chat' })
@@ -2642,7 +2849,7 @@ test('dispatches external actions for the selected root and shows opener errors'
 test('continues an interrupted task from the prompt, not a recovery button', async ({ page }) => {
   await page.goto('/?interrupted-task')
   const chat = page.getByRole('region', { name: 'Task chat' })
-  await expect(chat.locator('.chat__state')).toHaveText('interrupted')
+  await expect(page.locator('.chat__state')).toHaveCount(0)
   for (const label of ['Resume', 'Reconnect', 'Start new session']) {
     await expect(chat.getByRole('button', { name: label, exact: true })).toHaveCount(0)
   }
@@ -2650,7 +2857,7 @@ test('continues an interrupted task from the prompt, not a recovery button', asy
   await expect(prompt).toBeEnabled()
   await prompt.fill('continue where we left off')
   await chat.getByRole('button', { name: 'Send' }).click()
-  await expect(chat.locator('.chat__state')).toHaveText('waiting')
+  await expect(page.locator('.chat__state')).toHaveCount(0)
   await expect(chat.getByText('working on it')).toBeVisible()
 })
 
@@ -2667,10 +2874,8 @@ test('cancels an active turn and waits for the settled workspace', async ({ page
     else await cancel.click()
     await expect(chat.getByRole('button', { name: 'Cancelling…' })).toBeDisabled()
     await expect(chat.getByRole('button', { name: 'Allow' })).toBeDisabled()
-    await expect(chat.locator('.chat__state')).toHaveText('waiting')
     await expect(prompt).toBeDisabled()
     await page.evaluate(() => window.dispatchEvent(new Event('test-cancel-finished')))
-    await expect(chat.locator('.chat__state')).toHaveText('ready')
     await expect(chat.locator('.entry__permission')).toContainText('withdrawn')
     await expect(chat.getByRole('button', { name: 'Allow' })).toHaveCount(0)
     await expect(prompt).toBeEnabled()
@@ -2700,7 +2905,16 @@ test('answers a question in the transcript', async ({ page }) => {
   await card.getByRole('button', { name: 'Send answer' }).click()
   await expect(card).toContainText('debug')
   await expect(card.getByRole('textbox', { name: 'Answer question' })).toHaveCount(0)
-  await expect(page.locator('.chat__state')).toHaveText('ready')
+})
+
+test('marks a single waiting conversation on the project row', async ({ page }) => {
+  await page.goto('/')
+  const navigation = page.getByRole('complementary', { name: 'Workspace navigation' })
+  const projectRow = navigation.locator('.project-row').filter({ hasText: 'demo' }).locator('.project')
+  await expect(projectRow.getByRole('img', { name: 'Waiting for you' })).toHaveCount(0)
+
+  await page.evaluate(() => window.__setTaskState('task-1', 'waiting'))
+  await expect(projectRow.getByRole('img', { name: 'Waiting for you' })).toBeVisible()
 })
 
 test('merges a read approval and its result into one row', async ({ page }) => {
@@ -2721,12 +2935,122 @@ test('merges a read approval and its result into one row', async ({ page }) => {
   await expect(row.locator('.entry__output')).toContainText('let answer = 42;')
 })
 
+test('follows the latest transcript row and collapses tool output', async ({ page }) => {
+  await page.goto('/?two-tasks')
+  const chat = page.getByRole('region', { name: 'Task chat' })
+  const view = chat.getByRole('region', { name: 'Transcript' })
+  const distanceFromBottom = () => view.evaluate((node) => node.scrollHeight - node.scrollTop - node.clientHeight)
+  const publish = (count: number, status: 'running' | 'completed' = 'completed') => page.evaluate(({ count, status }) => {
+    const entries: Entry[] = [{ id: 'prompt', sequence: 0, kind: { type: 'userMessage', data: { text: 'Run the checks' } } }]
+    for (let index = 0; index < count; index += 1) {
+      entries.push({ id: `note-${index}`, sequence: index + 1, kind: { type: 'agentText', data: { text: `Line ${index}` } } })
+    }
+    entries.push({ id: 'command', sequence: count + 1, kind: { type: 'toolCall', data: {
+      toolCallId: 'command', title: 'echo "--- /Users/me/src ---"; ls; uname -a', kind: 'command', status,
+      output: '--- /Users/me/src ---\ncontrib\nme', diffs: [], terminalId: null,
+    } } })
+    ;(window as unknown as { __setTranscript: (taskId: string, entries: Entry[]) => void }).__setTranscript('task-1', entries)
+  }, { count, status })
+
+  await publish(60)
+  await expect(chat.getByText('Line 59', { exact: true })).toBeVisible()
+
+  const card = chat.locator('.entry__user-card')
+  const surfaces = await card.evaluate((node) => {
+    const probe = document.createElement('div')
+    node.parentElement?.append(probe)
+    probe.style.background = 'var(--surface-raised)'
+    const raised = getComputedStyle(probe).backgroundColor
+    probe.style.background = 'var(--prompt-card)'
+    const prompt = getComputedStyle(probe).backgroundColor
+    probe.remove()
+    return {
+      raised,
+      prompt,
+      card: getComputedStyle(node).backgroundColor,
+      weight: getComputedStyle(node.querySelector('.entry__user') as HTMLElement).fontWeight,
+    }
+  })
+  // Chrome serializes a resolved color-mix as `color(srgb 0–1 …)` and plain tokens as `rgb(0–255 …)`.
+  const brightness = (color: string) => {
+    const scale = color.startsWith('color(') ? 255 : 1
+    return (color.match(/[\d.]+/g) ?? []).slice(0, 3).map(Number).reduce((sum, value) => sum + value * scale, 0)
+  }
+  expect(surfaces.prompt).not.toBe(surfaces.raised)
+  expect(surfaces.card).toBe(surfaces.prompt)
+  expect(brightness(surfaces.card)).toBeGreaterThan(brightness(surfaces.raised) + 20)
+  expect(surfaces.weight).toBe('400')
+
+  await expect.poll(distanceFromBottom).toBeLessThanOrEqual(24)
+  const tool = chat.locator('.entry__tool')
+  await expect(tool.locator('.entry__output')).toHaveCount(0)
+  await expect(tool.getByRole('button', { name: 'Show contents' })).toHaveAttribute('aria-expanded', 'false')
+  await tool.getByRole('button', { name: 'Show contents' }).click()
+  await expect(tool.getByRole('button', { name: 'Hide contents' })).toHaveAttribute('aria-expanded', 'true')
+  await expect(tool.locator('.entry__output')).toContainText('contrib')
+
+  await view.hover()
+  await page.mouse.wheel(0, -4000)
+  await expect.poll(distanceFromBottom).toBeGreaterThan(24)
+  await publish(61)
+  await expect.poll(distanceFromBottom).toBeGreaterThan(24)
+
+  await page.getByRole('button', { name: /Second chat/ }).click()
+  await page.getByRole('button', { name: /Ship it/ }).click()
+  await expect.poll(distanceFromBottom).toBeLessThanOrEqual(24)
+  await expect(chat.locator('.entry__tool .entry__output')).toHaveCount(0)
+
+  await publish(61, 'running')
+  await expect(chat.locator('.entry__tool .entry__output')).toContainText('contrib')
+  await publish(61, 'completed')
+  await expect(chat.locator('.entry__tool .entry__output')).toHaveCount(0)
+})
+
+test('renders an agent answer as formatted markdown', async ({ page }) => {
+  await page.goto('/')
+  const chat = page.getByRole('region', { name: 'Task chat' })
+  await page.evaluate(() => {
+    const entries: Entry[] = [{
+      id: 'answer', sequence: 1, kind: { type: 'agentText', data: { text: [
+        'Read two more, from sibling repos: **`/Users/me/src/me/rust-libs/README.md`** and `dns_filter_server`.',
+        '',
+        '# rust-libs',
+        '',
+        '```',
+        'api-client-utils',
+        'file-cache',
+        '```',
+        '',
+        '- Run unit tests: `utest`',
+        '- Run program: `run`',
+        '',
+        '> deprecated, moved to GitLab',
+        '',
+        'See [the tools](https://example.com/tools).',
+      ].join('\n') } },
+    }]
+    ;(window as unknown as { __setTranscript: (taskId: string, entries: Entry[]) => void }).__setTranscript('task-1', entries)
+  })
+  const answer = chat.locator('.entry__agent')
+  await expect(answer.locator('strong')).toHaveText('/Users/me/src/me/rust-libs/README.md')
+  await expect(answer.locator('code').first()).toHaveText('/Users/me/src/me/rust-libs/README.md')
+  await expect(answer.locator('.md__heading')).toHaveText('rust-libs')
+  await expect(answer.locator('.md__code-block')).toContainText('file-cache')
+  await expect(answer.locator('.md__list li')).toHaveCount(2)
+  await expect(answer.locator('.md__quote')).toContainText('moved to GitLab')
+  await expect(answer.locator('a')).toHaveAttribute('href', 'https://example.com/tools')
+  await expect(answer).not.toContainText('**')
+  await expect(answer).not.toContainText('```')
+  await expect(answer).not.toContainText('# rust-libs')
+})
+
 test('reports the reason the native adapter was skipped', async ({ page }) => {
   await page.goto('/?acp-fallback')
   const chat = page.getByRole('region', { name: 'Task chat' })
   await expect(chat.locator('.chat__adapter')).toHaveCount(0)
   await expect(chat.getByText('OpenCode native server unavailable: no loopback server')).toBeVisible()
-  await chat.getByText('Diagnostics', { exact: true }).click()
+  await chat.getByRole('button', { name: 'Task actions' }).click()
+  await chat.getByRole('menuitemcheckbox', { name: 'Show diagnostics' }).click()
   await expect(chat.getByText('ACP v1 OpenCode 2.0.14')).toBeVisible()
   await expect(chat.getByText('ACP', { exact: true })).toBeVisible()
   await expect(chat.getByText('/existing/opencode acp')).toBeVisible()
@@ -2737,7 +3061,6 @@ test('reports the reason the native adapter was skipped', async ({ page }) => {
 test('keeps chat controls available for an adapter that reports no support', async ({ page }) => {
   await page.goto('/?approval-fixture&limited-adapter')
   const chat = page.getByRole('region', { name: 'Task chat' })
-  await expect(chat.locator('.chat__state')).toHaveText('waiting')
   await expect(chat.getByRole('button', { name: 'Cancel turn' })).toBeEnabled()
   await expect(chat.locator('.entry__permission').getByRole('button', { name: 'Allow', exact: true }).first()).toBeEnabled()
   await expect(chat.getByRole('button', { name: 'Shell approvals: Ask me' })).toBeVisible()
@@ -3280,7 +3603,7 @@ test('ends a partial bracketed paste before sending the next key', async ({ page
   await expect(page.getByRole('dialog', { name: 'Error history' })).toContainText('The terminal stopped accepting the paste.')
 })
 
-test('opens Freebuff as a standalone terminal in the conversation pane', async ({ page }) => {
+test('keeps the composer available while the Freebuff terminal runs', async ({ page }) => {
   await page.goto('/')
   const chat = page.getByRole('region', { name: 'Task chat' })
   await chat.getByLabel('Prompt').fill('Keep this draft')
@@ -3288,8 +3611,8 @@ test('opens Freebuff as a standalone terminal in the conversation pane', async (
   await chat.getByRole('menuitemradio', { name: 'Freebuff (terminal)' }).click()
 
   const freebuff = page.getByRole('region', { name: 'Freebuff terminal' })
-  await expect(chat).toBeHidden()
-  await expect(freebuff.getByRole('heading')).toHaveCount(0)
+  await expect(freebuff).toBeVisible()
+  await expect(chat).toBeVisible()
   const input = freebuff.getByRole('textbox', { name: 'Terminal', exact: true })
   await expect(input).toBeFocused()
   await expect(freebuff.getByLabel('Terminal output')).toContainText('B')
@@ -3297,13 +3620,55 @@ test('opens Freebuff as a standalone terminal in the conversation pane', async (
   await expect.poll(() => page.evaluate(() =>
     (window as unknown as { __writes: string[] }).__writes,
   )).toEqual(['a'])
-  await page.getByRole('banner', { name: 'Workspace header' }).getByRole('button', { name: 'Back to chat' }).click()
 
+  const prompt = chat.getByLabel('Prompt')
+  await expect(prompt).toBeDisabled()
+  await expect(prompt).toHaveValue('Keep this draft')
+  await expect(prompt).toHaveAttribute('placeholder', 'Freebuff terminal is open — choose another agent to chat')
+  await expect(chat.getByRole('button', { name: 'Send' })).toBeDisabled()
+  await expect(chat.getByRole('button', { name: 'Agent: Freebuff (terminal)' })).toBeVisible()
+
+  await freebuff.getByRole('button', { name: 'Back to chat' }).click()
   await expect(freebuff).toBeHidden()
-  await expect(chat.getByLabel('Prompt')).toHaveValue('Keep this draft')
+  await expect(prompt).toBeEnabled()
+  await expect(prompt).toHaveValue('Keep this draft')
+  await expect(chat.getByRole('button', { name: 'Agent: Codex' })).toBeVisible()
   await expect.poll(() => page.evaluate(() =>
     (window as unknown as { __closedTerminals: string[] }).__closedTerminals,
-  )).toEqual(['freebuff-fixture'])
+  )).toEqual([])
+
+  await page.getByRole('button', { name: /^Freebuff freebuff · live$/ }).click()
+  await expect(freebuff).toBeVisible()
+  await expect(input).toBeFocused()
+
+  await chat.getByRole('button', { name: 'Agent: Freebuff (terminal)' }).click()
+  await chat.getByRole('menuitemradio', { name: 'Codex', exact: true }).click()
+  await expect(freebuff).toBeHidden()
+  await expect(chat.getByLabel('Prompt')).toBeEnabled()
+  await expect.poll(() => page.evaluate(() =>
+    (window as unknown as { __closedTerminals: string[] }).__closedTerminals,
+  )).toEqual([])
+})
+
+test('shows an ended Freebuff session instead of forwarding keys', async ({ page }) => {
+  await page.goto('/?freebuff-exit')
+  const chat = page.getByRole('region', { name: 'Task chat' })
+  await chat.getByLabel('Prompt').fill('Keep this draft')
+  await chat.getByRole('button', { name: 'Agent: Codex' }).click()
+  await chat.getByRole('menuitemradio', { name: 'Freebuff (terminal)' }).click()
+
+  const freebuff = page.getByRole('region', { name: 'Freebuff terminal' })
+  await expect(freebuff.getByRole('textbox', { name: 'Terminal', exact: true })).toBeVisible()
+  await page.evaluate(() => (window as unknown as { __endFreebuff: () => void }).__endFreebuff())
+
+  await expect(freebuff).toContainText('Freebuff ended with exit code 130')
+  await expect(freebuff.getByRole('button', { name: 'Restart' })).toBeVisible()
+  await expect(freebuff.getByRole('textbox', { name: 'Terminal', exact: true })).toHaveCount(0)
+  await expect(page.locator('.error-toast')).toHaveCount(0)
+  await expect(chat.getByLabel('Prompt')).toBeDisabled()
+
+  await freebuff.getByRole('button', { name: 'Restart' }).click()
+  await expect(freebuff.getByRole('textbox', { name: 'Terminal', exact: true })).toBeVisible()
 })
 
 test('opens the project picker, filters, and adds a project', async ({ page }) => {
@@ -4008,39 +4373,16 @@ test('retries a failed branch creation from the task header', async ({ page }) =
   await expect(retry).toHaveCount(0)
 })
 
-test('summarizes an auth failure and keeps the raw error behind details', async ({ page }) => {
+test('keeps the raw auth error behind the failure details', async ({ page }) => {
   await page.goto('/?agent-auth-failed')
   const chat = page.getByRole('region', { name: 'Task chat' })
   const failure = chat.locator('.entry__failure')
   await expect(failure).toContainText('Sign-in required')
-  await expect(failure.locator('.entry__failure-text')).toHaveText(
-    'Sign in to Turso and check its database token, then retry. Tried Codex (app-server) with model gpt-6.1-terra.',
-  )
   const details = failure.locator('details')
   await expect(details).not.toHaveAttribute('open', '')
   await details.locator('summary').click()
   await expect(details).toContainText('Turso rejected the database token: HTTP 401 Unauthorized')
   await expect(details).toContainText('Turso login required for workspace acme.')
-})
-
-test('names the harness and protocol that hit an auth failure', async ({ page }) => {
-  await page.goto('/?agent-auth-failed&acp-fallback')
-  const failure = page.getByRole('region', { name: 'Task chat' }).locator('.entry__failure')
-  await expect(failure.locator('.entry__failure-text')).toHaveText(
-    'Sign in to Turso and check its database token, then retry. Tried OpenCode (ACP v1 OpenCode 2.0.14) with model acme/qwen from provider acme.',
-  )
-})
-
-test('keeps a failure message bound to the model that failed', async ({ page }) => {
-  await page.goto('/?agent-auth-failed&agent-models&configured-opencode')
-  const composer = page.locator('.composer')
-  const failure = page.getByRole('region', { name: 'Task chat' }).locator('.entry__failure')
-  const recorded = 'Sign in to Turso and check its database token, then retry. Tried OpenCode (OpenCode 2.0.14 native HTTP) with model acme/deepseek from provider acme.'
-  await expect(failure.locator('.entry__failure-text')).toHaveText(recorded)
-  await composer.getByRole('button', { name: 'Model: DeepSeek V3' }).click()
-  await composer.getByRole('menu', { name: 'Model' }).getByRole('menuitemradio', { name: 'Qwen Coder' }).click()
-  await expect(composer.getByRole('button', { name: 'Model: Qwen Coder' })).toBeVisible()
-  await expect(failure.locator('.entry__failure-text')).toHaveText(recorded)
 })
 
 test('keeps advertised session modes changeable during a turn for the next prompt', async ({ page }) => {
@@ -4144,7 +4486,6 @@ test('does not reload the attachment limit on streaming project snapshots', asyn
       await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
     }
   })
-  await expect(page.getByRole('region', { name: 'Task chat' })).toContainText('working')
   expect(await requests()).toEqual(before)
   await page.getByRole('button', { name: 'Settings', exact: true }).click()
   await page.getByRole('spinbutton', { name: 'Attachment limit (bytes)' }).fill('900')

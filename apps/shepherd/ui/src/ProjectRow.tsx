@@ -128,6 +128,11 @@ export function ProjectRow(props: ProjectRowProps) {
           </Show>
         </span>
         <span class="project__name">{props.project.name}</span>
+        {/* A project with one conversation never shows task rows, so its own
+            row carries the waiting signal. */}
+        <Show when={props.project.waitingTaskCount === 1 && props.project.unfinishedTaskCount === 1}>
+          <WaitingIcon />
+        </Show>
       </button>
       <button
         type="button"
@@ -214,6 +219,16 @@ export function ProjectRow(props: ProjectRowProps) {
         </div>
       </Show>
     </div>
+  )
+}
+
+export function WaitingIcon() {
+  return (
+    <svg class="waiting-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" role="img" aria-label="Waiting for you">
+      <path d="M7.9 20A9 9 0 1 0 4 16.1L2 22Z" />
+      <path d="M9.7 9.4a2.4 2.4 0 1 1 3.4 2.2c-.6.3-1 .8-1 1.5v.3" />
+      <path d="M12 16.6h.01" />
+    </svg>
   )
 }
 

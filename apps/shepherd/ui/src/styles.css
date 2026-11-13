@@ -2,6 +2,7 @@
   --background: #131316;
   --surface: #17171b;
   --surface-raised: #1d1d22;
+  --prompt-card: color-mix(in srgb, var(--surface-raised) 90%, var(--text) 10%);
   --border: #26262d;
   --text: #e6e6ea;
   --text-secondary: #d9d9df;
@@ -962,11 +963,12 @@ textarea {
   background: transparent;
 }
 
-.task__state-label {
-  color: var(--text-muted);
-  font-size: 10px;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
+.task__unread {
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
 }
 
 .chat {
@@ -980,12 +982,28 @@ textarea {
   display: none;
 }
 
-.chat--terminal {
-  overflow: auto;
+.chat__terminal {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
 }
 
-.chat--terminal > p {
-  margin: 12px;
+.chat__terminal > .terminal-view {
+  flex: 1;
+  min-height: 0;
+}
+
+.chat__terminal-bar {
+  flex: none;
+  padding: 4px 8px;
+}
+
+.chat__terminal-state {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
 }
 
 .pane-header {
@@ -994,7 +1012,6 @@ textarea {
   gap: 10px;
   min-height: 40px;
   padding: 0 16px;
-  border-bottom: 1px solid var(--border);
 }
 
 .settings {
@@ -1356,7 +1373,23 @@ textarea {
 
 .chat__title {
   flex: 1;
+  min-width: 0;
+  overflow: hidden;
   font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat__branch,
+.chat__worktree {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 240px;
+  overflow: hidden;
+  color: var(--text-muted);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .chat__adapter,
@@ -1369,14 +1402,89 @@ textarea {
   margin: 0;
 }
 
-.chat__state {
-  padding: 2px 8px;
-  border: 1px solid var(--border);
-  border-radius: 999px;
+.chat__header-actions {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.chat__gauge {
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: none;
   color: var(--text-muted);
-  font-size: 11px;
-  letter-spacing: 0.05em;
-  text-transform: uppercase;
+}
+
+.chat__gauge:hover,
+.chat__gauge[aria-expanded='true'] {
+  background: var(--surface-raised);
+}
+
+.chat__gauge-track {
+  fill: none;
+  stroke: var(--border);
+  stroke-width: 2;
+}
+
+.chat__gauge-value {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 2;
+  stroke-linecap: round;
+  transition: stroke-dashoffset 180ms ease;
+}
+
+.chat__menu-card {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 12;
+  min-width: 200px;
+  padding: 4px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  box-shadow: 0 6px 20px var(--menu-shadow);
+}
+
+.chat__menu-card .nav-item {
+  width: 100%;
+}
+
+.chat__menu-card .nav-item:disabled {
+  color: var(--text-disabled);
+}
+
+.chat__context-card {
+  display: grid;
+  gap: 10px;
+  width: 260px;
+  padding: 12px;
+}
+
+.context-bar {
+  height: 6px;
+  border-radius: 999px;
+  background: var(--surface-raised);
+  overflow: hidden;
+}
+
+.context-bar__fill {
+  height: 100%;
+  border-radius: 999px;
+  background: var(--accent);
+}
+
+.context-card__note {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 12px;
 }
 
 .composer__picker-fallback {
@@ -1418,6 +1526,11 @@ textarea {
   min-height: 100%;
   place-items: center;
   text-align: center;
+}
+
+.chat__welcome--failure {
+  align-content: center;
+  gap: 10px;
 }
 
 .chat__welcome h1 {
@@ -1554,7 +1667,6 @@ textarea {
 
 .entry__user {
   margin: 0;
-  font-weight: 600;
 }
 
 .entry__user-card {
@@ -1563,12 +1675,78 @@ textarea {
   margin-left: auto;
   padding: 8px 12px;
   border-radius: 10px;
-  background: var(--surface-raised);
+  background: var(--prompt-card);
 }
 
 .entry__agent {
   margin: 0;
   line-height: 1.55;
+}
+
+.entry__agent > * + * {
+  margin-top: 8px;
+}
+
+.md__paragraph {
+  margin: 0;
+}
+
+.md__heading {
+  margin: 0;
+  font-weight: 600;
+}
+
+.md__heading-1,
+.md__heading-2 {
+  font-size: 1.12em;
+}
+
+.md__heading-3,
+.md__heading-4,
+.md__heading-5,
+.md__heading-6 {
+  font-size: 1.03em;
+}
+
+.md__inline-code {
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: var(--surface-raised);
+  font-family: monospace;
+  font-size: 0.92em;
+}
+
+.md__code-block {
+  margin: 0;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: var(--surface-raised);
+  overflow-x: auto;
+  font-family: monospace;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.md__list {
+  margin: 0;
+  padding-left: 20px;
+}
+
+.md__quote {
+  margin: 0;
+  padding-left: 10px;
+  border-left: 2px solid var(--border);
+  color: var(--text-secondary);
+}
+
+.md__rule {
+  margin: 0;
+  border: 0;
+  border-top: 1px solid var(--border);
+}
+
+.md__link {
+  color: var(--accent);
 }
 
 .entry__thought {
@@ -1686,6 +1864,10 @@ textarea {
   color: var(--text-muted);
   font-size: 11px;
   text-transform: uppercase;
+}
+
+.entry__tool-toggle {
+  margin-left: 8px;
 }
 
 .entry__output {
@@ -1865,8 +2047,26 @@ textarea {
   font-size: 11px;
 }
 
-.diagnostics summary {
-  cursor: pointer;
+.diagnostics--card {
+  margin: 8px 16px 0;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-raised);
+}
+
+.diagnostics__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.diagnostics__header h3 {
+  margin: 0;
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 600;
 }
 
 .diagnostics dl {
@@ -1891,12 +2091,6 @@ textarea {
   max-height: 120px;
   overflow: auto;
   white-space: pre-wrap;
-}
-
-.entry__usage {
-  margin: 0;
-  color: var(--text-disabled);
-  font-size: 11px;
 }
 
 .entry__plan {
@@ -2030,6 +2224,11 @@ textarea {
   color: var(--text-muted);
   font-size: 12px;
   cursor: pointer;
+}
+
+.composer__picker:disabled {
+  color: var(--text-disabled);
+  cursor: default;
 }
 
 .composer__approval-slot {
@@ -2291,6 +2490,12 @@ textarea {
   overflow-x: auto;
 }
 
+.terminal-list__row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
 .terminal-list__item {
   display: flex;
   gap: 8px;
@@ -2520,6 +2725,11 @@ textarea {
   overflow: auto;
   background: var(--surface-raised);
   border: 1px solid var(--border);
+}
+
+.waiting-icon {
+  flex: none;
+  color: var(--status-waiting);
 }
 
 .task__attention-badge {

@@ -44,7 +44,7 @@ function enabledButton(label: string) {
 }
 
 function chatState() {
-  return document.querySelector('.chat__state')?.textContent
+  return document.querySelector('.chat')?.getAttribute('data-task-state') ?? undefined
 }
 
 async function sendPrompt(text: string) {

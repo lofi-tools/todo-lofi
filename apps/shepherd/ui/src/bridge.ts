@@ -251,6 +251,7 @@ export interface ProjectSnapshot {
   unfinishedTaskCount: number
   reviewTaskCount: number
   runningTaskCount: number
+  waitingTaskCount: number
 }
 
 export interface ProjectList {
@@ -428,6 +429,8 @@ export interface AgentCapabilities {
   usage: boolean
   agentTerminals: boolean
   patchesInApprovals: boolean
+  compact: boolean
+  compactThreshold: number | null
 }
 
 export interface AgentModes {
@@ -486,7 +489,7 @@ export interface TerminalSnapshot {
   id: string
   projectId: string
   taskId: string | null
-  scope: 'project' | 'task'
+  scope: 'project' | 'task' | 'freebuff'
   title: string
   cwd: string
   command: string
@@ -728,6 +731,10 @@ export function cancelTask(taskId: string): Promise<TaskWorkspace> {
   return invoke<TaskWorkspace>('cancel_task', { taskId })
 }
 
+export function compactTask(taskId: string): Promise<TaskWorkspace> {
+  return invoke<TaskWorkspace>('compact_task', { taskId })
+}
+
 export function quit(force: boolean): Promise<QuitSummary> {
   return invoke<QuitSummary>('quit', { force })
 }
@@ -821,7 +828,7 @@ export function restartTerminal(terminalId: string, columns: number, rows: numbe
   return invoke('restart_terminal', { terminalId, columns, rows })
 }
 
-export function startFreebuffTerminal(projectId: string): Promise<string> {
+export function startFreebuffTerminal(projectId: string): Promise<TerminalList> {
   return invoke('start_freebuff_terminal', { projectId })
 }
 
