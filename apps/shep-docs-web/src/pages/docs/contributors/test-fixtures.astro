@@ -13,8 +13,8 @@ const toc = [
   { label: 'Rules', href: '#rules' },
 ]
 
-const commands = `direnv exec . cargo test -p agent-harness
-direnv exec . cargo test -p shepherd-core
+const commands = `direnv exec . cargo test -p shep-harness-codex
+direnv exec . cargo test -p shep-core
 direnv exec . pnpm --dir apps/shepherd/ui run test:e2e
 pnpm --dir apps/shep-docs-web run test:e2e`
 ---

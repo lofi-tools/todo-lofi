@@ -24,8 +24,9 @@ const summaries: Record<string, string> = {
 }
 
 const layout = [
-  { path: 'libs/shepherd-core', owns: 'Agents, terminals, task state, Git, storage, input routing and commands. No Tauri or GPUI types.' },
-  { path: 'libs/agent-harness', owns: 'The UI-free adapter trait, transcript event types and native adapter implementations.' },
+  { path: 'libs/shep-core', owns: 'Agents, terminals, task state, Git, storage, input routing and commands. No Tauri or GPUI types.' },
+  { path: 'libs/agent-harness', owns: 'The UI-free adapter trait, transcript event types and re-exports of every adapter crate.' },
+  { path: 'libs/shep-harness-*', owns: 'One crate per native adapter (codex, opencode, acp, pi, freebuff) over the shared contract in libs/shep-harness-core.' },
   { path: 'libs/acp-client', owns: 'ACP connection, sessions, permissions, filesystem and terminal client capabilities.' },
   { path: 'apps/shepherd/ui', owns: 'SolidJS views over the core bridge: task workspace, canvas terminal, preview and review.' },
   { path: 'apps/shepherd/src-tauri', owns: 'The window, Tauri commands, the event channel and the loopback preview wrapper.' },

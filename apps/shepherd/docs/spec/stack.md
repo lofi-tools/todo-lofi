@@ -9,7 +9,7 @@ Two shells, one core:
 
 - **v1** — Tauri 2 with a SolidJS + TypeScript frontend on the system webview.
 - **v2** — GPUI + gpui-component (gpui-kit) + gpui-kit-assets.
-- **Both** — `libs/shepherd-core`: tokio, harness adapters, PTY and terminal
+- **Both** — `libs/shep-core`: tokio, harness adapters, PTY and terminal
   state, Git, Turso store. No Tauri or GPUI types. v1 splits it out from the
   first commit precisely so v2 reuses it unchanged.
 
@@ -22,7 +22,7 @@ Two shells, one core:
 └───────────────▲───────────────────────────┬──────────────────┘
                 │ Event bus                 │ Command + input
 ┌───────────────┴───────────────────────────▼──────────────────┐
-│ libs/shepherd-core (one Rust process, one tokio runtime)     │
+│ libs/shep-core (one Rust process, one tokio runtime)     │
 │ projects · tasks · terminal layouts · harness · git · store  │
 │ terminal host: one emulation thread per terminal             │
 │ PTY tasks: portable-pty                                      │
@@ -48,7 +48,7 @@ owns its work and ends it on quit (§2.5 of the master spec).
 | Styling | CSS custom properties from shared tokens | gpui-kit theme tokens from the same palette |
 | Terminal painting | `<canvas>` (Canvas2D, WebGL only if measured) | GPUI canvas |
 | Shell ↔ core | `#[tauri::command]` + Tauri channel (binary frames) | `libs/gpui-tokio` bridge + event channel |
-| Core | `libs/shepherd-core` | same crate, same API |
+| Core | `libs/shep-core` | same crate, same API |
 | Commands | core registry and resolver | same |
 | VT engine | `libghostty-vt` | same |
 | PTY | `portable-pty` 0.9 | same |
@@ -56,13 +56,13 @@ owns its work and ends it on quit (§2.5 of the master spec).
 | Database | Turso via `toasty` 0.7 | same |
 | Search | Turso FTS (Tantivy-backed) | same |
 
-## Shared core (`libs/shepherd-core`)
+## Shared core (`libs/shep-core`)
 
-Cargo: `[lib] path = "src/shepherd_core.rs"`, edition 2024, no `mod.rs`.
+Cargo: `[lib] path = "src/shep_core.rs"`, edition 2024, no `mod.rs`.
 
 | Module | Responsibility |
 | --- | --- |
-| `shepherd_core.rs` | `Core` handle, startup, shutdown state machine, re-exports |
+| `shep_core.rs` | `Core` handle, startup, shutdown state machine, re-exports |
 | `commands.rs` | `Command` enum: every mutation a shell can request; command IDs, labels and defaults |
 | `input.rs` | focus and input mode, chord resolution, terminal key routing |
 | `events.rs` | `Event` enum: state, transcript, terminal frames, errors |
@@ -84,7 +84,7 @@ dependency; every adapter maps its protocol into `HarnessEvent`.
 Rules:
 
 - One dependency direction: shells depend on the core, and the core depends on
-  `agent-harness` for the contract. No UI crate. `cargo tree -p shepherd-core` must
+  `agent-harness` for the contract. No UI crate. `cargo tree -p shep-core` must
   never contain `tauri` or `gpui`, and CI fails the build if it does.
 - The core is the only writer to the database and the only owner of PTYs.
 - The API is commands in, events out. Snapshots (`ProjectList`, `TaskList`,
@@ -213,7 +213,7 @@ rows affected by cursor movement.
 - User settings live outside the database: `settings.json` and `keybindings.json`
   in the app config dir, versioned and written atomically; project overrides are
   keyed by absolute path (master spec §11.1).
-- Migrations are numbered SQL files in `libs/shepherd-core/migrations/`
+- Migrations are numbered SQL files in `libs/shep-core/migrations/`
   (`0001_init.sql`, `0002_…`), embedded with `include_dir`, applied at startup
   in one transaction after a file backup, with the applied version recorded in a
   migration table.
@@ -238,7 +238,7 @@ rows affected by cursor movement.
 | Path | Contents |
 | --- | --- |
 | `libs/agent-harness` | UI-free adapter trait, `HarnessEvent`, capabilities and transcript entry types |
-| `libs/shepherd-core` | shared core, terminal engine wrapper, Turso store, adapter implementations |
+| `libs/shep-core` | shared core, terminal engine wrapper, Turso store, adapter implementations |
 | `apps/shepherd` | v1 Tauri shell: `src-tauri/` (commands, channel bridge), `ui/` (SolidJS + TS) |
 | `apps/shepherd-gpui` | v2 GPUI shell (added at M6) |
 | `libs/acp-client` | ACP protocol types and client capabilities, used by the ACP adapter; no GPUI dependency, fake agent behind `test-support` |
@@ -276,7 +276,7 @@ propagated, no silently discarded fallible calls.
   against a dev server.
 - ACP crate: `cargo check -p acp-client` without UI dependencies, and
   `cargo test -p acp-client --features test-support` for the fake agent.
-- Boundary check: fail if `cargo tree -p shepherd-core` contains `tauri`, `gpui`
+- Boundary check: fail if `cargo tree -p shep-core` contains `tauri`, `gpui`
   or a webview crate.
 - Migration check: apply all migrations to an empty database and to a fixture
   from the previous schema in CI.
@@ -287,7 +287,7 @@ propagated, no silently discarded fallible calls.
 v1's UI is deliberately thin — core flows only — so the migration is view code,
 not a redesign. v2 is unscheduled: work starts when v1 is feature complete.
 
-1. Keep `libs/shepherd-core` free of shell types from the first commit; land the
+1. Keep `libs/shep-core` free of shell types from the first commit; land the
    `Command`/`Event` types with v1 so they are exercised by a real shell.
 2. Put the frame model and input encoding in the core, not in the canvas
    component, so v2 reuses both.

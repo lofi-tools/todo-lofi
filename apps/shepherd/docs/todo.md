@@ -39,7 +39,7 @@ touch. The three integration-test compilation units each took 0.4–0.6 s and
 overlapped; Cargo's report does not isolate linking. These single warm-cache
 measurements do not represent a substantive source edit or a cold build. At
 the time of those measurements, the renderer pulled in Turso through
-`shepherd-core`; the replay extraction below removes that dependency.
+`shep-core`; the replay extraction below removes that dependency.
 
 - [x] **Measure incremental rebuilds after real edits.** On 2026-11-11,
   after changing replay imports and then a capture-path variable in
@@ -60,9 +60,9 @@ the time of those measurements, the renderer pulled in Turso through
   `AGENTS.md` document the opt-in run and require the focused command while
   retaining broader checks.
 - [x] **Separate terminal rendering from capture and replay.** Moved the
-  Freebuff capture/replay helpers and four tests to `terminal-replay`; the
-  shell uses it for its capture tests. `cargo tree -p terminal-renderer` no
-  longer includes `shepherd-core` or `agent-harness`. All 26 renderer tests and
+  Freebuff capture/replay helpers and four tests to `shep-terminal-replay`; the
+  shell uses it for its capture tests. `cargo tree -p shep-terminal-renderer` no
+  longer includes `shep-core` or `agent-harness`. All 26 renderer tests and
   all four replay tests passed, and the shell test targets compile.
 - [x] **Measure integration-test linking.** On 2026-11-11, with dependencies
   already built, a temporary linker wrapper measured 0.091 s for
@@ -103,7 +103,7 @@ Tasks:
 - [x] Remove the Resume, Reconnect and Start new session controls. Opening a
   task restores its transcript only; the first prompt repairs the worktree,
   opens the adapter and resumes the recorded session when the adapter still
-  supports it (`libs/shepherd-core`, `apps/shepherd/ui`).
+  supports it (`libs/shep-core`, `apps/shepherd/ui`).
 - [x] Accept prompts on failed and interrupted tasks, with the state machine
   allowing those states to enter `working`, so continuing never fails on state.
 - [x] Remove capability gating from the chat UI: the composer, model and mode
@@ -127,29 +127,29 @@ Tasks:
 ## Build speed improvements
 
 - [x] **P1 — Isolate the terminal renderer and measure the tradeoff.**
-  - [x] Prototype a separate terminal-renderer crate, resolving its shared PTY
+  - [x] Prototype a separate shep-terminal-renderer crate, resolving its shared PTY
     and replay interfaces without introducing a dependency cycle. The VT
     parser, frames, encoder and replay verifier moved to
-    `libs/terminal-renderer`; the shell re-exports it as `terminal_screen`, and
+    `libs/shep-terminal-renderer`; the shell re-exports it as `terminal_screen`, and
     `RecordedScreenUpdate` moved with it. The shell no longer depends on
     `alacritty_terminal` or `compact_str`.
   - [x] Keep the renderer and `alacritty_terminal` optimized while building the
     rest of the Shepherd shell at `opt-level = 0`. The `shepherd` package
-    override was removed and `terminal-renderer` now has `opt-level = 2`.
+    override was removed and `shep-terminal-renderer` now has `opt-level = 2`.
   - [x] Compare repeated warm Shepherd rebuilds for representative shell and
     renderer edits with the current configuration. Touching
-    `terminal-renderer` rebuilt only `terminal-renderer` and the shell (15.8 s);
+    `shep-terminal-renderer` rebuilt only `shep-terminal-renderer` and the shell (15.8 s);
     touching the shell's `bridge.rs` rebuilt only the shell (10.7 s). Neither
-    edit rebuilt `alacritty_terminal`, `shepherd-core` or the rest of the
+    edit rebuilt `alacritty_terminal`, `shep-core` or the rest of the
     dependency graph. Final-tree rerun: touching
     `apps/shepherd/src-tauri/src/bridge.rs` rebuilt only `shepherd` in 42 s;
-    touching `libs/terminal-renderer/src/terminal_renderer.rs` rebuilt
-    `terminal-renderer` then `shepherd` in 18 s. `alacritty_terminal` and
-    `shepherd-core` did not recompile in either run.
+    touching `libs/shep-terminal-renderer/src/shep_terminal_renderer.rs` rebuilt
+    `shep-terminal-renderer` then `shepherd` in 18 s. `alacritty_terminal` and
+    `shep-core` did not recompile in either run.
   - [x] Compare terminal parser and encoder performance with the 1 MiB burst.
     The moved burst test reports 1 MiB parsed and encoded in 10.1 ms across
     4 frames (45,632 encoded bytes), and 1,000 frame snapshots in 16.9 ms. All
-    32 `terminal-renderer` tests pass. The native macOS desktop smoke
+    32 `shep-terminal-renderer` tests pass. The native macOS desktop smoke
     (GPUI/Metal/Gatekeeper path) is explicitly out of scope for this task; it
     is not used as evidence either way.
 - [x] **Keep local macOS test-binary launches off Gatekeeper assessment.**
@@ -171,7 +171,7 @@ Tasks:
   choosing **Anywhere** in System Settings, which weakens protection for every
   app.
 - [x] **P2 — Extract project discovery into a crate.** The scan and its tests
-  live in `libs/project-scan`; `shepherd-core` re-exports the module and tree
+  live in `libs/shep-project-scan`; `shep-core` re-exports the module and tree
   types, so the bridge and picker call sites are unchanged. The crate's 10
   tests pass, including repository boundaries, `.git` files, symlink rejection
   and sibling enumeration. The shell build was measured after the extraction:
@@ -185,7 +185,7 @@ Tasks:
   target set. The 11 CLI fixtures pass, including the resolved-name and
   integration cases.
 - [x] **P3 — Compare development debug-information settings.** Measured the
-  `shepherd-project-scan` test binary at three settings: default 2,051,384
+  `shep-project-scan` test binary at three settings: default 2,051,384
   bytes (29.6 s), `line-tables-only` 2,019,304 bytes (65.0 s), and `debug = 0`
   1,484,352 bytes (43.6 s). `line-tables-only` saved 1.6% while rebuilding the
   dev graph; `debug = 0` saved 27.6% but drops line information and backtraces.
@@ -194,15 +194,15 @@ Tasks:
   single-run timings are noisy. The default stays unchanged, and the artifacts
   were rebuilt with the default profile after the comparison.
 - [x] **Post-move shell and lib verification.** The shell package passes 128
-  tests with 1 ignored, and the libs pass: `terminal-renderer` 32,
-  `shepherd-project-scan` 10, `shepherd-core` 223 (4 ignored),
+  tests with 1 ignored, and the libs pass: `shep-terminal-renderer` 32,
+  `shep-project-scan` 10, `shep-core` 223 (4 ignored),
   `agent-harness` 253 (2 ignored, serial rerun after one timing flake), and
   `acp-client` 106. Two split breakages were repaired: the capture runner read
   `alacritty_terminal` from the shell manifest (now the renderer manifest), and
   the undrained-capture test relied on a macOS PTY staying open after its shell
   exits (now drops the receiver while the child writes). Final one-command
-  sweep: `cargo test -p shepherd -p shepherd-core -p terminal-renderer -p
-  shepherd-project-scan -p agent-harness -p acp-client --no-fail-fast` passed
+  sweep: `cargo test -p shepherd -p shep-core -p shep-terminal-renderer -p
+  shep-project-scan -p agent-harness -p acp-client --no-fail-fast` passed
   752 tests with 7 ignored, exit 0 in 597 s. A race in
   `FreebuffToolPublisher`/`FreebuffTextPublisher` could return `Ok` after the
   receiver closed when a capacity permit was selected before `closed()`; both
@@ -336,17 +336,17 @@ Tasks:
       available for diagnostics.
       A worktree-effect collector records specified regular files, deletion,
       and file modes without following symlinks, invalidating unsupported or
-      oversized captures. Its fixtures were outside shepherd-core shard 7/8.
+      oversized captures. Its fixtures were outside shep-core shard 7/8.
       Git status now supplies tracked, untracked and rename paths; staged or
       ignored files other than Freebuff's project ID are rejected rather than
       omitted. The unstaged/untracked
-      discovery fixture passed in shepherd-core shard 1/8; the staged/ignored
+      discovery fixture passed in shep-core shard 1/8; the staged/ignored
       fixture remains unverified. Effect collection now compares HEAD,
       branch, index entries and index flags against a pre-run identity; its
       branch-change fixture was outside shard 5/8. Detect or reject other Git
       metadata changes and handle other effect types. Replay planning validates
       complete captures, modes, size limits and duplicate paths; its fixture
-      passed in shepherd-core shard 8/8. Unix replay now applies supported file
+      passed in shep-core shard 8/8. Unix replay now applies supported file
       effects using confined directory handles after checking a clean worktree
       against the identity recorded before capture. Replay planning rejects
       missing, duplicated or late identities; its updated fixture passed in
@@ -356,7 +356,7 @@ Tasks:
       Connect capture and replay before live use.
       A capture lifecycle now records the clean base and, after the caller
       confirms terminal drain, collects effects before finalizing. Its combined
-      capture/replay fixture was outside shepherd-core shard 1/8; connect the
+      capture/replay fixture was outside shep-core shard 1/8; connect the
       shared session to a runner that proves process termination and drain.
       An ignored `approved_freebuff_capture` runner is feature-gated. Its
       targeted offline fake-CLI end-to-end fixture passed after fixing an
@@ -401,7 +401,7 @@ Tasks:
         captures and replays that one ignored regular file, while still rejecting
         other ignored files; offline Git-backed fixtures verify both the effect
         collector and the complete fake-CLI recorder. The repository-creating
-        recorder fixture and terminal-replay's Git-backed integration fixture
+        recorder fixture and shep-terminal-replay's Git-backed integration fixture
       are gated by default-off `git` features; explicit Git and comprehensive
       runs include them.
         This does not retroactively complete the failed recording. Do not submit
@@ -570,13 +570,13 @@ Tasks:
       CLI may have already changed files before the core handles it.
       A session-level persistence step now saves a terminal prompt with a
       working task and rolls back its in-memory transcript on save failure;
-      its fixture was not selected in shepherd-core shard 8/8. Core admission
+      its fixture was not selected in shep-core shard 8/8. Core admission
       now establishes the baseline, persists the prompt and task, then updates
       the in-memory task state; its baseline and gate fixture passed in
-      shepherd-core shard 5/8. An
+      shep-core shard 5/8. An
       internal submit gate serializes admission and input, blocks forwarding on
       admission failure, and marks ambiguous write failures; its failed-admission
-      fixture passed in shepherd-core shard 6/8. Connect every integrated Freebuff input
+      fixture passed in shep-core shard 6/8. Connect every integrated Freebuff input
       path and the verified screen classifier to the gate before enabling it.
   - [ ] **P2 — Validate and document:** run offline fixture and fake-CLI
     coverage by default. Gate genuinely live probes with `live-freebuff`,
@@ -668,12 +668,12 @@ current implementation or current test counts.
 | --- | --- |
 | Workspace | Root Cargo workspace includes `apps/*`, `libs/*` and `demos/*`. |
 | `apps/shepherd` | Tauri 2 shell: `src-tauri/` (window, generated desktop icons, default capability, command bridge, single event channel, durable core in the app data dir) and `ui/` (SolidJS + TypeScript + Vite, typed client in `src/bridge.ts`). `pnpm dev:shepherd` starts Vite on port 1420 and opens the window. At startup the shell detects Codex (configured path, `PATH`, then the macOS app bundle) and runs it through the `app-server` adapter; when detection finds nothing, prompting fails with the detection report instead of falling back to the fake. The scripted adapter remains for the shell's tests. The fixed regions are not built yet. |
-| `libs/shepherd-core` | Exists: command/event API, snapshots, task lifecycle, shutdown, harness session, Git worktree, terminal trait boundary, embedded migrations (`0001_init.sql`, `0002_workspace.sql`, `0003_sessions.sql`), a durable `TursoStore`, shared fixtures, a `test-support` scenario trace and the dependency-boundary script. 36 focused tests pass plus two ignored live runs, including the full fake-task lifecycle: send, approval, cancel, quit, reload and resume. `Core::load` opens durable records, marks every live task `interrupted`, and keeps the newest agent session per task so resume asks the adapter for the thread the previous run opened; transcript rows are still not reloaded. |
+| `libs/shep-core` | Exists: command/event API, snapshots, task lifecycle, shutdown, harness session, Git worktree, terminal trait boundary, embedded migrations (`0001_init.sql`, `0002_workspace.sql`, `0003_sessions.sql`), a durable `TursoStore`, shared fixtures, a `test-support` scenario trace and the dependency-boundary script. 36 focused tests pass plus two ignored live runs, including the full fake-task lifecycle: send, approval, cancel, quit, reload and resume. `Core::load` opens durable records, marks every live task `interrupted`, and keeps the newest agent session per task so resume asks the adapter for the thread the previous run opened; transcript rows are still not reloaded. |
 | `libs/agent-harness` | Exists: adapter contract, event model, transcript assembly and a deterministic fake harness. 38 focused tests pass, two of them ignored live runs against the installed Codex. |
 | `libs/acp-client` | Exists, with protocol types, permissions, fs/terminal capabilities and a fake agent behind `test-support`. Reuse it; do not rewrite ACP. |
 | `libs/storage` | Existing reference for `toasty` + Turso wiring and embedded migrations. Shepherd gets its own database and schema. |
 | Frontend | Shepherd UI package exists at `apps/shepherd/ui` (SolidJS + Vite 8); `apps/shepherd` and `apps/shepherd/ui` are pnpm workspace members. Root uses `pnpm` 11.25. |
-| Tests | `agent-harness` has 38 focused tests (two are ignored live runs against the installed Codex; the other 36 run without a CLI, and 20 of them drive the Codex adapter through stub binaries; three replay recorded wire fixtures from `libs/agent-harness/fixtures/codex` with no CLI at all; the rest cover probe tiers, install detection and its fallbacks, message and tool mapping including a restore that reattaches an item, an approval round trip including a file-change diff, an interrupt, a resume that names the stored thread ID, the `exec --json` fallback with its stream mapping and cancel, and a denied approval as `decline`); `shepherd-core` has 37 plus two ignored live runs (the four extra cover the project scan: repository discovery and descent stopping, chain collapsing, branch grouping, and skipped folders; two more cover resuming the stored session after a restart and the explicit fallback when the adapter cannot resume it; three more cover the failure rows for a missing binary, a rejected prompt and a mid-turn exit; one covers the diagnostics naming the command and protocol, one covers denying an approval, and one covers the pump that folds adapter events arriving between commands); the Tauri shell has 9 tests (bridge commands, snapshot serialization, durable load, the PTY engine's output/exit code/close, and the VT parser's text, SGR and resize behaviour), plus 5 Playwright smokes in `apps/shepherd/ui/tests`. The existing ACP tests remain the closest adapter harness. `scripts/check-shepherd-boundary.sh` enforces the core boundary. |
+| Tests | `agent-harness` has 38 focused tests (two are ignored live runs against the installed Codex; the other 36 run without a CLI, and 20 of them drive the Codex adapter through stub binaries; three replay recorded wire fixtures from `libs/agent-harness/fixtures/codex` with no CLI at all; the rest cover probe tiers, install detection and its fallbacks, message and tool mapping including a restore that reattaches an item, an approval round trip including a file-change diff, an interrupt, a resume that names the stored thread ID, the `exec --json` fallback with its stream mapping and cancel, and a denied approval as `decline`); `shep-core` has 37 plus two ignored live runs (the four extra cover the project scan: repository discovery and descent stopping, chain collapsing, branch grouping, and skipped folders; two more cover resuming the stored session after a restart and the explicit fallback when the adapter cannot resume it; three more cover the failure rows for a missing binary, a rejected prompt and a mid-turn exit; one covers the diagnostics naming the command and protocol, one covers denying an approval, and one covers the pump that folds adapter events arriving between commands); the Tauri shell has 9 tests (bridge commands, snapshot serialization, durable load, the PTY engine's output/exit code/close, and the VT parser's text, SGR and resize behaviour), plus 5 Playwright smokes in `apps/shepherd/ui/tests`. The existing ACP tests remain the closest adapter harness. `scripts/check-shepherd-boundary.sh` enforces the core boundary. |
 
 ### Toolchain check (2026-11-04)
 
@@ -709,7 +709,7 @@ task can produce reviewable work.
 
 | Slice | User-visible proof | Main automated proof | Gate |
 | --- | --- | --- | --- |
-| S0 | No window; a fake task runs and survives restart in a test | `cargo test -p shepherd-core`, fake harness, temp Git repo | A complete fake task lifecycle passes headlessly. |
+| S0 | No window; a fake task runs and survives restart in a test | `cargo test -p shep-core`, fake harness, temp Git repo | A complete fake task lifecycle passes headlessly. |
 | S1 | Add a repo, create a draft, send a fake task, open a terminal | Core integration tests + Playwright shell smoke | The walking skeleton is usable without a crash. |
 | S2 | A real Codex task streams, approves, cancels and resumes | Codex fixtures + fake server + live smoke | Real Codex works on a disposable repo. |
 | S3 | A Codex task reaches review, commits and squash-merges | Temp-repo Git tests + review-trigger tests | One real task goes prompt → review → merge in Shepherd. |
@@ -729,7 +729,7 @@ restarted and resumed entirely in tests.
 
 - [x] Create `libs/agent-harness` with `[lib] path = "src/agent_harness.rs"`:
   `AgentHarness`, `HarnessEvent`, capabilities, transcript entry types.
-- [x] Create `libs/shepherd-core` with `[lib] path = "src/shepherd_core.rs"`:
+- [x] Create `libs/shep-core` with `[lib] path = "src/shep_core.rs"`:
   `Core`, `Command`, `Event`, snapshots, lifecycle and shutdown state.
 - [x] Implement `projects`, `tasks`, `harness`, `git`, `store` and `input`
   boundaries. Keep terminal behind a trait; do not build the full terminal UI.
@@ -744,7 +744,7 @@ restarted and resumed entirely in tests.
   into its own data directory; no test writes to the real app data directory.
 - [x] Add a test-support feature for scenario traces so a failed test prints the
   command/event order, not just an assertion.
-- [x] Add the boundary check: `cargo tree -p shepherd-core` must not contain
+- [x] Add the boundary check: `cargo tree -p shep-core` must not contain
   `tauri`, `gpui` or a webview crate.
 
 ### Proof
@@ -754,7 +754,7 @@ Run:
 ```sh
 cargo fmt --check
 cargo test -p agent-harness
-cargo test -p shepherd-core
+cargo test -p shep-core
 cargo test -p acp-client --features test-support
 direnv exec . ./scripts/check-shepherd-boundary.sh
 ```
@@ -934,8 +934,8 @@ an approval, a cancel and a resume inside Shepherd.
 Automated:
 
 ```sh
-cargo test -p shepherd-core codex
-cargo test -p shepherd-core --features test-support
+cargo test -p shep-core codex
+cargo test -p shep-core --features test-support
 ```
 
 Cover:
@@ -2754,7 +2754,7 @@ placeholder tabs and no unearned state badges.
   branch is distinct, resolves the same approval ID with mixed allow and deny
   decisions, and verifies each transcript and result file stays in its own task
   and project, including after a database reopen. It runs in the normal
-  `shepherd-core` suite. A live multi-agent run was not exercised here because
+  `shep-core` suite. A live multi-agent run was not exercised here because
   it needs installed agents and their credentials; the scripted fixture is the
   offline acceptance evidence.
 - [ ] Release checklist on both target platforms.
@@ -2914,7 +2914,7 @@ those prerequisites.
   typecheck`, `pnpm --dir apps/ts-docs-web run typecheck`, both static builds,
   `pnpm --dir apps/shepherd/ui typecheck`, the two focused Shepherd preview
   tests, `cargo fmt --check`, both clippy runs, and `cargo test -p
-  shepherd-core --lib` (178 passed, 4 ignored) also passed.
+  shep-core --lib` (178 passed, 4 ignored) also passed.
 - [x] Split documentation by audience under `/docs/users` and
   `/docs/contributors`.
   User pages cover installation, configuration, the mental model, preview and
@@ -3060,7 +3060,7 @@ implemented; no public deployment exists yet.
   on an explicit Add slot action; applying the advisory is also an explicit
   action. A missing file or an unsupported contract version is shown as a
   message and leaves the pool unchanged. Catalog typecheck reports 0 errors,
-  44 Vitest tests pass and 13 e2e tests pass; `cargo test -p shepherd-core`
+  44 Vitest tests pass and 13 e2e tests pass; `cargo test -p shep-core`
   passes 211 tests (4 ignored), with fmt, clippy and `cargo check -p shepherd`
   clean; the app typechecks, builds and passes 130 e2e tests. The only remaining
   part of this item is the snapshot refresh below.
@@ -3080,7 +3080,7 @@ implemented; no public deployment exists yet.
     error. Tests cover seeding, preserved usage, local precedence, stale
     snapshots, missing and ambiguous records, a repeated timestamp, a rejected
     contract version, memory parity and a Turso re-open. `cargo test -p
-    shepherd-core` passes 201 tests (4 ignored), clippy and fmt are clean, the
+    shep-core` passes 201 tests (4 ignored), clippy and fmt are clean, the
     app has 128 passing e2e tests, and the docs have 31 passing e2e tests.
   - [x] Give each built-in provider its own reset-window rule.
     Evidence (2026-11-09): `PoolResetPolicy` and `PoolResetWindow` in
@@ -3097,7 +3097,7 @@ implemented; no public deployment exists yet.
     advisory's period matches one of the provider's windows, and it never
     replaces a provider or user reset. Tests cover the Codex windows, period
     matching, derived status windows, catalog reset seeding, an unused slot and
-    providers without a rule. `cargo test -p shepherd-core` passes 206 tests (4
+    providers without a rule. `cargo test -p shep-core` passes 206 tests (4
     ignored), clippy and fmt are clean, the app has 128 passing e2e tests, and
     the docs have 31 passing e2e tests.
   - [x] Enforce both Codex windows together when selecting a slot.
@@ -3115,7 +3115,7 @@ implemented; no public deployment exists yet.
     published windows (Claude, OpenCode, Pi) keep the single-limit rule. Tests
     cover exclusion on either Codex window, selection when both have headroom,
     the unchanged single-limit path and the window-scoped correction.
-    `cargo test -p shepherd-core` passes 207 tests (4 ignored), clippy and fmt
+    `cargo test -p shep-core` passes 207 tests (4 ignored), clippy and fmt
     are clean, the app has 129 passing e2e tests, and the docs have 31 passing
     e2e tests.
   - [x] Hardcode the built-in harness windows instead of refreshing the catalog.
@@ -3130,7 +3130,7 @@ implemented; no public deployment exists yet.
     observed or corrected. The app fixture reports Claude windows, and Settings
     shows them with an unknown reset. Tests cover the Codex reset arithmetic,
     Claude's provider-reported anchor, harnesses without a rule, period
-    matching and the status and catalog paths. `cargo test -p shepherd-core`
+    matching and the status and catalog paths. `cargo test -p shep-core`
     passes 208 tests (4 ignored), clippy and fmt are clean, the app has 129
     passing e2e tests, and the docs have 31 passing e2e tests.
   - [ ] Refresh the snapshot without a manual import.
@@ -3160,7 +3160,7 @@ implemented; no public deployment exists yet.
   gating and exercises the metadata script, including a changed-checksum and a
   missing-artifact failure. The hosted tag run has not been exercised from this
   checkout; the first `shepherd-v*` tag is its acceptance run, and no release
-  is claimed to exist. `cargo test -p shepherd-core` passes 210 tests (4
+  is claimed to exist. `cargo test -p shep-core` passes 210 tests (4
   ignored), clippy and fmt are clean, `cargo check -p shepherd` and the
   packaging test pass, the app has 129 passing e2e tests, and the docs have 31
   passing e2e tests.
@@ -3205,7 +3205,7 @@ implemented; no public deployment exists yet.
   account it uses. Store the user's priority order, provider/model metadata,
   local usage ledger, reset window, cooldown state and last-used timestamp.
   Credentials are referenced, never copied into the pool record or logs.
-  Evidence (2026-11-09): `PoolSlot` and `PoolSlotId` in `shepherd-core` store the
+  Evidence (2026-11-09): `PoolSlot` and `PoolSlotId` in `shep-core` store the
   agent, provider and model ids/names, an opaque `credential_ref` (never a
   secret), priority, enabled state, last observed usage, limit and unit, reset
   time, cooldown, last-used time, last error and created/updated timestamps.
@@ -3214,9 +3214,9 @@ implemented; no public deployment exists yet.
   by priority, creation time and id; an update preserves `created_at`. Saves
   reject an empty provider or model id, a negative priority and an empty limit
   unit. Tests round-trip both stores, verify ordering, updates, removal,
-  validation and re-open durability. `cargo test -p shepherd-core` passes 180
-  tests (4 ignored), and `cargo clippy -p shepherd-core --all-targets -- -D
-  warnings` and `cargo fmt -p shepherd-core` pass.
+  validation and re-open durability. `cargo test -p shep-core` passes 180
+  tests (4 ignored), and `cargo clippy -p shep-core --all-targets -- -D
+  warnings` and `cargo fmt -p shep-core` pass.
 - [x] Implement the quota ledger and availability states.
   Seed limits from a catalog snapshot when available, update from provider
   rate-limit/quota responses, and let the user correct limits or reset times.
@@ -3235,8 +3235,8 @@ implemented; no public deployment exists yet.
   and unknown usage or limits stay unknown. Tests cover both stores, ordering,
   re-open durability, removal, owner and input validation, every state
   transition, clock changes across a reset and a later user correction.
-  `cargo test -p shepherd-core` passes 183 tests (4 ignored), and `cargo clippy
-  -p shepherd-core --all-targets -- -D warnings` and `cargo fmt -p shepherd-core`
+  `cargo test -p shep-core` passes 183 tests (4 ignored), and `cargo clippy
+  -p shep-core --all-targets -- -D warnings` and `cargo fmt -p shep-core`
   pass.
 - [x] Select a slot by user priority with quota-aware fallback.
   A new task or conversation tries the user's preferred healthy slot, then the
@@ -3246,7 +3246,7 @@ implemented; no public deployment exists yet.
   starts, exhaustion, cooldown, provider failure and manual override.
   Evidence (2026-11-09): `PoolSelectionRequest`, `PoolSelectionOutcome`,
   `PoolSkippedSlot`, `PoolSelectionRecord` and `choose_pool_slot` live in
-  `shepherd-core`. Selection orders by priority, creation time and id; an
+  `shep-core`. Selection orders by priority, creation time and id; an
   override is tried first and falls back when it is missing or unavailable;
   reserved, disabled, exhausted, cooling-down, unhealthy and unknown slots are
   skipped with their state and reason; a request with no eligible slot reports
@@ -3258,8 +3258,8 @@ implemented; no public deployment exists yet.
   stores cover priority order, every unavailable state, precedence, an expired
   reset period, override fallback, reservation reuse, deterministic ties,
   concurrent requests, re-open durability, malformed rows and invalid input.
-  `cargo test -p shepherd-core` passes 188 tests (4 ignored), and `cargo clippy
-  -p shepherd-core --all-targets -- -D warnings` and `cargo fmt -p shepherd-core`
+  `cargo test -p shep-core` passes 188 tests (4 ignored), and `cargo clippy
+  -p shep-core --all-targets -- -D warnings` and `cargo fmt -p shep-core`
   pass.
 - [x] Select a pool slot when a turn starts.
   A new task or conversation tries the user's preferred healthy slot, then the
@@ -3276,7 +3276,7 @@ implemented; no public deployment exists yet.
   `PoolUnavailable` naming the skipped slots, leaves the task ready and opens no
   session. Tests cover the chosen slot, the transcript note, the stored
   selection, a disabled slot plus an agent mismatch, and the unchanged no-pool
-  path. `cargo test -p shepherd-core` passes 210 tests (4 ignored), clippy and
+  path. `cargo test -p shep-core` passes 210 tests (4 ignored), clippy and
   fmt are clean, the app has 129 passing e2e tests, and the docs have 31 passing
   e2e tests.
 - [x] Release idle reservations without losing resumable sessions.
@@ -3299,10 +3299,10 @@ implemented; no public deployment exists yet.
   Reusing a reservation clears its idle marker so active work is not released.
   Tests cover both stores for timeout/early release, active and unsettled
   reservations, repeat release, session resumability, slot reuse and invalid
-  input; a Turso re-open verifies durability. `cargo test -p shepherd-core`
+  input; a Turso re-open verifies durability. `cargo test -p shep-core`
   passes 192 tests (4
-  ignored), and `cargo clippy -p shepherd-core --all-targets -- -D warnings` and
-  `cargo fmt -p shepherd-core` pass.
+  ignored), and `cargo clippy -p shep-core --all-targets -- -D warnings` and
+  `cargo fmt -p shep-core` pass.
 - [x] Add the pool UI and operating limits.
   Show each slot's provider/model, priority, availability, known limit/reset,
   current task, last error and last-used time. Users can reorder, disable, edit
@@ -3324,9 +3324,9 @@ implemented; no public deployment exists yet.
     slot selection can choose. Tests against both stores cover status contents,
     disabled selection fallback, order changes, repeat calls and rejected input.
     No migration was needed; slots, selections and the ledger already persist.
-    `cargo test -p shepherd-core` passes 195 tests (4 ignored), and `cargo
-    clippy -p shepherd-core --all-targets -- -D warnings` and `cargo fmt -p
-    shepherd-core` pass.
+    `cargo test -p shep-core` passes 195 tests (4 ignored), and `cargo
+    clippy -p shep-core --all-targets -- -D warnings` and `cargo fmt -p
+    shep-core` pass.
   - [x] Add a Settings pool UI for status, ordering and enable/disable.
     Evidence (2026-11-09): `Settings → Agent pool` loads `pool_status` and
     shows provider/model, priority, availability with its reason, known
@@ -3360,7 +3360,7 @@ implemented; no public deployment exists yet.
     the docs have 31 passing e2e tests.
   - [x] Wire the existing one-turn force override into the pool UI.
     Evidence (2026-11-09): `PoolForceRequest` and `PoolForceOutcome` live in
-    `shepherd-core`, and `Core::{force_pool_slot,clear_pool_force,pool_selection_request}`
+    `shep-core`, and `Core::{force_pool_slot,clear_pool_force,pool_selection_request}`
     keep the forced slot in session state, so neither store ever writes it and
     `PoolStatus.forced_slot` reports the marker. Forcing an available slot
     applies, a repeat returns `applied: false` with its reason, and a disabled,
@@ -3373,7 +3373,7 @@ implemented; no public deployment exists yet.
     slots show a local hint instead of a force button. Tests cover one-turn
     consumption, repeats, unavailable and missing slots, re-open state, the
     confirmation and its cancellation, a rejected force and clearing.
-    `cargo test -p shepherd-core` passes 199 tests (4 ignored), clippy and fmt
+    `cargo test -p shep-core` passes 199 tests (4 ignored), clippy and fmt
     are clean, the app has 126 passing e2e tests, and the docs have 31 passing
     e2e tests. Task-start selection remains later work.
 
@@ -3461,7 +3461,7 @@ Record every gate result here. Do not silently mark a gate passed.
 
 | Date | Slice | Result | Evidence / decision |
 | --- | --- | --- | --- |
-| 2026-11-04 | S0 | Pass | Headless fake-task lifecycle in temporary repositories and databases: draft creates no worktree, first send creates one, approval pauses at `waiting` and resumes, cancel keeps worktree and session, quit marks the task `interrupted`, reload offers resume with a new session (never claiming the old process survived), a chat-only turn returns to `ready`, and a changed turn enters `review`. `cargo test -p shepherd-core` (18), `cargo test -p agent-harness` (9), `cargo test -p acp-client --features test-support` and `./scripts/check-shepherd-boundary.sh` pass. |
+| 2026-11-04 | S0 | Pass | Headless fake-task lifecycle in temporary repositories and databases: draft creates no worktree, first send creates one, approval pauses at `waiting` and resumes, cancel keeps worktree and session, quit marks the task `interrupted`, reload offers resume with a new session (never claiming the old process survived), a chat-only turn returns to `ready`, and a changed turn enters `review`. `cargo test -p shep-core` (18), `cargo test -p agent-harness` (9), `cargo test -p acp-client --features test-support` and `./scripts/check-shepherd-boundary.sh` pass. |
 | 2026-11-05 | S1 | Pass | The two-launch macOS smoke added the repository through the picker, created a draft with no branch or worktree, displayed scripted text and a tool row, ran `pwd` and `printf`, and sent Ctrl+C to a foreground command. Task switching preserved the draft, transcript, and shared terminal. Closing the window warned about one waiting task. After confirming and relaunching, the task was interrupted, terminal records were ended, and **Resume** reattached the scripted session. The 18-test browser suite also passed. |
 | 2026-11-05 | S2 | Pass | The native macOS window ran the installed Codex CLI at GPT-6.1 Terra low effort on disposable repositories. It streamed a one-file edit into Review, allowed an approval, interrupted a running command, accepted a follow-up, rendered the failure row and stderr after a mid-turn SIGKILL, and resumed the same thread and worktree after relaunch. All four native scenarios replayed their captures in fresh disposable data. The headless adapter and core suites also cover protocol probing, tool mapping, fallback, failure, and session recovery. |
 | 2026-11-05 | S3 | Pass | The live desktop reviewed two files, applied a review note in a second turn, staged and committed, and confirmed the squash merge in the Git pane. The cached replay covered the same steps, archived the task, and reopened it in a second native launch after the fixture removed the clean worktree. Git verified the base contents, single parent, retained task branch, and the recreated worktree at the original task commit. |

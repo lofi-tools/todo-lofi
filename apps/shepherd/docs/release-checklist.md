@@ -23,7 +23,7 @@ Run from the repository root inside the Nix dev shell (`direnv allow .` once).
 - [ ] `direnv exec . cargo fmt --check`
 - [ ] `direnv exec . cargo clippy --workspace -- -D warnings`
 - [ ] `direnv exec . cargo test -p agent-harness`
-- [ ] `direnv exec . cargo test -p shepherd-core`
+- [ ] `direnv exec . cargo test -p shep-core`
 - [ ] `direnv exec . cargo test -p shepherd`
 - [ ] `direnv exec . cargo test -p shepherd --test packaging`
 - [ ] `direnv exec . cargo test -p shepherd --test shell_scope`

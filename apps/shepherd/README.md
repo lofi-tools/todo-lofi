@@ -1,7 +1,7 @@
 # Shepherd
 
 Desktop shell for Shepherd: a Tauri 2 window over the SolidJS UI in `ui/`. Task
-behaviour lives in `libs/shepherd-core`; this directory owns only the window, the
+behaviour lives in `libs/shep-core`; this directory owns only the window, the
 invoke commands and the event channel.
 
 ## Run
@@ -173,7 +173,7 @@ protocol and starts a separate Codex process for each prompt.
 
 Every core command has one `#[tauri::command]`, and the window receives core
 events over a single Tauri channel. `ui/src/bridge.ts` holds the typed client;
-the snapshots come from `shepherd-core`, never from a second frontend model.
+the snapshots come from `shep-core`, never from a second frontend model.
 
 ## Attachment limits
 
@@ -255,7 +255,7 @@ OpenCode profile. The native turn smoke uses a loopback model fixture, and
 the installed ACP fallback smoke checks session creation and reload.
 
 ```sh
-direnv exec . cargo test -p agent-harness --features live-opencode opencode::tests::installed_
+direnv exec . cargo test -p shep-harness-opencode --features live-opencode opencode::tests::installed_
 ```
 
 ## Use an installed Claude Code ACP adapter
@@ -311,7 +311,7 @@ direnv exec . python3 scripts/test-shards.py --all
 direnv exec . python3 scripts/test-shards.py --all --browser
 direnv exec . python3 scripts/test-shards.py --shard 3/8
 direnv exec . python3 scripts/test-shards.py --seed HEAD~4 --dry-run
-direnv exec . python3 scripts/test-shards.py --package shepherd-core --test module::tests::example
+direnv exec . python3 scripts/test-shards.py --package shep-core --test module::tests::example
 direnv exec . python3 scripts/test-shards.py --last-ran 'rust:crate::module::tests::example'
 ```
 
@@ -356,12 +356,12 @@ currently there are none. Native desktop smokes and gated live-agent probes
 remain separate. Ordinary tests retain their existing harness and live-agent
 cache rules.
 
-Many `shepherd-core` and `shepherd` tests that create Git repositories use
+Many `shep-core` and `shepherd` tests that create Git repositories use
 their non-default `git` features. Run them explicitly when working on those
 behaviors with:
 
 ```sh
-direnv exec . cargo test -p shepherd-core --features git
+direnv exec . cargo test -p shep-core --features git
 direnv exec . cargo test -p shepherd --features git
 ```
 
@@ -388,7 +388,7 @@ checkout before starting, so it remains available at older commits:
 ```sh
 cp scripts/bisect-rust-test.py /tmp/shepherd-bisect-rust-test.py
 git bisect start HEAD <known-good-commit>
-git bisect run direnv exec . python3 /tmp/shepherd-bisect-rust-test.py --package shepherd-core module::tests::example
+git bisect run direnv exec . python3 /tmp/shepherd-bisect-rust-test.py --package shep-core module::tests::example
 git bisect reset
 ```
 
@@ -417,8 +417,8 @@ The installed-process probes are excluded by default. Each requires the
 feature for that agent because a replay would skip the process being tested.
 
 ```sh
-direnv exec . cargo test -p agent-harness --features live-claude --lib acp::tests::installed_claude_code_opens_an_acp_session
-direnv exec . cargo test -p agent-harness --features live-pi --lib pi::tests::installed_pi_exchanges_extension_dialog_records
+direnv exec . cargo test -p shep-harness-acp --features live-claude --lib acp::tests::installed_claude_code_opens_an_acp_session
+direnv exec . cargo test -p shep-harness-pi --features live-pi --lib pi::tests::installed_pi_exchanges_extension_dialog_records
 ```
 
 ## Live Codex tests
@@ -431,9 +431,9 @@ effort. An existing capture takes precedence when recording is enabled. Cache
 files with a different model or effort, or an empty session, are rejected.
 
 ```sh
-direnv exec . cargo test -p agent-harness -- --ignored live_codex
-direnv exec . cargo test -p shepherd-core -- --ignored live_exit
-direnv exec . cargo test -p shepherd-core -- --ignored live_restart
+direnv exec . cargo test -p shep-harness-codex -- --ignored live_codex
+direnv exec . cargo test -p shep-core -- --ignored live_exit
+direnv exec . cargo test -p shep-core -- --ignored live_restart
 direnv exec . ./scripts/smoke-shepherd-terminal.sh --codex-review-merge
 ```
 

@@ -34,7 +34,7 @@ These were chosen explicitly and override the pre-interview draft.
 | Pi protocol | **JSON-line RPC** (not ACP): `pi --mode rpc` is Pi's documented subprocess interface, with run lifecycle, commands and extension UI. Pi documents no ACP mode. |
 | Freebuff | A standalone PTY runs `freebuff` directly and replaces the conversation pane while open. |
 | Task isolation | **One Git worktree per task** by default, at `<git-dir>/shepherd/worktrees/<slug>`. A shared checkout is opt-in with a warning. |
-| Shared core | `libs/shepherd-core`, UI-agnostic: agents, terminals, state, Git, store. No Tauri or GPUI types; split out in v1 so v2 reuses it unchanged. |
+| Shared core | `libs/shep-core`, UI-agnostic: agents, terminals, state, Git, store. No Tauri or GPUI types; split out in v1 so v2 reuses it unchanged. |
 | App shell (v1) | **Tauri 2** with a **SolidJS + TypeScript** frontend on the system webview; terminals paint on a canvas. |
 | App shell (v2) | **GPUI + gpui-component (gpui-kit) + gpui-kit-assets**, same core, same frame model. |
 | v2 timing | v2 is planned but unscheduled: work starts when v1 is feature complete, not on a calendar date. |
@@ -252,7 +252,7 @@ detailed treatment of its controls as the rest of the shell is built.
 ### 3.1 Processes and threads
 
 ```
-shepherd-core (one Rust process, one tokio runtime)
+shep-core (one Rust process, one tokio runtime)
 ├── harness adapters (stdio, RPC, ACP, PTY wrapper)
 ├── terminal host: one emulation thread per terminal (libghostty-vt)
 ├── PTY reader/writer tasks (portable-pty)
@@ -277,18 +277,18 @@ next launch detects and offers to stop.
 
 | Location | Responsibility |
 | --- | --- |
-| `libs/shepherd-core/src/shepherd_core.rs` | library root (`[lib] path`): `Core` handle, command/event bus, lifecycle, shutdown |
-| `libs/shepherd-core/src/projects.rs` | project registry, Git metadata, path validation |
-| `libs/shepherd-core/src/tasks.rs` | task records, queue, state machine, orphan cleanup |
-| `libs/shepherd-core/src/input.rs` | focus and input mode, chord resolution, terminal key routing |
+| `libs/shep-core/src/shep_core.rs` | library root (`[lib] path`): `Core` handle, command/event bus, lifecycle, shutdown |
+| `libs/shep-core/src/projects.rs` | project registry, Git metadata, path validation |
+| `libs/shep-core/src/tasks.rs` | task records, queue, state machine, orphan cleanup |
+| `libs/shep-core/src/input.rs` | focus and input mode, chord resolution, terminal key routing |
 | `libs/agent-harness/src/agent_harness.rs` | library root: `AgentHarness` trait, `HarnessEvent`, capabilities and transcript entry types; no UI or database types |
 | `libs/acp-client/src/acp_client.rs` | ACP protocol: connection, sessions, permissions, fs and terminal client capabilities; no GPUI or database types; fake agent behind `test-support` |
-| `libs/shepherd-core/src/harness.rs` + `harness/` | tier selection and adapter implementations: Codex, OpenCode, Pi RPC, ACP, terminal wrapper |
-| `libs/shepherd-core/src/terminal.rs` | `TerminalEngine` boundary, frame model, input encoding, scrollback |
-| `libs/shepherd-core/src/pty.rs` | spawn, resize, reader/writer tasks, process groups |
-| `libs/shepherd-core/src/git.rs` | Git commands, worktrees, serialized mutations |
-| `libs/shepherd-core/src/search.rs` | Turso full-text queries across tasks and projects |
-| `libs/shepherd-core/src/store.rs` | Turso via toasty, embedded migrations, batched writes |
+| `libs/shep-core/src/harness.rs` + `harness/` | tier selection and adapter implementations: Codex, OpenCode, Pi RPC, ACP, terminal wrapper |
+| `libs/shep-core/src/terminal.rs` | `TerminalEngine` boundary, frame model, input encoding, scrollback |
+| `libs/shep-core/src/pty.rs` | spawn, resize, reader/writer tasks, process groups |
+| `libs/shep-core/src/git.rs` | Git commands, worktrees, serialized mutations |
+| `libs/shep-core/src/search.rs` | Turso full-text queries across tasks and projects |
+| `libs/shep-core/src/store.rs` | Turso via toasty, embedded migrations, batched writes |
 | `apps/shepherd/src-tauri/` | v1 Tauri builder, window, invoke commands, channel bridge |
 | `apps/shepherd/ui/` | v1 SolidJS views, task workspaces, canvas terminal, key/IME capture |
 | `apps/shepherd-gpui/src/main.rs` | v2 GPUI shell: entities, gpui-kit widgets, GPUI canvas terminal |
@@ -1222,7 +1222,7 @@ is bounded (scrollback, stderr, search results, per-task event queue).
 | **M3** | OpenCode adapter, ACP path (Claude Code), standalone Freebuff terminal | OpenCode and ACP produce a correct transcript. A fixture verifies that Freebuff opens a plain terminal in the conversation region. |
 | **M4** | Files, Git and preview panes | Tree respects ignore rules; badges update; stage, unstage, commit with hooks and signing, history and branch checkout work; a failing hook preserves the message; squash-merge is disabled on a dirty or off-base root and lists conflict paths with a terminal action; preview loads the project URL and element annotations add structured context, with screenshot fallback when injection is blocked |
 | **M5** | Pi RPC adapter, attachments, mentions, model/mode pickers, cross-task search, notifications | Pi runs through RPC, uses its approval bridge when available, and is labelled **unreviewed tools** when it is not; a version without RPC drops to a pane with a reason; images and files reach the agent; `@file` inserts a link; search finds text in old tasks |
-| **M6** | v2 GPUI shell over the same core: gpui-kit panes, GPUI canvas terminal, v1 shell deleted after flow parity. Starts only when v1 is feature complete, with no calendar date | Every v1 flow passes on GPUI; keybindings, settings, transcripts and search history carry over; theme and accessibility parity and the platform floor are tracked as accepted debt at deletion; `cargo tree -p shepherd-core` has no Tauri or GPUI crate; frames and input behave identically |
+| **M6** | v2 GPUI shell over the same core: gpui-kit panes, GPUI canvas terminal, v1 shell deleted after flow parity. Starts only when v1 is feature complete, with no calendar date | Every v1 flow passes on GPUI; keybindings, settings, transcripts and search history carry over; theme and accessibility parity and the platform floor are tracked as accepted debt at deletion; `cargo tree -p shep-core` has no Tauri or GPUI crate; frames and input behave identically |
 
 ## 17. Resolved decisions
 
@@ -1271,7 +1271,7 @@ all UI follow-up answers are recorded here for traceability.
   first send (§7.2).
 
 Earlier resolutions — attachment cap 50 MB, the default FTS tokenizer with prefix
-queries, core-assigned event ordering and item IDs, and `libs/shepherd-core` as
+queries, core-assigned event ordering and item IDs, and `libs/shep-core` as
 the shared core from v1 — are folded into §3.2, §4.2, §10 and §11.
 
 ## 18. Non-goals
