@@ -15,8 +15,7 @@ use shep_core::worktree_pool::{WorktreePoolId, WorktreePoolRecord, WorktreePoolS
 pub mod test_support;
 
 use shep_core::store::{
-    PoolAvailabilityState,
-    PoolCatalogAdvisory, PoolCatalogOutcome, PoolCatalogSeed,
+    PoolAvailabilityState, PoolCatalogAdvisory, PoolCatalogOutcome, PoolCatalogSeed,
     PoolCooldownClearRequest, PoolIdleKept, PoolIdleReleaseOutcome, PoolIdleReleaseRequest,
     PoolIdleReleased, PoolQuotaCorrectionOutcome, PoolQuotaCorrectionRequest, PoolQuotaEntry,
     PoolQuotaSource, PoolReorderOutcome, PoolReorderRequest, PoolSelectionOutcome,
@@ -26,12 +25,12 @@ use shep_core::store::{
     choose_pool_slot, idle_release_block_reason, latest_pool_quota_entry_for_window,
     pool_catalog_outcome, pool_catalog_seed_entry, pool_cooldown_clear_entry,
     pool_correction_is_current, pool_correction_outcome, pool_quota_correction_entry,
-    pool_quota_entry_order, pool_reset_window_statuses, pool_slot_availability,
-    timestamp, timestamp_or_missing, validate_draft_owner,
-    validate_pool_catalog_advisory, validate_pool_cooldown_clear_request,
-    validate_pool_idle_release_request, validate_pool_quota_correction_request,
-    validate_pool_quota_entry, validate_pool_reorder_request, validate_pool_selection_record,
-    validate_pool_selection_request, validate_pool_slot,
+    pool_quota_entry_order, pool_reset_window_statuses, pool_slot_availability, timestamp,
+    timestamp_or_missing, validate_draft_owner, validate_pool_catalog_advisory,
+    validate_pool_cooldown_clear_request, validate_pool_idle_release_request,
+    validate_pool_quota_correction_request, validate_pool_quota_entry,
+    validate_pool_reorder_request, validate_pool_selection_record, validate_pool_selection_request,
+    validate_pool_slot,
 };
 use shep_core::tasks::{Agent, AgentTier, Task, TaskId, TaskState};
 use shep_core::terminal::{
@@ -5292,8 +5291,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn freebuff_terminal_scope_persists_and_reloads()
-    -> Result<(), Box<dyn std::error::Error>> {
+    async fn freebuff_terminal_scope_persists_and_reloads() -> Result<(), Box<dyn std::error::Error>>
+    {
         async fn verify(store: &dyn Store, root: &Path) -> Result<(), Box<dyn std::error::Error>> {
             let project = Project::new(root.join("freebuff"));
             store.save_project(&project).await?;
