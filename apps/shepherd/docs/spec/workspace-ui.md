@@ -81,7 +81,9 @@ current layout and give future changes a point of comparison.
   while the separator is focused. Save the chosen width with the task.
 - In Files, name the active root above the tree and let the user choose the
   project root or the selected task's worktree using a compact, themed picker;
-  label the project root `/`. Put it, the filename filter, and the settings gear
+  label the project root `/`. The root follows the selected task as it changes;
+  only an explicit `/` keeps it on the project root, and switching projects
+  never asks for another project's task. Put it, the filename filter, and the settings gear
   on one row, with the gear at the right. Match the filter height to the root
   picker, with minimal vertical padding. Keep the gear transparent and
   borderless, with a subtle background only on hover.

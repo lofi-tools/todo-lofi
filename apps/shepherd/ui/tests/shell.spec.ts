@@ -2795,6 +2795,43 @@ test('keeps the files pane on the selected project when switching project rows',
   expect(await crossProjectRequests()).toEqual([])
 })
 
+test('never pairs the files pane with another project’s task when a remembered Files tab is restored', async ({ page }) => {
+  await page.goto('/?review-fixture')
+  const files = page.getByRole('region', { name: 'Workspace files' })
+  const root = files.getByLabel('File root')
+  const chatTitle = page.getByRole('region', { name: 'Task chat' }).locator('.chat__title')
+  const requests = () => page.evaluate(() => (window as unknown as {
+    __fileRequests: Array<{ command: string; projectId: string; taskId: string | null; projectMatches: boolean }>
+  }).__fileRequests)
+
+  await page.getByRole('tab', { name: 'Files', exact: true }).click()
+  await expect(root).toHaveValue('worktree')
+  await expect(chatTitle).toHaveText('Ship it')
+
+  await page.getByRole('button', { name: 'notes', exact: true }).click()
+  await page.getByRole('tab', { name: 'Files', exact: true }).click()
+  await expect(root).toHaveValue('project')
+
+  await page.getByRole('button', { name: 'demo', exact: true }).click()
+  await page.getByRole('button', { name: /Ship it/ }).click()
+  await expect(root).toHaveValue('worktree')
+  await expect(chatTitle).toHaveText('Ship it')
+
+  await page.evaluate(() => { (window as unknown as { __fileRequests: unknown[] }).__fileRequests.length = 0 })
+
+  // The scenario from the plan: the demo task is open and notes remembers Files.
+  await page.getByRole('button', { name: 'notes', exact: true }).click()
+  await expect(page.getByRole('tab', { name: 'Files', exact: true })).toHaveAttribute('aria-selected', 'true')
+  await expect(root).toHaveValue('project')
+  await expect(files.getByRole('button', { name: /README\.md/ })).toBeVisible()
+
+  const afterSwitch = await requests()
+  expect(afterSwitch.filter((request) => !request.projectMatches)).toEqual([])
+  expect(afterSwitch.some((request) => request.projectId === 'project-notes' && request.taskId === null)).toBe(true)
+  await expect(page.getByRole('alert')).toHaveCount(0)
+  await expect(page.locator('.error-toast')).toHaveCount(0)
+})
+
 test('distinguishes unavailable projects from a missing saved task', async ({ page }) => {
   await page.goto('/?missing-project')
   const chat = page.getByRole('region', { name: 'Task chat' })
