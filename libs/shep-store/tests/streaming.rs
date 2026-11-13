@@ -4,15 +4,10 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
 
-use async_trait::async_trait;
-use shep_harness_core::{
-    AgentHarness, ApprovalId, Capabilities, Decision, DeltaKind, HarnessEvent, HarnessResult,
-    ItemId, PromptInput, SessionApproval, SessionId, SpawnSpec,
-};
+use shep_harness_core::{DeltaKind, HarnessEvent, ItemId, PromptInput, SessionApproval};
 use shep_harness_core::{Entry, TurnFinishReason};
 use tokio::sync::mpsc;
 
-use shep_core::harness::HarnessFactory;
 use shep_core::harness::HarnessSession;
 use shep_core::store::Store;
 use shep_core::test_support::{TestDatabase, TestRepository};

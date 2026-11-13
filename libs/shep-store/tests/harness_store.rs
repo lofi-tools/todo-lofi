@@ -3,7 +3,7 @@
 use shep_core::harness::{HarnessSession, ProjectApprovals};
 use shep_core::session::SessionRecord;
 use shep_core::store::Store;
-use shep_core::test_support::{TestDatabase, TestDirectory};
+use shep_core::test_support::TestDatabase;
 use shep_core::*;
 use shep_harness_core::fake_harness::FakeHarness;
 use shep_harness_core::{

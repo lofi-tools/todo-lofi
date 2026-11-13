@@ -17,23 +17,20 @@ use shep_core::store::{
 use shep_core::store::{PoolReorderRequest, PoolSlotEnabledRequest};
 use shep_core::*;
 use shep_store::TursoStore;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
 use shep_core::git::{GitError, GitService};
 use shep_core::harness::*;
-use shep_core::session::*;
 use shep_core::store::*;
 use shep_core::terminal::*;
 use shep_core::test_support::TestRepository;
 use shep_core::test_support::{FakeHarnessFactory, TestCore};
 use shep_core::test_support::{TestDatabase, TestDirectory};
-use shep_harness_core::{
-    FailureKind, HarnessEvent, ItemId, PromptInput, SessionId, TurnFinishReason,
-};
-use shep_store::test_support::{LateHarness, LateHarnessFactory};
+use shep_harness_core::{FailureKind, HarnessEvent, PromptInput, SessionId, TurnFinishReason};
+use shep_store::test_support::LateHarnessFactory;
 use tokio::sync::mpsc;
 
 async fn add_project(
@@ -2297,7 +2294,6 @@ async fn killed_deletion_recovers_worktree_before_and_after_commit()
     }
 
     use std::os::unix::process::ExitStatusExt as _;
-    use std::time::Duration;
     for phase in ["staged", "committed"] {
         let repository = TestRepository::new()?;
         let database = TestDatabase::new()?;

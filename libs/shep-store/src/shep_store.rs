@@ -5836,7 +5836,6 @@ mod tests {
         Ok(())
     }
 
-    #[cfg(feature = "git")]
     #[tokio::test]
     async fn resumed_collection_rechecks_existing_worktree_before_removal()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -5894,7 +5893,6 @@ mod tests {
         Ok(())
     }
 
-    #[cfg(feature = "git")]
     #[tokio::test]
     async fn unrelated_missing_archived_checkout_is_not_marked_collected()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -5933,7 +5931,6 @@ mod tests {
         Ok(())
     }
 
-    #[cfg(feature = "git")]
     #[tokio::test]
     async fn failed_collection_save_keeps_a_recoverable_task()
     -> Result<(), Box<dyn std::error::Error>> {
