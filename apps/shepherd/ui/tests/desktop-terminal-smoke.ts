@@ -47,6 +47,11 @@ function chatState() {
   return document.querySelector('.chat')?.getAttribute('data-task-state') ?? undefined
 }
 
+function chatSettled() {
+  const current = chatState()
+  return current === 'ready' || current === 'review'
+}
+
 async function sendPrompt(text: string) {
   const input = await waitFor('active composer', () => {
     const textarea = document.querySelector<HTMLTextAreaElement>('textarea[aria-label="Prompt"]')
@@ -749,7 +754,7 @@ async function prepareTask(project: bridge.ProjectSnapshot) {
     await getCurrentWindow().title() === `${project.name} — Shepherd (1 working)`)
   const allow = await enabledButton('Allow')
   allow.click()
-  await waitFor('ready after the scripted approval', () => chatState() === 'ready')
+  await waitFor('ready after the scripted approval', () => chatSettled())
   const listed = (await bridge.taskList(project.id)).tasks
   if (listed.length !== before + 1) throw new Error('Sending the first prompt should create exactly one task')
   const { task } = await bridge.taskWorkspace(listed[0].id)
@@ -885,7 +890,7 @@ async function replayCodexApproval() {
   if (!deny) throw new Error('The approval card has no Deny button')
   deny.click()
   await waitFor('recorded denial and completed turn', () =>
-    chatState() === 'ready' &&
+    chatSettled() &&
     document.querySelector('.entry__permission-decision')?.textContent === 'deny')
   return { ok: true, codexApprovalReplay: true }
 }
@@ -904,17 +909,17 @@ async function exerciseLiveCodex() {
   const allow = Array.from(card.querySelectorAll('button')).find((entry) => entry.textContent?.trim() === 'Allow')
   if (!allow) throw new Error('The approval card has no Allow button')
   allow.click()
-  await waitFor('recorded allowance and completed turn', () => chatState() === 'ready' &&
+  await waitFor('recorded allowance and completed turn', () => chatSettled() &&
     document.querySelector('.entry__permission-decision')?.textContent === 'allow' &&
     document.querySelector('.entry__agent')?.textContent, CODEX_WAIT)
 
   await startCodexSleep()
   const cancel = await enabledButton('Cancel turn')
   cancel.click()
-  await waitFor('interrupted turn settles', () => chatState() === 'ready')
+  await waitFor('interrupted turn settles', () => chatSettled())
 
   await sendPrompt('Reply with the single word: ready.')
-  await waitFor('reply after cancellation', () => chatState() === 'ready' &&
+  await waitFor('reply after cancellation', () => chatSettled() &&
     Array.from(document.querySelectorAll('.entry__agent')).at(-1)?.textContent?.trim() === 'ready', CODEX_WAIT)
   const replay = await invoke<boolean>('finish_codex_smoke')
   return { ok: true, approvalAllowed: true, cancelledRunningTool: true, followUp: true, replay }
@@ -1104,9 +1109,9 @@ async function resumeCodexAfterRestart() {
     throw new Error('The interrupted task and worktree were not restored')
   }
   await sendPrompt('Reply with the single word: resumed.')
-  await waitFor('resumed Codex thread after sending', () => chatState() === 'ready' &&
+  await waitFor('resumed Codex thread after sending', () => chatSettled() &&
     document.querySelector('.entry__notice')?.textContent?.includes('resumed the previous agent session'), CODEX_WAIT)
-  await waitFor('Codex reply after restart', () => chatState() === 'ready' &&
+  await waitFor('Codex reply after restart', () => chatSettled() &&
     document.querySelector('.entry__agent')?.textContent?.trim() === 'resumed', CODEX_WAIT)
   const { task } = await bridge.taskWorkspace(interrupted.id)
   if (task.worktreePath !== interrupted.worktreePath || task.branch !== interrupted.branch) {
