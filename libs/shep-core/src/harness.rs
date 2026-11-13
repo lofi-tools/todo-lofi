@@ -1525,11 +1525,10 @@ impl TerminalSubmitGate {
 #[cfg(test)]
 mod tests {
     use shep_harness_core::fake_harness::{FakeHarness, FakeStep, FakeTurn};
-    use shep_harness_core::{ApprovalId, Decision, FileDiff, ToolCallId, ToolStatus};
+    use shep_harness_core::{ApprovalId, Decision, FileDiff, ToolStatus};
 
     use super::*;
-    use crate::Project;
-    use crate::test_support::{TestDatabase, TestDirectory};
+    use crate::test_support::TestDirectory;
 
     #[tokio::test]
     async fn compact_needs_the_adapter_capability_and_reaches_the_adapter() {
