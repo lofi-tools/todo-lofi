@@ -142,6 +142,58 @@
               set -euo pipefail
               cd "${wd}"
               test_database_root="$PWD/.cache/test-db"
+              ui_directory="$PWD/apps/shepherd/ui"
+              ps_bin=/bin/ps
+              [ -x "$ps_bin" ] || ps_bin=/usr/bin/ps
+              lsof_bin=/usr/sbin/lsof
+              [ -x "$lsof_bin" ] || lsof_bin=/usr/bin/lsof
+              [ -x "$lsof_bin" ] || lsof_bin=${pkgs.lsof}/bin/lsof
+
+              # A killed `tauri dev` can leave its Vite child orphaned on the
+              # dev port, because Tauri only reaps the direct
+              # `beforeDevCommand` process. Reap only a listener proven to be
+              # this project's UI server with no live Shepherd supervisor in
+              # its ancestry; anything else is reported and left alone.
+              reap_orphaned_ui_server() {
+                local port="$1" pid current parent command cwd listing orphaned
+                for pid in $("$lsof_bin" -nP -iTCP:"$port" -sTCP:LISTEN -t 2>/dev/null); do
+                  listing=$("$lsof_bin" -a -p "$pid" -d cwd -Fn 2>/dev/null || true)
+                  cwd="''${listing##*$'\n'n}"
+                  if [ "''${cwd:-}" != "$ui_directory" ]; then
+                    printf 'shep: port %s is held by PID %s (%s); leaving it\n' \
+                      "$port" "$pid" "''${cwd:-unknown}" >&2
+                    continue
+                  fi
+                  orphaned=1
+                  current="$pid"
+                  while :; do
+                    command=$("$ps_bin" -o command= -p "$current" 2>/dev/null || true)
+                    case "$command" in
+                      *watchexec*|*dev:shepherd*|*tauri*)
+                        printf 'shep: port %s is held by a live Shepherd run; stop it first\n' \
+                          "$port" >&2
+                        orphaned=0
+                        break
+                        ;;
+                    esac
+                    parent=$("$ps_bin" -o ppid= -p "$current" 2>/dev/null || true)
+                    parent="''${parent//[[:space:]]/}"
+                    case "$parent" in ""|0|1) break ;; esac
+                    current="$parent"
+                  done
+                  if [ "$orphaned" = 1 ]; then
+                    printf 'shep: reaping orphaned UI dev server PID %s on port %s\n' \
+                      "$pid" "$port" >&2
+                    kill -TERM "$pid" 2>/dev/null || true
+                    for _ in 1 2 3 4 5; do
+                      kill -0 "$pid" 2>/dev/null || break
+                      sleep 0.2
+                    done
+                    kill -KILL "$pid" 2>/dev/null || true
+                  fi
+                done
+              }
+
               watch_shepherd() {
                 ${pkgs.watchexec}/bin/watchexec --restart --stop-timeout 10s --shell=none \
                   --watch apps/shepherd/src-tauri/src \
@@ -159,6 +211,7 @@
               case "$*" in
                 "")
                   export SHEPHERD_DEV_DATA_DIR="$test_database_root"
+                  reap_orphaned_ui_server 1420
                   watch_shepherd
                   ;;
                 --test)
@@ -167,6 +220,7 @@
                   trap 'rm -rf -- "$session_data_directory"' EXIT
                   export SHEPHERD_DEV_DATA_DIR="$session_data_directory"
                   export VITE_SHEPHERD_EPHEMERAL=1
+                  reap_orphaned_ui_server 1435
                   watch_shepherd --config '{"build":{"beforeDevCommand":"pnpm --dir ui run dev --port 1435","devUrl":"http://localhost:1435"}}'
                   ;;
                 *) printf '%s\n' 'Usage: shep [--test]' >&2; exit 2 ;;
