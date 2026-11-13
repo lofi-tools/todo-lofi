@@ -2134,7 +2134,7 @@ mod tests {
         let (error_sender, mut errors) = mpsc::unbounded_channel();
         let recording = Arc::new(TerminalRecording::new(capture, 80, 24, error_sender)?);
         let mut engine = PtyTerminals::new();
-        let (sender, mut receiver) = mpsc::channel(8);
+        let (sender, receiver) = mpsc::channel(8);
         engine.spawn_recorded(
             TerminalSpec {
                 id: TerminalId::new("undrained"),
