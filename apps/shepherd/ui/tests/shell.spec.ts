@@ -10,9 +10,13 @@ import { expect, test } from '@playwright/test'
 
 import type { AgentTerminal, CommandCondition, Entry, Event as ShepherdEvent, FileChange, GitMutation, InspectorTab, ShortcutScope, TaskState, TerminalLayout, TerminalSnapshot, TerminalSplit, WorkspaceLayout } from '../src/bridge'
 
+// The shell suite drives a real browser and takes minutes; it is opt-in through
+// `pnpm test:e2e` or test-shards.py --browser.
+test.skip(process.env.SHEPHERD_UI_E2E !== '1', 'The shell suite is opt-in')
+
 const workspaceCommands: Array<{
   id: string; label: string; category: string; mac?: string; linux?: string; scope?: ShortcutScope; requires?: CommandCondition[]
-}> = JSON.parse(readFileSync(new URL('../../../../libs/shepherd-core/src/workspace-commands.json', import.meta.url), 'utf8'))
+}> = JSON.parse(readFileSync(new URL('../../../../libs/shep-core/src/workspace-commands.json', import.meta.url), 'utf8'))
 
 test.beforeEach(async ({ context }) => {
   await context.addInitScript((registry) => {

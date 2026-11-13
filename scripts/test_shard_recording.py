@@ -100,7 +100,7 @@ class Recorder:
             with tempfile.TemporaryDirectory(dir=self.history.parent) as temporary:
                 report = Path(temporary) / "playwright.json"
                 environment = dict(os.environ, PLAYWRIGHT_JSON_OUTPUT_FILE=str(report),
-                                   TEST_SHARD_PORT=str(available_port()))
+                                   TEST_SHARD_PORT=str(available_port()), SHEPHERD_UI_E2E="1")
                 environment.pop("ASTRO_PREVIEW_BACKGROUND", None)
                 environment.pop("ASTRO_DEV_BACKGROUND", None)
                 subprocess.run([*command, "--reporter=list,json"], cwd=directory, env=environment, check=True)

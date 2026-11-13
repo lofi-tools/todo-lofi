@@ -9,7 +9,7 @@
     "build": "vite build",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
-    "test:e2e": "playwright test"
+    "test:e2e": "SHEPHERD_UI_E2E=1 playwright test"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",
