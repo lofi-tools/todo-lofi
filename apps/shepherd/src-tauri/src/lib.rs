@@ -1,7 +1,7 @@
 //! Shepherd's desktop shell.
 //!
 //! This crate owns the Tauri window, the invoke commands and the event channel.
-//! Task behaviour lives in `shepherd-core`; the shell never holds a second copy
+//! Task behaviour lives in `shep-core`; the shell never holds a second copy
 //! of the state model.
 
 mod attachments;
@@ -20,13 +20,13 @@ mod preview_annotations;
 mod preview_server;
 mod pty_terminal;
 mod settings;
-pub use terminal_renderer as terminal_screen;
+pub use shep_terminal_renderer as terminal_screen;
 
 use std::path::PathBuf;
 
 use agent_harness::codex::CodexTier;
 use agent_harness::settings::AgentSettings;
-use shepherd_core::harness::HarnessFactory;
+use shep_core::harness::HarnessFactory;
 use tauri::Manager;
 
 fn codex_factory(
@@ -308,6 +308,7 @@ pub fn run() -> Result<(), tauri::Error> {
             bridge::commands::project_approvals,
             bridge::commands::reset_approval_grant,
             bridge::commands::cancel_task,
+            bridge::commands::compact_task,
             bridge::commands::quit,
             bridge::commands::project_list,
             bridge::commands::project_remote,

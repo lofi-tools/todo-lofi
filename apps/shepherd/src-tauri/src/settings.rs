@@ -10,7 +10,7 @@ use tokio::sync::Mutex;
 use crate::bridge::{BridgeError, ShellState};
 use crate::config_files::{backup_path, encode_json, read_optional, write_atomic};
 
-pub use terminal_renderer::DEFAULT_SCROLLBACK;
+pub use shep_terminal_renderer::DEFAULT_SCROLLBACK;
 pub const DEFAULT_ATTACHMENT_BYTES: usize = 50_000_000;
 const MAX_SCROLLBACK: u64 = 100_000;
 

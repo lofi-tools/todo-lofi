@@ -22,23 +22,24 @@ use agent_harness::codex::CodexProjectModels;
 use agent_harness::{AgentMode, AgentModels, CodexTurnOptions, Decision, PromptInput, SpawnSpec};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use shepherd_core::files::{self, DirectoryListing, FileSearchQuery, FileSearchResult, TextFile};
-use shepherd_core::git::GitService;
-use shepherd_core::harness::HarnessFactory;
-use shepherd_core::store::{
+use shep_core::files::{self, DirectoryListing, FileSearchQuery, FileSearchResult, TextFile};
+use shep_core::git::GitService;
+use shep_core::harness::HarnessFactory;
+use shep_core::store::{
     PoolCatalogAdvisory, PoolCatalogOutcome, PoolCooldownClearRequest, PoolQuotaCorrectionOutcome,
     PoolQuotaCorrectionRequest, PoolReorderOutcome, PoolReorderRequest, PoolSlot,
-    PoolSlotEnabledOutcome, PoolSlotEnabledRequest, PoolSlotId, PoolStatus, Store, TursoStore,
+    PoolSlotEnabledOutcome, PoolSlotEnabledRequest, PoolSlotId, PoolStatus, Store,
 };
-use shepherd_core::terminal::{
+use shep_core::terminal::{
     InspectorTab, ProcessRecord, TerminalEvent, TerminalId, TerminalList, TerminalRecord,
-    TerminalService, TerminalSpec,
+    TerminalScope, TerminalService, TerminalSpec,
 };
-use shepherd_core::{
+use shep_core::{
     Agent, Command, CommandResult, Core, CoreError, Event, PoolForceOutcome, PoolForceRequest,
     ProjectApprovalsSnapshot, ProjectId, ProjectList, QuitSummary, TaskId, TaskList, TaskState,
     TaskWorkspace, WorkspaceLayout,
 };
+use shep_store::TursoStore;
 use tokio::sync::{Mutex, Semaphore, broadcast, mpsc, oneshot, watch};
 use tokio::time::Instant;
 
@@ -806,7 +807,7 @@ pub struct ShellState {
 }
 
 struct ProjectScanCache {
-    value: Option<shepherd_core::project_scan::ProjectScan>,
+    value: Option<shep_core::project_scan::ProjectScan>,
     startup_valid: bool,
 }
 
@@ -1112,7 +1113,7 @@ impl ShellState {
                     false
                 };
                 Self::broadcast_core_events(&mut core, &events);
-                if core.shutdown_state() == shepherd_core::ShutdownState::Closed {
+                if core.shutdown_state() == shep_core::ShutdownState::Closed {
                     break;
                 }
                 core.arm_agent_events(&agent_events);
@@ -1130,7 +1131,7 @@ impl ShellState {
         let result = core.execute(command).await;
         Self::broadcast_core_events(&mut core, &self.events);
         core.arm_agent_events(&self.agent_events);
-        if core.shutdown_state() == shepherd_core::ShutdownState::Closed {
+        if core.shutdown_state() == shep_core::ShutdownState::Closed {
             self.agent_events.notify_one();
         }
         result.map_err(BridgeError::from)
@@ -1155,7 +1156,7 @@ impl ShellState {
     async fn git_read<T: Send + 'static>(
         &self,
         task_id: TaskId,
-        read: impl FnOnce(shepherd_core::TaskGitRead) -> Result<T, CoreError> + Send + 'static,
+        read: impl FnOnce(shep_core::TaskGitRead) -> Result<T, CoreError> + Send + 'static,
     ) -> Result<T, BridgeError> {
         let context = self.core.lock().await.task_git_read(&task_id)?;
         let result = tokio::task::spawn_blocking(move || read(context))
@@ -1827,6 +1828,13 @@ impl ShellState {
         .await
     }
 
+    pub async fn compact_task(&self, task_id: String) -> Result<TaskWorkspace, BridgeError> {
+        self.workspace(Command::CompactTask {
+            task_id: TaskId::new(task_id),
+        })
+        .await
+    }
+
     pub async fn quit(&self, force: bool) -> Result<QuitSummary, BridgeError> {
         let engine = self.terminals.engine.clone();
         let preview_server = self.preview_server.clone();
@@ -1985,7 +1993,7 @@ impl ShellState {
     pub async fn project_scan(
         &self,
         rescan: bool,
-    ) -> Result<shepherd_core::project_scan::ProjectScan, BridgeError> {
+    ) -> Result<shep_core::project_scan::ProjectScan, BridgeError> {
         request_project_scan(&self.scan, rescan, async {
             let home = project_scan_root()
                 .ok_or_else(|| BridgeError::new("scan", "no home directory to scan"))?;
@@ -2174,7 +2182,7 @@ impl ShellState {
         &self,
         id: &str,
         query: &str,
-    ) -> Result<Vec<shepherd_core::search::SearchHit>, BridgeError> {
+    ) -> Result<Vec<shep_core::search::SearchHit>, BridgeError> {
         let cancelled = || BridgeError::new("search_cancelled", "Task search was cancelled.");
         let cancellation = {
             let mut searches = self.task_searches.lock().await;
@@ -2381,28 +2389,50 @@ impl ShellState {
         self.launch_terminal(record, columns, rows).await
     }
 
-    pub async fn start_freebuff_terminal(&self, project_id: String) -> Result<String, BridgeError> {
-        let _guard = self.terminal_lifecycle.lock().await;
-        let cwd = self
-            .core
-            .lock()
+    pub async fn start_freebuff_terminal(
+        &self,
+        project_id: String,
+    ) -> Result<TerminalList, BridgeError> {
+        self.start_freebuff_terminal_running(project_id, "freebuff".to_string())
             .await
-            .project_path(&ProjectId::new(project_id))?;
-        let id = self
-            .spawn_terminal(
-                TerminalSpec {
-                    id: TerminalId::new(uuid::Uuid::new_v4().to_string()),
-                    columns: 80,
-                    rows: 24,
-                    cwd,
-                    command: "freebuff".into(),
-                    args: Vec::new(),
-                    environment: BTreeMap::new(),
-                },
-                None,
-            )
-            .await?;
-        Ok(id.as_str().to_owned())
+    }
+
+    async fn start_freebuff_terminal_running(
+        &self,
+        project_id: String,
+        command: String,
+    ) -> Result<TerminalList, BridgeError> {
+        let _guard = self.terminal_lifecycle.lock().await;
+        let project_id = ProjectId::new(project_id);
+        let (cwd, existing) = {
+            let core = self.core.lock().await;
+            let cwd = core.project_path(&project_id)?;
+            let existing = core
+                .terminals_for(&project_id)
+                .into_iter()
+                .find(|terminal| terminal.scope == TerminalScope::Freebuff)
+                .map(|terminal| TerminalId::new(terminal.id));
+            (cwd, existing)
+        };
+        if let Some(id) = existing {
+            if self.screen_slot(id.as_str()).await.is_ok() {
+                return Ok(self.core.lock().await.terminal_list(&project_id));
+            }
+            // The session is kept across exits, so returning to an ended
+            // Freebuff relaunches its own record instead of starting a second.
+            let mut record = self.core.lock().await.terminal_record(&id)?;
+            record.ended_at = None;
+            record.exit_code = None;
+            return self.launch_terminal(record, 80, 24).await;
+        }
+        let record = TerminalRecord::freebuff(
+            TerminalId::new(uuid::Uuid::new_v4().to_string()),
+            project_id,
+            cwd,
+            command,
+            now_millis(),
+        );
+        self.launch_terminal(record, 80, 24).await
     }
 
     async fn launch_terminal(
@@ -2457,7 +2487,7 @@ impl ShellState {
                 .transpose()?;
             (core.shutdown_state(), project, core.process_store())
         };
-        if state != shepherd_core::ShutdownState::Running {
+        if state != shep_core::ShutdownState::Running {
             return Err(CoreError::NotRunning { state }.into());
         }
         let scrollback = if let Some(project) = project {
@@ -2806,7 +2836,7 @@ impl ShellState {
 
 async fn install_startup_scan(
     cache: &Mutex<ProjectScanCache>,
-    found: shepherd_core::project_scan::ProjectScan,
+    found: shep_core::project_scan::ProjectScan,
 ) {
     let mut cache = cache.lock().await;
     if cache.startup_valid && cache.value.is_none() {
@@ -2817,10 +2847,8 @@ async fn install_startup_scan(
 async fn request_project_scan(
     cache: &Mutex<ProjectScanCache>,
     rescan: bool,
-    scan: impl std::future::Future<
-        Output = Result<shepherd_core::project_scan::ProjectScan, BridgeError>,
-    >,
-) -> Result<shepherd_core::project_scan::ProjectScan, BridgeError> {
+    scan: impl std::future::Future<Output = Result<shep_core::project_scan::ProjectScan, BridgeError>>,
+) -> Result<shep_core::project_scan::ProjectScan, BridgeError> {
     let mut cache = cache.lock().await;
     if rescan || cache.value.is_none() {
         cache.startup_valid = false;
@@ -2834,8 +2862,8 @@ async fn request_project_scan(
 
 async fn scan_project_root(
     root: PathBuf,
-) -> Result<shepherd_core::project_scan::ProjectScan, BridgeError> {
-    tokio::task::spawn_blocking(move || shepherd_core::project_scan::scan(&root))
+) -> Result<shep_core::project_scan::ProjectScan, BridgeError> {
+    tokio::task::spawn_blocking(move || shep_core::project_scan::scan(&root))
         .await
         .map_err(|error| {
             BridgeError::new("scan", format!("the project scan did not finish: {error}"))
@@ -2892,7 +2920,7 @@ pub mod commands {
     #[tauri::command]
     pub async fn archived_worktree_issues(
         state: State<'_, ShellState>,
-    ) -> Result<Vec<shepherd_core::ArchivedWorktreeIssue>, BridgeError> {
+    ) -> Result<Vec<shep_core::ArchivedWorktreeIssue>, BridgeError> {
         Ok(state.core.lock().await.archived_worktree_issues().to_vec())
     }
 
@@ -3280,6 +3308,14 @@ pub mod commands {
     }
 
     #[tauri::command]
+    pub async fn compact_task(
+        state: State<'_, ShellState>,
+        task_id: String,
+    ) -> Result<TaskWorkspace, BridgeError> {
+        state.inner().compact_task(task_id).await
+    }
+
+    #[tauri::command]
     pub async fn quit(
         state: State<'_, ShellState>,
         force: bool,
@@ -3304,7 +3340,7 @@ pub mod commands {
     pub async fn project_scan(
         state: State<'_, ShellState>,
         rescan: bool,
-    ) -> Result<shepherd_core::project_scan::ProjectScan, BridgeError> {
+    ) -> Result<shep_core::project_scan::ProjectScan, BridgeError> {
         state.inner().project_scan(rescan).await
     }
 
@@ -3502,8 +3538,8 @@ pub mod commands {
     pub async fn mutate_git(
         state: State<'_, ShellState>,
         task_id: String,
-        mutation: shepherd_core::git::GitMutation,
-    ) -> Result<shepherd_core::git::GitSnapshot, BridgeError> {
+        mutation: shep_core::git::GitMutation,
+    ) -> Result<shep_core::git::GitSnapshot, BridgeError> {
         Ok(state
             .core
             .lock()
@@ -3517,7 +3553,7 @@ pub mod commands {
         state: State<'_, ShellState>,
         task_id: String,
         file: String,
-    ) -> Result<shepherd_core::git::GitFileDiff, BridgeError> {
+    ) -> Result<shep_core::git::GitFileDiff, BridgeError> {
         state
             .git_read(TaskId::new(task_id), move |context| {
                 context.git_file_diff(&file)
@@ -3529,7 +3565,7 @@ pub mod commands {
     pub async fn git_snapshot(
         state: State<'_, ShellState>,
         task_id: String,
-    ) -> Result<shepherd_core::git::GitSnapshot, BridgeError> {
+    ) -> Result<shep_core::git::GitSnapshot, BridgeError> {
         state
             .git_read(TaskId::new(task_id), |context| context.git_snapshot())
             .await
@@ -3658,7 +3694,7 @@ pub mod commands {
     pub async fn review_task(
         state: State<'_, ShellState>,
         task_id: String,
-        action: shepherd_core::ReviewAction,
+        action: shep_core::ReviewAction,
     ) -> Result<TaskWorkspace, BridgeError> {
         state
             .workspace(Command::ReviewTask {
@@ -3685,7 +3721,7 @@ pub mod commands {
     pub async fn review_snapshot(
         state: State<'_, ShellState>,
         task_id: String,
-    ) -> Result<shepherd_core::git::ReviewSnapshot, BridgeError> {
+    ) -> Result<shep_core::git::ReviewSnapshot, BridgeError> {
         state
             .git_read(TaskId::new(task_id), |context| context.review_snapshot())
             .await
@@ -3709,7 +3745,7 @@ pub mod commands {
         state: State<'_, ShellState>,
         search_id: String,
         query: String,
-    ) -> Result<Vec<shepherd_core::search::SearchHit>, BridgeError> {
+    ) -> Result<Vec<shep_core::search::SearchHit>, BridgeError> {
         state.search_tasks(&search_id, &query).await
     }
 
@@ -3740,7 +3776,7 @@ pub mod commands {
     pub async fn terminal_layout(
         state: State<'_, ShellState>,
         project_id: String,
-    ) -> Result<shepherd_core::terminal::TerminalLayout, BridgeError> {
+    ) -> Result<shep_core::terminal::TerminalLayout, BridgeError> {
         Ok(state
             .core
             .lock()
@@ -3752,8 +3788,8 @@ pub mod commands {
     pub async fn save_terminal_layout(
         state: State<'_, ShellState>,
         project_id: String,
-        layout: shepherd_core::terminal::TerminalLayout,
-    ) -> Result<shepherd_core::terminal::TerminalLayout, BridgeError> {
+        layout: shep_core::terminal::TerminalLayout,
+    ) -> Result<shep_core::terminal::TerminalLayout, BridgeError> {
         Ok(state
             .core
             .lock()
@@ -3802,7 +3838,7 @@ pub mod commands {
     pub async fn start_freebuff_terminal(
         state: State<'_, ShellState>,
         project_id: String,
-    ) -> Result<String, BridgeError> {
+    ) -> Result<TerminalList, BridgeError> {
         state.start_freebuff_terminal(project_id).await
     }
 
@@ -3991,7 +4027,7 @@ mod tests {
         for _ in 0..3 {
             assert!(
                 sender
-                    .send(shepherd_core::events::Event::TaskNeedsInput {
+                    .send(shep_core::events::Event::TaskNeedsInput {
                         task_id: "old".into(),
                     })
                     .is_ok()
@@ -3999,23 +4035,23 @@ mod tests {
         }
         assert!(matches!(
             super::next_core_event(&mut receiver).await,
-            Some(shepherd_core::events::Event::ResyncRequired)
+            Some(shep_core::events::Event::ResyncRequired)
         ));
         assert!(
             sender
-                .send(shepherd_core::events::Event::TaskNeedsInput {
+                .send(shep_core::events::Event::TaskNeedsInput {
                     task_id: "new".into(),
                 })
                 .is_ok()
         );
         assert!(matches!(super::next_core_event(&mut receiver).await,
-            Some(shepherd_core::events::Event::TaskNeedsInput { task_id }) if task_id == "new"));
+            Some(shep_core::events::Event::TaskNeedsInput { task_id }) if task_id == "new"));
     }
-    use shepherd_core::store::MemoryStore;
-    use shepherd_core::test_support::TestDirectory;
+    use shep_core::store::MemoryStore;
+    use shep_core::test_support::TestDirectory;
     #[cfg(any(feature = "git", feature = "live-codex"))]
-    use shepherd_core::test_support::TestRepository;
-    use shepherd_core::{TaskState, TaskSummary};
+    use shep_core::test_support::TestRepository;
+    use shep_core::{TaskState, TaskSummary};
 
     use super::*;
 
@@ -4188,7 +4224,7 @@ mod tests {
     #[tokio::test]
     async fn startup_scan_cannot_overwrite_a_later_scan_or_its_failure()
     -> Result<(), Box<dyn std::error::Error>> {
-        let fixture = |root: &str| shepherd_core::project_scan::ProjectScan {
+        let fixture = |root: &str| shep_core::project_scan::ProjectScan {
             root: root.into(),
             repositories: 0,
             tree: Vec::new(),
@@ -4673,7 +4709,7 @@ mod tests {
             AgentHarness, ApprovalId, Capabilities, DeltaKind, HarnessEvent, HarnessResult, ItemId,
             SessionId, TurnFinishReason,
         };
-        use shepherd_core::store::MemoryStore;
+        use shep_core::store::MemoryStore;
 
         struct Factory {
             receiver: std::sync::Mutex<Option<mpsc::UnboundedReceiver<HarnessEvent>>>,
@@ -4750,7 +4786,7 @@ mod tests {
             .execute(Command::CreateDraft {
                 project_id: ProjectId::new(project.id.clone()),
                 title: "Wakeup".into(),
-                agent: shepherd_core::Agent::Codex,
+                agent: shep_core::Agent::Codex,
             })
             .await?;
         let CommandResult::TaskWorkspace(draft) = draft else {
@@ -5176,7 +5212,7 @@ mod tests {
                 title: "Bridge".to_string(),
                 state: TaskState::Waiting,
                 agent: Agent::OpenCode,
-                tier: shepherd_core::AgentTier::Native,
+                tier: shep_core::AgentTier::Native,
                 branch: Some("shepherd/bridge".to_string()),
                 worktree_path: None,
                 error: None,
@@ -5483,6 +5519,96 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn starting_the_freebuff_terminal_reuses_one_record()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = TestDirectory::new()?;
+        let state = state_with(Core::new());
+        let projects = state
+            .add_project(directory.path().display().to_string())
+            .await?;
+        let project = projects.projects.first().ok_or("missing project")?;
+        let first = state
+            .start_freebuff_terminal_running(project.id.clone(), "/bin/sh".into())
+            .await?;
+        let [terminal] = first.terminals.as_slice() else {
+            return Err("expected one freebuff terminal".into());
+        };
+        assert_eq!(terminal.scope, TerminalScope::Freebuff);
+        assert_eq!(
+            (terminal.ended_at, terminal.task_id.as_deref()),
+            (None, None)
+        );
+        let id = terminal.id.clone();
+
+        let second = state
+            .start_freebuff_terminal_running(project.id.clone(), "/bin/sh".into())
+            .await?;
+        let [terminal] = second.terminals.as_slice() else {
+            return Err("expected one freebuff terminal".into());
+        };
+        assert_eq!(terminal.id, id);
+        assert!(state.screen_slot(&id).await.is_ok());
+        state.close_terminal(id).await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_freebuff_terminal_marks_its_exit_and_restarts_in_place()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = TestDirectory::new()?;
+        let state = state_with(Core::new());
+        let projects = state
+            .add_project(directory.path().display().to_string())
+            .await?;
+        let project = projects.projects.first().ok_or("missing project")?;
+        let list = state
+            .start_freebuff_terminal_running(project.id.clone(), "/bin/sh".into())
+            .await?;
+        let terminal = list.terminals.first().ok_or("missing terminal")?.clone();
+        let mut events = state.subscribe();
+        state
+            .terminal_write(
+                terminal.id.clone(),
+                TerminalInput::Text("exit 17\r".into()),
+                true,
+            )
+            .await?;
+        let ended = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Event::TerminalListChanged(snapshot) = events.recv().await?
+                    && snapshot.revision > list.revision
+                    && let Some(freebuff) = snapshot
+                        .terminals
+                        .iter()
+                        .find(|entry| entry.scope == TerminalScope::Freebuff)
+                    && freebuff.exit_code.is_some()
+                {
+                    return Ok::<_, broadcast::error::RecvError>(snapshot);
+                }
+            }
+        })
+        .await??;
+        let ended = ended
+            .terminals
+            .iter()
+            .find(|entry| entry.id == terminal.id)
+            .ok_or("missing ended terminal")?;
+        assert_eq!(ended.exit_code, Some(17));
+        assert!(ended.ended_at.is_some());
+
+        let restarted = state.restart_terminal(terminal.id.clone(), 80, 24).await?;
+        let [running] = restarted.terminals.as_slice() else {
+            return Err("restart should reuse one terminal record".into());
+        };
+        assert_eq!(running.id, terminal.id);
+        assert_eq!(running.scope, TerminalScope::Freebuff);
+        assert_eq!(running.cwd, terminal.cwd);
+        assert_eq!((running.ended_at, running.exit_code), (None, None));
+        state.close_terminal(terminal.id).await?;
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn unverified_freebuff_terminal_rejects_raw_user_input()
     -> Result<(), Box<dyn std::error::Error>> {
         let directory = TestDirectory::new()?;
@@ -5747,8 +5873,8 @@ mod tests {
     #[tokio::test]
     async fn archived_task_terminal_activity_refreshes_worktree_usage()
     -> Result<(), Box<dyn std::error::Error>> {
-        use shepherd_core::store::Store;
-        use shepherd_core::tasks::Task;
+        use shep_core::store::Store;
+        use shep_core::tasks::Task;
 
         let directory = TestDirectory::new()?;
         let repository = TestRepository::new()?;
@@ -6204,7 +6330,7 @@ mod tests {
         assert!(!recorded[0].boot_id.is_empty());
         let path = directory.path().join("shepherd.db");
         let reopened = TursoStore::open_at(&path).await?;
-        use shepherd_core::store::Store;
+        use shep_core::store::Store;
         assert_eq!(reopened.load_processes().await?, recorded);
         state.close_terminal(terminal.id.clone()).await?;
         tokio::time::timeout(Duration::from_secs(4), async {
@@ -6733,7 +6859,7 @@ mod tests {
         };
         assert_eq!(running.id, saved.id.as_str());
         assert_eq!(running.task_id.as_deref(), Some(task_id.as_str()));
-        assert_eq!(running.scope, shepherd_core::terminal::TerminalScope::Task);
+        assert_eq!(running.scope, shep_core::terminal::TerminalScope::Task);
         assert_eq!(running.cwd, worktree);
         assert_eq!(running.command, saved.command);
         assert_eq!((running.ended_at, running.exit_code), (None, None));
@@ -6927,7 +7053,7 @@ mod tests {
         drop(state);
         let reopened = Core::load(
             Box::new(TursoStore::open(&uri).await?),
-            Box::new(shepherd_core::harness::UnavailableHarnessFactory),
+            Box::new(shep_core::harness::UnavailableHarnessFactory),
         )
         .await?;
         assert!(

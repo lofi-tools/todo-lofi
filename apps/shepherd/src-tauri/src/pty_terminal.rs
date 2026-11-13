@@ -12,13 +12,13 @@ use std::time::Duration;
 use agent_harness::freebuff_capture::{CaptureEvent, CaptureSession};
 use agent_harness::{HarnessError, HarnessResult};
 use portable_pty::{ChildKiller, CommandBuilder, MasterPty, PtySize, native_pty_system};
-use shepherd_core::terminal::{
+use shep_core::terminal::{
     ProcessRecord, TerminalError, TerminalEvent, TerminalId, TerminalService, TerminalSpec,
     TerminalWrite, validate_size,
 };
 use tokio::sync::{mpsc, oneshot};
 
-use terminal_renderer::{RecordedScreenUpdate, Screen};
+use shep_terminal_renderer::{RecordedScreenUpdate, Screen};
 
 const MAX_WRITE_BYTES: usize = 64 * 1024;
 
@@ -1510,9 +1510,9 @@ mod tests {
     use std::time::Instant;
 
     #[cfg(all(unix, feature = "git"))]
-    use terminal_replay::verify_recorded_screens;
+    use shep_terminal_replay::verify_recorded_screens;
     #[cfg(all(unix, any(feature = "git", feature = "live-freebuff")))]
-    use terminal_replay::verify_unfinished_screens;
+    use shep_terminal_replay::verify_unfinished_screens;
 
     use super::*;
 
@@ -1682,7 +1682,7 @@ mod tests {
     #[cfg(all(unix, any(feature = "git", feature = "live-freebuff")))]
     async fn run_capture(config: CaptureRunnerConfig) -> Result<(), Box<dyn std::error::Error>> {
         use agent_harness::freebuff_capture::CaptureEvent;
-        use shepherd_core::harness::FreebuffLiveCapture;
+        use shep_core::harness::FreebuffLiveCapture;
         use std::io::Write as _;
         fn runtime(
             session: &agent_harness::freebuff_capture::CaptureSession,
@@ -1736,10 +1736,11 @@ mod tests {
         let capture = FreebuffLiveCapture::begin(&workspace, worktree.clone(), &scenario)?;
         let session = capture.session();
         runtime(&session, &metadata, &executable)?;
-        let renderer_dependency = include_str!("../../../../libs/terminal-renderer/Cargo.toml")
-            .lines()
-            .find(|line| line.starts_with("alacritty_terminal = "))
-            .ok_or("terminal renderer dependency is missing from the manifest")?;
+        let renderer_dependency =
+            include_str!("../../../../libs/shep-terminal-renderer/Cargo.toml")
+                .lines()
+                .find(|line| line.starts_with("alacritty_terminal = "))
+                .ok_or("terminal renderer dependency is missing from the manifest")?;
         session.record_and_apply(
             CaptureEvent::Terminal {
                 term: "xterm-256color".into(),
@@ -1912,8 +1913,8 @@ mod tests {
             );
         }
         let mut frames = 0usize;
-        let mut warnings = terminal_replay::FreebuffWarningTracker::default();
-        terminal_replay::replay_freebuff_capture_changes(&capture, &worktree, |_, frame| {
+        let mut warnings = shep_terminal_replay::FreebuffWarningTracker::default();
+        shep_terminal_replay::replay_freebuff_capture_changes(&capture, &worktree, |_, frame| {
             frames += 1;
             warnings.observe(frame)?;
             Ok(())
@@ -1938,8 +1939,8 @@ mod tests {
             .map(std::path::PathBuf::from)
             .ok_or("missing SHEPHERD_FREEBUFF_CAPTURE")?;
         let mut frames = 0usize;
-        let mut warnings = terminal_replay::FreebuffWarningTracker::default();
-        terminal_replay::visit_unfinished_screen_changes(&capture, |_, frame| {
+        let mut warnings = shep_terminal_replay::FreebuffWarningTracker::default();
+        shep_terminal_replay::visit_unfinished_screen_changes(&capture, |_, frame| {
             frames += 1;
             warnings.observe(frame)
         })?;
@@ -2005,7 +2006,7 @@ mod tests {
     async fn capture_runner_records_fake_cli_and_worktree_effects()
     -> Result<(), Box<dyn std::error::Error>> {
         use agent_harness::freebuff_capture::{CaptureEvent, read_complete_capture};
-        use shepherd_core::test_support::TestRepository;
+        use shep_core::test_support::TestRepository;
 
         async fn wait_for(path: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
             tokio::time::timeout(Duration::from_secs(10), async {

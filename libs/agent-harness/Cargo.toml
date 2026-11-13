@@ -2,40 +2,26 @@
 name = "agent-harness"
 version.workspace = true
 edition.workspace = true
-description = "UI-free coding-agent adapter contract and transcript model."
+description = "Re-exports the harness contract and every adapter crate."
 
 [lib]
 path = "src/agent_harness.rs"
 
 [features]
-live-test-support = ["dep:tempfile"]
-live-codex = ["live-test-support"]
-live-opencode = []
-live-claude = []
-live-pi = []
-live-freebuff = []
+live-test-support = ["shep-harness-core/live-test-support", "shep-harness-codex/live-test-support"]
+live-codex = ["live-test-support", "shep-harness-codex/live-codex"]
+live-opencode = ["shep-harness-opencode/live-opencode"]
+live-claude = ["shep-harness-acp/live-claude"]
+live-pi = ["shep-harness-pi/live-pi"]
+live-freebuff = ["shep-harness-freebuff/live-freebuff"]
 
 [dependencies]
-acp-client = { path = "../acp-client" }
-tempfile = { version = "3", optional = true }
-async-trait.workspace = true
-base64 = "0.22"
-bytes = "1"
-reqwest.workspace = true
-serde.workspace = true
-serde_json.workspace = true
-sha2.workspace = true
-thiserror.workspace = true
-tokio.workspace = true
-tracing.workspace = true
-uuid.workspace = true
-
-[target.'cfg(unix)'.dependencies]
-libc = "0.2"
+shep-harness-acp = { path = "../shep-harness-acp" }
+shep-harness-codex = { path = "../shep-harness-codex" }
+shep-harness-core = { path = "../shep-harness-core" }
+shep-harness-freebuff = { path = "../shep-harness-freebuff" }
+shep-harness-opencode = { path = "../shep-harness-opencode" }
+shep-harness-pi = { path = "../shep-harness-pi" }
 
 [dev-dependencies]
-acp-client = { path = "../acp-client", features = ["test-support"] }
-futures-channel = "0.3"
-tempfile = "3"
-tokio = { version = "1", features = ["macros", "rt"] }
-tracing-subscriber.workspace = true
+shep-harness-codex = { path = "../shep-harness-codex", features = ["live-test-support"] }

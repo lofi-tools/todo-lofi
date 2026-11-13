@@ -1,0 +1,5476 @@
+//! OpenCode's harnesses: its ACP entry point (the default), its private HTTP
+//! server, and the router that selects between them.
+
+use std::collections::{BTreeMap, HashSet, VecDeque};
+use std::path::{Path, PathBuf};
+use std::process::Stdio;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use async_trait::async_trait;
+use reqwest::{Client, Method, RequestBuilder, Response, Url};
+use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
+use tokio::process::{Child, Command};
+use tokio::sync::{Mutex as AsyncMutex, Semaphore, mpsc};
+use tokio::task::JoinHandle;
+use tokio::time::{Instant, timeout, timeout_at};
+
+use shep_harness_acp::acp::{AcpHarness, TerminalBackend};
+use shep_harness_core::settings::AgentSettings;
+use shep_harness_core::{
+    AdapterTier, AgentDiagnostics, AgentHarness, AgentMode, AgentModel, AgentModels, AgentModes,
+    ApprovalId, ApprovalRequest, Capabilities, Decision, DeltaKind, Entry, FailureKind,
+    HarnessError, HarnessEvent, HarnessResult, ItemId, PromptInput, SessionId, SessionState,
+    SpawnSpec, ToolCallId, ToolStatus, TurnFinishReason, TurnId, command_line, publish,
+};
+
+const STARTUP_TIMEOUT: Duration = Duration::from_secs(20);
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+const MAX_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
+const STREAM_CHUNK_BYTES: usize = 8 * 1024;
+const STREAM_BUFFER_CHUNKS: usize = 64;
+const MAX_PENDING_APPROVALS: usize = 64;
+const ACP_ARG: &str = "acp";
+const MODEL_CATALOG_SETTLE_ATTEMPTS: usize = 8;
+const MODEL_CATALOG_SETTLE_DELAY: Duration = Duration::from_millis(250);
+const USERNAME: &str = "opencode";
+const SERVER_ARGS: [&str; 5] = ["serve", "--hostname", "127.0.0.1", "--port", "0"];
+
+/// Read the configured executable without resolving aliases, modifying the
+/// settings file, or installing a binary.
+pub fn configured_executable(settings_path: &Path) -> HarnessResult<Option<PathBuf>> {
+    AgentSettings::read(settings_path)?.executable("agents.opencode.executable")
+}
+
+pub fn configured_launch(settings: &AgentSettings) -> HarnessResult<Option<SpawnSpec>> {
+    let Some(executable) = settings.executable("agents.opencode.executable")? else {
+        return Ok(None);
+    };
+    let program = executable
+        .into_os_string()
+        .into_string()
+        .map_err(|_| HarnessError::Protocol("agents.opencode.executable must be UTF-8".into()))?;
+    let mut spec = SpawnSpec {
+        program,
+        ..SpawnSpec::default()
+    };
+    if let Some(path) = settings.absolute_path("agents.opencode.config_file")? {
+        let path = path.into_os_string().into_string().map_err(|_| {
+            HarnessError::Protocol("agents.opencode.config_file must be UTF-8".into())
+        })?;
+        spec.environment.insert("OPENCODE_CONFIG".into(), path);
+    }
+    Ok(Some(spec))
+}
+
+pub async fn project_models(
+    spec: &SpawnSpec,
+    default_model: Option<&str>,
+) -> HarnessResult<AgentModels> {
+    let (server, mut startup_group) = OpenCodeServer::start_guarded(spec, None).await?;
+    let models = if server.probe.models {
+        server.model_catalog().await.map(|catalog| catalog.models)
+    } else {
+        Ok(AgentModels::default())
+    };
+    let models = models.map(|models| preferred_models(models, default_model));
+    let shutdown = server.shutdown().await;
+    startup_group.disarm();
+    finish_model_discovery(models, shutdown)
+}
+
+fn finish_model_discovery(
+    models: HarnessResult<AgentModels>,
+    shutdown: HarnessResult<()>,
+) -> HarnessResult<AgentModels> {
+    match (models, shutdown) {
+        (Ok(models), Ok(())) => Ok(models),
+        (Err(error), Ok(())) | (Ok(_), Err(error)) => Err(error),
+        (Err(discovery), Err(cleanup)) => Err(HarnessError::Protocol(format!(
+            "OpenCode model discovery failed: {discovery}; cleanup failed: {cleanup}"
+        ))),
+    }
+}
+
+pub async fn project_modes(spec: &SpawnSpec) -> HarnessResult<Vec<AgentMode>> {
+    let (server, mut startup_group) = OpenCodeServer::start_guarded(spec, None).await?;
+    let modes = if server.probe.modes {
+        server.mode_catalog().await
+    } else {
+        Ok(Vec::new())
+    };
+    let shutdown = server.shutdown().await;
+    startup_group.disarm();
+    finish_mode_discovery(modes, shutdown)
+}
+
+fn finish_mode_discovery(
+    modes: HarnessResult<Vec<AgentMode>>,
+    shutdown: HarnessResult<()>,
+) -> HarnessResult<Vec<AgentMode>> {
+    match (modes, shutdown) {
+        (Ok(modes), Ok(())) => Ok(modes),
+        (Err(error), Ok(())) | (Ok(_), Err(error)) => Err(error),
+        (Err(discovery), Err(cleanup)) => Err(HarnessError::Protocol(format!(
+            "OpenCode mode discovery failed: {discovery}; cleanup failed: {cleanup}"
+        ))),
+    }
+}
+
+fn require_absolute_executable(path: &Path) -> HarnessResult<()> {
+    if !path.is_absolute() {
+        return Err(HarnessError::Protocol(
+            "agents.opencode.executable must be an absolute path".into(),
+        ));
+    }
+    Ok(())
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OpenCodeProbe {
+    pub version: String,
+    pub resume: bool,
+    pub prompt_files: bool,
+    pub modes: bool,
+    pub models: bool,
+}
+
+#[derive(Deserialize)]
+struct Health {
+    version: String,
+}
+
+#[derive(Deserialize)]
+struct Api {
+    paths: BTreeMap<String, BTreeMap<String, Value>>,
+}
+
+impl Api {
+    fn supports(&self, method: &str, path: &str) -> bool {
+        self.paths
+            .get(path)
+            .is_some_and(|operations| operations.get(method).is_some_and(Value::is_object))
+    }
+
+    fn probe(&self, health: Health) -> HarnessResult<OpenCodeProbe> {
+        if health.version.is_empty() {
+            return Err(HarnessError::Protocol(
+                "OpenCode did not report a healthy versioned server".into(),
+            ));
+        }
+        for (method, path) in [
+            ("get", "/api/event"),
+            ("post", "/api/session"),
+            ("post", "/api/session/{sessionID}/prompt"),
+            ("post", "/api/session/{sessionID}/interrupt"),
+            ("delete", "/api/session/{sessionID}/inbox/{inboxID}"),
+            (
+                "post",
+                "/api/session/{sessionID}/permission/{requestID}/reply",
+            ),
+        ] {
+            if !self.supports(method, path) {
+                return Err(HarnessError::Protocol(format!(
+                    "OpenCode server does not support {} {path}",
+                    method.to_ascii_uppercase()
+                )));
+            }
+        }
+        Ok(OpenCodeProbe {
+            version: health.version,
+            resume: self.supports("get", "/api/session/{sessionID}"),
+            modes: self.supports("get", "/api/session/{sessionID}")
+                && self.supports("get", "/api/agent")
+                && self.supports("post", "/api/session/{sessionID}/agent"),
+            models: self.supports("get", "/api/model")
+                && self.supports("get", "/api/model/default")
+                && self.supports("post", "/api/session/{sessionID}/model"),
+            prompt_files: self
+                .paths
+                .get("/api/session/{sessionID}/prompt")
+                .and_then(|operations| operations.get("post"))
+                .and_then(|operation| {
+                    operation
+                        .pointer("/requestBody/content/application~1json/schema/properties/files")
+                })
+                .is_some(),
+        })
+    }
+}
+
+#[derive(Deserialize)]
+struct SessionRecord {
+    id: String,
+    location: SessionLocation,
+    agent: Option<String>,
+    model: Option<OpenCodeModelRef>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+struct OpenCodeModelRef {
+    id: String,
+    #[serde(rename = "providerID")]
+    provider_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    variant: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct OpenCodeModel {
+    #[serde(rename = "modelID")]
+    model_id: String,
+    #[serde(rename = "providerID")]
+    provider_id: String,
+    name: String,
+    #[serde(default)]
+    enabled: bool,
+}
+
+#[derive(Deserialize)]
+struct OpenCodeModelsResponse {
+    location: SessionLocation,
+    data: Vec<OpenCodeModel>,
+}
+
+struct OpenCodeCatalog {
+    models: AgentModels,
+    refs: BTreeMap<String, OpenCodeModelRef>,
+}
+
+impl OpenCodeModel {
+    fn selection_id(&self) -> String {
+        format!("{}/{}", self.provider_id, self.model_id)
+    }
+
+    fn reference(&self) -> OpenCodeModelRef {
+        OpenCodeModelRef {
+            id: self.model_id.clone(),
+            provider_id: self.provider_id.clone(),
+            variant: None,
+        }
+    }
+}
+
+impl OpenCodeModelRef {
+    fn selection_id(&self) -> String {
+        format!("{}/{}", self.provider_id, self.id)
+    }
+}
+
+fn preferred_models(mut models: AgentModels, default_model: Option<&str>) -> AgentModels {
+    if let Some(model) = default_model {
+        models.current = Some(model.to_owned());
+    }
+    models
+}
+
+/// The reference for `id`, accepting a catalog selection ID or a
+/// `provider/model` pair that OpenCode does not list as enabled.
+fn model_reference(
+    id: &str,
+    refs: &BTreeMap<String, OpenCodeModelRef>,
+) -> Option<OpenCodeModelRef> {
+    if let Some(reference) = refs.get(id) {
+        return Some(reference.clone());
+    }
+    let (provider_id, model_id) = id.split_once('/')?;
+    if provider_id.is_empty() || model_id.is_empty() {
+        return None;
+    }
+    Some(OpenCodeModelRef {
+        id: model_id.to_owned(),
+        provider_id: provider_id.to_owned(),
+        variant: None,
+    })
+}
+
+fn catalog_models(models: Vec<OpenCodeModel>, default: Option<OpenCodeModel>) -> OpenCodeCatalog {
+    let default_id = default.as_ref().map(OpenCodeModel::selection_id);
+    let mut refs = BTreeMap::new();
+    let mut options = Vec::new();
+    for model in models.into_iter().filter(|model| model.enabled) {
+        let id = model.selection_id();
+        if refs.contains_key(&id) {
+            continue;
+        }
+        refs.insert(id.clone(), model.reference());
+        options.push(AgentModel {
+            id,
+            name: model.name,
+            description: Some(model.provider_id),
+        });
+    }
+    if options.is_empty()
+        && let Some(model) = default
+    {
+        let id = model.selection_id();
+        refs.insert(id.clone(), model.reference());
+        options.push(AgentModel {
+            id,
+            name: model.name,
+            description: Some(model.provider_id),
+        });
+    }
+    let current = default_id
+        .filter(|id| options.iter().any(|model| &model.id == id))
+        .or_else(|| options.first().map(|model| model.id.clone()));
+    OpenCodeCatalog {
+        models: AgentModels { current, options },
+        refs,
+    }
+}
+
+#[derive(Deserialize)]
+struct OpenCodeAgent {
+    id: String,
+    name: String,
+    description: Option<String>,
+    mode: String,
+    hidden: bool,
+}
+
+#[derive(Deserialize)]
+struct OpenCodeAgents {
+    location: SessionLocation,
+    data: Vec<OpenCodeAgent>,
+}
+
+#[derive(Deserialize)]
+struct SessionLocation {
+    directory: PathBuf,
+}
+
+#[derive(Deserialize)]
+struct ResponseData<T> {
+    data: T,
+}
+
+#[derive(Deserialize)]
+struct InterruptResponse {
+    interrupted: bool,
+}
+
+pub struct OpenCodeNativeHarness {
+    server: Option<OpenCodeServer>,
+    session: Option<SessionId>,
+    modes: Option<AgentModes>,
+    models: Option<AgentModels>,
+    model_refs: BTreeMap<String, OpenCodeModelRef>,
+    default_model: Option<String>,
+    turn: Option<ActiveTurn>,
+    sender: mpsc::UnboundedSender<HarnessEvent>,
+    receiver: mpsc::UnboundedReceiver<HarnessEvent>,
+    stream_capacity: Arc<Semaphore>,
+    diagnostics: AgentDiagnostics,
+    process_tracker: Option<Arc<dyn shep_harness_core::AgentProcessTracker>>,
+    cleanup_required: bool,
+}
+
+impl Default for OpenCodeNativeHarness {
+    fn default() -> Self {
+        let (sender, receiver) = mpsc::unbounded_channel();
+        Self {
+            server: None,
+            session: None,
+            modes: None,
+            models: None,
+            model_refs: BTreeMap::new(),
+            default_model: None,
+            turn: None,
+            sender,
+            receiver,
+            stream_capacity: Arc::new(Semaphore::new(STREAM_BUFFER_CHUNKS)),
+            diagnostics: AgentDiagnostics::default(),
+            process_tracker: None,
+            cleanup_required: false,
+        }
+    }
+}
+
+struct ActiveTurn {
+    id: String,
+    finished: Arc<AtomicBool>,
+    approval: Arc<Mutex<ApprovalResponseState>>,
+    reader: JoinHandle<()>,
+}
+
+#[derive(Default)]
+struct ApprovalResponseState {
+    active: Option<ApprovalId>,
+    submitted: bool,
+}
+
+struct StopOnDrop {
+    child: Option<Arc<AsyncMutex<Child>>>,
+    sender: mpsc::UnboundedSender<HarnessEvent>,
+    signal_group: fn(&Child) -> std::io::Result<()>,
+    runtime: tokio::runtime::Handle,
+    operation: &'static str,
+    active_turn: Option<(tokio::task::AbortHandle, Arc<AtomicBool>)>,
+}
+
+impl StopOnDrop {
+    fn disarm(&mut self) {
+        self.child = None;
+    }
+}
+
+impl Drop for StopOnDrop {
+    fn drop(&mut self) {
+        let Some(child) = self.child.take() else {
+            return;
+        };
+        let sender = self.sender.clone();
+        let signal_group = self.signal_group;
+        let operation = self.operation;
+        if let Some((reader, finished)) = self.active_turn.take() {
+            reader.abort();
+            finished.store(true, Ordering::Release);
+        }
+        let immediate_signal = child.try_lock().ok().map(|child| signal_group(&child));
+        if let Some(Err(error)) = &immediate_signal {
+            tracing::warn!(%error, operation, "could not signal OpenCode after interrupted operation");
+        }
+        self.runtime.spawn(async move {
+            let mut text =
+                format!("OpenCode {operation} did not complete; the server was stopped.");
+            let result = match immediate_signal {
+                Some(Ok(())) => child.lock().await.kill().await,
+                Some(Err(error)) => Err(error),
+                None => stop_server_with(&mut *child.lock().await, signal_group).await,
+            };
+            if let Err(error) = result {
+                text = format!(
+                    "OpenCode {operation} did not complete; could not stop the server: {error}"
+                );
+            }
+            if publish(
+                &sender,
+                HarnessEvent::ConnectionFailed {
+                    kind: FailureKind::Protocol,
+                    text,
+                },
+            )
+            .is_err()
+            {
+                tracing::debug!(
+                    operation,
+                    "could not report interrupted OpenCode operation cleanup"
+                );
+            }
+        });
+    }
+}
+
+impl Drop for ActiveTurn {
+    fn drop(&mut self) {
+        self.reader.abort();
+    }
+}
+
+#[async_trait]
+impl AgentHarness for OpenCodeNativeHarness {
+    fn set_process_tracker(&mut self, tracker: Arc<dyn shep_harness_core::AgentProcessTracker>) {
+        self.process_tracker = Some(tracker);
+    }
+
+    fn events(&mut self) -> &mut mpsc::UnboundedReceiver<HarnessEvent> {
+        &mut self.receiver
+    }
+
+    fn diagnostics(&self) -> AgentDiagnostics {
+        let mut diagnostics = self.diagnostics.clone();
+        if let Some(server) = &self.server {
+            diagnostics.stderr_tail = server.stderr_tail();
+        }
+        diagnostics
+    }
+
+    fn tier(&self) -> AdapterTier {
+        AdapterTier::Native
+    }
+
+    fn models(&self) -> Option<AgentModels> {
+        self.models.clone()
+    }
+
+    fn set_default_model(&mut self, model: Option<String>) {
+        self.default_model = model;
+    }
+
+    fn modes(&self) -> Option<AgentModes> {
+        self.modes.clone()
+    }
+
+    async fn set_mode(&mut self, mode: &str) -> HarnessResult<()> {
+        if self
+            .turn
+            .as_ref()
+            .is_some_and(|turn| !turn.finished.load(Ordering::Acquire))
+        {
+            return Err(HarnessError::ModeUnavailable);
+        }
+        let server = self.server.as_ref().ok_or(HarnessError::NotStarted)?;
+        let session = self.session.as_ref().ok_or(HarnessError::SessionMissing)?;
+        let modes = self
+            .modes
+            .as_mut()
+            .filter(|modes| modes.options.iter().any(|option| option.id == mode))
+            .ok_or(HarnessError::ModeUnavailable)?;
+        if modes.current.as_deref() != Some(mode) {
+            let path = format!("{}/agent", session_path(session)?);
+            send_request(
+                server
+                    .request(Method::POST, &path)
+                    .json(&json!({ "agent": mode })),
+            )
+            .await?;
+            modes.current = Some(mode.to_owned());
+        }
+        Ok(())
+    }
+
+    async fn start(&mut self, mut spec: SpawnSpec) -> HarnessResult<Capabilities> {
+        if self.server.is_some() {
+            return Err(HarnessError::Protocol(
+                "OpenCode native harness is already started".into(),
+            ));
+        }
+        require_absolute_executable(Path::new(&spec.program))?;
+        let (server, mut startup_group) =
+            OpenCodeServer::start_guarded(&spec, self.process_tracker.clone()).await?;
+        if let Err(error) = server.subscribe().await {
+            let cleanup = server.shutdown().await;
+            startup_group.disarm();
+            if let Err(cleanup) = cleanup {
+                return Err(HarnessError::Reported {
+                    kind: FailureKind::Protocol,
+                    message: format!(
+                        "OpenCode subscription failed: {error}; cleanup failed: {cleanup}"
+                    ),
+                });
+            }
+            return Err(error);
+        }
+        startup_group.disarm();
+        let probe = server.probe();
+        let capabilities = Capabilities {
+            streaming: true,
+            thoughts: true,
+            tool_calls: true,
+            approvals: true,
+            resume: probe.resume,
+            cancel: true,
+            model_picker: probe.models,
+            images: probe.prompt_files,
+            resource_links: probe.prompt_files,
+            ..Capabilities::default()
+        };
+        spec.args.extend(SERVER_ARGS.map(str::to_owned));
+        self.diagnostics = AgentDiagnostics {
+            command: command_line(&spec),
+            protocol: format!("OpenCode {} native HTTP", probe.version),
+            ..AgentDiagnostics::default()
+        };
+        self.server = Some(server);
+        Ok(capabilities)
+    }
+
+    async fn open_session(&mut self, resume: Option<SessionId>) -> HarnessResult<SessionId> {
+        if self.session.is_some() {
+            return Err(HarnessError::Protocol(
+                "OpenCode session is already open".into(),
+            ));
+        }
+        let server = self.server.as_ref().ok_or(HarnessError::NotStarted)?;
+        let session = match resume {
+            Some(session) => server.resume_session(&session).await?,
+            None => server.create_session().await?,
+        };
+        if server.probe.modes {
+            match server.session_modes(&session).await {
+                Ok(modes) => self.modes = modes,
+                Err(_) => tracing::warn!("could not load OpenCode session modes"),
+            }
+        }
+        if server.probe.models {
+            let current = server
+                .read_session(&session)
+                .await
+                .ok()
+                .and_then(|record| record.model);
+            match server.model_catalog().await {
+                Ok(mut catalog) => {
+                    if let Some(model) = current {
+                        let id = model.selection_id();
+                        if catalog.models.options.iter().any(|option| option.id == id) {
+                            catalog.models.current = Some(id);
+                        }
+                    }
+                    if let Some(model) = &self.default_model {
+                        let reference = model_reference(model, &catalog.refs)
+                            .ok_or(HarnessError::ModelUnavailable)?;
+                        server.set_session_model(&session, &reference).await?;
+                        catalog.models.current = Some(model.clone());
+                    }
+                    // The catalog's current entry is the model the server will
+                    // actually run, including its own default when none is picked.
+                    self.diagnostics.model = catalog.models.current.clone();
+                    self.models = Some(catalog.models);
+                    self.model_refs = catalog.refs;
+                }
+                Err(error) => tracing::warn!(%error, "could not load OpenCode session models"),
+            }
+        }
+        self.session = Some(session.clone());
+        publish(
+            &self.sender,
+            HarnessEvent::SessionState {
+                state: SessionState::Ready,
+            },
+        )?;
+        Ok(session)
+    }
+
+    async fn prompt(&mut self, mut input: PromptInput) -> HarnessResult<()> {
+        if self.cleanup_required {
+            return Err(HarnessError::Protocol(
+                "OpenCode needs cleanup before another prompt".into(),
+            ));
+        }
+        if self
+            .turn
+            .as_ref()
+            .is_some_and(|turn| !turn.finished.load(Ordering::Acquire))
+        {
+            return Err(HarnessError::Protocol(
+                "OpenCode turn is already running".into(),
+            ));
+        }
+        if let Some(model) = input.model.take() {
+            let model_ref = self
+                .model_refs
+                .get(&model)
+                .cloned()
+                .ok_or(HarnessError::ModelUnavailable)?;
+            let server = self.server.as_ref().ok_or(HarnessError::NotStarted)?;
+            let session = self.session.clone().ok_or(HarnessError::SessionMissing)?;
+            server.set_session_model(&session, &model_ref).await?;
+            if let Some(models) = &mut self.models {
+                models.current = Some(model.clone());
+            }
+            self.diagnostics.model = Some(model);
+        }
+        let server = self.server.as_ref().ok_or(HarnessError::NotStarted)?;
+        let session = self.session.clone().ok_or(HarnessError::SessionMissing)?;
+        let path = session_path(&session)?;
+        let events = server.subscribe().await?;
+        let id = format!("msg_{}", uuid::Uuid::new_v4().simple());
+        let runtime = tokio::runtime::Handle::try_current().map_err(|error| {
+            HarnessError::Protocol(format!("OpenCode requires an async runtime: {error}"))
+        })?;
+        self.cleanup_required = true;
+        let mut admission = StopOnDrop {
+            child: Some(server.child.clone()),
+            sender: self.sender.clone(),
+            signal_group: signal_server_group,
+            runtime,
+            operation: "prompt admission",
+            active_turn: None,
+        };
+        if let Err(error) = server.enqueue_prompt(&session, &id, &input, true).await {
+            if let Err(cleanup) = server.cancel_prompt(&session, &id).await {
+                self.cleanup_required = true;
+                let kind = FailureKind::classify(&error).unwrap_or(FailureKind::Protocol);
+                let mut message =
+                    format!("{error}; could not cancel the unconfirmed OpenCode prompt: {cleanup}");
+                if let Err(stop) = server.shutdown().await {
+                    message.push_str(&format!("; could not stop the OpenCode server: {stop}"));
+                }
+                admission.disarm();
+                publish(
+                    &self.sender,
+                    HarnessEvent::ConnectionFailed {
+                        kind,
+                        text: message.clone(),
+                    },
+                )?;
+                return Err(HarnessError::Reported { kind, message });
+            }
+            admission.disarm();
+            self.cleanup_required = false;
+            return Err(error);
+        }
+        publish(
+            &self.sender,
+            HarnessEvent::TurnStarted {
+                turn_id: TurnId::new(id.clone()),
+            },
+        )?;
+        admission.disarm();
+        self.cleanup_required = false;
+        let finished = Arc::new(AtomicBool::new(false));
+        let approval = Arc::new(Mutex::new(ApprovalResponseState::default()));
+        let reader = tokio::spawn({
+            let id = id.clone();
+            let sender = self.sender.clone();
+            let stream_capacity = self.stream_capacity.clone();
+            let finished = finished.clone();
+            let approval = approval.clone();
+            let remove = server.request(Method::DELETE, &format!("{path}/inbox/{id}"));
+            let interrupt = server.request(Method::POST, &format!("{path}/interrupt"));
+            let child = server.child.clone();
+            let stderr = server.stderr.clone();
+            async move {
+                let terminal = match read_turn(
+                    events,
+                    session,
+                    &id,
+                    &sender,
+                    &stream_capacity,
+                    &approval,
+                )
+                .await
+                {
+                    Ok(event) => event,
+                    Err(error) => {
+                        let exit = if matches!(error, HarnessError::TransportClosed(_)) {
+                            match timeout(Duration::from_millis(250), child.lock().await.wait())
+                                .await
+                            {
+                                Ok(status) => status.map(Some),
+                                Err(_) => Ok(None),
+                            }
+                        } else {
+                            child.lock().await.try_wait()
+                        };
+                        if let Ok(Some(status)) = exit {
+                            HarnessEvent::Exited {
+                                code: status.code(),
+                                stderr: stderr_tail(&stderr),
+                            }
+                        } else {
+                            if let Err(status) = exit {
+                                tracing::warn!(%status, "could not read the OpenCode exit status");
+                            }
+                            if timeout(Duration::from_secs(1), async {
+                                if send_request(remove).await.is_err() {
+                                    tracing::warn!(
+                                        "could not remove the disconnected OpenCode prompt"
+                                    );
+                                }
+                                if send_request(interrupt).await.is_err() {
+                                    tracing::warn!(
+                                        "could not interrupt the disconnected OpenCode turn"
+                                    );
+                                }
+                            })
+                            .await
+                            .is_err()
+                            {
+                                tracing::warn!("OpenCode turn cleanup timed out");
+                            }
+                            disconnected_turn_failure(
+                                &mut *child.lock().await,
+                                error,
+                                signal_server_group,
+                            )
+                            .await
+                        }
+                    }
+                };
+                finished.store(true, Ordering::Release);
+                if let Err(error) = publish(&sender, terminal) {
+                    tracing::debug!(%error, "could not deliver OpenCode turn outcome");
+                }
+            }
+        });
+        self.turn = Some(ActiveTurn {
+            id,
+            finished,
+            approval,
+            reader,
+        });
+        Ok(())
+    }
+
+    async fn cancel(&mut self) -> HarnessResult<()> {
+        if self.cleanup_required {
+            return Err(HarnessError::Protocol(
+                "OpenCode needs cleanup before cancellation".into(),
+            ));
+        }
+        let server = self.server.as_ref().ok_or(HarnessError::NotStarted)?;
+        let session = self.session.as_ref().ok_or(HarnessError::SessionMissing)?;
+        if let Some(turn) = &self.turn
+            && !turn.finished.load(Ordering::Acquire)
+        {
+            let runtime = tokio::runtime::Handle::try_current().map_err(|error| {
+                HarnessError::Protocol(format!("OpenCode requires an async runtime: {error}"))
+            })?;
+            self.cleanup_required = true;
+            let mut cleanup = StopOnDrop {
+                child: Some(server.child.clone()),
+                sender: self.sender.clone(),
+                signal_group: signal_server_group,
+                runtime,
+                operation: "turn cancellation request",
+                active_turn: Some((turn.reader.abort_handle(), turn.finished.clone())),
+            };
+            if let Err(error) = server.cancel_prompt(session, &turn.id).await {
+                turn.reader.abort();
+                turn.finished.store(true, Ordering::Release);
+                let kind = FailureKind::classify(&error).unwrap_or(FailureKind::Protocol);
+                let mut message = format!("Could not cancel the OpenCode turn: {error}");
+                if let Err(stop) = server.shutdown().await {
+                    message.push_str(&format!("; could not stop the OpenCode server: {stop}"));
+                }
+                cleanup.disarm();
+                publish(
+                    &self.sender,
+                    HarnessEvent::ConnectionFailed {
+                        kind,
+                        text: message.clone(),
+                    },
+                )?;
+                return Err(HarnessError::Reported { kind, message });
+            }
+            cleanup.disarm();
+            self.cleanup_required = false;
+        }
+        Ok(())
+    }
+
+    async fn respond(&mut self, approval_id: ApprovalId, decision: Decision) -> HarnessResult<()> {
+        if self.cleanup_required {
+            return Err(HarnessError::Protocol(
+                "OpenCode needs cleanup before answering an approval".into(),
+            ));
+        }
+        let server = self.server.as_ref().ok_or(HarnessError::NotStarted)?;
+        let session = self.session.as_ref().ok_or(HarnessError::SessionMissing)?;
+        let id = approval_id.as_str();
+        if !id.starts_with("per") || !valid_id(id) {
+            return Err(HarnessError::NoPendingApproval);
+        }
+        let path = format!("{}/permission/{id}/reply", session_path(session)?);
+        let reply = match decision {
+            Decision::Allow => "once",
+            Decision::Deny => "reject",
+            Decision::AllowSession | Decision::AllowProject => {
+                return Err(HarnessError::ApprovalOptionUnavailable);
+            }
+        };
+        let turn = self.turn.as_ref().ok_or(HarnessError::NoPendingApproval)?;
+        let runtime = tokio::runtime::Handle::try_current().map_err(|error| {
+            HarnessError::Protocol(format!("OpenCode requires an async runtime: {error}"))
+        })?;
+        {
+            let mut state = turn.approval.lock().map_err(|_| {
+                HarnessError::Protocol("OpenCode approval state is unavailable".into())
+            })?;
+            if state.active.as_ref() != Some(&approval_id) || state.submitted {
+                return Err(HarnessError::NoPendingApproval);
+            }
+            state.submitted = true;
+        }
+        self.cleanup_required = true;
+        let mut cleanup = StopOnDrop {
+            child: Some(server.child.clone()),
+            sender: self.sender.clone(),
+            signal_group: signal_server_group,
+            runtime,
+            operation: "approval response",
+            active_turn: Some((turn.reader.abort_handle(), turn.finished.clone())),
+        };
+        if let Err(error) = send_request(
+            server
+                .request(Method::POST, &path)
+                .json(&json!({"decision": reply})),
+        )
+        .await
+        {
+            turn.reader.abort();
+            turn.finished.store(true, Ordering::Release);
+            let kind = FailureKind::classify(&error).unwrap_or(FailureKind::Protocol);
+            let mut message = format!("Could not deliver the OpenCode approval response: {error}");
+            if let Err(stop) = server.shutdown().await {
+                message.push_str(&format!("; could not stop the OpenCode server: {stop}"));
+            }
+            cleanup.disarm();
+            publish(
+                &self.sender,
+                HarnessEvent::ConnectionFailed {
+                    kind,
+                    text: message.clone(),
+                },
+            )?;
+            return Err(HarnessError::Reported { kind, message });
+        }
+        cleanup.disarm();
+        self.cleanup_required = false;
+        Ok(())
+    }
+
+    async fn shutdown(&mut self) -> HarnessResult<()> {
+        self.turn = None;
+        if let Some(server) = &self.server {
+            self.diagnostics.stderr_tail = server.stderr_tail();
+            server.shutdown().await?;
+            self.server = None;
+            publish(
+                &self.sender,
+                HarnessEvent::Exited {
+                    code: Some(0),
+                    stderr: self.diagnostics.stderr_tail.clone(),
+                },
+            )?;
+        }
+        self.session = None;
+        self.modes = None;
+        self.cleanup_required = false;
+        Ok(())
+    }
+}
+
+/// OpenCode's ACP entry point, `opencode acp`.
+#[derive(Default)]
+pub struct OpenCodeAcpHarness {
+    inner: AcpHarness,
+}
+
+impl OpenCodeAcpHarness {
+    pub fn with_terminals(mut self, terminals: Arc<dyn TerminalBackend>) -> Self {
+        self.inner = self.inner.with_terminals(terminals);
+        self
+    }
+}
+
+#[async_trait]
+impl AgentHarness for OpenCodeAcpHarness {
+    fn set_process_tracker(&mut self, tracker: Arc<dyn shep_harness_core::AgentProcessTracker>) {
+        self.inner.set_process_tracker(tracker);
+    }
+
+    fn events(&mut self) -> &mut mpsc::UnboundedReceiver<HarnessEvent> {
+        self.inner.events()
+    }
+
+    fn diagnostics(&self) -> AgentDiagnostics {
+        self.inner.diagnostics()
+    }
+
+    fn tier(&self) -> AdapterTier {
+        AdapterTier::Acp
+    }
+
+    fn models(&self) -> Option<AgentModels> {
+        self.inner.models()
+    }
+
+    fn modes(&self) -> Option<AgentModes> {
+        self.inner.modes()
+    }
+
+    async fn set_mode(&mut self, mode: &str) -> HarnessResult<()> {
+        self.inner.set_mode(mode).await
+    }
+
+    fn set_project_approval_policy(
+        &mut self,
+        policy: Arc<dyn shep_harness_core::ProjectApprovalPolicy>,
+    ) {
+        self.inner.set_project_approval_policy(policy);
+    }
+
+    fn session_approvals(&self) -> Vec<shep_harness_core::SessionApproval> {
+        self.inner.session_approvals()
+    }
+
+    async fn reset_session_approval(&mut self, id: &str) -> HarnessResult<()> {
+        self.inner.reset_session_approval(id).await
+    }
+
+    fn take_replayed_transcript(&mut self) -> Vec<Entry> {
+        self.inner.take_replayed_transcript()
+    }
+
+    async fn start(&mut self, mut spec: SpawnSpec) -> HarnessResult<Capabilities> {
+        spec.args.push(ACP_ARG.into());
+        // A self-update mid-session would replace the binary this process owns.
+        spec.environment
+            .entry("OPENCODE_DISABLE_AUTOUPDATE".into())
+            .or_insert_with(|| "1".into());
+        self.inner.start(spec).await
+    }
+
+    async fn open_session(&mut self, resume: Option<SessionId>) -> HarnessResult<SessionId> {
+        self.inner.open_session(resume).await
+    }
+
+    async fn prompt(&mut self, input: PromptInput) -> HarnessResult<()> {
+        self.inner.prompt(input).await
+    }
+
+    async fn cancel(&mut self) -> HarnessResult<()> {
+        self.inner.cancel().await
+    }
+
+    async fn respond(&mut self, approval_id: ApprovalId, decision: Decision) -> HarnessResult<()> {
+        self.inner.respond(approval_id, decision).await
+    }
+
+    async fn shutdown(&mut self) -> HarnessResult<()> {
+        self.inner.shutdown().await
+    }
+}
+
+/// Routes each OpenCode task to one of the two integrations. ACP is the
+/// default; [`OpenCodeHarness::native`] opts into the private HTTP server.
+pub enum OpenCodeHarness {
+    Acp(OpenCodeAcpHarness),
+    Native(OpenCodeNativeHarness),
+}
+
+impl Default for OpenCodeHarness {
+    fn default() -> Self {
+        Self::Acp(OpenCodeAcpHarness::default())
+    }
+}
+
+impl OpenCodeHarness {
+    pub fn native() -> Self {
+        Self::Native(OpenCodeNativeHarness::default())
+    }
+
+    /// The native server runs OpenCode's tools itself, so it never asks the
+    /// app for a terminal and ignores the backend.
+    pub fn with_terminals(self, terminals: Arc<dyn TerminalBackend>) -> Self {
+        match self {
+            Self::Acp(harness) => Self::Acp(harness.with_terminals(terminals)),
+            Self::Native(harness) => Self::Native(harness),
+        }
+    }
+}
+
+#[async_trait]
+impl AgentHarness for OpenCodeHarness {
+    fn set_process_tracker(&mut self, tracker: Arc<dyn shep_harness_core::AgentProcessTracker>) {
+        match self {
+            Self::Acp(harness) => harness.set_process_tracker(tracker),
+            Self::Native(harness) => harness.set_process_tracker(tracker),
+        }
+    }
+
+    fn events(&mut self) -> &mut mpsc::UnboundedReceiver<HarnessEvent> {
+        match self {
+            Self::Acp(harness) => harness.events(),
+            Self::Native(harness) => harness.events(),
+        }
+    }
+
+    fn diagnostics(&self) -> AgentDiagnostics {
+        match self {
+            Self::Acp(harness) => harness.diagnostics(),
+            Self::Native(harness) => harness.diagnostics(),
+        }
+    }
+
+    fn tier(&self) -> AdapterTier {
+        match self {
+            Self::Acp(harness) => harness.tier(),
+            Self::Native(harness) => harness.tier(),
+        }
+    }
+
+    fn models(&self) -> Option<AgentModels> {
+        match self {
+            Self::Acp(harness) => harness.models(),
+            Self::Native(harness) => harness.models(),
+        }
+    }
+
+    fn set_default_model(&mut self, model: Option<String>) {
+        match self {
+            Self::Acp(harness) => harness.set_default_model(model),
+            Self::Native(harness) => harness.set_default_model(model),
+        }
+    }
+
+    fn modes(&self) -> Option<AgentModes> {
+        match self {
+            Self::Acp(harness) => harness.modes(),
+            Self::Native(harness) => harness.modes(),
+        }
+    }
+
+    async fn set_mode(&mut self, mode: &str) -> HarnessResult<()> {
+        match self {
+            Self::Acp(harness) => harness.set_mode(mode).await,
+            Self::Native(harness) => harness.set_mode(mode).await,
+        }
+    }
+
+    fn set_project_approval_policy(
+        &mut self,
+        policy: Arc<dyn shep_harness_core::ProjectApprovalPolicy>,
+    ) {
+        match self {
+            Self::Acp(harness) => harness.set_project_approval_policy(policy),
+            Self::Native(harness) => harness.set_project_approval_policy(policy),
+        }
+    }
+
+    fn session_approvals(&self) -> Vec<shep_harness_core::SessionApproval> {
+        match self {
+            Self::Acp(harness) => harness.session_approvals(),
+            Self::Native(harness) => harness.session_approvals(),
+        }
+    }
+
+    async fn reset_session_approval(&mut self, id: &str) -> HarnessResult<()> {
+        match self {
+            Self::Acp(harness) => harness.reset_session_approval(id).await,
+            Self::Native(harness) => harness.reset_session_approval(id).await,
+        }
+    }
+
+    fn take_replayed_transcript(&mut self) -> Vec<Entry> {
+        match self {
+            Self::Acp(harness) => harness.take_replayed_transcript(),
+            Self::Native(harness) => harness.take_replayed_transcript(),
+        }
+    }
+
+    async fn start(&mut self, spec: SpawnSpec) -> HarnessResult<Capabilities> {
+        match self {
+            Self::Acp(harness) => harness.start(spec).await,
+            Self::Native(harness) => harness.start(spec).await,
+        }
+    }
+
+    async fn open_session(&mut self, resume: Option<SessionId>) -> HarnessResult<SessionId> {
+        match self {
+            Self::Acp(harness) => harness.open_session(resume).await,
+            Self::Native(harness) => harness.open_session(resume).await,
+        }
+    }
+
+    async fn prompt(&mut self, input: PromptInput) -> HarnessResult<()> {
+        match self {
+            Self::Acp(harness) => harness.prompt(input).await,
+            Self::Native(harness) => harness.prompt(input).await,
+        }
+    }
+
+    async fn cancel(&mut self) -> HarnessResult<()> {
+        match self {
+            Self::Acp(harness) => harness.cancel().await,
+            Self::Native(harness) => harness.cancel().await,
+        }
+    }
+
+    async fn respond(&mut self, approval_id: ApprovalId, decision: Decision) -> HarnessResult<()> {
+        match self {
+            Self::Acp(harness) => harness.respond(approval_id, decision).await,
+            Self::Native(harness) => harness.respond(approval_id, decision).await,
+        }
+    }
+
+    async fn shutdown(&mut self) -> HarnessResult<()> {
+        match self {
+            Self::Acp(harness) => harness.shutdown().await,
+            Self::Native(harness) => harness.shutdown().await,
+        }
+    }
+}
+
+async fn read_turn(
+    mut events: OpenCodeEvents,
+    session: SessionId,
+    prompt_id: &str,
+    sender: &mpsc::UnboundedSender<HarnessEvent>,
+    stream_capacity: &Arc<Semaphore>,
+    approval_state: &Arc<Mutex<ApprovalResponseState>>,
+) -> HarnessResult<HarnessEvent> {
+    let mut transcript = OpenCodeTranscript::new(session.clone());
+    let mut admitted = false;
+    let mut approvals = PendingApprovals {
+        ids: HashSet::new(),
+        active: None,
+        queued: VecDeque::new(),
+        state: approval_state.clone(),
+        sender,
+        capacity: stream_capacity.clone(),
+    };
+    let admission_deadline = Instant::now() + REQUEST_TIMEOUT;
+    loop {
+        let event = if admitted {
+            events.next().await?
+        } else {
+            timeout_at(admission_deadline, events.next())
+                .await
+                .map_err(|_| {
+                    HarnessError::Protocol("OpenCode prompt admission event timed out".into())
+                })??
+        };
+        if event.data["sessionID"] != session.as_str() {
+            continue;
+        }
+        if event.data["inboxID"] == prompt_id {
+            match event.kind.as_str() {
+                "session.inbox.enqueued" => admitted = true,
+                "session.inbox.cancelled" => {
+                    return Ok(HarnessEvent::TurnFinished {
+                        reason: TurnFinishReason::Cancelled,
+                    });
+                }
+                _ => {}
+            }
+        }
+        if !admitted {
+            continue;
+        }
+        if event.kind == "form.created" {
+            return Err(HarnessError::Protocol(
+                "OpenCode requested a form that Shepherd cannot display".into(),
+            ));
+        }
+        if event.kind == "session.execution.failed" {
+            let error = &event.data["error"];
+            if let Some(message) = error["message"].as_str().or_else(|| error.as_str()) {
+                let kind = if error["statusCode"] == 401 {
+                    FailureKind::AuthRequired
+                } else {
+                    FailureKind::from_message(message, FailureKind::AgentRejected)
+                };
+                publish_stream_event(
+                    sender,
+                    stream_capacity,
+                    HarnessEvent::TurnError {
+                        kind,
+                        text: message.to_owned(),
+                        context: None,
+                        stream_permit: None,
+                    },
+                )
+                .await?;
+            }
+        }
+        let Some(event) = transcript.apply(event)? else {
+            continue;
+        };
+        match event {
+            HarnessEvent::ApprovalRequested { request } => approvals.enqueue(request).await?,
+            HarnessEvent::ApprovalResolved {
+                approval_id,
+                decision,
+                source,
+            } => {
+                approvals.resolve(approval_id, decision, source).await?;
+            }
+            event @ HarnessEvent::TurnFinished { .. } => return Ok(event),
+            event => publish_stream_event(sender, stream_capacity, event).await?,
+        }
+    }
+}
+
+struct PendingApprovals<'a> {
+    ids: HashSet<ApprovalId>,
+    active: Option<ApprovalId>,
+    queued: VecDeque<ApprovalRequest>,
+    state: Arc<Mutex<ApprovalResponseState>>,
+    sender: &'a mpsc::UnboundedSender<HarnessEvent>,
+    capacity: Arc<Semaphore>,
+}
+
+impl PendingApprovals<'_> {
+    async fn enqueue(&mut self, request: ApprovalRequest) -> HarnessResult<()> {
+        register_approval(&mut self.ids, &request.approval_id)?;
+        self.queued.push_back(request);
+        self.show_next().await
+    }
+
+    async fn show_next(&mut self) -> HarnessResult<()> {
+        if self.active.is_none() && !self.queued.is_empty() {
+            let permit = self
+                .capacity
+                .clone()
+                .acquire_owned()
+                .await
+                .map_err(|_| HarnessError::ChannelClosed)?;
+            let Some(mut request) = self.queued.pop_front() else {
+                return Ok(());
+            };
+            request.stream_permit = Some(shep_harness_core::ApprovalCapacity::Stream(Arc::new(
+                permit,
+            )));
+            let id = request.approval_id.clone();
+            {
+                let mut state = self.state.lock().map_err(|_| {
+                    HarnessError::Protocol("OpenCode approval state is unavailable".into())
+                })?;
+                state.active = Some(id.clone());
+                state.submitted = false;
+            }
+            self.active = Some(id);
+            publish(self.sender, HarnessEvent::ApprovalRequested { request })?;
+        }
+        Ok(())
+    }
+
+    async fn resolve(
+        &mut self,
+        approval_id: ApprovalId,
+        decision: Decision,
+        source: shep_harness_core::ApprovalSource,
+    ) -> HarnessResult<()> {
+        if !self.ids.remove(&approval_id) {
+            return Ok(());
+        }
+        if self.active.as_ref() == Some(&approval_id) {
+            self.active = None;
+            {
+                let mut state = self.state.lock().map_err(|_| {
+                    HarnessError::Protocol("OpenCode approval state is unavailable".into())
+                })?;
+                state.active = None;
+                state.submitted = false;
+            }
+            publish(
+                self.sender,
+                HarnessEvent::ApprovalResolved {
+                    approval_id,
+                    decision,
+                    source,
+                },
+            )?;
+            self.show_next().await?;
+        } else {
+            self.queued
+                .retain(|request| request.approval_id != approval_id);
+        }
+        Ok(())
+    }
+}
+
+impl Drop for PendingApprovals<'_> {
+    fn drop(&mut self) {
+        match self.state.lock() {
+            Ok(mut state) => {
+                state.active = None;
+                state.submitted = false;
+            }
+            Err(error) => tracing::warn!(%error, "could not clear OpenCode approval state"),
+        }
+        if let Some(approval_id) = self.active.take()
+            && publish(self.sender, HarnessEvent::ApprovalWithdrawn { approval_id }).is_err()
+        {
+            tracing::debug!("could not withdraw pending OpenCode approval");
+        }
+    }
+}
+
+fn register_approval(approvals: &mut HashSet<ApprovalId>, id: &ApprovalId) -> HarnessResult<()> {
+    if approvals.contains(id) {
+        return Err(HarnessError::Protocol(
+            "OpenCode repeated a pending approval request".into(),
+        ));
+    }
+    if approvals.len() >= MAX_PENDING_APPROVALS {
+        return Err(HarnessError::Protocol(
+            "OpenCode exceeded the pending approval limit".into(),
+        ));
+    }
+    approvals.insert(id.clone());
+    Ok(())
+}
+
+async fn publish_stream_event(
+    sender: &mpsc::UnboundedSender<HarnessEvent>,
+    capacity: &Arc<Semaphore>,
+    mut event: HarnessEvent,
+) -> HarnessResult<()> {
+    if let HarnessEvent::TurnError {
+        text,
+        stream_permit,
+        ..
+    } = &mut event
+    {
+        shep_harness_core::truncate_turn_error(text);
+        let units = u32::try_from(text.len().div_ceil(STREAM_CHUNK_BYTES).max(1))
+            .map_err(|_| HarnessError::Protocol("OpenCode error exceeds queue capacity".into()))?;
+        let permit = capacity
+            .clone()
+            .acquire_many_owned(units)
+            .await
+            .map_err(|_| HarnessError::ChannelClosed)?;
+        *stream_permit = Some(Arc::new(permit));
+        return publish(sender, event);
+    }
+    if let HarnessEvent::ToolCall { stream_permit, .. } = &mut event {
+        let permit = capacity
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| HarnessError::ChannelClosed)?;
+        *stream_permit = Some(Arc::new(permit));
+        return publish(sender, event);
+    }
+    let HarnessEvent::Delta {
+        item_id,
+        kind,
+        text,
+        ..
+    } = event
+    else {
+        return publish(sender, event);
+    };
+    let mut remaining = text.as_str();
+    while !remaining.is_empty() {
+        let end = remaining.floor_char_boundary(remaining.len().min(STREAM_CHUNK_BYTES));
+        let (chunk, rest) = remaining
+            .split_at_checked(end)
+            .ok_or_else(|| HarnessError::Protocol("invalid OpenCode stream boundary".into()))?;
+        let permit = capacity
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| HarnessError::ChannelClosed)?;
+        publish(
+            sender,
+            HarnessEvent::Delta {
+                item_id: item_id.clone(),
+                kind,
+                text: chunk.to_owned(),
+                stream_permit: Some(Arc::new(permit)),
+            },
+        )?;
+        remaining = rest;
+    }
+    Ok(())
+}
+
+/// A loopback server owned by one Shepherd task.
+pub struct OpenCodeServer {
+    child: Arc<AsyncMutex<Child>>,
+    process_record: AsyncMutex<Option<(Arc<dyn shep_harness_core::AgentProcessTracker>, String)>>,
+    client: Client,
+    address: Url,
+    password: String,
+    directory: String,
+    probe: OpenCodeProbe,
+    stderr: Arc<Mutex<VecDeque<String>>>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct OpenCodeEvent {
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub data: Value,
+}
+
+/// Maps one OpenCode turn to Shepherd transcript events.
+pub struct OpenCodeTranscript {
+    session: SessionId,
+    fragments: BTreeMap<String, StreamedPrefix>,
+    tools: BTreeMap<String, String>,
+}
+
+#[derive(Default)]
+struct StreamedPrefix {
+    bytes: usize,
+    digest: Sha256,
+}
+
+impl OpenCodeTranscript {
+    pub fn new(session: SessionId) -> Self {
+        Self {
+            session,
+            fragments: BTreeMap::new(),
+            tools: BTreeMap::new(),
+        }
+    }
+
+    pub fn apply(&mut self, event: OpenCodeEvent) -> HarnessResult<Option<HarnessEvent>> {
+        if event.data["sessionID"].as_str() != Some(self.session.as_str()) {
+            return Ok(None);
+        }
+        let mapped = match event.kind.as_str() {
+            "session.text.delta" | "session.text.ended" => {
+                return self.text(event, DeltaKind::Message);
+            }
+            "session.reasoning.delta" | "session.reasoning.ended" => {
+                return self.text(event, DeltaKind::Thought);
+            }
+            "session.tool.input.started" => self.tool(event, ToolStatus::Pending)?,
+            "session.tool.called" => self.tool(event, ToolStatus::Running)?,
+            "session.tool.success" => self.tool(event, ToolStatus::Completed)?,
+            "session.tool.failed" => self.tool(event, ToolStatus::Failed)?,
+            "permission.asked" => HarnessEvent::ApprovalRequested {
+                request: event.decode::<PermissionRequest>()?.into_approval(),
+            },
+            "permission.replied" => {
+                let reply: PermissionReply = event.decode()?;
+                HarnessEvent::ApprovalResolved {
+                    approval_id: ApprovalId::new(reply.request_id),
+                    decision: match reply.reply {
+                        OpenCodeDecision::Once | OpenCodeDecision::Always => Decision::Allow,
+                        OpenCodeDecision::Reject => Decision::Deny,
+                    },
+                    source: shep_harness_core::ApprovalSource::Agent,
+                }
+            }
+            "session.execution.succeeded" => HarnessEvent::TurnFinished {
+                reason: TurnFinishReason::Completed,
+            },
+            "session.execution.failed" => HarnessEvent::TurnFinished {
+                reason: TurnFinishReason::Failed,
+            },
+            "session.execution.interrupted" => HarnessEvent::TurnFinished {
+                reason: if event.data["reason"] == "user" {
+                    TurnFinishReason::Cancelled
+                } else {
+                    TurnFinishReason::Interrupted
+                },
+            },
+            _ => return Ok(None),
+        };
+        Ok(Some(mapped))
+    }
+
+    fn text(
+        &mut self,
+        event: OpenCodeEvent,
+        kind: DeltaKind,
+    ) -> HarnessResult<Option<HarnessEvent>> {
+        let stream = match kind {
+            DeltaKind::Message => "text",
+            DeltaKind::Thought => "reasoning",
+        };
+        let is_delta = event.kind.ends_with(".delta");
+        let part: TextPart = event.decode()?;
+        let id = format!("{}:{stream}:{}", part.message_id, part.ordinal);
+        let text = if is_delta {
+            let delta = part.delta.ok_or_else(|| {
+                HarnessError::Protocol(format!("OpenCode {stream} delta is missing"))
+            })?;
+            let prefix = self.fragments.entry(id.clone()).or_default();
+            prefix.bytes = prefix
+                .bytes
+                .checked_add(delta.len())
+                .ok_or_else(|| HarnessError::Protocol(format!("OpenCode {stream} is too large")))?;
+            prefix.digest.update(delta.as_bytes());
+            delta
+        } else {
+            let text = part.text.ok_or_else(|| {
+                HarnessError::Protocol(format!("OpenCode final {stream} is missing"))
+            })?;
+            let prefix = self.fragments.remove(&id).unwrap_or_default();
+            let streamed = text.get(..prefix.bytes).ok_or_else(|| {
+                HarnessError::Protocol(format!("OpenCode final {stream} changed streamed content"))
+            })?;
+            if Sha256::digest(streamed.as_bytes()) != prefix.digest.finalize() {
+                return Err(HarnessError::Protocol(format!(
+                    "OpenCode final {stream} changed streamed content"
+                )));
+            }
+            text.get(prefix.bytes..)
+                .ok_or_else(|| {
+                    HarnessError::Protocol(format!(
+                        "OpenCode final {stream} changed streamed content"
+                    ))
+                })?
+                .to_owned()
+        };
+        Ok((!text.is_empty()).then_some(HarnessEvent::Delta {
+            item_id: ItemId::new(id),
+            kind,
+            text,
+            stream_permit: None,
+        }))
+    }
+
+    fn tool(&mut self, event: OpenCodeEvent, status: ToolStatus) -> HarnessResult<HarnessEvent> {
+        let tool: ToolUpdate = event.decode()?;
+        let id = tool.source.key();
+        if let Some(name) = tool.name {
+            self.tools.insert(id.clone(), name);
+        }
+        let name = self.tools.get(&id).map_or("Tool", String::as_str);
+        let title = tool.metadata["title"].as_str().unwrap_or(name).to_owned();
+        let mut output = String::new();
+        let mut first = true;
+        for text in tool
+            .content
+            .iter()
+            .filter(|part| part["type"] == "text")
+            .filter_map(|part| part["text"].as_str())
+        {
+            if !first {
+                output.push('\n');
+            }
+            first = false;
+            if text.len() > shep_harness_core::MAX_COMMAND_OUTPUT_BYTES {
+                output = shep_harness_core::bounded_command_output(text);
+            } else {
+                output.push_str(text);
+                shep_harness_core::limit_command_output(&mut output);
+            }
+        }
+        let output = if output.is_empty() {
+            tool.error["message"]
+                .as_str()
+                .map(shep_harness_core::bounded_command_output)
+        } else {
+            Some(output)
+        };
+        Ok(HarnessEvent::ToolCall {
+            tool_call_id: ToolCallId::new(id),
+            title,
+            kind: name.to_owned(),
+            status,
+            output,
+            diffs: Vec::new(),
+            terminal_id: None,
+            stream_permit: None,
+        })
+    }
+}
+
+impl OpenCodeEvent {
+    fn decode<T: DeserializeOwned>(self) -> HarnessResult<T> {
+        serde_json::from_value(self.data).map_err(|error| {
+            protocol_error(
+                &format!("could not parse OpenCode {} event", self.kind),
+                error,
+            )
+        })
+    }
+}
+
+#[derive(Deserialize)]
+struct TextPart {
+    #[serde(rename = "assistantMessageID")]
+    message_id: String,
+    ordinal: u64,
+    delta: Option<String>,
+    text: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct ToolSource {
+    #[serde(rename = "assistantMessageID", alias = "messageID")]
+    message_id: String,
+    id: String,
+}
+
+impl ToolSource {
+    fn key(&self) -> String {
+        format!("{}:{}", self.message_id, self.id)
+    }
+}
+
+#[derive(Deserialize)]
+struct ToolUpdate {
+    #[serde(flatten)]
+    source: ToolSource,
+    name: Option<String>,
+    #[serde(default)]
+    content: Vec<Value>,
+    #[serde(default)]
+    metadata: Value,
+    #[serde(default)]
+    error: Value,
+}
+
+#[derive(Deserialize)]
+struct PermissionRequest {
+    id: String,
+    action: String,
+    resources: Vec<String>,
+    #[serde(default)]
+    metadata: Value,
+    source: Option<ToolSource>,
+    message: Option<String>,
+}
+
+impl PermissionRequest {
+    fn into_approval(self) -> ApprovalRequest {
+        let tool = self
+            .source
+            .map_or_else(|| self.id.clone(), |source| source.key());
+        ApprovalRequest {
+            approval_id: ApprovalId::new(self.id),
+            tool_call_id: ToolCallId::new(tool),
+            title: self.message.unwrap_or(self.action),
+            arguments: json!({"resources": self.resources, "metadata": self.metadata}),
+            paths: Vec::new(),
+            patch: None,
+            choices: None,
+            stream_permit: None,
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct PermissionReply {
+    #[serde(rename = "requestID")]
+    request_id: String,
+    reply: OpenCodeDecision,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum OpenCodeDecision {
+    Once,
+    Always,
+    Reject,
+}
+
+pub struct OpenCodeEvents {
+    response: Response,
+    decoder: EventDecoder,
+    pending: bytes::Bytes,
+}
+
+impl OpenCodeEvents {
+    pub async fn next(&mut self) -> HarnessResult<OpenCodeEvent> {
+        loop {
+            if !self.pending.is_empty() {
+                let (consumed, event) = self.decoder.push(&self.pending)?;
+                self.pending = self.pending.slice(consumed..);
+                if let Some(event) = event {
+                    return Ok(event);
+                }
+            }
+            self.pending = self
+                .response
+                .chunk()
+                .await
+                .map_err(|error| {
+                    HarnessError::TransportClosed(format!(
+                        "Could not read the OpenCode event stream: {}",
+                        error.without_url()
+                    ))
+                })?
+                .ok_or_else(|| {
+                    HarnessError::TransportClosed("The OpenCode event stream disconnected.".into())
+                })?;
+        }
+    }
+}
+
+#[derive(Default)]
+struct EventDecoder {
+    line: Vec<u8>,
+    data: Vec<u8>,
+}
+
+impl EventDecoder {
+    fn push(&mut self, chunk: &[u8]) -> HarnessResult<(usize, Option<OpenCodeEvent>)> {
+        let mut consumed = 0;
+        for fragment in chunk.split_inclusive(|byte| *byte == b'\n') {
+            consumed += fragment.len();
+            if self.line.len().saturating_add(fragment.len()) > MAX_RESPONSE_BYTES {
+                return Err(HarnessError::Protocol(
+                    "OpenCode event line is too large".into(),
+                ));
+            }
+            self.line.extend_from_slice(fragment);
+            if !self.line.ends_with(b"\n") {
+                continue;
+            }
+            let line = self.line.strip_suffix(b"\n").unwrap_or(&self.line);
+            let line = line.strip_suffix(b"\r").unwrap_or(line);
+            if line.is_empty() && !self.data.is_empty() {
+                let event = serde_json::from_slice(&self.data).map_err(|error| {
+                    protocol_error("could not parse OpenCode stream event", error)
+                })?;
+                self.data.clear();
+                self.line.clear();
+                return Ok((consumed, Some(event)));
+            } else if let Some(data) = line.strip_prefix(b"data:") {
+                let data = data.strip_prefix(b" ").unwrap_or(data);
+                if self.data.len().saturating_add(data.len()).saturating_add(1) > MAX_RESPONSE_BYTES
+                {
+                    return Err(HarnessError::Protocol("OpenCode event is too large".into()));
+                }
+                self.data.extend_from_slice(data);
+                self.data.push(b'\n');
+            } else if line == b"event: effect/httpapi/stream/failure" {
+                return Err(HarnessError::Protocol(
+                    "OpenCode reported an event stream failure".into(),
+                ));
+            }
+            self.line.clear();
+        }
+        Ok((consumed, None))
+    }
+}
+
+fn server_command(spec: &SpawnSpec, directory: &str, password: &str) -> Command {
+    let mut command = Command::new(&spec.program);
+    command
+        .args(&spec.args)
+        .args(SERVER_ARGS)
+        .current_dir(directory)
+        .envs(&spec.environment)
+        .env("OPENCODE_PASSWORD", password)
+        .env("OPENCODE_SERVER_PASSWORD", password)
+        .env("OPENCODE_DISABLE_AUTOUPDATE", "1")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    #[cfg(unix)]
+    command.process_group(0);
+    command
+}
+
+struct StartupProcessGroup(#[cfg(unix)] Option<libc::pid_t>);
+
+impl StartupProcessGroup {
+    fn new(child: &Child) -> Self {
+        #[cfg(unix)]
+        {
+            Self(child.id().and_then(|id| libc::pid_t::try_from(id).ok()))
+        }
+        #[cfg(not(unix))]
+        {
+            let _child = child;
+            Self()
+        }
+    }
+
+    fn disarm(&mut self) {
+        #[cfg(unix)]
+        {
+            self.0 = None;
+        }
+    }
+}
+
+#[cfg(unix)]
+impl Drop for StartupProcessGroup {
+    fn drop(&mut self) {
+        if let Some(group) = self.0.take()
+            && unsafe { libc::killpg(group, libc::SIGKILL) } != 0
+        {
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() != Some(libc::ESRCH) {
+                tracing::warn!(%error, "could not stop OpenCode startup process group");
+            }
+        }
+    }
+}
+
+async fn stop_server(child: &mut tokio::process::Child) -> std::io::Result<()> {
+    stop_server_with(child, signal_server_group).await
+}
+
+fn signal_server_group(child: &Child) -> std::io::Result<()> {
+    #[cfg(not(unix))]
+    let _child = child;
+    #[cfg(unix)]
+    let group_error = child
+        .id()
+        .and_then(|id| libc::pid_t::try_from(id).ok())
+        .and_then(|group| {
+            if unsafe { libc::killpg(group, libc::SIGKILL) } == 0 {
+                return None;
+            }
+            let error = std::io::Error::last_os_error();
+            (error.raw_os_error() != Some(libc::ESRCH)).then_some(error)
+        });
+    #[cfg(unix)]
+    if let Some(error) = group_error {
+        return Err(error);
+    }
+    Ok(())
+}
+
+async fn stop_server_with(
+    child: &mut Child,
+    signal_group: impl FnOnce(&Child) -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    signal_group(child)?;
+    child.kill().await
+}
+
+async fn disconnected_turn_failure(
+    child: &mut Child,
+    error: HarnessError,
+    signal_group: impl FnOnce(&Child) -> std::io::Result<()>,
+) -> HarnessEvent {
+    let kind = FailureKind::classify(&error).unwrap_or(FailureKind::Protocol);
+    let text = match stop_server_with(child, signal_group).await {
+        Ok(()) => error.to_string(),
+        Err(cleanup) => format!("{error}; could not stop the OpenCode server: {cleanup}"),
+    };
+    HarnessEvent::ConnectionFailed { kind, text }
+}
+
+impl OpenCodeServer {
+    pub async fn start(spec: &SpawnSpec) -> HarnessResult<Self> {
+        let (server, mut startup_group) = Self::start_guarded(spec, None).await?;
+        startup_group.disarm();
+        Ok(server)
+    }
+
+    async fn start_guarded(
+        spec: &SpawnSpec,
+        tracker: Option<Arc<dyn shep_harness_core::AgentProcessTracker>>,
+    ) -> HarnessResult<(Self, StartupProcessGroup)> {
+        require_absolute_executable(Path::new(&spec.program))?;
+        let directory = tokio::fs::canonicalize(&spec.cwd)
+            .await
+            .map_err(|error| {
+                HarnessError::Protocol(format!("invalid OpenCode directory: {error}"))
+            })?
+            .into_os_string()
+            .into_string()
+            .map_err(|_| HarnessError::Protocol("OpenCode requires a UTF-8 directory".into()))?;
+        let client = Client::builder()
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
+            .connect_timeout(REQUEST_TIMEOUT)
+            .build()
+            .map_err(|error| protocol_error("could not configure OpenCode HTTP client", error))?;
+        let password = uuid::Uuid::new_v4().to_string();
+        let mut child = server_command(spec, &directory, &password)
+            .spawn()
+            .map_err(|source| HarnessError::Spawn {
+                program: spec.program.clone(),
+                source,
+            })?;
+        let mut startup_group = StartupProcessGroup::new(&child);
+        let process_record = if let Some(tracker) = tracker {
+            let pid = child.id().ok_or_else(|| HarnessError::Reported {
+                kind: FailureKind::Protocol,
+                message: "OpenCode server has no process ID".into(),
+            })?;
+            let id = match tracker.started(pid).await {
+                Ok(id) => id,
+                Err(error) => match child.try_wait() {
+                    Ok(Some(_)) => {
+                        return Err(HarnessError::Protocol(
+                            "OpenCode server exited during startup".into(),
+                        ));
+                    }
+                    _ => {
+                        return Err(HarnessError::Reported {
+                            kind: FailureKind::Protocol,
+                            message: format!("Could not record OpenCode server process: {error}"),
+                        });
+                    }
+                },
+            };
+            Some((tracker, id))
+        } else {
+            None
+        };
+        let initialized = async {
+            let stdout = child.stdout.take().ok_or_else(|| {
+                HarnessError::Protocol("OpenCode did not provide a startup pipe".into())
+            })?;
+            let stderr = Arc::new(Mutex::new(VecDeque::new()));
+            if let Some(mut output) = child.stderr.take() {
+                let stderr = stderr.clone();
+                let password = password.clone();
+                tokio::spawn(async move {
+                    let mut lines = acp_client::bounded_lines::BoundedLines::default();
+                    let mut bytes = [0u8; 4096];
+                    let record = |line: acp_client::bounded_lines::BoundedLine| {
+                        let mut tail = match stderr.lock() {
+                            Ok(tail) => tail,
+                            Err(error) => {
+                                tracing::error!(%error, "could not retain OpenCode stderr");
+                                error.into_inner()
+                            }
+                        };
+                        if tail.len() == 20 {
+                            tail.pop_front();
+                        }
+                        tail.push_back(sanitize_stderr_line(line, &password));
+                    };
+                    loop {
+                        match output.read(&mut bytes).await {
+                            Ok(0) => break,
+                            Ok(count) => {
+                                for line in lines.push(&bytes[..count]) {
+                                    record(line);
+                                }
+                            }
+                            Err(error) => {
+                                tracing::debug!(%error, "could not read OpenCode stderr");
+                                break;
+                            }
+                        }
+                    }
+                    if let Some(line) = lines.finish() {
+                        record(line);
+                    }
+                });
+            }
+            let mut startup = BufReader::new(stdout).take(64 * 1024).lines();
+            let address = timeout(STARTUP_TIMEOUT, async {
+                while let Some(line) = startup
+                    .next_line()
+                    .await
+                    .map_err(|error| protocol_error("could not read OpenCode startup", error))?
+                {
+                    let banner = line.trim().trim_start_matches("opencode ");
+                    if let Some(address) = banner.strip_prefix("server listening on ") {
+                        return loopback_address(address);
+                    }
+                }
+                Err(HarnessError::Protocol(
+                    "OpenCode did not announce a loopback server".into(),
+                ))
+            })
+            .await
+            .map_err(|_| HarnessError::Protocol("OpenCode server startup timed out".into()))??;
+            let mut stdout = startup.into_inner().into_inner();
+            tokio::spawn(async move {
+                if let Err(error) = tokio::io::copy(&mut stdout, &mut tokio::io::sink()).await {
+                    tracing::debug!(%error, "could not drain OpenCode stdout");
+                }
+            });
+            let request = |path: &str| {
+                client
+                    .get(format!("{}{path}", address.as_str().trim_end_matches('/')))
+                    .basic_auth(USERNAME, Some(&password))
+            };
+            let health = response_json(request("/api/info")).await?;
+            let api: Api = response_json(request("/openapi.json")).await?;
+            let probe = api.probe(health)?;
+            Ok::<_, HarnessError>((address, probe, stderr))
+        }
+        .await;
+        let (address, probe, stderr) = match initialized {
+            Ok(initialized) => initialized,
+            Err(error) => {
+                if let Err(cleanup) = stop_server(&mut child).await {
+                    match child.try_wait() {
+                        Ok(Some(_)) => {}
+                        _ => {
+                            return Err(HarnessError::Reported {
+                                kind: FailureKind::Protocol,
+                                message: format!(
+                                    "OpenCode startup failed: {error}; process cleanup failed: {cleanup}"
+                                ),
+                            });
+                        }
+                    }
+                }
+                startup_group.disarm();
+                if let Some((tracker, id)) = &process_record
+                    && let Err(cleanup) = tracker.stopped(id).await
+                {
+                    return Err(HarnessError::Reported {
+                        kind: FailureKind::Protocol,
+                        message: format!(
+                            "OpenCode startup failed: {error}; process record cleanup failed: {cleanup}"
+                        ),
+                    });
+                }
+                return Err(error);
+            }
+        };
+        Ok((
+            Self {
+                child: Arc::new(AsyncMutex::new(child)),
+                process_record: AsyncMutex::new(process_record),
+                client,
+                address,
+                password,
+                directory,
+                probe,
+                stderr,
+            },
+            startup_group,
+        ))
+    }
+
+    pub fn probe(&self) -> &OpenCodeProbe {
+        &self.probe
+    }
+
+    fn stderr_tail(&self) -> String {
+        stderr_tail(&self.stderr)
+    }
+
+    pub async fn subscribe(&self) -> HarnessResult<OpenCodeEvents> {
+        let handshake = async {
+            let response = self
+                .request(Method::GET, "/api/event")
+                .header(reqwest::header::ACCEPT, "text/event-stream")
+                .send()
+                .await
+                .and_then(Response::error_for_status)
+                .map_err(|error| http_error("could not subscribe to OpenCode events", error))?;
+            let content_type = response.headers().get(reqwest::header::CONTENT_TYPE);
+            if !content_type
+                .and_then(|value| value.to_str().ok())
+                .is_some_and(|value| value.split(';').next() == Some("text/event-stream"))
+            {
+                return Err(HarnessError::Protocol(
+                    "OpenCode did not return an event stream".into(),
+                ));
+            }
+            let mut events = OpenCodeEvents {
+                response,
+                decoder: EventDecoder::default(),
+                pending: bytes::Bytes::new(),
+            };
+            if events.next().await?.kind != "server.connected" {
+                return Err(HarnessError::Protocol(
+                    "OpenCode did not acknowledge the event stream".into(),
+                ));
+            }
+            Ok(events)
+        };
+        timeout(REQUEST_TIMEOUT, handshake).await.map_err(|_| {
+            HarnessError::Protocol("OpenCode event stream handshake timed out".into())
+        })?
+    }
+
+    pub async fn create_session(&self) -> HarnessResult<SessionId> {
+        let response: ResponseData<SessionRecord> =
+            response_json(self.request(Method::POST, "/api/session").json(&json!({
+                "location": { "directory": self.directory },
+                "permissions": [{ "action": "*", "resource": "*", "effect": "ask" }]
+            })))
+            .await?;
+        self.session_id(&response.data)
+    }
+
+    pub async fn resume_session(&self, session: &SessionId) -> HarnessResult<SessionId> {
+        if !self.probe.resume {
+            return Err(HarnessError::Protocol(
+                "OpenCode server does not support session lookup".into(),
+            ));
+        }
+        self.read_session(session).await?;
+        Ok(session.clone())
+    }
+
+    async fn read_session(&self, session: &SessionId) -> HarnessResult<SessionRecord> {
+        let response: ResponseData<SessionRecord> =
+            response_json(self.request(Method::GET, &session_path(session)?)).await?;
+        if &self.session_id(&response.data)? != session {
+            return Err(HarnessError::Protocol(
+                "OpenCode returned a different session".into(),
+            ));
+        }
+        Ok(response.data)
+    }
+
+    async fn session_modes(&self, session: &SessionId) -> HarnessResult<Option<AgentModes>> {
+        let options = self.mode_catalog().await?;
+        if options.is_empty() {
+            return Ok(None);
+        }
+        let current = self.read_session(session).await?.agent;
+        Ok(Some(AgentModes { current, options }))
+    }
+
+    async fn model_catalog(&self) -> HarnessResult<OpenCodeCatalog> {
+        let mut catalog = None;
+        for attempt in 0..MODEL_CATALOG_SETTLE_ATTEMPTS {
+            if attempt > 0 {
+                tokio::time::sleep(MODEL_CATALOG_SETTLE_DELAY).await;
+            }
+            let models: OpenCodeModelsResponse = response_json(
+                self.request(Method::GET, "/api/model")
+                    .query(&[("location[directory]", self.directory.as_str())]),
+            )
+            .await?;
+            if models.location.directory != Path::new(&self.directory) {
+                return Err(HarnessError::Protocol(
+                    "OpenCode returned models outside the task directory".into(),
+                ));
+            }
+            let default: ResponseData<Option<OpenCodeModel>> = response_json(
+                self.request(Method::GET, "/api/model/default")
+                    .query(&[("location[directory]", self.directory.as_str())]),
+            )
+            .await?;
+            // A freshly started server answers before its provider plugins
+            // settle, so an empty snapshot is not yet the real catalog.
+            let settled = !models.data.is_empty();
+            catalog = Some(catalog_models(models.data, default.data));
+            if settled {
+                break;
+            }
+        }
+        catalog.ok_or_else(|| HarnessError::Protocol("OpenCode returned no model catalog".into()))
+    }
+
+    async fn set_session_model(
+        &self,
+        session: &SessionId,
+        model: &OpenCodeModelRef,
+    ) -> HarnessResult<()> {
+        let path = format!("{}/model", session_path(session)?);
+        send_request(
+            self.request(Method::POST, &path)
+                .json(&json!({ "model": model })),
+        )
+        .await?;
+        Ok(())
+    }
+
+    async fn mode_catalog(&self) -> HarnessResult<Vec<AgentMode>> {
+        let request = || {
+            self.request(Method::GET, "/api/agent")
+                .query(&[("location[directory]", self.directory.as_str())])
+        };
+        let mut agents: OpenCodeAgents = response_json(request()).await?;
+        if agents.data.is_empty() {
+            // OpenCode can answer the first lookup before the workspace registry is ready.
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            agents = response_json(request()).await?;
+        }
+        if agents.location.directory != Path::new(&self.directory) {
+            return Err(HarnessError::Protocol(
+                "OpenCode returned modes outside the task directory".into(),
+            ));
+        }
+        Ok(agents
+            .data
+            .into_iter()
+            .filter(|agent| !agent.hidden && matches!(agent.mode.as_str(), "primary" | "all"))
+            .map(|agent| AgentMode {
+                id: agent.id,
+                name: agent.name,
+                description: agent.description,
+            })
+            .collect())
+    }
+
+    pub async fn interrupt_session(&self, session: &SessionId) -> HarnessResult<bool> {
+        let path = format!("{}/interrupt", session_path(session)?);
+        let response: InterruptResponse = response_json(self.request(Method::POST, &path)).await?;
+        Ok(response.interrupted)
+    }
+
+    async fn enqueue_prompt(
+        &self,
+        session: &SessionId,
+        prompt_id: &str,
+        input: &PromptInput,
+        resume: bool,
+    ) -> HarnessResult<()> {
+        let path = format!("{}/prompt", session_path(session)?);
+        let mut body = json!({"id": prompt_id, "text": input.text, "resume": resume});
+        if self.probe.prompt_files && !input.attachments.is_empty() {
+            let files = input
+                .attachments
+                .iter()
+                .map(|file| {
+                    Ok(json!({
+                        "uri": file.file_uri()?.as_str(),
+                        "name": file.path.file_name().map(|name| name.to_string_lossy()),
+                    }))
+                })
+                .collect::<HarnessResult<Vec<_>>>()?;
+            body["files"] = json!(files);
+        }
+        let response: ResponseData<Value> =
+            response_json(self.request(Method::POST, &path).json(&body)).await?;
+        if response.data["id"] != prompt_id || response.data["sessionID"] != session.as_str() {
+            return Err(HarnessError::Protocol(
+                "OpenCode admitted a different prompt".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    async fn cancel_prompt(&self, session: &SessionId, prompt_id: &str) -> HarnessResult<()> {
+        let path = format!("{}/inbox/{prompt_id}", session_path(session)?);
+        // The prompt may still be queued when Cancel arrives. Deleting a delivered item is a no-op.
+        let removal = send_request(self.request(Method::DELETE, &path)).await;
+        let interruption = self.interrupt_session(session).await;
+        match (removal, interruption) {
+            (Ok(_), Ok(_)) => Ok(()),
+            (Err(error), Ok(_)) => Err(error),
+            (Ok(_), Err(error)) => Err(error),
+            (Err(removal), Err(interruption)) => Err(HarnessError::Reported {
+                kind: FailureKind::classify(&removal).unwrap_or(FailureKind::Protocol),
+                message: format!(
+                    "could not remove the queued OpenCode prompt: {removal}; could not interrupt the OpenCode session: {interruption}"
+                ),
+            }),
+        }
+    }
+
+    pub async fn shutdown(&self) -> HarnessResult<()> {
+        stop_server(&mut *self.child.lock().await)
+            .await
+            .map_err(|error| protocol_error("could not stop OpenCode server", error))?;
+        let mut record = self.process_record.lock().await;
+        if let Some((tracker, id)) = &*record {
+            tracker
+                .stopped(id)
+                .await
+                .map_err(|error| HarnessError::Reported {
+                    kind: FailureKind::Protocol,
+                    message: format!("Could not clear OpenCode server process record: {error}"),
+                })?;
+            *record = None;
+        }
+        Ok(())
+    }
+
+    fn request(&self, method: Method, path: &str) -> RequestBuilder {
+        self.client
+            .request(
+                method,
+                format!("{}{path}", self.address.as_str().trim_end_matches('/')),
+            )
+            .basic_auth(USERNAME, Some(&self.password))
+    }
+
+    fn session_id(&self, record: &SessionRecord) -> HarnessResult<SessionId> {
+        if record.location.directory != Path::new(&self.directory) {
+            return Err(HarnessError::Protocol(
+                "OpenCode returned a session outside the task directory".into(),
+            ));
+        }
+        let session = SessionId::new(record.id.clone());
+        session_path(&session)?;
+        Ok(session)
+    }
+}
+
+fn sanitize_stderr_line(line: acp_client::bounded_lines::BoundedLine, password: &str) -> String {
+    if line.truncated {
+        "[long stderr line omitted]".to_owned()
+    } else {
+        line.text.replace(password, "[redacted]")
+    }
+}
+
+fn stderr_tail(stderr: &Mutex<VecDeque<String>>) -> String {
+    match stderr.lock() {
+        Ok(tail) => tail.iter().cloned().collect::<Vec<_>>().join("\n"),
+        Err(error) => {
+            tracing::error!(%error, "could not read the OpenCode stderr tail");
+            String::new()
+        }
+    }
+}
+
+fn loopback_address(address: &str) -> HarnessResult<Url> {
+    let address = Url::parse(address)
+        .map_err(|error| protocol_error("OpenCode returned an invalid listener address", error))?;
+    if address.scheme() != "http"
+        || address.host_str() != Some("127.0.0.1")
+        || !address.port().is_some_and(|port| port != 0)
+        || !address.username().is_empty()
+        || address.password().is_some()
+        || address.path() != "/"
+        || address.query().is_some()
+        || address.fragment().is_some()
+    {
+        return Err(HarnessError::Protocol(
+            "OpenCode did not bind an HTTP loopback port".into(),
+        ));
+    }
+    Ok(address)
+}
+
+fn session_path(session: &SessionId) -> HarnessResult<String> {
+    let id = session.as_str();
+    if !valid_id(id) {
+        return Err(HarnessError::Protocol("invalid OpenCode session ID".into()));
+    }
+    Ok(format!("/api/session/{id}"))
+}
+
+fn valid_id(id: &str) -> bool {
+    !id.is_empty()
+        && id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"-_".contains(&byte))
+}
+
+async fn send_request(request: RequestBuilder) -> HarnessResult<Response> {
+    request
+        .timeout(REQUEST_TIMEOUT)
+        .send()
+        .await
+        .and_then(reqwest::Response::error_for_status)
+        .map_err(|error| http_error("OpenCode HTTP request failed", error))
+}
+
+fn http_error(context: &str, error: reqwest::Error) -> HarnessError {
+    if error.status() == Some(reqwest::StatusCode::UNAUTHORIZED) {
+        HarnessError::Reported {
+            kind: FailureKind::AuthRequired,
+            message: format!("{context}: OpenCode returned HTTP 401 Unauthorized"),
+        }
+    } else {
+        protocol_error(context, error.without_url())
+    }
+}
+
+async fn response_json<T: DeserializeOwned>(request: RequestBuilder) -> HarnessResult<T> {
+    let mut response = send_request(request).await?;
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|error| protocol_error("could not read OpenCode response", error.without_url()))?
+    {
+        if bytes.len().saturating_add(chunk.len()) > MAX_RESPONSE_BYTES {
+            return Err(HarnessError::Protocol(
+                "OpenCode response is too large".into(),
+            ));
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    serde_json::from_slice(&bytes)
+        .map_err(|error| protocol_error("could not parse OpenCode response", error))
+}
+
+fn protocol_error(context: &str, error: impl std::fmt::Display) -> HarnessError {
+    HarnessError::Protocol(format!("{context}: {error}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn failed_native_record_cleanup_reports_the_cleanup_error()
+    -> Result<(), Box<dyn std::error::Error>> {
+        struct Tracker;
+        #[async_trait]
+        impl shep_harness_core::AgentProcessTracker for Tracker {
+            async fn started(&self, _pid: u32) -> Result<String, String> {
+                Ok("record".into())
+            }
+            async fn stopped(&self, _id: &str) -> Result<(), String> {
+                Err("fixture cleanup failure".into())
+            }
+        }
+        let directory = tempfile::tempdir()?;
+        let program = fixture_launcher(directory.path(), "#!/bin/sh\nexit 78\n")?;
+        let spec = SpawnSpec {
+            program,
+            cwd: directory.path().to_path_buf(),
+            ..Default::default()
+        };
+        let mut harness = OpenCodeNativeHarness::default();
+        harness.set_process_tracker(Arc::new(Tracker));
+        let error = harness
+            .start(spec)
+            .await
+            .expect_err("failed record cleanup must be reported");
+        assert!(error.to_string().contains("fixture cleanup failure"));
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn process_record_failure_stops_startup() -> Result<(), Box<dyn std::error::Error>> {
+        struct FailingTracker;
+        #[async_trait]
+        impl shep_harness_core::AgentProcessTracker for FailingTracker {
+            async fn started(&self, _pid: u32) -> Result<String, String> {
+                Err("fixture save failure".into())
+            }
+            async fn stopped(&self, _id: &str) -> Result<(), String> {
+                Err("unexpected cleanup".into())
+            }
+        }
+        let directory = tempfile::tempdir()?;
+        let program = fixture_launcher(directory.path(), "#!/bin/sh\nsleep 30\n")?;
+        let spec = SpawnSpec {
+            program,
+            cwd: directory.path().to_path_buf(),
+            ..Default::default()
+        };
+        let mut harness = OpenCodeNativeHarness::default();
+        harness.set_process_tracker(Arc::new(FailingTracker));
+        let error = harness
+            .start(spec)
+            .await
+            .expect_err("tracking failure must stop startup");
+        assert!(error.to_string().contains("fixture save failure"));
+        Ok(())
+    }
+
+    #[test]
+    fn acp_is_the_default_route_and_native_is_opt_in() {
+        assert_eq!(OpenCodeHarness::default().tier(), AdapterTier::Acp);
+        assert_eq!(OpenCodeHarness::native().tier(), AdapterTier::Native);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cancelled_native_start_stops_descendants() -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = tempfile::tempdir()?;
+        let script = directory.path().join("opencode");
+        std::fs::write(
+            &script,
+            "#!/bin/sh\n(sleep 1; printf escaped > escaped) &\nprintf ready > ready\nsleep 30\n",
+        )?;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700))?;
+        let spec = SpawnSpec {
+            program: script.to_string_lossy().into_owned(),
+            cwd: directory.path().to_owned(),
+            ..SpawnSpec::default()
+        };
+        let start = tokio::spawn(async move { OpenCodeServer::start(&spec).await });
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while !directory.path().join("ready").exists() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await?;
+        start.abort();
+        assert!(start.await.is_err_and(|error| error.is_cancelled()));
+        tokio::time::sleep(Duration::from_millis(1300)).await;
+        assert!(!directory.path().join("escaped").exists());
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn failed_native_start_stops_descendants_after_leader_exit()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let program = fixture_launcher(
+            directory.path(),
+            "#!/bin/sh\n(sleep 1; printf escaped > escaped) &\nprintf 'server listening on invalid\\n'\nexit 0\n",
+        )?;
+        let spec = SpawnSpec {
+            program,
+            cwd: directory.path().to_path_buf(),
+            ..Default::default()
+        };
+        assert!(OpenCodeServer::start(&spec).await.is_err());
+        tokio::time::sleep(Duration::from_millis(1300)).await;
+        assert!(!directory.path().join("escaped").exists());
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn failed_native_start_stops_descendants() -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = tempfile::tempdir()?;
+        let script = directory.path().join("opencode");
+        std::fs::write(
+            &script,
+            "#!/bin/sh\n(sleep 1; printf escaped > escaped) &\nprintf 'server listening on invalid\\n'\nsleep 30\n",
+        )?;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700))?;
+        let spec = SpawnSpec {
+            program: script.to_string_lossy().into_owned(),
+            cwd: directory.path().to_owned(),
+            ..SpawnSpec::default()
+        };
+        assert!(OpenCodeServer::start(&spec).await.is_err());
+        tokio::time::sleep(Duration::from_millis(1300)).await;
+        assert!(!directory.path().join("escaped").exists());
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn native_server_shutdown_stops_its_process_group()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = tempfile::tempdir()?;
+        let script = directory.path().join("opencode");
+        std::fs::write(
+            &script,
+            "#!/bin/sh\n(sleep 1; printf escaped > escaped) &\nprintf ready > ready\nwait\n",
+        )?;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700))?;
+        let spec = SpawnSpec {
+            program: script.to_string_lossy().into_owned(),
+            ..SpawnSpec::default()
+        };
+        let mut child = server_command(
+            &spec,
+            directory.path().to_str().ok_or("non-UTF-8 path")?,
+            "fixture",
+        )
+        .spawn()?;
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while !directory.path().join("ready").exists() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await?;
+        let pid = libc::pid_t::try_from(child.id().ok_or("missing process id")?)?;
+        assert_eq!(unsafe { libc::getpgid(pid) }, pid);
+        assert_ne!(unsafe { libc::getpgrp() }, pid);
+        stop_server(&mut child).await?;
+        tokio::time::sleep(Duration::from_millis(1300)).await;
+        assert!(!directory.path().join("escaped").exists());
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn failed_group_signal_keeps_server_for_shutdown_retry()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut command = Command::new("/bin/sleep");
+        command.arg("30").process_group(0).kill_on_drop(true);
+        let mut child = command.spawn()?;
+        let failure = stop_server_with(&mut child, |_| {
+            Err(std::io::Error::other("fixture signal failure"))
+        })
+        .await;
+        assert!(failure.is_err());
+        assert!(child.id().is_some());
+        assert!(child.try_wait()?.is_none());
+        stop_server(&mut child).await?;
+        assert!(child.try_wait()?.is_some());
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn disconnected_turn_reports_cleanup_failure_and_keeps_server_for_retry()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut command = Command::new("/bin/sleep");
+        command.arg("30").process_group(0).kill_on_drop(true);
+        let mut child = command.spawn()?;
+        let event = disconnected_turn_failure(
+            &mut child,
+            HarnessError::TransportClosed("fixture disconnect".into()),
+            |_| Err(std::io::Error::other("fixture cleanup failure")),
+        )
+        .await;
+        assert!(matches!(event, HarnessEvent::ConnectionFailed { text, .. }
+            if text.contains("fixture disconnect") && text.contains("fixture cleanup failure")));
+        assert!(child.id().is_some());
+        assert!(child.try_wait()?.is_none());
+        stop_server(&mut child).await?;
+        assert!(child.try_wait()?.is_some());
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cancelled_admission_reports_stop_failure_and_keeps_child_for_retry()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut command = Command::new("/bin/sleep");
+        command.arg("30").process_group(0).kill_on_drop(true);
+        let child = Arc::new(AsyncMutex::new(command.spawn()?));
+        let (sender, mut events) = mpsc::unbounded_channel();
+        let guard = StopOnDrop {
+            child: Some(child.clone()),
+            sender,
+            signal_group: |_| Err(std::io::Error::other("fixture stop failure")),
+            runtime: tokio::runtime::Handle::try_current()?,
+            operation: "prompt admission",
+            active_turn: None,
+        };
+        drop(guard);
+        assert!(matches!(
+            timeout(Duration::from_secs(5), events.recv()).await?,
+            Some(HarnessEvent::ConnectionFailed { text, .. }) if text.contains("fixture stop failure")
+        ));
+        let mut child = child.lock().await;
+        assert!(child.id().is_some());
+        assert!(child.try_wait()?.is_none());
+        stop_server(&mut child).await?;
+        assert!(child.try_wait()?.is_some());
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cancelled_admission_cleans_up_when_dropped_outside_the_runtime()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut command = Command::new("/bin/sleep");
+        command.arg("30").process_group(0).kill_on_drop(true);
+        let child = Arc::new(AsyncMutex::new(command.spawn()?));
+        let (sender, mut events) = mpsc::unbounded_channel();
+        let guard = StopOnDrop {
+            child: Some(child.clone()),
+            sender,
+            signal_group: signal_server_group,
+            runtime: tokio::runtime::Handle::try_current()?,
+            operation: "prompt admission",
+            active_turn: None,
+        };
+        let locked_child = child.lock().await;
+        std::thread::spawn(move || drop(guard))
+            .join()
+            .map_err(|_| "cleanup thread panicked")?;
+        drop(locked_child);
+        assert!(matches!(
+            timeout(Duration::from_secs(5), events.recv()).await?,
+            Some(HarnessEvent::ConnectionFailed { text, .. }) if text.contains("server was stopped")
+        ));
+        assert!(child.lock().await.try_wait()?.is_some());
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cancelled_admission_signals_child_after_runtime_shutdown()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+        let child = runtime.block_on(async {
+            let mut command = Command::new("/bin/sleep");
+            command.arg("30").process_group(0).kill_on_drop(true);
+            command.spawn()
+        })?;
+        let child = Arc::new(AsyncMutex::new(child));
+        let (sender, _events) = mpsc::unbounded_channel();
+        let guard = StopOnDrop {
+            child: Some(child.clone()),
+            sender,
+            signal_group: signal_server_group,
+            runtime: runtime.handle().clone(),
+            operation: "prompt admission",
+            active_turn: None,
+        };
+        drop(runtime);
+        drop(guard);
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            if child
+                .try_lock()
+                .map_err(|_| "child is locked")?
+                .try_wait()?
+                .is_some()
+            {
+                break;
+            }
+            if std::time::Instant::now() >= deadline {
+                return Err("child survived runtime shutdown".into());
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn mode_discovery_reports_agent_failure_in_detail()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = tempfile::tempdir()?;
+        let script = directory.path().join("opencode");
+        std::fs::write(
+            &script,
+            "#!/bin/sh\nprintf 'server listening on %s\\n' \"$TOKEN\"\n",
+        )?;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700))?;
+        let spec = SpawnSpec {
+            program: script.to_string_lossy().into_owned(),
+            cwd: directory.path().to_owned(),
+            environment: BTreeMap::from([("TOKEN".into(), "fixture-private-value".into())]),
+            ..SpawnSpec::default()
+        };
+        let error = match project_modes(&spec).await {
+            Ok(_) => return Err("expected discovery failure".into()),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("invalid listener address"));
+        assert!(!error.to_string().contains("hidden"));
+        Ok(())
+    }
+
+    #[test]
+    fn stderr_redaction_omits_truncated_lines_and_hides_credentials()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut lines = acp_client::bounded_lines::BoundedLines::default();
+        let normal = lines.push(b"token=secret\n");
+        assert_eq!(
+            sanitize_stderr_line(normal.into_iter().next().ok_or("missing line")?, "secret"),
+            "token=[redacted]"
+        );
+        let mut long = vec![b'x'; 5000];
+        long.extend_from_slice(b"secret\n");
+        let truncated = lines.push(&long).into_iter().next().ok_or("missing line")?;
+        assert_eq!(
+            sanitize_stderr_line(truncated, "secret"),
+            "[long stderr line omitted]"
+        );
+        Ok(())
+    }
+    use tokio::io::{AsyncRead, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    const NATIVE_API: &str = r#"{"paths":{
+        "/api/event": {"get": {}},
+        "/api/session": {"post": {}},
+        "/api/session/{sessionID}": {"get": {}},
+        "/api/session/{sessionID}/prompt": {"post": {}},
+        "/api/session/{sessionID}/inbox/{inboxID}": {"delete": {}},
+        "/api/session/{sessionID}/interrupt": {"post": {}},
+        "/api/session/{sessionID}/permission/{requestID}/reply": {"post": {}}
+    }}"#;
+
+    #[tokio::test]
+    async fn approvals_are_presented_one_at_a_time_and_queued_replies_are_skipped()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        let mut pending = PendingApprovals {
+            ids: HashSet::new(),
+            active: None,
+            queued: VecDeque::new(),
+            state: Arc::new(Mutex::new(ApprovalResponseState::default())),
+            sender: &sender,
+            capacity: Arc::new(Semaphore::new(2)),
+        };
+        for id in ["per_1", "per_2", "per_3"] {
+            pending
+                .enqueue(
+                    PermissionRequest {
+                        id: id.into(),
+                        action: "read".into(),
+                        resources: Vec::new(),
+                        metadata: Value::Null,
+                        source: None,
+                        message: None,
+                    }
+                    .into_approval(),
+                )
+                .await?;
+        }
+        assert!(
+            matches!(receiver.try_recv(), Ok(HarnessEvent::ApprovalRequested { request }) if request.approval_id.as_str() == "per_1")
+        );
+        assert!(receiver.try_recv().is_err());
+        pending
+            .resolve(
+                ApprovalId::new("per_3"),
+                Decision::Deny,
+                shep_harness_core::ApprovalSource::Agent,
+            )
+            .await?;
+        assert!(receiver.try_recv().is_err());
+        pending
+            .resolve(
+                ApprovalId::new("per_1"),
+                Decision::Allow,
+                shep_harness_core::ApprovalSource::Agent,
+            )
+            .await?;
+        assert!(
+            matches!(receiver.try_recv(), Ok(HarnessEvent::ApprovalResolved { approval_id, .. }) if approval_id.as_str() == "per_1")
+        );
+        assert!(
+            matches!(receiver.try_recv(), Ok(HarnessEvent::ApprovalRequested { request }) if request.approval_id.as_str() == "per_2")
+        );
+        drop(pending);
+        assert!(
+            matches!(receiver.try_recv(), Ok(HarnessEvent::ApprovalWithdrawn { approval_id }) if approval_id.as_str() == "per_2")
+        );
+        assert!(receiver.try_recv().is_err());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn approval_capacity_preserves_queued_replies_and_recovers()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        let capacity = Arc::new(Semaphore::new(1));
+        let mut pending = PendingApprovals {
+            ids: HashSet::new(),
+            active: None,
+            queued: VecDeque::new(),
+            state: Arc::new(Mutex::new(ApprovalResponseState::default())),
+            sender: &sender,
+            capacity: capacity.clone(),
+        };
+        for id in ["one", "two", "three"] {
+            pending
+                .enqueue(
+                    PermissionRequest {
+                        id: id.into(),
+                        action: "read".into(),
+                        resources: Vec::new(),
+                        metadata: Value::Null,
+                        source: None,
+                        message: None,
+                    }
+                    .into_approval(),
+                )
+                .await?;
+        }
+        let first = receiver.recv().await.ok_or("missing first approval")?;
+        assert_eq!(capacity.available_permits(), 0);
+        pending
+            .resolve(
+                ApprovalId::new("two"),
+                Decision::Deny,
+                shep_harness_core::ApprovalSource::Agent,
+            )
+            .await?;
+        let next = pending.resolve(
+            ApprovalId::new("one"),
+            Decision::Allow,
+            shep_harness_core::ApprovalSource::Agent,
+        );
+        tokio::pin!(next);
+        assert!(
+            timeout(Duration::from_millis(30), next.as_mut())
+                .await
+                .is_err()
+        );
+        assert!(matches!(
+            receiver.try_recv()?,
+            HarnessEvent::ApprovalResolved { .. }
+        ));
+        drop(first);
+        next.await?;
+        let third = receiver.recv().await.ok_or("missing third approval")?;
+        assert!(
+            matches!(&third, HarnessEvent::ApprovalRequested { request } if request.approval_id.as_str() == "three")
+        );
+        assert_eq!(capacity.available_permits(), 0);
+        drop(third);
+        assert_eq!(capacity.available_permits(), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cancelling_reader_withdraws_pending_approvals()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        let (ready, waiting) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            let mut pending = PendingApprovals {
+                ids: HashSet::new(),
+                active: None,
+                queued: VecDeque::new(),
+                state: Arc::new(Mutex::new(ApprovalResponseState::default())),
+                sender: &sender,
+                capacity: Arc::new(Semaphore::new(2)),
+            };
+            pending
+                .enqueue(
+                    PermissionRequest {
+                        id: "per_1".into(),
+                        action: "read".into(),
+                        resources: Vec::new(),
+                        metadata: Value::Null,
+                        source: None,
+                        message: None,
+                    }
+                    .into_approval(),
+                )
+                .await?;
+            ready.send(()).map_err(|_| HarnessError::ChannelClosed)?;
+            std::future::pending::<()>().await;
+            Ok::<_, HarnessError>(())
+        });
+        waiting.await?;
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(HarnessEvent::ApprovalRequested { .. })
+        ));
+        task.abort();
+        assert!(task.await.is_err_and(|error| error.is_cancelled()));
+        assert!(
+            matches!(receiver.try_recv(), Ok(HarnessEvent::ApprovalWithdrawn { approval_id }) if approval_id.as_str() == "per_1")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn repeated_pending_approval_is_rejected_without_replacement() -> HarnessResult<()> {
+        let mut pending = HashSet::new();
+        let id = ApprovalId::new("per_1");
+        register_approval(&mut pending, &id)?;
+        assert!(register_approval(&mut pending, &id).is_err());
+        assert_eq!(pending.len(), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn approval_burst_is_bounded_and_resolved_requests_free_capacity()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let address = listener.local_addr()?;
+        let fixture = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await?;
+            let (reader, mut writer) = socket.into_split();
+            read_fixture_request(reader).await?;
+            let mut body = format!(
+                "data: {}\n\n",
+                json!({"type":"session.inbox.enqueued", "data":{"sessionID":"ses_1", "inboxID":"msg_1"}})
+            );
+            for number in 0..MAX_PENDING_APPROVALS {
+                body.push_str(&format!("data: {}\n\n", json!({"type":"permission.asked", "data":{"sessionID":"ses_1", "id":format!("per_{number}"), "action":"read", "resources":[]}})));
+            }
+            body.push_str(&format!("data: {}\n\n", json!({"type":"permission.replied", "data":{"sessionID":"ses_1", "requestID":"per_0", "reply":"once"}})));
+            for id in ["per_extra", "per_overflow"] {
+                body.push_str(&format!("data: {}\n\n", json!({"type":"permission.asked", "data":{"sessionID":"ses_1", "id":id, "action":"read", "resources":[]}})));
+            }
+            writer.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await?;
+            writer.shutdown().await?;
+            Ok::<_, Box<dyn std::error::Error + Send + Sync>>(())
+        });
+        let response = Client::new()
+            .get(format!("http://{address}/events"))
+            .send()
+            .await?;
+        let events = OpenCodeEvents {
+            response,
+            decoder: EventDecoder::default(),
+            pending: bytes::Bytes::new(),
+        };
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        let error = read_turn(
+            events,
+            SessionId::new("ses_1"),
+            "msg_1",
+            &sender,
+            &Arc::new(Semaphore::new(2)),
+            &Arc::new(Mutex::new(ApprovalResponseState::default())),
+        )
+        .await
+        .err()
+        .ok_or("expected approval overflow")?;
+        assert!(error.to_string().contains("pending approval limit"));
+        let mut requested = 0;
+        let mut resolved = 0;
+        let mut withdrawn = HashSet::new();
+        while let Ok(event) = receiver.try_recv() {
+            match event {
+                HarnessEvent::ApprovalRequested { request } => {
+                    assert_ne!(request.approval_id.as_str(), "per_overflow");
+                    requested += 1;
+                }
+                HarnessEvent::ApprovalResolved { .. } => resolved += 1,
+                HarnessEvent::ApprovalWithdrawn { approval_id } => {
+                    withdrawn.insert(approval_id);
+                }
+                _ => return Err("unexpected event".into()),
+            }
+        }
+        assert_eq!(requested, 2);
+        assert_eq!(resolved, 1);
+        assert_eq!(withdrawn.len(), 1);
+        assert!(withdrawn.contains(&ApprovalId::new("per_1")));
+        fixture.await?.map_err(|error| error.to_string())?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn native_failure_event_retains_stream_capacity() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let address = listener.local_addr()?;
+        let fixture = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await?;
+            let (reader, mut writer) = socket.into_split();
+            read_fixture_request(reader).await?;
+            let body = format!(
+                "data: {}\n\ndata: {}\n\n",
+                json!({"type":"session.inbox.enqueued", "data":{"sessionID":"ses_1", "inboxID":"msg_1"}}),
+                json!({"type":"session.execution.failed", "data":{"sessionID":"ses_1", "error":{"message":"fixture failure"}}})
+            );
+            writer.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await?;
+            Ok::<_, Box<dyn std::error::Error + Send + Sync>>(())
+        });
+        let response = Client::new()
+            .get(format!("http://{address}/events"))
+            .send()
+            .await?;
+        let events = OpenCodeEvents {
+            response,
+            decoder: EventDecoder::default(),
+            pending: bytes::Bytes::new(),
+        };
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        let capacity = Arc::new(Semaphore::new(1));
+        let outcome = read_turn(
+            events,
+            SessionId::new("ses_1"),
+            "msg_1",
+            &sender,
+            &capacity,
+            &Arc::new(Mutex::new(ApprovalResponseState::default())),
+        )
+        .await?;
+        assert!(matches!(
+            outcome,
+            HarnessEvent::TurnFinished {
+                reason: TurnFinishReason::Failed
+            }
+        ));
+        let error = receiver.recv().await.ok_or("missing error")?;
+        assert!(
+            matches!(&error, HarnessEvent::TurnError { text, stream_permit: Some(_), .. } if text == "fixture failure")
+        );
+        assert_eq!(capacity.available_permits(), 0);
+        drop(error);
+        assert_eq!(capacity.available_permits(), 1);
+        fixture.await?.map_err(|error| error.to_string())?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn streamed_errors_wait_until_previous_error_is_consumed()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        let capacity = Arc::new(Semaphore::new(1));
+        let error = || HarnessEvent::TurnError {
+            kind: FailureKind::Protocol,
+            text: "failure".into(),
+            context: None,
+            stream_permit: None,
+        };
+        publish_stream_event(&sender, &capacity, error()).await?;
+        let first = receiver.recv().await.ok_or("missing first error")?;
+        let second = publish_stream_event(&sender, &capacity, error());
+        tokio::pin!(second);
+        assert!(
+            timeout(Duration::from_millis(30), second.as_mut())
+                .await
+                .is_err()
+        );
+        drop(first);
+        second.await?;
+        assert!(matches!(
+            receiver.recv().await,
+            Some(HarnessEvent::TurnError { .. })
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn streamed_errors_hold_capacity_and_bound_large_unicode_details()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        let capacity = Arc::new(Semaphore::new(STREAM_BUFFER_CHUNKS));
+        publish_stream_event(
+            &sender,
+            &capacity,
+            HarnessEvent::TurnError {
+                kind: FailureKind::AgentRejected,
+                text: "界".repeat(shep_harness_core::MAX_TURN_ERROR_BYTES),
+                context: None,
+                stream_permit: None,
+            },
+        )
+        .await?;
+        let error = receiver.recv().await.ok_or("missing error")?;
+        let HarnessEvent::TurnError {
+            text,
+            context: None,
+            stream_permit: Some(_),
+            ..
+        } = &error
+        else {
+            return Err("unexpected event".into());
+        };
+        assert!(text.len() <= shep_harness_core::MAX_TURN_ERROR_BYTES);
+        assert!(text.ends_with(shep_harness_core::TURN_ERROR_OMITTED));
+        assert_eq!(capacity.available_permits(), STREAM_BUFFER_CHUNKS - 8);
+        drop(error);
+        assert_eq!(capacity.available_permits(), STREAM_BUFFER_CHUNKS);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn streamed_text_applies_backpressure_and_preserves_utf8()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        let capacity = Arc::new(Semaphore::new(2));
+        let text = format!("{}tail", "界".repeat(6000));
+        let expected = text.clone();
+        let task = tokio::spawn({
+            let capacity = capacity.clone();
+            async move {
+                publish_stream_event(
+                    &sender,
+                    &capacity,
+                    HarnessEvent::Delta {
+                        item_id: ItemId::new("message"),
+                        kind: DeltaKind::Message,
+                        text,
+                        stream_permit: None,
+                    },
+                )
+                .await
+            }
+        });
+        let first = receiver.recv().await.ok_or("missing first chunk")?;
+        let second = receiver.recv().await.ok_or("missing second chunk")?;
+        assert_eq!(capacity.available_permits(), 0);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(30), receiver.recv())
+                .await
+                .is_err()
+        );
+        let mut output = match &first {
+            HarnessEvent::Delta { text, .. } => text.clone(),
+            _ => return Err("unexpected event".into()),
+        };
+        drop(first);
+        let third = receiver.recv().await.ok_or("missing third chunk")?;
+        for event in [&second, &third] {
+            let HarnessEvent::Delta { text, .. } = event else {
+                return Err("unexpected event".into());
+            };
+            assert!(text.len() <= STREAM_CHUNK_BYTES);
+            output.push_str(text);
+        }
+        task.await??;
+        assert_eq!(output, expected);
+        drop(second);
+        drop(third);
+        assert_eq!(capacity.available_permits(), 2);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn tool_updates_share_capacity_with_text_and_release_on_cancellation()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        let capacity = Arc::new(Semaphore::new(2));
+        let task = tokio::spawn({
+            let capacity = capacity.clone();
+            async move {
+                publish_stream_event(
+                    &sender,
+                    &capacity,
+                    HarnessEvent::Delta {
+                        item_id: ItemId::new("message"),
+                        kind: DeltaKind::Message,
+                        text: "hello".into(),
+                        stream_permit: None,
+                    },
+                )
+                .await?;
+                for id in ["first", "second"] {
+                    publish_stream_event(
+                        &sender,
+                        &capacity,
+                        HarnessEvent::ToolCall {
+                            tool_call_id: ToolCallId::new(id),
+                            title: id.into(),
+                            kind: "command".into(),
+                            status: ToolStatus::Running,
+                            output: None,
+                            diffs: Vec::new(),
+                            terminal_id: None,
+                            stream_permit: None,
+                        },
+                    )
+                    .await?;
+                }
+                Ok::<_, HarnessError>(())
+            }
+        });
+        let text = receiver.recv().await.ok_or("missing text")?;
+        let first = receiver.recv().await.ok_or("missing first tool")?;
+        assert_eq!(capacity.available_permits(), 0);
+        assert!(
+            timeout(Duration::from_millis(30), receiver.recv())
+                .await
+                .is_err()
+        );
+        let retained = first.clone();
+        drop(first);
+        assert!(
+            timeout(Duration::from_millis(30), receiver.recv())
+                .await
+                .is_err()
+        );
+        drop(text);
+        let second = receiver.recv().await.ok_or("missing second tool")?;
+        assert!(
+            matches!(second, HarnessEvent::ToolCall { ref tool_call_id, .. } if tool_call_id.as_str() == "second")
+        );
+        task.await??;
+        drop(retained);
+        drop(second);
+        assert_eq!(capacity.available_permits(), 2);
+        let held = capacity.clone().acquire_many_owned(2).await?;
+        let blocked = tokio::spawn({
+            let capacity = capacity.clone();
+            async move {
+                let (sender, _receiver) = mpsc::unbounded_channel();
+                publish_stream_event(
+                    &sender,
+                    &capacity,
+                    HarnessEvent::ToolCall {
+                        tool_call_id: ToolCallId::new("blocked"),
+                        title: "blocked".into(),
+                        kind: "command".into(),
+                        status: ToolStatus::Running,
+                        output: None,
+                        diffs: Vec::new(),
+                        terminal_id: None,
+                        stream_permit: None,
+                    },
+                )
+                .await
+            }
+        });
+        tokio::task::yield_now().await;
+        blocked.abort();
+        assert!(blocked.await.is_err_and(|error| error.is_cancelled()));
+        drop(held);
+        assert_eq!(capacity.available_permits(), 2);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cancelling_blocked_stream_releases_capacity() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        let capacity = Arc::new(Semaphore::new(1));
+        let task = tokio::spawn({
+            let capacity = capacity.clone();
+            async move {
+                publish_stream_event(
+                    &sender,
+                    &capacity,
+                    HarnessEvent::Delta {
+                        item_id: ItemId::new("message"),
+                        kind: DeltaKind::Message,
+                        text: "x".repeat(STREAM_CHUNK_BYTES + 1),
+                        stream_permit: None,
+                    },
+                )
+                .await
+            }
+        });
+        let event = receiver.recv().await.ok_or("missing chunk")?;
+        assert!(
+            tokio::time::timeout(Duration::from_millis(30), receiver.recv())
+                .await
+                .is_err()
+        );
+        task.abort();
+        assert!(task.await.is_err_and(|error| error.is_cancelled()));
+        drop(event);
+        assert_eq!(capacity.available_permits(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn mode_discovery_reports_both_failures_in_detail() {
+        let (modes, shutdown) = (
+            Err(HarnessError::Protocol("discovery detail".into())),
+            Err(HarnessError::Protocol("cleanup detail".into())),
+        );
+        let error = finish_mode_discovery(modes, shutdown).expect_err("both operations fail");
+        assert!(error.to_string().contains("discovery detail"));
+        assert!(error.to_string().contains("cleanup detail"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cancelled_subscription_stops_server_descendants()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let program = fixture_launcher(
+            directory.path(),
+            "#!/bin/sh\n(sleep 2; printf escaped > escaped) &\nprintf 'server listening on %s\\n' \"$SHEPHERD_TEST_OPENCODE_URL\"\nsleep 30\n",
+        )?;
+        let spec = SpawnSpec {
+            program,
+            cwd: directory.path().to_owned(),
+            environment: BTreeMap::from([(
+                "SHEPHERD_TEST_OPENCODE_URL".into(),
+                format!("http://{}", listener.local_addr()?),
+            )]),
+            ..SpawnSpec::default()
+        };
+        let (subscribed, wait_for_subscription) = tokio::sync::oneshot::channel();
+        let fixture = tokio::spawn(async move {
+            for response in [
+                json!({"version": "fixture"}).to_string(),
+                NATIVE_API.to_owned(),
+            ] {
+                let (socket, _) = listener.accept().await?;
+                let (reader, mut writer) = socket.into_split();
+                read_fixture_request(reader).await?;
+                writer.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response}", response.len()).as_bytes()).await?;
+            }
+            let (socket, _) = listener.accept().await?;
+            let (reader, _writer) = socket.into_split();
+            read_fixture_request(reader).await?;
+            subscribed
+                .send(())
+                .map_err(|_| std::io::Error::other("subscription receiver dropped"))?;
+            std::future::pending::<()>().await;
+            Ok::<_, Box<dyn std::error::Error + Send + Sync>>(())
+        });
+        let start = tokio::spawn(async move { OpenCodeNativeHarness::default().start(spec).await });
+        timeout(Duration::from_secs(5), wait_for_subscription).await??;
+        start.abort();
+        assert!(start.await.is_err_and(|error| error.is_cancelled()));
+        fixture.abort();
+        tokio::time::sleep(Duration::from_millis(2300)).await;
+        assert!(!directory.path().join("escaped").exists());
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cancelled_mode_discovery_stops_server_descendants()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let program = fixture_launcher(
+            directory.path(),
+            "#!/bin/sh\n(sleep 2; printf escaped > escaped) &\nprintf 'server listening on %s\\n' \"$SHEPHERD_TEST_OPENCODE_URL\"\nsleep 30\n",
+        )?;
+        let spec = SpawnSpec {
+            program,
+            cwd: directory.path().to_owned(),
+            environment: BTreeMap::from([(
+                "SHEPHERD_TEST_OPENCODE_URL".into(),
+                format!("http://{}", listener.local_addr()?),
+            )]),
+            ..SpawnSpec::default()
+        };
+        let (requested, wait_for_request) = tokio::sync::oneshot::channel();
+        let fixture = tokio::spawn(async move {
+            let mut api: Value = serde_json::from_str(NATIVE_API)?;
+            api["paths"]["/api/agent"] = json!({"get": {}});
+            api["paths"]["/api/session/{sessionID}/agent"] = json!({"post": {}});
+            for response in [json!({"version": "fixture"}).to_string(), api.to_string()] {
+                let (socket, _) = listener.accept().await?;
+                let (reader, mut writer) = socket.into_split();
+                read_fixture_request(reader).await?;
+                writer.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response}", response.len()).as_bytes()).await?;
+            }
+            let (socket, _) = listener.accept().await?;
+            let (reader, _writer) = socket.into_split();
+            let (request, _) = read_fixture_request(reader).await?;
+            assert!(request.starts_with("GET /api/agent?"));
+            requested
+                .send(())
+                .map_err(|_| std::io::Error::other("discovery receiver dropped"))?;
+            std::future::pending::<()>().await;
+            Ok::<_, Box<dyn std::error::Error + Send + Sync>>(())
+        });
+        let discovery = tokio::spawn(async move { project_modes(&spec).await });
+        timeout(Duration::from_secs(5), wait_for_request).await??;
+        discovery.abort();
+        assert!(discovery.await.is_err_and(|error| error.is_cancelled()));
+        fixture.abort();
+        tokio::time::sleep(Duration::from_millis(2300)).await;
+        assert!(!directory.path().join("escaped").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn reads_an_explicit_opencode_executable() -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let settings = directory.path().join("settings.json");
+        let executable = directory.path().join("profile/bin/opencode");
+        assert_eq!(configured_executable(&settings)?, None);
+        std::fs::write(
+            &settings,
+            serde_json::to_vec(&json!({
+                "version": 1,
+                "app": { "agents.opencode.executable": executable, "theme": "dark" }
+            }))?,
+        )?;
+        assert_eq!(configured_executable(&settings)?, Some(executable));
+        let launch = configured_launch(&AgentSettings::read(&settings)?)?
+            .ok_or("expected a configured launch")?;
+        assert!(!launch.environment.contains_key("OPENCODE_CONFIG"));
+        let invalid: AgentSettings = serde_json::from_value(json!({"app": {
+            "agents.opencode.executable": launch.program,
+            "agents.opencode.config_file": "relative.json"
+        }}))?;
+        assert!(configured_launch(&invalid).is_err());
+        std::fs::write(
+            &settings,
+            r#"{"app":{"agents.opencode.executable":"opencode"}}"#,
+        )?;
+        assert!(configured_executable(&settings).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn catalog_prefers_the_default_model_and_lists_only_enabled_choices()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let model = |id: &str, enabled: bool| OpenCodeModel {
+            model_id: id.into(),
+            provider_id: "acme".into(),
+            name: id.to_uppercase(),
+            enabled,
+        };
+        let catalog = catalog_models(
+            vec![model("a", true), model("b", true), model("c", false)],
+            Some(model("b", true)),
+        );
+        assert_eq!(catalog.models.current.as_deref(), Some("acme/b"));
+        assert_eq!(
+            catalog
+                .models
+                .options
+                .iter()
+                .map(|model| model.id.as_str())
+                .collect::<Vec<_>>(),
+            ["acme/a", "acme/b"]
+        );
+        assert!(!catalog.refs.contains_key("acme/c"));
+
+        let fallback = catalog_models(vec![model("a", false)], Some(model("d", true)));
+        assert_eq!(fallback.models.current.as_deref(), Some("acme/d"));
+        assert_eq!(fallback.models.options.len(), 1);
+        assert!(fallback.refs.contains_key("acme/d"));
+        Ok(())
+    }
+
+    #[test]
+    fn a_configured_model_overrides_the_catalog_default() {
+        let models = AgentModels {
+            current: Some("acme/default".into()),
+            options: vec![shep_harness_core::AgentModel {
+                id: "acme/default".into(),
+                name: "Default".into(),
+                description: None,
+            }],
+        };
+        assert_eq!(
+            preferred_models(models.clone(), None).current.as_deref(),
+            Some("acme/default")
+        );
+        assert_eq!(
+            preferred_models(models, Some("acme/chosen"))
+                .current
+                .as_deref(),
+            Some("acme/chosen")
+        );
+    }
+
+    #[test]
+    fn model_references_fall_back_to_the_provider_and_model_pair() {
+        let refs = BTreeMap::from([(
+            "acme/listed".to_string(),
+            OpenCodeModelRef {
+                id: "listed".into(),
+                provider_id: "acme".into(),
+                variant: Some("fast".into()),
+            },
+        )]);
+        assert_eq!(
+            model_reference("acme/listed", &refs),
+            refs.get("acme/listed").cloned()
+        );
+        assert_eq!(
+            model_reference("orcarouter/orcarouter/free", &refs),
+            Some(OpenCodeModelRef {
+                id: "orcarouter/free".into(),
+                provider_id: "orcarouter".into(),
+                variant: None,
+            })
+        );
+        assert_eq!(model_reference("unqualified", &refs), None);
+        assert_eq!(model_reference("acme/", &refs), None);
+    }
+
+    #[test]
+    fn requires_the_server_to_advertise_permission_replies()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut api: Api = serde_json::from_str(NATIVE_API)?;
+        let permission_path = "/api/session/{sessionID}/permission/{requestID}/reply";
+        let permission = api
+            .paths
+            .remove(permission_path)
+            .ok_or("expected permission API")?;
+        let session_path = "/api/session/{sessionID}";
+        let session = api
+            .paths
+            .remove(session_path)
+            .ok_or("expected session lookup API")?;
+        let health = || Health {
+            version: "fixture".into(),
+        };
+        let error = api
+            .probe(health())
+            .expect_err("permission handling is required");
+        assert!(error.to_string().contains("/permission/{requestID}/reply"));
+        api.paths.insert(permission_path.into(), permission);
+        assert!(!api.probe(health())?.resume);
+        api.paths.insert(session_path.into(), session);
+        assert!(api.probe(health())?.resume);
+        assert!(!api.probe(health())?.prompt_files);
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn native_http_contract_requires_prompt_admission_before_streaming()
+    -> Result<(), Box<dyn std::error::Error>> {
+        struct Tracker {
+            pid: Mutex<Option<u32>>,
+            fail_clear: AtomicBool,
+        }
+        #[async_trait]
+        impl shep_harness_core::AgentProcessTracker for Tracker {
+            async fn started(&self, pid: u32) -> Result<String, String> {
+                *self.pid.lock().map_err(|error| error.to_string())? = Some(pid);
+                Ok("fixture-record".into())
+            }
+            async fn stopped(&self, id: &str) -> Result<(), String> {
+                assert_eq!(id, "fixture-record");
+                if self.fail_clear.swap(false, Ordering::SeqCst) {
+                    return Err("fixture cleanup failure".into());
+                }
+                *self.pid.lock().map_err(|error| error.to_string())? = None;
+                Ok(())
+            }
+        }
+        let root = tempfile::tempdir()?;
+        let directory = root.path().canonicalize()?;
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let program = fixture_launcher(
+            &directory,
+            r#"#!/bin/sh
+[ "$*" = "serve --hostname 127.0.0.1 --port 0" ] || exit 2
+printf 'opencode server listening on %s\n' "$SHEPHERD_TEST_OPENCODE_URL"
+exec sleep 60
+"#,
+        )?;
+        let spec = SpawnSpec {
+            program,
+            cwd: directory.clone(),
+            environment: BTreeMap::from([(
+                "SHEPHERD_TEST_OPENCODE_URL".into(),
+                format!("http://{}", listener.local_addr()?),
+            )]),
+            ..SpawnSpec::default()
+        };
+        let fixture = serve_native_fixture(listener, &directory, false, None, None, 0);
+        let client = async {
+            let mut harness = OpenCodeNativeHarness::default();
+            let tracker = Arc::new(Tracker {
+                pid: Mutex::new(None),
+                fail_clear: AtomicBool::new(true),
+            });
+            harness.set_process_tracker(tracker.clone());
+            let capabilities = harness.start(spec).await?;
+            assert!(
+                tracker
+                    .pid
+                    .lock()
+                    .map_err(|error| error.to_string())?
+                    .is_some()
+            );
+            assert_eq!(harness.tier(), AdapterTier::Native);
+            assert!(capabilities.streaming && capabilities.resume);
+            assert_eq!(harness.open_session(None).await?.as_str(), "ses_fixture");
+            let transcript = fixture_reply(&mut harness).await?;
+            assert_eq!(transcript.len(), 1);
+            assert_eq!(
+                transcript.entry(0).map(Entry::summary).as_deref(),
+                Some("agent: native fixture reply")
+            );
+            let error = harness
+                .shutdown()
+                .await
+                .expect_err("cleanup must fail once");
+            assert!(error.to_string().contains("fixture cleanup failure"));
+            assert!(harness.server.is_some());
+            harness.shutdown().await?;
+            assert!(
+                tracker
+                    .pid
+                    .lock()
+                    .map_err(|error| error.to_string())?
+                    .is_none()
+            );
+            Ok::<_, Box<dyn std::error::Error>>(())
+        };
+        timeout(REQUEST_TIMEOUT, async { tokio::try_join!(fixture, client) }).await??;
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn unconfirmed_prompt_with_failed_cancel_stops_the_server()
+    -> Result<(), Box<dyn std::error::Error>> {
+        struct Tracker(AtomicBool);
+        #[async_trait]
+        impl shep_harness_core::AgentProcessTracker for Tracker {
+            async fn started(&self, _: u32) -> Result<String, String> {
+                Ok("fixture-record".into())
+            }
+            async fn stopped(&self, _: &str) -> Result<(), String> {
+                if self.0.swap(false, Ordering::SeqCst) {
+                    Err("fixture record cleanup failure".into())
+                } else {
+                    Ok(())
+                }
+            }
+        }
+        let root = tempfile::tempdir()?;
+        let directory = root.path().canonicalize()?;
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let program = fixture_launcher(
+            &directory,
+            r#"#!/bin/sh
+[ "$*" = "serve --hostname 127.0.0.1 --port 0" ] || exit 2
+printf 'opencode server listening on %s\n' "$SHEPHERD_TEST_OPENCODE_URL"
+exec sleep 60
+"#,
+        )?;
+        let spec = SpawnSpec {
+            program,
+            cwd: directory.clone(),
+            environment: BTreeMap::from([(
+                "SHEPHERD_TEST_OPENCODE_URL".into(),
+                format!("http://{}", listener.local_addr()?),
+            )]),
+            ..SpawnSpec::default()
+        };
+        let fixture = serve_native_fixture(listener, &directory, true, None, None, 0);
+        let client = async {
+            let mut harness = OpenCodeNativeHarness::default();
+            harness.set_process_tracker(Arc::new(Tracker(AtomicBool::new(true))));
+            harness.start(spec).await?;
+            harness.open_session(None).await?;
+            let error = harness
+                .prompt(PromptInput::text("Reply with local fixture text only"))
+                .await
+                .err()
+                .ok_or("prompt unexpectedly succeeded")?;
+            assert!(
+                error
+                    .to_string()
+                    .contains("could not cancel the unconfirmed OpenCode prompt")
+            );
+            assert!(error.to_string().contains("fixture record cleanup failure"));
+            assert!(
+                error
+                    .to_string()
+                    .contains("could not remove the queued OpenCode prompt")
+            );
+            assert!(
+                error
+                    .to_string()
+                    .contains("could not interrupt the OpenCode session")
+            );
+            assert!(matches!(
+                harness.prompt(PromptInput::text("must not start")).await,
+                Err(HarnessError::Protocol(message)) if message.contains("needs cleanup")
+            ));
+            let events: Vec<_> = std::iter::from_fn(|| harness.receiver.try_recv().ok()).collect();
+            assert!(events.iter().any(|event| matches!(event, HarnessEvent::ConnectionFailed { text, .. } if text.contains("could not cancel the unconfirmed OpenCode prompt"))));
+            let server = harness.server.as_ref().ok_or("server handle was lost")?;
+            assert!(server.child.lock().await.try_wait()?.is_some());
+            harness.shutdown().await?;
+            Ok::<_, Box<dyn std::error::Error>>(())
+        };
+        timeout(REQUEST_TIMEOUT, async { tokio::try_join!(fixture, client) }).await??;
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cancelled_prompt_admission_stops_the_server_before_retry()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = tempfile::tempdir()?;
+        let directory = root.path().canonicalize()?;
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let program = fixture_launcher(
+            &directory,
+            r#"#!/bin/sh
+[ "$*" = "serve --hostname 127.0.0.1 --port 0" ] || exit 2
+printf 'opencode server listening on %s\n' "$SHEPHERD_TEST_OPENCODE_URL"
+exec sleep 60
+"#,
+        )?;
+        let spec = SpawnSpec {
+            program,
+            cwd: directory.clone(),
+            environment: BTreeMap::from([(
+                "SHEPHERD_TEST_OPENCODE_URL".into(),
+                format!("http://{}", listener.local_addr()?),
+            )]),
+            ..SpawnSpec::default()
+        };
+        let (started, waiting) = tokio::sync::oneshot::channel();
+        let (release, released) = tokio::sync::oneshot::channel();
+        let fixture = serve_native_fixture(
+            listener,
+            &directory,
+            false,
+            Some((started, released)),
+            None,
+            0,
+        );
+        let client = async {
+            let mut harness = OpenCodeNativeHarness::default();
+            harness.start(spec).await?;
+            harness.open_session(None).await?;
+            let mut prompt =
+                Box::pin(harness.prompt(PromptInput::text("Reply with local fixture text only")));
+            tokio::select! {
+                result = &mut prompt => return Err(format!("prompt completed unexpectedly: {result:?}").into()),
+                result = waiting => result?,
+            }
+            drop(prompt);
+            release.send(()).map_err(|_| "fixture ended early")?;
+            assert!(
+                matches!(harness.prompt(PromptInput::text("must not start")).await,
+                Err(HarnessError::Protocol(message)) if message.contains("needs cleanup"))
+            );
+            let event = timeout(Duration::from_secs(5), async {
+                loop {
+                    match harness.receiver.recv().await {
+                        Some(event @ HarnessEvent::ConnectionFailed { .. }) => break Ok(event),
+                        Some(_) => continue,
+                        None => break Err("event stream closed"),
+                    }
+                }
+            })
+            .await??;
+            assert!(
+                matches!(event, HarnessEvent::ConnectionFailed { text, .. } if text.contains("prompt admission did not complete"))
+            );
+            let server = harness.server.as_ref().ok_or("server handle was lost")?;
+            assert!(server.child.lock().await.try_wait()?.is_some());
+            harness.shutdown().await?;
+            Ok::<_, Box<dyn std::error::Error>>(())
+        };
+        timeout(REQUEST_TIMEOUT, async { tokio::try_join!(fixture, client) }).await??;
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn interrupted_turn_cancellation_stops_server_and_reports_failure()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = tempfile::tempdir()?;
+        let directory = root.path().canonicalize()?;
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let program = fixture_launcher(
+            &directory,
+            r#"#!/bin/sh
+[ "$*" = "serve --hostname 127.0.0.1 --port 0" ] || exit 2
+printf 'opencode server listening on %s\n' "$SHEPHERD_TEST_OPENCODE_URL"
+exec sleep 60
+"#,
+        )?;
+        let spec = SpawnSpec {
+            program,
+            cwd: directory.clone(),
+            environment: BTreeMap::from([(
+                "SHEPHERD_TEST_OPENCODE_URL".into(),
+                format!("http://{}", listener.local_addr()?),
+            )]),
+            ..SpawnSpec::default()
+        };
+        let (started, waiting) = tokio::sync::oneshot::channel();
+        let (release, released) = tokio::sync::oneshot::channel();
+        let fixture = serve_native_fixture(
+            listener,
+            &directory,
+            false,
+            None,
+            Some((started, released)),
+            0,
+        );
+        let client = async {
+            let mut harness = OpenCodeNativeHarness::default();
+            harness.start(spec).await?;
+            harness.open_session(None).await?;
+            harness
+                .prompt(PromptInput::text("Reply with local fixture text only"))
+                .await?;
+            let mut cancel = Box::pin(harness.cancel());
+            tokio::select! {
+                result = &mut cancel => return Err(format!("cancel completed unexpectedly: {result:?}").into()),
+                result = waiting => result?,
+            }
+            drop(cancel);
+            release.send(0).map_err(|_| "fixture ended early")?;
+            assert!(
+                matches!(harness.cancel().await, Err(HarnessError::Protocol(message)) if message.contains("needs cleanup"))
+            );
+            let event = timeout(Duration::from_secs(5), async {
+                loop {
+                    match harness.receiver.recv().await {
+                        Some(event @ HarnessEvent::ConnectionFailed { .. }) => break Ok(event),
+                        Some(_) => continue,
+                        None => break Err("event stream closed"),
+                    }
+                }
+            })
+            .await??;
+            assert!(
+                matches!(event, HarnessEvent::ConnectionFailed { text, .. } if text.contains("turn cancellation request did not complete"))
+            );
+            assert!(
+                harness
+                    .turn
+                    .as_ref()
+                    .is_some_and(|turn| turn.finished.load(Ordering::Acquire))
+            );
+            assert!(
+                harness
+                    .server
+                    .as_ref()
+                    .ok_or("missing server")?
+                    .child
+                    .lock()
+                    .await
+                    .try_wait()?
+                    .is_some()
+            );
+            harness.shutdown().await?;
+            Ok::<_, Box<dyn std::error::Error>>(())
+        };
+        timeout(REQUEST_TIMEOUT, async { tokio::try_join!(fixture, client) }).await??;
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn successful_turn_cancellation_keeps_server_running()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = tempfile::tempdir()?;
+        let directory = root.path().canonicalize()?;
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let program = fixture_launcher(
+            &directory,
+            r#"#!/bin/sh
+[ "$*" = "serve --hostname 127.0.0.1 --port 0" ] || exit 2
+printf 'opencode server listening on %s\n' "$SHEPHERD_TEST_OPENCODE_URL"
+exec sleep 60
+"#,
+        )?;
+        let spec = SpawnSpec {
+            program,
+            cwd: directory.clone(),
+            environment: BTreeMap::from([(
+                "SHEPHERD_TEST_OPENCODE_URL".into(),
+                format!("http://{}", listener.local_addr()?),
+            )]),
+            ..SpawnSpec::default()
+        };
+        let (started, waiting) = tokio::sync::oneshot::channel();
+        let (release, released) = tokio::sync::oneshot::channel();
+        let fixture = serve_native_fixture(
+            listener,
+            &directory,
+            false,
+            None,
+            Some((started, released)),
+            0,
+        );
+        let client = async {
+            let mut harness = OpenCodeNativeHarness::default();
+            harness.start(spec).await?;
+            harness.open_session(None).await?;
+            harness
+                .prompt(PromptInput::text("Reply with local fixture text only"))
+                .await?;
+            let cancel = harness.cancel();
+            let release_fixture = async {
+                waiting.await?;
+                release.send(1).map_err(|_| "fixture ended early")?;
+                Ok::<_, Box<dyn std::error::Error>>(())
+            };
+            tokio::try_join!(
+                async {
+                    cancel
+                        .await
+                        .map_err(|error| -> Box<dyn std::error::Error> { Box::new(error) })
+                },
+                release_fixture
+            )?;
+            assert!(!harness.cleanup_required);
+            assert!(
+                harness
+                    .server
+                    .as_ref()
+                    .ok_or("missing server")?
+                    .child
+                    .lock()
+                    .await
+                    .try_wait()?
+                    .is_none()
+            );
+            harness.shutdown().await?;
+            Ok::<_, Box<dyn std::error::Error>>(())
+        };
+        timeout(REQUEST_TIMEOUT, async { tokio::try_join!(fixture, client) }).await??;
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn failed_turn_cancellation_reports_cleanup_failure_and_allows_retry()
+    -> Result<(), Box<dyn std::error::Error>> {
+        struct Tracker(AtomicBool);
+        #[async_trait]
+        impl shep_harness_core::AgentProcessTracker for Tracker {
+            async fn started(&self, _: u32) -> Result<String, String> {
+                Ok("fixture-record".into())
+            }
+            async fn stopped(&self, _: &str) -> Result<(), String> {
+                if self.0.swap(false, Ordering::SeqCst) {
+                    Err("fixture record cleanup failure".into())
+                } else {
+                    Ok(())
+                }
+            }
+        }
+        let root = tempfile::tempdir()?;
+        let directory = root.path().canonicalize()?;
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let program = fixture_launcher(
+            &directory,
+            r#"#!/bin/sh
+[ "$*" = "serve --hostname 127.0.0.1 --port 0" ] || exit 2
+printf 'opencode server listening on %s\n' "$SHEPHERD_TEST_OPENCODE_URL"
+exec sleep 60
+"#,
+        )?;
+        let spec = SpawnSpec {
+            program,
+            cwd: directory.clone(),
+            environment: BTreeMap::from([(
+                "SHEPHERD_TEST_OPENCODE_URL".into(),
+                format!("http://{}", listener.local_addr()?),
+            )]),
+            ..SpawnSpec::default()
+        };
+        let (started, waiting) = tokio::sync::oneshot::channel();
+        let (release, released) = tokio::sync::oneshot::channel();
+        let fixture = serve_native_fixture(
+            listener,
+            &directory,
+            false,
+            None,
+            Some((started, released)),
+            0,
+        );
+        let client = async {
+            let mut harness = OpenCodeNativeHarness::default();
+            harness.set_process_tracker(Arc::new(Tracker(AtomicBool::new(true))));
+            harness.start(spec).await?;
+            harness.open_session(None).await?;
+            harness
+                .prompt(PromptInput::text("Reply with local fixture text only"))
+                .await?;
+            let cancel = harness.cancel();
+            let release_fixture = async {
+                waiting.await?;
+                release.send(2).map_err(|_| "fixture ended early")?;
+                Ok::<_, Box<dyn std::error::Error>>(())
+            };
+            let (error, ()) = tokio::try_join!(
+                async {
+                    Ok::<_, Box<dyn std::error::Error>>(
+                        cancel.await.err().ok_or("cancel unexpectedly succeeded")?,
+                    )
+                },
+                release_fixture
+            )?;
+            let message = error.to_string();
+            assert!(message.contains("could not remove the queued OpenCode prompt"));
+            assert!(message.contains("could not interrupt the OpenCode session"));
+            assert!(message.contains("fixture record cleanup failure"));
+            assert!(std::iter::from_fn(|| harness.receiver.try_recv().ok()).any(|event| matches!(event, HarnessEvent::ConnectionFailed { text, .. } if text.contains("fixture record cleanup failure"))));
+            assert!(harness.cleanup_required);
+            assert!(
+                harness
+                    .server
+                    .as_ref()
+                    .ok_or("missing server")?
+                    .child
+                    .lock()
+                    .await
+                    .try_wait()?
+                    .is_some()
+            );
+            harness.shutdown().await?;
+            Ok::<_, Box<dyn std::error::Error>>(())
+        };
+        timeout(REQUEST_TIMEOUT, async { tokio::try_join!(fixture, client) }).await??;
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn queued_approvals_complete_through_native_http()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = tempfile::tempdir()?;
+        let directory = root.path().canonicalize()?;
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let program = fixture_launcher(
+            &directory,
+            r#"#!/bin/sh
+[ "$*" = "serve --hostname 127.0.0.1 --port 0" ] || exit 2
+printf 'opencode server listening on %s\n' "$SHEPHERD_TEST_OPENCODE_URL"
+exec sleep 60
+"#,
+        )?;
+        let spec = SpawnSpec {
+            program,
+            cwd: directory.clone(),
+            environment: BTreeMap::from([(
+                "SHEPHERD_TEST_OPENCODE_URL".into(),
+                format!("http://{}", listener.local_addr()?),
+            )]),
+            ..SpawnSpec::default()
+        };
+        let fixture = serve_native_fixture(listener, &directory, false, None, None, 1);
+        let client = async {
+            let mut harness = OpenCodeNativeHarness::default();
+            harness.start(spec).await?;
+            harness.open_session(None).await?;
+            harness
+                .prompt(PromptInput::text("Reply with local fixture text only"))
+                .await?;
+            for (expected, decision) in [
+                ("per_first", Decision::Allow),
+                ("per_second", Decision::Deny),
+            ] {
+                let id = loop {
+                    match harness.receiver.recv().await.ok_or("event stream closed")? {
+                        HarnessEvent::ApprovalRequested { request } => break request.approval_id,
+                        HarnessEvent::TurnFinished { .. }
+                        | HarnessEvent::ConnectionFailed { .. } => {
+                            return Err("turn ended before approval".into());
+                        }
+                        _ => {}
+                    }
+                };
+                assert_eq!(id.as_str(), expected);
+                if expected == "per_first" {
+                    assert!(matches!(
+                        harness
+                            .respond(ApprovalId::new("per_second"), Decision::Allow)
+                            .await,
+                        Err(HarnessError::NoPendingApproval)
+                    ));
+                    assert!(
+                        timeout(Duration::from_millis(30), harness.receiver.recv())
+                            .await
+                            .is_err()
+                    );
+                }
+                harness.respond(id.clone(), decision).await?;
+                assert!(matches!(
+                    harness.respond(id, decision).await,
+                    Err(HarnessError::NoPendingApproval)
+                ));
+            }
+            loop {
+                match harness.receiver.recv().await.ok_or("event stream closed")? {
+                    HarnessEvent::TurnFinished {
+                        reason: TurnFinishReason::Completed,
+                    } => break,
+                    HarnessEvent::ConnectionFailed { text, .. } => return Err(text.into()),
+                    _ => {}
+                }
+            }
+            harness.shutdown().await?;
+            Ok::<_, Box<dyn std::error::Error>>(())
+        };
+        timeout(REQUEST_TIMEOUT, async { tokio::try_join!(fixture, client) }).await??;
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn failed_or_interrupted_approval_response_stops_the_server()
+    -> Result<(), Box<dyn std::error::Error>> {
+        struct Tracker(AtomicBool);
+        #[async_trait]
+        impl shep_harness_core::AgentProcessTracker for Tracker {
+            async fn started(&self, _: u32) -> Result<String, String> {
+                Ok("fixture-record".into())
+            }
+            async fn stopped(&self, _: &str) -> Result<(), String> {
+                if self.0.swap(false, Ordering::SeqCst) {
+                    Err("fixture record cleanup failure".into())
+                } else {
+                    Ok(())
+                }
+            }
+        }
+        for mode in [2, 3] {
+            let root = tempfile::tempdir()?;
+            let directory = root.path().canonicalize()?;
+            let listener = TcpListener::bind("127.0.0.1:0").await?;
+            let program = fixture_launcher(
+                &directory,
+                r#"#!/bin/sh
+[ "$*" = "serve --hostname 127.0.0.1 --port 0" ] || exit 2
+printf 'opencode server listening on %s\n' "$SHEPHERD_TEST_OPENCODE_URL"
+exec sleep 60
+"#,
+            )?;
+            let spec = SpawnSpec {
+                program,
+                cwd: directory.clone(),
+                environment: BTreeMap::from([(
+                    "SHEPHERD_TEST_OPENCODE_URL".into(),
+                    format!("http://{}", listener.local_addr()?),
+                )]),
+                ..SpawnSpec::default()
+            };
+            let (started, waiting) = tokio::sync::oneshot::channel();
+            let (release, released) = tokio::sync::oneshot::channel();
+            let gate = (mode == 3).then_some((started, released));
+            let fixture = serve_native_fixture(listener, &directory, false, gate, None, mode);
+            let client = async {
+                let mut harness = OpenCodeNativeHarness::default();
+                if mode == 2 {
+                    harness.set_process_tracker(Arc::new(Tracker(AtomicBool::new(true))));
+                }
+                harness.start(spec).await?;
+                harness.open_session(None).await?;
+                harness
+                    .prompt(PromptInput::text("Reply with local fixture text only"))
+                    .await?;
+                let id = loop {
+                    if let Some(HarnessEvent::ApprovalRequested { request }) =
+                        harness.receiver.recv().await
+                    {
+                        break request.approval_id;
+                    }
+                };
+                if mode == 2 {
+                    let error = harness
+                        .respond(id, Decision::Allow)
+                        .await
+                        .err()
+                        .ok_or("response unexpectedly succeeded")?;
+                    assert!(
+                        error
+                            .to_string()
+                            .contains("Could not deliver the OpenCode approval response")
+                    );
+                    assert!(error.to_string().contains("fixture record cleanup failure"));
+                } else {
+                    let mut response = Box::pin(harness.respond(id, Decision::Allow));
+                    tokio::select! {
+                        result = &mut response => return Err(format!("response completed unexpectedly: {result:?}").into()),
+                        result = waiting => result?,
+                    }
+                    drop(response);
+                    release.send(()).map_err(|_| "fixture ended early")?;
+                }
+                assert!(harness.cleanup_required);
+                let event = timeout(Duration::from_secs(5), async {
+                    loop {
+                        match harness.receiver.recv().await {
+                            Some(event @ HarnessEvent::ConnectionFailed { .. }) => break Ok(event),
+                            Some(_) => continue,
+                            None => break Err("event stream closed"),
+                        }
+                    }
+                })
+                .await??;
+                assert!(
+                    matches!(event, HarnessEvent::ConnectionFailed { text, .. } if text.contains("approval response"))
+                );
+                assert!(
+                    harness
+                        .server
+                        .as_ref()
+                        .ok_or("missing server")?
+                        .child
+                        .lock()
+                        .await
+                        .try_wait()?
+                        .is_some()
+                );
+                harness.shutdown().await?;
+                Ok::<_, Box<dyn std::error::Error>>(())
+            };
+            timeout(REQUEST_TIMEOUT, async { tokio::try_join!(fixture, client) }).await??;
+        }
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    async fn serve_native_fixture(
+        listener: TcpListener,
+        directory: &Path,
+        fail_prompt: bool,
+        mut hang_prompt: Option<(
+            tokio::sync::oneshot::Sender<()>,
+            tokio::sync::oneshot::Receiver<()>,
+        )>,
+        mut hang_cancel: Option<(
+            tokio::sync::oneshot::Sender<()>,
+            tokio::sync::oneshot::Receiver<u8>,
+        )>,
+        approval_fixture: u8,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut stream = None;
+        for expected in [
+            "GET /api/info",
+            "GET /openapi.json",
+            "GET /api/event",
+            "POST /api/session",
+            "GET /api/event",
+            "POST /api/session/ses_fixture/prompt",
+        ] {
+            let (socket, _) = listener.accept().await?;
+            let (reader, mut writer) = socket.into_split();
+            let (request, body) = read_fixture_request(reader).await?;
+            assert_eq!(request, format!("{expected} HTTP/1.1"));
+            let mut status = "200 OK";
+            let response = match expected {
+                "GET /api/info" => json!({"version": "fixture"}).to_string(),
+                "GET /openapi.json" => NATIVE_API.to_owned(),
+                "GET /api/event" => {
+                    writer.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\ndata: {\"type\":\"server.connected\",\"data\":{}}\n\n").await?;
+                    stream = Some(writer);
+                    continue;
+                }
+                "POST /api/session" => {
+                    let body: Value = serde_json::from_slice(&body)?;
+                    assert_eq!(
+                        body,
+                        json!({"location": {"directory": directory}, "permissions": [{"action": "*", "resource": "*", "effect": "ask"}]})
+                    );
+                    json!({"data": {"id": "ses_fixture", "location": {"directory": directory}}})
+                        .to_string()
+                }
+                "POST /api/session/ses_fixture/prompt" => {
+                    let body: Value = serde_json::from_slice(&body)?;
+                    let prompt_id = body["id"].as_str().ok_or("expected prompt ID")?;
+                    assert_eq!(body["text"], "Reply with local fixture text only");
+                    assert_eq!(body["resume"], true);
+                    if approval_fixture != 3
+                        && let Some((started, release)) = hang_prompt.take()
+                    {
+                        started.send(()).map_err(|_| "prompt waiter dropped")?;
+                        release.await?;
+                        return Ok(());
+                    }
+                    if fail_prompt {
+                        status = "500 Internal Server Error";
+                        "{}".to_string()
+                    } else {
+                        let stream = stream.as_mut().ok_or("expected an event stream")?;
+                        let delta = |session, delta| json!({"sessionID": session, "assistantMessageID": "msg_fixture", "ordinal": 0, "delta": delta});
+                        for (kind, data) in [
+                            (
+                                "session.inbox.enqueued",
+                                json!({"sessionID": "ses_fixture", "inboxID": "msg_previous"}),
+                            ),
+                            ("session.text.delta", delta("ses_fixture", "prior turn")),
+                            (
+                                "session.inbox.enqueued",
+                                json!({"sessionID": "ses_fixture", "inboxID": prompt_id}),
+                            ),
+                            ("session.text.delta", delta("ses_other", "other session")),
+                            (
+                                "session.text.delta",
+                                delta("ses_fixture", "native fixture reply"),
+                            ),
+                            (
+                                "session.execution.succeeded",
+                                json!({"sessionID": "ses_fixture"}),
+                            ),
+                        ] {
+                            if kind == "session.execution.succeeded"
+                                && (hang_cancel.is_some() || approval_fixture != 0)
+                            {
+                                continue;
+                            }
+                            let event = json!({"type": kind, "data": data});
+                            stream
+                                .write_all(format!("data: {event}\n\n").as_bytes())
+                                .await?;
+                        }
+                        if approval_fixture != 0 {
+                            for id in ["per_first", "per_second"] {
+                                let event = json!({"type":"permission.asked", "data":{"sessionID":"ses_fixture", "id":id, "action":"read", "resources":[]}});
+                                stream
+                                    .write_all(format!("data: {event}\n\n").as_bytes())
+                                    .await?;
+                            }
+                        }
+                        json!({"data": {"id": prompt_id, "sessionID": "ses_fixture"}}).to_string()
+                    }
+                }
+                _ => return Err("unexpected fixture request".into()),
+            };
+            let header = format!(
+                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                response.len()
+            );
+            writer.write_all(header.as_bytes()).await?;
+            writer.write_all(response.as_bytes()).await?;
+            writer.shutdown().await?;
+        }
+        if approval_fixture != 0 {
+            for (id, decision, reply) in [
+                ("per_first", "once", "once"),
+                ("per_second", "reject", "reject"),
+            ] {
+                let (socket, _) = listener.accept().await?;
+                let (reader, mut writer) = socket.into_split();
+                let (request, body) = read_fixture_request(reader).await?;
+                assert_eq!(
+                    request,
+                    format!("POST /api/session/ses_fixture/permission/{id}/reply HTTP/1.1")
+                );
+                assert_eq!(
+                    serde_json::from_slice::<Value>(&body)?,
+                    json!({"decision": decision})
+                );
+                if approval_fixture == 2 {
+                    writer.write_all(b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await?;
+                    writer.shutdown().await?;
+                    return Ok(());
+                }
+                if approval_fixture == 3 {
+                    let (started, release) = hang_prompt.take().ok_or("missing approval gate")?;
+                    started.send(()).map_err(|_| "approval waiter dropped")?;
+                    release.await?;
+                    return Ok(());
+                }
+                writer
+                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                    .await?;
+                writer.shutdown().await?;
+                let stream = stream.as_mut().ok_or("expected an event stream")?;
+                let event = json!({"type":"permission.replied", "data":{"sessionID":"ses_fixture", "requestID":id, "reply":reply}});
+                stream
+                    .write_all(format!("data: {event}\n\n").as_bytes())
+                    .await?;
+            }
+            let stream = stream.as_mut().ok_or("expected an event stream")?;
+            stream.write_all(b"data: {\"type\":\"session.execution.succeeded\",\"data\":{\"sessionID\":\"ses_fixture\"}}\n\n").await?;
+        }
+        if fail_prompt {
+            let (socket, _) = listener.accept().await?;
+            let (reader, mut writer) = socket.into_split();
+            let (request, _) = read_fixture_request(reader).await?;
+            assert!(request.starts_with("DELETE /api/session/ses_fixture/inbox/msg_"));
+            writer.write_all(b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await?;
+            writer.shutdown().await?;
+            let (socket, _) = listener.accept().await?;
+            let (reader, mut writer) = socket.into_split();
+            let (request, _) = read_fixture_request(reader).await?;
+            assert_eq!(request, "POST /api/session/ses_fixture/interrupt HTTP/1.1");
+            writer.write_all(b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await?;
+            writer.shutdown().await?;
+        }
+        if let Some((started, release)) = hang_cancel.take() {
+            let (socket, _) = listener.accept().await?;
+            let (reader, mut writer) = socket.into_split();
+            let (request, _) = read_fixture_request(reader).await?;
+            assert!(request.starts_with("DELETE /api/session/ses_fixture/inbox/msg_"));
+            started.send(()).map_err(|_| "cancel waiter dropped")?;
+            let outcome = release.await?;
+            if outcome == 2 {
+                writer.write_all(b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await?;
+                writer.shutdown().await?;
+                let (socket, _) = listener.accept().await?;
+                let (reader, mut writer) = socket.into_split();
+                let (request, _) = read_fixture_request(reader).await?;
+                assert_eq!(request, "POST /api/session/ses_fixture/interrupt HTTP/1.1");
+                writer.write_all(b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await?;
+                writer.shutdown().await?;
+            } else if outcome == 1 {
+                writer
+                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                    .await?;
+                writer.shutdown().await?;
+                let (socket, _) = listener.accept().await?;
+                let (reader, mut writer) = socket.into_split();
+                let (request, _) = read_fixture_request(reader).await?;
+                assert_eq!(request, "POST /api/session/ses_fixture/interrupt HTTP/1.1");
+                let response = r#"{"interrupted":true}"#;
+                writer.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response}", response.len()).as_bytes()).await?;
+                writer.shutdown().await?;
+                let stream = stream.as_mut().ok_or("expected an event stream")?;
+                stream.write_all(b"data: {\"type\":\"session.execution.interrupted\",\"data\":{\"sessionID\":\"ses_fixture\"}}\n\n").await?;
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn decodes_split_event_lines_and_preserves_events_before_failure()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut decoder = EventDecoder::default();
+        let mut events = Vec::new();
+        for byte in ": heartbeat\n\r\ndata: {\"type\":\"session.text.delta\",\r\n\
+                     data: \"data\":{\"delta\":\"héllo\"}}\r\n\r\n"
+            .as_bytes()
+            .chunks(1)
+        {
+            let (_, event) = decoder.push(byte)?;
+            events.extend(event);
+        }
+        let input = b"data: {\"type\":\"session.execution.succeeded\",\"data\":{}}\n\n\
+              event: effect/httpapi/stream/failure\n";
+        let (consumed, event) = decoder.push(input)?;
+        events.extend(event);
+        assert!(decoder.push(&input[consumed..]).is_err());
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].kind, "session.text.delta");
+        assert_eq!(events[0].data, json!({"delta": "héllo"}));
+        assert_eq!(events[1].kind, "session.execution.succeeded");
+        Ok(())
+    }
+
+    #[test]
+    fn decodes_one_event_at_a_time_from_a_large_chunk() -> Result<(), Box<dyn std::error::Error>> {
+        let mut decoder = EventDecoder::default();
+        let input =
+            b"data: {\"type\":\"session.execution.succeeded\",\"data\":{}}\n\n".repeat(1000);
+        let mut remaining = input.as_slice();
+        let mut count = 0;
+        while !remaining.is_empty() {
+            let (consumed, event) = decoder.push(remaining)?;
+            assert!(consumed > 0);
+            assert_eq!(
+                event.ok_or("expected an event")?.kind,
+                "session.execution.succeeded"
+            );
+            remaining = &remaining[consumed..];
+            count += 1;
+        }
+        assert_eq!(count, 1000);
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_fragmented_oversized_event_lines_and_multiline_data()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fragment = vec![b'x'; 1024 * 1024];
+        let mut decoder = EventDecoder::default();
+        for _ in 0..8 {
+            decoder.push(&fragment)?;
+        }
+        assert!(decoder.push(b"x").is_err());
+
+        let mut decoder = EventDecoder::default();
+        for _ in 0..7 {
+            decoder.push(b"data: ")?;
+            decoder.push(&fragment)?;
+            decoder.push(b"\n")?;
+        }
+        decoder.push(b"data: ")?;
+        assert!(decoder.push(&fragment).is_ok());
+        assert!(decoder.push(b"\n").is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn maps_only_the_task_session_and_appends_the_unstreamed_suffix()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut mapping = OpenCodeTranscript::new(SessionId::new("ses_1"));
+        let mut transcript = shep_harness_core::Transcript::default();
+        for (kind, data) in [
+            (
+                "session.text.delta",
+                json!({
+                    "sessionID": "ses_other", "assistantMessageID": "msg_1", "ordinal": 0, "delta": "other"
+                }),
+            ),
+            (
+                "session.text.delta",
+                json!({
+                    "sessionID": "ses_1", "assistantMessageID": "msg_1", "ordinal": 0, "delta": "héllo"
+                }),
+            ),
+            (
+                "session.reasoning.ended",
+                json!({
+                    "sessionID": "ses_1", "assistantMessageID": "msg_1", "ordinal": 0, "text": "considered"
+                }),
+            ),
+            (
+                "session.text.ended",
+                json!({
+                    "sessionID": "ses_1", "assistantMessageID": "msg_1", "ordinal": 0, "text": "héllo world"
+                }),
+            ),
+        ] {
+            if let Some(event) = mapping.apply(OpenCodeEvent {
+                kind: kind.into(),
+                data,
+            })? {
+                transcript.apply(&event);
+            }
+        }
+        assert_eq!(transcript.len(), 2);
+        assert_eq!(
+            transcript
+                .entry(0)
+                .map(shep_harness_core::Entry::summary)
+                .as_deref(),
+            Some("agent: héllo world")
+        );
+        assert_eq!(
+            transcript
+                .entry(1)
+                .map(shep_harness_core::Entry::summary)
+                .as_deref(),
+            Some("thought: considered")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_changed_or_split_utf8_streamed_prefix() -> Result<(), Box<dyn std::error::Error>> {
+        for final_text in ["ab!", "b!", "é"] {
+            let mut mapping = OpenCodeTranscript::new(SessionId::new("ses_1"));
+            mapping.apply(OpenCodeEvent {
+                kind: "session.text.delta".into(),
+                data: json!({"sessionID": "ses_1", "assistantMessageID": "msg", "ordinal": 0, "delta": "a"}),
+            })?;
+            let result = mapping.apply(OpenCodeEvent {
+                kind: "session.text.ended".into(),
+                data: json!({"sessionID": "ses_1", "assistantMessageID": "msg", "ordinal": 0, "text": final_text}),
+            });
+            if final_text == "ab!" {
+                assert!(result.is_ok());
+            } else {
+                assert!(result.is_err());
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn limits_queued_tool_output_and_error_to_utf8_tails() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let mut mapping = OpenCodeTranscript::new(SessionId::new("ses_1"));
+        let large = format!(
+            "{}tail",
+            "界".repeat(shep_harness_core::MAX_COMMAND_OUTPUT_BYTES)
+        );
+        for data in [
+            json!({"sessionID": "ses_1", "assistantMessageID": "msg_1", "id": "call_1", "content": [{"type": "text", "text": large}]}),
+            json!({"sessionID": "ses_1", "assistantMessageID": "msg_1", "id": "call_1", "error": {"message": large}}),
+        ] {
+            let event = mapping.apply(OpenCodeEvent {
+                kind: "session.tool.success".into(),
+                data,
+            })?;
+            match event {
+                Some(HarnessEvent::ToolCall {
+                    output: Some(output),
+                    ..
+                }) => {
+                    assert!(output.len() <= shep_harness_core::MAX_COMMAND_OUTPUT_BYTES);
+                    assert!(output.ends_with("tail"));
+                    assert!(output.starts_with("[… earlier command output omitted …]"));
+                }
+                _ => return Err("expected tool output".into()),
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn tool_output_preserves_the_bounded_tail_across_parts()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let large = "界".repeat(shep_harness_core::MAX_COMMAND_OUTPUT_BYTES);
+        let parts = ["small", large.as_str(), "", "end"];
+        let expected = shep_harness_core::bounded_command_output(&parts.join("\n"));
+        let mut mapping = OpenCodeTranscript::new(SessionId::new("ses_1"));
+        let event = mapping.apply(OpenCodeEvent {
+            kind: "session.tool.success".into(),
+            data: json!({"sessionID": "ses_1", "assistantMessageID": "msg_1", "id": "call_1",
+                "content": parts.iter().map(|text| json!({"type": "text", "text": text})).collect::<Vec<_>>() }),
+        })?;
+        assert!(
+            matches!(event, Some(HarnessEvent::ToolCall { output: Some(output), .. }) if output == expected)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn maps_one_tool_id_across_execution_and_approval() -> Result<(), Box<dyn std::error::Error>> {
+        let mut mapping = OpenCodeTranscript::new(SessionId::new("ses_1"));
+        let mut apply = |kind: &str, data| {
+            mapping.apply(OpenCodeEvent {
+                kind: kind.into(),
+                data,
+            })
+        };
+        let started = apply(
+            "session.tool.input.started",
+            json!({
+                "sessionID": "ses_1", "assistantMessageID": "msg_1", "id": "call_1", "name": "bash"
+            }),
+        )?;
+        assert!(
+            matches!(started, Some(HarnessEvent::ToolCall { tool_call_id, status: ToolStatus::Pending, .. }) if tool_call_id.as_str() == "msg_1:call_1")
+        );
+        let approval = apply(
+            "permission.asked",
+            json!({
+                "sessionID": "ses_1", "id": "per_1", "action": "bash", "resources": ["cargo test"],
+                "source": { "type": "tool", "messageID": "msg_1", "id": "call_1" }
+            }),
+        )?;
+        assert!(
+            matches!(approval, Some(HarnessEvent::ApprovalRequested { request }) if
+            request.tool_call_id.as_str() == "msg_1:call_1" && request.approval_id.as_str() == "per_1")
+        );
+        let replied = apply(
+            "permission.replied",
+            json!({
+                "sessionID": "ses_1", "requestID": "per_1", "reply": "once"
+            }),
+        )?;
+        assert!(matches!(
+            replied,
+            Some(HarnessEvent::ApprovalResolved {
+                decision: Decision::Allow,
+                ..
+            })
+        ));
+        let finished = apply(
+            "session.tool.success",
+            json!({
+                "sessionID": "ses_1", "assistantMessageID": "msg_1", "id": "call_1",
+                "content": [{ "type": "text", "text": "passed" }]
+            }),
+        )?;
+        assert!(
+            matches!(finished, Some(HarnessEvent::ToolCall { tool_call_id, title, status: ToolStatus::Completed, output: Some(output), .. }) if
+            tool_call_id.as_str() == "msg_1:call_1" && title == "bash" && output == "passed")
+        );
+        Ok(())
+    }
+
+    #[cfg(feature = "live-opencode")]
+    #[tokio::test]
+    async fn installed_server_creates_and_resumes_a_session()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = tempfile::tempdir()?;
+        let spec = installed_fixture_spec(root.path())?;
+        let server = OpenCodeServer::start(&spec).await?;
+        assert!(server.probe().resume);
+        let mut events = server.subscribe().await?;
+        let session = server.create_session().await?;
+        let created = timeout(REQUEST_TIMEOUT, async {
+            loop {
+                let event = events.next().await?;
+                if event.kind == "session.created" {
+                    return Ok::<_, HarnessError>(event);
+                }
+            }
+        })
+        .await??;
+        assert_eq!(created.data["sessionID"], session.as_str());
+        server.shutdown().await?;
+
+        let restarted = OpenCodeServer::start(&spec).await?;
+        assert_eq!(restarted.resume_session(&session).await?, session);
+        assert!(!restarted.interrupt_session(&session).await?);
+        let events = restarted.subscribe().await?;
+        let prompt_id = format!("msg_{}", uuid::Uuid::new_v4().simple());
+        restarted
+            .enqueue_prompt(
+                &session,
+                &prompt_id,
+                &PromptInput::text("queued fixture"),
+                false,
+            )
+            .await?;
+        restarted.cancel_prompt(&session, &prompt_id).await?;
+        let (sender, _receiver) = mpsc::unbounded_channel();
+        let terminal = timeout(
+            REQUEST_TIMEOUT,
+            read_turn(
+                events,
+                session,
+                &prompt_id,
+                &sender,
+                &Arc::new(Semaphore::new(STREAM_BUFFER_CHUNKS)),
+                &Arc::new(Mutex::new(ApprovalResponseState::default())),
+            ),
+        )
+        .await??;
+        assert!(matches!(
+            terminal,
+            HarnessEvent::TurnFinished {
+                reason: TurnFinishReason::Cancelled
+            }
+        ));
+        restarted.shutdown().await?;
+        Ok(())
+    }
+
+    #[cfg(feature = "live-opencode")]
+    #[tokio::test]
+    async fn installed_harness_switches_mode_and_reads_it_on_reconnect()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = tempfile::tempdir()?;
+        let spec = installed_fixture_spec(root.path())?;
+        let draft_modes = project_modes(&spec).await?;
+        let mode = draft_modes
+            .iter()
+            .find(|option| option.id == "plan")
+            .ok_or("expected Plan before creating a session")?;
+        let mut harness = OpenCodeNativeHarness::default();
+        harness.start(spec.clone()).await?;
+        assert_eq!(harness.tier(), AdapterTier::Native);
+        let session = harness.open_session(None).await?;
+        let server = harness.server.as_ref().ok_or("missing native server")?;
+        assert!(server.probe().modes);
+        assert!(
+            harness
+                .modes()
+                .ok_or("missing native modes")?
+                .options
+                .contains(mode)
+        );
+        assert!(matches!(
+            harness.set_mode("missing-fixture-mode").await,
+            Err(HarnessError::ModeUnavailable)
+        ));
+        harness.set_mode(&mode.id).await?;
+        assert_eq!(
+            harness
+                .modes()
+                .ok_or("missing selected mode")?
+                .current
+                .as_deref(),
+            Some(mode.id.as_str())
+        );
+        harness.shutdown().await?;
+
+        let mut reopened = OpenCodeNativeHarness::default();
+        reopened.start(spec).await?;
+        assert_eq!(reopened.open_session(Some(session.clone())).await?, session);
+        assert_eq!(
+            reopened
+                .modes()
+                .ok_or("missing restored mode")?
+                .current
+                .as_deref(),
+            Some(mode.id.as_str())
+        );
+        reopened.shutdown().await?;
+        Ok(())
+    }
+
+    #[cfg(feature = "live-opencode")]
+    #[tokio::test]
+    async fn installed_harness_streams_a_turn_through_a_local_fixture()
+    -> Result<(), Box<dyn std::error::Error>> {
+        installed_harness_with_fixture_provider(FixtureModel::Text).await
+    }
+
+    #[cfg(feature = "live-opencode")]
+    #[tokio::test]
+    async fn installed_harness_delivers_an_image_to_the_local_provider()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use base64::{Engine as _, engine::general_purpose::STANDARD};
+
+        let root = tempfile::tempdir()?;
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let spec = installed_provider_spec(root.path(), &listener)?;
+        let path = root.path().join("a screenshot.png");
+        std::fs::write(&path, STANDARD.decode(FIXTURE_PNG)?)?;
+        let provider = tokio::spawn(serve_fixture_model(listener, FixtureModel::Image));
+        let outcome = async {
+            let mut harness = OpenCodeNativeHarness::default();
+            assert!(harness.start(spec).await?.images);
+            assert_eq!(harness.tier(), AdapterTier::Native);
+            harness.open_session(None).await?;
+            harness
+                .prompt(PromptInput {
+                    text: "Inspect the attached image.".into(),
+                    attachments: vec![shep_harness_core::PromptAttachment {
+                        path,
+                        image_mime_type: Some("image/png".into()),
+                        metadata: None,
+                    }],
+                    ..PromptInput::default()
+                })
+                .await?;
+            let events = fixture_outcome(&mut harness, TurnFinishReason::Completed).await?;
+            harness.shutdown().await?;
+            Ok::<_, HarnessError>(events)
+        }
+        .await;
+        provider.abort();
+        let mut transcript = shep_harness_core::Transcript::default();
+        for event in outcome? {
+            transcript.apply(&event);
+        }
+        assert_eq!(
+            transcript
+                .entry(0)
+                .map(shep_harness_core::Entry::summary)
+                .as_deref(),
+            Some("agent: received fixture image")
+        );
+        Ok(())
+    }
+
+    #[cfg(feature = "live-opencode")]
+    #[tokio::test]
+    async fn installed_harness_reports_a_provider_sign_in_failure()
+    -> Result<(), Box<dyn std::error::Error>> {
+        installed_harness_with_fixture_provider(FixtureModel::Unauthorized).await
+    }
+
+    #[cfg(feature = "live-opencode")]
+    fn installed_provider_spec(
+        root: &Path,
+        listener: &TcpListener,
+    ) -> Result<SpawnSpec, Box<dyn std::error::Error>> {
+        let mut spec = installed_fixture_spec(root)?;
+        let endpoint = format!("http://{}/v1", listener.local_addr()?);
+        let config = root.join("fixture config.json");
+        std::fs::write(
+            &config,
+            serde_json::to_vec(&json!({
+                "model": "shepherd_fixture/coder",
+                "providers": {
+                    "shepherd_fixture": {
+                        "name": "Local Shepherd fixture",
+                        "package": "@opencode/ai/providers/openai-compatible",
+                        "settings": { "baseURL": endpoint },
+                        "models": {
+                            "coder": {
+                                "modelID": "coder",
+                                "capabilities": { "tools": true, "input": ["text", "image"], "output": ["text"] },
+                                "limit": { "context": 32768, "output": 8192 }
+                            }
+                        }
+                    }
+                }
+            }))?,
+        )?;
+        let settings = serde_json::from_value(json!({"app": {
+            "agents.opencode.executable": spec.program,
+            "agents.opencode.config_file": config
+        }}))?;
+        let launch = configured_launch(&settings)?.ok_or("expected a configured launch")?;
+        spec.environment.extend(launch.environment);
+        Ok(spec)
+    }
+
+    #[cfg(feature = "live-opencode")]
+    async fn installed_harness_with_fixture_provider(
+        model: FixtureModel,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let root = tempfile::tempdir()?;
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let spec = installed_provider_spec(root.path(), &listener)?;
+        let provider = tokio::spawn(serve_fixture_model(listener, model));
+        let unauthorized = matches!(model, FixtureModel::Unauthorized);
+        let outcome = async {
+            let mut harness = OpenCodeNativeHarness::default();
+            harness.start(spec).await?;
+            assert_eq!(harness.tier(), AdapterTier::Native);
+            harness.open_session(None).await?;
+            let transcript = if unauthorized {
+                harness
+                    .prompt(PromptInput::text("test local sign-in failure"))
+                    .await?;
+                let mut transcript = shep_harness_core::Transcript::default();
+                for event in fixture_outcome(&mut harness, TurnFinishReason::Failed).await? {
+                    transcript.apply(&event);
+                }
+                transcript
+            } else {
+                fixture_reply(&mut harness).await?
+            };
+            harness.shutdown().await?;
+            Ok::<_, HarnessError>(transcript)
+        }
+        .await;
+        provider.abort();
+        let transcript = outcome?;
+        if unauthorized {
+            assert!(
+                transcript
+                    .entries()
+                    .iter()
+                    .any(|entry| entry.summary().contains("sign-in required")),
+                "{:?}",
+                transcript.entries()
+            );
+        } else {
+            assert_eq!(transcript.len(), 1);
+            assert_eq!(
+                transcript
+                    .entry(0)
+                    .map(shep_harness_core::Entry::summary)
+                    .as_deref(),
+                Some("agent: local fixture reply")
+            );
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "live-opencode")]
+    #[tokio::test]
+    async fn installed_harness_approves_and_cancels_after_resuming()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = tempfile::tempdir()?;
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let spec = installed_provider_spec(root.path(), &listener)?;
+        let provider = tokio::spawn(serve_fixture_model(listener, FixtureModel::Shell));
+        let outcome = async {
+            let mut first = OpenCodeNativeHarness::default();
+            assert!(first.start(spec.clone()).await?.resume);
+            let session = first.open_session(None).await?;
+            first.shutdown().await?;
+
+            let mut reopened = OpenCodeNativeHarness::default();
+            let capabilities = reopened.start(spec).await?;
+            assert_eq!(reopened.tier(), AdapterTier::Native);
+            assert!(capabilities.approvals && capabilities.cancel);
+            assert_eq!(reopened.open_session(Some(session.clone())).await?, session);
+
+            for (decision, outcome) in [
+                (Decision::Allow, TurnFinishReason::Completed),
+                (Decision::Deny, TurnFinishReason::Interrupted),
+            ] {
+                reopened
+                    .prompt(PromptInput::text("Run the approval fixture"))
+                    .await?;
+                let approval = fixture_approval(&mut reopened).await?;
+                reopened.respond(approval.clone(), decision).await?;
+                let events = fixture_outcome(&mut reopened, outcome).await?;
+                assert!(
+                    events
+                        .iter()
+                        .any(|event| matches!(event, HarnessEvent::ApprovalResolved {
+                    approval_id, decision: resolved, ..
+                } if *approval_id == approval && *resolved == decision)),
+                    "{events:?}"
+                );
+                let marker = events.iter().any(|event| {
+                    matches!(event, HarnessEvent::ToolCall {
+                    status: ToolStatus::Completed, output: Some(output), ..
+                } if output.contains("shepherd_approval_fixture"))
+                });
+                assert_eq!(marker, decision == Decision::Allow, "{events:?}");
+            }
+
+            reopened
+                .prompt(PromptInput::text("Run the cancellation fixture"))
+                .await?;
+            let pending = fixture_approval(&mut reopened).await?;
+            reopened.cancel().await?;
+            let events = fixture_outcome(&mut reopened, TurnFinishReason::Cancelled).await?;
+            assert!(
+                events
+                    .iter()
+                    .any(|event| matches!(event, HarnessEvent::ApprovalWithdrawn {
+                approval_id
+            } if *approval_id == pending)),
+                "{events:?}"
+            );
+            assert!(
+                !events.iter().any(|event| matches!(
+                    event,
+                    HarnessEvent::ToolCall {
+                        status: ToolStatus::Completed,
+                        ..
+                    }
+                )),
+                "{events:?}"
+            );
+            reopened.shutdown().await?;
+            Ok::<_, Box<dyn std::error::Error>>(())
+        }
+        .await;
+        provider.abort();
+        outcome
+    }
+
+    #[cfg(feature = "live-opencode")]
+    async fn fixture_approval(harness: &mut OpenCodeNativeHarness) -> HarnessResult<ApprovalId> {
+        timeout(REQUEST_TIMEOUT, async {
+            while let Some(event) = harness.events().recv().await {
+                match event {
+                    HarnessEvent::ApprovalRequested { request } => {
+                        assert!(
+                            request
+                                .arguments
+                                .to_string()
+                                .contains("shepherd_approval_fixture"),
+                            "{request:?}"
+                        );
+                        return Ok(request.approval_id);
+                    }
+                    HarnessEvent::TurnFinished { .. }
+                    | HarnessEvent::ConnectionFailed { .. }
+                    | HarnessEvent::Exited { .. } => {
+                        return Err(protocol_error(
+                            "fixture ended before requesting approval",
+                            format_args!("{event:?}"),
+                        ));
+                    }
+                    _ => {}
+                }
+            }
+            Err(HarnessError::ChannelClosed)
+        })
+        .await
+        .map_err(|error| protocol_error("fixture approval timed out", error))?
+    }
+
+    #[cfg(feature = "live-opencode")]
+    async fn fixture_outcome(
+        harness: &mut OpenCodeNativeHarness,
+        expected: TurnFinishReason,
+    ) -> HarnessResult<Vec<HarnessEvent>> {
+        let mut events = Vec::new();
+        timeout(REQUEST_TIMEOUT, async {
+            while let Some(event) = harness.events().recv().await {
+                match event {
+                    HarnessEvent::TurnFinished { reason } => {
+                        assert_eq!(reason, expected, "{events:?}");
+                        return Ok(events);
+                    }
+                    HarnessEvent::ConnectionFailed { .. } | HarnessEvent::Exited { .. } => {
+                        return Err(protocol_error(
+                            "fixture connection closed",
+                            format_args!("{event:?}"),
+                        ));
+                    }
+                    _ => events.push(event),
+                }
+            }
+            Err(HarnessError::ChannelClosed)
+        })
+        .await
+        .map_err(|error| protocol_error("fixture turn timed out", error))?
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn acp_is_the_default_and_streams_a_turn() -> Result<(), Box<dyn std::error::Error>> {
+        struct Tracker {
+            starts: std::sync::atomic::AtomicUsize,
+            stops: std::sync::atomic::AtomicUsize,
+        }
+        #[async_trait]
+        impl shep_harness_core::AgentProcessTracker for Tracker {
+            async fn started(&self, _pid: u32) -> Result<String, String> {
+                Ok(self.starts.fetch_add(1, Ordering::SeqCst).to_string())
+            }
+            async fn stopped(&self, _id: &str) -> Result<(), String> {
+                self.stops.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }
+        }
+        let root = tempfile::tempdir()?;
+        let program = fixture_launcher(
+            root.path(),
+            r#"#!/bin/sh
+if [ "$1" != acp ]; then exit 78; fi
+[ "$OPENCODE_CONFIG" = "$PWD/fixture config.json" ] || exit 79
+while IFS= read -r record; do
+    request_id=$(printf '%s\n' "$record" | sed -nE 's/.*"id":("[^"]+"|[0-9]+).*/\1/p')
+    case "$record" in
+        *'"method":"initialize"'*)
+            printf '{"jsonrpc":"2.0","id":%s,"result":{"protocolVersion":1}}\n' "$request_id";;
+        *'"method":"session/new"'*)
+            printf '{"jsonrpc":"2.0","id":%s,"result":{"sessionId":"fixture"}}\n' "$request_id";;
+        *'"method":"session/prompt"'*)
+            printf '%s\n' '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"fixture","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"ACP fixture reply"}}}}'
+            printf '{"jsonrpc":"2.0","id":%s,"result":{"stopReason":"end_turn"}}\n' "$request_id";;
+    esac
+done
+"#,
+        )?;
+        let cwd = root.path().canonicalize()?;
+        let settings = serde_json::from_value(json!({"app": {
+            "agents.opencode.executable": program,
+            "agents.opencode.config_file": cwd.join("fixture config.json")
+        }}))?;
+        let spec = SpawnSpec {
+            cwd,
+            ..configured_launch(&settings)?.ok_or("expected a configured launch")?
+        };
+        let mut harness = OpenCodeHarness::default();
+        let tracker = Arc::new(Tracker {
+            starts: std::sync::atomic::AtomicUsize::new(0),
+            stops: std::sync::atomic::AtomicUsize::new(0),
+        });
+        harness.set_process_tracker(tracker.clone());
+        harness.start(spec).await?;
+        assert_eq!(harness.tier(), AdapterTier::Acp);
+        assert!(harness.diagnostics().command.ends_with(" acp"));
+        assert_eq!(harness.open_session(None).await?.as_str(), "fixture");
+        let transcript = fixture_reply(&mut harness).await?;
+        assert_eq!(
+            transcript
+                .entry(0)
+                .map(shep_harness_core::Entry::summary)
+                .as_deref(),
+            Some("agent: ACP fixture reply")
+        );
+        harness.shutdown().await?;
+        assert_eq!(tracker.starts.load(Ordering::SeqCst), 1);
+        assert_eq!(tracker.stops.load(Ordering::SeqCst), 1);
+        Ok(())
+    }
+
+    #[cfg(all(unix, feature = "live-opencode"))]
+    #[tokio::test]
+    async fn installed_harness_loads_an_acp_session() -> Result<(), Box<dyn std::error::Error>> {
+        let root = tempfile::tempdir()?;
+        let mut spec = installed_fixture_spec(root.path())?;
+        let launcher = fixture_launcher(
+            root.path(),
+            "#!/bin/sh\nif [ \"$1\" = serve ]; then exit 78; fi\nexec \"$SHEPHERD_OPENCODE_FIXTURE_EXEC\" \"$@\"\n",
+        )?;
+        let program = std::mem::replace(&mut spec.program, launcher);
+        spec.environment
+            .insert("SHEPHERD_OPENCODE_FIXTURE_EXEC".into(), program);
+        let mut first = OpenCodeHarness::default();
+        assert!(first.start(spec.clone()).await?.resume);
+        assert_eq!(first.tier(), AdapterTier::Acp);
+        let session = first.open_session(None).await?;
+        first.shutdown().await?;
+        let mut reopened = OpenCodeHarness::default();
+        reopened.start(spec).await?;
+        assert_eq!(reopened.open_session(Some(session.clone())).await?, session);
+        reopened.shutdown().await?;
+        Ok(())
+    }
+
+    async fn fixture_reply(
+        harness: &mut dyn AgentHarness,
+    ) -> HarnessResult<shep_harness_core::Transcript> {
+        harness
+            .prompt(PromptInput::text("Reply with local fixture text only"))
+            .await?;
+        let mut transcript = shep_harness_core::Transcript::default();
+        timeout(REQUEST_TIMEOUT, async {
+            loop {
+                let event = harness
+                    .events()
+                    .recv()
+                    .await
+                    .ok_or(HarnessError::ChannelClosed)?;
+                transcript.apply(&event);
+                match event {
+                    HarnessEvent::TurnFinished {
+                        reason: TurnFinishReason::Completed,
+                    } => return Ok(transcript),
+                    HarnessEvent::TurnFinished { reason } => {
+                        return Err(protocol_error(
+                            "fixture turn ended",
+                            format_args!("{reason:?}"),
+                        ));
+                    }
+                    HarnessEvent::TurnError { text, .. }
+                    | HarnessEvent::Exited { stderr: text, .. } => {
+                        return Err(HarnessError::Protocol(text));
+                    }
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .map_err(|error| protocol_error("fixture turn timed out", error))?
+    }
+
+    #[cfg(unix)]
+    fn fixture_launcher(directory: &Path, script: &str) -> std::io::Result<String> {
+        use std::os::unix::fs::PermissionsExt;
+        let path = directory.join("opencode-fixture");
+        std::fs::write(&path, script)?;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))?;
+        Ok(path.to_string_lossy().into_owned())
+    }
+
+    #[cfg(feature = "live-opencode")]
+    fn installed_fixture_spec(root: &Path) -> Result<SpawnSpec, Box<dyn std::error::Error>> {
+        let settings = PathBuf::from(
+            std::env::var_os("SHEPHERD_OPENCODE_TEST_SETTINGS")
+                .ok_or("set SHEPHERD_OPENCODE_TEST_SETTINGS to the path of a settings.json file")?,
+        );
+        let executable =
+            configured_executable(&settings)?.ok_or("configure agents.opencode.executable")?;
+        let project = root.join("project");
+        std::fs::create_dir(&project)?;
+        let mut environment = BTreeMap::new();
+        for (name, path) in [
+            ("HOME", root.to_owned()),
+            ("XDG_CONFIG_HOME", root.join("config")),
+            ("XDG_DATA_HOME", root.join("data")),
+            ("XDG_CACHE_HOME", root.join("cache")),
+            ("XDG_STATE_HOME", root.join("state")),
+        ] {
+            environment.insert(name.into(), path.to_string_lossy().into_owned());
+        }
+        for (name, value) in [
+            ("OPENCODE_DISABLE_MODELS_FETCH", "1"),
+            ("HTTP_PROXY", "http://127.0.0.1:1"),
+            ("HTTPS_PROXY", "http://127.0.0.1:1"),
+            ("NO_PROXY", "127.0.0.1,localhost"),
+        ] {
+            environment.insert(name.into(), value.into());
+        }
+        Ok(SpawnSpec {
+            program: executable
+                .into_os_string()
+                .into_string()
+                .map_err(|_| "OpenCode path must be UTF-8")?,
+            cwd: project,
+            environment,
+            ..SpawnSpec::default()
+        })
+    }
+
+    #[cfg(feature = "live-opencode")]
+    #[derive(Clone, Copy)]
+    enum FixtureModel {
+        Text,
+        Image,
+        Unauthorized,
+        Shell,
+    }
+
+    #[cfg(feature = "live-opencode")]
+    const FIXTURE_PNG: &str = "iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAIAAACQkWg2AAAAFklEQVR4nGNwURIkCTGMahjVMHw1AAB4uncB7nfs+wAAAABJRU5ErkJggg==";
+
+    #[cfg(feature = "live-opencode")]
+    async fn serve_fixture_model(
+        listener: TcpListener,
+        model: FixtureModel,
+    ) -> std::io::Result<()> {
+        loop {
+            let (socket, _) = listener.accept().await?;
+            let (reader, mut writer) = socket.into_split();
+            let (_, request) = read_fixture_request(reader).await?;
+            if matches!(model, FixtureModel::Unauthorized) {
+                let body = r#"{"error":{"message":"Local fixture credential expired","type":"invalid_request_error","code":"invalid_api_key"}}"#;
+                let response = format!(
+                    "HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                writer.write_all(response.as_bytes()).await?;
+                writer.shutdown().await?;
+                continue;
+            }
+            let fixture_text = if matches!(model, FixtureModel::Image) {
+                let request: Value = serde_json::from_slice(&request)?;
+                let expected = format!("data:image/png;base64,{FIXTURE_PNG}");
+                let found = request["messages"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|message| message["content"].as_array())
+                    .flatten()
+                    .any(|part| part["image_url"]["url"] == expected);
+                if found {
+                    "received fixture image"
+                } else {
+                    "missing fixture image"
+                }
+            } else {
+                "local fixture reply"
+            };
+            let shell_call = if matches!(model, FixtureModel::Shell) {
+                fixture_shell_call(&serde_json::from_slice(&request)?)
+            } else {
+                None
+            };
+            let (reply, finish_reason) = shell_call.map_or_else(
+                || (json!({"role":"assistant", "content":fixture_text}), "stop"),
+                |call| {
+                    (
+                        json!({"role":"assistant", "tool_calls":[call]}),
+                        "tool_calls",
+                    )
+                },
+            );
+            let mut body = String::new();
+            for (delta, finish) in [(reply, None), (json!({}), Some(finish_reason))] {
+                let chunk = json!({
+                    "id":"chatcmpl-fixture", "object":"chat.completion.chunk", "created":1,
+                    "model":"coder", "choices":[{"index":0,"delta":delta,"finish_reason":finish}]
+                });
+                body.push_str(&format!("data: {chunk}\n\n"));
+            }
+            body.push_str("data: [DONE]\n\n");
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            writer.write_all(response.as_bytes()).await?;
+            writer.shutdown().await?;
+        }
+    }
+
+    #[cfg(feature = "live-opencode")]
+    fn fixture_shell_call(request: &Value) -> Option<Value> {
+        let last_input = request["messages"]
+            .as_array()?
+            .iter()
+            .rev()
+            .find(|message| matches!(message["role"].as_str(), Some("tool" | "user")))?;
+        if last_input["role"] != "user" {
+            return None;
+        }
+        let shell = request["tools"]
+            .as_array()?
+            .iter()
+            .find(|tool| tool["function"]["name"] == "shell")?;
+        let arguments = json!({"command": "printf shepherd_approval_fixture"});
+        Some(json!({
+            "index": 0, "id": format!("call_{}", uuid::Uuid::new_v4().simple()), "type": "function",
+            "function": {"name": shell["function"]["name"], "arguments": arguments.to_string()}
+        }))
+    }
+
+    async fn read_fixture_request(
+        reader: impl AsyncRead + Unpin,
+    ) -> std::io::Result<(String, Vec<u8>)> {
+        let mut reader = BufReader::new(reader);
+        let mut request = String::new();
+        reader.read_line(&mut request).await?;
+        request.truncate(request.trim_end().len());
+        let mut line = String::new();
+        let mut length = 0;
+        while reader.read_line(&mut line).await? > 0 && line != "\r\n" {
+            if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                length = value
+                    .trim()
+                    .parse::<usize>()
+                    .map_err(std::io::Error::other)?;
+            }
+            line.clear();
+        }
+        if length > MAX_RESPONSE_BYTES {
+            return Err(std::io::Error::other("fixture request is too large"));
+        }
+        let mut body = vec![0; length];
+        reader.read_exact(&mut body).await?;
+        Ok((request, body))
+    }
+}

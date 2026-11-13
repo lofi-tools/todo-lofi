@@ -1,0 +1,33 @@
+[package]
+name = "shep-harness-core"
+version.workspace = true
+edition.workspace = true
+description = "UI-free coding-agent adapter contract, transcript model and shared settings."
+
+[lib]
+name = "shep_harness_core"
+path = "src/shep_harness_core.rs"
+
+[features]
+live-test-support = ["dep:tempfile"]
+
+[dependencies]
+acp-client = { path = "../acp-client" }
+async-trait.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tempfile = { version = "3", optional = true }
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+futures-channel = "0.3"
+tempfile = "3"
+tokio = { version = "1", features = ["macros", "rt"] }
+tracing-subscriber.workspace = true

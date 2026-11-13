@@ -1,0 +1,22 @@
+[package]
+name = "shep-terminal-replay"
+version.workspace = true
+edition.workspace = true
+description = "Verification and replay of captured Shepherd terminal sessions."
+
+[lib]
+path = "src/shep_terminal_replay.rs"
+
+[features]
+git = ["shep-core/git"]
+
+[dependencies]
+shep-harness-core = { path = "../shep-harness-core" }
+shep-harness-freebuff = { path = "../shep-harness-freebuff" }
+serde_json.workspace = true
+shep-core = { path = "../shep-core" }
+shep-terminal-renderer = { path = "../shep-terminal-renderer" }
+
+[dev-dependencies]
+shep-core = { path = "../shep-core", features = ["test-support"] }
+tempfile = "3"

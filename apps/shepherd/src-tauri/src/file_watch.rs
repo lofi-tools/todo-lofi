@@ -4,8 +4,8 @@ use std::time::Duration;
 
 use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use serde::Serialize;
-use shepherd_core::files::{self, FileChange, WorkspaceGitStatus};
-use shepherd_core::git::{GitError, GitService};
+use shep_core::files::{self, FileChange, WorkspaceGitStatus};
+use shep_core::git::{GitError, GitService};
 use tokio::sync::watch;
 use tokio::time::{Instant, sleep_until};
 
@@ -241,7 +241,7 @@ impl WatchPaths {
 mod tests {
     use std::process::Command;
 
-    use shepherd_core::test_support::TestRepository;
+    use shep_core::test_support::TestRepository;
 
     use super::*;
 

@@ -1,0 +1,39 @@
+[package]
+name = "shep-core"
+version.workspace = true
+edition.workspace = true
+description = "Headless Shepherd core: commands, events, snapshots, task lifecycle and shutdown."
+
+[lib]
+path = "src/shep_core.rs"
+
+[features]
+git = []
+test-support = ["dep:tempfile"]
+live-codex = []
+
+[dependencies]
+shep-harness-core = { path = "../shep-harness-core" }
+shep-harness-freebuff = { path = "../shep-harness-freebuff" }
+shep-project-scan = { path = "../shep-project-scan" }
+async-trait.workspace = true
+ignore = "0.4"
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+syntect = { version = "5", features = ["default-syntaxes", "default-themes"] }
+tempfile = { version = "3", optional = true }
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+url.workspace = true
+uuid.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1", features = ["fs"] }
+
+[dev-dependencies]
+shep-harness-core = { path = "../shep-harness-core", features = ["live-test-support"] }
+shep-harness-full = { package = "agent-harness", path = "../agent-harness", features = ["live-test-support"] }
+tempfile = "3"
+tokio = { version = "1", features = ["macros", "rt"] }

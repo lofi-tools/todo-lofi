@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 const SHEPHERD_MANIFESTS: [&str; 4] = [
     "apps/shepherd/src-tauri/Cargo.toml",
-    "libs/shepherd-core/Cargo.toml",
+    "libs/shep-core/Cargo.toml",
     "libs/agent-harness/Cargo.toml",
     "libs/acp-client/Cargo.toml",
 ];

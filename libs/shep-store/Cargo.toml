@@ -1,0 +1,35 @@
+[package]
+name = "shep-store"
+version.workspace = true
+edition.workspace = true
+description = "Shepherd's durable store: the Toasty schema, its migrations and the Turso backend."
+
+[lib]
+name = "shep_store"
+path = "src/shep_store.rs"
+
+[dependencies]
+shep-core = { path = "../shep-core" }
+shep-harness-core = { path = "../shep-harness-core" }
+async-trait.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+toasty = { version = "0.7", features = ["turso"] }
+toasty-driver-turso = "0.7"
+turso_parser = "0.6.1"
+tokio.workspace = true
+tracing.workspace = true
+url.workspace = true
+uuid.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1", features = ["fs"] }
+
+[dev-dependencies]
+shep-harness-core = { path = "../shep-harness-core", features = ["live-test-support"] }
+shep-harness-full = { package = "agent-harness", path = "../agent-harness", features = ["live-test-support"] }
+shep-core = { path = "../shep-core", features = ["test-support"] }
+tempfile = "3"
+tokio = { version = "1", features = ["macros", "rt"] }

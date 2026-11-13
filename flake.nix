@@ -201,8 +201,14 @@
                   --watch apps/shepherd/src-tauri/build.rs \
                   --watch apps/shepherd/src-tauri/tauri.conf.json \
                   --watch apps/shepherd/src-tauri/capabilities \
-                  --watch libs/shepherd-core \
+                  --watch libs/shep-core \
                   --watch libs/agent-harness \
+                  --watch libs/shep-harness-core \
+                  --watch libs/shep-harness-acp \
+                  --watch libs/shep-harness-codex \
+                  --watch libs/shep-harness-freebuff \
+                  --watch libs/shep-harness-opencode \
+                  --watch libs/shep-harness-pi \
                   --watch libs/acp-client \
                   --watch Cargo.toml --watch Cargo.lock \
                   --exts rs,toml,json,sql,lock \

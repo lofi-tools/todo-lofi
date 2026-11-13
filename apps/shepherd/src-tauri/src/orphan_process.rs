@@ -1,5 +1,5 @@
 use serde::Serialize;
-use shepherd_core::terminal::ProcessRecord;
+use shep_core::terminal::ProcessRecord;
 use std::collections::BTreeMap;
 use std::fs::{File, OpenOptions};
 use std::io;

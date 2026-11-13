@@ -1,6 +1,6 @@
 use crate::bridge::{BridgeError, ShellState};
 use crate::settings::SettingKey;
-use shepherd_core::TaskId;
+use shep_core::TaskId;
 use tauri::State;
 
 #[tauri::command]

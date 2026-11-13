@@ -15,16 +15,16 @@ class FocusedSelectionTests(unittest.TestCase):
     def setUp(self):
         self.roots = {
             "apps/shepherd/src-tauri": "shepherd",
-            "libs/shepherd-core": "shepherd-core",
-            "libs/terminal-renderer": "terminal-renderer",
+            "libs/shep-core": "shep-core",
+            "libs/shep-terminal-renderer": "shep-terminal-renderer",
             "demos/example": "example",
         }
         self.omitted = {"example"}
 
     def test_selects_changed_crates_without_dependents(self):
         self.assertEqual(
-            FOCUSED.select(["libs/shepherd-core/src/tasks.rs"], self.roots, self.omitted),
-            (["shepherd-core"], False, False, False, set()),
+            FOCUSED.select(["libs/shep-core/src/tasks.rs"], self.roots, self.omitted),
+            (["shep-core"], False, False, False, set()),
         )
 
     def test_selects_ui_without_rust_crates(self):
@@ -36,7 +36,7 @@ class FocusedSelectionTests(unittest.TestCase):
     def test_shared_paths_select_supported_packages_and_ui(self):
         self.assertEqual(
             FOCUSED.select(["Cargo.lock"], self.roots, self.omitted),
-            (["shepherd", "shepherd-core", "terminal-renderer"], True, True, False, set()),
+            (["shep-core", "shep-terminal-renderer", "shepherd"], True, True, False, set()),
         )
 
     def test_omits_demo_paths(self):
@@ -81,7 +81,7 @@ class FocusedSelectionTests(unittest.TestCase):
             patch.object(FOCUSED.SHARDS, "web_workspace", return_value=({}, {}, [])),
             patch.object(FOCUSED.SHARDS, "web_test_suites", return_value=[]),
             patch.object(FOCUSED.SHARDS, "excluded_packages", return_value=self.omitted),
-            patch.object(FOCUSED.SHARDS, "changed_paths", return_value=["libs/shepherd-core/src/tasks.rs"]),
+            patch.object(FOCUSED.SHARDS, "changed_paths", return_value=["libs/shep-core/src/tasks.rs"]),
             patch.object(FOCUSED, "full_due", return_value=False),
             patch.object(FOCUSED.sys, "argv", ["shepherd-focused-tests.py", "--git"]),
             patch.object(FOCUSED.subprocess, "run") as run,
@@ -91,13 +91,13 @@ class FocusedSelectionTests(unittest.TestCase):
             self.assertEqual(run.call_args.args[0][-2:], ["--features", "git"])
 
     def test_git_flag_enables_replay_git_tests_for_changed_replay_crate(self):
-        roots = self.roots | {"libs/terminal-replay": "terminal-replay"}
+        roots = self.roots | {"libs/shep-terminal-replay": "shep-terminal-replay"}
         with (
             patch.object(FOCUSED.SHARDS, "workspace", return_value=(roots, {})),
             patch.object(FOCUSED.SHARDS, "web_workspace", return_value=({}, {}, [])),
             patch.object(FOCUSED.SHARDS, "web_test_suites", return_value=[]),
             patch.object(FOCUSED.SHARDS, "excluded_packages", return_value=self.omitted),
-            patch.object(FOCUSED.SHARDS, "changed_paths", return_value=["libs/terminal-replay/src/terminal_replay.rs"]),
+            patch.object(FOCUSED.SHARDS, "changed_paths", return_value=["libs/shep-terminal-replay/src/shep_terminal_replay.rs"]),
             patch.object(FOCUSED, "full_due", return_value=False),
             patch.object(FOCUSED.sys, "argv", ["shepherd-focused-tests.py", "--git"]),
             patch.object(FOCUSED.subprocess, "run") as run,

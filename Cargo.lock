@@ -263,22 +263,12 @@ dependencies = [
 name = "agent-harness"
 version = "0.1.0"
 dependencies = [
- "acp-client",
- "async-trait",
- "base64 0.22.1",
- "bytes",
- "futures-channel",
- "libc",
- "reqwest 0.13.4",
- "serde",
- "serde_json",
- "sha2 0.11.0",
- "tempfile",
- "thiserror 1.0.69",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "uuid",
+ "shep-harness-acp",
+ "shep-harness-codex",
+ "shep-harness-core",
+ "shep-harness-freebuff",
+ "shep-harness-opencode",
+ "shep-harness-pi",
 ]
 
 [[package]]
@@ -11043,6 +11033,200 @@ dependencies = [
 ]
 
 [[package]]
+name = "shep-core"
+version = "0.1.0"
+dependencies = [
+ "agent-harness",
+ "async-trait",
+ "ignore",
+ "rustix 1.1.4",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "shep-harness-core",
+ "shep-harness-freebuff",
+ "shep-project-scan",
+ "syntect",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+ "url",
+ "uuid",
+]
+
+[[package]]
+name = "shep-harness-acp"
+version = "0.1.0"
+dependencies = [
+ "acp-client",
+ "async-trait",
+ "base64 0.22.1",
+ "futures-channel",
+ "libc",
+ "serde",
+ "serde_json",
+ "shep-harness-core",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
+name = "shep-harness-codex"
+version = "0.1.0"
+dependencies = [
+ "acp-client",
+ "async-trait",
+ "futures-channel",
+ "libc",
+ "serde",
+ "serde_json",
+ "shep-harness-core",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
+name = "shep-harness-core"
+version = "0.1.0"
+dependencies = [
+ "acp-client",
+ "async-trait",
+ "futures-channel",
+ "libc",
+ "reqwest 0.13.4",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
+name = "shep-harness-freebuff"
+version = "0.1.0"
+dependencies = [
+ "acp-client",
+ "async-trait",
+ "futures-channel",
+ "libc",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "shep-harness-acp",
+ "shep-harness-core",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
+name = "shep-harness-opencode"
+version = "0.1.0"
+dependencies = [
+ "acp-client",
+ "async-trait",
+ "base64 0.22.1",
+ "bytes",
+ "futures-channel",
+ "libc",
+ "reqwest 0.13.4",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "shep-harness-acp",
+ "shep-harness-core",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
+name = "shep-harness-pi"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "base64 0.22.1",
+ "futures-channel",
+ "libc",
+ "serde",
+ "serde_json",
+ "shep-harness-core",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
+name = "shep-project-scan"
+version = "0.1.0"
+dependencies = [
+ "rustix 1.1.4",
+ "serde",
+ "tempfile",
+]
+
+[[package]]
+name = "shep-store"
+version = "0.1.0"
+dependencies = [
+ "agent-harness",
+ "async-trait",
+ "rustix 1.1.4",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "shep-core",
+ "shep-harness-core",
+ "tempfile",
+ "thiserror 1.0.69",
+ "toasty",
+ "toasty-driver-turso",
+ "tokio",
+ "tracing",
+ "turso_parser",
+ "url",
+ "uuid",
+]
+
+[[package]]
+name = "shep-terminal-renderer"
+version = "0.1.0"
+dependencies = [
+ "alacritty_terminal",
+ "compact_str",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "shep-terminal-replay"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "shep-core",
+ "shep-harness-core",
+ "shep-harness-freebuff",
+ "shep-terminal-renderer",
+ "tempfile",
+]
+
+[[package]]
 name = "shepherd"
 version = "0.1.0"
 dependencies = [
@@ -11059,51 +11243,19 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.11.0",
- "shepherd-core",
+ "shep-core",
+ "shep-store",
+ "shep-terminal-renderer",
+ "shep-terminal-replay",
  "tauri",
  "tauri-build",
  "tempfile",
- "terminal-renderer",
- "terminal-replay",
  "thiserror 1.0.69",
  "toasty",
  "toasty-driver-turso",
  "tokio",
  "tracing",
  "uuid",
-]
-
-[[package]]
-name = "shepherd-core"
-version = "0.1.0"
-dependencies = [
- "agent-harness",
- "async-trait",
- "ignore",
- "rustix 1.1.4",
- "serde",
- "serde_json",
- "sha2 0.11.0",
- "shepherd-project-scan",
- "syntect",
- "tempfile",
- "thiserror 1.0.69",
- "toasty",
- "toasty-driver-turso",
- "tokio",
- "tracing",
- "turso_parser",
- "url",
- "uuid",
-]
-
-[[package]]
-name = "shepherd-project-scan"
-version = "0.1.0"
-dependencies = [
- "rustix 1.1.4",
- "serde",
- "tempfile",
 ]
 
 [[package]]
@@ -12998,27 +13150,6 @@ dependencies = [
  "serde",
  "thiserror 1.0.69",
  "unicode-width 0.1.14",
-]
-
-[[package]]
-name = "terminal-renderer"
-version = "0.1.0"
-dependencies = [
- "alacritty_terminal",
- "compact_str",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "terminal-replay"
-version = "0.1.0"
-dependencies = [
- "agent-harness",
- "serde_json",
- "shepherd-core",
- "tempfile",
- "terminal-renderer",
 ]
 
 [[package]]

@@ -1,6 +1,6 @@
 //! The live agent adapters the desktop app runs.
 //!
-//! Detection happens once at startup. `shepherd-core` stays CLI-agnostic, so the
+//! Detection happens once at startup. `shep-core` stays CLI-agnostic, so the
 //! core asks this factory both for the adapter and for the command it should
 //! launch inside each task's directory.
 
@@ -15,8 +15,8 @@ use agent_harness::opencode::OpenCodeHarness;
 use agent_harness::pi::PiHarness;
 use agent_harness::settings::{AgentSettings, ConfiguredCommand};
 use agent_harness::{AgentHarness, FailureKind, HarnessError, SpawnSpec};
-use shepherd_core::harness::HarnessFactory;
-use shepherd_core::{Agent, CoreError};
+use shep_core::harness::HarnessFactory;
+use shep_core::{Agent, CoreError};
 
 const DEFAULT_CODEX_MODEL: &str = "gpt-6.1-terra";
 
@@ -113,7 +113,7 @@ impl HarnessFactory for DesktopHarnessFactory {
 
     fn launch_for_task(
         &self,
-        task_id: &shepherd_core::TaskId,
+        task_id: &shep_core::TaskId,
         agent: Agent,
         cwd: PathBuf,
     ) -> Result<(Box<dyn AgentHarness>, SpawnSpec), CoreError> {
@@ -299,7 +299,7 @@ mod tests {
         use agent_harness::{HarnessEvent, PromptInput, TurnFinishReason};
         use std::os::unix::fs::PermissionsExt;
 
-        let directory = shepherd_core::test_support::TestDirectory::new()?;
+        let directory = shep_core::test_support::TestDirectory::new()?;
         let program = directory.join("codex-fixture");
         std::fs::write(
             &program,

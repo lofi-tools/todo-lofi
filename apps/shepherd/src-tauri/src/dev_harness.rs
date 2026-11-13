@@ -2,8 +2,8 @@
 
 use agent_harness::fake_harness::{FakeHarness, FakeStep, FakeTurn};
 use agent_harness::{AgentHarness, ToolStatus};
-use shepherd_core::CoreError;
-use shepherd_core::harness::HarnessFactory;
+use shep_core::CoreError;
+use shep_core::harness::HarnessFactory;
 
 #[cfg(all(debug_assertions, feature = "desktop-codex-smoke"))]
 use agent_harness::live_codex::LiveCodexRun;

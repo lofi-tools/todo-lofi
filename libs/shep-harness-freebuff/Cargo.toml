@@ -1,0 +1,30 @@
+[package]
+name = "shep-harness-freebuff"
+version.workspace = true
+edition.workspace = true
+description = "Freebuff terminal adapter and its wire capture format."
+
+[features]
+live-freebuff = []
+
+[dependencies]
+acp-client = { path = "../acp-client" }
+shep-harness-acp = { path = "../shep-harness-acp" }
+shep-harness-core = { path = "../shep-harness-core" }
+async-trait.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+acp-client = { path = "../acp-client", features = ["test-support"] }
+futures-channel = "0.3"
+tempfile = "3"
+tokio = { version = "1", features = ["macros", "rt"] }
+tracing-subscriber.workspace = true

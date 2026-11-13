@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use shepherd_core::input::{
+use shep_core::input::{
     CommandRegistry, KeyPlatform, command_registry as defaults, command_registry_with_overrides,
     normalize_binding,
 };
@@ -44,7 +44,7 @@ enum DocumentError {
     #[error(transparent)]
     Json(#[from] serde_json::Error),
     #[error(transparent)]
-    Binding(#[from] shepherd_core::input::KeybindingError),
+    Binding(#[from] shep_core::input::KeybindingError),
 }
 
 fn parse_document(

@@ -1,0 +1,27 @@
+[package]
+name = "shep-harness-pi"
+version.workspace = true
+edition.workspace = true
+description = "Pi adapter for Shepherd."
+
+[features]
+live-pi = []
+
+[dependencies]
+shep-harness-core = { path = "../shep-harness-core" }
+async-trait.workspace = true
+base64 = "0.22"
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+futures-channel = "0.3"
+tempfile = "3"
+tokio = { version = "1", features = ["macros", "rt"] }
+tracing-subscriber.workspace = true

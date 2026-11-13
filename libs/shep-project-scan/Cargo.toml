@@ -1,0 +1,18 @@
+[package]
+name = "shep-project-scan"
+version.workspace = true
+edition.workspace = true
+description = "Bounded Git-repository discovery and project-picker tree shaping."
+
+[lib]
+name = "shep_project_scan"
+path = "src/project_scan.rs"
+
+[dependencies]
+serde.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1", features = ["fs"] }
+
+[dev-dependencies]
+tempfile = "3"

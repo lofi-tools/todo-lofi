@@ -1,0 +1,30 @@
+[package]
+name = "shep-harness-codex"
+version.workspace = true
+edition.workspace = true
+description = "Codex app-server adapter for Shepherd."
+
+[features]
+live-test-support = ["dep:tempfile", "shep-harness-core/live-test-support"]
+live-codex = []
+
+[dependencies]
+acp-client = { path = "../acp-client" }
+shep-harness-core = { path = "../shep-harness-core" }
+async-trait.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tempfile = { version = "3", optional = true }
+tokio.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+shep-harness-core = { path = "../shep-harness-core", features = ["live-test-support"] }
+futures-channel = "0.3"
+tempfile = "3"
+tokio = { version = "1", features = ["macros", "rt"] }
+tracing-subscriber.workspace = true
