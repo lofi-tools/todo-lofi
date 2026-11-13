@@ -19,8 +19,7 @@ current layout and give future changes a point of comparison.
 - Place a slim icon rail to the left, outside the wrapper. The rail and the
   Previous and Next control group share a 52 px width and 6 px padding. The
   rail currently has placeholder icons for Workspace and Conversations.
-  Previous and Next are placeholders for navigation history. While the
-  Freebuff terminal is visible, Previous is available as **Back to chat**.
+  Previous and Next are placeholders for navigation history.
 - **Search tasks** sits immediately after Previous and Next in the window
   header. It has a magnifier inside the field and shows the current shortcut
   as individually bordered, muted keycaps with small text, tight spacing and
@@ -64,6 +63,9 @@ current layout and give future changes a point of comparison.
   Show ACP terminals for the selected task as interactive **agent: <title>**
   panes. Use the same terminal input, resize, and hide controls as task
   shells. Released agent panes disappear when the turn settles.
+  Show the project's standalone Freebuff session as one **Freebuff** row in the
+  Terms list with its live or ended state, an attention dot when it exits while
+  another agent is in front, **Open** in front and **Restart** when it ended.
   Down from the Terminals tab focuses the first live pane's **Hide pane**
   button. Arrow keys on live pane header buttons move between adjacent live
   panes. Up from a pane with no live pane above it returns to the Terminals
@@ -232,6 +234,10 @@ current layout and give future changes a point of comparison.
   visible after applying the archive filter. A sole visible task opens directly
   in the conversation pane. Reserve the expanded area for task rows. Compose
   stays on the project row and the archive switch stays in the context card.
+- Keep the state word out of a task row: the leading state dot, waiting icon and
+  **Needs review** badge carry it. Put an accent dot at the end of the row when
+  the task received conversation output since it was last open, and clear it
+  when the task opens.
 - While the status-bar review filter is active, show waiting-for-review tasks
   under each matching project, including a sole review task. Checkboxes and
   modifier-clicks select rows across projects. **Archive selected** shows the
@@ -269,9 +275,14 @@ current layout and give future changes a point of comparison.
   triggers have transparent backgrounds and no borders. Use Shepherd's themed
   popover styling for the expanded menus. The project picker switches the
   selected project. Codex is the default agent. **Freebuff (terminal)** opens
-  a standalone terminal that fills the conversation pane. Use **Back to chat**
-  in the window header to close it. Other unavailable agents are disabled until
-  their integrations are ready.
+  a standalone terminal that fills the area above the composer. The composer
+  stays in place with only its agent picker interactive; its text area and Send
+  are disabled with a placeholder that names the reason. Choosing another agent
+  leaves the terminal running in the background and shows that agent's chat.
+  **Back to chat** in the terminal's own bar does the same. An exited session
+  shows its exit code with **Restart**, and a **Freebuff** row in the Terminals
+  tab brings the running session back to the front. Other unavailable agents
+  are disabled until their integrations are ready.
 - The planned [integrated Freebuff agent](./freebuff-adapter.md) is a separate
   picker choice that uses the normal task conversation; retain the standalone
   terminal choice and its Back to chat behavior. Keep the integrated session's
@@ -287,8 +298,31 @@ current layout and give future changes a point of comparison.
 - Saved tasks offer **Delete task** in the conversation header. Confirm deletion
   in a dialog; keep the worktree by default, and offer removal only when it is
   clean. The task branch is retained. Active turns cannot be deleted.
-- Show **Needs input** on waiting task rows and an attention dot on the
-  selected task's composer. Review rows have a ring and **Needs review** badge.
+- Show a mustard chat-bubble-with-question-mark icon on a waiting task row, and
+  on the project row when that row stands in for a project's single
+  conversation. Keep an attention dot on the selected task's composer. Review
+  rows have a ring and **Needs review** badge.
+- Keep the task state out of the conversation header; the sidebar row, review
+  badge and status bar carry it, so the header stays usable for chatting. The
+  header has no bottom border.
+- Opening a task either renders its conversation or shows the failure with
+  **Retry** in the conversation pane; never leave the pane on a loading state.
+- Show the task's branch after the title once the branch exists, and its
+  worktree path (home abbreviated as `~/`) once a worktree exists. Both are
+  muted labels that truncate, with the full value in their tooltip.
+- Keep the header to the title, branch, worktree, adapter notes and **Cancel turn**. Put **Show
+  diagnostics** and **Delete task…** behind a trailing ⋯ menu that closes on a
+  second click, an outside click or Escape. Diagnostics open as a card at the
+  top of the conversation pane instead of a permanent disclosure, and the ⋯
+  row toggles that card.
+- Show context usage as a circular gauge just before the ⋯ menu, only once the
+  conversation reports usage. The gauge is a button: it opens a context window
+  card with a full-width fill bar, **Auto-compacts at N tokens** (90% of the
+  window unless the adapter reports its own threshold) and **Compact now**.
+  Clicking the gauge again closes the card. The transcript shows no usage rows.
+- **Compact now** asks the core to compact the session through the adapter's own
+  protocol. When the adapter cannot compact, the card says so and the action
+  stays disabled.
 - Show the negotiated adapter tier in the conversation header after a session
   opens. When a fallback is used, show its reason and keep the command,
   protocol, capabilities and stderr in **Diagnostics**.
@@ -314,19 +348,30 @@ current layout and give future changes a point of comparison.
 
 ## Conversation transcript
 
-- Render an agent's replies as plain text at the full transcript width, without
-  a card per message.
+- Render an agent's replies as formatted Markdown at the full transcript width,
+  without a card per message: headings, bold and italic, inline code, fenced
+  code blocks, lists, quotes, rules and links. Keep search hits highlighted in
+  the text.
 - Thinking segments stream open with the live output. Collapse a segment to a
   one-line **Thinking · N words** summary once it has scrolled above the visible
   transcript, and let the user expand or collapse it again.
-- Show each prompt sent from the composer in a card on the raised neutral
-  surface, aligned to the trailing edge and no wider than 80% of the pane. Text
+- Show each prompt sent from the composer in a card on a neutral surface
+  slightly more contrasting than the raised surface, in regular weight text,
+  aligned to the trailing edge and no wider than 80% of the pane. Text
   typed into the agent's terminal keeps the plain transcript row.
 - Reads, searches and listings share one row with a file-and-magnifier icon. It
   carries the tool's title and, while an approval is open, its allow choices in
   place of a separate approval card. Once answered, it reports the decision, the
   paths it touched and a line count, with the captured output behind **Show
   contents**.
+- Other tool calls show their title and status with the captured output behind
+  the same **Show contents** toggle. Keep the output open while the call runs so
+  live output stays visible, collapse it once it settles, and start a
+  conversation reopened from another task collapsed.
+- Keep the transcript at its latest row while the reader stays at the bottom,
+  and leave their position alone once they scroll up. Opening a conversation,
+  switching back to it, or returning to it from Settings or Freebuff starts at
+  the latest row.
 
 ## Conversation composer
 

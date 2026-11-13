@@ -12,8 +12,10 @@ Freebuff's interactive CLI input, and the adapter reads its terminal display to
 produce Shepherd's normal task and transcript events, including streamed
 assistant text, tool activity, approvals, errors, and turn completion. The task
 runs in Shepherd's usual task worktree and uses the existing Freebuff login.
-Keep **Freebuff (terminal)** as a separate, standalone option with its existing
-behavior and **Back to chat** control. The integrated option participates in
+Keep **Freebuff (terminal)** as a separate, standalone option. It fills the
+space above the composer, keeps its process in the background while another
+agent's chat is in front, and offers **Back to chat** and **Restart** in its own
+bar. The integrated option participates in
 the normal task lifecycle and persisted transcript.
 
 Keep the integrated session's actual Freebuff terminal visible in the terminal
