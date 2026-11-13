@@ -24,13 +24,14 @@ interface CachedDirectory {
 }
 
 export function FilesPane(props: { projectId: string; worktreeTaskId: string | null; initialFile?: { taskId: string; path: string }; showDotfiles: boolean; settingsDisabled: boolean; onShowDotfilesChange: (value: boolean) => void }) {
-  const [scope, setScope] = createSignal(props.worktreeTaskId ? 'worktree' : 'project')
+  // The selected task's worktree is the default root; the picker pins `/`.
+  const [root, setRoot] = createSignal<'worktree' | 'project'>('worktree')
   const [query, setQuery] = createSignal('')
   const [settingsOpen, setSettingsOpen] = createSignal(false)
   const [menuPosition, setMenuPosition] = createSignal({ left: 0, top: 0 })
   let settingsButton: HTMLButtonElement | undefined
   let settingsMenu: HTMLDivElement | undefined
-  const taskId = () => scope() === 'worktree' ? props.worktreeTaskId : null
+  const taskId = () => root() === 'worktree' ? props.worktreeTaskId : null
   const location = createMemo(() => ({ projectId: props.projectId, taskId: taskId() }))
 
   function toggleSettings() {
@@ -61,9 +62,12 @@ export function FilesPane(props: { projectId: string; worktreeTaskId: string | n
       <div class="terminal-pane__bar files-pane__toolbar files-pane__topbar">
         <span class="files-root-picker">
           <select aria-label="File root" value={taskId() ? 'worktree' : 'project'}
-            onChange={(event) => { setScope(event.currentTarget.value); setQuery('') }}>
+            onChange={(event) => { setRoot(event.currentTarget.value === 'worktree' ? 'worktree' : 'project'); setQuery('') }}>
             <option value="project">/</option>
-            <Show when={props.worktreeTaskId}><option value="worktree">Task worktree</option></Show>
+            {/* The option stays rendered: a select ignores a value whose option
+                appears in the same update, and the selected task's workspace
+                can arrive after this pane opens. */}
+            <option value="worktree" disabled={!props.worktreeTaskId}>Task worktree</option>
           </select>
           <svg aria-hidden="true" width="10" height="10" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="m2.5 4.5 3.5 3.5 3.5-3.5" /></svg>
         </span>
