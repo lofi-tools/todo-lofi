@@ -2362,10 +2362,18 @@ export function App() {
                     match={searchJump()?.taskId === current().task.id && searchJump()?.snippet.field === 'task' ? searchJump()?.snippet.matched : undefined} /></span>
                 </Show>
                 <Show when={current().task.branch}>
-                  {(branch) => <span class="chat__branch" title={`Branch ${branch()}`}>{branch()}</span>}
+                  {(branch) => (
+                    <span class="chat__branch" title={`Branch ${branch()}`}>
+                      <BranchIcon /><span class="chat__chip-text">{branch()}</span>
+                    </span>
+                  )}
                 </Show>
                 <Show when={current().task.worktreePath}>
-                  {(path) => <span class="chat__worktree" title={`Worktree ${path()}`}>{abbreviateHome(path())}</span>}
+                  {(path) => (
+                    <span class="chat__worktree" title={`Worktree ${path()}`}>
+                      <WorktreeIcon /><span class="chat__chip-text">{abbreviateHome(path())}</span>
+                    </span>
+                  )}
                 </Show>
                 <Show when={current().capabilities?.unreviewedTools}>
                   <span class="chat__adapter" title="Pi's tools run under Pi's configuration; Shepherd cannot approve them">unreviewed tools</span>
@@ -2961,6 +2969,7 @@ interface PickerOption {
   name: string
   detail?: string
   disabled?: boolean
+  icon?: JSX.Element
 }
 
 interface PickerGroup {
@@ -3007,10 +3016,13 @@ function ComposerPickers(props: { agent: string; agentName: string; agents: Pick
           </PickerMenu>
         </div>
       </Show>
-      <PickerMenu label="Agent" text={props.agentName} value={props.agent} options={props.agents} onChange={props.onAgentChange} triggerClass="composer__picker" above>
+      <PickerMenu label="Agent" text={props.agentName} value={props.agent}
+        options={props.agents.map((option) => ({ ...option, icon: <AgentIcon agent={option.id} /> }))}
+        onChange={props.onAgentChange} triggerClass="composer__picker" above>
         <Show when={props.freebuffLive}>
           <span class="terminal-attention" role="img" aria-label="Freebuff terminal is live" />
         </Show>
+        <AgentIcon agent={props.agent} />
         <span class="composer__picker-label">{props.agentName}</span>
         <PickerCaret />
       </PickerMenu>
@@ -3373,6 +3385,9 @@ function PickerMenu(props: PickerMenuProps & { triggerClass: string; above?: boo
                 classList={{ 'picker-menu__option--active': props.filterable && activeId() === option.id }}
                 onClick={() => chooseOption(group, option)}
               >
+                <Show when={option.icon}>
+                  <span class="picker-menu__icon">{option.icon}</span>
+                </Show>
                 <span>{option.name}</span>
                 <Show when={group.value === option.id}>
                   <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -3411,6 +3426,83 @@ function PlusIcon() {
       <path d="M12 5v14M5 12h14" />
     </svg>
   )
+}
+
+function BranchIcon() {
+  return (
+    <svg class="chat__chip-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <path d="M6 3v12" />
+      <circle cx="18" cy="6" r="3" />
+      <circle cx="6" cy="18" r="3" />
+      <path d="M18 9a9 9 0 0 1-9 9" />
+    </svg>
+  )
+}
+
+function WorktreeIcon() {
+  return (
+    <svg class="chat__chip-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <path d="M8 5.5V5a2 2 0 0 1 2-2h3.4l1.6 1.8H20a2 2 0 0 1 2 2v6.4a2 2 0 0 1-2 2h-1.6" />
+      <path d="M2 20.5V11a2 2 0 0 1 2-2h3.4l1.6 1.8h5A2 2 0 0 1 16 12.8v7.7a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2Z" />
+    </svg>
+  )
+}
+
+const CLAUDE_MARK_RAYS = [0, 45, 90, 135, 180, 225, 270, 315]
+
+function ClaudeMark() {
+  return (
+    <>
+      {CLAUDE_MARK_RAYS.map((angle) => (
+        <path d="M12 2.4 13.25 9.9 12 11.7 10.75 9.9Z" transform={`rotate(${angle} 12 12)`} fill="#D97757" />
+      ))}
+    </>
+  )
+}
+
+function AgentIcon(props: { agent: string }) {
+  const frame = (children: JSX.Element, viewBox = '0 0 24 24', width = 14, height = 14) => (
+    <svg class="agent-mark" width={width} height={height} viewBox={viewBox} aria-hidden="true">
+      {children}
+    </svg>
+  )
+  switch (props.agent) {
+    case 'codex':
+      return frame(
+        <g fill="currentColor">
+          {[0, 60, 120, 180, 240, 300].map((angle) => (
+            <rect x="10.3" y="3" width="3.4" height="9" rx="1.7" transform={`rotate(${angle} 12 12)`} />
+          ))}
+        </g>,
+      )
+    case 'claude':
+      return frame(<ClaudeMark />)
+    case 'opencode':
+      return frame(
+        <g>
+          <path d="M18 30H6V18H18V30Z" fill="#CFCECD" />
+          <path d="M18 12H6V30H18V12ZM24 36H0V6H24V36Z" fill="#656363" />
+        </g>,
+        '0 0 24 30',
+        12,
+        15,
+      )
+    case 'pi':
+      return frame(
+        <g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M5.5 8.5h13" />
+          <path d="M8.8 8.5v9.5" />
+          <path d="M15.2 8.5v7c0 1.5.7 2.5 1.8 2.5" />
+        </g>,
+      )
+    default:
+      return frame(
+        <g>
+          <rect x="2.4" y="2.4" width="19.2" height="19.2" rx="5.6" fill="var(--accent)" />
+          <path d="M8.8 8.4 13 12l-4.2 3.6" fill="none" stroke="#fff" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" />
+        </g>,
+      )
+  }
 }
 
 const INSPECTOR_TABS: InspectorTabOption[] = [

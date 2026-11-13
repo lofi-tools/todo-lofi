@@ -1382,12 +1382,27 @@ textarea {
 
 .chat__branch,
 .chat__worktree {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
   flex: 0 1 auto;
   min-width: 0;
   max-width: 240px;
   overflow: hidden;
   color: var(--text-muted);
   font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat__chip-icon {
+  flex: none;
+  opacity: 0.8;
+}
+
+.chat__chip-text {
+  min-width: 0;
+  overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -1579,6 +1594,12 @@ textarea {
 .picker-menu .nav-item span {
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.picker-menu__icon {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
 }
 
 .picker-menu__group {

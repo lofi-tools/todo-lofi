@@ -309,7 +309,8 @@ current layout and give future changes a point of comparison.
   **Retry** in the conversation pane; never leave the pane on a loading state.
 - Show the task's branch after the title once the branch exists, and its
   worktree path (home abbreviated as `~/`) once a worktree exists. Both are
-  muted labels that truncate, with the full value in their tooltip.
+  muted labels that truncate, with the full value in their tooltip, and each
+  carries a small git-branch or worktree icon before its text.
 - Keep the header to the title, branch, worktree, adapter notes and **Cancel turn**. Put **Show
   diagnostics** and **Delete task…** behind a trailing ⋯ menu that closes on a
   second click, an outside click or Escape. Diagnostics open as a card at the
@@ -386,6 +387,8 @@ current layout and give future changes a point of comparison.
   commands, then the shell safety picker, then the agent picker. Put the
   model and effort picker immediately before Send at the trailing edge. Keep
   the model picker and Send together when the toolbar wraps in a narrow window.
+- The agent picker shows the agent's own inline SVG mark, coloured where the
+  brand has a colour, in both the trigger and the menu rows.
 - Use compact, app-styled menus that open above the toolbar when there is room.
   The trigger carets point down regardless of opening direction. Keep
   unavailable attachment, command, agent, model, and effort options visible
