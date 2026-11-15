@@ -51,7 +51,7 @@ A local-first task manager for macOS and Linux, built on [GPUI](https://github.c
 - `skills` — install local agent skills, including `reference-repos`, from `docs/agent_skills`
 
 The reference list lives in `flake.nix` as `referenceRepos`: `pandacode`, `herdr`,
-`herdr-core`, `herdr-app`, and `pi`. Run checkout commands inside the Nix dev shell
+`herdr-core`, `herdr-app`, `pi`, and `orca`. Run checkout commands inside the Nix dev shell
 (or use `nix develop -c checkout-references`). Existing checkouts are preserved;
 the command does not refresh or reset them. The local skill lets agents inspect
 these checkouts by name.
