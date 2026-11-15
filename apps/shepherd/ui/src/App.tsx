@@ -3070,7 +3070,6 @@ function WorkspaceFrame(props: {
     }}>
       <header class="shell__header" aria-label="Workspace header">
         <Show when={!props.settingsOpen}>
-          <span class="shell__header-divider shell__header-divider--rail" aria-hidden="true" />
           <Show when={!props.sidebarHidden}><span class="shell__header-divider shell__header-divider--conversation" aria-hidden="true" /></Show>
           <span class="shell__header-divider shell__header-divider--inspector" aria-hidden="true" />
         </Show>

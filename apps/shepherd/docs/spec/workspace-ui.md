@@ -47,7 +47,7 @@ current layout and give future changes a point of comparison.
 - Use one window grid for the header, workspace, and footer. The header and
   workspace share columns through CSS subgrid. The navigation, conversation,
   and inspector sections of the header share the window background. Short
-  vertical dividers in the header align with the workspace pane boundaries.
+  vertical dividers in the header align with the internal pane boundaries.
 - Keep the inspector on the right. Left-align its five icon tabs in the header
   above it in this order: **Terminals**, **Preview**, **Review**, and **Files**.
   Give each icon an accessible name and tooltip. Use Left and Right to switch

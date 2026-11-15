@@ -5464,12 +5464,11 @@ test('aligns short header dividers with the workspace panes', async ({ page }) =
   await page.goto('/')
   const header = page.getByRole('banner', { name: 'Workspace header' })
   const dividers = header.locator('.shell__header-divider')
-  await expect(dividers).toHaveCount(3)
+  await expect(dividers).toHaveCount(2)
   const headerBounds = (await header.boundingBox())!
-  const sidebarBounds = (await page.locator('.shell__body > .sidebar').boundingBox())!
   const chatBounds = (await page.getByRole('region', { name: 'Task chat' }).boundingBox())!
   const inspectorBounds = (await page.getByRole('complementary', { name: 'Inspector' }).boundingBox())!
-  for (const [index, boundary] of [sidebarBounds.x, chatBounds.x, inspectorBounds.x].entries()) {
+  for (const [index, boundary] of [chatBounds.x, inspectorBounds.x].entries()) {
     const bounds = (await dividers.nth(index).boundingBox())!
     expect(Math.abs(bounds.x - boundary)).toBeLessThanOrEqual(1)
     expect(bounds.y).toBeGreaterThan(headerBounds.y)

@@ -203,7 +203,6 @@ textarea {
   pointer-events: none;
 }
 
-.shell__header-divider--rail { grid-column: 2; justify-self: start; }
 .shell__header-divider--conversation { grid-column: 3; justify-self: start; }
 .shell__header-divider--inspector { grid-column: 3; justify-self: end; }
 
