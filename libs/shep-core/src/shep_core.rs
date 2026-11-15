@@ -52,9 +52,8 @@ use crate::snapshots::TaskApproval;
 use crate::store::{
     MemoryStore, PoolCatalogAdvisory, PoolCatalogOutcome, PoolCooldownClearRequest,
     PoolQuotaCorrectionOutcome, PoolQuotaCorrectionRequest, PoolReorderOutcome, PoolReorderRequest,
-    PoolSelectionOutcome, PoolSelectionRequest, PoolSlot, PoolSlotEnabledOutcome,
-    PoolSlotEnabledRequest, PoolSlotId, PoolStatus, Store, StoreError, WorktreeDeletion,
-    WorktreePoolRecord, WorktreePoolState,
+    PoolSelectionRequest, PoolSlot, PoolSlotEnabledOutcome, PoolSlotEnabledRequest, PoolSlotId,
+    PoolStatus, Store, StoreError, WorktreeDeletion, WorktreePoolRecord, WorktreePoolState,
 };
 use crate::terminal::{
     InspectorTab, ProcessRecord, TerminalId, TerminalLayout, TerminalList, TerminalRecord,
@@ -336,23 +335,6 @@ impl Default for Core {
     fn default() -> Self {
         Self::new()
     }
-}
-
-fn pool_selection_note(slot: &PoolSlot, outcome: &PoolSelectionOutcome) -> String {
-    let mut note = format!(
-        "pool: {} · {} ({})",
-        slot.provider_name,
-        slot.model_name,
-        slot.agent.as_str()
-    );
-    for skip in &outcome.skipped {
-        note.push_str(&format!(
-            "; skipped {}: {}",
-            skip.slot_id.as_str(),
-            skip.reason
-        ));
-    }
-    note
 }
 
 fn archived_worktree_cutoff() -> u64 {
@@ -2446,29 +2428,6 @@ impl Core {
             let baseline = GitService.turn_baseline(path)?;
             self.turn_baselines.insert(task_id.clone(), baseline);
         }
-        let mut selection_request =
-            self.pool_selection_request(task_id.as_str(), projects::now_millis());
-        selection_request.agent = Some(self.task(task_id)?.agent);
-        let pool_selection = self.store.select_pool_slot(&selection_request).await?;
-        let pool_note = match &pool_selection.slot {
-            Some(slot) => Some(pool_selection_note(slot, &pool_selection)),
-            None if pool_selection.reason == "no pool slots" => None,
-            None => {
-                let skipped = pool_selection
-                    .skipped
-                    .iter()
-                    .map(|skip| format!("{}: {}", skip.slot_id.as_str(), skip.reason))
-                    .collect::<Vec<_>>()
-                    .join("; ");
-                let reason = if skipped.is_empty() {
-                    pool_selection.reason.clone()
-                } else {
-                    format!("{} ({skipped})", pool_selection.reason)
-                };
-                return Err(CoreError::PoolUnavailable { reason });
-            }
-        };
-
         self.set_task_state(task_id, TaskState::Working)?;
         if let Some(task) = self.tasks.get_mut(task_id) {
             task.error = None;
@@ -2512,11 +2471,6 @@ impl Core {
             return Err(error);
         }
 
-        if let Some(note) = pool_note
-            && let Some(session) = self.sessions.get_mut(task_id)
-        {
-            session.note(note, false);
-        }
         self.fallback_model(task_id, &mut input);
 
         let outcome = {

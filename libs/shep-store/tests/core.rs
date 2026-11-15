@@ -707,7 +707,8 @@ async fn pool_catalog_seeds_the_in_memory_store_and_skips_ambiguous_records()
 }
 
 #[tokio::test]
-async fn a_turn_selects_a_pool_slot_and_records_it() -> Result<(), Box<dyn std::error::Error>> {
+async fn legacy_disabled_pool_slot_does_not_block_a_turn() -> Result<(), Box<dyn std::error::Error>>
+{
     let repository = TestRepository::new()?;
     let mut core = Core::with_services(
         Box::new(MemoryStore::new()),
@@ -719,89 +720,20 @@ async fn a_turn_selects_a_pool_slot_and_records_it() -> Result<(), Box<dyn std::
     let draft = workspace_of(
         core.execute(Command::CreateDraft {
             project_id,
-            title: "Pool turn".into(),
+            title: "New conversation".into(),
             agent: Agent::Codex,
         })
         .await?,
     );
-    let task_id = TaskId::new(draft.task.id.clone());
     let mut slot = PoolSlot::new(Agent::Codex, "acme", "Acme", "model-a", "Model A");
-    slot.id = PoolSlotId::new("turn-slot");
+    slot.enabled = false;
     core.store.save_pool_slot(&slot).await?;
-    let mut entry = PoolQuotaEntry::new(slot.id.clone(), PoolQuotaSource::Provider, 100);
-    entry.used = Some(0);
-    entry.limit = Some(10);
-    entry.limit_unit = Some("requests".into());
-    core.store.append_pool_quota_entry(&entry).await?;
-
-    let workspace = workspace_of(
-        core.execute(Command::SendPrompt {
-            task_id: task_id.clone(),
-            input: PromptInput::text("start"),
-        })
-        .await?,
-    );
-    let rows = summaries(&workspace);
-    assert!(
-        rows.iter()
-            .any(|row| row.contains("pool: Acme · Model A (codex)")),
-        "rows: {rows:?}"
-    );
-    let selections = core.store.load_pool_selections().await?;
-    let selection = selections
-        .iter()
-        .find(|selection| selection.request_id == task_id.as_str())
-        .ok_or("missing pool selection")?;
-    assert_eq!(selection.slot_id.as_ref(), Some(&slot.id));
-    Ok(())
-}
-
-#[tokio::test]
-async fn a_turn_refuses_to_start_when_no_slot_can_serve_it()
--> Result<(), Box<dyn std::error::Error>> {
-    let repository = TestRepository::new()?;
-    let mut core = Core::with_services(
-        Box::new(MemoryStore::new()),
-        Box::new(FakeHarnessFactory::new(Vec::new())),
-    );
-    let project_id = add_project(&mut core, repository.path().to_path_buf()).await?;
-    let draft = workspace_of(
-        core.execute(Command::CreateDraft {
-            project_id,
-            title: "Blocked turn".into(),
-            agent: Agent::Codex,
-        })
-        .await?,
-    );
-    let task_id = TaskId::new(draft.task.id.clone());
-    let mut disabled = PoolSlot::new(Agent::Codex, "acme", "Acme", "model-a", "Model A");
-    disabled.id = PoolSlotId::new("disabled-slot");
-    disabled.enabled = false;
-    core.store.save_pool_slot(&disabled).await?;
-    let mut other = PoolSlot::new(Agent::Claude, "other", "Other", "model-b", "Model B");
-    other.id = PoolSlotId::new("other-slot");
-    other.priority = 1;
-    core.store.save_pool_slot(&other).await?;
-
-    let error = core
-        .execute(Command::SendPrompt {
-            task_id: task_id.clone(),
-            input: PromptInput::text("start"),
-        })
-        .await
-        .err()
-        .ok_or("the turn must not start")?;
-    let CoreError::PoolUnavailable { reason } = error else {
-        return Err(format!("unexpected error: {error}").into());
-    };
-    assert!(reason.contains("no eligible pool slot"), "reason: {reason}");
-    assert!(reason.contains("disabled"), "reason: {reason}");
-    assert!(reason.contains("claude"), "reason: {reason}");
-    assert_eq!(
-        core.tasks.get(&task_id).map(|task| task.state),
-        Some(TaskState::Ready)
-    );
-    assert!(!core.sessions.contains_key(&task_id));
+    core.execute(Command::SendPrompt {
+        task_id: TaskId::new(draft.task.id),
+        input: PromptInput::text("start"),
+    })
+    .await?;
+    assert!(core.store.load_pool_selections().await?.is_empty());
     Ok(())
 }
 
