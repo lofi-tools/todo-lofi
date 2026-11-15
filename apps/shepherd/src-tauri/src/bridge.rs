@@ -3821,6 +3821,19 @@ pub mod commands {
     }
 
     #[tauri::command]
+    pub async fn promote_terminal(
+        state: State<'_, ShellState>,
+        terminal_id: String,
+    ) -> Result<TerminalList, BridgeError> {
+        Ok(state
+            .core
+            .lock()
+            .await
+            .promote_terminal(&TerminalId::new(terminal_id))
+            .await?)
+    }
+
+    #[tauri::command]
     pub async fn start_terminal(
         state: State<'_, ShellState>,
         project_id: String,
@@ -6052,14 +6065,19 @@ mod tests {
         state.close_terminal(terminal_id.clone()).await?;
         tokio::time::timeout(Duration::from_secs(4), async {
             loop {
-                if state
+                // A shell that exits while the app runs is deleted, so a missing
+                // record counts as ended.
+                let ended = match state
                     .core
                     .lock()
                     .await
-                    .terminal_record(&TerminalId::new(&terminal_id))?
-                    .ended_at
-                    .is_some()
+                    .terminal_record(&TerminalId::new(&terminal_id))
                 {
+                    Ok(record) => record.ended_at.is_some(),
+                    Err(CoreError::TerminalNotFound { .. }) => true,
+                    Err(error) => return Err(error),
+                };
+                if ended {
                     break;
                 }
                 tokio::time::sleep(Duration::from_millis(20)).await;
@@ -6741,11 +6759,14 @@ mod tests {
         let remaining = tokio::time::timeout(Duration::from_secs(5), async {
             loop {
                 let mut core = state.core.lock().await;
-                let terminal = core.terminal_record(&id)?;
+                let ended = match core.terminal_record(&id) {
+                    Ok(terminal) => terminal.ended_at.is_some(),
+                    // The shell deletes an exited terminal that is not being kept.
+                    Err(CoreError::TerminalNotFound { .. }) => true,
+                    Err(error) => return Err(error),
+                };
                 let processes = core.recorded_processes().await?;
-                if terminal.ended_at.is_some()
-                    && processes.iter().any(|process| process.pid != leader.pid)
-                {
+                if ended && processes.iter().any(|process| process.pid != leader.pid) {
                     return Ok::<_, CoreError>(processes);
                 }
                 drop(core);

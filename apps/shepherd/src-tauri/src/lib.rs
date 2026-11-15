@@ -358,6 +358,7 @@ pub fn run() -> Result<(), tauri::Error> {
             bridge::commands::save_terminal_layout,
             bridge::commands::save_inspector_tab,
             bridge::commands::terminal_list,
+            bridge::commands::promote_terminal,
             bridge::commands::inspect_previous_processes,
             bridge::commands::stop_previous_process,
             bridge::commands::archived_worktree_issues,

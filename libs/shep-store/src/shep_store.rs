@@ -2087,6 +2087,8 @@ impl Store for TursoStore {
                 ((?4 = 'project' OR ?4 = 'freebuff') AND ?3 = '') OR \
                 (?4 = 'task' AND EXISTS (SELECT 1 FROM tasks WHERE id = ?3 AND project_id = ?2))\
              ) ON CONFLICT (id) DO UPDATE SET \
+                task_id = excluded.task_id, \
+                scope = excluded.scope, \
                 title = excluded.title, \
                 cwd = excluded.cwd, \
                 command = excluded.command, \
@@ -2094,8 +2096,8 @@ impl Store for TursoStore {
                 ended_at = excluded.ended_at, \
                 exit_code = excluded.exit_code \
              WHERE terminals.project_id = excluded.project_id \
-                AND COALESCE(terminals.task_id, '') = COALESCE(excluded.task_id, '') \
-                AND terminals.scope = excluded.scope",
+                AND ((COALESCE(terminals.task_id, '') = COALESCE(excluded.task_id, '') AND terminals.scope = excluded.scope) \
+                  OR (terminals.scope = 'task' AND excluded.scope = 'project' AND excluded.task_id IS NULL))",
         )
         .bind(terminal.id.as_str())
         .bind(terminal.project_id.as_str())
@@ -2226,6 +2228,16 @@ impl Store for TursoStore {
                 task_id: task_id.clone(),
             });
         }
+        Ok(())
+    }
+
+    async fn delete_terminal(&self, terminal_id: &TerminalId) -> Result<(), StoreError> {
+        let mut db = self.db.lock().await;
+        toasty::sql::statement("DELETE FROM terminals WHERE id = ?1")
+            .bind(terminal_id.as_str())
+            .exec(&mut *db)
+            .await
+            .map_err(StoreError::database)?;
         Ok(())
     }
 

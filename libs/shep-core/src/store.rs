@@ -21,7 +21,7 @@ use crate::{
     session::SessionRecord,
     snapshots::WorkspaceLayout,
     tasks::{Agent, Task, TaskId, TaskState},
-    terminal::{ProcessRecord, TerminalLayout, TerminalRecord, TerminalScope},
+    terminal::{ProcessRecord, TerminalId, TerminalLayout, TerminalRecord, TerminalScope},
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -771,6 +771,7 @@ pub trait Store: Send + Sync {
     ) -> Result<(), StoreError>;
     async fn load_terminals(&self) -> Result<Vec<TerminalRecord>, StoreError>;
     async fn save_terminal(&self, terminal: &TerminalRecord) -> Result<(), StoreError>;
+    async fn delete_terminal(&self, terminal_id: &TerminalId) -> Result<(), StoreError>;
     async fn load_terminal_layouts(&self) -> Result<Vec<(ProjectId, TerminalLayout)>, StoreError>;
     async fn save_terminal_layout(
         &self,
@@ -1321,8 +1322,10 @@ impl Store for MemoryStore {
             };
         let same_owner = terminals.get(terminal.id.as_str()).is_none_or(|existing| {
             existing.project_id == terminal.project_id
-                && existing.task_id == terminal.task_id
-                && existing.scope == terminal.scope
+                && ((existing.task_id == terminal.task_id && existing.scope == terminal.scope)
+                    || (existing.scope == TerminalScope::Task
+                        && terminal.scope == TerminalScope::Project
+                        && terminal.task_id.is_none()))
         });
         if !valid_owner || !same_owner {
             return Err(StoreError::TerminalOwnerMissing {
@@ -1330,6 +1333,11 @@ impl Store for MemoryStore {
             });
         }
         terminals.insert(terminal.id.as_str().to_string(), terminal.clone());
+        Ok(())
+    }
+
+    async fn delete_terminal(&self, terminal_id: &TerminalId) -> Result<(), StoreError> {
+        self.terminals.write().await.remove(terminal_id.as_str());
         Ok(())
     }
 

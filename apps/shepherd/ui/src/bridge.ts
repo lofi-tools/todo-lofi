@@ -815,6 +815,10 @@ export function terminalList(projectId: string): Promise<TerminalList> {
   return invoke('terminal_list', { projectId })
 }
 
+export function promoteTerminal(terminalId: string): Promise<TerminalList> {
+  return invoke('promote_terminal', { terminalId })
+}
+
 export function startTerminal(
   projectId: string,
   taskId: string | null,

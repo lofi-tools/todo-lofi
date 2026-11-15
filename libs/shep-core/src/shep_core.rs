@@ -58,7 +58,7 @@ use crate::store::{
 };
 use crate::terminal::{
     InspectorTab, ProcessRecord, TerminalId, TerminalLayout, TerminalList, TerminalRecord,
-    TerminalSnapshot,
+    TerminalScope, TerminalSnapshot,
 };
 
 /// Events buffered between drains. A shell drains after every command and pump,
@@ -1159,6 +1159,22 @@ impl Core {
         Ok(())
     }
 
+    pub async fn promote_terminal(
+        &mut self,
+        terminal_id: &TerminalId,
+    ) -> Result<TerminalList, CoreError> {
+        let mut terminal = self.terminal_record(terminal_id)?;
+        if terminal.scope != crate::terminal::TerminalScope::Task {
+            return Err(CoreError::Store(StoreError::InvalidRow(
+                "Only task terminals can be shared".into(),
+            )));
+        }
+        terminal.scope = crate::terminal::TerminalScope::Project;
+        terminal.task_id = None;
+        self.record_terminal(&terminal).await?;
+        Ok(self.terminal_list(&terminal.project_id))
+    }
+
     pub async fn end_terminal(
         &mut self,
         terminal_id: &TerminalId,
@@ -1173,14 +1189,46 @@ impl Core {
             return Ok(());
         }
 
-        let mut terminal = seen.clone();
-        terminal.ended_at = Some(crate::projects::now_millis());
-        terminal.exit_code = exit_code;
-        self.store.save_terminal(&terminal).await?;
-        let project_id = terminal.project_id.clone();
-        self.terminals.insert(terminal_id.clone(), terminal);
+        // A quit keeps its ended records so the next launch can show the saved
+        // layout with a restart, and the Freebuff session is kept for the same
+        // reason. Every other exit removes the terminal and its pane.
+        if self.shutdown != ShutdownState::Running || seen.scope == TerminalScope::Freebuff {
+            let mut terminal = seen.clone();
+            terminal.ended_at = Some(crate::projects::now_millis());
+            terminal.exit_code = exit_code;
+            self.store.save_terminal(&terminal).await?;
+            let project_id = terminal.project_id.clone();
+            self.terminals.insert(terminal_id.clone(), terminal);
+            self.publish_terminal_list(&project_id);
+            return Ok(());
+        }
+
+        let project_id = seen.project_id.clone();
+        self.store.delete_terminal(terminal_id).await?;
+        self.terminals.remove(terminal_id);
+        self.remove_terminal_from_layout(&project_id, terminal_id)
+            .await?;
         self.publish_terminal_list(&project_id);
         Ok(())
+    }
+
+    async fn remove_terminal_from_layout(
+        &mut self,
+        project_id: &ProjectId,
+        terminal_id: &TerminalId,
+    ) -> Result<(), CoreError> {
+        let mut layout = self.terminal_layout(project_id)?;
+        let previous = layout.root.clone();
+        let removed = std::collections::BTreeSet::from([terminal_id.as_str().to_owned()]);
+        layout.root = layout.root.and_then(|root| root.without(&removed));
+        if layout.root == previous {
+            return Ok(());
+        }
+        layout.revision = layout
+            .revision
+            .checked_add(1)
+            .ok_or(CoreError::TerminalLayoutChanged)?;
+        self.persist_terminal_layout(project_id, &layout).await
     }
 
     fn publish_terminal_list(&mut self, project_id: &ProjectId) {
