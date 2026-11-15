@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16" fill="none">
+  <defs>
+    <mask id="worktree-chip-gap" maskUnits="userSpaceOnUse" x="0" y="0" width="16" height="16">
+      <rect width="16" height="16" fill="#fff"/>
+      <rect x="8" y="7.6" width="8.4" height="8.4" rx="1.8" fill="#000"/>
+      <g stroke="#000" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M11.3935 11.6803L15.2997 7.7741 M12.8691 13.1568L15.2984 15.586 M7.5016 11.6803H11.3834 M15.6585 10.372V7.4148H12.7013 M12.6999 15.9452H15.6572V12.988"/>
+      </g>
+    </mask>
+  </defs>
+  <path d="M2.5914 13.1053H4.8128H11.4771C12.704 13.1053 13.6985 12.0788 13.6985 10.8124V6.7994V6.2262C13.6985 4.9598 12.704 3.9331 11.4771 3.9331H9.0651C8.4759 3.9331 7.9109 3.6915 7.4943 3.2615L6.5742 2.3117C6.1576 1.8816 5.5926 1.64 5.0034 1.64H2.5914C1.3646 1.64 0.37 2.6667 0.37 3.9331V10.8124C0.37 12.0788 1.3646 13.1053 2.5914 13.1053Z" mask="url(#worktree-chip-gap)" stroke="currentColor" stroke-width="1.05" stroke-linejoin="round"/>
+  <path d="M11.3935 11.6803L15.2997 7.7741 M12.8691 13.1568L15.2984 15.586 M7.5016 11.6803H11.3834 M15.6585 10.372V7.4148H12.7013 M12.6999 15.9452H15.6572V12.988" stroke="currentColor" stroke-width="1" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>
