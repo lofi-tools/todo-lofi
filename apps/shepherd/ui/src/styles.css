@@ -2558,6 +2558,39 @@ textarea {
   color: var(--text-muted);
 }
 
+.terminal-scope-icon {
+  flex: none;
+  color: var(--text-muted);
+}
+
+.segmented {
+  display: inline-flex;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--text) 7%, transparent);
+}
+
+.segmented .segmented__option {
+  padding: 3px 9px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.segmented .segmented__option:hover {
+  color: var(--text);
+}
+
+.segmented .segmented__option[aria-pressed='true'] {
+  background: var(--accent);
+  color: var(--surface);
+  font-weight: 600;
+}
+
 .terminal-pane__view {
   flex: 1;
   min-height: 220px;
@@ -3100,6 +3133,64 @@ textarea {
   border: 1px solid var(--border);
   border-radius: 6px;
   background: var(--surface);
+}
+
+.terminal-pane__slot {
+  position: relative;
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+}
+
+/* Split affordances sit on the pane edges and stay out of the way until the
+   pane is hovered or its controls take focus. */
+.terminal-pane__slot:hover .terminal-split-add,
+.terminal-pane__slot:focus-within .terminal-split-add {
+  opacity: 1;
+}
+
+.terminal-split-add {
+  position: absolute;
+  z-index: 2;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text-muted);
+  opacity: 0;
+  transition: opacity 120ms ease, background-color 120ms ease;
+}
+
+.terminal-split-add:hover,
+.terminal-split-add:focus-visible {
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+  color: var(--text);
+}
+
+.terminal-split-add:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: -1px;
+}
+
+.terminal-split-add--right {
+  inset-block: 0;
+  inset-inline-end: 0;
+  width: 14px;
+  cursor: pointer;
+}
+
+.terminal-split-add--bottom {
+  inset-inline: 0;
+  inset-block-end: 0;
+  height: 14px;
+  cursor: pointer;
+}
+
+.terminal-split-add:disabled {
+  opacity: 0;
+  cursor: default;
 }
 
 .terminal-tile--active {

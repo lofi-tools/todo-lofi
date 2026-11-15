@@ -4,11 +4,19 @@
  * stay listed with their exit code instead of pretending to still be live.
  */
 
-import { For, Show, batch, createEffect, createMemo, createSignal, createUniqueId, onCleanup, onMount } from 'solid-js'
+import { For, Match, Show, Switch, batch, createEffect, createMemo, createSignal, createUniqueId, onCleanup, onMount } from 'solid-js'
 
 import * as bridge from './bridge'
+import { FreebuffMark } from './FreebuffMark'
+import { SegmentedControl } from './SegmentedControl'
 import { KITTY_REPORT_EVENTS, encodeKittyKey, encodeLegacyKey, encodeTerminalText } from './terminal_keys'
 import { reportError } from './diagnostics'
+
+const TERMINAL_TYPES: { value: 'both' | 'project' | 'task'; label: string }[] = [
+  { value: 'both', label: 'Both' },
+  { value: 'project', label: 'Project' },
+  { value: 'task', label: 'Task' },
+]
 
 interface TerminalSize {
   columns: number
@@ -69,7 +77,7 @@ export function FreebuffPane(props: {
               </Show>
             }>
               {(entry) => <div class="terminal-ended">
-                <p>Freebuff ended{formatExit(entry().exitCode)}</p>
+                <p>Ended{formatExit(entry().exitCode)}</p>
                 <p><code>{entry().command}</code> in <code>{entry().cwd}</code></p>
                 <button type="button" ref={restart} onClick={props.onRestart} disabled={props.pending}>Restart</button>
               </div>}
@@ -130,6 +138,8 @@ export function TerminalPane(props: TerminalPaneProps) {
     if (message) reportError('terminal', message)
   }
   const [hiddenAgentTerminals, setHiddenAgentTerminals] = createSignal(new Set<string>())
+  const [scopeFilter, setScopeFilter] = createSignal<'both' | 'project' | 'task'>('both')
+  const scopeShown = (scope: 'project' | 'task') => scopeFilter() === 'both' || scopeFilter() === scope
   const agentTerminalIds = createMemo(() => (props.agentTerminals ?? []).map((terminal) => terminal.id))
   const agentTerminal = (id: string) => props.agentTerminals?.find((terminal) => terminal.id === id)
   const agentPaneVisible = (id: string) => !hiddenAgentTerminals().has(id)
@@ -152,11 +162,18 @@ export function TerminalPane(props: TerminalPaneProps) {
   })
 
   const freebuff = () => terminals().find((terminal) => terminal.scope === 'freebuff')
+  // The Freebuff session runs at the project root, so the project type governs it.
+  const typeShown = (scope: 'project' | 'task' | 'freebuff') =>
+    scope === 'freebuff' ? scopeShown('project') : scopeShown(scope)
   const visible = () => terminals().filter((terminal) =>
     terminal.scope !== 'freebuff' && (terminal.scope === 'project' || terminal.taskId === props.taskId))
+  // Only the list and the split tree apply the type filter; lookups stay
+  // unfiltered so a filtered pane keeps its title instead of reading unavailable.
+  const listed = () => visible().filter((entry) => typeShown(entry.scope))
   const terminal = (id: string) => visible().find((entry) => entry.id === id)
   const paneVisible = (id: string) => !terminals().some((entry) =>
-    entry.id === id && entry.scope === 'task' && entry.taskId !== props.taskId)
+    entry.id === id && (entry.scope === 'freebuff' || !typeShown(entry.scope)
+      || (entry.scope === 'task' && entry.taskId !== props.taskId)))
   const root = () => {
     if (!layoutLoaded()) return null
     const saved = layout()
@@ -173,7 +190,18 @@ export function TerminalPane(props: TerminalPaneProps) {
 
   function applyTerminalList(snapshot: bridge.TerminalList) {
     if (snapshot.projectId !== props.projectId) return
-    setTerminalList((current) => current && current.revision >= snapshot.revision ? current : snapshot)
+    const current = terminalList()
+    if (current && current.revision >= snapshot.revision) return
+    const previous = current ? new Set(current.terminals.map((terminal) => terminal.id)) : undefined
+    setTerminalList(snapshot)
+    if (!previous) return
+    // A shell that exits while the app runs is deleted by the core, which also
+    // drops its pane; mirror that here so no unavailable placeholder appears.
+    const gone = [...previous].filter((id) => !snapshot.terminals.some((terminal) => terminal.id === id))
+    const node = layout().root
+    if (!gone.length || !node) return
+    const pruned = gone.reduce<bridge.TerminalSplit | null>((tree, id) => tree && removePane(tree, id), node)
+    if (pruned !== node) setLayout({ ...layout(), root: pruned })
   }
 
   async function run(action: () => Promise<void>) {
@@ -193,11 +221,11 @@ export function TerminalPane(props: TerminalPaneProps) {
     setLayout(await bridge.saveTerminalLayout(props.projectId, { ...layout(), root }))
   }
 
-  async function show(terminalId: string, axis: bridge.SplitAxis = 'vertical') {
+  async function show(terminalId: string, axis: bridge.SplitAxis = 'vertical', splitFrom?: string) {
     if (!contains(root(), terminalId)) {
       const previous = root()
       const added = leaf(terminalId)
-      const target = active()
+      const target = previous && splitFrom && contains(previous, splitFrom) ? splitFrom : active()
       const split = (first: bridge.TerminalSplit) => splitInHalf(axis, first, added)
       await save(previous ? (target ? replacePane(previous, target, split) : split(previous)) : added)
     }
@@ -249,7 +277,10 @@ export function TerminalPane(props: TerminalPaneProps) {
     if (node) void run(() => save(updateSplit(node, path, ratio)))
   }
 
-  function start(taskId: string | null, axis: bridge.SplitAxis) {
+  function start(taskId: string | null, axis: bridge.SplitAxis, splitFrom?: string) {
+    const scope = taskId === null ? 'project' : 'task'
+    // Starting a terminal the filter hides would look like nothing happened.
+    if (!typeShown(scope)) setScopeFilter('both')
     const activeId = active()
     const size = (activeId && measuredSizes.get(activeId)) || DEFAULT_TERMINAL_SIZE
     const columns = activeId && axis === 'horizontal' ? Math.max(2, Math.floor(size.columns / 2)) : size.columns
@@ -259,7 +290,7 @@ export function TerminalPane(props: TerminalPaneProps) {
       const list = await bridge.startTerminal(props.projectId, taskId, columns, rows)
       applyTerminalList(list)
       const created = list.terminals.find((terminal) => !before.has(terminal.id))
-      if (created) await show(created.id, axis)
+      if (created) await show(created.id, axis, splitFrom)
     })
   }
 
@@ -294,6 +325,11 @@ export function TerminalPane(props: TerminalPaneProps) {
     const id = active()
     const entry = id && terminal(id)
     if (entry) start(entry.taskId, axis)
+  }
+
+  function splitPane(id: string, axis: bridge.SplitAxis) {
+    const entry = terminal(id)
+    if (entry) start(entry.taskId, axis, id)
   }
 
   function detachActive() {
@@ -345,11 +381,17 @@ export function TerminalPane(props: TerminalPaneProps) {
   return (
     <div class="terminal-pane">
       <div class="terminal-pane__bar">
-        <button type="button" onClick={startSharedTerminal} disabled={pending()}>New shared terminal</button>
-        <button type="button" onClick={startTaskTerminal} disabled={pending() || !props.taskHasWorktree}
-          aria-keyshortcuts={props.taskTerminalShortcut}>New task terminal</button>
-        <button type="button" onClick={() => splitActive('horizontal')} disabled={pending() || !active()}>Split right</button>
-        <button type="button" onClick={() => splitActive('vertical')} disabled={pending() || !active()}>Split down</button>
+        <button type="button" class="terminal-pane__new" aria-label="New terminal"
+          title={scopeFilter() === 'project' ? 'New project terminal' : 'New task terminal'}
+          disabled={pending() || (scopeFilter() !== 'project' && !props.taskHasWorktree)}
+          onClick={() => scopeFilter() === 'project' ? startSharedTerminal() : startTaskTerminal()}>
+          <svg width="18" height="18" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M11 16H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v6M5 7l3 2.5L5 12m5 0h2" />
+            <path d="M15.5 12.5v6m-3-3h6" />
+          </svg>
+        </button>
+        <SegmentedControl label="Terminal types" value={scopeFilter()} choices={TERMINAL_TYPES}
+          onChange={setScopeFilter} />
         <Show when={attached().length > 1}>
           <Show when={attachedVisible().length > 1}>
             <button type="button" onClick={single} disabled={pending()}>Single</button>
@@ -362,33 +404,43 @@ export function TerminalPane(props: TerminalPaneProps) {
         </Show>
       </div>
       <details open>
-        <summary>Terminal instances</summary>
+        <summary>Terminals</summary>
         <ul class="terminal-list" aria-label="Terminals">
-        <For each={visible()}>
+        <For each={listed()}>
           {(entry) => (
-            <li>
+            <li class="terminal-list__row">
               <button type="button" class="terminal-list__item"
                 aria-current={entry.id === active() ? 'true' : undefined}
+                title={`${entry.scope === 'project' ? 'Project shared' : 'Task'} terminal · ${entry.endedAt === null ? 'live' : 'ended'}${contains(root(), entry.id) ? '' : ' · view closed'}`}
                 disabled={pending()} onClick={() => void run(() => show(entry.id))}>
+                <ScopeIcon scope={entry.scope} />
                 <span>{entry.title}</span>
                 <Show when={props.attention.includes(entry.id)}>
                   <span class="terminal-attention" role="img" aria-label="Terminal needs attention" />
                 </Show>
-                <span class="terminal-list__state">{entry.scope === 'project' ? 'shared' : 'task'} · {entry.endedAt === null ? 'live' : 'ended'}{contains(root(), entry.id) ? '' : ' · hidden'}</span>
               </button>
+              <Show when={entry.scope === 'task'}>
+                <button type="button" disabled={pending()} aria-label={`Share ${entry.title}`}
+                  title="Share this terminal with the project; its working directory stays the same"
+                  onClick={() => void run(async () => {
+                    applyTerminalList(await bridge.promoteTerminal(entry.id))
+                    if (scopeFilter() === 'task') setScopeFilter('both')
+                  })}>Share</button>
+              </Show>
             </li>
           )}
         </For>
-        <Show when={freebuff()}>
+        <Show when={typeShown('freebuff') ? freebuff() : undefined}>
           {(entry) => (
             <li class="terminal-list__row">
               <button type="button" class="terminal-list__item" aria-current={props.freebuffFront ? 'true' : undefined}
+                title={`Freebuff · ${entry().endedAt === null ? 'live' : 'ended'}${props.freebuffFront ? ' · in front' : ''}`}
                 onClick={props.onOpenFreebuff}>
+                <FreebuffMark size={13} />
                 <span>Freebuff</span>
                 <Show when={props.freebuffAttention}>
                   <span class="terminal-attention" role="img" aria-label="Freebuff terminal needs attention" />
                 </Show>
-                <span class="terminal-list__state">freebuff · {entry().endedAt === null ? 'live' : 'ended'}{props.freebuffFront ? ' · in front' : ''}</span>
               </button>
               <Show when={entry().endedAt !== null}>
                 <button type="button" onClick={() => restartFreebuff(entry().id)} disabled={pending()}>Restart</button>
@@ -396,15 +448,15 @@ export function TerminalPane(props: TerminalPaneProps) {
             </li>
           )}
         </Show>
-        <For each={props.agentTerminals}>
+        <For each={typeShown('task') ? props.agentTerminals : []}>
           {(entry) => (
             <li>
               <button type="button" class="terminal-list__item" onClick={() => {
                 setAgentPaneVisible(entry.id, true)
                 if (entry.live) setFocusRequest({ id: entry.id })
               }}>
+                <TaskTerminalIcon />
                 <span>agent: {entry.title}</span>
-                <span class="terminal-list__state">task · {entry.live ? 'live' : 'ended'}{agentPaneVisible(entry.id) ? '' : ' · hidden'}</span>
               </button>
             </li>
           )}
@@ -416,7 +468,7 @@ export function TerminalPane(props: TerminalPaneProps) {
           <CommandTerminals commands={commands()} shown={props.shown} agent={props.agent} />
         </Show>
       </Show>
-      <For each={agentTerminalIds()}>
+      <For each={typeShown('task') ? agentTerminalIds() : []}>
         {(id) => (
           <Show when={agentPaneVisible(id) && agentTerminal(id)}>
             {(entry) => (
@@ -440,11 +492,12 @@ export function TerminalPane(props: TerminalPaneProps) {
         )}
       </For>
       <Show when={firstMatchingPane(root(), paneVisible)} fallback={
-        <Show when={commands().size === 0 && !agentTerminalIds().some(agentPaneVisible)}><p class="empty">Open an instance or start a terminal.</p></Show>
+        <Show when={commands().size === 0 && !agentTerminalIds().some(agentPaneVisible)}>
+          <p class="empty">Open an instance or start a terminal.</p>
+        </Show>
       }>
-        <TerminalTree node={root()!} terminal={terminal} paneVisible={paneVisible} active={active()} shown={props.shown} select={setSelectedId} focusRequest={focusRequest()} onTerminalFocus={props.onTerminalFocus}
-          restart={restart} measure={(id, size) => measuredSizes.set(id, size)}
-          path={[]} resize={resizeSplit} detach={detach} stop={(id) => void run(() => bridge.closeTerminal(id))} pending={pending()} />
+                <TerminalTree node={root()!} terminal={terminal} paneVisible={paneVisible} active={active()} shown={props.shown} select={setSelectedId} focusRequest={focusRequest()} onTerminalFocus={props.onTerminalFocus}
+          restart={restart} measure={(id, size) => measuredSizes.set(id, size)} path={[]} resize={resizeSplit} detach={detach} stop={(id) => void run(() => bridge.closeTerminal(id))} split={splitPane} pending={pending()} />
       </Show>
     </div>
   )
@@ -500,6 +553,49 @@ function CommandOutput(props: { text: string | null | undefined; shown: boolean 
         const { scrollHeight, scrollTop, clientHeight } = event.currentTarget
         follow = scrollHeight - scrollTop - clientHeight <= 1
       }}>{props.text ?? 'No output yet.'}</pre>
+  )
+}
+
+function ScopeIcon(props: { scope: bridge.TerminalSnapshot['scope'] }) {
+  return <Switch fallback={<TerminalGlyphIcon />}>
+    <Match when={props.scope === 'project'}><ProjectTerminalIcon /></Match>
+    <Match when={props.scope === 'task'}><TaskTerminalIcon /></Match>
+  </Switch>
+}
+
+function ProjectTerminalIcon() {
+  return (
+    <svg class="terminal-scope-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z" />
+    </svg>
+  )
+}
+
+function TaskTerminalIcon() {
+  return (
+    <svg class="terminal-scope-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <path d="M6 3v12" />
+      <circle cx="18" cy="6" r="3" />
+      <circle cx="6" cy="18" r="3" />
+      <path d="M18 9a9 9 0 0 1-9 9" />
+    </svg>
+  )
+}
+
+function TerminalGlyphIcon() {
+  return (
+    <svg class="terminal-scope-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <path d="m4 17 6-6-6-6" />
+      <path d="M12 19h8" />
+    </svg>
+  )
+}
+
+function PlusIcon() {
+  return (
+    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
+      <path d="M12 5v14M5 12h14" />
+    </svg>
   )
 }
 
@@ -579,6 +675,7 @@ interface TerminalTreeProps {
   measure: (id: string, size: TerminalSize) => void
   stop: (id: string) => void
   detach: (id: string) => void
+  split: (id: string, axis: bridge.SplitAxis) => void
   pending: boolean
 }
 
@@ -615,22 +712,25 @@ function TerminalTree(props: TerminalTreeProps) {
         </Show>
       }>
         {(entry) => (
+          <div class="terminal-pane__slot">
           <section class="terminal-tile" classList={{ 'terminal-tile--active': entry().id === props.active }}
             aria-label={entry().title} aria-description={entry().scope === 'project' ? 'Shared terminal' : 'Task terminal'}
             onFocusIn={() => props.select(entry().id)}>
             <div class="terminal-pane__bar">
+              <ScopeIcon scope={entry().scope} />
               <span>{entry().title}</span>
               <button type="button" data-terminal-focus={entry().endedAt === null ? '' : undefined}
+                title="The terminal keeps running; reopen it under Terminals."
                 onClick={() => props.detach(entry().id)} disabled={props.pending}>Hide pane</button>
               <Show when={entry().endedAt === null}>
-                <button type="button" onClick={() => props.stop(entry().id)} disabled={props.pending}>Stop process</button>
+                <button type="button" title="Ends this shell process."
+                  onClick={() => props.stop(entry().id)} disabled={props.pending}>Stop process</button>
               </Show>
             </div>
             <Show when={entry().endedAt === null} fallback={
               <div class="terminal-ended">
-                <p>{entry().title} ended{formatExit(entry().exitCode)}</p>
+                <p>Ended{formatExit(entry().exitCode)}</p>
                 <p><code>{entry().command}</code> in <code>{entry().cwd}</code></p>
-                <span class="terminal-list__state">{entry().scope === 'project' ? 'Shared terminal' : 'Task terminal'}</span>
                 <button type="button" onClick={() => props.restart(entry().id)} disabled={props.pending}>Restart</button>
               </div>
             }>
@@ -639,6 +739,17 @@ function TerminalTree(props: TerminalTreeProps) {
               </Show>
             </Show>
           </section>
+          <button type="button" class="terminal-split-add terminal-split-add--right" aria-label="Split right"
+            title="Split right" tabIndex={-1} disabled={props.pending}
+            onClick={() => props.split(entry().id, 'horizontal')}>
+            <PlusIcon />
+          </button>
+          <button type="button" class="terminal-split-add terminal-split-add--bottom" aria-label="Split down"
+            title="Split down" tabIndex={-1} disabled={props.pending}
+            onClick={() => props.split(entry().id, 'vertical')}>
+            <PlusIcon />
+          </button>
+          </div>
         )}
       </Show>
     }>

@@ -43,6 +43,12 @@ function enabledButton(label: string) {
   })
 }
 
+async function newTerminal(scope: 'Project' | 'Task') {
+  const filter = await enabledButton(scope)
+  filter.click()
+  return enabledButton('New terminal')
+}
+
 function chatState() {
   return document.querySelector('.chat')?.getAttribute('data-task-state') ?? undefined
 }
@@ -284,7 +290,7 @@ async function exerciseNativeIme(
   expected?: readonly { text: string; event: 'compositionend' | 'input' }[],
 ) {
   const project = await openFixtureProject()
-  const start = await enabledButton('New shared terminal')
+  const start = await newTerminal('Project')
   start.click()
   const input = await waitFor('terminal input', () => document.querySelector<HTMLTextAreaElement>('.terminal-view__input'))
   const { terminals: [terminal] } = await bridge.terminalList(project.id)
@@ -337,7 +343,7 @@ async function exerciseNativeIme(
 
 async function exerciseMacosVisibility() {
   const project = await openFixtureProject()
-  const start = await enabledButton('New shared terminal')
+  const start = await newTerminal('Project')
   start.click()
   const context = await waitFor('painted terminal canvas', () => {
     const canvas = document.querySelector<HTMLCanvasElement>('.terminal-view__canvas')
@@ -780,7 +786,7 @@ async function exerciseTaskSwitch(project: bridge.ProjectSnapshot, shared: bridg
     })
   } else {
     await openInspectorTab('terminals')
-    const start = await enabledButton('New task terminal')
+    const start = await newTerminal('Task')
     start.click()
   }
   await waitFor('three terminal canvases', () => document.querySelectorAll('.terminal-view__canvas').length === 3)
@@ -844,7 +850,7 @@ async function openFixtureProject() {
 async function exerciseLargeDiff() {
   const project = await openFixtureProject()
   await openInspectorTab('terminals')
-  ;(await enabledButton('New shared terminal')).click()
+  ;(await newTerminal('Project')).click()
   const terminal = await waitFor('shared terminal', async () =>
     (await bridge.terminalList(project.id)).terminals.find((entry) => entry.scope === 'project'))
   await sendPrompt('Prepare the large diff review')
@@ -947,10 +953,13 @@ async function exerciseCodexEdit() {
   return { ok: true, streamedText: true, toolRow: true, reviewedWorktreeEdit: true, replay }
 }
 
-async function openInspectorTab(tab: 'terminals' | 'review' | 'git') {
+async function openInspectorTab(tab: 'terminals' | 'review' | 'git' | 'files') {
+  const requested = tab
+  if (tab === 'git') tab = 'files'
   const control = await waitFor(`${tab} tab`, () =>
     document.querySelector<HTMLButtonElement>(`#inspector-tab-${tab}`))
   control.click()
+  if (requested === 'git') (await enabledButton('Changes')).click()
 }
 
 async function reviewedFilePatch(path: string, addedLine: string) {
@@ -994,7 +1003,10 @@ async function exerciseCodexReviewMerge() {
   commit.click()
   await waitFor('task commit in Git history', () =>
     document.querySelector('[aria-label="Git worktree"]')?.textContent?.includes('Apply the review feedback'))
-  const merge = await enabledButton('Squash-merge into base')
+  await openInspectorTab('review')
+  ;(await enabledButton('Approve committed changes')).click()
+  await openInspectorTab('git')
+  const merge = await enabledButton('Merge into main')
   merge.click()
   await waitFor('squash-merge confirmation in the Git pane', () =>
     document.querySelector('[aria-label="Git worktree"] [role="status"]')?.textContent === 'Squash-merged into main.')
@@ -1164,7 +1176,7 @@ async function smoke() {
   press(search, 'Escape')
   await waitFor('focus returns after closing header search', () => document.activeElement === searchOpener)
   const start = await waitFor('shared terminal action', () => {
-    const entry = button('New shared terminal')
+    const entry = button('New terminal')
     return entry && !entry.disabled && entry
   })
   start.click()
@@ -1262,7 +1274,7 @@ async function restore() {
   const layout = await bridge.terminalLayout(project.id)
   if (layout.root?.type !== 'split') throw new Error('The split layout was not restored')
   await waitFor('Git tab selected after relaunch', () =>
-    document.querySelector('#inspector-tab-git[aria-selected="true"]'))
+    document.querySelector('#inspector-tab-files[aria-selected="true"]'))
   await openInspectorTab('terminals')
 
   const restart = await waitFor('restored terminal restart action', () => {

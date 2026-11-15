@@ -4675,6 +4675,33 @@ test('keeps the shared terminal attached while switching task terminals', async 
   expect(subscriptions.filter((id) => id === 'terminal-task')).toHaveLength(2)
 })
 
+test('marks terminal scope with an icon and filters the list and panes by type', async ({ page }) => {
+  await page.goto('/?scoped-terminals')
+
+  const shared = page.getByRole('region', { name: 'Terminal 1' })
+  const scoped = page.getByRole('region', { name: 'Task shell' })
+  await expect(shared.locator('svg.terminal-scope-icon')).toHaveCount(1)
+  await expect(scoped.locator('svg.terminal-scope-icon')).toHaveCount(1)
+
+  await expect(page.getByRole('button', { name: 'Terminal 1' })).toHaveAttribute('title', /Project shared terminal/)
+
+  const filter = page.getByRole('group', { name: 'Terminal types' })
+  await expect(filter.getByRole('button', { name: 'Both' })).toHaveAttribute('aria-pressed', 'true')
+  await filter.getByRole('button', { name: 'Task' }).click()
+  await expect(shared).toHaveCount(0)
+  await expect(scoped.getByRole('textbox')).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Terminal 1' })).toHaveCount(0)
+
+  await filter.getByRole('button', { name: 'Project' }).click()
+  await expect(shared.getByRole('textbox')).toBeVisible()
+  await expect(scoped).toHaveCount(0)
+  await expect(page.getByRole('button', { name: 'Task shell' })).toHaveCount(0)
+
+  await filter.getByRole('button', { name: 'Both' }).click()
+  await expect(shared.getByRole('textbox')).toBeVisible()
+  await expect(scoped.getByRole('textbox')).toBeVisible()
+})
+
 test('streams read-only Codex command output beside a live shell', async ({ page }) => {
   await page.goto('/?scoped-terminals')
   const shared = page.getByRole('region', { name: 'Terminal 1' }).getByRole('textbox')
