@@ -19,6 +19,8 @@ const MAX_SCROLLBACK: u64 = 100_000;
 pub enum SettingKey {
     #[serde(rename = "agents.priority")]
     AgentPriority,
+    #[serde(rename = "onboarding.completed")]
+    OnboardingCompleted,
     #[serde(rename = "theme")]
     Theme,
     #[serde(rename = "appearance.density")]
@@ -38,8 +40,9 @@ pub enum SettingKey {
 }
 
 impl SettingKey {
-    const ALL: [Self; 9] = [
+    const ALL: [Self; 10] = [
         Self::AgentPriority,
+        Self::OnboardingCompleted,
         Self::Theme,
         Self::Density,
         Self::ShowArchived,
@@ -53,6 +56,7 @@ impl SettingKey {
     fn name(self) -> &'static str {
         match self {
             Self::AgentPriority => "agents.priority",
+            Self::OnboardingCompleted => "onboarding.completed",
             Self::Theme => "theme",
             Self::Density => "appearance.density",
             Self::ShowArchived => "tasks.show_archived",
@@ -67,6 +71,7 @@ impl SettingKey {
     fn default_value(self) -> Value {
         match self {
             Self::AgentPriority => json!(["codex", "opencode", "pi", "claude", "freebuff"]),
+            Self::OnboardingCompleted => json!(false),
             Self::Theme => json!("system"),
             Self::Density => json!("compact"),
             Self::ShowArchived | Self::Notifications => json!(false),
@@ -91,8 +96,16 @@ impl SettingKey {
                     let mut seen = std::collections::BTreeSet::new();
                     agents.iter().all(|agent| {
                         agent.as_str().is_some_and(|name| {
-                            matches!(name, "codex" | "opencode" | "pi" | "claude" | "freebuff")
-                                && seen.insert(name)
+                            matches!(
+                                name,
+                                "codex"
+                                    | "opencode"
+                                    | "pi"
+                                    | "claude"
+                                    | "freebuff"
+                                    | "antigravity"
+                                    | "kilocode"
+                            ) && seen.insert(name)
                         })
                     })
                 }) =>
@@ -105,7 +118,10 @@ impl SettingKey {
             Self::Density if !matches!(value.as_str(), Some("compact" | "comfortable")) => {
                 "Choose compact or comfortable."
             }
-            Self::ShowArchived | Self::Notifications | Self::ShowDotfiles
+            Self::ShowArchived
+            | Self::Notifications
+            | Self::ShowDotfiles
+            | Self::OnboardingCompleted
                 if !value.is_boolean() =>
             {
                 "Enter true or false."

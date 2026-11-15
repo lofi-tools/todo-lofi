@@ -3590,6 +3590,7 @@ pub mod commands {
     pub struct DetectedHarness {
         agent: &'static str,
         path: String,
+        version: Option<String>,
     }
 
     #[tauri::command]
@@ -3651,6 +3652,7 @@ pub mod commands {
             detected.push(DetectedHarness {
                 agent: "codex",
                 path: install.program.to_string_lossy().into_owned(),
+                version: install.probe.version,
             });
         }
         for app in ["ChatGPT.app", "Codex.app"] {
@@ -3675,8 +3677,35 @@ pub mod commands {
                     detected.push(DetectedHarness {
                         agent: "codex",
                         path: install.program.to_string_lossy().into_owned(),
+                        version: install.probe.version,
                     });
                 }
+            }
+        }
+        let home = std::env::var_os("HOME").map(PathBuf::from);
+        let mut applications = vec![
+            PathBuf::from("/Applications"),
+            PathBuf::from("/Applications/Nix Apps"),
+        ];
+        if let Some(home) = &home {
+            applications.push(home.join("Applications"));
+            applications.push(home.join("Applications/Home Manager Apps"));
+            applications.push(home.join("Applications/NixTrampolines"));
+        }
+        let configured = settings
+            .executable("agents.antigravity.executable")
+            .map_err(|error| error.to_string())?;
+        for app in configured.into_iter().chain(
+            applications
+                .into_iter()
+                .map(|directory| directory.join("Antigravity.app")),
+        ) {
+            if app.is_dir() || app.is_file() {
+                detected.push(DetectedHarness {
+                    agent: "antigravity",
+                    path: app.to_string_lossy().into_owned(),
+                    version: None,
+                });
             }
         }
         for (agent, executable) in [
@@ -3684,11 +3713,41 @@ pub mod commands {
             ("opencode", "opencode"),
             ("pi", "pi"),
             ("freebuff", "freebuff"),
+            ("kilocode", "kilo"),
+            ("antigravity", "antigravity"),
         ] {
+            if agent == "antigravity" && detected.iter().any(|entry| entry.agent == agent) {
+                continue;
+            }
             let configured = settings
                 .executable(&format!("agents.{agent}.executable"))
                 .map_err(|error| error.to_string())?;
-            let candidates = configured.into_iter().chain(
+            let known_candidates = {
+                std::env::var_os("HOME")
+                    .map(PathBuf::from)
+                    .into_iter()
+                    .flat_map(|home| {
+                        [
+                            home.join(".local/bin").join(executable),
+                            home.join(".nix-profile/bin").join(executable),
+                            home.join(".local/state/nix/profile/bin").join(executable),
+                        ]
+                    })
+                    .chain(std::env::var_os("USER").map(|user| {
+                        PathBuf::from("/etc/profiles/per-user")
+                            .join(user)
+                            .join("bin")
+                            .join(executable)
+                    }))
+                    .chain([
+                        PathBuf::from("/run/current-system/sw/bin").join(executable),
+                        PathBuf::from("/nix/var/nix/profiles/default/bin").join(executable),
+                        PathBuf::from("/opt/homebrew/bin").join(executable),
+                        PathBuf::from("/usr/local/bin").join(executable),
+                    ])
+                    .collect::<Vec<_>>()
+            };
+            let candidates = configured.into_iter().chain(known_candidates).chain(
                 std::env::split_paths(&path)
                     .map(|directory| current_directory.join(directory).join(executable)),
             );
@@ -3709,11 +3768,67 @@ pub mod commands {
                 detected.push(DetectedHarness {
                     agent,
                     path: candidate.to_string_lossy().into_owned(),
+                    version: None,
                 });
                 break;
             }
         }
+        let mut version_checks = tokio::task::JoinSet::new();
+        for (index, harness) in detected.iter().enumerate() {
+            if harness.version.is_none() {
+                let path = harness.path.clone();
+                version_checks.spawn(async move { (index, harness_version(&path).await) });
+            }
+        }
+        while let Some(result) = version_checks.join_next().await {
+            match result {
+                Ok((index, version)) => {
+                    if let Some(harness) = detected.get_mut(index) {
+                        harness.version = version;
+                    }
+                }
+                Err(error) => tracing::warn!(%error, "harness version task failed"),
+            }
+        }
         Ok(detected)
+    }
+
+    async fn harness_version(path: &str) -> Option<String> {
+        let mut command = if Path::new(path).is_dir() {
+            let mut command = tokio::process::Command::new("/usr/bin/plutil");
+            command.args(["-extract", "CFBundleShortVersionString", "raw", "-o", "-"]);
+            command.arg(Path::new(path).join("Contents/Info.plist"));
+            command
+        } else {
+            let mut command = tokio::process::Command::new(path);
+            command.arg("--version");
+            command
+        };
+        command
+            .stdin(std::process::Stdio::null())
+            .kill_on_drop(true);
+        match tokio::time::timeout(std::time::Duration::from_secs(3), command.output()).await {
+            Ok(Ok(output)) if output.status.success() => {
+                let version = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+                if version.is_empty() {
+                    None
+                } else {
+                    Some(version)
+                }
+            }
+            Ok(Ok(output)) => {
+                tracing::debug!(%path, status = %output.status, "harness version check failed");
+                None
+            }
+            Ok(Err(error)) => {
+                tracing::debug!(%path, %error, "could not read harness version");
+                None
+            }
+            Err(error) => {
+                tracing::debug!(%path, %error, "harness version check timed out");
+                None
+            }
+        }
     }
 
     #[tauri::command]
