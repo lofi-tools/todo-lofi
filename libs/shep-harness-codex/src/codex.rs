@@ -579,8 +579,47 @@ const APP_BUNDLE_LAYOUTS: [&str; 2] = [
 /// "not installed" is a result rather than an error.
 pub async fn detect(profile_path: Option<&Path>, cwd: &Path) -> CodexDetection {
     let path_env = std::env::var_os("PATH").unwrap_or_default();
-    let application_roots = [PathBuf::from("/Applications")];
-    detect_in(profile_path, cwd, &path_env, &application_roots).await
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let mut search_paths = Vec::new();
+    if let Some(home) = &home {
+        search_paths.extend([
+            home.join(".local/bin"),
+            home.join(".nix-profile/bin"),
+            home.join(".local/state/nix/profile/bin"),
+        ]);
+    }
+    if let Some(user) = std::env::var_os("USER") {
+        search_paths.push(
+            PathBuf::from("/etc/profiles/per-user")
+                .join(user)
+                .join("bin"),
+        );
+    }
+    search_paths.extend([
+        PathBuf::from("/run/current-system/sw/bin"),
+        PathBuf::from("/nix/var/nix/profiles/default/bin"),
+        PathBuf::from("/opt/homebrew/bin"),
+        PathBuf::from("/usr/local/bin"),
+    ]);
+    search_paths.extend(std::env::split_paths(&path_env));
+    let ordered_path = match std::env::join_paths(search_paths) {
+        Ok(path) => path,
+        Err(error) => {
+            tracing::warn!(%error, "could not prepare Codex search paths");
+            path_env
+        }
+    };
+    let mut application_roots = vec![
+        PathBuf::from("/Applications"),
+        PathBuf::from("/Applications/Nix Apps"),
+    ];
+    if let Some(home) = home {
+        application_roots.extend([
+            home.join("Applications"),
+            home.join("Applications/Home Manager Apps"),
+        ]);
+    }
+    detect_in(profile_path, cwd, &ordered_path, &application_roots).await
 }
 
 async fn detect_in(
@@ -645,9 +684,6 @@ fn codex_candidates(
     if let Some(profile_path) = profile_path {
         candidates.push((profile_path.to_path_buf(), CodexInstallKind::ProfilePath));
     }
-    if let Some(found) = find_on_path("codex", path_env) {
-        candidates.push((found, CodexInstallKind::Path));
-    }
     for root in application_roots {
         for app in APP_BUNDLE_APPS {
             for layout in APP_BUNDLE_LAYOUTS {
@@ -655,14 +691,12 @@ fn codex_candidates(
             }
         }
     }
+    candidates.extend(
+        std::env::split_paths(path_env)
+            .filter(|directory| !directory.as_os_str().is_empty())
+            .map(|directory| (directory.join("codex"), CodexInstallKind::Path)),
+    );
     candidates
-}
-
-fn find_on_path(program: &str, path_env: &OsStr) -> Option<PathBuf> {
-    std::env::split_paths(path_env)
-        .filter(|directory| !directory.as_os_str().is_empty())
-        .map(|directory| directory.join(program))
-        .find(|candidate| candidate.is_file())
 }
 
 #[cfg(unix)]
@@ -8086,6 +8120,27 @@ done
             "reason: {}",
             detection.attempts[0].reason
         );
+    }
+
+    #[test]
+    fn detection_checks_bundles_before_path_entries() -> Result<(), Box<dyn std::error::Error>> {
+        let directory = TempDir::new()?;
+        let configured = directory.path().join("configured-codex");
+        let first = directory.path().join("first");
+        let second = directory.path().join("second");
+        let path = std::env::join_paths([&first, &second])?;
+        let candidates =
+            codex_candidates(Some(&configured), &path, &[directory.path().to_path_buf()]);
+        assert_eq!(candidates.first().map(|entry| &entry.0), Some(&configured));
+        let bundle = directory
+            .path()
+            .join("ChatGPT.app/Contents/Resources/codex-cli/bin/codex");
+        let position = |target: &Path| candidates.iter().position(|entry| entry.0 == target);
+        let bundle_position = position(&bundle).ok_or("missing bundle candidate")?;
+        let first_position = position(&first.join("codex")).ok_or("missing first PATH entry")?;
+        let second_position = position(&second.join("codex")).ok_or("missing second PATH entry")?;
+        assert!(bundle_position < first_position && first_position < second_position);
+        Ok(())
     }
 
     #[tokio::test]
