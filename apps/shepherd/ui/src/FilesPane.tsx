@@ -1,4 +1,4 @@
-import { For, Show, createEffect, createMemo, createResource, createSignal, onCleanup, onMount } from 'solid-js'
+import { For, Show, createEffect, createMemo, createResource, createSignal, on, onCleanup, onMount } from 'solid-js'
 
 import { actOnWorkspaceFile, cancelFileSearch, listFiles, readWorkspaceFile, reserveFileSearch, searchWorkspaceFiles, watchWorkspaceFiles, type DirectoryListing, type FileAction, type FileChange, type FileSearchResult, type WorkspaceFileEntry } from './bridge'
 import iconTheme from './charmed-icons.json'
@@ -24,15 +24,12 @@ interface CachedDirectory {
 }
 
 export function FilesPane(props: { projectId: string; worktreeTaskId: string | null; initialFile?: { taskId: string; path: string }; showDotfiles: boolean; settingsDisabled: boolean; onShowDotfilesChange: (value: boolean) => void }) {
-  // The selected task's worktree is the default root; the picker pins `/`.
-  const [root, setRoot] = createSignal<'worktree' | 'project'>('worktree')
   const [query, setQuery] = createSignal('')
   const [settingsOpen, setSettingsOpen] = createSignal(false)
   const [menuPosition, setMenuPosition] = createSignal({ left: 0, top: 0 })
   let settingsButton: HTMLButtonElement | undefined
   let settingsMenu: HTMLDivElement | undefined
-  const taskId = () => root() === 'worktree' ? props.worktreeTaskId : null
-  const location = createMemo(() => ({ projectId: props.projectId, taskId: taskId() }))
+  const location = createMemo(() => ({ projectId: props.projectId, taskId: props.worktreeTaskId }))
 
   function toggleSettings() {
     if (!settingsOpen() && settingsButton) {
@@ -60,17 +57,6 @@ export function FilesPane(props: { projectId: string; worktreeTaskId: string | n
   return (
     <section class="files-pane" aria-label="Workspace files">
       <div class="terminal-pane__bar files-pane__toolbar files-pane__topbar">
-        <span class="files-root-picker">
-          <select aria-label="File root" value={taskId() ? 'worktree' : 'project'}
-            onChange={(event) => { setRoot(event.currentTarget.value === 'worktree' ? 'worktree' : 'project'); setQuery('') }}>
-            <option value="project">/</option>
-            {/* The option stays rendered: a select ignores a value whose option
-                appears in the same update, and the selected task's workspace
-                can arrive after this pane opens. */}
-            <option value="worktree" disabled={!props.worktreeTaskId}>Task worktree</option>
-          </select>
-          <svg aria-hidden="true" width="10" height="10" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="m2.5 4.5 3.5 3.5 3.5-3.5" /></svg>
-        </span>
         <input type="search" aria-label="Find files" placeholder="Filter by name" value={query()}
           onInput={(event) => setQuery(event.currentTarget.value)} />
         <button ref={settingsButton} type="button" class="files-settings-button" aria-label="File explorer settings" title="File explorer settings"
@@ -98,6 +84,12 @@ export function FilesPane(props: { projectId: string; worktreeTaskId: string | n
 function FileBrowser(props: FileLocation & { showDotfiles: boolean; initialPath?: string; query: string }) {
   const [selected, setSelected] = createSignal<FileSelection | null>(props.initialPath ? { path: props.initialPath, line: null } : null)
   const [openPath, setOpenPath] = createSignal(props.initialPath ? parentPath(props.initialPath) : '')
+  createEffect(on(() => props.initialPath, (path) => {
+    if (path) {
+      setOpenPath(parentPath(path))
+      setSelected({ path, line: null })
+    }
+  }))
   const [results, setResults] = createSignal<FileSearchResult>()
   const [status, setStatus] = createSignal<'idle' | 'searching'>('idle')
   const [changes, setChanges] = createSignal<FileChange[]>([])
@@ -360,7 +352,7 @@ function parentPath(path: string): string {
   return separator < 0 ? '' : path.slice(0, separator)
 }
 
-function FileIcon(props: { name: string; ignored?: boolean }) {
+export function FileIcon(props: { name: string; ignored?: boolean }) {
   const icon = () => {
     const name = (props.name.split('/').pop() ?? '').toLowerCase()
     const stems: Record<string, string> = iconTheme.stems
@@ -375,7 +367,7 @@ function FileIcon(props: { name: string; ignored?: boolean }) {
   return <ThemeIcon icon={icon()} ignored={props.ignored} />
 }
 
-function ThemeIcon(props: { icon: string; ignored?: boolean }) {
+export function ThemeIcon(props: { icon: string; ignored?: boolean }) {
   const url = () => `${import.meta.env.BASE_URL}charmed-icons/${props.icon}.svg`
   return <Show when={props.ignored} fallback={<img class="files-tree__icon" src={url()} alt="" />}>
     <span class="files-tree__icon files-tree__icon--ignored" aria-hidden="true" style={{ 'mask-image': `url("${url()}")` }} />

@@ -79,13 +79,24 @@ current layout and give future changes a point of comparison.
   key still sends a terminal chord.
   Resize the inspector at its left edge by dragging or with the arrow keys
   while the separator is focused. Save the chosen width with the task.
-- In Files, name the active root above the tree and let the user choose the
-  project root or the selected task's worktree using a compact, themed picker;
-  label the project root `/`. The root follows the selected task as it changes;
-  only an explicit `/` keeps it on the project root, and switching projects
-  never asks for another project's task. Put it, the filename filter, and the settings gear
-  on one row, with the gear at the right. Match the filter height to the root
-  picker, with minimal vertical padding. Keep the gear transparent and
+- In Files, use the shared segmented control to switch between **Files** and
+  **Changes**. Show only changed files in the same tree and icon style, with
+  added and removed line counts per file and totals at the top. Keep the task
+  Git card overlaid at the bottom with an upward shadow, its branch, worktree,
+  and commit composer; show a PR only when one is attached. Its header shows the task and base
+  branches and a merge control offering squash-merge or merge each commit.
+  Right-align the merge method menu with its button group. The commit message
+  field contains a bottom-row split button for Commit and Amend; amending the
+  tip still requires confirmation. Review offers
+  a separate approval that keeps the task open; approve a clean committed tree,
+  and require renewed approval if its commit changes. The merge also requires
+  the existing Git safety checks.
+  Show the selected task’s worktree in Files; when no task worktree is available,
+  show the project root. Do not offer a root picker, and never use another
+  project’s task when switching projects. Keep the task on its assigned branch
+  and worktree; do not offer branch checkout or creation in the Git pane.
+  Put the filename filter and settings
+  gear on one row, with the gear at the right. Keep the gear transparent and
   borderless, with a subtle background only on hover.
   Show a small folder icon on
   each directory row without an expand caret. Expand folders in place on

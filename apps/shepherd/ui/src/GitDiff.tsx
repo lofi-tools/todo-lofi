@@ -6,7 +6,7 @@ const statusLabels: Partial<Record<string, string>> = {
   A: 'added', C: 'copied', D: 'deleted', M: 'modified', R: 'renamed', T: 'type changed', U: 'unmerged',
 }
 
-function describeStatus(index: string, worktree: string): string {
+export function describeStatus(index: string, worktree: string): string {
   const status = index + worktree
   if (status === '??') return 'Untracked'
   if (status === '!!') return 'Ignored'

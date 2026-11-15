@@ -43,13 +43,24 @@ test.beforeEach(async ({ context }) => {
     const attachmentLimitRequests: string[] = []
     const taskRevisions = new Map<string, number>()
     let failedReviewSnapshot = false
+    let watchedGitFiles: FileChange[] = []
     const gitState = () => {
       const last = gitMutations.at(-1)?.type
+      const files = last === 'commit' ? [] : options.has('watch-git') ? watchedGitFiles.map((file) => ({ path: file.path, originalPath: file.originalPath, actionable: true, index: ' ', worktree: file.kind === 'deleted' ? 'D' : 'M' })) : options.has('changes-fixture') ? [
+        { path: 'src/main.rs', originalPath: null, actionable: true, index: ' ', worktree: 'M' },
+        { path: 'src/new.ts', originalPath: null, actionable: true, index: '?', worktree: '?' },
+        { path: 'old.txt', originalPath: null, actionable: true, index: ' ', worktree: 'D' },
+        { path: 'assets/image.bin', originalPath: null, actionable: true, index: '?', worktree: '?' },
+      ] : [{ path: 'src/main.rs', originalPath: null, actionable: true,
+        index: last === 'stage' ? 'M' : ' ', worktree: last === 'stage' ? ' ' : 'M' }]
       return {
-        branch: 'shepherd/ship-it', tracking: null, projectRoot: null, branches: ['main'], history: [],
-        files: last === 'commit' ? [] : [{ path: 'src/main.rs', originalPath: null, actionable: true,
-          index: last === 'stage' ? 'M' : ' ', worktree: last === 'stage' ? ' ' : 'M' }],
-        stagedRevision: 'fixture', mergeBlocked: null, stagedDiff: last === 'stage' ? 'staged diff' : '', unstagedDiff: 'fixture diff',
+        branch: 'shepherd/ship-it', tracking: null, projectRoot: null, branches: ['main'], history: [], files,
+        lineStats: options.has('watch-git') ? watchedGitFiles.map((file) => ({ path: file.path, added: 2, removed: 1 })) : options.has('changes-fixture') ? [
+          { path: 'src/main.rs', added: 3, removed: 1 }, { path: 'src/new.ts', added: 5, removed: 0 },
+          { path: 'old.txt', added: 0, removed: 4 }, { path: 'assets/image.bin', added: null, removed: null },
+        ] : [{ path: 'src/main.rs', added: 3, removed: 1 }],
+        stagedRevision: 'fixture', mergeBlocked: options.has('root-dirty') ? 'The project root has uncommitted changes.' : null,
+        stagedDiff: last === 'stage' ? 'staged diff' : '', unstagedDiff: 'fixture diff',
       }
     }
     const promptFileUploads: Array<{ taskId: string; name: string; text: string }> = []
@@ -2470,10 +2481,122 @@ test('refreshes Git and Review on revision changes but not transcript snapshots'
   await expect.poll(counts).toMatchObject({ git: gitBefore.git + 1, gitDiff: gitBefore.gitDiff + 1 })
 })
 
+test('lists the Codex CLI bundled with ChatGPT in Harnesses settings', async ({ page }) => {
+  await page.goto('/')
+  await page.getByRole('button', { name: 'Settings', exact: true }).click()
+  await page.getByRole('navigation', { name: 'Settings categories' }).getByRole('button', { name: 'Harnesses' }).click()
+  const harnesses = page.getByRole('region', { name: 'Detected harnesses' })
+  await expect(harnesses).toContainText('Codex · ChatGPT app')
+  await expect(harnesses).toContainText('/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex')
+})
+
+test('shows changed files in the explorer tree with line counts', async ({ page }) => {
+  await page.goto('/?changes-fixture')
+  await page.getByRole('tab', { name: 'Files', exact: true }).click()
+  await page.getByRole('button', { name: 'Changes', exact: true }).click()
+  const changed = page.getByRole('region', { name: 'Changed files' })
+  await expect(changed).toContainText('4 changed files')
+  await expect(changed.getByRole('img', { name: '8 lines added, 5 lines removed' })).toBeVisible()
+  await expect(changed.getByText('Some files have binary or unavailable line counts.')).toBeVisible()
+  const main = changed.getByRole('button', { name: 'src/main.rs', exact: true })
+  await expect(main).toHaveClass(/files-tree__entry/)
+  await expect(main.locator('img')).toHaveAttribute('src', /rust\.svg$/)
+  await expect(main.getByRole('img', { name: '3 lines added, 1 lines removed' })).toBeVisible()
+  await expect(changed.getByRole('button', { name: 'src/new.ts' })).toContainText('+5')
+  await expect(changed.getByRole('button', { name: 'old.txt' })).toContainText('−4')
+  await expect(changed.getByRole('button', { name: 'assets/image.bin' })).toContainText('Binary')
+  await expect(changed.getByRole('button', { name: 'worktree.txt' })).toHaveCount(0)
+  await main.click()
+  await expect(page.getByRole('region', { name: 'Unstaged diff' })).toHaveText('fixture diff')
+})
+
+test('refreshes the changed-file list when the worktree watcher reports changes', async ({ page }) => {
+  await page.goto('/?watch-git')
+  await page.getByRole('tab', { name: 'Files', exact: true }).click()
+  await page.getByRole('button', { name: 'Changes', exact: true }).click()
+  const changed = page.getByRole('region', { name: 'Changed files' })
+  await expect(changed).toContainText('Working tree clean.')
+  await page.evaluate(() => window.__publishFileChanges('file-watch-1', [{ path: 'src/new.rs', kind: 'modified', originalPath: null }]))
+  await expect(changed.getByRole('button', { name: 'src/new.rs' })).toBeVisible()
+  await expect(changed.getByRole('img', { name: '2 lines added, 1 lines removed' }).first()).toBeVisible()
+})
+
+test('commits and confirms amends from the split button', async ({ page }) => {
+  await page.goto('/')
+  await page.getByRole('tab', { name: 'Files', exact: true }).click()
+  await page.getByRole('button', { name: 'Changes', exact: true }).click()
+  const git = page.getByRole('region', { name: 'Git worktree' })
+  await git.getByRole('button', { name: 'Stage all' }).click()
+  const form = git.locator('[data-git-commit]')
+  await form.getByRole('textbox', { name: 'Commit message' }).fill('Add a change')
+  await form.getByRole('button', { name: 'Commit', exact: true }).click()
+  await expect.poll(() => page.evaluate(() => window.__gitMutations)).toEqual([
+    { type: 'stage', path: null }, { type: 'commit', message: 'Add a change', expected: 'fixture' },
+  ])
+  await form.getByRole('button', { name: 'Commit action' }).click()
+  await page.getByRole('menu', { name: 'Commit action' }).getByRole('menuitemradio', { name: 'Amend' }).click()
+  await form.getByRole('textbox', { name: 'Commit message' }).fill('Update the message')
+  await form.getByRole('button', { name: 'Amend', exact: true }).click()
+  await form.getByRole('button', { name: 'Replace tip on shepherd/ship-it' }).click()
+  await expect.poll(() => page.evaluate(() => window.__gitMutations.at(-1))).toEqual({ type: 'amend', message: 'Update the message', expected: 'fixture' })
+})
+
+test('places commit actions inside the composer and aligns the merge menu', async ({ page }) => {
+  await page.goto('/?root-dirty')
+  await page.getByRole('tab', { name: 'Files', exact: true }).click()
+  const git = page.getByRole('region', { name: 'Git worktree' })
+  await expect(git.getByText('The project root has uncommitted changes.')).toHaveCount(0)
+  await expect(git.getByRole('button', { name: 'Merge into main' })).toBeDisabled()
+  const message = git.getByRole('textbox', { name: 'Commit message' })
+  const form = git.locator('[data-git-commit]')
+  const commit = form.getByRole('button', { name: 'Commit', exact: true })
+  const messageBounds = await message.boundingBox()
+  const commitBounds = await commit.boundingBox()
+  const formBounds = await form.boundingBox()
+  expect(commitBounds!.y).toBeGreaterThanOrEqual(messageBounds!.y + messageBounds!.height)
+  expect(commitBounds!.y + commitBounds!.height).toBeLessThanOrEqual(formBounds!.y + formBounds!.height)
+  const mergeGroup = git.getByRole('group', { name: 'Merge controls' })
+  const mergePicker = git.getByRole('button', { name: 'Merge method' })
+  await mergePicker.click()
+  const menu = page.getByRole('menu', { name: 'Merge method' })
+  await expect.poll(async () => {
+    const menuBounds = await menu.boundingBox()
+    const groupBounds = await mergeGroup.boundingBox()
+    return Math.abs((menuBounds!.x + menuBounds!.width) - (groupBounds!.x + groupBounds!.width))
+  }).toBeLessThan(3)
+  await expect(menu.getByRole('menuitemradio', { name: 'Merge each' })).toHaveAttribute('title', 'Merge each commit')
+  await menu.getByRole('menuitemradio', { name: 'Merge each' }).click()
+  await expect(mergePicker).not.toBeFocused()
+  await expect(git.getByRole('button', { name: 'Merge into main' })).toContainText('Merge each')
+  await form.getByRole('button', { name: 'Commit action' }).click()
+  await page.getByRole('menu', { name: 'Commit action' }).getByRole('menuitemradio', { name: 'Amend' }).click()
+  await message.fill('Update the commit')
+  await form.getByRole('button', { name: 'Amend', exact: true }).click()
+  await expect(form.getByRole('button', { name: 'Replace tip on shepherd/ship-it' })).toBeVisible()
+  await form.getByRole('button', { name: 'Cancel' }).click()
+  expect(await page.evaluate(() => window.__gitMutations)).toEqual([])
+})
+
+test('the overlaid Git card leaves file content reachable', async ({ page }) => {
+  await page.goto('/?many-files')
+  await page.getByRole('tab', { name: 'Files', exact: true }).click()
+  const git = page.getByRole('region', { name: 'Git worktree' })
+  const card = git.locator('.explorer__git-block')
+  await expect(card).toHaveCSS('position', 'absolute')
+  await expect(card).not.toHaveCSS('box-shadow', 'none')
+  const last = git.getByRole('region', { name: 'Workspace files' }).getByRole('button', { name: 'file-79.txt' })
+  await last.scrollIntoViewIfNeeded()
+  const lastBounds = await last.boundingBox()
+  const cardBounds = await card.boundingBox()
+  expect(lastBounds!.y + lastBounds!.height).toBeLessThanOrEqual(cardBounds!.y)
+})
+
 test('reports Git failures in the toast while keeping retry controls', async ({ page }) => {
   await page.goto('/?git-mutation-error')
-  await page.getByRole('tab', { name: 'Git', exact: true }).click()
+  await page.getByRole('tab', { name: 'Files', exact: true }).click()
+  await page.getByRole('button', { name: 'Changes', exact: true }).click()
   const git = page.getByRole('region', { name: 'Git worktree' })
+  await git.getByRole('button', { name: 'src/main.rs', exact: true }).click()
   await git.getByRole('button', { name: 'Stage', exact: true }).click()
   await expect(page.getByRole('alert')).toContainText('Git hook rejected this change')
   await expect(git.getByRole('alert')).toHaveCount(0)
