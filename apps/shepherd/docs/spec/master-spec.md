@@ -154,11 +154,20 @@ detailed treatment of its controls as the rest of the shell is built.
 - The **Terminals** tab stores one arrangement per project, not per task: a split
   tree with sizes, slot order and terminal scope. A **project-shared** slot shows
   the same PTY in every task of that project; a **task-specific** slot shows the
-  active task's PTY, or a create/empty state when that task has none.
+  active task's PTY, or a create/empty state when that task has none. Instance
+  rows and pane headers carry a folder icon for a project-shared terminal and a
+  branch icon for a task terminal. A Both/Project/Task filter shows all
+  terminals, only project-shared ones, or only task ones in both the list and
+  the panes. Rows keep the scope and view state in their tooltip rather than in
+  the row text.
 - Task terminals keep running while another task is active and reappear when
   their task is selected. Shared terminals keep running across every task in the
   project. Closing a terminal view detaches only the view; the PTY keeps running
   and can be reopened from the Terminals tab's instance menu.
+- Splitting starts from the pane itself: a full-height **+** on a pane's right
+  edge splits it right, and a full-width **+** along its bottom edge splits it
+  down. Both appear only while the pane is hovered or focused, and the toolbar
+  carries no split buttons; the split commands stay in the palette.
 - Terminal layout presets (single, side by side, stacked, quad) are per-project
   starting points a user can apply and then edit; they are shortcuts inside the
   Terminals tab. Single keeps the active pane visible and hides the other
@@ -641,7 +650,9 @@ The inspector has exactly one Terminals tab. It contains the project's saved
 terminal arrangement: a split tree of terminal panes whose slots are
 project-shared or task-specific. Splits, focus and resize follow §2.2 and §2.3;
 no terminal is shown outside this tab. A pane whose terminal has exited shows the
-code, last command, scope and a restart action.
+code, last command, scope and a restart action. The type filter above the
+instance list applies to the list and the split tree alike; a filtered-out pane
+is skipped rather than shown as unavailable.
 
 The selected task's Codex commands have a read-only section beside the
 interactive terminals. It shows command status and streams the combined stdout
@@ -661,6 +672,9 @@ have no PTY, input, restart action, or slot in the saved layout.
   Terminals tab of their task, or of every task for a shared terminal, with their
   last cwd and command and a one-click restart. This is stated in the UI, not
   presented as restoration.
+- A terminal whose process exits while the app runs is deleted with its saved
+  pane and record, so no ended row or dead pane lingers. Quitting and the
+  Freebuff session are the exceptions that keep an ended record for a restart.
 - Closing a terminal view detaches it only; the PTY keeps running and the view
   can be reopened from the Terminals tab's instance menu.
 
@@ -923,7 +937,7 @@ unit-tested against fixtures.
 - Diff: unified per file, word-level highlighting, staged and unstaged, binary
   files shown as size plus a notice.
 - Log: last 50 commits on the branch, author, relative time, subject.
-- Branches: local list, checkout action, detached HEAD stated explicitly.
+- Branches: task branch and detached HEAD stated explicitly; task worktrees do not expose branch switching.
 
 ### 9.3 Mutations
 
@@ -1033,7 +1047,7 @@ receives the relative path in the prompt text.
 
 ### 11.1 Settings files
 
-`settings.json` and `keybindings.json` live in the app config directory and are
+`settings.json` and `keymap.json` live in the app config directory and are
 the only source of truth for user settings; there is no settings table. The
 in-memory model is still scoped key/value pairs, serialized per scope:
 
@@ -1049,7 +1063,7 @@ in-memory model is still scoped key/value pairs, serialized per scope:
 - Project overrides are keyed by absolute path, so the file stays readable; a
   moved project loses its overrides. Keybindings are app-scoped, one chord per
   command; sequences are rejected.
-- `keybindings.json` uses `{"version":1,"bindings":{"commandPalette":"F9"}}`.
+- `keymap.json` uses `{"version":1,"bindings":{"commandPalette":"F9"}}`.
   The keys in `bindings` are command IDs from the registry. Settings records
   and saves one chord at a time. Reset removes the entry, restoring the
   platform default. Chords conflict only when their input scopes overlap.
@@ -1325,7 +1339,7 @@ reason rather than failing silently.
 ## Appendix C — Default keymap
 
 Defaults live in the core's command registry; user overrides live in
-`keybindings.json`. One chord per command; sequences are rejected. On Linux the
+`keymap.json`. One chord per command; sequences are rejected. On Linux the
 app uses Ctrl Shift where the plain chord is a standard readline key, so the
 focused terminal keeps Ctrl-K, Ctrl-P, Ctrl-W and friends. Only these chords (or
 user overrides of them) are claimed while a terminal has focus. **Send next key

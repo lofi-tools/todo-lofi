@@ -210,7 +210,7 @@ rows affected by cursor movement.
 - Embedded **Turso** through `toasty` 0.7 with `toasty-driver-turso`, the same
   stack `libs/storage` already uses. Database file in the platform data dir;
   Shepherd has its own file and schema.
-- User settings live outside the database: `settings.json` and `keybindings.json`
+- User settings live outside the database: `settings.json` and `keymap.json`
   in the app config dir, versioned and written atomically; project overrides are
   keyed by absolute path (master spec §11.1).
 - Migrations are numbered SQL files in `libs/shep-core/migrations/`
