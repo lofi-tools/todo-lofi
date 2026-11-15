@@ -3081,6 +3081,36 @@ test('renders an agent answer as formatted markdown', async ({ page }) => {
   await expect(answer).not.toContainText('# rust-libs')
 })
 
+test('renders tables in saved and streamed transcript messages', async ({ page }) => {
+  await page.goto('/?two-tasks')
+  await page.evaluate(() => {
+    const entries: Entry[] = [{ id: 'tables', sequence: 1, kind: { type: 'agentText', data: { text: [
+      '| Scope | Access |',
+      '| :--- | ---: |',
+      '| **Repo** | `yes` |',
+      '| Escaped \\| pipe | no |',
+      '',
+      '| Scope | Access | |---|---| | Repo/worktree | yes | | sudo | would need a password |',
+      '',
+      '```bash',
+      '| not | a table | |---|---| | still | code |',
+      '```',
+    ].join('\n') } } }]
+    ;(window as unknown as { __setTranscript: (taskId: string, entries: Entry[]) => void }).__setTranscript('task-1', entries)
+  })
+  const chat = page.getByRole('region', { name: 'Task chat' })
+  const tables = chat.locator('.entry__agent table')
+  await expect(tables).toHaveCount(2)
+  await expect(tables.nth(0).getByRole('columnheader', { name: 'Scope' })).toBeVisible()
+  await expect(tables.nth(0).getByRole('cell', { name: 'Escaped | pipe' })).toBeVisible()
+  await expect(tables.nth(0).getByRole('cell', { name: 'yes' })).toHaveCSS('text-align', 'right')
+  await expect(tables.nth(1).getByRole('cell', { name: 'would need a password' })).toBeVisible()
+  await expect(chat.locator('.md__code-block')).toContainText('| not | a table |')
+  await page.getByRole('button', { name: /Second chat/ }).click()
+  await page.getByRole('button', { name: /Ship it/ }).click()
+  await expect(tables).toHaveCount(2)
+})
+
 test('reports the reason the native adapter was skipped', async ({ page }) => {
   await page.goto('/?acp-fallback')
   const chat = page.getByRole('region', { name: 'Task chat' })

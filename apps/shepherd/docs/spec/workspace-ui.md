@@ -353,7 +353,7 @@ current layout and give future changes a point of comparison.
 
 - Render an agent's replies as formatted Markdown at the full transcript width,
   without a card per message: headings, bold and italic, inline code, fenced
-  code blocks, lists, quotes, rules and links. Keep search hits highlighted in
+  code blocks, lists, quotes, tables, rules and links. Keep search hits highlighted in
   the text.
 - Thinking segments stream open with the live output. Collapse a segment to a
   one-line **Thinking · N words** summary once it has scrolled above the visible

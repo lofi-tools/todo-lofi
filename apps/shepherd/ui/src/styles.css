@@ -1708,6 +1708,10 @@ textarea {
   margin-top: 8px;
 }
 
+.entry__agent > :is(.md__paragraph, .md__code-block, .md__table-scroll) + * {
+  margin-top: 16px;
+}
+
 .md__paragraph {
   margin: 0;
 }
@@ -1759,6 +1763,11 @@ textarea {
   border-left: 2px solid var(--border);
   color: var(--text-secondary);
 }
+
+.md__table-scroll { max-width: 100%; overflow-x: auto; }
+.md__table { border-collapse: collapse; font-size: inherit; }
+.md__table th, .md__table td { padding: 5px 9px; border: 1px solid var(--border); vertical-align: top; }
+.md__table th { background: var(--surface-raised); font-weight: 600; }
 
 .md__rule {
   margin: 0;

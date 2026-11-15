@@ -14,6 +14,7 @@ type Block =
   | { type: 'paragraph'; value: string }
   | { type: 'list'; ordered: boolean; items: string[] }
   | { type: 'quote'; value: string }
+  | { type: 'table'; headers: string[]; alignments: ('left' | 'center' | 'right')[]; rows: string[][] }
   | { type: 'rule' }
 
 // Underscore emphasis is deliberately unsupported so `snake_case` names survive.
@@ -23,6 +24,7 @@ const HEADING = /^(#{1,6})\s+(.*)$/
 const RULE = /^\s*(?:-{3,}|\*{3,}|_{3,})\s*$/
 const QUOTE = /^>\s?(.*)$/
 const LIST = /^\s*(?:([-*+])|(\d{1,9})[.)])\s+(.*)$/
+const FLAT_TABLE = /\|\s+\|\s*:?-{3,}/
 
 function parseInline(source: string): Inline[] {
   const nodes: Inline[] = []
@@ -46,12 +48,52 @@ function isBlockStart(line: string) {
   return FENCE.test(line) || HEADING.test(line) || RULE.test(line) || QUOTE.test(line) || LIST.test(line)
 }
 
+function tableCells(line: string): string[] {
+  let text = line.trim()
+  if (text.startsWith('|')) text = text.slice(1)
+  if (text.endsWith('|') && !text.endsWith('\\|')) text = text.slice(0, -1)
+  const cells: string[] = []
+  let cell = ''
+  let code = false
+  for (let index = 0; index < text.length; index += 1) {
+    const character = text[index]
+    if (character === '\\' && text[index + 1] === '|') {
+      cell += '|'
+      index += 1
+    } else if (character === '`') {
+      code = !code
+      cell += character
+    } else if (character === '|' && !code) {
+      cells.push(cell.trim())
+      cell = ''
+    } else cell += character
+  }
+  cells.push(cell.trim())
+  return cells
+}
+
+function tableHeader(lines: string[], index: number) {
+  if (!lines[index]?.includes('|') || !lines[index + 1]?.includes('|')) return undefined
+  const headers = tableCells(lines[index])
+  const separators = tableCells(lines[index + 1])
+  if (headers.length !== separators.length || !separators.every((cell) => /^:?-{3,}:?$/.test(cell))) return undefined
+  const alignments = separators.map((cell): 'left' | 'center' | 'right' =>
+    cell.startsWith(':') && cell.endsWith(':') ? 'center' : cell.endsWith(':') ? 'right' : 'left')
+  return { headers, alignments }
+}
+
+function flatTableRows(line: string): string[] | undefined {
+  if (!line.trimStart().startsWith('|') || !FLAT_TABLE.test(line)) return undefined
+  const rows = line.split(/(?<=\|)\s+(?=\|)/)
+  return tableHeader(rows, 0) ? rows : undefined
+}
+
 function parseBlocks(source: string): Block[] {
   const lines = source.replace(/\r\n?/g, '\n').split('\n')
   const blocks: Block[] = []
   let index = 0
   while (index < lines.length) {
-    const line = lines[index]
+    let line = lines[index]
     if (!line.trim()) {
       index += 1
       continue
@@ -65,6 +107,23 @@ function parseBlocks(source: string): Block[] {
       }
       if (index < lines.length) index += 1
       blocks.push({ type: 'code', value: body.join('\n') })
+      continue
+    }
+    const rows = flatTableRows(line)
+    if (rows) {
+      lines.splice(index, 1, ...rows)
+      line = lines[index]
+    }
+    const table = tableHeader(lines, index)
+    if (table) {
+      const rows: string[][] = []
+      index += 2
+      while (index < lines.length && lines[index].trim() && lines[index].includes('|')) {
+        const cells = tableCells(lines[index])
+        rows.push(table.headers.map((_, column) => cells[column] ?? ''))
+        index += 1
+      }
+      blocks.push({ type: 'table', ...table, rows })
       continue
     }
     const heading = HEADING.exec(line)
@@ -103,7 +162,7 @@ function parseBlocks(source: string): Block[] {
       continue
     }
     const paragraph: string[] = []
-    while (index < lines.length && lines[index].trim() && !isBlockStart(lines[index])) {
+    while (index < lines.length && lines[index].trim() && !isBlockStart(lines[index]) && !tableHeader(lines, index) && !flatTableRows(lines[index])) {
       paragraph.push(lines[index].trim())
       index += 1
     }
@@ -144,6 +203,12 @@ export function Markdown(props: { source: string; renderText: (value: string) =>
             ? <ol class="md__list">{block.items.map((item) => <li>{inline(item)}</li>)}</ol>
             : <ul class="md__list">{block.items.map((item) => <li>{inline(item)}</li>)}</ul>
           case 'quote': return <blockquote class="md__quote">{inline(block.value)}</blockquote>
+          case 'table': return <div class="md__table-scroll" tabIndex={0} role="region" aria-label="Table">
+            <table class="md__table">
+              <thead><tr>{block.headers.map((header, index) => <th scope="col" style={{ 'text-align': block.alignments[index] }}>{inline(header)}</th>)}</tr></thead>
+              <tbody>{block.rows.map((row) => <tr>{row.map((cell, index) => <td style={{ 'text-align': block.alignments[index] }}>{inline(cell)}</td>)}</tr>)}</tbody>
+            </table>
+          </div>
           case 'rule': return <hr class="md__rule" />
           case 'paragraph': return <p class="md__paragraph">{inline(block.value)}</p>
         }
