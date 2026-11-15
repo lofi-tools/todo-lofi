@@ -68,5 +68,7 @@ pub struct TaskWorkspace {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub modes: Option<shep_harness_core::AgentModes>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_mode: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub models: Option<shep_harness_core::AgentModels>,
 }

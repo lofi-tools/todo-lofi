@@ -1595,6 +1595,7 @@ impl Core {
                 .map(|session| session.capabilities().clone())
                 .or_else(|| record.and_then(|record| record.capabilities.clone())),
             modes: session.and_then(HarnessSession::modes),
+            default_mode: session.and_then(HarnessSession::default_mode),
             models: session.and_then(HarnessSession::models),
         })
     }

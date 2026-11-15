@@ -170,6 +170,7 @@ pub struct HarnessSession {
     harness: Box<dyn AgentHarness>,
     capabilities: Capabilities,
     session_id: Option<SessionId>,
+    default_mode: Option<String>,
     transcript: Transcript,
     dirty_entries: BTreeSet<usize>,
     /// Set when a tool call stopped changing, so the next persist keeps the
@@ -192,6 +193,7 @@ impl HarnessSession {
             harness,
             capabilities: Capabilities::default(),
             session_id: None,
+            default_mode: None,
             transcript: Transcript::default(),
             dirty_entries: BTreeSet::new(),
             flush_pending: false,
@@ -235,6 +237,7 @@ impl HarnessSession {
             self.restore_transcript(replay);
         }
         self.session_id = Some(session_id.clone());
+        self.default_mode = self.harness.modes().and_then(|modes| modes.current);
         self.capabilities.mode_picker = self.harness.modes().is_some();
         self.capabilities.model_picker = self.harness.models().is_some();
         Ok(session_id)
@@ -245,6 +248,10 @@ impl HarnessSession {
             return None;
         }
         self.harness.modes()
+    }
+
+    pub fn default_mode(&self) -> Option<String> {
+        self.default_mode.clone()
     }
 
     pub fn models(&self) -> Option<AgentModels> {
@@ -1529,6 +1536,73 @@ mod tests {
 
     use super::*;
     use crate::test_support::TestDirectory;
+    #[cfg(feature = "git")]
+    use crate::Project;
+
+    #[tokio::test]
+    async fn session_keeps_the_initial_mode_when_the_user_selects_another()
+    -> Result<(), Box<dyn std::error::Error>> {
+        struct ModeHarness {
+            inner: FakeHarness,
+            current: String,
+        }
+
+        #[async_trait]
+        impl AgentHarness for ModeHarness {
+            fn events(&mut self) -> &mut tokio::sync::mpsc::UnboundedReceiver<HarnessEvent> {
+                self.inner.events()
+            }
+            fn modes(&self) -> Option<shep_harness_core::AgentModes> {
+                Some(shep_harness_core::AgentModes {
+                    current: Some(self.current.clone()),
+                    options: Vec::new(),
+                })
+            }
+            async fn set_mode(&mut self, mode: &str) -> Result<(), HarnessError> {
+                self.current = mode.to_owned();
+                Ok(())
+            }
+            async fn start(&mut self, spec: SpawnSpec) -> Result<Capabilities, HarnessError> {
+                self.inner.start(spec).await
+            }
+            async fn open_session(
+                &mut self,
+                resume: Option<SessionId>,
+            ) -> Result<SessionId, HarnessError> {
+                self.inner.open_session(resume).await
+            }
+            async fn prompt(&mut self, input: PromptInput) -> Result<(), HarnessError> {
+                self.inner.prompt(input).await
+            }
+            async fn cancel(&mut self) -> Result<(), HarnessError> {
+                self.inner.cancel().await
+            }
+            async fn respond(
+                &mut self,
+                id: ApprovalId,
+                decision: Decision,
+            ) -> Result<(), HarnessError> {
+                self.inner.respond(id, decision).await
+            }
+            async fn shutdown(&mut self) -> Result<(), HarnessError> {
+                self.inner.shutdown().await
+            }
+        }
+
+        let mut session = HarnessSession::new(Box::new(ModeHarness {
+            inner: FakeHarness::new(Vec::new()),
+            current: "build".into(),
+        }));
+        session.start(SpawnSpec::default()).await?;
+        session.open_session(None).await?;
+        session.set_mode("plan").await?;
+        assert_eq!(session.default_mode().as_deref(), Some("build"));
+        assert_eq!(
+            session.modes().and_then(|modes| modes.current).as_deref(),
+            Some("plan")
+        );
+        Ok(())
+    }
 
     #[tokio::test]
     async fn compact_needs_the_adapter_capability_and_reaches_the_adapter() {
