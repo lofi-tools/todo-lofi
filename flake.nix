@@ -84,6 +84,7 @@
             { name = "herdr-core"; url = "https://github.com/herdrdev/herdr-core"; }
             { name = "herdr-app"; url = "https://github.com/herdrdev/herdr-app"; }
             { name = "pi"; url = "https://github.com/earendil-works/pi"; }
+            { name = "orca"; url = "https://github.com/stablyai/orca"; }
           ];
 
           bash.wd = "$(git rev-parse --show-toplevel)";
