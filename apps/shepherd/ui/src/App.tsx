@@ -2499,8 +2499,8 @@ export function App() {
             )}
           </Show>
 
+          <div class="chat__transcript-wrap" hidden={!!freebuffProjectId()}>
           <div class="chat__transcript" ref={transcript} tabIndex={-1} role="region" aria-label="Transcript"
-            hidden={!!freebuffProjectId()}
             onScroll={(event) => {
               const element = event.currentTarget
               followTranscript = element.scrollHeight - element.scrollTop - element.clientHeight <= 24
@@ -2611,6 +2611,7 @@ export function App() {
                 )
               }}
             </Show>
+          </div>
           </div>
 
           <Show when={freebuffProjectId()} keyed>
