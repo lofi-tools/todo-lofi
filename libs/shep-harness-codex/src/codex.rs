@@ -3502,7 +3502,16 @@ async fn handle_notification(
 fn tool_call_from_item(item: &Value) -> Option<HarnessEvent> {
     let tool_call_id = item.get("id").and_then(Value::as_str)?.to_string();
     let kind = item.get("type").and_then(Value::as_str)?;
-    let status = tool_status(item.get("status").and_then(Value::as_str));
+    let status = if kind == "commandExecution"
+        && item
+            .get("exitCode")
+            .and_then(Value::as_i64)
+            .is_some_and(|code| code != 0)
+    {
+        ToolStatus::Failed
+    } else {
+        tool_status(item.get("status").and_then(Value::as_str))
+    };
 
     let (title, kind_name, output, diffs) = match kind {
         "commandExecution" => (
@@ -5395,6 +5404,18 @@ done
         assert!(output.starts_with(shep_harness_core::COMMAND_OUTPUT_OMITTED));
         assert!(output.ends_with("tail"));
         Ok(())
+    }
+
+    #[test]
+    fn app_server_command_status_reflects_exit_code() {
+        for (exit_code, expected) in [(0, ToolStatus::Completed), (1, ToolStatus::Failed)] {
+            let event = tool_call_from_item(&json!({
+                "id": "call", "type": "commandExecution", "status": "completed", "exitCode": exit_code
+            }));
+            assert!(
+                matches!(event, Some(HarnessEvent::ToolCall { status, .. }) if status == expected)
+            );
+        }
     }
 
     #[test]
