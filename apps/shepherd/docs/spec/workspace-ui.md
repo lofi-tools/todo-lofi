@@ -370,13 +370,16 @@ current layout and give future changes a point of comparison.
 
 ## Conversation transcript
 
+- Overlay the top of the transcript with a broad inset shadow using the same
+  theme-aware shadow colours as the Git card, so messages scroll beneath it.
 - Render an agent's replies as formatted Markdown at the full transcript width,
   without a card per message: headings, bold and italic, inline code, fenced
   code blocks, lists, quotes, tables, rules and links. Keep search hits highlighted in
   the text.
 - Thinking segments stream open with the live output. Collapse a segment to a
   one-line **Thinking · N words** summary once it has scrolled above the visible
-  transcript, and let the user expand or collapse it again.
+  transcript, and let the user expand or collapse it again. Show the full text
+  only while expanded and reveal the caret on hover or keyboard focus.
 - Show each prompt sent from the composer in a card on a neutral surface
   slightly more contrasting than the raised surface, in regular weight text,
   aligned to the trailing edge and no wider than 80% of the pane. Text
@@ -386,7 +389,9 @@ current layout and give future changes a point of comparison.
   place of a separate approval card. Once answered, it reports the decision, the
   paths it touched and a line count, with the captured output behind **Show
   contents**.
-- Other tool calls show their title and status with the captured output behind
+- Terminal commands use a terminal-coloured card, a coloured terminal icon and
+  monospace text. Show a green check for success or a red cross for failure;
+  retain the textual status for commands that have not completed. Other tool calls show their title and status with the captured output behind
   the same **Show contents** toggle. Keep the output open while the call runs so
   live output stays visible, collapse it once it settles, and start a
   conversation reopened from another task collapsed.

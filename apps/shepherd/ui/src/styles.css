@@ -1892,23 +1892,18 @@ textarea {
 }
 
 .entry__thought-caret {
-  font-style: normal;
+  opacity: 0;
+  transition: opacity 120ms ease;
 }
+
+.entry__thought:hover .entry__thought-caret,
+.entry__thought-toggle:focus-visible .entry__thought-caret { opacity: 1; }
 
 .entry__thought-text {
   margin: 4px 0 0 19px;
   font-style: italic;
   line-height: 1.5;
   white-space: pre-wrap;
-}
-
-.entry__thought-preview {
-  margin: 2px 0 0 19px;
-  overflow: hidden;
-  font-style: italic;
-  opacity: 0.75;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .entry__read {
@@ -1977,6 +1972,16 @@ textarea {
   border-radius: 8px;
   background: var(--surface);
 }
+
+.entry__command { background: color-mix(in srgb, var(--terminal-background) 90%, var(--success-text)); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.entry__command-header { display: flex; align-items: flex-start; gap: 7px; min-width: 0; }
+.entry__command-icon { flex: none; color: var(--success-text); }
+.entry__command-title { flex: 1; min-width: 0; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 13px; }
+.entry__command-result { flex: none; display: inline-flex; }
+.entry__command-result--success { color: var(--success-text); }
+.entry__command-result--failure { color: var(--status-failed); }
+.entry__command-toggle { margin-top: 6px; font-family: inherit; }
+.entry__command .entry__output { font-family: inherit; }
 
 .entry__tool-title {
   font-size: 13px;

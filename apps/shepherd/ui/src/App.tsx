@@ -67,6 +67,7 @@ const APPROVAL_LABELS: Record<bridge.Decision, string> = {
 const DEFAULT_APPROVAL_CHOICES: bridge.Decision[] = ['allow', 'deny']
 const READ_TOOL_KINDS = new Set(['read', 'search', 'fetch', 'list', 'glob', 'grep', 'ls'])
 const isReadToolCall = (toolCall: bridge.ToolCallEntry) => READ_TOOL_KINDS.has(toolCall.kind.toLowerCase())
+const COMMAND_TOOL_KINDS = new Set(['command', 'shell', 'execute'])
 const AGENT_OPTIONS: PickerOption[] = [
   { id: 'codex', name: bridge.AGENT_LABELS.codex },
   { id: 'opencode', name: bridge.AGENT_LABELS.opencode },
@@ -3701,10 +3702,6 @@ function ThoughtRow(props: {
     onCleanup(() => observer.disconnect())
   })
   const words = () => props.text.trim().split(/\s+/).filter((word) => word.length > 0).length
-  const preview = () => {
-    const line = props.text.trim().split('\n').find((line) => line.trim().length > 0) ?? ''
-    return line.length > 140 ? `${line.slice(0, 140)}…` : line
-  }
   return (
     <div class="entry__thought" ref={row}>
       <button type="button" class="entry__thought-toggle" aria-expanded={props.open()} onClick={props.onToggle}>
@@ -3713,9 +3710,11 @@ function ThoughtRow(props: {
           <path d="M10 19h4" />
         </svg>
         <span>{props.open() ? 'Thinking' : `Thinking · ${words()} words`}</span>
-        <span class="entry__thought-caret" aria-hidden="true">{props.open() ? '▾' : '▸'}</span>
+        <svg class="entry__thought-caret" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d={props.open() ? 'm4 6 4 4 4-4' : 'm6 4 4 4-4 4'} />
+        </svg>
       </button>
-      <Show when={props.open()} fallback={<p class="entry__thought-preview">{preview()}</p>}>
+      <Show when={props.open()}>
         <p class="entry__thought-text"><SearchMark text={props.text} match={props.match()} /></p>
       </Show>
     </div>
@@ -3839,6 +3838,33 @@ function ToolCallRow(props: { toolCall: bridge.ToolCallEntry; context: EntryCont
   )
 }
 
+function TerminalCommandRow(props: { toolCall: bridge.ToolCallEntry; context: EntryContext; text: (value: string) => JSX.Element }) {
+  const open = () => props.context.outputOpen(props.toolCall)
+  return <div class="entry__tool entry__command">
+    <div class="entry__command-header">
+      <svg class="entry__command-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <rect x="3" y="4" width="18" height="16" rx="2" /><path d="m7 9 3 3-3 3m6 0h4" />
+      </svg>
+      <span class="entry__command-title">{props.text(props.toolCall.title)}</span>
+      <Show when={props.toolCall.status === 'completed' || props.toolCall.status === 'failed'} fallback={<span class="entry__tool-status">{props.toolCall.status}</span>}>
+        <span class="entry__command-result" classList={{ 'entry__command-result--success': props.toolCall.status === 'completed', 'entry__command-result--failure': props.toolCall.status === 'failed' }} role="img" aria-label={props.toolCall.status === 'completed' ? 'Succeeded' : 'Failed'}>
+          <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <Show when={props.toolCall.status === 'completed'} fallback={<path d="M4 4l8 8M12 4l-8 8" />}><path d="m3 8 3 3 7-7" /></Show>
+          </svg>
+        </span>
+      </Show>
+    </div>
+    <Show when={props.toolCall.output}>
+      {(output) => <>
+        <button type="button" class="entry__read-toggle entry__command-toggle" aria-expanded={open()} onClick={() => props.context.toggleOutput(props.toolCall)}>
+          {open() ? 'Hide contents' : 'Show contents'}
+        </button>
+        <Show when={open()}><pre class="entry__output">{props.text(output())}</pre></Show>
+      </>}
+    </Show>
+  </div>
+}
+
 function entryBody(entry: bridge.Entry, context: EntryContext, match: () => string | undefined) {
   const kind = entry.kind
   const text = (value: string) => <SearchMark text={value} match={match()} />
@@ -3866,7 +3892,9 @@ function entryBody(entry: bridge.Entry, context: EntryContext, match: () => stri
     case 'question':
       return <QuestionCard question={kind.data} canAnswer={context.canAnswer} awaiting={() => context.awaitingAnswer(kind.data.questionId)} onAnswer={context.answerQuestion} match={match} />
     case 'toolCall':
-      return <ToolCallRow toolCall={kind.data} context={context} text={text} />
+      return COMMAND_TOOL_KINDS.has(kind.data.kind.toLowerCase())
+        ? <TerminalCommandRow toolCall={kind.data} context={context} text={text} />
+        : <ToolCallRow toolCall={kind.data} context={context} text={text} />
     case 'plan':
       return (
         <ul class="entry__plan">

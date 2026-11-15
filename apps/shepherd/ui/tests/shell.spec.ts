@@ -3166,6 +3166,51 @@ test('follows the latest transcript row and collapses tool output', async ({ pag
   await expect(chat.locator('.entry__tool .entry__output')).toHaveCount(0)
 })
 
+test('reveals the thinking caret on hover and hides collapsed text', async ({ page }) => {
+  await page.goto('/')
+  await page.evaluate(() => {
+    const entries: Entry[] = [{ id: 'thought', sequence: 1, kind: { type: 'thought', data: { text: 'First line of thought\nMore details' } } }]
+    ;(window as unknown as { __setTranscript: (taskId: string, entries: Entry[]) => void }).__setTranscript('task-1', entries)
+  })
+  const thought = page.locator('.entry__thought')
+  const toggle = thought.getByRole('button', { name: /Thinking/ })
+  const caret = thought.locator('.entry__thought-caret')
+  await page.mouse.move(0, 0)
+  await expect(caret).toHaveCSS('opacity', '0')
+  await toggle.hover()
+  await expect(caret).toHaveCSS('opacity', '1')
+  await expect(thought).toContainText('First line of thought')
+  await toggle.click()
+  await expect(toggle).toHaveAttribute('aria-expanded', 'false')
+  await expect(thought).not.toContainText('First line of thought')
+  await toggle.click()
+  await expect(thought).toContainText('More details')
+})
+
+test('shows terminal commands with their result and expandable output', async ({ page }) => {
+  await page.goto('/')
+  await page.evaluate(() => {
+    const entries: Entry[] = [
+      { id: 'ok', sequence: 1, kind: { type: 'toolCall', data: { toolCallId: 'ok', title: 'echo ok', kind: 'command', status: 'completed', output: 'ok', diffs: [], terminalId: null } } },
+      { id: 'fail', sequence: 2, kind: { type: 'toolCall', data: { toolCallId: 'fail', title: 'false', kind: 'execute', status: 'failed', output: 'error', diffs: [], terminalId: null } } },
+      { id: 'running', sequence: 3, kind: { type: 'toolCall', data: { toolCallId: 'running', title: 'sleep 1', kind: 'shell', status: 'running', output: 'waiting', diffs: [], terminalId: null } } },
+      { id: 'edit', sequence: 4, kind: { type: 'toolCall', data: { toolCallId: 'edit', title: 'Edit files', kind: 'edit', status: 'completed', output: null, diffs: [], terminalId: null } } },
+    ]
+    ;(window as unknown as { __setTranscript: (taskId: string, entries: Entry[]) => void }).__setTranscript('task-1', entries)
+  })
+  const chat = page.getByRole('region', { name: 'Task chat' })
+  const commands = chat.locator('.entry__command')
+  await expect(commands).toHaveCount(3)
+  await expect(commands.nth(0).getByRole('img', { name: 'Succeeded' })).toBeVisible()
+  await expect(commands.nth(1).getByRole('img', { name: 'Failed' })).toBeVisible()
+  await expect(commands.nth(0)).not.toContainText('completed')
+  await expect(commands.nth(2)).toContainText('running')
+  await expect(commands.nth(2).locator('.entry__output')).toHaveText('waiting')
+  await commands.nth(0).getByRole('button', { name: 'Show contents' }).click()
+  await expect(commands.nth(0).locator('.entry__output')).toHaveText('ok')
+  await expect(chat.locator('.entry__tool:not(.entry__command)')).toContainText('completed')
+})
+
 test('renders an agent answer as formatted markdown', async ({ page }) => {
   await page.goto('/')
   const chat = page.getByRole('region', { name: 'Task chat' })
