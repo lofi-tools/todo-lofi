@@ -4977,6 +4977,23 @@ async fn review_commit_merge_archive_and_reopen_a_task() -> Result<(), Box<dyn s
     assert_eq!(review.task.state, TaskState::Review);
     let path = PathBuf::from(review.task.worktree_path.ok_or("missing worktree")?);
     let branch = review.task.branch.ok_or("missing task branch")?;
+    for mutation in [
+        GitMutation::Checkout {
+            branch: "main".into(),
+        },
+        GitMutation::CreateBranch {
+            branch: "other-task-branch".into(),
+        },
+    ] {
+        assert!(matches!(
+            core.mutate_git(&task_id, mutation).await,
+            Err(CoreError::TaskBranchFixed)
+        ));
+    }
+    assert_eq!(
+        shep_core::git::run_git(&path, &["branch", "--show-current"])?.trim(),
+        branch
+    );
     let files = core.review_snapshot(&task_id)?.files;
     assert!(files.iter().any(|file| file.path == "README.md"));
     assert!(files.iter().any(|file| file.path == "notes.txt"));
@@ -5014,6 +5031,47 @@ async fn review_commit_merge_archive_and_reopen_a_task() -> Result<(), Box<dyn s
         .await?;
     assert!(committed.files.is_empty());
     let _tip = shep_core::git::run_git(&path, &["rev-parse", "HEAD"])?;
+    assert!(
+        core.mutate_git(&task_id, GitMutation::SquashMerge)
+            .await
+            .is_err()
+    );
+    assert!(
+        core.mutate_git(&task_id, GitMutation::MergeEach)
+            .await
+            .is_err()
+    );
+    let approved = workspace_of(
+        core.execute(Command::ReviewTask {
+            task_id: task_id.clone(),
+            action: ReviewAction::Approve,
+        })
+        .await?,
+    );
+    assert_eq!(approved.task.state, TaskState::Review);
+    assert!(core.git_snapshot(&task_id)?.merge_blocked.is_none());
+    std::fs::write(path.join("extra.txt"), "more changes\n")?;
+    let staged = core
+        .mutate_git(&task_id, GitMutation::Stage { path: None })
+        .await?;
+    core.mutate_git(
+        &task_id,
+        GitMutation::Commit {
+            message: "Add another change".into(),
+            expected: staged.staged_revision,
+        },
+    )
+    .await?;
+    assert!(
+        core.mutate_git(&task_id, GitMutation::SquashMerge)
+            .await
+            .is_err()
+    );
+    core.execute(Command::ReviewTask {
+        task_id: task_id.clone(),
+        action: ReviewAction::Approve,
+    })
+    .await?;
     core.mutate_git(&task_id, GitMutation::SquashMerge).await?;
     assert_eq!(
         std::fs::read_to_string(repository.path().join("README.md"))?,

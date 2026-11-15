@@ -160,6 +160,14 @@ const MIGRATIONS: &[Migration] = &[
         name: "0026_freebuff_terminal_scope.sql",
         sql: include_str!("../toasty/migrations/0026_freebuff_terminal_scope.sql"),
     },
+    Migration {
+        name: "0027_review_approval.sql",
+        sql: include_str!("../toasty/migrations/0027_review_approval.sql"),
+    },
+    Migration {
+        name: "0028_pool_configuration_checkpoint.sql",
+        sql: include_str!("../toasty/migrations/0028_pool_configuration_checkpoint.sql"),
+    },
 ];
 
 /// The durable store used by the application. The database handle is guarded
@@ -719,11 +727,11 @@ async fn write_task(
                 id, project_id, title, state, tier, proposed_worktree_path, \
                 proposed_branch, worktree_path, branch, base_branch, error, \
                 created_at, updated_at, branch_tip_sha, agent, worktree_last_used_at, collection_pending, \
-                model, mode, branch_error\
+                model, mode, branch_error, approved_tip_sha\
              ) SELECT \
                 ?1, ?2, ?3, ?4, ?5, ?6, ?7, \
                 NULLIF(?8, ''), NULLIF(?9, ''), NULLIF(?10, ''), NULLIF(?11, ''), ?12, ?13, NULLIF(?14, ''), ?15, ?16, ?17, \
-                NULLIF(?18, ''), NULLIF(?19, ''), NULLIF(?20, '')\
+                NULLIF(?18, ''), NULLIF(?19, ''), NULLIF(?20, ''), NULLIF(?21, '')\
              FROM projects WHERE id = ?2 \
              ON CONFLICT (id) DO UPDATE SET \
                 title = excluded.title, \
@@ -743,7 +751,8 @@ async fn write_task(
                 collection_pending = excluded.collection_pending, \
                 model = excluded.model, \
                 mode = excluded.mode, \
-                branch_error = excluded.branch_error \
+                branch_error = excluded.branch_error, \
+                approved_tip_sha = excluded.approved_tip_sha \
              WHERE tasks.project_id = excluded.project_id",
         )
         .bind(task.id.as_str())
@@ -766,6 +775,7 @@ async fn write_task(
         .bind(task.model.as_deref().unwrap_or_default())
         .bind(task.mode.as_deref().unwrap_or_default())
         .bind(task.branch_error.as_deref().unwrap_or_default())
+        .bind(task.approved_tip_sha.as_deref().unwrap_or_default())
         .exec(&mut *executor)
         .await.map_err(StoreError::database)?;
     if updated != 1 {
@@ -1905,7 +1915,7 @@ impl Store for TursoStore {
             "SELECT id, project_id, title, state, tier, proposed_worktree_path, \
                     proposed_branch, worktree_path, branch, base_branch, error, \
                     created_at, updated_at, branch_tip_sha, agent, worktree_last_used_at, collection_pending, \
-                    model, mode, branch_error \
+                    model, mode, branch_error, approved_tip_sha \
              FROM tasks ORDER BY created_at, id",
         )
         .column_types([
@@ -1929,6 +1939,7 @@ impl Store for TursoStore {
             Type::String,
             Type::String,
             Type::String,
+            Type::String,
         ])
         .exec(&mut *db)
         .await.map_err(StoreError::database)?;
@@ -1945,7 +1956,7 @@ impl Store for TursoStore {
         let mut transaction = db.transaction().await.map_err(StoreError::database)?;
         for task in tasks {
             let result = toasty::sql::statement(
-                "UPDATE tasks SET state = 'done', updated_at = ?2 WHERE id = ?1 AND state = 'review'",
+                "UPDATE tasks SET state = 'done', updated_at = ?2, approved_tip_sha = NULL WHERE id = ?1 AND state = 'review'",
             )
             .bind(task.id.as_str())
             .bind(task.updated_at as i64)
@@ -2608,6 +2619,7 @@ fn parse_task(value: Value) -> Result<Task, StoreError> {
         worktree_last_used_at: required_u64(record.get(15))?,
         collection_pending: required_u64(record.get(16))? != 0,
         branch_tip_sha: optional_string(record.get(13))?,
+        approved_tip_sha: optional_string(record.get(20))?,
         model: optional_string(record.get(17))?,
         mode: optional_string(record.get(18))?,
         branch_error: optional_string(record.get(19))?,

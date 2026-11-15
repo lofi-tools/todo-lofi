@@ -86,6 +86,7 @@ pub enum Command {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum ReviewAction {
+    Approve,
     Archive,
     Reopen,
     SendNote { text: String },

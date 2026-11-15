@@ -70,6 +70,8 @@ pub const MAX_PENDING_EVENTS: usize = 256;
 /// does not turn a failed command into a successful event.
 #[derive(Debug, thiserror::Error)]
 pub enum CoreError {
+    #[error("A task remains on its assigned branch and worktree.")]
+    TaskBranchFixed,
     #[error("project path is empty")]
     EmptyProjectPath,
     #[error("project path is already registered: {path}")]
@@ -261,6 +263,7 @@ pub struct TaskGitRead {
     state: &'static str,
     base_branch: Option<String>,
     branch: Option<String>,
+    approved_tip_sha: Option<String>,
 }
 
 impl TaskGitRead {
@@ -304,6 +307,17 @@ impl TaskGitRead {
             }
             _ => Some("The task has no recorded branch.".into()),
         };
+        if snapshot.merge_blocked.is_none() {
+            snapshot.merge_blocked = match &self.branch {
+                Some(branch)
+                    if self.approved_tip_sha.as_ref()
+                        == Some(&GitService.checked_out_tip(&self.worktree_path, branch)?) =>
+                {
+                    None
+                }
+                _ => Some("Approve the current committed changes before merging.".into()),
+            };
+        }
         Ok(snapshot)
     }
 }
@@ -1486,6 +1500,7 @@ impl Core {
             state: task.state.as_str(),
             base_branch: task.base_branch.clone(),
             branch: task.branch.clone(),
+            approved_tip_sha: task.approved_tip_sha.clone(),
         })
     }
 
@@ -1535,9 +1550,21 @@ impl Core {
                 path: file,
                 expected,
             } => GitService.discard_unstaged(path, &file, &expected)?,
-            git::GitMutation::Checkout { branch } => GitService.checkout(path, &branch)?,
-            git::GitMutation::CreateBranch { branch } => GitService.create_branch(path, &branch)?,
-            git::GitMutation::SquashMerge => {
+            git::GitMutation::Checkout { .. } | git::GitMutation::CreateBranch { .. } => {
+                return Err(CoreError::TaskBranchFixed);
+            }
+            operation @ (git::GitMutation::SquashMerge | git::GitMutation::MergeEach) => {
+                if self
+                    .task_git_read(task_id)?
+                    .git_snapshot()?
+                    .merge_blocked
+                    .is_some()
+                {
+                    return Err(GitError::MergeUnavailable {
+                        reason: "Review approval or merge prerequisites are missing".into(),
+                    }
+                    .into());
+                }
                 let (Some(base), Some(branch)) = (&task.base_branch, &task.branch) else {
                     return Err(GitError::MergeUnavailable {
                         reason: "the task has no recorded branch".into(),
@@ -1547,8 +1574,11 @@ impl Core {
                 let mut updated = task.clone();
                 updated.branch_tip_sha = Some(GitService.checked_out_tip(path, branch)?);
                 self.store.save_task(&updated).await?;
-                let outcome =
-                    GitService.squash_merge(&repository.root, path, base, branch, &task.title);
+                let outcome = if matches!(operation, git::GitMutation::SquashMerge) {
+                    GitService.squash_merge(&repository.root, path, base, branch, &task.title)
+                } else {
+                    GitService.merge_each(&repository.root, path, base, branch)
+                };
                 self.tasks.insert(task_id.clone(), updated);
                 outcome?;
             }
@@ -2070,6 +2100,29 @@ impl Core {
         }
         let mut task = self.task(task_id)?.clone();
         match action {
+            ReviewAction::Approve => {
+                if task.state != TaskState::Review {
+                    return Err(CoreError::TaskNotReady {
+                        id: task_id.to_string(),
+                        state: task.state.as_str(),
+                    });
+                }
+                let (_, _, path) = self.task_git_worktree(task_id)?;
+                let branch = task
+                    .branch
+                    .as_deref()
+                    .ok_or_else(|| GitError::MergeUnavailable {
+                        reason: "the task has no recorded branch".into(),
+                    })?;
+                if !GitService.snapshot(path)?.files.is_empty() {
+                    return Err(GitError::MergeUnavailable {
+                        reason: "commit all changes before approving".into(),
+                    }
+                    .into());
+                }
+                task.approved_tip_sha = Some(GitService.checked_out_tip(path, branch)?);
+                task.updated_at = crate::projects::now_millis();
+            }
             ReviewAction::Archive => {
                 self.archive_reviewed(vec![task_id.clone()]).await?;
                 return Ok(CommandResult::TaskWorkspace(self.task_workspace(task_id)?));

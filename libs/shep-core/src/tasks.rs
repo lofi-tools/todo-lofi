@@ -219,6 +219,7 @@ pub struct Task {
     pub branch: Option<String>,
     pub base_branch: Option<String>,
     pub branch_tip_sha: Option<String>,
+    pub approved_tip_sha: Option<String>,
     pub model: Option<String>,
     pub mode: Option<String>,
     pub branch_error: Option<String>,
@@ -248,6 +249,7 @@ impl Task {
             branch: None,
             base_branch: None,
             branch_tip_sha: None,
+            approved_tip_sha: None,
             model: None,
             mode: None,
             branch_error: None,
@@ -267,6 +269,9 @@ impl Task {
                 to: next.as_str(),
                 allowed: self.state.allowed_next(),
             });
+        }
+        if self.state == TaskState::Review && next != TaskState::Review {
+            self.approved_tip_sha = None;
         }
         self.state = next;
         self.updated_at = now_millis();

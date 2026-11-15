@@ -1173,12 +1173,14 @@ export type GitMutation =
   | { type: 'checkout'; branch: string }
   | { type: 'createBranch'; branch: string }
   | { type: 'squashMerge' }
+  | { type: 'mergeEach' }
 
 export function mutateGit(taskId: string, mutation: GitMutation): Promise<GitSnapshot> {
   return invoke('mutate_git', { taskId, mutation })
 }
 
 export type ReviewAction =
+  | { type: 'approve' }
   | { type: 'archive' }
   | { type: 'reopen' }
   | { type: 'sendNote'; text: string }

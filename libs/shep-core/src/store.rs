@@ -1195,6 +1195,7 @@ impl Store for MemoryStore {
         for task in archived {
             if let Some(stored) = tasks.get_mut(task.id.as_str()) {
                 stored.state = TaskState::Done;
+                stored.approved_tip_sha = None;
                 stored.updated_at = task.updated_at;
             }
         }

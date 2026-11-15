@@ -24,6 +24,7 @@ export function ReviewPane(props: { task: TaskDetail; queuedNote?: string; openF
 
   const [note, setNote] = createSignal('')
   const [pending, setPending] = createSignal(false)
+  const [approvalNotice, setApprovalNotice] = createSignal('')
   const running = () => ['starting', 'working', 'waiting', 'queued'].includes(props.task.state)
 
   async function apply(action: ReviewAction) {
@@ -32,6 +33,7 @@ export function ReviewPane(props: { task: TaskDetail; queuedNote?: string; openF
     try {
       await props.onAction(action)
       if (action.type === 'sendNote') setNote('')
+      if (action.type === 'approve') setApprovalNotice('Committed changes approved. A new commit requires another approval.')
     } catch (failure) {
       reportError('review_task', failure)
     } finally {
@@ -74,9 +76,11 @@ export function ReviewPane(props: { task: TaskDetail; queuedNote?: string; openF
       </Show>
       <Show when={props.task.state === 'review'}>
         <div class="terminal-pane__bar">
+          <button type="button" disabled={pending()} onClick={() => void apply({ type: 'approve' })}>Approve committed changes</button>
           <button type="button" disabled={pending()} onClick={() => void apply({ type: 'archive' })}>Mark reviewed and archive</button>
         </div>
       </Show>
+      <Show when={approvalNotice()}>{(notice) => <p class="empty" role="status">{notice()}</p>}</Show>
       <Show when={review.loading}><p class="empty" role="status">Loading changes…</p></Show>
       <Show when={!review.error && review()}>
         {(snapshot) => (
