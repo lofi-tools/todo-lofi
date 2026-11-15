@@ -278,11 +278,12 @@ export function App() {
   const [settingsCategory, setSettingsCategory] = createSignal<SettingsCategory>('Workspace')
   const [settingsProjectId, setSettingsProjectId] = createSignal<string>()
   const [preferences, setPreferences] = createSignal<bridge.SettingsSnapshot>()
+  const onboarding = () => !!preferences() && !preferences()?.warning && !(preferences()?.app['onboarding.completed'] ?? preferences()?.defaults['onboarding.completed'] ?? false)
   createEffect(() => {
     const available = agentAvailability()
     const priority = agentPriority(preferences()?.app['agents.priority'])
     if (!available || !preferences() || workspace() || selectedTaskId() || draftAgentManuallySelected()) return
-    const preferred = priority.find((agent) => available[agent])
+    const preferred = priority.find((agent): agent is bridge.Agent => agent in available && available[agent as bridge.Agent])
     if (preferred) {
       setNewTaskAgent(preferred)
       setDraftAgentManuallySelected(true)
@@ -2376,7 +2377,7 @@ export function App() {
 
   return (
     <>
-      <WorkspaceFrame canGoBack={historyIndex() > 0} canGoForward={historyIndex() < history().length - 1} onBack={() => navigateHistory(-1)} onForward={() => navigateHistory(1)} taskId={selectedTaskId()} inspectorWidth={inspectorWidth()} onInspectorWidthChange={resizeInspector} settingsOpen={settingsOpen()}
+      <WorkspaceFrame canGoBack={historyIndex() > 0} canGoForward={historyIndex() < history().length - 1} onBack={() => navigateHistory(-1)} onForward={() => navigateHistory(1)} taskId={selectedTaskId()} inspectorWidth={inspectorWidth()} onInspectorWidthChange={resizeInspector} settingsOpen={settingsOpen() || onboarding()}
         search={<TaskSearch open={searchOpen()} disabled={pending() || !projects().length} shortcut={chordFor('searchTasks')}
           mac={mac}
           inputRef={(input) => { searchInput = input }}
@@ -2389,6 +2390,7 @@ export function App() {
         sidebarHidden={sidebarHidden()} onCommands={() => openPalette('commands')} paletteShortcut={chordFor('commandPalette')}
         onSettings={() => { setProjectSettingsRequest(undefined); setSettingsOpen((open) => !open) }}
         footer={workspaceFooter}>
+        <Show when={onboarding()} fallback={<>
         <aside ref={sidebar} class="sidebar" aria-label="Workspace navigation" hidden={sidebarHidden() || settingsOpen()}>
           <header class="sidebar__header">
             <h2 class="sidebar__title">Projects</h2>
@@ -2959,6 +2961,10 @@ export function App() {
             </InspectorPanel>
           </div>
         </aside>
+        </>}><Onboarding priority={preferences()?.app['agents.priority']} onComplete={async (priority) => {
+          await editPreference('agents.priority', priority)
+          await editPreference('onboarding.completed', true)
+        }} /></Show>
       </WorkspaceFrame>
 
       <Show when={palette()} keyed>
@@ -2986,6 +2992,53 @@ export function App() {
       </Show>
     </>
   )
+}
+
+function Onboarding(props: { priority?: bridge.PoolAgent[]; onComplete: (priority: bridge.PoolAgent[]) => Promise<void> }) {
+  const [discovery] = createResource(async () => {
+    try { return { harnesses: await bridge.detectedHarnesses(), error: '' } }
+    catch (error) { return { harnesses: [], error: describe(error) } }
+  })
+  const agents = createMemo(() => [...new Set((discovery()?.harnesses ?? []).map((harness) => harness.agent))])
+  const [selected, setSelected] = createSignal<bridge.PoolAgent[]>()
+  const [saving, setSaving] = createSignal(false)
+  const [error, setError] = createSignal('')
+  createEffect(() => {
+    if (!discovery() || selected()) return
+    setSelected(props.priority ? agents().filter((agent) => props.priority?.includes(agent)) : agents().filter((agent) => agent !== 'antigravity' && agent !== 'kilocode'))
+  })
+  async function complete() {
+    setSaving(true)
+    setError('')
+    try {
+      const chosen = selected() ?? []
+      const existing = (props.priority ?? []).filter((agent) => !agents().includes(agent) || chosen.includes(agent))
+      await props.onComplete([...new Set([...existing, ...chosen])])
+    } catch (failure) { setError(describe(failure)) }
+    finally { setSaving(false) }
+  }
+  return <section class="onboarding" aria-labelledby="onboarding-title">
+    <div class="onboarding__content">
+      <h1 id="onboarding-title">Welcome to Shepherd</h1>
+      <p>Choose the detected harnesses to add to your agent pool. You can change their priority later in Settings.</p>
+      <Show when={discovery.loading}><p class="empty">Detecting harnesses…</p></Show>
+      <Show when={discovery()?.error}>{(message) => <p role="alert">Could not detect harnesses: {message()}</p>}</Show>
+      <Show when={!discovery.loading && !discovery()?.error && !agents().length}><p class="empty">No harnesses detected.</p></Show>
+      <ul class="pool__list">
+        <For each={agents()}>{(agent) => {
+          const unimplemented = agent === 'antigravity' || agent === 'kilocode'
+          const paths = () => discovery()?.harnesses.filter((harness) => harness.agent === agent).map((harness) => harness.path) ?? []
+          return <li class="pool__agent" classList={{ 'pool__agent--unimplemented': unimplemented }}>
+            <label class="onboarding__choice"><input type="checkbox" checked={selected()?.includes(agent) ?? false} onChange={(event) => setSelected((current) => event.currentTarget.checked ? [...(current ?? []), agent] : (current ?? []).filter((item) => item !== agent))} />
+              <span class="pool__agent-label"><span class="settings__harness-name"><AgentIcon agent={agent} />{bridge.harnessLabel(agent, paths())}</span><Show when={unimplemented}><span class="empty">Unimplemented</span></Show></span>
+            </label>
+          </li>
+        }}</For>
+      </ul>
+      <Show when={error()}>{(message) => <p role="alert">Could not complete onboarding: {message()}</p>}</Show>
+      <button class="project-action" type="button" disabled={discovery.loading || !!discovery()?.error || saving()} onClick={() => void complete()}>Continue</button>
+    </div>
+  </section>
 }
 
 const INSPECTOR_MIN_WIDTH = 240

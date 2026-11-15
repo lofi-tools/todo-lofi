@@ -217,10 +217,37 @@ current layout and give future changes a point of comparison.
   It offers the same per-source import buttons even when the sidebar already
   contains projects.
   Setting labels and their inputs share a row across settings sections.
-  **Settings → Agent pool** shows installed agents in a drag-reorderable priority list, with animated movement and keyboard-accessible move buttons.
+  Settings section headings match the Settings heading. **Settings → Agent pool**
+  shows available agents in a drag-reorderable priority list, with a card following
+  the pointer and animated movement. Alt-Up and Alt-Down reorder a focused card.
+  Detected but unavailable harnesses appear in a separate section. Selecting a
+  harness or its settings gear opens its settings and detected paths in a pane to
+  the right. Selecting the same harness again or using the pane's close button
+  closes it. Antigravity and Kilo Code are shown as unimplemented, with muted
+  text and grayscale icons, and can be added to the saved priority without being
+  selected to run a conversation. Offer detected harnesses that are not already
+  in the pool for addition. Detect the Antigravity app and Kilo CLI,
+  including common Nix profile locations. Identify Codex from the ChatGPT app
+  separately from a standalone installation.
+  Probe discovered versions with a bounded check. Show an update recommendation
+  for versions below the recorded baseline, and report unknown versions without
+  blocking an agent. In the absence of documented integration minimums, the
+  baseline is the current release recorded when Shepherd was updated; it is not
+  a claim that older versions cannot work.
+  Baselines recorded 2026-11-15: [Codex 0.169.0](https://github.com/openai/codex/releases/tag/rust-v0.169.0),
+  [OpenCode 1.19.5](https://github.com/anomalyco/opencode/releases/tag/v1.19.5),
+  [Pi 1.5.2](https://github.com/earendil-works/pi/releases/tag/v1.5.2),
+  [Claude Code 2.1.325](https://github.com/anthropics/claude-code/releases/tag/v2.1.325),
+  [Freebuff 0.2.36](https://www.npmjs.com/package/freebuff?activeTab=versions),
+  [Antigravity 2.32.0](https://antigravity.google/docs/changelog), and
+  [Kilo Code 7.8.27](https://github.com/Kilo-Org/kilocode/releases/tag/v7.8.27).
   A new conversation selects the first available agent in that order; the user
   can change the draft agent. If none is available, the draft remains editable
   and explains how to configure a harness. Priority is saved in `settings.json`.
+- On first launch, the main pane offers detected harnesses for the agent pool.
+  Mark unimplemented harnesses and let users opt into adding them. Continuing
+  saves the choices and `onboarding.completed: true`; setting that key in
+  `settings.json` skips onboarding for preconfigured installations.
 - **Settings → Workspace** has an unchecked **Notify when tasks need input**
   option. Enabling it allows system notifications for new waits outside the
   focused task workspace. Review changes only affect the in-app indicators

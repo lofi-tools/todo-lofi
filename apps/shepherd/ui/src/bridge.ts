@@ -30,7 +30,13 @@ export type TaskState =
 
 export type AgentTier = 'native' | 'acp' | 'terminal-wrapper' | 'plain-pane'
 export type Agent = 'codex' | 'opencode' | 'pi' | 'claude' | 'freebuff'
-export const AGENT_LABELS: Record<Agent, string> = { codex: 'Codex', opencode: 'OpenCode', pi: 'Pi', claude: 'Claude Code', freebuff: 'Freebuff' }
+export type PoolAgent = Agent | 'antigravity' | 'kilocode'
+export const AGENT_LABELS: Record<PoolAgent, string> = { codex: 'Codex', opencode: 'OpenCode', pi: 'Pi', claude: 'Claude Code', freebuff: 'Freebuff', antigravity: 'Antigravity', kilocode: 'Kilo Code' }
+export function harnessLabel(agent: PoolAgent, paths: string[]): string {
+  if (agent !== 'codex' || paths.length === 0) return AGENT_LABELS[agent]
+  const sources = [...new Set(paths.map((path) => path.includes('/ChatGPT.app/') ? 'ChatGPT app' : path.includes('/Codex.app/') ? 'Codex app' : 'standalone CLI'))]
+  return `Codex · ${sources.join(', ')}`
+}
 
 export type ShutdownState = 'running' | 'draining' | 'terminating' | 'closed'
 
@@ -91,7 +97,20 @@ export function setKeybinding(platform: KeyPlatform, edit: KeybindingEdit): Prom
   return invoke('set_keybinding', { platform, edit })
 }
 
-export function detectedHarnesses(): Promise<{ agent: Agent; path: string }[]> {
+export type DetectedHarness = { agent: PoolAgent; path: string; version?: string | null }
+export const HARNESS_BASELINE: Record<PoolAgent, string> = { codex: '0.169.0', opencode: '1.19.5', pi: '1.5.2', claude: '2.1.325', freebuff: '0.2.36', antigravity: '2.32.0', kilocode: '7.8.27' }
+
+export function harnessVersionStatus(agent: PoolAgent, version?: string | null): string {
+  const actual = version?.match(/(\d+)\.(\d+)\.(\d+)(-[\w.-]+)?/)
+  if (!actual) return 'Version unknown'
+  const baseline = HARNESS_BASELINE[agent].split('.').map(Number)
+  const parts = actual.slice(1, 4).map(Number)
+  const difference = parts.findIndex((part, index) => part !== baseline[index])
+  const outdated = difference < 0 ? !!actual[4] : parts[difference] < baseline[difference]
+  return outdated ? `${actual[0]} · Update recommended (baseline ${HARNESS_BASELINE[agent]})` : `Version ${actual[0]}`
+}
+
+export function detectedHarnesses(): Promise<DetectedHarness[]> {
   return invoke('detected_harnesses')
 }
 
@@ -1216,7 +1235,8 @@ export function archiveReviewed(taskIds: string[]): Promise<void> {
 }
 
 export interface SettingsValues {
-  'agents.priority': Agent[]
+  'agents.priority': PoolAgent[]
+  'onboarding.completed': boolean
   theme: 'system' | 'light' | 'dark'
   'appearance.density': 'compact' | 'comfortable'
   'tasks.show_archived': boolean

@@ -100,6 +100,7 @@ test.beforeEach(async ({ context }) => {
     const options = new URLSearchParams(window.location.search)
     function readPreferences() {
       const defaults = {
+        'onboarding.completed': !options.has('onboarding'),
         theme: 'system', 'appearance.density': 'compact',
         'tasks.show_archived': false, 'notifications.enabled': false, 'appearance.send_accent': 'Blue',
         'attachments.max_file_bytes': 50_000_000, 'terminal.scrollback_lines': 10_000, 'files.show_dotfiles': true,
@@ -770,7 +771,7 @@ test.beforeEach(async ({ context }) => {
             const edit = args.edit
             const path = projects.find((project) => project.id === edit.projectId)?.path
             const scope = path ? preferences.projects[path] ??= {} : preferences.app
-            if ((scope[edit.key] ?? null) !== edit.previous) {
+            if (JSON.stringify(scope[edit.key] ?? null) !== JSON.stringify(edit.previous)) {
               throw { code: 'settings_conflict', message: 'The setting changed on disk. Reload configuration before retrying.' }
             }
             if (edit.value === null) delete scope[edit.key]
@@ -969,7 +970,7 @@ test.beforeEach(async ({ context }) => {
             return []
           }
           case 'detected_harnesses':
-            return [{ agent: 'codex', path: '/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex' }]
+            return [{ agent: 'codex', path: '/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex', version: 'codex-cli 0.168.0' }, ...(options.has('unavailable-harness') ? [{ agent: 'claude', path: '/usr/local/bin/claude' }] : []), ...(options.has('onboarding') ? [{ agent: 'antigravity', path: '/Users/me/Applications/Antigravity.app' }, { agent: 'kilocode', path: '/etc/profiles/per-user/me/bin/kilo', version: '7.8.27' }] : [])]
           case 'git_snapshot':
             gitRequests.git++
             return gitState()
@@ -4230,9 +4231,17 @@ test('dragging agents reorders and persists their priority', async ({ page }) =>
   await page.getByRole('button', { name: 'Settings', exact: true }).click()
   await page.getByRole('navigation', { name: 'Settings categories' }).getByRole('button', { name: 'Agent pool' }).click()
   const pool = page.getByRole('region', { name: 'Agent priority' })
-  const rows = pool.locator('li')
+  await expect(pool.locator('ol li').filter({ hasText: 'Codex' })).toContainText('Update recommended (baseline 0.169.0)')
+  const rows = pool.locator('ol li')
   await expect(rows).toHaveCount(3)
-  await rows.filter({ hasText: 'Codex' }).dragTo(rows.filter({ hasText: 'Pi' }), { targetPosition: { x: 20, y: 30 } })
+  const source = await rows.filter({ hasText: 'Codex' }).locator('.pool__drag-handle').boundingBox()
+  const target = await rows.filter({ hasText: 'Pi' }).boundingBox()
+  if (!source || !target) throw new Error('Missing agent rows')
+  await page.mouse.move(source.x + source.width / 2, source.y + source.height / 2)
+  await page.mouse.down()
+  await page.mouse.move(target.x + 20, target.y + target.height - 2, { steps: 10 })
+  await expect(page.locator('.pool__drag-card')).toBeVisible()
+  await page.mouse.up()
   await expect(rows.nth(0)).toContainText('OpenCode')
   await expect(rows.nth(1)).toContainText('Pi')
   await expect(rows.nth(2)).toContainText('Codex')
@@ -4246,18 +4255,16 @@ test('cancelling an agent drag restores the saved order', async ({ page }) => {
   await page.goto('/?agents-priority-3')
   await page.getByRole('button', { name: 'Settings', exact: true }).click()
   await page.getByRole('navigation', { name: 'Settings categories' }).getByRole('button', { name: 'Agent pool' }).click()
-  const rows = page.getByRole('region', { name: 'Agent priority' }).locator('li')
+  const rows = page.getByRole('region', { name: 'Agent priority' }).locator('ol li')
   await expect(rows).toHaveCount(3)
-  await page.evaluate(() => {
-    const items = document.querySelectorAll<HTMLLIElement>('.pool__agent')
-    const source = items[0]
-    const target = items[2]
-    const transfer = new DataTransfer()
-    source.dispatchEvent(new DragEvent('dragstart', { bubbles: true, cancelable: true, dataTransfer: transfer }))
-    const bounds = target.getBoundingClientRect()
-    target.dispatchEvent(new DragEvent('dragover', { bubbles: true, cancelable: true, clientY: bounds.bottom - 1, dataTransfer: transfer }))
-    source.dispatchEvent(new DragEvent('dragend', { bubbles: true, dataTransfer: transfer }))
-  })
+  const source = await rows.first().locator('.pool__drag-handle').boundingBox()
+  const target = await rows.nth(2).boundingBox()
+  if (!source || !target) throw new Error('Missing agent rows')
+  await page.mouse.move(source.x + source.width / 2, source.y + source.height / 2)
+  await page.mouse.down()
+  await page.mouse.move(target.x + 20, target.y + target.height - 2, { steps: 10 })
+  await page.keyboard.press('Escape')
+  await page.mouse.up()
   await expect(rows.nth(0)).toContainText('Codex')
   await expect(rows.nth(2)).toContainText('Pi')
   const saved = await page.evaluate(() => JSON.parse(localStorage.getItem('fixture.settings') ?? '{}'))
@@ -4291,14 +4298,81 @@ test('reorders installed agents in settings', async ({ page }) => {
   await page.getByRole('button', { name: 'Settings', exact: true }).click()
   await page.getByRole('navigation', { name: 'Settings categories' }).getByRole('button', { name: 'Agent pool' }).click()
   const pool = page.getByRole('region', { name: 'Agent priority' })
-  const rows = pool.locator('li')
+  const rows = pool.locator('ol li')
   await expect(rows.first()).toContainText('Codex')
-  await pool.getByRole('button', { name: 'Move Codex down' }).click()
+  await rows.first().focus()
+  await page.keyboard.press('Alt+ArrowDown')
   await expect(rows.first()).toContainText('OpenCode')
   await page.reload()
   await page.getByRole('button', { name: 'Settings', exact: true }).click()
   await page.getByRole('navigation', { name: 'Settings categories' }).getByRole('button', { name: 'Agent pool' }).click()
   await expect(page.getByRole('region', { name: 'Agent priority' }).locator('li').first()).toContainText('OpenCode')
+})
+
+test('opens harness details and separates unavailable harnesses', async ({ page }) => {
+  await page.goto('/?agents-priority&unavailable-harness')
+  await page.getByRole('button', { name: 'Settings', exact: true }).click()
+  await page.getByRole('navigation', { name: 'Settings categories' }).getByRole('button', { name: 'Agent pool' }).click()
+  const pool = page.getByRole('region', { name: 'Agent priority' })
+  await expect(pool.getByRole('heading', { name: 'Unavailable' })).toBeVisible()
+  await expect(pool.locator('ul li')).toContainText(['Claude Code', 'Antigravity', 'Kilo Code'])
+  await pool.locator('ul li').filter({ hasText: 'Kilo Code' }).getByRole('button', { name: 'Add' }).click()
+  await expect(pool.locator('ul li').filter({ hasText: 'Kilo Code' }).getByRole('button', { name: 'Add' })).toHaveCount(0)
+  await pool.getByRole('button', { name: 'Codex harness settings' }).click()
+  const detail = page.getByRole('complementary', { name: 'Codex harness settings' })
+  await expect(detail).toContainText('agents.codex.executable')
+  await expect(detail).toContainText('/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex')
+  await pool.getByRole('button', { name: 'Claude Code harness settings' }).click()
+  await expect(page.getByRole('complementary', { name: 'Claude Code harness settings' })).toContainText('/usr/local/bin/claude')
+  await pool.locator('ol li').filter({ hasText: 'Codex' }).click()
+  await expect(detail).toBeVisible()
+  await pool.locator('ol li').filter({ hasText: 'Codex' }).click()
+  await expect(detail).toHaveCount(0)
+  await pool.locator('ol li').filter({ hasText: 'Codex' }).click()
+  await detail.getByRole('button', { name: 'Close harness settings' }).click()
+  await expect(detail).toHaveCount(0)
+})
+
+test('onboarding offers detected harnesses and saves the selection', async ({ page }) => {
+  await page.goto('/?onboarding')
+  await expect(page.getByRole('heading', { name: 'Welcome to Shepherd' })).toBeVisible()
+  await expect(page.getByText('Codex · ChatGPT app')).toBeVisible()
+  await expect(page.getByText('Unimplemented')).toHaveCount(2)
+  await page.getByRole('checkbox', { name: /Antigravity/ }).check()
+  await page.getByRole('checkbox', { name: /Kilo Code/ }).check()
+  await page.getByRole('button', { name: 'Continue', exact: true }).click()
+  await expect(page.getByRole('heading', { name: 'Welcome to Shepherd' })).toHaveCount(0)
+  const saved = await page.evaluate(() => JSON.parse(localStorage.getItem('fixture.settings') ?? '{}'))
+  expect(saved.app['onboarding.completed']).toBe(true)
+  expect(saved.app['agents.priority']).toEqual(['codex', 'antigravity', 'kilocode'])
+  await page.reload()
+  await expect(page.getByRole('heading', { name: 'Welcome to Shepherd' })).toHaveCount(0)
+  await page.getByRole('button', { name: 'Settings', exact: true }).click()
+  await page.getByRole('navigation', { name: 'Settings categories' }).getByRole('button', { name: 'Agent pool' }).click()
+  const kilo = page.getByRole('region', { name: 'Agent priority' }).locator('ul li').filter({ hasText: 'Kilo Code' })
+  await expect(kilo).toContainText('Version 7.8.27')
+  await expect(kilo.getByRole('button', { name: 'Add' })).toHaveCount(0)
+})
+
+test('configured onboarding completion skips onboarding', async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem('fixture.settings', JSON.stringify({ app: { 'onboarding.completed': true, 'agents.priority': ['codex'] } })))
+  await page.goto('/?onboarding')
+  await expect(page.getByRole('button', { name: 'Settings', exact: true })).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'Welcome to Shepherd' })).toHaveCount(0)
+})
+
+test('offers newly detected implemented harnesses for the pool', async ({ page }) => {
+  await page.addInitScript(() => { if (!localStorage.getItem('fixture.settings')) localStorage.setItem('fixture.settings', JSON.stringify({ app: { 'agents.priority': ['codex'] } })) })
+  await page.goto('/?agents-priority')
+  await page.getByRole('button', { name: 'Settings', exact: true }).click()
+  await page.getByRole('navigation', { name: 'Settings categories' }).getByRole('button', { name: 'Agent pool' }).click()
+  const pool = page.getByRole('region', { name: 'Agent priority' })
+  await pool.locator('ul li').filter({ hasText: 'OpenCode' }).getByRole('button', { name: 'Add' }).click()
+  await expect(pool.locator('ol li').nth(1)).toContainText('OpenCode')
+  await page.reload()
+  await page.getByRole('button', { name: 'Settings', exact: true }).click()
+  await page.getByRole('navigation', { name: 'Settings categories' }).getByRole('button', { name: 'Agent pool' }).click()
+  await expect(page.getByRole('region', { name: 'Agent priority' }).locator('ol li').nth(1)).toContainText('OpenCode')
 })
 
 test('applies the Send accent from Appearance and restores it after reload', async ({ page }) => {

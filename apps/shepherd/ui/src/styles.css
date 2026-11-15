@@ -308,6 +308,11 @@ textarea {
 .shell__body > .settings {
   grid-area: 2 / sidebar / 3 / -1;
 }
+.shell__body > .onboarding { grid-area: 2 / sidebar / 3 / -1; min-width: 0; overflow: auto; padding: 32px; }
+.onboarding__content { max-width: 580px; margin: 0 auto; }
+.onboarding__content h1 { font-size: 24px; }
+.onboarding__content > .project-action { margin-top: 20px; }
+.onboarding__choice { display: flex; align-items: center; gap: 12px; width: 100%; cursor: pointer; }
 
 .inspector[hidden],
 .workspace-divider[hidden] {
@@ -1041,6 +1046,10 @@ textarea {
   height: 100%;
   min-height: 0;
 }
+.settings__body--detail { grid-template-columns: minmax(160px, 220px) minmax(220px, 1fr) minmax(240px, 1fr); }
+.settings__category h3, .settings__detail h3 { margin: 0; font-size: 18px; line-height: 1.3; }
+.settings__detail { min-width: 0; overflow: auto; padding: 16px; border-left: 1px solid var(--border); }
+.settings__detail-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 
 .settings__nav {
   min-width: 0;
@@ -1235,11 +1244,20 @@ textarea {
   background: var(--surface-raised);
   transition: transform 180ms ease, opacity 180ms ease;
 }
-.pool__agent[draggable='true'] { cursor: grab; }
+.pool__agent--editable { cursor: grab; user-select: none; }
 .pool__agent--dragging { opacity: .45; cursor: grabbing; }
-.pool__drag-handle { color: var(--text-muted); font-size: 18px; line-height: 1; }
+.pool__agent--selected { border-color: var(--accent); }
+.pool__agent--unimplemented .pool__agent-label { color: var(--text-muted); }
+.pool__agent--unimplemented .agent-mark { filter: grayscale(1); }
+.pool__drag-card { position: fixed; z-index: 1000; pointer-events: none; opacity: .95; box-shadow: 0 8px 24px #0003; transition: none; }
+.pool__drag-handle { color: var(--text-muted); font-size: 18px; line-height: 1; touch-action: none; }
 .pool__agent-label { flex: 1; min-width: 0; }
+button.pool__agent-label { padding: 0; border: 0; background: transparent; color: inherit; font: inherit; text-align: left; cursor: pointer; }
 .pool__agent-label p { margin: 4px 0 0; }
+.pool__agent-label > .empty { display: block; margin-top: 4px; }
+.pool__settings { display: grid; place-items: center; padding: 4px; border: 0; border-radius: 5px; color: var(--text-muted); background: transparent; cursor: pointer; }
+.pool__settings:hover, .pool__settings:focus-visible { background: var(--surface-raised); color: var(--text); }
+.pool__section-heading { margin: 18px 0 8px; }
 .pool__agent-actions { flex: none; }
 @media (prefers-reduced-motion: reduce) { .pool__agent { transition: none; } }
 
