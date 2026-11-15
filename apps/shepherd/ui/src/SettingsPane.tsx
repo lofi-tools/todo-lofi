@@ -1,16 +1,30 @@
-import { For, Show, createEffect, createResource, createSignal, on, type JSX } from 'solid-js'
+import { For, Show, createEffect, createMemo, createResource, createSignal, on, type JSX } from 'solid-js'
 
 import { AGENT_LABELS, projectApprovals, resetApprovalGrant, type CommandBinding, type CommandRegistry, type KeybindingEdit, type ProjectApproval, type ProjectSnapshot, type SessionApproval, type SettingsSnapshot, type SettingsEdit, type SettingKey } from './bridge'
 import { displayChord, normalizeChord } from './keybindings'
 import { reportError } from './diagnostics'
 import { PoolSettings } from './PoolSettings'
+import { SettingsSelect } from './SettingsSelect'
+import { AgentIcon } from './AgentIcon'
+import { detectedHarnesses } from './bridge'
 
-const categories = ['Workspace', 'Projects', 'Agent pool', 'Appearance', 'Keyboard shortcuts'] as const
+export const categories = ['Workspace', 'Projects', 'Agent pool', 'Harnesses', 'Appearance', 'Keyboard shortcuts'] as const
+
+function matchesSearch(text: string, query: string) {
+  return !query || query.split(/\s+/).every((word) => text.toLowerCase().includes(word))
+}
 
 export const SEND_ACCENTS = ['Blue', 'Violet', 'Teal', 'Amber', 'Neutral'] as const
 export type SendAccent = (typeof SEND_ACCENTS)[number]
 
+export type SettingsCategory = (typeof categories)[number]
+
 interface SettingsPaneProps {
+  category: SettingsCategory
+  onCategoryChange: (category: SettingsCategory) => void
+  settingsProjectId?: string
+  onSettingsProjectChange: (projectId: string) => void
+  onBack: () => void
   preferences?: SettingsSnapshot
   preferencesEditable: boolean
   preferenceBusy: boolean
@@ -33,14 +47,15 @@ interface SettingsPaneProps {
   pending: boolean
   projectImports: JSX.Element
   project?: ProjectSnapshot
+  projects: ProjectSnapshot[]
   projectSettingsRequest?: { id: string }
-  approvalChange?: { projectId: string }
-  showProjectArchived: boolean
+  approvalChange?: { projectId?: string }
+  showProjectArchived: (projectId: string) => boolean
   onShowProjectArchived: (projectId: string, visible: boolean | null) => void
   onSavePreviewUrl: (projectId: string, url: string) => Promise<void>
 }
 
-function ProjectPreviewSetting(props: { url?: string | null; onSave: (url: string) => Promise<void> }) {
+function ProjectPreviewSetting(props: { url?: string | null; localOverride: boolean; onSave: (url: string) => Promise<void> }) {
   const [url, setUrl] = createSignal(props.url ?? '')
   const [saving, setSaving] = createSignal(false)
   createEffect(on(() => props.url, (saved) => setUrl(saved ?? '')))
@@ -61,12 +76,13 @@ function ProjectPreviewSetting(props: { url?: string | null; onSave: (url: strin
 
   return (
     <form class="settings__project" onSubmit={save}>
-      <label class="settings__preview-url">
-        Preview URL
+      <label class="settings__row settings__preview-url">
+        <span>Preview URL</span>
         <input type="text" inputmode="url" value={url()} onInput={(event) => setUrl(event.currentTarget.value)}
-          disabled={saving()} placeholder="http://localhost:3000" />
+          disabled={saving() || props.localOverride} placeholder="http://localhost:3000" />
       </label>
-      <button type="submit" class="project-action" disabled={saving() || url() === (props.url ?? '')}>Save preview URL</button>
+      <Show when={props.localOverride}><p class="empty">Set in .config/shepherd/settings.json. Edit that file to change it.</p></Show>
+      <button type="submit" class="project-action" disabled={saving() || props.localOverride || url() === (props.url ?? '')}>Save preview URL</button>
     </form>
   )
 }
@@ -113,7 +129,7 @@ function ApprovalGrantList(props: {
   )
 }
 
-function ProjectApprovals(props: { projectId: string; change?: { projectId: string } }) {
+function ProjectApprovals(props: { projectId: string; change?: { projectId?: string } }) {
   const [resetting, setResetting] = createSignal(false)
   const [approvals, { refetch }] = createResource(() => props.projectId, async (projectId) => {
     try {
@@ -125,7 +141,7 @@ function ProjectApprovals(props: { projectId: string; change?: { projectId: stri
   })
 
   createEffect(on(() => props.change, (change) => {
-    if (change?.projectId === props.projectId) void refetch()
+    if (change && (!change.projectId || change.projectId === props.projectId)) void refetch()
   }, { defer: true }))
 
   async function reset(approvalId: string, taskId?: string) {
@@ -202,8 +218,8 @@ function NumberPreference(props: {
       event.preventDefault()
       if (props.editable && valid()) void save(number())
     }}>
-      <label class="settings__preview-url">
-        {props.label}
+      <label class="settings__row settings__preview-url">
+        <span>{props.label}</span>
         <input type="number" min={props.minimum} max={props.maximum} step="1" value={draft()}
           disabled={!props.editable} onInput={(event) => setDraft(event.currentTarget.value)} />
       </label>
@@ -230,9 +246,10 @@ function NumberPreferences(props: {
   project?: ProjectSnapshot
   editable: boolean
   onEdit: SettingsPaneProps['onEditPreference']
+  query?: string
 }) {
   return (
-    <For each={numberPreferences}>
+    <For each={numberPreferences.filter(({ key, label }) => matchesSearch(`${props.project ? 'projects' : 'workspace'} ${key} ${label}`, props.query ?? ''))}>
       {({ key, label, minimum, maximum }) => {
         const scope = () => props.project ? props.preferences.projects[props.project.path] : props.preferences.app
         const inherited = () => (props.project ? props.preferences.app[key] : undefined) ?? props.preferences.defaults[key]
@@ -249,6 +266,7 @@ function KeyboardShortcuts(props: {
   mac: boolean
   onReload: () => Promise<CommandRegistry>
   onEdit: (edit: KeybindingEdit) => Promise<void>
+  query?: string
 }) {
   const [editing, setEditing] = createSignal<{ id: string; previous: string | null }>()
   const [chord, setChord] = createSignal<string | null>(null)
@@ -260,7 +278,7 @@ function KeyboardShortcuts(props: {
   let opener: HTMLButtonElement | undefined
   let recorder: HTMLInputElement | undefined
 
-  const commands = () => props.registry?.commands ?? []
+  const commands = () => (props.registry?.commands ?? []).filter((command) => matchesSearch(`keyboard shortcuts ${command.label} ${command.id} ${command.category} ${command.chord ?? ''}`, props.query ?? ''))
   const editable = () => !!props.registry && !props.registry.warning && !pending()
   const previous = (command: CommandBinding) => command.overridden ? command.chord : null
   const format = (chord: string | null | undefined) => chord ? displayChord(chord, props.mac) : 'Unassigned'
@@ -353,32 +371,32 @@ function KeyboardShortcuts(props: {
                     <span>{binding().label}</span>
                     <span class="empty">{binding().category}</span>
                   </div>
-                  <span>
+                  <span hidden={editing()?.id === id}>
                     <kbd>{format(binding().chord)}</kbd>
                     <Show when={binding().overridden}><small class="empty">Default {format(binding().defaultChord)}</small></Show>
                   </span>
-                  <button ref={editButton} type="button" class="project-action" disabled={!editable() || !!editing()}
+                  <button ref={editButton} type="button" class="project-action" hidden={editing()?.id === id} disabled={!editable() || !!editing()}
                     aria-label={`Edit ${binding().label} shortcut`} onClick={(event) => begin(binding(), event.currentTarget)}>Edit</button>
-                  <Show when={binding().overridden}>
+                  <Show when={binding().overridden && editing()?.id !== id}>
                     <button type="button" class="project-action" disabled={!editable() || !!editing()}
                       aria-label={`Reset ${binding().label} shortcut`} onClick={() => {
                         opener = editButton
                         void apply({ command: id, previous: previous(binding()), chord: null })
                       }}>Reset</button>
                   </Show>
+                  <Show when={editing()?.id === id}>
+                    <form class="settings__shortcut-row" onSubmit={(event) => {
+                      event.preventDefault()
+                      const edit = editing()
+                      if (edit && chord()) void apply({ command: edit.id, previous: edit.previous, chord: chord() })
+                    }}>
+                      <input data-shortcut-capture ref={recorder} aria-label={`Record shortcut for ${binding().label}`}
+                        placeholder="Press a shortcut" value={chord() ? format(chord()) : ''} readonly disabled={pending()} onKeyDown={record} />
+                      <button type="submit" class="project-action" disabled={!editable() || !chord()}>Save shortcut</button>
+                      <button type="button" class="project-action" disabled={pending()} onClick={() => { setError(''); finish() }}>Cancel</button>
+                    </form>
+                  </Show>
                 </div>
-                <Show when={editing()?.id === id}>
-                  <form class="settings__shortcut-row" onSubmit={(event) => {
-                    event.preventDefault()
-                    const edit = editing()
-                    if (edit && chord()) void apply({ command: edit.id, previous: edit.previous, chord: chord() })
-                  }}>
-                    <input data-shortcut-capture ref={recorder} aria-label={`Record shortcut for ${binding().label}`}
-                      placeholder="Press a shortcut" value={chord() ? format(chord()) : ''} readonly disabled={pending()} onKeyDown={record} />
-                    <button type="submit" class="project-action" disabled={!editable() || !chord()}>Save shortcut</button>
-                    <button type="button" class="project-action" disabled={pending()} onClick={() => { setError(''); finish() }}>Cancel</button>
-                  </form>
-                </Show>
               </li>
             )}</Show>
           }}
@@ -388,8 +406,51 @@ function KeyboardShortcuts(props: {
   )
 }
 
+function HarnessSettings(props: { query?: string }) {
+  const [harnesses, { refetch }] = createResource(async () => {
+    try { return { value: await detectedHarnesses(), error: '' } }
+    catch (error) { return { value: undefined, error: settingsError(error) } }
+  })
+  return (
+    <section class="settings__harnesses" aria-label="Detected harnesses" aria-busy={harnesses.loading}>
+      <p class="empty">Harness CLIs found in configured paths, on PATH, or in supported app bundles. Restart Shepherd after changing harness settings.</p>
+      <button type="button" class="project-action" disabled={harnesses.loading} onClick={() => void refetch()}>Refresh harnesses</button>
+      <Show when={harnesses.loading}><p class="empty">Detecting harnesses…</p></Show>
+      <Show when={harnesses.latest?.error}>{(error) => <p role="alert">{error()}</p>}</Show>
+      <Show when={!harnesses.loading && harnesses.latest?.value?.length === 0}><p class="empty">No harnesses detected.</p></Show>
+      <For each={(harnesses.latest?.value ?? []).filter((harness) => matchesSearch(`${AGENT_LABELS[harness.agent]} ${harness.path}`, props.query ?? ''))}>{(harness) => (
+        <div class="settings__harness"><div class="settings__harness-name"><AgentIcon agent={harness.agent} />{AGENT_LABELS[harness.agent]}{harness.path.includes('/ChatGPT.app/') ? ' · ChatGPT app' : harness.path.includes('/Codex.app/') ? ' · Codex app' : ''}</div><code>{harness.path}</code></div>
+      )}</For>
+    </section>
+  )
+}
+
 export function SettingsPane(props: SettingsPaneProps) {
-  const [category, setCategory] = createSignal<(typeof categories)[number]>('Workspace')
+  const category = () => props.category
+  const setCategory = props.onCategoryChange
+  const settingsProjectId = () => props.settingsProjectId ?? props.project?.id ?? props.projects[0]?.id
+  const setSettingsProjectId = props.onSettingsProjectChange
+  const settingsProject = createMemo(() => props.projects.find((project) => project.id === settingsProjectId()))
+  const [search, setSearch] = createSignal('')
+  const query = () => search().trim().toLowerCase()
+  const searchTerms: Record<(typeof categories)[number], string> = {
+    Workspace: 'show archived tasks notify notifications when tasks need input attachment limit bytes terminal scrollback lines reload settings configuration',
+    Projects: 'project settings show archived tasks preview url attachment limit bytes terminal scrollback lines approvals saved live session add project import chatgpt',
+    'Agent pool': 'agent pool priority installed agents reorder',
+    Harnesses: 'harnesses codex chatgpt opencode pi claude code freebuff executable path refresh',
+    Appearance: 'appearance theme system light dark density compact comfortable send button accent blue violet teal amber neutral',
+    'Keyboard shortcuts': 'keyboard shortcuts shortcut bindings commands reload configuration',
+  }
+  const matchingCategories = createMemo(() => categories.filter((name) => {
+    const value = query()
+    if (!value) return true
+    if (matchesSearch(`${name} ${searchTerms[name]}`, value)) return true
+    return name === 'Keyboard shortcuts' && (props.keybindings?.commands ?? []).some((command) =>
+      matchesSearch(`keyboard shortcuts ${command.label} ${command.id} ${command.category} ${command.chord ?? ''}`, value))
+  }))
+  const activeCategory = () => matchingCategories().includes(category()) ? category() : matchingCategories()[0]
+  const showSetting = (description: string) => matchesSearch(`${activeCategory() ?? ''} ${description}`, query()) || matchesSearch(activeCategory() ?? '', query())
+  const narrowedQuery = () => matchesSearch(activeCategory() ?? '', query()) ? '' : query()
   const theme = () => props.preferences?.app.theme ?? 'system'
   const density = () => props.preferences?.app['appearance.density'] ?? 'compact'
 
@@ -405,31 +466,49 @@ export function SettingsPane(props: SettingsPaneProps) {
     }
   }
   createEffect(on(() => props.projectSettingsRequest, (request) => {
-    if (request) setCategory('Projects')
+    if (request) { setSettingsProjectId(request.id); setSearch(''); setCategory('Projects') }
   }))
+  createEffect(() => {
+    if (!settingsProject() && props.projects.length) setSettingsProjectId(props.project?.id ?? props.projects[0]?.id)
+  })
 
   return (
     <section class="settings" aria-labelledby="settings-title">
-      <header class="pane-header">
-        <h2 id="settings-title">Settings</h2>
-      </header>
       <div class="settings__body">
         <nav class="settings__nav" aria-label="Settings categories">
-          <For each={categories}>
+          <button type="button" class="settings__back" onClick={props.onBack}><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M19 12H5m7-7-7 7 7 7" /></svg>Back to app</button>
+          <header class="settings__header"><h2 id="settings-title">Settings</h2></header>
+          <div class="settings__search">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5" /><path d="m15.5 15.5 5 5" /></svg>
+            <input class="task-search__input" type="search" aria-label="Search settings" placeholder="Search settings" value={search()} onInput={(event) => setSearch(event.currentTarget.value)} />
+          </div>
+          <For each={matchingCategories()}>
             {(name) => (
-              <button
-                type="button"
-                class="nav-item"
-                aria-current={category() === name ? 'true' : undefined}
-                onClick={() => setCategory(name)}
-              >
-                {name}
-              </button>
+              <>
+                <button
+                  type="button"
+                  class="nav-item"
+                  aria-current={activeCategory() === name ? 'true' : undefined}
+                  onClick={() => setCategory(name)}
+                >
+                  {name}
+                </button>
+                <Show when={name === 'Projects' && activeCategory() === 'Projects' && props.projects.length > 0}>
+                  <div class="settings__project-nav" role="group" aria-label="Project settings">
+                    <For each={props.projects}>{(project) => (
+                      <button type="button" class="nav-item settings__project-link" title={project.path}
+                        aria-current={settingsProjectId() === project.id ? 'true' : undefined}
+                        onClick={() => setSettingsProjectId(project.id)}>{project.name}</button>
+                    )}</For>
+                  </div>
+                </Show>
+              </>
             )}
           </For>
         </nav>
         <section class="settings__category" aria-labelledby="settings-category-title">
-          <h3 id="settings-category-title">{category()}</h3>
+          <h3 id="settings-category-title">{activeCategory() ?? 'No matching settings'}</h3>
+          <Show when={!activeCategory()}><p class="empty">Try another search.</p></Show>
           <Show when={props.settingsConflicts.length}>
             <div class="settings__project">
               <p class="empty">Reload configuration to review the changed value, then retry or discard your edit.</p>
@@ -443,8 +522,8 @@ export function SettingsPane(props: SettingsPaneProps) {
               )}</For>
             </div>
           </Show>
-          <Show when={category() === 'Workspace'}>
-            <label>
+          <Show when={activeCategory() === 'Workspace'}>
+            <Show when={showSetting('show archived tasks')}><label class="settings__row settings__row--checkbox"><span>Show archived tasks</span>
               <input
                 type="checkbox"
                 checked={props.showArchived}
@@ -455,90 +534,81 @@ export function SettingsPane(props: SettingsPaneProps) {
                   props.onShowArchived(visible)
                 }}
               />
-              Show archived tasks
-            </label>
-            <label>
+            </label></Show>
+            <Show when={showSetting('notify when tasks need input notifications')}><label class="settings__row settings__row--checkbox"><span>Notify when tasks need input</span>
               <input type="checkbox" checked={props.notificationsEnabled} disabled={!props.preferencesEditable}
                 onChange={(event) => {
                   const enabled = event.currentTarget.checked
                   event.currentTarget.checked = props.notificationsEnabled
                   props.onNotificationsEnabled(enabled)
                 }} />
-              Notify when tasks need input
-            </label>
+            </label></Show>
             <Show when={props.preferences}>
-              {(snapshot) => <NumberPreferences preferences={snapshot()} editable={props.preferencesEditable} onEdit={props.onEditPreference} />}
+              {(snapshot) => <NumberPreferences preferences={snapshot()} editable={props.preferencesEditable} onEdit={props.onEditPreference} query={narrowedQuery()} />}
             </Show>
-            <Show when={!props.settingsConflicts.length}>
+            <Show when={!props.settingsConflicts.length && showSetting('reload settings configuration')}>
               <button type="button" class="project-action" disabled={props.preferenceBusy} onClick={props.onReloadPreferences}>Reload settings</button>
             </Show>
           </Show>
-          <Show when={category() === 'Projects'}>
-            <Show when={props.project}>
+          <Show when={activeCategory() === 'Projects'}>
+            <Show when={settingsProject()}>
               {(project) => (
                 <div class="settings__project">
                   <h4>Project settings</h4>
                   <p>{project().name}</p>
                   <p class="empty settings__project-path">{project().path}</p>
-                  <label>
+                  <Show when={showSetting('show archived tasks')}><label class="settings__row settings__row--checkbox"><span>Show archived tasks</span>
                     <input
                       type="checkbox"
-                      checked={props.showProjectArchived}
+                      checked={props.showProjectArchived(project().id)}
                       disabled={!props.preferencesEditable}
                       onChange={(event) => {
                         const visible = event.currentTarget.checked
-                        event.currentTarget.checked = props.showProjectArchived
+                        event.currentTarget.checked = props.showProjectArchived(project().id)
                         props.onShowProjectArchived(project().id, visible)
                       }}
                     />
-                    Show archived tasks
-                  </label>
-                  <Show when={props.preferences?.projects[project().path]?.['tasks.show_archived'] !== undefined}>
+                  </label></Show>
+                  <Show when={showSetting('show archived tasks') && props.preferences?.projects[project().path]?.['tasks.show_archived'] !== undefined}>
                     <button type="button" class="project-action" disabled={!props.preferencesEditable}
                       onClick={() => props.onShowProjectArchived(project().id, null)}>Use workspace archive visibility</button>
                   </Show>
                   <Show when={project().id} keyed>
                     {(projectId) => <>
-                      <ProjectPreviewSetting url={project().previewUrl} onSave={(url) => props.onSavePreviewUrl(projectId, url)} />
+                      <Show when={showSetting('preview url')}><ProjectPreviewSetting url={project().previewUrl}
+                        localOverride={typeof (props.preferences?.projects[project().path] as Record<string, unknown> | undefined)?.['preview.url'] === 'string'}
+                        onSave={(url) => props.onSavePreviewUrl(projectId, url)} /></Show>
                       <Show when={props.preferences}>
                         {(snapshot) => <NumberPreferences preferences={snapshot()} project={project()}
-                          editable={props.preferencesEditable} onEdit={props.onEditPreference} />}
+                          editable={props.preferencesEditable} onEdit={props.onEditPreference} query={narrowedQuery()} />}
                       </Show>
-                      <ProjectApprovals projectId={projectId} change={props.approvalChange} />
+                      <Show when={showSetting('approvals saved project live session')}><ProjectApprovals projectId={projectId} change={props.approvalChange} /></Show>
                     </>}
                   </Show>
                 </div>
               )}
             </Show>
-            <button type="button" class="project-action" onClick={props.onAddProject} disabled={props.pending}>Add project</button>
-            <p class="empty">Import all from</p>
-            {props.projectImports}
+            <Show when={showSetting('add project')}><button type="button" class="project-action" onClick={props.onAddProject} disabled={props.pending}>Add project</button></Show>
+            <Show when={showSetting('import projects chatgpt')}><p class="empty">Import all from</p>{props.projectImports}</Show>
           </Show>
-          <Show when={category() === 'Agent pool'}>
-            <PoolSettings />
+          <Show when={activeCategory() === 'Agent pool'}>
+            <PoolSettings priority={props.preferences?.app['agents.priority']} editable={props.preferencesEditable && !props.preferenceBusy} onChange={(priority) => props.onEditPreference('agents.priority', priority)} />
           </Show>
-          <Show when={category() === 'Appearance'}>
-            <label>
+          <Show when={activeCategory() === 'Harnesses'}><HarnessSettings query={['codex', 'chatgpt', 'opencode', 'pi', 'claude', 'freebuff'].some((name) => name.includes(query())) ? narrowedQuery() : ''} /></Show>
+          <Show when={activeCategory() === 'Appearance'}>
+            <Show when={showSetting('theme system light dark')}><label class="settings__row">
               <span id="appearance-theme-label">Theme</span>
-              <select class="project-action" disabled={!props.preferencesEditable}
-                aria-labelledby="appearance-theme-label" value={theme()}
-                onChange={(event) => void chooseAppearance('theme', event.currentTarget)}>
-                <option value="system">System</option>
-                <option value="light">Light</option>
-                <option value="dark">Dark</option>
-              </select>
-            </label>
-            <label>
+              <SettingsSelect label="Theme" value={theme()} disabled={!props.preferencesEditable}
+                options={[{ value: 'system', label: 'System' }, { value: 'light', label: 'Light' }, { value: 'dark', label: 'Dark' }]}
+                onChange={(input) => void chooseAppearance('theme', input)} />
+            </label></Show>
+            <Show when={showSetting('density compact comfortable')}><label class="settings__row">
               <span id="appearance-density-label">Density</span>
-              <select class="project-action" disabled={!props.preferencesEditable}
-                aria-labelledby="appearance-density-label" value={density()}
-                onChange={(event) => void chooseAppearance('appearance.density', event.currentTarget)}>
-                <option value="compact">Compact</option>
-                <option value="comfortable">Comfortable</option>
-              </select>
-            </label>
-            <fieldset class="settings__accent-picker">
-              <legend>Send button accent</legend>
+              <SettingsSelect label="Density" value={density()} disabled={!props.preferencesEditable}
+                options={[{ value: 'compact', label: 'Compact' }, { value: 'comfortable', label: 'Comfortable' }]}
+                onChange={(input) => void chooseAppearance('appearance.density', input)} />
+            </label></Show>
+            <Show when={showSetting('send button accent blue violet teal amber neutral')}><div class="settings__row"><span id="send-accent-label">Send button accent</span><fieldset class="settings__accent-picker" aria-labelledby="send-accent-label">
               <For each={SEND_ACCENTS}>
                 {(accent) => (
                   <input
@@ -560,11 +630,12 @@ export function SettingsPane(props: SettingsPaneProps) {
                   />
                 )}
               </For>
-            </fieldset>
+            </fieldset></div></Show>
           </Show>
-          <Show when={category() === 'Keyboard shortcuts'}>
+          <Show when={activeCategory() === 'Keyboard shortcuts'}>
             <KeyboardShortcuts registry={props.keybindings} mac={props.mac}
-              onReload={props.onReloadKeybindings} onEdit={props.onEditKeybinding} />
+              onReload={props.onReloadKeybindings} onEdit={props.onEditKeybinding}
+              query={(props.keybindings?.commands ?? []).some((command) => matchesSearch(`keyboard shortcuts ${command.label} ${command.id} ${command.category} ${command.chord ?? ''}`, query())) ? narrowedQuery() : ''} />
           </Show>
         </section>
       </div>

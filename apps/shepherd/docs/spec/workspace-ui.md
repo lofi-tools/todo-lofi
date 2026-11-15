@@ -176,13 +176,21 @@ current layout and give future changes a point of comparison.
   are unavailable or unimplemented. The current placeholders are OpenCode,
   Pi, Claude Code, and Freebuff. Keep the empty state free of explanatory copy
   above these controls.
-- Anchor **Settings** at the bottom of the Projects sidebar. The gear and label
-  are muted, with a transparent, borderless resting state and a hover highlight.
-  Opening Settings replaces the conversation pane. The settings subnavigation
+- Anchor an icon-only **Settings** gear at the bottom of the left icon rail.
+  Show a **Settings** hover card and highlight the active button. Opening
+  Settings replaces the Projects sidebar, conversation, and inspector. The settings subnavigation
   groups controls under **Workspace**, **Projects**, **Appearance**, and
   **Keyboard shortcuts**.
-  **Settings → Projects** offers the same per-source import buttons even when
-  the sidebar already contains projects.
+  **Settings → Harnesses** lists configured and detected harness CLIs, including Codex in supported app bundles, with their brand marks and paths, and offers a refresh. Detection does not configure an integration.
+  **Settings → Projects** lists every project in a subnavigation. Each project
+  exposes the same project controls without changing the active workspace project.
+  It offers the same per-source import buttons even when the sidebar already
+  contains projects.
+  Setting labels and their inputs share a row across settings sections.
+  **Settings → Agent pool** shows installed agents in a drag-reorderable priority list, with animated movement and keyboard-accessible move buttons.
+  A new conversation selects the first available agent in that order; the user
+  can change the draft agent. If none is available, the draft remains editable
+  and explains how to configure a harness. Priority is saved in `settings.json`.
 - **Settings → Workspace** has an unchecked **Notify when tasks need input**
   option. Enabling it allows system notifications for new waits outside the
   focused task workspace. Review changes only affect the in-app indicators
