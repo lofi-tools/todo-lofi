@@ -328,11 +328,13 @@ current layout and give future changes a point of comparison.
   header has no bottom border.
 - Opening a task either renders its conversation or shows the failure with
   **Retry** in the conversation pane; never leave the pane on a loading state.
-- Show the task's branch after the title once the branch exists, and its
-  worktree path (home abbreviated as `~/`) once a worktree exists. Both are
-  muted labels that truncate, with the full value in their tooltip, and each
-  carries a small git-branch or worktree icon before its text.
-- Keep the header to the title, branch, worktree, adapter notes and **Cancel turn**. Put **Show
+- Show the task's branch below the composer once the branch exists, and its
+  worktree path relative to the project root once a worktree exists. Both are
+  muted labels that carry the full absolute value in their tooltip, and each
+  carries a small icon before its text: a git branch and Zed's worktree mark.
+  Label the task checkout as Worktree or Main checkout, and leave space below
+  the row. The branch truncates; the worktree path omits the project prefix.
+- Keep the header to the title, adapter notes and **Cancel turn**. Put **Show
   diagnostics** and **Delete task…** behind a trailing ⋯ menu that closes on a
   second click, an outside click or Escape. Diagnostics open as a card at the
   top of the conversation pane instead of a permanent disclosure, and the ⋯

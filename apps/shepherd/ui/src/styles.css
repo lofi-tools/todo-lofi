@@ -1473,24 +1473,40 @@ textarea {
   white-space: nowrap;
 }
 
+.chat__workspace-details {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+  padding: 6px 21px 10px;
+}
+
+.composer:has(+ .chat__workspace-details) { margin-bottom: 0; }
+
 .chat__branch,
 .chat__worktree {
   display: inline-flex;
   align-items: center;
-  gap: 5px;
+  gap: 2px;
   flex: 0 1 auto;
   min-width: 0;
   max-width: 240px;
   overflow: hidden;
-  color: var(--text-muted);
-  font-size: 12px;
+  color: color-mix(in srgb, var(--text-muted) 85%, var(--surface));
+  font-size: 11px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .chat__chip-icon {
   flex: none;
+  width: 12px;
+  height: 12px;
   opacity: 0.8;
+}
+
+.chat__worktree {
+  max-width: none;
 }
 
 .chat__chip-text {

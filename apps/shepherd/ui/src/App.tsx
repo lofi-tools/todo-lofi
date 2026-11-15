@@ -1223,6 +1223,16 @@ export function App() {
     return path.startsWith(`${home}/`) || path.startsWith(`${home}\\`) ? `~/${path.slice(home.length + 1)}` : path
   }
 
+  function worktreeLabel(path: string, projectId: string) {
+    const root = projects().find((entry) => entry.id === projectId)?.path.replace(/[\\/]+$/, '')
+    if (root) {
+      for (const separator of ['/', '\\']) {
+        if (path.startsWith(`${root}${separator}`)) return path.slice(root.length + 1)
+      }
+    }
+    return abbreviateHome(path)
+  }
+
   async function selectTask(taskId: string) {
     setSearchJump(undefined)
     setSelectedTaskId(taskId)
@@ -2362,20 +2372,6 @@ export function App() {
                   <span class="chat__title"><SearchMark text={current().task.title}
                     match={searchJump()?.taskId === current().task.id && searchJump()?.snippet.field === 'task' ? searchJump()?.snippet.matched : undefined} /></span>
                 </Show>
-                <Show when={current().task.branch}>
-                  {(branch) => (
-                    <span class="chat__branch" title={`Branch ${branch()}`}>
-                      <BranchIcon /><span class="chat__chip-text">{branch()}</span>
-                    </span>
-                  )}
-                </Show>
-                <Show when={current().task.worktreePath}>
-                  {(path) => (
-                    <span class="chat__worktree" title={`Worktree ${path()}`}>
-                      <WorktreeIcon /><span class="chat__chip-text">{abbreviateHome(path())}</span>
-                    </span>
-                  )}
-                </Show>
                 <Show when={current().capabilities?.unreviewedTools}>
                   <span class="chat__adapter" title="Pi's tools run under Pi's configuration; Shepherd cannot approve them">unreviewed tools</span>
                 </Show>
@@ -2707,9 +2703,25 @@ export function App() {
               </div>
             </div>
           </div>
+          <Show when={workspace()}>
+            {(current) => <Show when={current().task.branch || current().task.worktreePath || (selectedProject()?.isGitRepository && selectedProject()?.path)}>
+              <div class="chat__workspace-details">
+                <Show when={current().task.branch}>
+                  {(branch) => <span class="chat__branch" title={`Branch ${branch()}`}>
+                    <BranchIcon /><span class="chat__chip-text">{branch()}</span>
+                  </span>}
+                </Show>
+                <Show when={current().task.worktreePath || (selectedProject()?.isGitRepository && selectedProject()?.path)}>
+                  {(path) => <span class="chat__worktree" title={`Checkout ${path()}`}>
+                    <WorktreeIcon /><span class="chat__chip-text">{current().task.worktreePath && path().replace(/[\\/]+$/, '') !== selectedProject()?.path.replace(/[\\/]+$/, '') ? 'Worktree' : 'Main checkout'}: {worktreeLabel(path(), current().task.projectId)}</span>
+                  </span>}
+                </Show>
+              </div>
+            </Show>}
+          </Show>
         </section>
 
-        <aside ref={inspector} class="inspector" id="workspace-inspector" aria-label="Inspector">
+        <aside ref={inspector} class="inspector" id="workspace-inspector" aria-label="Inspector" hidden={settingsOpen()}>
           <div class="shell__header-inspector" data-tauri-drag-region={isTauri() && mac ? '' : undefined}>
             {inspectorTabsHeader}
           </div>
@@ -3432,20 +3444,19 @@ function PlusIcon() {
 
 function BranchIcon() {
   return (
-    <svg class="chat__chip-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-      <path d="M6 3v12" />
-      <circle cx="18" cy="6" r="3" />
-      <circle cx="6" cy="18" r="3" />
-      <path d="M18 9a9 9 0 0 1-9 9" />
+    <svg class="chat__chip-icon" width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <path d="M4.5 13C5.32843 13 6 12.3284 6 11.5C6 10.6716 5.32843 10 4.5 10C3.67157 10 3 10.6716 3 11.5C3 12.3284 3.67157 13 4.5 13Z" />
+      <path d="M11.5 6C12.3284 6 13 5.3284 13 4.5C13 3.6716 12.3284 3 11.5 3C10.6716 3 10 3.6716 10 4.5C10 5.3284 10.6716 6 11.5 6Z" />
+      <path d="M4.5 10L4.5 3" />
+      <path d="M10 4.44133C8.54131 4.44133 7.14236 5.02697 6.11091 6.06943C5.07946 7.11188 4.5 8.52575 4.5 10" />
     </svg>
   )
 }
 
 function WorktreeIcon() {
   return (
-    <svg class="chat__chip-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-      <path d="M8 5.5V5a2 2 0 0 1 2-2h3.4l1.6 1.8H20a2 2 0 0 1 2 2v6.4a2 2 0 0 1-2 2h-1.6" />
-      <path d="M2 20.5V11a2 2 0 0 1 2-2h3.4l1.6 1.8h5A2 2 0 0 1 16 12.8v7.7a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2Z" />
+    <svg class="chat__chip-icon" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <path d="M7.78314 8.0003L12.3252 3.45825 M9.49899 9.71719L12.3237 12.5419 M3.25763 8.00031H7.77134 M12.7424 6.47908V3.04047H9.3038 M9.30225 12.9595H12.7409V9.52094" />
     </svg>
   )
 }

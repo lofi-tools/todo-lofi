@@ -2702,7 +2702,7 @@ test('reports a failed task open and retries instead of staying on Opening task'
   await expect(page.getByRole('button', { name: /Second chat/ })).toHaveAttribute('aria-current', 'true')
 })
 
-test('labels the header with the task branch and worktree and marks unread output', async ({ page }) => {
+test('shows the task branch and worktree below the composer and marks unread output', async ({ page }) => {
   await page.goto('/?two-tasks')
   const chat = page.getByRole('region', { name: 'Task chat' })
   await expect(chat.getByTitle('Branch shepherd/ship-it')).toHaveText('shepherd/ship-it')
