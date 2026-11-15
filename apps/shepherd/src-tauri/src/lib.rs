@@ -30,6 +30,70 @@ use agent_harness::settings::AgentSettings;
 use shep_core::harness::HarnessFactory;
 use tauri::Manager;
 
+#[cfg(target_os = "macos")]
+fn align_window_controls(window: &tauri::WebviewWindow) -> Result<(), Box<dyn std::error::Error>> {
+    use objc2_app_kit::{NSView, NSWindow, NSWindowButton};
+    use objc2_foundation::NSPoint;
+
+    let native_window = std::ptr::NonNull::new(window.ns_window()?.cast::<NSWindow>())
+        .ok_or("missing native window")?;
+    let content_view = std::ptr::NonNull::new(window.ns_view()?.cast::<NSView>())
+        .ok_or("missing native content view")?;
+    // The CSS workspace header is 42 points high; convert its centre into each
+    // button's superview because AppKit and the webview use different origins.
+    unsafe {
+        let native_window = native_window.as_ref();
+        let content_view = content_view.as_ref();
+        let content_bounds = content_view.convertRect_toView(content_view.bounds(), None);
+        let header_center = content_bounds.origin.y + content_bounds.size.height - 21.0;
+        let close = native_window
+            .standardWindowButton(NSWindowButton::CloseButton)
+            .ok_or("missing native close button")?;
+        let minimize = native_window
+            .standardWindowButton(NSWindowButton::MiniaturizeButton)
+            .ok_or("missing native minimize button")?;
+        let zoom = native_window
+            .standardWindowButton(NSWindowButton::ZoomButton)
+            .ok_or("missing native zoom button")?;
+        let spacing = minimize.frame().origin.x - close.frame().origin.x;
+        if spacing <= 0.0 {
+            return Err("invalid native window button spacing".into());
+        }
+        let mut largest_offset = 0.0_f64;
+        for (index, button) in [close, minimize, zoom].iter().enumerate() {
+            let parent = button.superview().ok_or("window button has no superview")?;
+            let position = parent.convertPoint_fromView(NSPoint::new(0.0, header_center), None);
+            let frame = button.frame();
+            button.setFrameOrigin(NSPoint::new(
+                14.0 + spacing * index as f64,
+                position.y - frame.size.height / 2.0,
+            ));
+            let placed = button.convertRect_toView(button.bounds(), None);
+            let center = placed.origin.y + placed.size.height / 2.0;
+            largest_offset = largest_offset.max((center - header_center).abs());
+        }
+        if largest_offset > 0.5 {
+            return Err(format!(
+                "native window controls are {largest_offset:.1} points from the header centre"
+            )
+            .into());
+        }
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn schedule_window_control_alignment(window: &tauri::WebviewWindow) {
+    let target = window.clone();
+    if let Err(error) = window.run_on_main_thread(move || {
+        if let Err(error) = align_window_controls(&target) {
+            tracing::warn!(%error, "could not align native window controls");
+        }
+    }) {
+        tracing::warn!(%error, "could not schedule native window control alignment");
+    }
+}
+
 fn codex_factory(
     data_directory: &std::path::Path,
     configured: Option<&std::path::Path>,
@@ -128,7 +192,36 @@ pub fn run() -> Result<(), tauri::Error> {
     };
 
     let builder = builder
+        .on_page_load(|_webview, _payload| {
+            #[cfg(target_os = "macos")]
+            if _webview.label() == "main"
+                && _payload.event() == tauri::webview::PageLoadEvent::Finished
+            {
+                if let Some(window) = _webview.get_webview_window("main") {
+                    schedule_window_control_alignment(&window);
+                }
+            }
+        })
+        .on_window_event(|_window, _event| {
+            #[cfg(target_os = "macos")]
+            if _window.label() == "main"
+                && matches!(
+                    _event,
+                    tauri::WindowEvent::Resized(_)
+                        | tauri::WindowEvent::Focused(true)
+                        | tauri::WindowEvent::ScaleFactorChanged { .. }
+                )
+            {
+                if let Some(window) = _window.get_webview_window("main") {
+                    schedule_window_control_alignment(&window);
+                }
+            }
+        })
         .setup(|app| {
+            #[cfg(target_os = "macos")]
+            if let Some(window) = app.get_webview_window("main") {
+                schedule_window_control_alignment(&window);
+            }
             let terminals = bridge::TerminalHost::default();
             let override_directory = cfg!(debug_assertions)
                 .then(|| std::env::var_os("SHEPHERD_DEV_DATA_DIR"))

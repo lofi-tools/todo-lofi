@@ -32,7 +32,6 @@
         "title": "Shepherd",
         "titleBarStyle": "Overlay",
         "hiddenTitle": true,
-        "trafficLightPosition": { "x": 14, "y": 14 },
         "width": 1280,
         "height": 820,
         "minWidth": 900,

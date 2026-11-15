@@ -11238,6 +11238,8 @@ dependencies = [
  "mime_guess",
  "notify 8.2.1",
  "notify-rust",
+ "objc2-app-kit 0.3.2",
+ "objc2-foundation 0.3.2",
  "percent-encoding",
  "portable-pty",
  "serde",
