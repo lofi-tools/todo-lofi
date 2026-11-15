@@ -95,3 +95,47 @@ pub fn now_millis() -> u64 {
         .map(|duration| duration.as_millis() as u64)
         .unwrap_or(0)
 }
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+    use std::path::PathBuf;
+
+    use super::Project;
+    use crate::Core;
+
+    #[test]
+    fn preview_override_preserves_saved_url() -> Result<(), Box<dyn std::error::Error>> {
+        let mut core = Core::new();
+        let mut project = Project::new(PathBuf::from("/tmp/shepherd-preview-test"));
+        project.preview_url = Some("http://localhost:3000".parse()?);
+        let id = project.id.clone();
+        core.project_order.push(id.clone());
+        core.projects.insert(id.clone(), project);
+        let mut overrides = BTreeMap::new();
+        overrides.insert(id.clone(), "http://localhost:4000".parse()?);
+        assert_eq!(
+            core.set_project_preview_overrides(overrides),
+            vec![id.clone()]
+        );
+        assert_eq!(
+            core.project_preview_url(&id)?
+                .as_ref()
+                .map(ToString::to_string)
+                .as_deref(),
+            Some("http://localhost:4000/")
+        );
+        assert_eq!(
+            core.set_project_preview_overrides(BTreeMap::new()),
+            vec![id.clone()]
+        );
+        assert_eq!(
+            core.project_preview_url(&id)?
+                .as_ref()
+                .map(ToString::to_string)
+                .as_deref(),
+            Some("http://localhost:3000/")
+        );
+        Ok(())
+    }
+}

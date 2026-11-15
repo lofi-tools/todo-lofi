@@ -224,6 +224,7 @@ pub struct Core {
     pub projects: BTreeMap<ProjectId, Project>,
     #[doc(hidden)]
     pub project_order: Vec<ProjectId>,
+    project_preview_overrides: BTreeMap<ProjectId, url::Url>,
     #[doc(hidden)]
     pub tasks: BTreeMap<TaskId, Task>,
     workspace_layouts: BTreeMap<TaskId, WorkspaceLayout>,
@@ -377,6 +378,7 @@ impl Core {
         Self {
             projects: BTreeMap::new(),
             project_order: Vec::new(),
+            project_preview_overrides: BTreeMap::new(),
             tasks: BTreeMap::new(),
             workspace_layouts: BTreeMap::new(),
             sessions: BTreeMap::new(),
@@ -1755,6 +1757,11 @@ impl Core {
         project_id: ProjectId,
         input: &str,
     ) -> Result<CommandResult, CoreError> {
+        if self.project_preview_overrides.contains_key(&project_id) {
+            return Err(CoreError::Store(StoreError::InvalidRow(
+                "Preview URL is set in the project's .config/shepherd/settings.json".into(),
+            )));
+        }
         let input = input.trim();
         let url = if input.is_empty() {
             None
@@ -3740,7 +3747,29 @@ impl Core {
         &self,
         project_id: &ProjectId,
     ) -> Result<Option<url::Url>, CoreError> {
-        Ok(self.project(project_id)?.preview_url.clone())
+        let project = self.project(project_id)?;
+        Ok(self
+            .project_preview_overrides
+            .get(project_id)
+            .cloned()
+            .or_else(|| project.preview_url.clone()))
+    }
+
+    pub fn set_project_preview_overrides(
+        &mut self,
+        overrides: BTreeMap<ProjectId, url::Url>,
+    ) -> Vec<ProjectId> {
+        let changed = self
+            .project_order
+            .iter()
+            .filter(|id| self.project_preview_overrides.get(*id) != overrides.get(*id))
+            .cloned()
+            .collect::<Vec<_>>();
+        self.project_preview_overrides = overrides;
+        if !changed.is_empty() {
+            self.emit(Event::ProjectListChanged(self.project_list()));
+        }
+        changed
     }
 
     #[doc(hidden)]
@@ -3892,7 +3921,11 @@ impl Core {
                 .last_task_id
                 .as_ref()
                 .map(|task_id| task_id.as_str().to_string()),
-            preview_url: project.preview_url.as_ref().map(ToString::to_string),
+            preview_url: self
+                .project_preview_overrides
+                .get(&project.id)
+                .or(project.preview_url.as_ref())
+                .map(ToString::to_string),
             unfinished_task_count,
             review_task_count,
             running_task_count,
