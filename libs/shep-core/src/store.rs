@@ -807,6 +807,8 @@ pub trait Store: Send + Sync {
     ) -> Result<(), StoreError>;
     async fn reset_project_approval(&self, project: &ProjectId, id: &str)
     -> Result<(), StoreError>;
+    async fn load_pool_configuration_checkpoint(&self) -> Result<Option<String>, StoreError>;
+    async fn save_pool_configuration_checkpoint(&self, checkpoint: &str) -> Result<(), StoreError>;
     async fn load_pool_slots(&self) -> Result<Vec<PoolSlot>, StoreError>;
     async fn save_pool_slot(&self, slot: &PoolSlot) -> Result<(), StoreError>;
     async fn remove_pool_slot(&self, slot_id: &PoolSlotId) -> Result<(), StoreError>;
@@ -928,6 +930,7 @@ pub struct MemoryStore {
     transcripts: RwLock<BTreeMap<TaskId, BTreeMap<u64, Entry>>>,
     project_approvals: RwLock<BTreeMap<ProjectId, BTreeMap<String, ProjectApproval>>>,
     pool_slots: RwLock<BTreeMap<PoolSlotId, PoolSlot>>,
+    pool_configuration_checkpoint: RwLock<Option<String>>,
     pool_quota_ledger: RwLock<Vec<PoolQuotaEntry>>,
     pool_selections: RwLock<BTreeMap<String, PoolSelectionRecord>>,
     pool_selection_lock: Mutex<()>,
@@ -1433,6 +1436,15 @@ impl Store for MemoryStore {
         }
         sessions.retain(|seen| seen.id != session.id);
         sessions.push(session.clone());
+        Ok(())
+    }
+
+    async fn load_pool_configuration_checkpoint(&self) -> Result<Option<String>, StoreError> {
+        Ok(self.pool_configuration_checkpoint.read().await.clone())
+    }
+
+    async fn save_pool_configuration_checkpoint(&self, checkpoint: &str) -> Result<(), StoreError> {
+        *self.pool_configuration_checkpoint.write().await = Some(checkpoint.to_string());
         Ok(())
     }
 

@@ -41,6 +41,12 @@ export interface ArchivedWorktreeIssue {
   reason: string
 }
 
+export interface AgentSkill { id: string; name: string; description: string; path: string }
+
+export function agentSkills(projectId: string, taskId: string | null, agent: Agent): Promise<AgentSkill[]> {
+  return invoke('agent_skills', { projectId, taskId, agent })
+}
+
 export function archivedWorktreeIssues(): Promise<ArchivedWorktreeIssue[]> {
   return invoke('archived_worktree_issues')
 }
@@ -83,6 +89,10 @@ export function commandRegistry(platform: KeyPlatform): Promise<CommandRegistry>
 
 export function setKeybinding(platform: KeyPlatform, edit: KeybindingEdit): Promise<CommandRegistry> {
   return invoke('set_keybinding', { platform, edit })
+}
+
+export function detectedHarnesses(): Promise<{ agent: Agent; path: string }[]> {
+  return invoke('detected_harnesses')
 }
 
 export function agentAvailability(): Promise<Record<Agent, boolean>> {
@@ -465,6 +475,7 @@ export interface TaskWorkspace {
   adapterTier: AgentTier | null
   capabilities: AgentCapabilities | null
   modes?: AgentModes
+  defaultMode?: string
   models?: AgentModels
 }
 
@@ -1037,6 +1048,7 @@ export interface GitSnapshot {
   branches: string[]
   history: { id: string; author: string; time: string; subject: string }[]
   files: GitFile[]
+  lineStats: Array<{ path: string; added: number | null; removed: number | null }>
   stagedRevision: string
   mergeBlocked: string | null
   stagedDiff: string
@@ -1204,6 +1216,7 @@ export function archiveReviewed(taskIds: string[]): Promise<void> {
 }
 
 export interface SettingsValues {
+  'agents.priority': Agent[]
   theme: 'system' | 'light' | 'dark'
   'appearance.density': 'compact' | 'comfortable'
   'tasks.show_archived': boolean

@@ -119,6 +119,12 @@ impl From<CoreError> for BridgeError {
     }
 }
 
+impl From<shep_core::store::StoreError> for BridgeError {
+    fn from(error: shep_core::store::StoreError) -> Self {
+        Self::from(CoreError::from(error))
+    }
+}
+
 impl From<files::FileError> for BridgeError {
     fn from(error: files::FileError) -> Self {
         let mut bridge_error = Self::new("files", error.to_string());
@@ -771,6 +777,49 @@ impl TerminalBackend for TerminalHost {
     }
 }
 
+fn pool_configuration_checkpoint(
+    config: &crate::settings::PoolConfiguration,
+) -> Result<String, BridgeError> {
+    let mut checkpoint = config.clone();
+    checkpoint.extra.clear();
+    for slot in &mut checkpoint.slots {
+        slot.credential_ref = None;
+        slot.extra.clear();
+        for limit in &mut slot.manual_limits {
+            limit.extra.clear();
+        }
+    }
+    serde_json::to_string(&checkpoint).map_err(|error| BridgeError::new("pool", error.to_string()))
+}
+
+fn manual_pool_limits(
+    entries: &[shep_core::store::PoolQuotaEntry],
+) -> Vec<crate::settings::ConfiguredPoolLimit> {
+    use shep_core::store::{PoolQuotaSource, pool_quota_entry_order};
+    let mut sorted = entries.iter().collect::<Vec<_>>();
+    sorted.sort_by(|left, right| pool_quota_entry_order(left, right));
+    let mut previous = BTreeMap::new();
+    let mut manual = BTreeMap::new();
+    for entry in sorted {
+        let key = entry.window_key.clone();
+        let values = (entry.limit, entry.limit_unit.clone(), entry.reset_at);
+        if entry.source == PoolQuotaSource::User && previous.get(&key) != Some(&values) {
+            manual.insert(
+                key.clone(),
+                crate::settings::ConfiguredPoolLimit {
+                    window_key: key.clone(),
+                    limit: entry.limit,
+                    limit_unit: entry.limit_unit.clone(),
+                    reset_at: entry.reset_at,
+                    extra: Default::default(),
+                },
+            );
+        }
+        previous.insert(key, values);
+    }
+    manual.into_values().collect()
+}
+
 /// The state Tauri manages for the window: one core, one event broadcaster, the
 /// PTY engine, one parsed screen per live terminal, and the cached project scan
 /// shared with the startup scan task.
@@ -795,6 +844,8 @@ pub struct ShellState {
     events: broadcast::Sender<Event>,
     terminal_subscriptions: Arc<Mutex<BTreeMap<String, TerminalSubscription>>>,
     terminal_lifecycle: Mutex<()>,
+    pool_configuration_lock: Mutex<()>,
+    applied_pool_configuration: Mutex<Option<crate::settings::PoolConfiguration>>,
     pending_quit: Mutex<Option<QuitSummary>>,
     terminals: TerminalHost,
     preview_server: Arc<crate::preview_server::PreviewServer>,
@@ -962,6 +1013,8 @@ impl ShellState {
             events,
             terminal_subscriptions: Arc::new(Mutex::new(BTreeMap::new())),
             terminal_lifecycle: Mutex::new(()),
+            pool_configuration_lock: Mutex::new(()),
+            applied_pool_configuration: Mutex::new(None),
             pending_quit: Mutex::new(None),
             terminals,
             preview_server: Arc::new(crate::preview_server::PreviewServer::default()),
@@ -1172,14 +1225,46 @@ impl ShellState {
         Ok(result)
     }
 
+    pub(crate) async fn refresh_project_preview_overrides(&self) -> Result<(), BridgeError> {
+        let local = self.preferences.project_preview_overrides().await;
+        let changed = {
+            let mut core = self.core.lock().await;
+            let overrides = core
+                .project_list()
+                .projects
+                .into_iter()
+                .filter_map(|project| {
+                    local
+                        .get(&project.path)
+                        .and_then(|value| shep_core::projects::parse_preview_url(value))
+                        .map(|url| (ProjectId::new(project.id), url))
+                })
+                .collect();
+            core.set_project_preview_overrides(overrides)
+        };
+        for project in changed {
+            self.preview_server.forget_project(project.as_str()).await;
+        }
+        Ok(())
+    }
+
     pub async fn add_project(&self, path: String) -> Result<ProjectList, BridgeError> {
-        match self
+        let projects = match self
             .execute(Command::AddProject { path: path.into() })
             .await?
         {
-            CommandResult::ProjectList(projects) => Ok(projects),
-            other => Err(unexpected(&other)),
-        }
+            CommandResult::ProjectList(projects) => projects,
+            other => return Err(unexpected(&other)),
+        };
+        let paths = projects
+            .projects
+            .iter()
+            .filter(|project| !project.missing)
+            .map(|project| PathBuf::from(&project.path))
+            .collect::<Vec<_>>();
+        self.preferences.load_project_preferences(&paths).await;
+        self.refresh_project_preview_overrides().await?;
+        Ok(self.project_list().await)
     }
 
     pub async fn set_project_preview_url(
@@ -2010,11 +2095,373 @@ impl ShellState {
             .map_err(BridgeError::from)
     }
 
-    pub async fn pool_status(&self) -> Result<PoolStatus, BridgeError> {
-        let mut core = self.core.lock().await;
-        core.pool_status(now_millis())
+    async fn capture_pool_configuration(
+        &self,
+        store: Arc<dyn Store>,
+    ) -> Result<crate::settings::PoolConfiguration, BridgeError> {
+        use crate::settings::{ConfiguredPoolSlot, PoolConfiguration};
+        let mut result = PoolConfiguration::default();
+        for slot in store.load_pool_slots().await.map_err(BridgeError::from)? {
+            let mut configured = ConfiguredPoolSlot::from_slot(&slot);
+            let entries = store
+                .load_pool_quota_entries(&slot.id)
+                .await
+                .map_err(BridgeError::from)?;
+            configured.manual_limits = manual_pool_limits(&entries);
+            if entries.is_empty() && (slot.limit.is_some() || slot.reset_at.is_some()) {
+                configured
+                    .manual_limits
+                    .push(crate::settings::ConfiguredPoolLimit {
+                        window_key: None,
+                        limit: slot.limit,
+                        limit_unit: slot.limit.and(slot.limit_unit.clone()),
+                        reset_at: slot.reset_at,
+                        extra: Default::default(),
+                    });
+            }
+            result.slots.push(configured);
+        }
+        Ok(result)
+    }
+
+    pub(crate) async fn sync_pool_configuration(&self) -> Result<(), BridgeError> {
+        let result = self.apply_pool_configuration().await;
+        self.core
+            .lock()
             .await
-            .map_err(BridgeError::from)
+            .set_pool_configuration_error(result.as_ref().err().map(ToString::to_string));
+        result
+    }
+
+    async fn apply_pool_configuration(&self) -> Result<(), BridgeError> {
+        if !self.preferences.has_path() {
+            return Ok(());
+        }
+        let _guard = self.pool_configuration_lock.lock().await;
+        let mut core = self.core.lock().await;
+        let Some(config) = self.preferences.pool_configuration().await? else {
+            let config = self
+                .capture_pool_configuration(core.process_store())
+                .await?;
+            self.preferences.write_pool_configuration(&config).await?;
+            core.process_store()
+                .save_pool_configuration_checkpoint(&pool_configuration_checkpoint(&config)?)
+                .await
+                .map_err(BridgeError::from)?;
+            *self.applied_pool_configuration.lock().await = Some(config);
+            return Ok(());
+        };
+        let store = core.process_store();
+        let previous_config = match self.applied_pool_configuration.lock().await.clone() {
+            Some(config) => Some(config),
+            None => store
+                .load_pool_configuration_checkpoint()
+                .await
+                .map_err(BridgeError::from)?
+                .map(|document| {
+                    serde_json::from_str(&document).map_err(|error| {
+                        BridgeError::new(
+                            "pool",
+                            format!("Invalid pool configuration checkpoint: {error}"),
+                        )
+                    })
+                })
+                .transpose()?,
+        };
+        let existing = store.load_pool_slots().await.map_err(BridgeError::from)?;
+        let mut ids = BTreeSet::new();
+        let mut identities = BTreeSet::new();
+        for configured in &config.slots {
+            if configured.id.as_str().trim().is_empty()
+                || !ids.insert(configured.id.clone())
+                || !identities.insert((
+                    configured.agent.as_str(),
+                    configured.provider_id.clone(),
+                    configured.model_id.clone(),
+                ))
+            {
+                return Err(BridgeError::new(
+                    "settings",
+                    "Agent pool slots must have unique nonempty IDs and agent/provider/model identities.",
+                ));
+            }
+            let mut slot = PoolSlot::new(
+                configured.agent,
+                &configured.provider_id,
+                &configured.provider_name,
+                &configured.model_id,
+                &configured.model_name,
+            );
+            slot.id = configured.id.clone();
+            slot.priority = configured.priority;
+            slot.enabled = configured.enabled;
+            shep_core::store::validate_pool_slot(&slot).map_err(BridgeError::from)?;
+            if existing.iter().any(|old| {
+                old.id == slot.id
+                    && (old.agent != slot.agent
+                        || old.provider_id != slot.provider_id
+                        || old.model_id != slot.model_id)
+            }) {
+                return Err(BridgeError::new(
+                    "settings",
+                    "An existing pool slot ID cannot be reused for a different agent, provider, or model.",
+                ));
+            }
+            let mut windows = BTreeSet::new();
+            for limit in &configured.manual_limits {
+                if !windows.insert(limit.window_key.clone()) {
+                    return Err(BridgeError::new(
+                        "settings",
+                        "A pool slot has duplicate manual quota windows.",
+                    ));
+                }
+                if let Some(key) = &limit.window_key
+                    && shep_core::pool_reset::PoolResetPolicy::for_agent(slot.agent)
+                        .window_by_key(key)
+                        .is_none()
+                {
+                    return Err(BridgeError::new(
+                        "settings",
+                        format!("Unknown quota window {key}."),
+                    ));
+                }
+                let request = PoolQuotaCorrectionRequest {
+                    slot_id: slot.id.clone(),
+                    limit: limit.limit,
+                    limit_unit: limit.limit_unit.clone(),
+                    reset_at: limit.reset_at,
+                    now: now_millis(),
+                    window_key: limit.window_key.clone(),
+                };
+                shep_core::store::validate_pool_quota_correction_request(&request)
+                    .map_err(BridgeError::from)?;
+            }
+        }
+        for mut old in existing
+            .iter()
+            .filter(|slot| !ids.contains(&slot.id))
+            .cloned()
+        {
+            if old.enabled {
+                old.enabled = false;
+                store
+                    .save_pool_slot(&old)
+                    .await
+                    .map_err(BridgeError::from)?;
+            }
+        }
+        for configured in &config.slots {
+            let mut slot = existing
+                .iter()
+                .find(|slot| slot.id == configured.id)
+                .cloned()
+                .unwrap_or_else(|| {
+                    let mut slot = PoolSlot::new(
+                        configured.agent,
+                        &configured.provider_id,
+                        &configured.provider_name,
+                        &configured.model_id,
+                        &configured.model_name,
+                    );
+                    slot.id = configured.id.clone();
+                    slot
+                });
+            slot.provider_name = configured.provider_name.clone();
+            slot.model_name = configured.model_name.clone();
+            slot.credential_ref = configured.credential_ref.clone();
+            slot.priority = configured.priority;
+            slot.enabled = configured.enabled;
+            store
+                .save_pool_slot(&slot)
+                .await
+                .map_err(BridgeError::from)?;
+            let entries = store
+                .load_pool_quota_entries(&slot.id)
+                .await
+                .map_err(BridgeError::from)?;
+            let previous_manual = manual_pool_limits(&entries);
+            for limit in &configured.manual_limits {
+                let last_user = entries
+                    .iter()
+                    .filter(|entry| {
+                        entry.source == shep_core::store::PoolQuotaSource::User
+                            && entry.window_key == limit.window_key
+                    })
+                    .max_by(|left, right| shep_core::store::pool_quota_entry_order(left, right));
+                let changed = previous_config.as_ref().is_some_and(|previous| {
+                    previous
+                        .slots
+                        .iter()
+                        .find(|slot| slot.id == configured.id)
+                        .and_then(|slot| {
+                            slot.manual_limits
+                                .iter()
+                                .find(|previous| previous.window_key == limit.window_key)
+                        })
+                        .is_none_or(|previous| {
+                            previous.limit != limit.limit
+                                || previous.limit_unit != limit.limit_unit
+                                || previous.reset_at != limit.reset_at
+                        })
+                });
+                if (previous_config.is_some() && !changed)
+                    || (previous_config.is_none()
+                        && last_user.is_some_and(|entry| {
+                            entry.limit == limit.limit
+                                && entry.limit_unit == limit.limit_unit
+                                && entry.reset_at == limit.reset_at
+                        }))
+                {
+                    continue;
+                }
+                let latest = entries
+                    .iter()
+                    .filter(|entry| entry.window_key == limit.window_key)
+                    .map(|entry| entry.observed_at)
+                    .max()
+                    .unwrap_or(0);
+                core.correct_pool_quota(&PoolQuotaCorrectionRequest {
+                    slot_id: slot.id.clone(),
+                    limit: limit.limit,
+                    limit_unit: limit.limit_unit.clone(),
+                    reset_at: limit.reset_at,
+                    window_key: limit.window_key.clone(),
+                    now: now_millis().max(latest.saturating_add(1)),
+                })
+                .await
+                .map_err(BridgeError::from)?;
+            }
+            for previous in &previous_manual {
+                if configured
+                    .manual_limits
+                    .iter()
+                    .any(|limit| limit.window_key == previous.window_key)
+                {
+                    continue;
+                }
+                let latest = entries
+                    .iter()
+                    .filter(|entry| entry.window_key == previous.window_key)
+                    .max_by(|left, right| shep_core::store::pool_quota_entry_order(left, right));
+                if !latest.is_some_and(|entry| {
+                    entry.source == shep_core::store::PoolQuotaSource::User
+                        && entry.limit == previous.limit
+                        && entry.limit_unit == previous.limit_unit
+                        && entry.reset_at == previous.reset_at
+                        && (entry.limit.is_some()
+                            || entry.limit_unit.is_some()
+                            || entry.reset_at.is_some())
+                }) {
+                    continue;
+                }
+                core.correct_pool_quota(&PoolQuotaCorrectionRequest {
+                    slot_id: slot.id.clone(),
+                    limit: None,
+                    limit_unit: None,
+                    reset_at: None,
+                    window_key: previous.window_key.clone(),
+                    now: now_millis().max(
+                        latest
+                            .map_or(0, |entry| entry.observed_at)
+                            .saturating_add(1),
+                    ),
+                })
+                .await
+                .map_err(BridgeError::from)?;
+            }
+        }
+        let status = core
+            .pool_status(now_millis())
+            .await
+            .map_err(BridgeError::from)?;
+        if status.forced_slot.as_ref().is_some_and(|forced| {
+            !config
+                .slots
+                .iter()
+                .any(|slot| &slot.id == forced && slot.enabled)
+        }) {
+            core.clear_pool_force();
+        }
+        store
+            .save_pool_configuration_checkpoint(&pool_configuration_checkpoint(&config)?)
+            .await
+            .map_err(BridgeError::from)?;
+        *self.applied_pool_configuration.lock().await = Some(config);
+        Ok(())
+    }
+
+    async fn persist_pool_configuration(
+        &self,
+        store: Arc<dyn Store>,
+        added: Option<&PoolSlotId>,
+        correction: Option<&PoolQuotaCorrectionRequest>,
+    ) -> Result<(), BridgeError> {
+        if !self.preferences.has_path() {
+            return Ok(());
+        }
+        let current = self.preferences.pool_configuration().await?;
+        let mut captured = self.capture_pool_configuration(store.clone()).await?;
+        if let Some(current) = current {
+            captured.extra = current.extra.clone();
+            captured.slots.retain(|slot| {
+                added == Some(&slot.id) || current.slots.iter().any(|saved| saved.id == slot.id)
+            });
+            for slot in &mut captured.slots {
+                slot.extra = current
+                    .slots
+                    .iter()
+                    .find(|saved| saved.id == slot.id)
+                    .map(|saved| saved.extra.clone())
+                    .unwrap_or_default();
+                slot.manual_limits = current
+                    .slots
+                    .iter()
+                    .find(|saved| saved.id == slot.id)
+                    .map(|saved| saved.manual_limits.clone())
+                    .unwrap_or_default();
+                if let Some(request) = correction.filter(|request| request.slot_id == slot.id) {
+                    let extra = slot
+                        .manual_limits
+                        .iter()
+                        .find(|limit| limit.window_key == request.window_key)
+                        .map(|limit| limit.extra.clone())
+                        .unwrap_or_default();
+                    slot.manual_limits
+                        .retain(|limit| limit.window_key != request.window_key);
+                    slot.manual_limits
+                        .push(crate::settings::ConfiguredPoolLimit {
+                            window_key: request.window_key.clone(),
+                            limit: request.limit,
+                            limit_unit: request.limit_unit.clone(),
+                            reset_at: request.reset_at,
+                            extra,
+                        });
+                }
+            }
+        }
+        self.preferences.write_pool_configuration(&captured).await?;
+        store
+            .save_pool_configuration_checkpoint(&pool_configuration_checkpoint(&captured)?)
+            .await
+            .map_err(BridgeError::from)?;
+        *self.applied_pool_configuration.lock().await = Some(captured);
+        Ok(())
+    }
+
+    pub async fn pool_status(&self) -> Result<PoolStatus, BridgeError> {
+        self.sync_pool_configuration().await?;
+        let config = self.preferences.pool_configuration().await?;
+        let mut core = self.core.lock().await;
+        let mut status = core
+            .pool_status(now_millis())
+            .await
+            .map_err(BridgeError::from)?;
+        if let Some(config) = config {
+            status
+                .slots
+                .retain(|entry| config.slots.iter().any(|slot| slot.id == entry.slot.id));
+        }
+        Ok(status)
     }
 
     pub async fn force_pool_slot(&self, slot_id: String) -> Result<PoolForceOutcome, BridgeError> {
@@ -2059,10 +2506,26 @@ impl ShellState {
     ) -> Result<PoolSlot, BridgeError> {
         let agent = Agent::parse(&agent)
             .ok_or_else(|| BridgeError::new("pool_slot", format!("Unknown agent: {agent}")))?;
+        let _guard = self.pool_configuration_lock.lock().await;
         let mut core = self.core.lock().await;
-        core.add_pool_slot(agent, &provider_id, &provider_name, &model_id, &model_name)
+        let slot = core
+            .add_pool_slot(agent, &provider_id, &provider_name, &model_id, &model_name)
             .await
-            .map_err(BridgeError::from)
+            .map_err(BridgeError::from)?;
+        if let Err(error) = self
+            .persist_pool_configuration(core.process_store(), Some(&slot.id), None)
+            .await
+        {
+            core.set_pool_configuration_error(Some(error.to_string()));
+            if let Err(rollback) = core.process_store().remove_pool_slot(&slot.id).await {
+                return Err(BridgeError::new(
+                    "pool",
+                    format!("{error}; could not restore the pool: {rollback}"),
+                ));
+            }
+            return Err(error);
+        }
+        Ok(slot)
     }
 
     pub async fn generated_pool_catalog(&self) -> Result<Option<String>, BridgeError> {
@@ -2090,10 +2553,58 @@ impl ShellState {
             slot_ids: slot_ids.into_iter().map(PoolSlotId::new).collect(),
             now: now_millis(),
         };
+        let _guard = self.pool_configuration_lock.lock().await;
         let mut core = self.core.lock().await;
-        core.reorder_pool_slots(&request)
+        let mut request = request;
+        let store = core.process_store();
+        if let Some(config) = self.preferences.pool_configuration().await? {
+            let requested = request.slot_ids.iter().collect::<BTreeSet<_>>();
+            let configured = config
+                .slots
+                .iter()
+                .map(|slot| &slot.id)
+                .collect::<BTreeSet<_>>();
+            if requested != configured || requested.len() != request.slot_ids.len() {
+                return Err(BridgeError::new(
+                    "pool",
+                    "Pool reorder must include every configured slot exactly once.",
+                ));
+            }
+        }
+        let previous = store.load_pool_slots().await.map_err(BridgeError::from)?;
+        let previous_ids = previous.iter().map(|slot| slot.id.clone()).collect();
+        for slot in previous {
+            if !request.slot_ids.contains(&slot.id) {
+                request.slot_ids.push(slot.id);
+            }
+        }
+        let mut outcome = core
+            .reorder_pool_slots(&request)
             .await
-            .map_err(BridgeError::from)
+            .map_err(BridgeError::from)?;
+        if let Err(error) = self
+            .persist_pool_configuration(core.process_store(), None, None)
+            .await
+        {
+            core.set_pool_configuration_error(Some(error.to_string()));
+            let rollback = PoolReorderRequest {
+                slot_ids: previous_ids,
+                now: now_millis(),
+            };
+            if let Err(rollback) = core.reorder_pool_slots(&rollback).await {
+                return Err(BridgeError::new(
+                    "pool",
+                    format!("{error}; could not restore pool order: {rollback}"),
+                ));
+            }
+            return Err(error);
+        }
+        if let Some(config) = self.preferences.pool_configuration().await? {
+            outcome
+                .slots
+                .retain(|slot| config.slots.iter().any(|saved| saved.id == slot.id));
+        }
+        Ok(outcome)
     }
 
     pub async fn set_pool_slot_enabled(
@@ -2106,10 +2617,47 @@ impl ShellState {
             enabled,
             now: now_millis(),
         };
+        let _guard = self.pool_configuration_lock.lock().await;
+        if let Some(config) = self.preferences.pool_configuration().await?
+            && !config.slots.iter().any(|slot| slot.id == request.slot_id)
+        {
+            return Err(BridgeError::new(
+                "pool",
+                "This pool slot is not in settings.json. Reload settings.",
+            ));
+        }
         let mut core = self.core.lock().await;
-        core.set_pool_slot_enabled(&request)
+        let previous = core
+            .process_store()
+            .load_pool_slots()
             .await
-            .map_err(BridgeError::from)
+            .map_err(BridgeError::from)?
+            .into_iter()
+            .find(|slot| slot.id == request.slot_id)
+            .ok_or_else(|| BridgeError::new("pool", "Pool slot not found."))?;
+        let outcome = core
+            .set_pool_slot_enabled(&request)
+            .await
+            .map_err(BridgeError::from)?;
+        if let Err(error) = self
+            .persist_pool_configuration(core.process_store(), None, None)
+            .await
+        {
+            core.set_pool_configuration_error(Some(error.to_string()));
+            let rollback = PoolSlotEnabledRequest {
+                slot_id: request.slot_id.clone(),
+                enabled: previous.enabled,
+                now: now_millis(),
+            };
+            if let Err(rollback) = core.set_pool_slot_enabled(&rollback).await {
+                return Err(BridgeError::new(
+                    "pool",
+                    format!("{error}; could not restore slot state: {rollback}"),
+                ));
+            }
+            return Err(error);
+        }
+        Ok(outcome)
     }
 
     pub async fn correct_pool_quota(
@@ -2128,10 +2676,54 @@ impl ShellState {
             now: now_millis(),
             window_key,
         };
+        let _guard = self.pool_configuration_lock.lock().await;
+        if let Some(config) = self.preferences.pool_configuration().await?
+            && !config.slots.iter().any(|slot| slot.id == request.slot_id)
+        {
+            return Err(BridgeError::new(
+                "pool",
+                "This pool slot is not in settings.json. Reload settings.",
+            ));
+        }
         let mut core = self.core.lock().await;
-        core.correct_pool_quota(&request)
+        let entries = core
+            .process_store()
+            .load_pool_quota_entries(&request.slot_id)
             .await
-            .map_err(BridgeError::from)
+            .map_err(BridgeError::from)?;
+        let previous = entries
+            .iter()
+            .filter(|entry| entry.window_key == request.window_key)
+            .max_by(|left, right| shep_core::store::pool_quota_entry_order(left, right))
+            .cloned();
+        let outcome = core
+            .correct_pool_quota(&request)
+            .await
+            .map_err(BridgeError::from)?;
+        if let Err(error) = self
+            .persist_pool_configuration(core.process_store(), None, Some(&request))
+            .await
+        {
+            core.set_pool_configuration_error(Some(error.to_string()));
+            if outcome.applied {
+                let rollback = PoolQuotaCorrectionRequest {
+                    slot_id: request.slot_id.clone(),
+                    limit: previous.as_ref().and_then(|entry| entry.limit),
+                    limit_unit: previous.as_ref().and_then(|entry| entry.limit_unit.clone()),
+                    reset_at: previous.as_ref().and_then(|entry| entry.reset_at),
+                    window_key: request.window_key.clone(),
+                    now: now_millis().max(request.now.saturating_add(1)),
+                };
+                if let Err(rollback) = core.correct_pool_quota(&rollback).await {
+                    return Err(BridgeError::new(
+                        "pool",
+                        format!("{error}; could not restore quota: {rollback}"),
+                    ));
+                }
+            }
+            return Err(error);
+        }
+        Ok(outcome)
     }
 
     pub async fn clear_pool_slot_cooldown(
@@ -2992,6 +3584,136 @@ pub mod commands {
     ) -> Result<(), BridgeError> {
         state.terminals.set_appearance(appearance).await;
         Ok(())
+    }
+
+    #[derive(serde::Serialize)]
+    pub struct DetectedHarness {
+        agent: &'static str,
+        path: String,
+    }
+
+    #[tauri::command]
+    pub async fn agent_skills(
+        state: State<'_, ShellState>,
+        project_id: String,
+        task_id: Option<String>,
+        agent: String,
+    ) -> Result<Vec<crate::skills::AgentSkill>, BridgeError> {
+        let agent =
+            Agent::parse(&agent).ok_or_else(|| BridgeError::new("skills", "Unknown agent."))?;
+        let directory = {
+            let core = state.core.lock().await;
+            let project = ProjectId::new(project_id);
+            let project_path = core.project_path(&project)?;
+            if let Some(task_id) = task_id {
+                let task = core.task(&TaskId::new(task_id))?;
+                if task.project_id != project {
+                    return Err(BridgeError::new(
+                        "skills",
+                        "Task does not belong to this project.",
+                    ));
+                }
+                task.worktree_path.clone().unwrap_or(project_path)
+            } else {
+                project_path
+            }
+        };
+        let home = std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .ok_or_else(|| BridgeError::new("skills", "Could not determine the home directory."))?;
+        let codex_home = std::env::var_os("CODEX_HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| home.join(".codex"));
+        let config_home = std::env::var_os("XDG_CONFIG_HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| home.join(".config"));
+        tokio::task::spawn_blocking(move || {
+            crate::skills::discover(agent, &directory, &home, &codex_home, &config_home)
+        })
+        .await
+        .map_err(|error| BridgeError::new("skills", error.to_string()))?
+        .map_err(|error| BridgeError::new("skills", error))
+    }
+
+    #[tauri::command]
+    pub async fn detected_harnesses(
+        state: State<'_, ShellState>,
+    ) -> Result<Vec<DetectedHarness>, String> {
+        let path = std::env::var_os("PATH").unwrap_or_default();
+        let current_directory = std::env::current_dir().map_err(|error| error.to_string())?;
+        let settings = state.preferences.agent_settings().await;
+        let codex_path = settings
+            .executable("agents.codex.executable")
+            .map_err(|error| error.to_string())?;
+        let codex = agent_harness::codex::detect(codex_path.as_deref(), &current_directory).await;
+        let mut detected = Vec::new();
+        if let Some(install) = codex.install {
+            detected.push(DetectedHarness {
+                agent: "codex",
+                path: install.program.to_string_lossy().into_owned(),
+            });
+        }
+        for app in ["ChatGPT.app", "Codex.app"] {
+            for layout in [
+                "Contents/Resources/codex-cli/bin/codex",
+                "Contents/Resources/codex",
+            ] {
+                let candidate = PathBuf::from("/Applications").join(app).join(layout);
+                if !candidate.is_file()
+                    || detected
+                        .iter()
+                        .any(|entry| entry.path == candidate.to_string_lossy().as_ref())
+                {
+                    continue;
+                }
+                let detection =
+                    agent_harness::codex::detect(Some(&candidate), &current_directory).await;
+                if let Some(install) = detection
+                    .install
+                    .filter(|install| install.program == candidate)
+                {
+                    detected.push(DetectedHarness {
+                        agent: "codex",
+                        path: install.program.to_string_lossy().into_owned(),
+                    });
+                }
+            }
+        }
+        for (agent, executable) in [
+            ("claude", "claude"),
+            ("opencode", "opencode"),
+            ("pi", "pi"),
+            ("freebuff", "freebuff"),
+        ] {
+            let configured = settings
+                .executable(&format!("agents.{agent}.executable"))
+                .map_err(|error| error.to_string())?;
+            let candidates = configured.into_iter().chain(
+                std::env::split_paths(&path)
+                    .map(|directory| current_directory.join(directory).join(executable)),
+            );
+            for candidate in candidates {
+                let Ok(metadata) = candidate.metadata() else {
+                    continue;
+                };
+                if !metadata.is_file() {
+                    continue;
+                }
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    if metadata.permissions().mode() & 0o111 == 0 {
+                        continue;
+                    }
+                }
+                detected.push(DetectedHarness {
+                    agent,
+                    path: candidate.to_string_lossy().into_owned(),
+                });
+                break;
+            }
+        }
+        Ok(detected)
     }
 
     #[tauri::command]
@@ -4848,6 +5570,234 @@ mod tests {
             }
         })
         .await??;
+        Ok(())
+    }
+
+    #[test]
+    fn migration_distinguishes_manual_limits_from_cooldown_clears() {
+        use shep_core::store::{PoolQuotaEntry, PoolQuotaSource};
+        let id = PoolSlotId::new("slot");
+        let mut provider = PoolQuotaEntry::new(id.clone(), PoolQuotaSource::Provider, 1);
+        provider.limit = Some(10);
+        let mut cooldown = PoolQuotaEntry::new(id.clone(), PoolQuotaSource::User, 2);
+        cooldown.limit = Some(10);
+        assert!(manual_pool_limits(&[provider.clone(), cooldown.clone()]).is_empty());
+        let mut correction = PoolQuotaEntry::new(id.clone(), PoolQuotaSource::User, 3);
+        correction.limit = Some(20);
+        let mut newer_provider = PoolQuotaEntry::new(id.clone(), PoolQuotaSource::Provider, 4);
+        newer_provider.limit = Some(30);
+        let mut newer_cooldown = PoolQuotaEntry::new(id, PoolQuotaSource::User, 5);
+        newer_cooldown.limit = Some(30);
+        let limits = manual_pool_limits(&[
+            provider,
+            cooldown,
+            correction,
+            newer_provider,
+            newer_cooldown,
+        ]);
+        assert_eq!(limits.len(), 1);
+        assert_eq!(limits.first().and_then(|limit| limit.limit), Some(20));
+    }
+
+    #[tokio::test]
+    async fn pool_configuration_migrates_and_reloads_without_erasing_observations()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("settings.json");
+        let mut state = ShellState::new(Core::new());
+        state.preferences = Settings::new(path.clone());
+        state.preferences.reload().await;
+        let original = {
+            let mut core = state.core.lock().await;
+            core.add_pool_slot(Agent::Codex, "provider", "Provider", "model", "Model")
+                .await?
+        };
+        state.sync_pool_configuration().await?;
+        let mut document: serde_json::Value = serde_json::from_slice(&std::fs::read(&path)?)?;
+        assert_eq!(
+            document["app"]["agent_pool"]["slots"][0]["id"],
+            original.id.as_str()
+        );
+        let store = state.core.lock().await.process_store();
+        let mut observation = shep_core::store::PoolQuotaEntry::new(
+            original.id.clone(),
+            shep_core::store::PoolQuotaSource::Provider,
+            10,
+        );
+        observation.used = Some(3);
+        observation.limit = Some(12);
+        store.append_pool_quota_entry(&observation).await?;
+        state
+            .correct_pool_quota(
+                original.id.as_str().to_string(),
+                Some(15),
+                Some("requests".into()),
+                None,
+                None,
+            )
+            .await?;
+        document = serde_json::from_slice(&std::fs::read(&path)?)?;
+        assert_eq!(
+            document["app"]["agent_pool"]["slots"][0]["manualLimits"][0]["limit"],
+            15
+        );
+        document["app"]["agent_pool"]["slots"][0]["enabled"] = serde_json::json!(false);
+        document["app"]["agent_pool"]["slots"][0]["manualLimits"] = serde_json::json!([{ "windowKey": null, "limit": 20, "limitUnit": "requests", "resetAt": null }]);
+        crate::config_files::write_atomic(&path, &crate::config_files::encode_json(&document)?)?;
+        state.preferences.reload().await;
+        state.sync_pool_configuration().await?;
+        let status = state.pool_status().await?;
+        let entry = status.slots.first().ok_or("missing configured slot")?;
+        assert!(!entry.slot.enabled);
+        assert_eq!(
+            entry.latest_quota.as_ref().and_then(|entry| entry.used),
+            Some(3)
+        );
+        assert_eq!(
+            entry.latest_quota.as_ref().and_then(|entry| entry.limit),
+            Some(20)
+        );
+        document["app"]["agent_pool"]["slots"] = serde_json::json!([]);
+        crate::config_files::write_atomic(&path, &crate::config_files::encode_json(&document)?)?;
+        state.preferences.reload().await;
+        state.sync_pool_configuration().await?;
+        assert!(state.pool_status().await?.slots.is_empty());
+        assert!(
+            !store
+                .load_pool_quota_entries(&original.id)
+                .await?
+                .is_empty()
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn ambiguous_legacy_limit_is_preserved_as_manual()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("settings.json");
+        let mut state = ShellState::new(Core::new());
+        state.preferences = Settings::new(path.clone());
+        state.preferences.reload().await;
+        let store = state.core.lock().await.process_store();
+        let mut slot = PoolSlot::new(Agent::Codex, "provider", "Provider", "model", "Model");
+        slot.limit = Some(10);
+        store.save_pool_slot(&slot).await?;
+        state.sync_pool_configuration().await?;
+        let document: serde_json::Value = serde_json::from_slice(&std::fs::read(&path)?)?;
+        assert_eq!(
+            document["app"]["agent_pool"]["slots"][0]["manualLimits"][0]["limit"],
+            10
+        );
+        assert_eq!(
+            store
+                .load_pool_slots()
+                .await?
+                .first()
+                .and_then(|slot| slot.limit),
+            Some(10)
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn pool_configuration_conflict_restores_slot_enabled_state()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("settings.json");
+        let mut state = ShellState::new(Core::new());
+        state.preferences = Settings::new(path.clone());
+        state.preferences.reload().await;
+        state.sync_pool_configuration().await?;
+        let slot = state
+            .add_pool_slot(
+                "codex".into(),
+                "provider".into(),
+                "Provider".into(),
+                "model".into(),
+                "Model".into(),
+            )
+            .await?;
+        let mut document: serde_json::Value = serde_json::from_slice(&std::fs::read(&path)?)?;
+        document["app"]["agent_pool"]["slots"][0]["priority"] = serde_json::json!(7);
+        crate::config_files::write_atomic(&path, &crate::config_files::encode_json(&document)?)?;
+        assert!(
+            state
+                .set_pool_slot_enabled(slot.id.as_str().to_string(), false)
+                .await
+                .is_err()
+        );
+        let stored = state
+            .core
+            .lock()
+            .await
+            .process_store()
+            .load_pool_slots()
+            .await?;
+        assert!(stored.first().ok_or("missing slot")?.enabled);
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&std::fs::read(&path)?)?,
+            document
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn project_local_preview_overrides_without_changing_saved_url()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let mut state = ShellState::new(Core::new());
+        state.preferences = Settings::new(directory.path().join("global.json"));
+        state.preferences.reload().await;
+        let projects = state
+            .add_project(directory.path().to_string_lossy().into_owned())
+            .await?;
+        let project = projects.projects.first().ok_or("missing project")?;
+        let id = project.id.clone();
+        let project_path = PathBuf::from(&project.path);
+        state
+            .set_project_preview_url(id.clone(), "http://localhost:3000".into())
+            .await?;
+        let local = project_path.join(".config/shepherd/settings.json");
+        crate::config_files::write_atomic(
+            &local,
+            br#"{ "version": 1, "settings": { "preview.url": "http://localhost:4000" } }"#,
+        )?;
+        state
+            .preferences
+            .load_project_preferences(std::slice::from_ref(&project_path))
+            .await;
+        state.refresh_project_preview_overrides().await?;
+        assert_eq!(
+            state
+                .project_list()
+                .await
+                .projects
+                .first()
+                .and_then(|project| project.preview_url.as_deref()),
+            Some("http://localhost:4000/")
+        );
+        assert!(
+            state
+                .set_project_preview_url(id.clone(), "http://localhost:5000".into())
+                .await
+                .is_err()
+        );
+        std::fs::remove_file(local)?;
+        state
+            .preferences
+            .load_project_preferences(std::slice::from_ref(&project_path))
+            .await;
+        state.refresh_project_preview_overrides().await?;
+        assert_eq!(
+            state
+                .project_list()
+                .await
+                .projects
+                .first()
+                .and_then(|project| project.preview_url.as_deref()),
+            Some("http://localhost:3000/")
+        );
         Ok(())
     }
 

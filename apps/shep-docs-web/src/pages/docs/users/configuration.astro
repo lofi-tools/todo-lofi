@@ -59,9 +59,10 @@ const paths = [
 
   <h2 id="files">Settings files</h2>
   <p>
-    <code>settings.json</code> and <code>keybindings.json</code> live in the app config directory and
-    are the only source of truth for user settings. They are versioned JSON, written atomically with
-    owner-only permissions; a newer version refuses edits instead of downgrading.
+    <code>settings.json</code> and <code>keymap.json</code> live in the app config directory and
+    contain app preferences and keyboard shortcuts. Both files use versioned JSON and are written
+    atomically with owner-only permissions; a newer version refuses edits instead of downgrading.
+    Agent priority is stored in settings.json. Project preview URLs can also be stored in project-local settings.
   </p>
   <TableScroll label="Settings file locations">
     <table>
@@ -84,11 +85,16 @@ const paths = [
 
   <h2 id="agents">Agent executables</h2>
   <p>
-    Shepherd discovers installed agents, but you can pin an existing executable by absolute path.
+    Settings → Harnesses lists detected executable paths. Codex is probed for protocol support,
+    including inside supported ChatGPT and Codex app bundles; the other rows show executable
+    files found at configured paths or on PATH. You can pin an existing executable by absolute path.
     A stable profile symlink is fine. OpenCode can also take an explicit configuration file, passed
     through as <code>OPENCODE_CONFIG</code> for native, ACP and project-mode discovery.
   </p>
   <ul>
+    <li><code>agents.codex.executable</code> — optional absolute path to Codex. Without it, Shepherd checks PATH and supported ChatGPT and Codex app bundles.</li>
+    <li><code>agents.pi.executable</code> — absolute path to the Pi executable.</li>
+    <li><code>agents.freebuff.executable</code> — optional absolute path to Freebuff; PATH is also searched.</li>
     <li><code>agents.opencode.executable</code> — absolute path to an existing OpenCode executable.</li>
     <li><code>agents.opencode.config_file</code> — optional absolute path to its configuration file.</li>
     <li><code>agents.opencode.default_model</code> — optional <code>provider/model</code> that Shepherd selects for every new OpenCode session, overriding the model set in OpenCode's own configuration. A project entry takes precedence.</li>
@@ -120,6 +126,11 @@ const paths = [
     <li><code>attachments.max_file_bytes</code> — default 50,000,000 bytes per file. Applies to composer files and preview screenshots; a project can override it.</li>
     <li><code>terminal.scrollback_lines</code> — 0 to 100,000, default 10,000. Read when a terminal starts or restarts.</li>
     <li><code>notifications.enabled</code> — opt-in system notifications for waits outside the focused task.</li>
+    <li><code>tasks.show_archived</code> — show archived tasks; a project can override it.</li>
+    <li><code>files.show_dotfiles</code> — show dotfiles in the file explorer.</li>
+    <li><code>theme</code> — <code>system</code>, <code>light</code>, or <code>dark</code>.</li>
+    <li><code>appearance.density</code> — <code>compact</code> or <code>comfortable</code>.</li>
+    <li><code>appearance.send_accent</code> — <code>Blue</code>, <code>Violet</code>, <code>Teal</code>, <code>Amber</code>, or <code>Neutral</code>.</li>
   </ul>
   <p>
     Settings → Workspace edits the defaults; Settings → Projects edits the selected project's
@@ -128,7 +139,9 @@ const paths = [
 
   <h2 id="preview">Preview URL</h2>
   <p>
-    Save a loopback HTTP(S) address in Settings → Projects. Leaving the field empty clears it. The
+    Save a loopback HTTP(S) address in Settings → Projects. Leaving the field empty clears it.
+    A project's <code>.config/shepherd/settings.json</code> may set the <code>preview.url</code> key
+    inside its <code>settings</code> object to override the saved value without changing it; reload settings after editing the file. The
     Preview tab loads that address in an isolated surface, and the annotation wrapper embeds it
     without proxying it. Only loopback targets are accepted.
   </p>
@@ -142,7 +155,7 @@ const paths = [
     Settings → Appearance offers System, Light and Dark, compact or comfortable density, and the
     Send accent. Settings → Keyboard shortcuts records one chord per command, rejects conflicts and
     can reset to the platform default. Bindings are app-scoped and live in
-    <code>keybindings.json</code>.
+    <code>keymap.json</code>.
   </p>
   <p>
     If the keybindings file cannot be read, Shepherd keeps the default registry and reports the path;

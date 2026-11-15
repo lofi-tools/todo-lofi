@@ -1202,6 +1202,30 @@ impl Store for TursoStore {
         Ok(())
     }
 
+    async fn load_pool_configuration_checkpoint(&self) -> Result<Option<String>, StoreError> {
+        let mut db = self.db.lock().await;
+        let rows =
+            toasty::sql::query("SELECT document FROM pool_configuration_checkpoint WHERE id = 1")
+                .column_types([Type::String])
+                .exec(&mut *db)
+                .await
+                .map_err(StoreError::database)?;
+        match rows.first() {
+            Some(Value::Record(record)) => Ok(Some(required_string(record.first())?)),
+            Some(_) => Err(StoreError::InvalidRow(
+                "invalid pool configuration checkpoint".into(),
+            )),
+            None => Ok(None),
+        }
+    }
+
+    async fn save_pool_configuration_checkpoint(&self, checkpoint: &str) -> Result<(), StoreError> {
+        let mut db = self.db.lock().await;
+        toasty::sql::statement("INSERT INTO pool_configuration_checkpoint (id, document) VALUES (1, ?1) ON CONFLICT (id) DO UPDATE SET document = excluded.document")
+            .bind(checkpoint).exec(&mut *db).await.map_err(StoreError::database)?;
+        Ok(())
+    }
+
     async fn load_pool_slots(&self) -> Result<Vec<PoolSlot>, StoreError> {
         let mut db = self.db.lock().await;
         let rows = toasty::sql::query(
@@ -3243,6 +3267,27 @@ mod tests {
             directory.path(),
         )
         .await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn pool_configuration_checkpoint_survives_reopen()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = TestDirectory::new()?;
+        let path = directory.join("pool-checkpoint.db");
+        let store = TursoStore::open_at(&path).await?;
+        assert!(store.load_pool_configuration_checkpoint().await?.is_none());
+        store.save_pool_configuration_checkpoint("first").await?;
+        store.save_pool_configuration_checkpoint("second").await?;
+        drop(store);
+        let reopened = TursoStore::open_at(&path).await?;
+        assert_eq!(
+            reopened
+                .load_pool_configuration_checkpoint()
+                .await?
+                .as_deref(),
+            Some("second")
+        );
         Ok(())
     }
 
@@ -5289,6 +5334,12 @@ mod tests {
                 store.save_terminal(&moved).await,
                 Err(StoreError::TerminalOwnerMissing { .. })
             ));
+            let mut promoted = terminal.clone();
+            promoted.id = TerminalId::new("promoted");
+            store.save_terminal(&promoted).await?;
+            promoted.scope = TerminalScope::Project;
+            promoted.task_id = None;
+            store.save_terminal(&promoted).await?;
             terminal.ended_at = Some(2);
             store.save_terminal(&terminal).await?;
             store.delete_task(&task.id, None).await?;
@@ -5297,10 +5348,12 @@ mod tests {
                 Err(StoreError::TerminalOwnerMissing { .. })
             ));
             let remaining = store.load_terminals().await?;
-            assert_eq!(remaining.len(), 1);
-            assert_eq!(
-                remaining.first().ok_or("missing shared terminal")?.id,
-                shared.id
+            assert_eq!(remaining.len(), 2);
+            assert!(remaining.iter().any(|entry| entry.id == shared.id));
+            assert!(
+                remaining
+                    .iter()
+                    .any(|entry| entry.id == promoted.id && entry.scope == TerminalScope::Project)
             );
             Ok(())
         }

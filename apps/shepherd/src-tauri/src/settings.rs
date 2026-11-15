@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::io;
 use std::path::{Path, PathBuf};
 
@@ -16,6 +17,8 @@ const MAX_SCROLLBACK: u64 = 100_000;
 
 #[derive(Clone, Copy, Deserialize)]
 pub enum SettingKey {
+    #[serde(rename = "agents.priority")]
+    AgentPriority,
     #[serde(rename = "theme")]
     Theme,
     #[serde(rename = "appearance.density")]
@@ -35,7 +38,8 @@ pub enum SettingKey {
 }
 
 impl SettingKey {
-    const ALL: [Self; 8] = [
+    const ALL: [Self; 9] = [
+        Self::AgentPriority,
         Self::Theme,
         Self::Density,
         Self::ShowArchived,
@@ -48,6 +52,7 @@ impl SettingKey {
 
     fn name(self) -> &'static str {
         match self {
+            Self::AgentPriority => "agents.priority",
             Self::Theme => "theme",
             Self::Density => "appearance.density",
             Self::ShowArchived => "tasks.show_archived",
@@ -61,6 +66,7 @@ impl SettingKey {
 
     fn default_value(self) -> Value {
         match self {
+            Self::AgentPriority => json!(["codex", "opencode", "pi", "claude", "freebuff"]),
             Self::Theme => json!("system"),
             Self::Density => json!("compact"),
             Self::ShowArchived | Self::Notifications => json!(false),
@@ -80,6 +86,19 @@ impl SettingKey {
 
     fn validate(self, value: &Value) -> Result<(), String> {
         let reason = match self {
+            Self::AgentPriority
+                if !value.as_array().is_some_and(|agents| {
+                    let mut seen = std::collections::BTreeSet::new();
+                    agents.iter().all(|agent| {
+                        agent.as_str().is_some_and(|name| {
+                            matches!(name, "codex" | "opencode" | "pi" | "claude" | "freebuff")
+                                && seen.insert(name)
+                        })
+                    })
+                }) =>
+            {
+                "Enter a list of unique supported agents."
+            }
             Self::Theme if !matches!(value.as_str(), Some("system" | "light" | "dark")) => {
                 "Choose system, light, or dark."
             }
@@ -115,6 +134,61 @@ impl SettingKey {
     }
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PoolConfiguration {
+    pub slots: Vec<ConfiguredPoolSlot>,
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ConfiguredPoolSlot {
+    pub id: shep_core::store::PoolSlotId,
+    pub agent: shep_core::Agent,
+    pub provider_id: String,
+    pub provider_name: String,
+    pub model_id: String,
+    pub model_name: String,
+    pub credential_ref: Option<String>,
+    pub priority: i64,
+    pub enabled: bool,
+    #[serde(default)]
+    pub manual_limits: Vec<ConfiguredPoolLimit>,
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ConfiguredPoolLimit {
+    pub window_key: Option<String>,
+    pub limit: Option<u64>,
+    pub limit_unit: Option<String>,
+    pub reset_at: Option<u64>,
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
+}
+
+impl ConfiguredPoolSlot {
+    pub fn from_slot(slot: &shep_core::store::PoolSlot) -> Self {
+        Self {
+            id: slot.id.clone(),
+            agent: slot.agent,
+            provider_id: slot.provider_id.clone(),
+            provider_name: slot.provider_name.clone(),
+            model_id: slot.model_id.clone(),
+            model_name: slot.model_name.clone(),
+            credential_ref: slot.credential_ref.clone(),
+            priority: slot.priority,
+            enabled: slot.enabled,
+            manual_limits: Vec::new(),
+            extra: Map::new(),
+        }
+    }
+}
+
 #[derive(Default)]
 pub struct Settings {
     path: Option<PathBuf>,
@@ -125,6 +199,7 @@ pub struct Settings {
 struct CachedSettings {
     document: Value,
     warning: Option<String>,
+    project_local: BTreeMap<String, Map<String, Value>>,
 }
 
 #[derive(Serialize)]
@@ -156,7 +231,7 @@ impl CachedSettings {
                 })
                 .collect()
         }
-        let projects = self.document["projects"]
+        let mut projects: Map<String, Value> = self.document["projects"]
             .as_object()
             .into_iter()
             .flatten()
@@ -165,6 +240,12 @@ impl CachedSettings {
                 (!values.is_empty()).then(|| (path.clone(), Value::Object(values)))
             })
             .collect();
+        for (path, local) in &self.project_local {
+            let scope = projects.entry(path.clone()).or_insert_with(|| json!({}));
+            if let Some(scope) = scope.as_object_mut() {
+                scope.extend(local.clone());
+            }
+        }
         SettingsSnapshot {
             app: preferences(&self.document["app"], false),
             projects,
@@ -316,14 +397,158 @@ impl Settings {
                 Ok(document) => CachedSettings {
                     document,
                     warning: None,
+                    project_local: BTreeMap::new(),
                 },
                 Err(warning) => CachedSettings {
                     document: Value::Null,
                     warning: Some(warning),
+                    project_local: BTreeMap::new(),
                 },
             };
         }
         cached.snapshot()
+    }
+
+    pub async fn load_project_preferences(&self, projects: &[PathBuf]) -> SettingsSnapshot {
+        let mut local = BTreeMap::new();
+        let mut warnings = Vec::new();
+        for project in projects {
+            let path = project.join(".config/shepherd/settings.json");
+            let result = async {
+                let Some(bytes) = read_optional(&path)
+                    .await
+                    .map_err(|error| error.to_string())?
+                else {
+                    return Ok(None);
+                };
+                let document: Value =
+                    serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
+                if document.get("version").and_then(Value::as_u64) != Some(1) {
+                    return Err("Expected version 1.".to_string());
+                }
+                let scope = document
+                    .get("settings")
+                    .and_then(Value::as_object)
+                    .ok_or_else(|| "Expected a settings object.".to_string())?;
+                validate_scope(scope, true).map_err(|error| error.to_string())?;
+                if let Some(value) = scope.get("preview.url").filter(|value| !value.is_null()) {
+                    let raw = value
+                        .as_str()
+                        .ok_or_else(|| "preview.url must be a loopback HTTP(S) URL.".to_string())?;
+                    if shep_core::projects::parse_preview_url(raw).is_none() {
+                        return Err("preview.url must be a loopback HTTP(S) URL.".to_string());
+                    }
+                }
+                let mut values: Map<String, Value> = SettingKey::ALL
+                    .into_iter()
+                    .filter(|key| key.project_scoped())
+                    .filter_map(|key| {
+                        scope
+                            .get(key.name())
+                            .filter(|value| !value.is_null())
+                            .map(|value| (key.name().to_string(), value.clone()))
+                    })
+                    .collect();
+                if let Some(value) = scope.get("preview.url").filter(|value| !value.is_null()) {
+                    values.insert("preview.url".to_string(), value.clone());
+                }
+                Ok::<_, String>(Some(values))
+            }
+            .await;
+            match result {
+                Ok(Some(scope)) => {
+                    local.insert(project.to_string_lossy().into_owned(), scope);
+                }
+                Ok(None) => {}
+                Err(error) => warnings.push(Self::message(&path, error)),
+            }
+        }
+        let mut cached = self.cached.lock().await;
+        cached.project_local = local;
+        if !warnings.is_empty() {
+            let warning = warnings.join(" ");
+            cached.warning = Some(match cached.warning.take() {
+                Some(existing) => format!("{existing} {warning}"),
+                None => warning,
+            });
+        }
+        cached.snapshot()
+    }
+
+    pub async fn project_preview_overrides(&self) -> BTreeMap<String, String> {
+        self.cached
+            .lock()
+            .await
+            .project_local
+            .iter()
+            .filter_map(|(path, values)| {
+                values
+                    .get("preview.url")
+                    .and_then(Value::as_str)
+                    .map(|value| (path.clone(), value.to_string()))
+            })
+            .collect()
+    }
+
+    pub(crate) fn has_path(&self) -> bool {
+        self.path.is_some()
+    }
+
+    pub(crate) async fn pool_configuration(
+        &self,
+    ) -> Result<Option<PoolConfiguration>, BridgeError> {
+        if self.path.is_none() {
+            return Ok(None);
+        }
+        let cached = self.cached.lock().await;
+        if cached.document.is_null() {
+            return Err(BridgeError::new(
+                "settings",
+                cached
+                    .warning
+                    .clone()
+                    .unwrap_or_else(|| "Settings are unavailable.".into()),
+            ));
+        }
+        cached.document["app"]
+            .get("agent_pool")
+            .filter(|value| !value.is_null())
+            .map(|value| {
+                serde_json::from_value(value.clone()).map_err(|error| {
+                    BridgeError::new(
+                        "settings",
+                        format!("Invalid agent_pool configuration: {error}"),
+                    )
+                })
+            })
+            .transpose()
+    }
+
+    pub(crate) async fn write_pool_configuration(
+        &self,
+        config: &PoolConfiguration,
+    ) -> Result<(), BridgeError> {
+        let path = self
+            .path
+            .as_deref()
+            .ok_or_else(|| BridgeError::new("settings", "No settings file is configured."))?;
+        let mut cached = self.cached.lock().await;
+        let original = read_optional(path)
+            .await
+            .map_err(|error| BridgeError::new("settings", Self::message(path, error)))?;
+        let (mut document, _) = parse_document(original.as_deref())
+            .map_err(|error| BridgeError::new("settings", Self::message(path, error)))?;
+        if document["app"].get("agent_pool") != cached.document["app"].get("agent_pool") {
+            return Err(BridgeError::new(
+                "settings_conflict",
+                "Agent pool configuration changed on disk. Reload settings before editing.",
+            ));
+        }
+        document["app"]["agent_pool"] = serde_json::to_value(config)
+            .map_err(|error| BridgeError::new("settings", error.to_string()))?;
+        Self::replace(path, original.as_deref(), &document).await?;
+        cached.document = document;
+        Ok(())
     }
 
     pub async fn agent_settings(&self) -> AgentSettings {
@@ -345,7 +570,13 @@ impl Settings {
         project
             .filter(|_| key.project_scoped())
             .and_then(Path::to_str)
-            .and_then(|path| cached.document["projects"][path].get(key.name()))
+            .and_then(|path| {
+                cached
+                    .project_local
+                    .get(path)
+                    .and_then(|scope| scope.get(key.name()))
+                    .or_else(|| cached.document["projects"][path].get(key.name()))
+            })
             .filter(|value| !value.is_null())
             .or_else(|| {
                 cached.document["app"]
@@ -384,6 +615,17 @@ impl Settings {
                 })
             })
             .transpose()?;
+        if project.is_some_and(|project| {
+            cached
+                .project_local
+                .get(project)
+                .is_some_and(|scope| scope.contains_key(edit.key.name()))
+        }) {
+            return Err(BridgeError::new(
+                "settings",
+                "This value is set in the project's .config/shepherd/settings.json. Edit that file to change it.",
+            ));
+        }
         if let Some(value) = &edit.value {
             edit.key
                 .validate(value)
@@ -418,10 +660,8 @@ impl Settings {
         } else if migrate {
             Self::replace(path, original.as_deref(), &document).await?;
         }
-        *cached = CachedSettings {
-            document,
-            warning: None,
-        };
+        cached.document = document;
+        cached.warning = None;
         Ok(cached.snapshot())
     }
 }
@@ -430,7 +670,18 @@ impl Settings {
 pub async fn reload_settings(
     state: State<'_, ShellState>,
 ) -> Result<SettingsSnapshot, BridgeError> {
-    Ok(state.preferences.reload().await)
+    state.preferences.reload().await;
+    let projects = state
+        .project_list()
+        .await
+        .projects
+        .into_iter()
+        .filter(|project| !project.missing)
+        .map(|project| PathBuf::from(project.path))
+        .collect::<Vec<_>>();
+    let snapshot = state.preferences.load_project_preferences(&projects).await;
+    state.refresh_project_preview_overrides().await?;
+    Ok(snapshot)
 }
 
 #[tauri::command]
@@ -506,12 +757,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn local_project_preferences_override_saved_values()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let project = directory.path().join("project");
+        std::fs::create_dir_all(&project)?;
+        let settings_path = directory.path().join("settings.json");
+        let project_path = project.to_str().ok_or("project path")?;
+        let global = json!({"version": 1, "app": {"terminal.scrollback_lines": 30}, "projects": {(project_path): {"terminal.scrollback_lines": 40}}});
+        write_atomic(&settings_path, &encode_json(&global)?)?;
+        let local_path = project.join(".config/shepherd/settings.json");
+        let local = json!({"version": 1, "settings": {"terminal.scrollback_lines": 50}});
+        write_atomic(&local_path, &encode_json(&local)?)?;
+        let settings = Settings::new(settings_path);
+        settings.reload().await;
+        let snapshot = settings
+            .load_project_preferences(std::slice::from_ref(&project))
+            .await;
+        assert!(snapshot.warning.is_none());
+        assert_eq!(
+            settings.value(Some(&project), SettingKey::Scrollback).await,
+            json!(50)
+        );
+        assert_eq!(
+            snapshot.projects[project.to_str().ok_or("project path")?]["terminal.scrollback_lines"],
+            json!(50)
+        );
+        assert!(
+            settings
+                .edit(
+                    Some(&project),
+                    edit(SettingKey::Scrollback, Some(json!(50)), Some(json!(60)))
+                )
+                .await
+                .is_err()
+        );
+        assert_eq!(std::fs::read(&local_path)?, encode_json(&local)?);
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn migrates_legacy_settings_and_resolves_project_overrides_per_key()
     -> Result<(), Box<dyn std::error::Error>> {
         let directory = tempfile::tempdir()?;
         let path = directory.path().join("settings.json");
         let old = json!({
-            "app": {"tasks.show_archived": true, "attachments.max_file_bytes": 30, "agents.opencode.executable": "/existing/bin/opencode"},
+            "app": {"tasks.show_archived": true, "attachments.max_file_bytes": 30, "agents.opencode.executable": "/existing/bin/opencode", "agents.codex.executable": "/existing/bin/codex"},
             "projects": {"/one": {"attachments.max_file_bytes": 10, "future": ["preserve"]}, "/two": {"terminal.scrollback_lines": 20}},
             "future": {"preserve": true}
         });
@@ -527,6 +818,13 @@ mod tests {
                 .await
                 .executable("agents.opencode.executable")?,
             Some("/existing/bin/opencode".into())
+        );
+        assert_eq!(
+            settings
+                .agent_settings()
+                .await
+                .executable("agents.codex.executable")?,
+            Some("/existing/bin/codex".into())
         );
         assert_eq!(
             settings

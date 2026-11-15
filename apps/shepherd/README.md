@@ -175,6 +175,79 @@ Every core command has one `#[tauri::command]`, and the window receives core
 events over a single Tauri channel. `ui/src/bridge.ts` holds the typed client;
 the snapshots come from `shep-core`, never from a second frontend model.
 
+## Settings JSON
+
+Shepherd reads `settings.json` from `~/Library/Application Support/dev.shepherd.shell/`
+on macOS and from `$XDG_CONFIG_HOME/dev.shepherd.shell/` on Linux (normally
+`~/.config/dev.shepherd.shell/`). Create the file if it does not exist.
+
+```json
+{
+  "version": 1,
+  "app": {
+    "theme": "system",
+    "appearance.density": "compact",
+    "appearance.send_accent": "Blue",
+    "tasks.show_archived": false,
+    "notifications.enabled": false,
+    "attachments.max_file_bytes": 50000000,
+    "terminal.scrollback_lines": 10000,
+    "files.show_dotfiles": true,
+    "agents.codex.executable": "/absolute/path/to/codex",
+    "agents.opencode.executable": "/absolute/path/to/opencode",
+    "agents.claude.executable": "/absolute/path/to/claude-code-acp",
+    "agents.pi.executable": "/absolute/path/to/pi",
+    "agents.freebuff.executable": "/absolute/path/to/freebuff"
+  },
+  "projects": {
+    "/absolute/path/to/project": {
+      "tasks.show_archived": false,
+      "attachments.max_file_bytes": 50000000,
+      "terminal.scrollback_lines": 10000
+    }
+  }
+}
+```
+
+Omit executable keys to use automatic detection where supported. Codex detection
+checks PATH and the Codex executable bundled with ChatGPT or Codex on macOS.
+A configured Codex path is tried first; if it cannot be used, detection tries
+the other candidates. OpenCode, Claude Code, and Pi use their configured paths.
+Freebuff also supports PATH discovery. Claude's path must point to an ACP adapter.
+Restart Shepherd after editing harness settings. **Reload settings** applies the
+other preferences. Keyboard shortcuts use `keymap.json`. Agent priority is stored under `app["agents.priority"]`; project usage data remains in the database. Existing
+`keybindings.json` files are read until a shortcut edit creates `keymap.json`;
+the old file is retained.
+
+Project-local overrides can be read from `<project>/.config/shepherd/settings.json`:
+
+```json
+{
+  "version": 1,
+  "settings": {
+    "tasks.show_archived": false,
+    "attachments.max_file_bytes": 20000000,
+    "terminal.scrollback_lines": 20000,
+    "preview.url": "http://localhost:3000"
+  }
+}
+```
+
+The preview URL must be loopback HTTP or HTTPS. It overrides the saved project
+URL without replacing it; removing the local value restores the saved URL.
+These preference values take precedence over saved project and app values. Reload
+settings after editing this file. When a value is supplied by this file, edit the
+file to change it; Shepherd leaves it untouched.
+
+In **Settings → Agent pool**, reorder installed agents to choose which available
+agent a new conversation uses first. You can change the agent in the draft.
+If none is available, the draft remains editable until a harness is configured.
+The order can also be edited in `settings.json`:
+
+```json
+{ "app": { "agents.priority": ["codex", "opencode", "pi", "claude", "freebuff"] } }
+```
+
 ## Attachment limits
 
 Shepherd allows up to 50 MB per attachment by default. Change the default in

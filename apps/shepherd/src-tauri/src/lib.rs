@@ -20,6 +20,7 @@ mod preview_annotations;
 mod preview_server;
 mod pty_terminal;
 mod settings;
+mod skills;
 pub use shep_terminal_renderer as terminal_screen;
 
 use std::path::PathBuf;
@@ -31,10 +32,11 @@ use tauri::Manager;
 
 fn codex_factory(
     data_directory: &std::path::Path,
+    configured: Option<&std::path::Path>,
 ) -> (Box<dyn HarnessFactory>, Option<PathBuf>, bool) {
     let probe_directory = std::env::current_dir().unwrap_or_else(|_| data_directory.to_path_buf());
     let detection =
-        tauri::async_runtime::block_on(agent_harness::codex::detect(None, &probe_directory));
+        tauri::async_runtime::block_on(agent_harness::codex::detect(configured, &probe_directory));
     match &detection.install {
         Some(install) => {
             tracing::info!("{}", detection.summary());
@@ -172,7 +174,22 @@ pub fn run() -> Result<(), tauri::Error> {
             ): (Box<dyn HarnessFactory>, _, _, _, _, _, _, _) = match dev_factory {
                 Some(factory) => (factory, None, false, None, false, false, false, None),
                 None => {
-                    let (codex, codex_program, codex_detected) = codex_factory(&data_directory);
+                    let codex_path =
+                        agents
+                            .as_ref()
+                            .map_err(ToString::to_string)
+                            .and_then(|settings| {
+                                settings
+                                    .executable("agents.codex.executable")
+                                    .map_err(|error| error.to_string())
+                            });
+                    if let Err(error) = &codex_path {
+                        tracing::warn!(%error, "could not load Codex configuration");
+                    }
+                    let (codex, codex_program, codex_detected) = codex_factory(
+                        &data_directory,
+                        codex_path.as_ref().ok().and_then(Option::as_deref),
+                    );
                     let (opencode, pi, claude) = match &agents {
                         Ok(settings) => (
                             agent_harness::opencode::configured_launch(settings),
@@ -273,7 +290,7 @@ pub fn run() -> Result<(), tauri::Error> {
             state.start_event_pump();
             app.manage(state);
             app.manage(keybindings::KeybindingSettings::new(
-                preference_directory.join("keybindings.json"),
+                preference_directory.join("keymap.json"),
             ));
             Ok(())
         })
@@ -283,6 +300,8 @@ pub fn run() -> Result<(), tauri::Error> {
             keybindings::command_registry,
             keybindings::set_keybinding,
             bridge::commands::agent_availability,
+            bridge::commands::detected_harnesses,
+            bridge::commands::agent_skills,
             bridge::commands::add_project,
             bridge::commands::set_project_preview_url,
             bridge::commands::open_project_preview,

@@ -101,6 +101,8 @@ pub enum CoreError {
     EmptyTitle,
     #[error("the prompt is empty")]
     EmptyPrompt,
+    #[error("Agent pool settings are unavailable: {0}. Reload settings after fixing the file.")]
+    PoolConfigurationUnavailable(String),
     #[error("Codex model and effort options require a Codex task.")]
     CodexOptionsForOtherAgent,
     #[error("Could not resolve mentioned file {path}. {source}")]
@@ -244,6 +246,7 @@ pub struct Core {
     /// A slot the user forced for the next turn. This is session state, so it is
     /// deliberately absent from the store and does not survive a restart.
     forced_pool_slot: Option<PoolSlotId>,
+    pool_configuration_error: Option<String>,
     #[doc(hidden)]
     pub store: Arc<dyn Store>,
     harness_factory: Box<dyn HarnessFactory>,
@@ -374,6 +377,7 @@ impl Core {
             terminal_list_revision: 0,
             archived_worktree_issues: Vec::new(),
             forced_pool_slot: None,
+            pool_configuration_error: None,
             store: Arc::from(store),
             harness_factory,
             shutdown: ShutdownState::Running,
@@ -960,6 +964,10 @@ impl Core {
 
     pub fn process_store(&self) -> Arc<dyn Store> {
         self.store.clone()
+    }
+
+    pub fn set_pool_configuration_error(&mut self, error: Option<String>) {
+        self.pool_configuration_error = error;
     }
 
     pub async fn pool_status(&mut self, now: u64) -> Result<PoolStatus, CoreError> {
