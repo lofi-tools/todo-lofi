@@ -666,6 +666,7 @@ impl GitService {
             staged_revision: self.staged_revision(path)?,
             merge_blocked: None,
             branches: branches.lines().map(str::to_string).collect(),
+            line_stats: self.line_stats(path, &checkout.files)?,
             files: checkout.files,
             history: self.history(path)?,
             staged_diff: run_git(
@@ -674,6 +675,56 @@ impl GitService {
             )?,
             unstaged_diff: run_git(path, &["diff", "--no-ext-diff", "--no-textconv", "--"])?,
         })
+    }
+
+    fn line_stats(&self, path: &Path, files: &[GitFile]) -> Result<Vec<GitLineStats>, GitError> {
+        let output = git_bytes(
+            path,
+            &[
+                "diff",
+                "--numstat",
+                "-z",
+                "--find-renames",
+                "--no-ext-diff",
+                "--no-textconv",
+                "HEAD",
+                "--",
+            ],
+        )?;
+        let mut stats = parse_numstat(&output)?;
+        for file in files
+            .iter()
+            .filter(|file| file.index == "?" && file.worktree == "?" && file.actionable)
+        {
+            let output = Command::new("git")
+                .arg("-C")
+                .arg(path)
+                .args([
+                    "diff",
+                    "--no-index",
+                    "--numstat",
+                    "-z",
+                    "--no-ext-diff",
+                    "--no-textconv",
+                    "--",
+                    "/dev/null",
+                ])
+                .arg(&file.path)
+                .output()
+                .map_err(|source| GitError::Io { source })?;
+            if !output.status.success() && output.status.code() != Some(1) {
+                return Err(GitError::CommandFailed {
+                    command: format!("git diff --no-index --numstat -- /dev/null {}", file.path),
+                    status: output.status,
+                    stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+                });
+            }
+            if let Some(mut entry) = parse_numstat(&output.stdout)?.into_iter().next() {
+                entry.path = file.path.clone();
+                stats.push(entry);
+            }
+        }
+        Ok(stats)
     }
 
     fn history(&self, path: &Path) -> Result<Vec<GitCommit>, GitError> {
@@ -875,6 +926,31 @@ impl GitService {
         commit_with_message(root, message, false)
     }
 
+    pub fn merge_each(
+        &self,
+        root: &Path,
+        path: &Path,
+        base: &str,
+        branch: &str,
+    ) -> Result<(), GitError> {
+        if let Some(reason) = self.merge_blocked(root, path, base, branch)? {
+            return Err(GitError::MergeUnavailable { reason });
+        }
+        let reference = format!("refs/heads/{branch}");
+        if let Err(error) = run_git(root, &["merge", "--no-edit", "--", &reference]) {
+            let conflicts = git_bytes(root, &["diff", "--name-only", "--diff-filter=U", "-z"])?;
+            let paths = git_paths(&conflicts).collect::<Vec<_>>().join(", ");
+            if !paths.is_empty() {
+                return Err(GitError::MergeConflicts {
+                    paths,
+                    detail: error.to_string(),
+                });
+            }
+            return Err(error);
+        }
+        Ok(())
+    }
+
     pub(crate) fn status(&self, path: &Path) -> Result<Vec<GitFile>, GitError> {
         Ok(self.status_with_branch(path)?.1)
     }
@@ -1055,6 +1131,46 @@ pub struct CheckoutStatus {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct GitLineStats {
+    pub path: String,
+    pub added: Option<u64>,
+    pub removed: Option<u64>,
+}
+
+fn parse_numstat(output: &[u8]) -> Result<Vec<GitLineStats>, GitError> {
+    let mut fields = output
+        .split(|byte| *byte == 0)
+        .filter(|field| !field.is_empty());
+    let mut result = Vec::new();
+    while let Some(record) = fields.next() {
+        let mut columns = record.splitn(3, |byte| *byte == b'\t');
+        let added = columns.next().ok_or(GitError::InvalidStatus)?;
+        let removed = columns.next().ok_or(GitError::InvalidStatus)?;
+        let name = columns.next().ok_or(GitError::InvalidStatus)?;
+        let name = if name.is_empty() {
+            fields.next().ok_or(GitError::InvalidStatus)?;
+            fields.next().ok_or(GitError::InvalidStatus)?
+        } else {
+            name
+        };
+        let count = |value: &[u8]| -> Result<Option<u64>, GitError> {
+            if value == b"-" {
+                return Ok(None);
+            }
+            let value = std::str::from_utf8(value).map_err(|_| GitError::InvalidStatus)?;
+            Ok(Some(value.parse().map_err(|_| GitError::InvalidStatus)?))
+        };
+        result.push(GitLineStats {
+            path: String::from_utf8_lossy(name).into_owned(),
+            added: count(added)?,
+            removed: count(removed)?,
+        });
+    }
+    Ok(result)
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct GitSnapshot {
     pub branch: Option<String>,
     pub tracking: Option<String>,
@@ -1062,6 +1178,7 @@ pub struct GitSnapshot {
     pub branches: Vec<String>,
     pub history: Vec<GitCommit>,
     pub files: Vec<GitFile>,
+    pub line_stats: Vec<GitLineStats>,
     pub staged_diff: String,
     pub staged_revision: String,
     pub merge_blocked: Option<String>,
@@ -1079,6 +1196,7 @@ pub enum GitMutation {
     Checkout { branch: String },
     CreateBranch { branch: String },
     SquashMerge,
+    MergeEach,
 }
 
 fn commit_with_message(path: &Path, message: &str, amend: bool) -> Result<(), GitError> {
@@ -1685,6 +1803,37 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "git")]
+    #[test]
+    fn snapshot_counts_tracked_untracked_and_binary_changes()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fixture = TestRepository::new()?;
+        fixture.write_file("README.md", "changed\nsecond\n")?;
+        GitService.stage(fixture.path(), Some("README.md"))?;
+        fixture.write_file("README.md", "changed\nsecond\nthird\n")?;
+        fixture.write_file("new file.txt", "first\nsecond")?;
+        std::fs::write(fixture.path().join("binary.bin"), [0, 1, 2, 3])?;
+        let snapshot = GitService.snapshot(fixture.path())?;
+        let find = |path: &str| snapshot.line_stats.iter().find(|entry| entry.path == path);
+        let tracked = find("README.md").ok_or("missing tracked stats")?;
+        assert_eq!((tracked.added, tracked.removed), (Some(3), Some(1)));
+        let untracked = find("new file.txt").ok_or("missing untracked stats")?;
+        assert_eq!((untracked.added, untracked.removed), (Some(2), Some(0)));
+        let binary = find("binary.bin").ok_or("missing binary stats")?;
+        assert_eq!((binary.added, binary.removed), (None, None));
+        Ok(())
+    }
+
+    #[test]
+    fn numstat_keeps_rename_destinations_and_binary_markers() -> Result<(), GitError> {
+        let stats = parse_numstat(b"3\t2\t\0before name\0after name\0-\t-\tbinary.bin\0")?;
+        assert_eq!(stats.len(), 2);
+        assert_eq!(stats[0].path, "after name");
+        assert_eq!((stats[0].added, stats[0].removed), (Some(3), Some(2)));
+        assert_eq!((stats[1].added, stats[1].removed), (None, None));
+        Ok(())
+    }
+
     #[cfg(unix)]
     #[cfg(feature = "git")]
     #[test]
@@ -1805,6 +1954,27 @@ mod tests {
             )?,
             tip
         );
+        Ok(())
+    }
+
+    #[cfg(feature = "git")]
+    #[test]
+    fn merge_each_preserves_task_commits() -> Result<(), Box<dyn std::error::Error>> {
+        let fixture = TestRepository::new()?;
+        let task = task_worktree(&fixture)?;
+        for (file, message) in [
+            ("first.txt", "First change"),
+            ("second.txt", "Second change"),
+        ] {
+            std::fs::write(task.join(file), message)?;
+            GitService.stage(&task, None)?;
+            GitService.commit(&task, message, &GitService.snapshot(&task)?.staged_revision)?;
+        }
+        let tip = run_git(&task, &["rev-parse", "HEAD"])?;
+        GitService.merge_each(fixture.path(), &task, "main", "shepherd/example")?;
+        assert_eq!(run_git(fixture.path(), &["rev-parse", "HEAD"])?, tip);
+        let history = run_git(fixture.path(), &["log", "-2", "--format=%s"])?;
+        assert_eq!(history, "Second change\nFirst change");
         Ok(())
     }
 
