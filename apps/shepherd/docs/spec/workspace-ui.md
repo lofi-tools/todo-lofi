@@ -19,7 +19,7 @@ current layout and give future changes a point of comparison.
 - Place a slim icon rail to the left, outside the wrapper. The rail and the
   Previous and Next control group share a 52 px width and 6 px padding. The
   rail currently has placeholder icons for Workspace and Conversations.
-  Previous and Next are placeholders for navigation history.
+  Previous and Next navigate screen history, including project conversations, inspector tabs, and settings sections. Settings includes a Back to app button above a larger heading with space above it.
 - **Search tasks** sits immediately after Previous and Next in the window
   header. It has a magnifier inside the field and shows the current shortcut
   as individually bordered, muted keycaps with small text, tight spacing and
@@ -46,20 +46,38 @@ current layout and give future changes a point of comparison.
   is draggable. Quit uses the system window or app controls.
 - Use one window grid for the header, workspace, and footer. The header and
   workspace share columns through CSS subgrid. The navigation, conversation,
-  and inspector sections of the header share the window background.
+  and inspector sections of the header share the window background. Short
+  vertical dividers in the header align with the workspace pane boundaries.
 - Keep the inspector on the right. Left-align its five icon tabs in the header
-  above it in this order: **Terminals**, **Preview**, **Review**, **Git**, and
-  **Files**.
+  above it in this order: **Terminals**, **Preview**, **Review**, and **Files**.
   Give each icon an accessible name and tooltip. Use Left and Right to switch
   between available tabs. Show terminal and review attention as dots with
   accessible descriptions. The tabs follow the conversation in the Tab
   sequence, with one tab stop for the selected tab and the named panel next.
-  Settings can occupy the middle pane while the sidebar and inspector remain
-  in place.
+  Settings replaces the Projects sidebar, conversation, and inspector; the
+  inspector tabs and resize control are hidden until Settings closes. The wider
+  settings navigation contains the heading and a search field; the settings
+  content starts at the top and searches include setting names and shortcuts.
   In Terminals, keep the selected task's read-only Codex command output
   alongside the interactive terminal panes. Follow the latest command by
   default and let the user select an earlier command without shifting focus
   when new output arrives.
+  Give each instance row and pane header a scope icon: a folder for a
+  project-shared terminal and a branch for a task terminal; the Freebuff row
+  reuses the composer picker's Freebuff brand mark (`FreebuffMark`) rather than a
+  separate glyph. Keep the scope and view state out of the row
+  text: name it in the row's tooltip instead. Beside the creation actions, a
+  segmented **Both / Project / Task** filter narrows the instance list and the
+  panes; starting a terminal the filter hides returns it to **Both**. The
+  A single icon-only **New terminal** button creates the selected scope; **Both**
+  creates a task terminal and is disabled until a worktree exists. A task
+  terminal can be shared with the project while retaining its working directory.
+  The segmented control is the reusable `SegmentedControl` component: a weak track
+  with a strong selected option, no separate borders between options.
+  Split from the pane rather than the toolbar: a full-height **+** on the right
+  edge splits right and a full-width **+** on the bottom edge splits down. Reveal
+  them while the pane is hovered or focused, keep them out of the Tab order, and
+  keep the palette commands as the keyboard path.
   Show ACP terminals for the selected task as interactive **agent: <title>**
   panes. Use the same terminal input, resize, and hide controls as task
   shells. Released agent panes disappear when the turn settles.
@@ -124,7 +142,8 @@ current layout and give future changes a point of comparison.
   Git and Review file rows expose their change status in words. Diff text is
   a named, keyboard-focusable region.
 - In Preview, offer **Project settings** when the selected project has no
-  preview URL. **Settings → Projects** saves or clears that project's loopback
+  preview URL. A valid `preview.url` in the project's `.config/shepherd/settings.json`
+  overrides the saved URL without changing it. **Settings → Projects** saves or clears that project's loopback
   URL. When it is configured, show the address, **Reload**, **Open in browser**,
   **Open annotation wrapper**, and **Project settings** above the sandboxed page.
   The preview uses a separate origin from the shell so the project can load its
@@ -415,8 +434,10 @@ current layout and give future changes a point of comparison.
   commands, then the shell safety picker, then the agent picker. Put the
   model and effort picker immediately before Send at the trailing edge. Keep
   the model picker and Send together when the toolbar wraps in a narrow window.
-- The agent picker shows the agent's own inline SVG mark, coloured where the
-  brand has a colour, in both the trigger and the menu rows.
+- The agent picker shows the agent's own inline SVG mark from the brand's
+  published asset, coloured where the brand has a colour, in both the trigger
+  and the menu rows. An unavailable agent keeps its mark but shows it greyed
+  out and dimmed.
 - Use compact, app-styled menus that open above the toolbar when there is room.
   The trigger carets point down regardless of opening direction. Keep
   unavailable attachment, command, agent, model, and effort options visible
@@ -434,10 +455,11 @@ current layout and give future changes a point of comparison.
   worktree. A sent mention resolves against the task's worktree.
 - The safety picker shows a small shield containing `>_`, the current value
   **Ask me**, and a down caret immediately after the text. Reserve a 128 px
-  slot wide enough for **Approve for me** so changes to the value leave sibling
+  slot so changes to the value leave sibling
   positions stable. Inside that slot, fit the button and its hover and click
-  areas to the shield, label, and caret. **Ask me** is the default. **Approve for
-  me** is a disabled upcoming option. Show the picker in an empty chat or
+  areas to the shield, label, and caret. Show each option's name and description
+  on one line. **Ask me** is the default. **Auto**, described as **Decide for me**,
+  is a disabled upcoming option. Show the picker in an empty chat or
   draft. For an existing session, show it when the adapter reports approval
   support. A legacy session can report its capabilities after reconnecting.
 - Show the selected model name on the model and effort trigger. Shepherd's
@@ -445,14 +467,33 @@ current layout and give future changes a point of comparison.
   the model resolved from Shepherd's launch configuration. Once a session
   starts, use the model reported by that session. List the visible models
   advertised by Codex and the reasoning efforts available for the chosen
-  model. Choosing a model also selects its advertised default effort. A
+  model. The model filter fills the menu’s inner width without an extra inset.
+  Choosing a model also selects its advertised default effort. A
   choice in the composer applies to the next turn. Use **Codex default** if
   the model name is unavailable. OpenCode and Claude Code use their own
   model configuration and do not show this picker.
-- Show a Mode picker beside Send when the connected session advertises
-  choices. Native OpenCode drafts can also pick from the project's catalog.
-  Apply a draft choice before the first prompt and display the session's
-  current mode once connected. Keep choices disabled during a turn.
+- Typing `/` at a word boundary opens a command card directly above the
+  composer. Keep focus in the prompt and fuzzy-filter commands as the user types.
+  The card grows with its results up to a scrollable maximum. Group the
+  built-in `/compact` and `/model` actions under **Commands** and advertised
+  agent modes under **Modes**, and discovered agent skills under **Skills**.
+  Use prominent section headings and one row per option, with an icon, name,
+  and a single-line, ellipsized description,
+  omitting each heading when no entries match. Selecting a skill inserts its
+  agent-specific invocation in the prompt where supported. For agents without
+  one, show the selected skill without inserting text and prefix the outgoing
+  message with `use skill <name>. ` or `Use skills <name1>, <name2>. `.
+  Show each selected skill name and icon in the accent color with a remove
+  button revealed on hover or keyboard focus.
+  `/compact` compacts an eligible conversation; `/model` opens the model picker
+  with its fuzzy filter focused. Unavailable commands remain visible but disabled.
+  Arrow keys
+  and Enter select a command; Escape dismisses the card. Selecting a mode removes
+  the command token and applies the mode to the draft or next turn. Display the
+  explicitly selected mode in the accent color with a sliders icon above the
+  prompt, alongside selected skills. A remove button clears the mode choice
+  and restores the session default; do not show an implicit default as selected.
+  OpenCode drafts also use the project's catalog.
   Shepherd handles approval requests through its shell approval controls.
 - Send sits inside the card, at the end of the lower row. Use the compact
   right-pointing arrowhead icon and a bright accent when enabled. The current

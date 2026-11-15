@@ -255,6 +255,7 @@ test.beforeEach(async ({ context }) => {
         agent: options.has('acp-fallback') || options.has('agent-models') ? 'opencode' : 'codex',
         tier: options.has('acp-fallback') ? 'acp' : 'native',
         branch: 'shepherd/ship-it',
+        mode: options.has('no-default-mode') ? 'plan' : null,
         worktreePath: '/tmp/demo/.git/shepherd/worktrees/ship-it',
         error: options.has('agent-auth-failed') ? 'Turso rejected the database token: HTTP 401 Unauthorized'
           : options.has('agent-failed') ? 'The agent exited with code 23 before the turn finished.' : null,
@@ -513,8 +514,9 @@ test.beforeEach(async ({ context }) => {
         agentTerminals: agentTerminals.get(taskId) ?? [],
         adapterTier: task.state === 'draft' ? null : task.tier,
         capabilities,
+        defaultMode: hasModes && !options.has('no-default-mode') ? 'build' : undefined,
         modes: hasModes ? {
-          current: sessionModes.get(taskId) ?? 'build',
+          current: sessionModes.get(taskId) ?? (options.has('no-default-mode') ? 'plan' : 'build'),
           options: advertisedModes,
         } : undefined,
         models: options.has('agent-models') && task.agent === 'opencode' && task.state !== 'draft' ? {
@@ -578,8 +580,15 @@ test.beforeEach(async ({ context }) => {
             localStorage.setItem('fixture.keybindings', JSON.stringify(overrides))
             return result
           }
+          case 'agent_skills':
+            if ((options.has('fixture-skills') && args.agent === 'codex') || options.has('all-agent-skills')) {
+              const skills = [{ id: 'review-code', name: args.agent === 'opencode' ? 'Review Code' : 'review-code', description: options.has('long-skill-description') ? 'A long description for review skills that cannot fit into the width of this command card and must be truncated.' : 'Review changes', path: '/tmp/demo/.agents/skills/review-code/SKILL.md' }]
+              if (options.has('two-skills')) skills.push({ id: 'run-tests', name: 'Run Tests', description: 'Run the tests', path: '/tmp/demo/.agents/skills/run-tests/SKILL.md' })
+              return skills
+            }
+            return []
           case 'agent_availability':
-            return { codex: true, opencode: false, claude: false }
+            return { codex: !options.has('no-agents'), opencode: options.has('agents-priority') || options.has('agents-priority-3') || options.has('configured-opencode'), pi: options.has('configured-pi') || options.has('agents-priority-3'), claude: options.has('configured-claude'), freebuff: options.has('configured-freebuff') }
           case 'pool_status':
             poolStatusReads += 1
             if (options.has('pool-status-error') && poolStatusReads === 1) throw { message: 'Pool status unavailable.' }
@@ -847,10 +856,12 @@ test.beforeEach(async ({ context }) => {
           case 'opencode_configured':
             return options.has('configured-opencode')
           case 'opencode_project_modes':
-            return options.has('draft-modes') && args.projectId === 'project-notes' ? advertisedModes : []
+            return options.has('many-modes') && args.projectId === 'project-notes' ? [...advertisedModes, ...Array.from({ length: 20 }, (_, index) => ({ id: `mode${index}`, name: `Mode ${index}`, description: null }))] : options.has('draft-modes') && args.projectId === 'project-notes' ? advertisedModes : []
           case 'opencode_project_models':
             modelCatalogRequests.push(args.projectId)
             return options.has('agent-models') ? { current: advertisedModels[0].id, options: advertisedModels } : { current: null, options: [] }
+          case 'pi_configured':
+            return options.has('configured-pi')
           case 'claude_configured':
             return options.has('configured-claude')
           case 'freebuff_availability':
@@ -957,6 +968,8 @@ test.beforeEach(async ({ context }) => {
             ]
             return []
           }
+          case 'detected_harnesses':
+            return [{ agent: 'codex', path: '/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex' }]
           case 'git_snapshot':
             gitRequests.git++
             return gitState()
@@ -1170,7 +1183,6 @@ test.beforeEach(async ({ context }) => {
             if (options.has('send-prompt-fails')) throw { message: 'Sign in required', code: 'agent' }
             const task = tasks.find((candidate) => candidate.id === args.taskId)
             task.model = args.model ?? null
-            task.mode = args.mode ?? null
             if (args.codex) codexTurns.push({ taskId: args.taskId, ...args.codex })
             if (args.mode) sessionModes.set(args.taskId, args.mode)
             if (args.model) sessionModels.set(args.taskId, args.model)
@@ -1462,6 +1474,7 @@ test.beforeEach(async ({ context }) => {
     window.__publishFileChanges = (id: string, files: FileChange[], branch?: string | null) => {
       const watcher = fileWatchers.get(id)
       if (!watcher) throw new Error(`Unknown fixture watcher ${id}`)
+      if (options.has('watch-git')) watchedGitFiles = files
       const paths = watchedSourceFiles.get(watcher.taskId) ?? new Set(['src/main.rs'])
       for (const file of files) {
         if (file.originalPath) paths.delete(file.originalPath)
@@ -1992,6 +2005,8 @@ test('saves a project preview URL and loads and reloads a sandboxed page', async
   await expect(page.locator('.error-toast')).toContainText('Enter a loopback HTTP or HTTPS URL')
   await setting.fill(url)
   await save.click()
+  await expect(save).toBeDisabled()
+  await page.getByRole('button', { name: 'Back to app' }).click()
   const frame = page.frameLocator('iframe[title="Project website"]')
   await expect(frame.getByRole('heading')).toHaveText('Load 1')
   await expect(frame.getByText('Isolated origin')).toBeVisible()
@@ -2002,16 +2017,22 @@ test('saves a project preview URL and loads and reloads a sandboxed page', async
   await expect(page.getByRole('region', { name: 'Project preview' }).getByRole('alert')).toHaveCount(0)
   await page.getByRole('button', { name: 'Open annotation wrapper' }).click()
   await expect.poll(() => page.evaluate(() => window.__annotationWrapperOpens)).toEqual(['project-1'])
-  const deniedFrame = page.waitForEvent('requestfailed', (request) => request.url() === shellUrl && request.isNavigationRequest())
+  await page.getByRole('button', { name: 'Settings', exact: true }).click()
   await setting.fill('http://localhost:1431/preview-redirect')
   await save.click()
+  const deniedFrame = page.waitForEvent('requestfailed', (request) => request.url() === shellUrl && request.isNavigationRequest())
+  await page.getByRole('button', { name: 'Back to app' }).click()
   await deniedFrame
+  await page.getByRole('button', { name: 'Settings', exact: true }).click()
   await setting.fill(shellUrl)
   await save.click()
+  await page.getByRole('button', { name: 'Back to app' }).click()
   await expect(page.getByRole('region', { name: 'Project preview' }).getByRole('alert')).toContainText('Choose a preview URL on a different origin from Shepherd')
   await expect(page.getByTitle('Project website')).toHaveCount(0)
+  await page.getByRole('button', { name: 'Settings', exact: true }).click()
   await setting.clear()
   await save.click()
+  await page.getByRole('button', { name: 'Back to app' }).click()
   await expect(page.getByText('Set a preview URL for this project.')).toBeVisible()
   await expect(page.getByTitle('Project website')).toHaveCount(0)
 })
@@ -2171,15 +2192,19 @@ test('adds a screenshot note with image coordinates when the page blocks framing
   await expect(page.getByRole('list', { name: 'Queued annotations' })).toHaveCount(0)
 })
 
-test('browses a worktree and project root with preloaded folders and read-only previews', async ({ page }) => {
+test('browses the task worktree with preloaded folders and read-only previews', async ({ page }) => {
   await page.goto('/')
   await expect(page.getByRole('region', { name: 'Task chat' }).getByText('ready to go')).toBeVisible()
   expect(await page.evaluate(() => window.__fileListings)).toEqual([])
   await page.getByRole('tab', { name: 'Files' }).click()
 
   const files = page.getByRole('region', { name: 'Workspace files' })
-  const root = files.getByLabel('File root')
-  await expect(root).toHaveValue('worktree')
+  await expect(files.getByLabel('File root')).toHaveCount(0)
+  await expect(page.getByText('PR —', { exact: true })).toHaveCount(0)
+  await page.getByRole('button', { name: 'Changes', exact: true }).click()
+  await expect(page.getByLabel('Local branch')).toHaveCount(0)
+  await expect(page.getByRole('button', { name: 'Create and check out' })).toHaveCount(0)
+  await page.getByRole('button', { name: 'Files', exact: true }).click()
   await expect(files.getByRole('button', { name: 'worktree.txt' })).toBeVisible()
   await expect.poll(() => page.evaluate(() => window.__fileListings)).toEqual(['', 'src'])
   const folder = files.getByRole('button', { name: 'src' })
@@ -2192,10 +2217,6 @@ test('browses a worktree and project root with preloaded folders and read-only p
   await expect(viewer.getByText('fn main() {}')).toHaveCSS('color', 'rgb(163, 190, 140)')
   await expect(viewer.locator('.files-viewer__number')).toHaveText(['1', '2'])
 
-  await root.selectOption('project')
-  await expect(viewer).toHaveCount(0)
-  await expect(files.getByRole('button', { name: 'README.md' })).toBeVisible()
-  await expect(files.getByRole('button', { name: 'worktree.txt' })).toHaveCount(0)
   await expect(files.getByRole('button', { name: '.env.example' })).toBeVisible()
   await files.getByRole('button', { name: 'File explorer settings' }).click()
   const showDotfiles = page.getByRole('menuitemcheckbox', { name: 'Show dotfiles' })
@@ -2206,8 +2227,8 @@ test('browses a worktree and project root with preloaded folders and read-only p
   await showDotfiles.click()
   await expect(files.getByRole('button', { name: '.env.example' })).toBeVisible()
   await page.keyboard.press('Escape')
-  await files.getByRole('button', { name: 'README.md' }).click()
-  await expect(viewer.getByText('<file>', { exact: true })).toBeVisible()
+  await files.getByRole('button', { name: 'worktree.txt' }).click()
+  await expect(viewer.getByText('worktree.txt')).toBeVisible()
 })
 
 test('waits for a slow folder before expanding it', async ({ page }) => {
@@ -2471,7 +2492,8 @@ test('refreshes Git and Review on revision changes but not transcript snapshots'
   await updateRevision(1_760_000_000_001)
   await expect.poll(counts).toMatchObject({ review: reviewBefore.review + 1, reviewDiff: reviewBefore.reviewDiff + 1 })
 
-  await page.getByRole('tab', { name: 'Git', exact: true }).click()
+  await page.getByRole('tab', { name: 'Files', exact: true }).click()
+  await page.getByRole('button', { name: 'Changes', exact: true }).click()
   await page.getByRole('region', { name: 'Git worktree' }).getByRole('button', { name: 'src/main.rs', exact: true }).click()
   await expect(page.getByRole('region', { name: 'Unstaged diff', exact: true })).toHaveText('fixture diff')
   const gitBefore = await counts()
@@ -2706,8 +2728,12 @@ test('shows the task branch and worktree below the composer and marks unread out
   await page.goto('/?two-tasks')
   const chat = page.getByRole('region', { name: 'Task chat' })
   await expect(chat.getByTitle('Branch shepherd/ship-it')).toHaveText('shepherd/ship-it')
-  await expect(chat.getByTitle('Worktree /tmp/demo/.git/shepherd/worktrees/ship-it'))
-    .toHaveText('/tmp/demo/.git/shepherd/worktrees/ship-it')
+  await expect(chat.getByTitle('Checkout /tmp/demo/.git/shepherd/worktrees/ship-it'))
+    .toHaveText('Worktree: .git/shepherd/worktrees/ship-it')
+  const composer = chat.locator('.composer')
+  const details = chat.locator('.chat__workspace-details')
+  await expect(details.getByTitle('Branch shepherd/ship-it')).toBeVisible()
+  expect((await details.boundingBox())!.y).toBeGreaterThanOrEqual((await composer.boundingBox())!.y + (await composer.boundingBox())!.height)
 
   const second = page.getByRole('button', { name: /Second chat/ })
   const unread = () => second.getByRole('img', { name: 'Unread output' })
@@ -2760,21 +2786,16 @@ test('filters filenames as the user types and opens a match', async ({ page }) =
   const query = files.getByRole('searchbox', { name: 'Find files' })
   const results = files.getByRole('region', { name: 'File search results' })
   const searches = () => page.evaluate(() => window.__fileSearches)
-  const root = files.getByLabel('File root')
   const gear = files.getByRole('button', { name: 'File explorer settings' })
-  const bounds = await Promise.all([root, query, gear].map((element) => element.boundingBox()))
+  const bounds = await Promise.all([query, gear].map((element) => element.boundingBox()))
   expect(bounds.every((box) => box !== null)).toBe(true)
   expect(Math.abs(bounds[0]!.y - bounds[1]!.y)).toBeLessThan(8)
-  expect(Math.abs(bounds[2]!.y - bounds[1]!.y)).toBeLessThan(8)
   expect(bounds[0]!.x).toBeLessThan(bounds[1]!.x)
-  expect(bounds[1]!.x).toBeLessThan(bounds[2]!.x)
-  expect(Math.abs(bounds[0]!.height - bounds[1]!.height)).toBeLessThan(2)
   await expect(gear).toHaveCSS('border-top-width', '0px')
   await expect(gear).toHaveCSS('background-color', 'rgba(0, 0, 0, 0)')
   await gear.hover()
   await expect(gear).not.toHaveCSS('background-color', 'rgba(0, 0, 0, 0)')
   await expect(files.getByRole('button', { name: 'Search contents' })).toHaveCount(0)
-  await expect(root.locator('option[value="project"]')).toHaveText('/')
 
   await query.fill('main')
   await expect(results.getByRole('button', { name: 'src/main.rs' })).toBeVisible()
@@ -2782,11 +2803,6 @@ test('filters filenames as the user types and opens a match', async ({ page }) =
 
   await results.getByRole('button', { name: 'src/main.rs' }).click()
   await expect(files.getByRole('region', { name: 'File preview' })).toContainText('fn main() {}')
-  await root.selectOption('project')
-  await expect(results).toHaveCount(0)
-  await query.fill('main')
-  await expect(results.getByRole('button', { name: 'src/main.rs' })).toBeVisible()
-  expect((await searches()).at(-1)).toMatchObject({ taskId: null, mode: 'name' })
 })
 
 test('recovers Files and Git status after a watcher startup error', async ({ page }) => {
@@ -2818,7 +2834,6 @@ test('shares worktree status with Files and stops watching unused roots', async 
   await expect(page.getByRole('region', { name: 'Task chat' }).getByText('ready to go')).toBeVisible()
   await page.getByRole('tab', { name: 'Files' }).click()
   const files = page.getByRole('region', { name: 'Workspace files' })
-  const root = files.getByLabel('File root')
   const folder = files.getByRole('button', { name: 'src', exact: true })
   const status = page.locator('.status-bar')
   const watchIds = () => page.evaluate(() => window.__fileWatchIds())
@@ -2851,14 +2866,8 @@ test('shares worktree status with Files and stops watching unused roots', async 
   await publish('file-watch-1', [])
   await expect(files.getByRole('img')).toHaveCount(0)
   await expect(files.getByRole('button', { name: 'added.rs' })).toBeVisible()
-  await root.selectOption('project')
-  await expect.poll(watchIds).toContain('file-watch-2')
-  expect(await unwatched()).not.toContain('file-watch-1')
-  await publish('file-watch-1', [{ path: 'retired.md', kind: 'deleted', originalPath: null }])
-  await expect(status).toContainText('1 changed file')
-  await expect(files.getByText('retired.md')).toHaveCount(0)
   await page.getByRole('tab', { name: 'Terminals' }).click()
-  await expect.poll(unwatched).toContain('file-watch-2')
+  await expect.poll(unwatched).not.toContain('file-watch-1')
 })
 
 test('updates the native title and clears worktree status when switching projects', async ({ page }) => {
@@ -2885,59 +2894,47 @@ test('updates the native title and clears worktree status when switching project
 test('keeps the files pane on the selected project when switching project rows', async ({ page }) => {
   await page.goto('/?review-fixture')
   const files = page.getByRole('region', { name: 'Workspace files' })
-  const root = files.getByLabel('File root')
   const crossProjectRequests = () => page.evaluate(() => (window as unknown as {
     __fileRequests: Array<{ projectMatches: boolean }>
   }).__fileRequests.filter((request) => !request.projectMatches))
 
   await page.getByRole('tab', { name: 'Files', exact: true }).click()
-  await expect(root).toHaveValue('worktree')
   await expect(files.getByRole('button', { name: /worktree\.txt/ })).toBeVisible()
 
   await page.getByRole('button', { name: 'notes', exact: true }).click()
   await page.getByRole('tab', { name: 'Files', exact: true }).click()
-  await expect(root).toHaveValue('project')
   await expect(files.getByRole('button', { name: /README\.md/ })).toBeVisible()
   await page.getByRole('button', { name: /Read notes/ }).click()
-  await expect(root).toHaveValue('worktree')
 
   await page.getByRole('button', { name: 'demo', exact: true }).click()
-  await expect(root).toHaveValue('worktree')
   await page.getByRole('button', { name: 'notes', exact: true }).click()
   await page.getByRole('button', { name: /Read notes/ }).click()
-  await expect(root).toHaveValue('worktree')
   await expect(files.getByRole('button', { name: /worktree\.txt/ })).toBeVisible()
 
   expect(await crossProjectRequests()).toEqual([])
   await expect(page.getByRole('alert')).toHaveCount(0)
 
   await page.getByRole('button', { name: 'demo', exact: true }).click()
-  await root.selectOption('project')
   await page.getByRole('button', { name: /Add tests/ }).click()
-  await expect(root).toHaveValue('project')
   expect(await crossProjectRequests()).toEqual([])
 })
 
 test('never pairs the files pane with another project’s task when a remembered Files tab is restored', async ({ page }) => {
   await page.goto('/?review-fixture')
   const files = page.getByRole('region', { name: 'Workspace files' })
-  const root = files.getByLabel('File root')
   const chatTitle = page.getByRole('region', { name: 'Task chat' }).locator('.chat__title')
   const requests = () => page.evaluate(() => (window as unknown as {
     __fileRequests: Array<{ command: string; projectId: string; taskId: string | null; projectMatches: boolean }>
   }).__fileRequests)
 
   await page.getByRole('tab', { name: 'Files', exact: true }).click()
-  await expect(root).toHaveValue('worktree')
   await expect(chatTitle).toHaveText('Ship it')
 
   await page.getByRole('button', { name: 'notes', exact: true }).click()
   await page.getByRole('tab', { name: 'Files', exact: true }).click()
-  await expect(root).toHaveValue('project')
 
   await page.getByRole('button', { name: 'demo', exact: true }).click()
   await page.getByRole('button', { name: /Ship it/ }).click()
-  await expect(root).toHaveValue('worktree')
   await expect(chatTitle).toHaveText('Ship it')
 
   await page.evaluate(() => { (window as unknown as { __fileRequests: unknown[] }).__fileRequests.length = 0 })
@@ -2945,7 +2942,6 @@ test('never pairs the files pane with another project’s task when a remembered
   // The scenario from the plan: the demo task is open and notes remembers Files.
   await page.getByRole('button', { name: 'notes', exact: true }).click()
   await expect(page.getByRole('tab', { name: 'Files', exact: true })).toHaveAttribute('aria-selected', 'true')
-  await expect(root).toHaveValue('project')
   await expect(files.getByRole('button', { name: /README\.md/ })).toBeVisible()
 
   const afterSwitch = await requests()
@@ -2969,9 +2965,10 @@ test('focuses Files from Git and Review and opens the selected worktree file', a
   await page.goto('/')
   await expect(page.getByRole('region', { name: 'Task chat' }).getByText('ready to go')).toBeVisible()
   for (const tab of ['Git', 'Review']) {
-    await page.getByRole('tab', { name: tab, exact: true }).click()
+    await page.getByRole('tab', { name: tab === 'Git' ? 'Files' : 'Review', exact: true }).click()
+    if (tab === 'Git') await page.getByRole('button', { name: 'Changes', exact: true }).click()
     const change = page.getByRole('button', { name: 'src/main.rs', exact: true })
-    await expect(change).toHaveAccessibleDescription('Unstaged modified')
+    await expect(change).toHaveAccessibleDescription(/^Unstaged modified/)
     await change.press('Enter')
     const diff = page.getByRole('region', { name: tab === 'Git' ? 'Unstaged diff' : 'File diff', exact: true })
     await expect(diff).toHaveText('fixture diff')
@@ -2981,7 +2978,7 @@ test('focuses Files from Git and Review and opens the selected worktree file', a
     const filesTab = page.getByRole('tab', { name: 'Files', exact: true })
     await expect(filesTab).toHaveAttribute('aria-selected', 'true')
     await expect(filesTab).toBeFocused()
-    await expect(page.getByLabel('File root')).toHaveValue('worktree')
+    await expect(page.getByLabel('File root')).toHaveCount(0)
     const preview = page.getByRole('region', { name: 'File preview' })
     await expect(preview.getByText('src/main.rs')).toBeVisible()
     await expect(preview.getByText('fn main() {}')).toBeVisible()
@@ -2995,14 +2992,12 @@ test('dispatches external actions for the selected root and shows opener errors'
   const preview = page.getByRole('region', { name: 'File preview' })
   await page.getByRole('button', { name: 'worktree.txt', exact: true }).click()
   await preview.getByRole('button', { name: 'Open in external editor' }).click()
-  await page.getByLabel('File root').selectOption('project')
-  await page.getByRole('button', { name: 'README.md', exact: true }).click()
   await preview.getByRole('button', { name: 'Reveal in file manager' }).click()
   await expect(page.getByRole('alert')).toHaveText(/Could not reveal the file in the file manager: opener unavailable/)
   await expect(preview.getByRole('alert')).toHaveCount(0)
   expect(await page.evaluate(() => window.__fileActions)).toEqual([
     { projectId: 'project-1', taskId: 'task-1', path: 'worktree.txt', action: 'edit' },
-    { projectId: 'project-1', taskId: null, path: 'README.md', action: 'reveal' },
+    { projectId: 'project-1', taskId: 'task-1', path: 'worktree.txt', action: 'reveal' },
   ])
 })
 
@@ -3401,6 +3396,26 @@ test('composes the first chat in an empty project and hides its sole task row', 
   await expect(page.locator('.transcript')).toContainText('First prompt')
 })
 
+test('uses saved priority for a new draft and allows changing its agent', async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem('fixture.settings', JSON.stringify({ app: { 'agents.priority': ['opencode', 'codex'] } })))
+  await page.goto('/?two-projects&configured-opencode')
+  await page.getByRole('button', { name: 'notes', exact: true }).click()
+  const welcome = page.getByRole('heading', { name: 'What should OpenCode build in notes?' })
+  await expect(welcome).toBeVisible()
+  await welcome.getByRole('button', { name: 'Agent: OpenCode' }).click()
+  await welcome.getByRole('menuitemradio', { name: 'Codex' }).click()
+  await expect(page.getByRole('heading', { name: 'What should Codex build in notes?' })).toBeVisible()
+})
+
+test('keeps a draft editable when no agent is available', async ({ page }) => {
+  await page.goto('/?two-projects&no-agents')
+  await page.getByRole('button', { name: 'notes', exact: true }).click()
+  await expect(page.getByRole('status').filter({ hasText: 'No agent is available' })).toBeVisible()
+  await page.getByLabel('Prompt').fill('Keep this draft')
+  await expect(page.getByLabel('Prompt')).toHaveValue('Keep this draft')
+  await expect(page.locator('.composer').getByRole('button', { name: 'Send' })).toBeDisabled()
+})
+
 test('uses the configured OpenCode agent for a new composer', async ({ page }) => {
   await page.goto('/?two-projects&configured-opencode')
   await page.getByRole('button', { name: 'notes', exact: true }).click()
@@ -3434,6 +3449,9 @@ test('selects a configured Claude Code ACP agent for a new composer', async ({ p
   await page.getByLabel('Prompt').fill('Review the code')
   const composer = page.locator('.composer')
   await expect(composer.getByRole('button', { name: 'Agent: Claude Code' })).toBeVisible()
+  await expect(
+    composer.getByRole('button', { name: 'Agent: Claude Code' }).locator('.agent-mark path'),
+  ).toHaveAttribute('fill', '#D97757')
   await expect(composer.getByRole('button', { name: /Model \/ effort/ })).toHaveCount(0)
 })
 
@@ -3843,7 +3861,13 @@ test('keeps the composer available while the Freebuff terminal runs', async ({ p
   const chat = page.getByRole('region', { name: 'Task chat' })
   await chat.getByLabel('Prompt').fill('Keep this draft')
   await chat.getByRole('button', { name: 'Agent: Codex' }).click()
-  await chat.getByRole('menuitemradio', { name: 'Freebuff (terminal)' }).click()
+  const unavailableFreebuff = chat.getByRole('menuitemradio', { name: 'Freebuff', exact: true })
+  await expect(unavailableFreebuff.locator('.picker-menu__icon')).toHaveCSS('filter', 'grayscale(1)')
+  await expect(unavailableFreebuff.locator('.picker-menu__icon')).toHaveCSS('opacity', '0.45')
+  const terminalOption = chat.getByRole('menuitemradio', { name: 'Freebuff (terminal)' })
+  await expect(terminalOption.locator('.picker-menu__icon')).toHaveCSS('filter', 'none')
+  await expect(terminalOption.locator('.picker-menu__icon')).toHaveCSS('opacity', '1')
+  await terminalOption.click()
 
   const freebuff = page.getByRole('region', { name: 'Freebuff terminal' })
   await expect(freebuff).toBeVisible()
@@ -3872,7 +3896,7 @@ test('keeps the composer available while the Freebuff terminal runs', async ({ p
     (window as unknown as { __closedTerminals: string[] }).__closedTerminals,
   )).toEqual([])
 
-  await page.getByRole('button', { name: /^Freebuff freebuff · live$/ }).click()
+  await page.getByRole('button', { name: 'Freebuff', exact: true }).click()
   await expect(freebuff).toBeVisible()
   await expect(input).toBeFocused()
 
@@ -3890,13 +3914,19 @@ test('shows an ended Freebuff session instead of forwarding keys', async ({ page
   const chat = page.getByRole('region', { name: 'Task chat' })
   await chat.getByLabel('Prompt').fill('Keep this draft')
   await chat.getByRole('button', { name: 'Agent: Codex' }).click()
-  await chat.getByRole('menuitemradio', { name: 'Freebuff (terminal)' }).click()
+  const unavailableFreebuff = chat.getByRole('menuitemradio', { name: 'Freebuff', exact: true })
+  await expect(unavailableFreebuff.locator('.picker-menu__icon')).toHaveCSS('filter', 'grayscale(1)')
+  await expect(unavailableFreebuff.locator('.picker-menu__icon')).toHaveCSS('opacity', '0.45')
+  const terminalOption = chat.getByRole('menuitemradio', { name: 'Freebuff (terminal)' })
+  await expect(terminalOption.locator('.picker-menu__icon')).toHaveCSS('filter', 'none')
+  await expect(terminalOption.locator('.picker-menu__icon')).toHaveCSS('opacity', '1')
+  await terminalOption.click()
 
   const freebuff = page.getByRole('region', { name: 'Freebuff terminal' })
   await expect(freebuff.getByRole('textbox', { name: 'Terminal', exact: true })).toBeVisible()
   await page.evaluate(() => (window as unknown as { __endFreebuff: () => void }).__endFreebuff())
 
-  await expect(freebuff).toContainText('Freebuff ended with exit code 130')
+  await expect(freebuff).toContainText('Ended with exit code 130')
   await expect(freebuff.getByRole('button', { name: 'Restart' })).toBeVisible()
   await expect(freebuff.getByRole('textbox', { name: 'Terminal', exact: true })).toHaveCount(0)
   await expect(page.locator('.error-toast')).toHaveCount(0)
@@ -4059,15 +4089,36 @@ test('batch imports local Codex projects from the empty Projects list', async ({
   await expect(projects.getByRole('button', { name: 'New project' })).toBeEnabled()
 })
 
-test('opens settings in the task pane and returns to the current chat', async ({ page }) => {
+test('expands settings across the workspace and restores the inspector and chat', async ({ page }) => {
   await page.goto('/')
   await expect(page.getByRole('button', { name: 'Quit', exact: true })).toHaveCount(0)
   await page.getByLabel('Prompt').fill('keep this draft')
+  await page.getByRole('tab', { name: 'Files', exact: true }).click()
 
   const settings = page.getByRole('button', { name: 'Settings', exact: true })
   const chat = page.getByRole('region', { name: 'Task chat' })
+  const inspector = page.locator('#workspace-inspector')
+  const sidebar = page.locator('.sidebar')
+  const divider = page.locator('.workspace-divider')
+  const previousInspector = await inspector.boundingBox()
+  const previousSidebar = await sidebar.boundingBox()
+  await expect(page.getByRole('navigation', { name: 'Quick navigation' }).getByRole('button', { name: 'Settings' })).toHaveCount(1)
+  await settings.hover()
+  await expect(page.getByRole('tooltip', { name: 'Settings' })).toBeVisible()
   await settings.click()
   await expect(chat).toBeHidden()
+  await expect(inspector).toBeHidden()
+  await expect(sidebar).toBeHidden()
+  await expect(divider).toBeHidden()
+  await expect(page.getByRole('tablist', { name: 'Inspector tabs' })).toHaveCount(0)
+  const settingsPane = page.getByRole('region', { name: 'Settings', exact: true })
+  const bounds = await settingsPane.boundingBox()
+  expect(bounds).not.toBeNull()
+  expect(previousInspector).not.toBeNull()
+  expect(previousSidebar).not.toBeNull()
+  if (!bounds || !previousInspector || !previousSidebar) throw new Error('Workspace bounds are unavailable')
+  expect(Math.abs(bounds.x - previousSidebar.x)).toBeLessThan(2)
+  expect(Math.abs(bounds.x + bounds.width - previousInspector.x - previousInspector.width)).toBeLessThan(2)
   await expect(settings).toHaveAttribute('aria-pressed', 'true')
   const categories = page.getByRole('navigation', { name: 'Settings categories' })
   await expect(categories.getByRole('button', { name: 'Workspace' })).toHaveAttribute('aria-current', 'true')
@@ -4078,197 +4129,176 @@ test('opens settings in the task pane and returns to the current chat', async ({
   await settings.click()
 
   await expect(chat).toBeVisible()
+  await expect(inspector).toBeVisible()
+  await expect(sidebar).toBeVisible()
+  await expect(divider).toBeVisible()
+  await expect(page.getByRole('tab', { name: 'Files', exact: true })).toHaveAttribute('aria-selected', 'true')
   await expect(page.getByLabel('Prompt')).toHaveValue('keep this draft')
   await page.getByRole('button', { name: 'demo', exact: true }).press('Shift+F10')
   await expect(page.getByRole('menuitemcheckbox', { name: 'Show archived' })).toHaveAttribute('aria-checked', 'true')
 })
 
-test('loads, reorders and disables agent pool slots from Settings', async ({ page }) => {
+test('navigates project settings without changing the active project', async ({ page }) => {
+  await page.goto('/?two-projects')
+  await page.getByRole('button', { name: 'Settings', exact: true }).click()
+  await page.getByRole('navigation', { name: 'Settings categories' }).getByRole('button', { name: 'Projects', exact: true }).click()
+  const projects = page.getByRole('group', { name: 'Project settings' })
+  await expect(projects.getByRole('button', { name: 'demo', exact: true })).toHaveAttribute('aria-current', 'true')
+  await projects.getByRole('button', { name: 'notes', exact: true }).click()
+  await expect(projects.getByRole('button', { name: 'notes', exact: true })).toHaveAttribute('aria-current', 'true')
+  const panel = page.getByRole('region', { name: 'Projects', exact: true })
+  await expect(panel.getByText('/tmp/notes', { exact: true })).toBeVisible()
+  await expect(panel.getByLabel('Preview URL')).toBeVisible()
+  await expect(panel.getByLabel('Show archived tasks')).toBeVisible()
+  await expect(panel.getByLabel('Attachment limit (bytes)')).toBeVisible()
+  await expect(panel.getByLabel('Terminal scrollback (lines)')).toBeVisible()
+  await expect(panel.getByRole('region', { name: 'Saved project approvals' })).toBeVisible()
+  await projects.getByRole('button', { name: 'demo', exact: true }).click()
+  await expect(panel.getByText('/tmp/demo', { exact: true })).toBeVisible()
+  await expect(panel.getByLabel('Preview URL')).toBeVisible()
+  await expect(panel.getByLabel('Show archived tasks')).toBeVisible()
+  await expect(panel.getByLabel('Attachment limit (bytes)')).toBeVisible()
+  await expect(panel.getByLabel('Terminal scrollback (lines)')).toBeVisible()
+  await page.getByRole('button', { name: 'Settings', exact: true }).click()
+  await expect(page.getByRole('button', { name: 'demo', exact: true })).toHaveAttribute('aria-current', 'true')
+})
+
+test('searches settings and shortcuts across categories', async ({ page }) => {
   await page.goto('/')
   await page.getByRole('button', { name: 'Settings', exact: true }).click()
-  await page.getByRole('navigation', { name: 'Settings categories' }).getByRole('button', { name: 'Agent pool' }).click()
-  const pool = page.getByRole('region', { name: 'Agent pool' })
-  const rows = pool.locator('.pool__slot')
-  const acme = pool.locator('.pool__slot').filter({ hasText: 'Acme · Model A' })
-  const zed = pool.locator('.pool__slot').filter({ hasText: 'Zed · Model B' })
-  await expect(pool.getByRole('heading', { name: 'Acme · Model A' })).toBeVisible()
-  await expect(pool.getByText('3 of 10 requests', { exact: true })).toBeVisible()
-  await expect(acme.locator('.pool__facts')).toContainText('5-hour:')
-  await expect(acme.locator('.pool__facts')).toContainText('Weekly:')
-  await expect(zed.locator('.pool__facts')).toContainText('5-hour:')
-  await expect(zed.locator('.pool__facts')).toContainText('Weekly:')
-  await expect(zed.locator('.pool__facts')).toContainText('reset unknown')
-  await expect(rows.first()).toContainText('Acme · Model A')
-  await expect(rows.last()).toContainText('Zed · Model B')
-
-  await pool.getByRole('button', { name: 'Move Acme · Model A down' }).click()
-  await expect(pool.getByRole('status')).toHaveText('priority order updated by user')
-  await expect(rows.first()).toContainText('Zed · Model B')
-  await expect.poll(() => page.evaluate(() => (window as unknown as { __poolOperations: string[] }).__poolOperations))
-    .toEqual(['reorder:slot-zed,slot-acme'])
-
-  await pool.getByRole('button', { name: 'Disable Acme · Model A' }).click()
-  await expect(pool.getByRole('status')).toHaveText('slot disabled by user')
-  await expect(pool.getByRole('button', { name: 'Enable Acme · Model A' })).toBeVisible()
-  await expect(pool.getByText('slot is disabled')).toBeVisible()
-  await expect.poll(() => page.evaluate(() => (window as unknown as { __poolOperations: string[] }).__poolOperations))
-    .toEqual(['reorder:slot-zed,slot-acme', 'toggle:slot-acme:false'])
+  const navigation = page.getByRole('navigation', { name: 'Settings categories' })
+  const panel = page.locator('.settings__category')
+  const navigationBounds = await navigation.boundingBox()
+  const panelBounds = await panel.boundingBox()
+  if (!navigationBounds || !panelBounds) throw new Error('Settings bounds are unavailable')
+  expect(navigationBounds.width).toBeGreaterThanOrEqual(200)
+  expect(Math.abs(navigationBounds.y - panelBounds.y)).toBeLessThan(2)
+  const search = page.getByRole('searchbox', { name: 'Search settings' })
+  await search.fill('notifications')
+  await expect(page.getByLabel('Notify when tasks need input')).toBeVisible()
+  await expect(page.getByLabel('Show archived tasks')).toHaveCount(0)
+  await search.fill('theme')
+  await expect(page.getByRole('combobox', { name: 'Theme' })).toBeVisible()
+  await expect(page.getByRole('combobox', { name: 'Density' })).toHaveCount(0)
+  await search.fill('command palette')
+  await expect(page.getByRole('button', { name: 'Edit Command palette shortcut' })).toBeVisible()
+  await search.fill('no such setting')
+  await expect(page.getByRole('heading', { name: 'No matching settings' })).toBeVisible()
+  await search.clear()
+  await expect(navigation.getByRole('button', { name: 'Workspace' })).toBeVisible()
 })
 
-test('adds a pool slot from the generated catalog without creating one automatically', async ({ page }) => {
+test('navigates backward and forward between projects', async ({ page }) => {
+  await page.goto('/?two-projects')
+  await page.getByRole('button', { name: 'notes', exact: true }).click()
+  await expect(page.getByRole('heading', { name: /build in notes/ })).toBeVisible()
+  const previous = page.getByRole('button', { name: 'Previous', exact: true })
+  const next = page.getByRole('button', { name: 'Next', exact: true })
+  await expect(previous).toBeEnabled()
+  await previous.click()
+  await expect(page.getByRole('heading', { name: /build in notes/ })).toHaveCount(0)
+  await expect(next).toBeEnabled()
+  await next.click()
+  await expect(page.getByRole('heading', { name: /build in notes/ })).toBeVisible()
+})
+
+test('navigates backward and forward through settings and the workspace', async ({ page }) => {
+  await page.goto('/')
+  const previous = page.getByRole('button', { name: 'Previous', exact: true })
+  const next = page.getByRole('button', { name: 'Next', exact: true })
+  await page.getByRole('button', { name: 'Settings', exact: true }).click()
+  await expect(previous).toBeEnabled()
+  await previous.click()
+  await expect(page.getByRole('heading', { name: 'Settings', exact: true })).toHaveCount(0)
+  await expect(next).toBeEnabled()
+  await next.click()
+  await expect(page.getByRole('heading', { name: 'Settings', exact: true })).toBeVisible()
+  await page.getByRole('navigation', { name: 'Settings categories' }).getByRole('button', { name: 'Appearance' }).click()
+  await expect(page.getByRole('heading', { name: 'Appearance', exact: true })).toBeVisible()
+  await expect.poll(async () => await previous.isEnabled()).toBe(true)
+  await page.waitForTimeout(150)
+  await previous.click()
+  await expect(page.getByRole('heading', { name: 'Workspace', exact: true })).toBeVisible()
+  await next.click()
+  await expect(page.getByRole('heading', { name: 'Appearance', exact: true })).toBeVisible()
+  await page.getByRole('button', { name: 'Back to app' }).click()
+  await expect(page.getByRole('heading', { name: 'Settings', exact: true })).toHaveCount(0)
+})
+
+test('dragging agents reorders and persists their priority', async ({ page }) => {
+  await page.goto('/?agents-priority-3')
+  await page.getByRole('button', { name: 'Settings', exact: true }).click()
+  await page.getByRole('navigation', { name: 'Settings categories' }).getByRole('button', { name: 'Agent pool' }).click()
+  const pool = page.getByRole('region', { name: 'Agent priority' })
+  const rows = pool.locator('li')
+  await expect(rows).toHaveCount(3)
+  await rows.filter({ hasText: 'Codex' }).dragTo(rows.filter({ hasText: 'Pi' }), { targetPosition: { x: 20, y: 30 } })
+  await expect(rows.nth(0)).toContainText('OpenCode')
+  await expect(rows.nth(1)).toContainText('Pi')
+  await expect(rows.nth(2)).toContainText('Codex')
+  await page.reload()
+  await page.getByRole('button', { name: 'Settings', exact: true }).click()
+  await page.getByRole('navigation', { name: 'Settings categories' }).getByRole('button', { name: 'Agent pool' }).click()
+  await expect(page.getByRole('region', { name: 'Agent priority' }).locator('li').nth(2)).toContainText('Codex')
+})
+
+test('cancelling an agent drag restores the saved order', async ({ page }) => {
+  await page.goto('/?agents-priority-3')
+  await page.getByRole('button', { name: 'Settings', exact: true }).click()
+  await page.getByRole('navigation', { name: 'Settings categories' }).getByRole('button', { name: 'Agent pool' }).click()
+  const rows = page.getByRole('region', { name: 'Agent priority' }).locator('li')
+  await expect(rows).toHaveCount(3)
+  await page.evaluate(() => {
+    const items = document.querySelectorAll<HTMLLIElement>('.pool__agent')
+    const source = items[0]
+    const target = items[2]
+    const transfer = new DataTransfer()
+    source.dispatchEvent(new DragEvent('dragstart', { bubbles: true, cancelable: true, dataTransfer: transfer }))
+    const bounds = target.getBoundingClientRect()
+    target.dispatchEvent(new DragEvent('dragover', { bubbles: true, cancelable: true, clientY: bounds.bottom - 1, dataTransfer: transfer }))
+    source.dispatchEvent(new DragEvent('dragend', { bubbles: true, dataTransfer: transfer }))
+  })
+  await expect(rows.nth(0)).toContainText('Codex')
+  await expect(rows.nth(2)).toContainText('Pi')
+  const saved = await page.evaluate(() => JSON.parse(localStorage.getItem('fixture.settings') ?? '{}'))
+  expect(saved.app?.['agents.priority']).toBeUndefined()
+})
+
+test('aligns settings labels and inputs in each section', async ({ page }) => {
   await page.goto('/')
   await page.getByRole('button', { name: 'Settings', exact: true }).click()
-  await page.getByRole('navigation', { name: 'Settings categories' }).getByRole('button', { name: 'Agent pool' }).click()
-  const pool = page.getByRole('region', { name: 'Agent pool' })
-  const add = pool.getByRole('group', { name: 'Add slot' })
-
-  await expect(add.getByLabel('New slot harness')).toHaveValue('claude-code')
-  await expect(add.getByLabel('New slot provider')).toHaveValue('anthropic')
-  await add.getByLabel('New slot model').selectOption('claude-sonnet')
-  await add.getByRole('button', { name: 'Add slot' }).click()
-
-  await expect(pool.getByRole('status')).toHaveText('Added Anthropic · Claude Sonnet.')
-  await expect(pool.getByRole('heading', { name: 'Anthropic · Claude Sonnet' })).toBeVisible()
-  await expect.poll(() => page.evaluate(() => (window as unknown as { __poolOperations: string[] }).__poolOperations))
-    .toEqual(['add:claude:anthropic:claude-sonnet'])
-})
-
-test('corrects a provider window limit separately from the single limit', async ({ page }) => {
-  await page.goto('/')
-  await page.getByRole('button', { name: 'Settings', exact: true }).click()
-  await page.getByRole('navigation', { name: 'Settings categories' }).getByRole('button', { name: 'Agent pool' }).click()
-  const pool = page.getByRole('region', { name: 'Agent pool' })
-  const acme = pool.locator('.pool__slot').filter({ hasText: 'Acme · Model A' })
-
-  await expect(acme.locator('.pool__facts')).toContainText('5-hour:')
-  await acme.getByLabel('Window for Acme · Model A').selectOption('weekly')
-  await acme.getByLabel('Limit for Acme · Model A').fill('4')
-  await acme.getByRole('button', { name: 'Save correction' }).click()
-  await expect(pool.getByRole('status')).toHaveText('limit correction applied by user')
-  await expect(acme.locator('.pool__facts')).toContainText('Weekly: 4 requests limit')
-  await expect(acme.locator('.pool__facts')).toContainText('5-hour: usage unknown')
-  await expect.poll(() => page.evaluate(() => (window as unknown as { __poolOperations: string[] }).__poolOperations))
-    .toEqual(['correct-window:slot-acme:weekly:4'])
-})
-
-test('corrects pool quotas, rejects an invalid correction and clears a cooldown', async ({ page }) => {
-  await page.goto('/')
-  await page.getByRole('button', { name: 'Settings', exact: true }).click()
-  await page.getByRole('navigation', { name: 'Settings categories' }).getByRole('button', { name: 'Agent pool' }).click()
-  const pool = page.getByRole('region', { name: 'Agent pool' })
-  const acme = pool.locator('.pool__slot').filter({ hasText: 'Acme · Model A' })
-  const zed = pool.locator('.pool__slot').filter({ hasText: 'Zed · Model B' })
-
-  await acme.getByLabel('Limit for Acme · Model A').fill('20')
-  await acme.getByRole('button', { name: 'Save correction' }).click()
-  await expect(pool.getByRole('status')).toHaveText('limit correction applied by user')
-  await expect(acme).toContainText('3 of 20 requests')
-
-  await acme.getByRole('button', { name: 'Save correction' }).click()
-  await expect(pool.getByRole('status')).toHaveText('limit correction is already current')
-
-  await acme.getByLabel('Limit for Acme · Model A').fill('13')
-  await acme.getByRole('button', { name: 'Save correction' }).click()
-  await expect(pool.getByRole('alert')).toContainText('Pool correction rejected by fixture.')
-
-  await zed.getByRole('button', { name: 'Clear cooldown for Zed · Model B' }).click()
-  await expect(pool.getByRole('status')).toHaveText('cooldown cleared by user')
-  await expect(zed.getByText('Cooling down')).toHaveCount(0)
-  await expect(zed.getByRole('button', { name: 'Clear cooldown for Zed · Model B' })).toHaveCount(0)
-  await expect.poll(() => page.evaluate(() => (window as unknown as { __poolOperations: string[] }).__poolOperations))
-    .toEqual(['correct:slot-acme:20:requests:1800000000000', 'cooldown:slot-zed'])
-})
-
-test('forces a pool slot for one turn with confirmation and clears it', async ({ page }) => {
-  await page.goto('/')
-  await page.getByRole('button', { name: 'Settings', exact: true }).click()
-  await page.getByRole('navigation', { name: 'Settings categories' }).getByRole('button', { name: 'Agent pool' }).click()
-  const pool = page.getByRole('region', { name: 'Agent pool' })
-  const acme = pool.locator('.pool__slot').filter({ hasText: 'Acme · Model A' })
-  const zed = pool.locator('.pool__slot').filter({ hasText: 'Zed · Model B' })
-
-  await expect(zed.getByRole('button', { name: 'Force Zed · Model B for the next turn' })).toBeDisabled()
-  await expect(zed.getByText('Only available slots can be forced.')).toBeVisible()
-
-  await acme.getByRole('button', { name: 'Force Acme · Model A for the next turn' }).click()
-  await expect(acme.getByText('Force Acme · Model A for the next turn?')).toBeVisible()
-  await acme.getByRole('button', { name: 'Cancel forcing Acme · Model A' }).click()
-  await expect(acme.getByRole('button', { name: 'Confirm forcing Acme · Model A' })).toHaveCount(0)
-
-  await acme.getByRole('button', { name: 'Force Acme · Model A for the next turn' }).click()
-  await acme.getByRole('button', { name: 'Confirm forcing Acme · Model A' }).click()
-  await expect(pool.getByRole('status')).toHaveText('slot forced for the next turn')
-  const forced = pool.getByRole('group', { name: 'Forced slot' })
-  await expect(forced).toContainText('Forced for the next turn: Acme · Model A.')
-  await expect(acme.getByText('Forced for the next turn.')).toBeVisible()
-
-  await forced.getByRole('button', { name: 'Clear force' }).click()
-  await expect(pool.getByRole('status')).toHaveText('force for slot-acme cleared')
-  await expect(pool.getByRole('group', { name: 'Forced slot' })).toHaveCount(0)
-  await expect.poll(() => page.evaluate(() => (window as unknown as { __poolOperations: string[] }).__poolOperations))
-    .toEqual(['force:slot-acme', 'unforce:slot-acme'])
-})
-
-test('surfaces a rejected pool force without marking the slot', async ({ page }) => {
-  await page.goto('/?pool-force-reject')
-  await page.getByRole('button', { name: 'Settings', exact: true }).click()
-  await page.getByRole('navigation', { name: 'Settings categories' }).getByRole('button', { name: 'Agent pool' }).click()
-  const pool = page.getByRole('region', { name: 'Agent pool' })
-  const acme = pool.locator('.pool__slot').filter({ hasText: 'Acme · Model A' })
-
-  await acme.getByRole('button', { name: 'Force Acme · Model A for the next turn' }).click()
-  await acme.getByRole('button', { name: 'Confirm forcing Acme · Model A' }).click()
-  await expect(pool.getByRole('status')).toHaveText('cannot force an exhausted slot: quota exhausted: used 10 of 10 requests')
-  await expect(pool.getByRole('group', { name: 'Forced slot' })).toHaveCount(0)
-  await expect(acme.getByRole('button', { name: 'Force Acme · Model A for the next turn' })).toBeVisible()
-})
-
-test('imports a catalog snapshot to seed an unknown limit and lists skipped slots', async ({ page }) => {
-  await page.goto('/?pool-unknown-limit')
-  await page.getByRole('button', { name: 'Settings', exact: true }).click()
-  await page.getByRole('navigation', { name: 'Settings categories' }).getByRole('button', { name: 'Agent pool' }).click()
-  const pool = page.getByRole('region', { name: 'Agent pool' })
-  const snapshot = {
-    contractVersion: 2, snapshotId: 'snap-1', schemaVersion: 3,
-    generatedAt: '2026-11-01T00:00:00Z', stale: false,
-    records: [{ providerId: 'acme', modelId: null, allowance: 50, allowanceUnit: 'requests', capacity: 'known' }],
+  const nav = page.getByRole('navigation', { name: 'Settings categories' })
+  async function expectSameLine(name: string) {
+    const label = page.locator('.settings__row').filter({ has: page.getByLabel(name, { exact: true }) })
+    const bounds = await label.locator(':scope > span').first().boundingBox()
+    const input = await page.getByLabel(name, { exact: true }).boundingBox()
+    if (!bounds || !input) throw new Error(`Missing settings row: ${name}`)
+    expect(Math.abs((bounds.y + bounds.height / 2) - (input.y + input.height / 2))).toBeLessThan(3)
+    expect(input.x).toBeGreaterThan(bounds.x + bounds.width)
   }
-
-  await pool.getByLabel('Catalog snapshot file').setInputFiles({
-    name: 'agent-pool-advisory.v2.json', mimeType: 'application/json', buffer: Buffer.from(JSON.stringify(snapshot)),
-  })
-  await pool.getByRole('button', { name: 'Apply catalog snapshot' }).click()
-  await expect(pool.getByRole('status')).toHaveText('Applied 1 of 2 catalog records.')
-  await expect(pool.getByText('50 requests limit; usage unknown')).toBeVisible()
-  await expect(pool.getByRole('list', { name: 'Skipped catalog records' }))
-    .toContainText('Zed · Model B: catalog has no record for this slot')
-  await expect.poll(() => page.evaluate(() => (window as unknown as { __poolOperations: string[] }).__poolOperations))
-    .toEqual(['catalog:snap-1'])
+  await expectSameLine('Show archived tasks')
+  await expectSameLine('Attachment limit (bytes)')
+  await nav.getByRole('button', { name: 'Projects' }).click()
+  await expectSameLine('Preview URL')
+  await expectSameLine('Terminal scrollback (lines)')
+  await nav.getByRole('button', { name: 'Appearance' }).click()
+  await expectSameLine('Theme')
+  await expectSameLine('Density')
 })
 
-test('rejects a catalog snapshot with an unsupported contract', async ({ page }) => {
-  await page.goto('/')
+test('reorders installed agents in settings', async ({ page }) => {
+  await page.goto('/?agents-priority')
   await page.getByRole('button', { name: 'Settings', exact: true }).click()
   await page.getByRole('navigation', { name: 'Settings categories' }).getByRole('button', { name: 'Agent pool' }).click()
-  const pool = page.getByRole('region', { name: 'Agent pool' })
-  const snapshot = { contractVersion: 1, snapshotId: 'snap-old', schemaVersion: 3, generatedAt: '2026-01-01T00:00:00Z', stale: false, records: [] }
-
-  await pool.getByLabel('Catalog snapshot file').setInputFiles({
-    name: 'agent-pool-advisory.v1.json', mimeType: 'application/json', buffer: Buffer.from(JSON.stringify(snapshot)),
-  })
-  await pool.getByRole('button', { name: 'Apply catalog snapshot' }).click()
-  await expect(pool.getByRole('alert')).toContainText('Unsupported catalog advisory contract version 1.')
-})
-
-test('surfaces a pool status failure and retries it', async ({ page }) => {
-  await page.goto('/?pool-status-error')
+  const pool = page.getByRole('region', { name: 'Agent priority' })
+  const rows = pool.locator('li')
+  await expect(rows.first()).toContainText('Codex')
+  await pool.getByRole('button', { name: 'Move Codex down' }).click()
+  await expect(rows.first()).toContainText('OpenCode')
+  await page.reload()
   await page.getByRole('button', { name: 'Settings', exact: true }).click()
   await page.getByRole('navigation', { name: 'Settings categories' }).getByRole('button', { name: 'Agent pool' }).click()
-  const pool = page.getByRole('region', { name: 'Agent pool' })
-  await expect(pool.getByRole('alert')).toContainText('Pool status unavailable.')
-  await pool.getByRole('button', { name: 'Retry pool' }).click()
-  await expect(pool.getByText('3 of 10 requests', { exact: true })).toBeVisible()
-  await expect(pool.getByRole('alert')).toHaveCount(0)
+  await expect(page.getByRole('region', { name: 'Agent priority' }).locator('li').first()).toContainText('OpenCode')
 })
 
 test('applies the Send accent from Appearance and restores it after reload', async ({ page }) => {
@@ -4439,8 +4469,8 @@ test('focuses the composer card and opens the toolbar menus above it', async ({ 
   await shell.click()
   const approvals = composer.getByRole('menu', { name: 'Shell approvals' })
   await expect(attachments).toBeHidden()
-  await expect(approvals.getByRole('menuitemradio', { name: 'Ask me', checked: true })).toBeFocused()
-  await expect(approvals.getByRole('menuitemradio', { name: 'Approve for me (coming soon)' })).toBeDisabled()
+  await expect(approvals.getByRole('menuitemradio', { name: 'Ask me Ask before running commands', checked: true })).toBeFocused()
+  await expect(approvals.getByRole('menuitemradio', { name: 'Auto Decide for me' })).toBeDisabled()
   const shellBounds = await shell.boundingBox()
   const menuBounds = await approvals.boundingBox()
   if (!shellBounds || !menuBounds) throw new Error('The approvals menu and trigger should be visible')
@@ -4500,6 +4530,21 @@ test('filters the model picker from a focused search field', async ({ page }) =>
   const menu = composer.getByRole('menu', { name: 'Model' })
   const filter = menu.getByRole('searchbox', { name: 'Filter model' })
   await expect(filter).toBeFocused()
+  const inset = await menu.evaluate((element) => {
+    const bounds = element.getBoundingClientRect()
+    const field = element.querySelector<HTMLInputElement>('.picker-menu__filter')
+    if (!field) throw new Error('Missing model filter')
+    const fieldBounds = field.getBoundingClientRect()
+    const style = getComputedStyle(element)
+    return {
+      left: fieldBounds.left - bounds.left,
+      right: bounds.right - fieldBounds.right,
+      expectedLeft: parseFloat(style.borderLeftWidth) + parseFloat(style.paddingLeft),
+      expectedRight: parseFloat(style.borderRightWidth) + parseFloat(style.paddingRight),
+    }
+  })
+  expect(inset.left).toBeCloseTo(inset.expectedLeft, 0)
+  expect(inset.right).toBeCloseTo(inset.expectedRight, 0)
   await expect(menu.getByRole('menuitemradio', { name: 'Qwen Coder' })).toBeVisible()
   await filter.fill('qwn')
   await expect(menu.getByRole('menuitemradio', { name: 'Qwen Coder' })).toBeVisible()
@@ -4535,7 +4580,7 @@ test('shows the no-model fallback and retries the catalog', async ({ page }) => 
   await composer.getByRole('button', { name: 'Agent: Codex' }).click()
   await composer.getByRole('menuitemradio', { name: 'OpenCode' }).click()
   await expect(composer.getByRole('button', { name: 'No model available', exact: true })).toBeDisabled()
-  await expect(composer.getByRole('button', { name: 'No mode available', exact: true })).toBeDisabled()
+  await expect(composer.getByRole('button', { name: /Mode:/ })).toHaveCount(0)
   const requestsBeforeRetry = (await page.evaluate(() => window.__modelCatalogRequests)).length
   await composer.getByRole('button', { name: /No model available\. Retry/ }).click()
   await expect.poll(() => page.evaluate(() => window.__modelCatalogRequests.length))
@@ -4569,9 +4614,9 @@ test('keeps the project composer model across reload', async ({ page }) => {
   const composer = page.locator('.composer')
   await composer.getByRole('button', { name: 'Agent: Codex' }).click()
   await composer.getByRole('menuitemradio', { name: 'OpenCode' }).click()
-  await composer.getByRole('button', { name: 'Mode: Default mode' }).click()
-  await composer.getByRole('menu', { name: 'Mode' }).getByRole('menuitemradio', { name: 'Plan' }).click()
-  await expect(composer.getByRole('button', { name: 'Mode: Plan' })).toBeVisible()
+  await composer.getByLabel('Prompt').fill('/plan')
+  await composer.getByRole('option', { name: /plan/i }).click()
+  await expect(composer.getByText('Mode: Plan', { exact: true })).toBeVisible()
   await composer.getByRole('button', { name: 'Model: DeepSeek V3' }).click()
   await composer.getByRole('menu', { name: 'Model' }).getByRole('menuitemradio', { name: 'Qwen Coder' }).click()
   await expect(composer.getByRole('button', { name: 'Model: Qwen Coder' })).toBeVisible()
@@ -4580,7 +4625,7 @@ test('keeps the project composer model across reload', async ({ page }) => {
   await page.getByRole('button', { name: 'notes', exact: true }).click()
   await composer.getByRole('button', { name: 'Agent: Codex' }).click()
   await composer.getByRole('menuitemradio', { name: 'OpenCode' }).click()
-  await expect(composer.getByRole('button', { name: 'Mode: Plan' })).toBeVisible()
+  await expect(composer.getByText('Mode: Plan', { exact: true })).toBeVisible()
   await expect(composer.getByRole('button', { name: 'Model: Qwen Coder' })).toBeVisible()
 })
 
@@ -4620,47 +4665,323 @@ test('keeps the raw auth error behind the failure details', async ({ page }) => 
   await expect(details).toContainText('Turso login required for workspace acme.')
 })
 
-test('keeps advertised session modes changeable during a turn for the next prompt', async ({ page }) => {
+test('uses advertised session mode commands for the next prompt', async ({ page }) => {
   await page.goto('/?acp-fallback&session-modes')
   const composer = page.locator('.composer')
-  const menu = composer.getByRole('menu', { name: 'Mode' })
-  await composer.getByRole('button', { name: 'Mode: Build' }).click()
-  await expect(menu.getByRole('menuitemradio', { name: 'Build', checked: true })).toBeVisible()
-  await menu.getByRole('menuitemradio', { name: 'Plan' }).click()
-  const mode = composer.getByRole('button', { name: 'Mode: Plan' })
-  await expect(mode).toBeVisible()
-  await expect(composer.getByRole('button', { name: /Model \/ effort/ })).toHaveCount(0)
-  await composer.getByLabel('Prompt', { exact: true }).fill('Plan the change')
+  const prompt = composer.getByLabel('Prompt', { exact: true })
+  await expect(composer.getByText('Mode: Build', { exact: true })).toHaveCount(0)
+  await prompt.fill('/plan')
+  await composer.getByRole('option', { name: /plan/i }).click()
+  await expect(composer.getByText('Mode: Plan', { exact: true })).toBeVisible()
+  await prompt.fill('Plan the change')
   await composer.getByRole('button', { name: 'Send', exact: true }).click()
   await expect(page.locator('.transcript')).toContainText('Plan the change')
-  await mode.click()
-  const build = menu.getByRole('menuitemradio', { name: 'Build' })
-  await expect(build).toBeEnabled()
-  await build.click()
-  await expect(composer.getByRole('button', { name: 'Mode: Build' })).toBeVisible()
-  await composer.getByLabel('Prompt', { exact: true }).fill('Use build next')
+  await prompt.fill('/build')
+  await composer.getByRole('option', { name: /build/i }).click()
+  await expect(composer.getByText('Mode: Build', { exact: true })).toBeVisible()
+  await prompt.fill('Use build next')
   await composer.getByRole('button', { name: 'Send', exact: true }).click()
   await expect.poll(() => page.evaluate(() => window.__sentPrompts.at(-1)))
     .toMatchObject({ text: 'Use build next', mode: 'build' })
 })
 
-test('uses the selected OpenCode mode on the first turn', async ({ page }) => {
+test('uses a slash command to select the OpenCode mode on the first turn', async ({ page }) => {
   await page.goto('/?two-projects&configured-opencode&draft-modes')
   await page.getByRole('button', { name: 'notes', exact: true }).click()
   const composer = page.locator('.composer')
   await composer.getByRole('button', { name: 'Agent: Codex' }).click()
   await composer.getByRole('menuitemradio', { name: 'OpenCode', exact: true }).click()
-  await composer.getByRole('button', { name: 'Mode: Default mode' }).click()
-  const menu = composer.getByRole('menu', { name: 'Mode' })
-  await expect(menu.getByRole('menuitemradio', { name: 'Default mode', checked: true })).toBeVisible()
-  await menu.getByRole('menuitemradio', { name: 'Plan' }).click()
-  await expect(composer.getByRole('button', { name: 'Mode: Plan' })).toBeVisible()
-
-  await composer.getByLabel('Prompt', { exact: true }).fill('Plan the first turn')
-  await expect(composer.getByRole('button', { name: 'Mode: Plan' })).toBeVisible()
+  const prompt = composer.getByLabel('Prompt', { exact: true })
+  await prompt.fill('/plan')
+  await prompt.press('Enter')
+  await expect(prompt).toHaveValue('')
+  const mode = composer.locator('.composer__mode').filter({ hasText: 'Mode: Plan' })
+  await expect(mode).toBeVisible()
+  await expect(mode.locator('svg')).toBeVisible()
+  const modeBounds = await mode.boundingBox()
+  const promptBounds = await prompt.boundingBox()
+  expect(modeBounds!.y + modeBounds!.height).toBeLessThanOrEqual(promptBounds!.y)
+  await prompt.fill('Plan the first turn')
   await composer.getByRole('button', { name: 'Send', exact: true }).click()
   await expect(page.locator('.transcript')).toContainText('Plan the first turn')
-  await expect(composer.getByRole('button', { name: 'Mode: Plan' })).toBeVisible()
+  await expect(composer.getByText('Mode: Plan', { exact: true })).toBeVisible()
+})
+
+test('removes a draft mode before the first prompt', async ({ page }) => {
+  await page.goto('/?two-projects&configured-opencode&draft-modes')
+  await page.getByRole('button', { name: 'notes', exact: true }).click()
+  const composer = page.locator('.composer')
+  await composer.getByRole('button', { name: 'Agent: Codex' }).click()
+  await composer.getByRole('menuitemradio', { name: 'OpenCode', exact: true }).click()
+  const prompt = composer.getByLabel('Prompt')
+  await prompt.fill('/plan')
+  await composer.getByRole('option', { name: /Plan/ }).click()
+  const mode = composer.locator('.composer__mode')
+  await mode.hover()
+  await mode.getByRole('button', { name: 'Remove mode Plan' }).click()
+  await expect(mode).toHaveCount(0)
+  await prompt.fill('Start normally')
+  await composer.getByRole('button', { name: 'Send', exact: true }).click()
+  await expect.poll(() => page.evaluate(() => window.__sentPrompts.at(-1)?.text)).toBe('Start normally')
+  expect(await page.evaluate(() => window.__sentPrompts.at(-1)?.mode)).toBeUndefined()
+  await expect(mode).toHaveCount(0)
+})
+
+test('removes an explicit mode and restores the session default for the next turn', async ({ page }) => {
+  await page.goto('/?acp-fallback&session-modes')
+  const composer = page.locator('.composer')
+  const prompt = composer.getByLabel('Prompt')
+  await expect(composer.locator('.composer__mode')).toHaveCount(0)
+  await prompt.fill('/plan')
+  await composer.getByRole('option', { name: /Plan/ }).click()
+  const mode = composer.locator('.composer__mode')
+  await expect(mode).toContainText('Mode: Plan')
+  const remove = mode.getByRole('button', { name: 'Remove mode Plan' })
+  await expect(remove).toHaveCSS('opacity', '0')
+  await mode.hover()
+  await expect(remove).toHaveCSS('opacity', '1')
+  await remove.click()
+  await expect(mode).toHaveCount(0)
+  await prompt.fill('Use default')
+  await composer.getByRole('button', { name: 'Send', exact: true }).click()
+  await expect.poll(() => page.evaluate(() => window.__sentPrompts.at(-1))).toMatchObject({ text: 'Use default', mode: 'build' })
+  await expect(mode).toHaveCount(0)
+})
+
+test('explains when the agent has not reported a default mode', async ({ page }) => {
+  await page.goto('/?acp-fallback&session-modes&no-default-mode')
+  const composer = page.locator('.composer')
+  const mode = composer.locator('.composer__mode')
+  await expect(mode).toContainText('Mode: Plan')
+  await mode.hover()
+  await mode.getByRole('button', { name: 'Remove mode Plan' }).click()
+  await expect(page.getByRole('alert')).toContainText('The agent did not report its default mode')
+  await expect(mode).toBeVisible()
+})
+
+test('fuzzy filters slash commands in a bounded card above the composer', async ({ page }) => {
+  await page.goto('/?two-projects&configured-opencode&many-modes')
+  await page.getByRole('button', { name: 'notes', exact: true }).click()
+  const composer = page.locator('.composer')
+  await composer.getByRole('button', { name: 'Agent: Codex' }).click()
+  await composer.getByRole('menuitemradio', { name: 'OpenCode', exact: true }).click()
+  const prompt = composer.getByLabel('Prompt')
+  await prompt.fill('/')
+  const list = composer.getByRole('listbox', { name: 'Composer commands' })
+  await expect(list.getByText('Modes', { exact: true })).toBeVisible()
+  await expect(list.getByRole('option')).toHaveCount(24)
+  const card = composer.locator('.composer__commands')
+  const dimensions = await card.evaluate((node) => ({ top: node.getBoundingClientRect().top, bottom: node.getBoundingClientRect().bottom, height: node.clientHeight, scroll: node.scrollHeight, max: getComputedStyle(node).maxHeight }))
+  const composerBounds = await composer.boundingBox()
+  expect(composerBounds).not.toBeNull()
+  expect(dimensions.bottom).toBeLessThanOrEqual(composerBounds!.y)
+  expect(dimensions.scroll).toBeGreaterThan(dimensions.height)
+  await prompt.fill('/pln')
+  await expect(list.getByRole('option', { name: /plan/i })).toBeVisible()
+  expect(await list.getByRole('option').count()).toBeLessThan(24)
+  expect((await card.boundingBox())!.height).toBeLessThan(dimensions.height)
+  await prompt.fill('/zzzz')
+  await expect(list.getByText('Modes', { exact: true })).toHaveCount(0)
+  await expect(composer.getByText('No commands match.')).toBeVisible()
+  await prompt.press('Escape')
+  await expect(list).toHaveCount(0)
+  await expect(prompt).toBeFocused()
+})
+
+test('shows prominent command sections with single-line option details', async ({ page }) => {
+  await page.goto('/?two-projects&configured-opencode&draft-modes&all-agent-skills&long-skill-description')
+  await page.getByRole('button', { name: 'notes', exact: true }).click()
+  const composer = page.locator('.composer')
+  await composer.getByRole('button', { name: 'Agent: Codex' }).click()
+  await composer.getByRole('menuitemradio', { name: 'OpenCode', exact: true }).click()
+  await composer.getByLabel('Prompt').fill('/')
+  const list = composer.getByRole('listbox', { name: 'Composer commands' })
+  const heading = list.getByText('Skills', { exact: true })
+  await expect(heading).toHaveCSS('font-size', '13px')
+  await expect(heading).toHaveCSS('font-weight', '600')
+  const skill = list.getByRole('option', { name: /Review Code/ })
+  const skillName = skill.locator('.composer__command-name')
+  const description = skill.locator('.composer__command-description')
+  await expect(skill.locator('svg')).toBeVisible()
+  await expect(description).toHaveCSS('text-overflow', 'ellipsis')
+  await expect(description).toHaveCSS('white-space', 'nowrap')
+  expect(await description.evaluate((node) => node.scrollWidth > node.clientWidth)).toBe(true)
+  const nameBounds = await skillName.boundingBox()
+  const detailBounds = await description.boundingBox()
+  expect(Math.abs(nameBounds!.y - detailBounds!.y)).toBeLessThan(4)
+  const mode = list.getByRole('option', { name: /Plan before editing/ })
+  await expect(mode.locator('svg')).toBeVisible()
+  const modeName = await mode.locator('.composer__command-name').boundingBox()
+  const modeDetail = await mode.locator('.composer__command-description').boundingBox()
+  expect(Math.abs(modeName!.y - modeDetail!.y)).toBeLessThan(4)
+})
+
+test('lists discovered skills as fuzzy commands and inserts the skill at the caret', async ({ page }) => {
+  await page.goto('/?fixture-skills')
+  const prompt = page.getByLabel('Prompt')
+  await prompt.fill('Please /rvw')
+  const list = page.getByRole('listbox', { name: 'Composer commands' })
+  await expect(list.getByText('Skills', { exact: true })).toBeVisible()
+  await expect(list.getByText('Modes', { exact: true })).toHaveCount(0)
+  await expect(list.getByRole('option', { name: /review-code/i })).toBeVisible()
+  await prompt.press('Enter')
+  await expect(prompt).toHaveValue('Please $review-code ')
+  const selected = page.getByRole('list', { name: 'Selected skills' })
+  await expect(selected.getByLabel('Selected skill: review-code')).toBeVisible()
+  await expect(selected.locator('svg')).toBeVisible()
+  await expect(prompt).toBeFocused()
+  await prompt.fill('Please $review-code $review-code ')
+  await selected.getByRole('button', { name: 'Remove skill review-code' }).focus()
+  await expect(selected.getByRole('button', { name: 'Remove skill review-code' })).toHaveCSS('opacity', '1')
+  await selected.getByRole('button', { name: 'Remove skill review-code' }).click()
+  await expect(prompt).toHaveValue('Please ')
+  await expect(selected).toHaveCount(0)
+  await prompt.fill('/not-a-skill')
+  await expect(selected).toHaveCount(0)
+  await expect(list.getByText('Skills', { exact: true })).toHaveCount(0)
+})
+
+test('places native Pi skills before existing prompt text', async ({ page }) => {
+  await page.goto('/?two-projects&configured-pi&all-agent-skills')
+  await page.getByRole('button', { name: 'notes', exact: true }).click()
+  const composer = page.locator('.composer')
+  await composer.getByRole('button', { name: 'Agent: Codex' }).click()
+  await composer.getByRole('menuitemradio', { name: 'Pi', exact: true }).click()
+  const prompt = composer.getByLabel('Prompt')
+  await prompt.fill('Review this /rvw')
+  await composer.getByRole('option', { name: /review-code/i }).click()
+  await expect(prompt).toHaveValue('/skill:review-code Review this ')
+  await expect(composer.getByLabel('Selected skill: review-code')).toBeVisible()
+})
+
+test('keeps fallback skills out of the prompt and prefixes the sent message', async ({ page }) => {
+  await page.goto('/?two-projects&configured-opencode&all-agent-skills&two-skills')
+  await page.getByRole('button', { name: 'notes', exact: true }).click()
+  const composer = page.locator('.composer')
+  await composer.getByRole('button', { name: 'Agent: Codex' }).click()
+  await composer.getByRole('menuitemradio', { name: 'OpenCode', exact: true }).click()
+  const prompt = composer.getByLabel('Prompt')
+  await prompt.fill('Please check /rvw')
+  await composer.getByRole('option', { name: /Review Code/ }).click()
+  await expect(prompt).toHaveValue('Please check ')
+  await expect(composer.getByLabel('Selected skill: Review Code')).toBeVisible()
+  await prompt.fill('Please check /rnt')
+  await composer.getByRole('option', { name: /Run Tests/ }).click()
+  await expect(prompt).toHaveValue('Please check ')
+  await expect(composer.getByLabel('Selected skill: Run Tests')).toBeVisible()
+  await page.reload()
+  await page.getByRole('button', { name: 'notes', exact: true }).click()
+  await composer.getByRole('button', { name: 'Agent: Codex' }).click()
+  await composer.getByRole('menuitemradio', { name: 'OpenCode', exact: true }).click()
+  await expect(prompt).toHaveValue('Please check ')
+  await expect(composer.getByLabel('Selected skill: Review Code')).toBeVisible()
+  await expect(composer.getByLabel('Selected skill: Run Tests')).toBeVisible()
+  await composer.getByRole('button', { name: 'Send', exact: true }).click()
+  await expect.poll(() => page.evaluate(() => window.__sentPrompts.at(-1))).toMatchObject({ text: 'Use skills review-code, run-tests. Please check' })
+  await expect(composer.getByRole('list', { name: 'Selected skills' })).toHaveCount(0)
+})
+
+test('removes fallback skills with the hover control and sends a single prefix', async ({ page }) => {
+  await page.goto('/?two-projects&configured-opencode&all-agent-skills&two-skills')
+  await page.getByRole('button', { name: 'notes', exact: true }).click()
+  const composer = page.locator('.composer')
+  await composer.getByRole('button', { name: 'Agent: Codex' }).click()
+  await composer.getByRole('menuitemradio', { name: 'OpenCode', exact: true }).click()
+  const prompt = composer.getByLabel('Prompt')
+  await prompt.fill('/rvw')
+  await composer.getByRole('option', { name: /Review Code/ }).click()
+  await prompt.fill('/rnt')
+  await composer.getByRole('option', { name: /Run Tests/ }).click()
+  const selected = composer.getByLabel('Selected skill: Run Tests')
+  const remove = composer.getByRole('button', { name: 'Remove skill Run Tests' })
+  await expect(remove).toHaveCSS('opacity', '0')
+  await selected.hover()
+  await expect(remove).toHaveCSS('opacity', '1')
+  await remove.click()
+  await expect(selected).toHaveCount(0)
+  await prompt.fill('Please review')
+  await composer.getByRole('button', { name: 'Send', exact: true }).click()
+  await expect.poll(() => page.evaluate(() => window.__sentPrompts.at(-1))).toMatchObject({ text: 'use skill review-code. Please review' })
+})
+
+test('sends a fallback skill without requiring prompt text', async ({ page }) => {
+  await page.goto('/?two-projects&configured-opencode&all-agent-skills')
+  await page.getByRole('button', { name: 'notes', exact: true }).click()
+  const composer = page.locator('.composer')
+  await composer.getByRole('button', { name: 'Agent: Codex' }).click()
+  await composer.getByRole('menuitemradio', { name: 'OpenCode', exact: true }).click()
+  const prompt = composer.getByLabel('Prompt')
+  await prompt.fill('/rvw')
+  await composer.getByRole('option', { name: /Review Code/ }).click()
+  await expect(prompt).toHaveValue('')
+  await expect(composer.getByRole('button', { name: 'Send', exact: true })).toBeEnabled()
+  await composer.getByRole('button', { name: 'Send', exact: true }).click()
+  await expect.poll(() => page.evaluate(() => window.__sentPrompts.at(-1))).toMatchObject({ text: 'use skill review-code.' })
+})
+
+test('preserves fallback skills and prompt if sending fails', async ({ page }) => {
+  await page.goto('/?two-projects&configured-opencode&all-agent-skills&send-prompt-fails')
+  await page.getByRole('button', { name: 'notes', exact: true }).click()
+  const composer = page.locator('.composer')
+  await composer.getByRole('button', { name: 'Agent: Codex' }).click()
+  await composer.getByRole('menuitemradio', { name: 'OpenCode', exact: true }).click()
+  const prompt = composer.getByLabel('Prompt')
+  await prompt.fill('/rvw')
+  await composer.getByRole('option', { name: /Review Code/ }).click()
+  await prompt.fill('Please review')
+  await composer.getByRole('button', { name: 'Send', exact: true }).click()
+  await expect(page.getByRole('alert')).toContainText('Sign in required')
+  await expect(prompt).toHaveValue('Please review')
+  await expect(composer.getByLabel('Selected skill: Review Code')).toBeVisible()
+})
+
+test('updates visible skills when the draft agent changes', async ({ page }) => {
+  await page.goto('/?two-projects&configured-opencode&fixture-skills')
+  await page.getByRole('button', { name: 'notes', exact: true }).click()
+  const composer = page.locator('.composer')
+  const prompt = composer.getByLabel('Prompt')
+  await prompt.fill('/rvw')
+  await expect(composer.getByRole('option', { name: /review-code/i })).toBeVisible()
+  await prompt.press('Escape')
+  await composer.getByRole('button', { name: 'Agent: Codex' }).click()
+  await composer.getByRole('menuitemradio', { name: 'OpenCode' }).click()
+  await prompt.fill('/rvw')
+  await expect(composer.getByRole('option', { name: /review-code/i })).toHaveCount(0)
+  await expect(composer.getByRole('listbox', { name: 'Composer commands' }).getByText('Skills', { exact: true })).toHaveCount(0)
+})
+
+test('slash commands compact the context and open the model filter', async ({ page }) => {
+  await page.goto('/')
+  const composer = page.locator('.composer')
+  const prompt = composer.getByLabel('Prompt')
+  await prompt.fill('/compact')
+  const list = composer.getByRole('listbox', { name: 'Composer commands' })
+  await expect(list.getByText('Modes', { exact: true })).toHaveCount(0)
+  await list.getByRole('option', { name: /Compact context/ }).click()
+  await expect.poll(() => page.evaluate(() => (window as unknown as { __compactRequests: () => string[] }).__compactRequests())).toEqual(['task-1'])
+  await expect(prompt).toHaveValue('')
+  await prompt.fill('/model')
+  await prompt.press('Enter')
+  const menu = composer.getByRole('menu', { name: 'Model / effort' })
+  await expect(menu).toBeVisible()
+  const filter = menu.getByRole('searchbox', { name: 'Filter model / effort' })
+  await expect(filter).toBeFocused()
+  await filter.fill('gpt61')
+  await expect(menu.getByRole('menuitemradio', { name: /gpt-6.1-terra/i })).toBeVisible()
+})
+
+test('slash model opens the OpenCode model filter', async ({ page }) => {
+  await page.goto('/?two-projects&configured-opencode&agent-models')
+  await page.getByRole('button', { name: 'notes', exact: true }).click()
+  const composer = page.locator('.composer')
+  await composer.getByRole('button', { name: 'Agent: Codex' }).click()
+  await composer.getByRole('menuitemradio', { name: 'OpenCode' }).click()
+  await composer.getByLabel('Prompt').fill('/model')
+  await composer.getByRole('option', { name: /Choose model/ }).click()
+  const filter = composer.getByRole('menu', { name: 'Model' }).getByRole('searchbox', { name: 'Filter model' })
+  await expect(filter).toBeFocused()
+  await filter.fill('qwn')
+  await expect(composer.getByRole('menuitemradio', { name: 'Qwen Coder' })).toBeVisible()
 })
 
 test('queues removable files and uploads them only when sending the prompt', async ({ page }) => {
@@ -4794,7 +5115,7 @@ test('shows a live terminal and an ended one with a restart action', async ({ pa
   await page.goto('/')
 
   await page.getByRole('tab', { name: 'Terminals' }).click()
-  await expect(page.getByRole('button', { name: 'New shared terminal' })).toBeVisible()
+  await expect(page.getByRole('button', { name: 'New terminal' })).toBeVisible()
   await expect(page.getByRole('button', { name: /Terminal 1/ })).toBeVisible()
 
   await page.getByRole('button', { name: /Terminal 2/ }).click()
@@ -4806,18 +5127,18 @@ for (const restart of [false, true]) {
   test(`keeps an immediate terminal exit after ${restart ? 'restart' : 'start'}`, async ({ page }) => {
     await page.goto('/?early-terminal-exit')
     if (restart) {
-      await page.getByRole('button', { name: /Terminal 2.*ended/ }).click()
+      await page.getByRole('button', { name: 'Terminal 2' }).click()
       await page.getByRole('button', { name: 'Restart' }).click()
     } else {
-      await page.getByRole('button', { name: 'New shared terminal' }).click()
+      await page.getByRole('button', { name: 'New terminal' }).click()
     }
     await page.waitForFunction(() => typeof window.__finishTerminalLaunch === 'function')
     await page.evaluate(() => window.__finishTerminalLaunch())
     const pane = page.getByRole('region', { name: 'Short-lived shell' })
-    await expect(pane).toContainText('ended with exit code 23')
+    await expect(pane).toContainText('Ended with exit code 23')
     await expect(pane.getByRole('button', { name: 'Restart' })).toBeEnabled()
     await page.evaluate(() => window.__replayTerminalList())
-    await expect(pane).toContainText('ended with exit code 23')
+    await expect(pane).toContainText('Ended with exit code 23')
     await expect(pane.getByRole('textbox')).toHaveCount(0)
   })
 }
@@ -4933,7 +5254,7 @@ test('shows an interactive ACP terminal only for its owning task', async ({ page
 
   await pane.getByRole('button', { name: 'Hide pane' }).click()
   await expect(pane).toHaveCount(0)
-  await page.getByRole('button', { name: /agent: Run tests.*hidden/ }).click()
+  await page.getByRole('button', { name: 'agent: Run tests' }).click()
   await expect(input).toBeFocused()
 
   await page.getByRole('button', { name: /Other task/ }).click()
@@ -5035,11 +5356,11 @@ test('clears a terminal bell when its focused window returns', async ({ page }) 
 test('tabs from the sidebar through chat and into the selected inspector panel', async ({ page }) => {
   await page.goto('/')
   const chat = page.getByRole('region', { name: 'Task chat' })
-  await expect(chat.getByPlaceholder('Send a prompt')).toBeEnabled()
+  await expect(chat.getByPlaceholder('Ask anything, @ to mention files, / for commands')).toBeEnabled()
   const sidebar = page.getByRole('complementary', { name: 'Workspace navigation' })
   const tablist = page.getByRole('tablist', { name: 'Inspector tabs' })
   const terminals = tablist.getByRole('tab', { name: 'Terminals' })
-  await sidebar.getByRole('button', { name: 'Settings', exact: true }).focus()
+  await sidebar.locator('button:visible').last().focus()
 
   const chatStops: string[] = []
   for (let step = 0; step < 20; step++) {
@@ -5053,7 +5374,7 @@ test('tabs from the sidebar through chat and into the selected inspector panel',
   await page.keyboard.press('Tab')
   await expect(page.getByRole('tabpanel', { name: 'Terminals' })).toBeFocused()
   await page.keyboard.press('Tab')
-  await expect(page.getByRole('button', { name: 'New shared terminal' })).toBeFocused()
+  await expect(page.getByRole('button', { name: 'New terminal' })).toBeFocused()
 
   await page.keyboard.press('Shift+Tab')
   await page.keyboard.press('Shift+Tab')
@@ -5135,8 +5456,27 @@ test('resizes a split and reopens a hidden terminal from the instance list', asy
 
   await scoped.getByRole('button', { name: 'Hide pane' }).click()
   await expect(scoped).toHaveCount(0)
-  await page.getByRole('button', { name: /Task shell.*hidden/ }).click()
+  await page.getByRole('button', { name: 'Task shell' }).click()
   await expect(scoped.getByRole('textbox')).toBeFocused()
+})
+
+test('aligns short header dividers with the workspace panes', async ({ page }) => {
+  await page.goto('/')
+  const header = page.getByRole('banner', { name: 'Workspace header' })
+  const dividers = header.locator('.shell__header-divider')
+  await expect(dividers).toHaveCount(3)
+  const headerBounds = (await header.boundingBox())!
+  const sidebarBounds = (await page.locator('.shell__body > .sidebar').boundingBox())!
+  const chatBounds = (await page.getByRole('region', { name: 'Task chat' }).boundingBox())!
+  const inspectorBounds = (await page.getByRole('complementary', { name: 'Inspector' }).boundingBox())!
+  for (const [index, boundary] of [sidebarBounds.x, chatBounds.x, inspectorBounds.x].entries()) {
+    const bounds = (await dividers.nth(index).boundingBox())!
+    expect(Math.abs(bounds.x - boundary)).toBeLessThanOrEqual(1)
+    expect(bounds.y).toBeGreaterThan(headerBounds.y)
+    expect(bounds.y + bounds.height).toBeLessThan(headerBounds.y + headerBounds.height)
+  }
+  await page.getByRole('button', { name: 'Settings', exact: true }).click()
+  await expect(dividers).toHaveCount(0)
 })
 
 test('resizes the inspector and restores the saved width for the selected task', async ({ page }) => {
@@ -5183,11 +5523,11 @@ test('saves Quad and Single layouts while keeping the terminal instances', async
   await expect.poll(readLayout).toEqual(split('horizontal', split('vertical',
     split('horizontal', leaf(1), leaf(2)),
     split('horizontal', leaf(3), leaf(4))), leaf('later')))
-  await page.getByRole('button', { name: /Terminal 3.*live/ }).click()
+  await page.getByRole('button', { name: 'Terminal 3' }).click()
   await page.getByRole('button', { name: 'Single', exact: true }).click()
   await expect.poll(readLayout).toEqual(split('horizontal', leaf(3), leaf('later')))
   await expect(page.getByRole('region', { name: 'Terminal 3' }).getByRole('textbox')).toBeFocused()
-  await expect(page.getByRole('button', { name: /Terminal 1.*live.*hidden/ })).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Terminal 1' })).toHaveAttribute('title', /view closed/)
   await page.getByRole('button', { name: /Other task/ }).click()
   await expect(page.getByRole('region', { name: 'Other shell' }).getByRole('textbox')).toBeVisible()
 })

@@ -1,3 +1,4 @@
+import { PickerCaret, PickerMenu, type PickerMenuProps, type PickerOption } from './PickerMenu'
 /**
  * The fixed task-workspace shell. Regions never move between each other; every
  * value comes from the core's snapshots through the bridge, never from a second
@@ -14,14 +15,17 @@ import { CommandPalette, type PaletteEntry } from './CommandPalette'
 import { displayChord, normalizeChord } from './keybindings'
 import { ComposerInput } from './ComposerInput'
 import { FilesPane } from './FilesPane'
+import { SegmentedControl } from './SegmentedControl'
 import { Markdown } from './Markdown'
 import { ProjectImportSources, ProjectPicker } from './ProjectPicker'
 import { ProjectRow } from './ProjectRow'
 import { PreviewPane, type PreviewAnnotation } from './PreviewPane'
 import { GitPane } from './GitPane'
 import { ReviewPane } from './ReviewPane'
-import { SEND_ACCENTS, SettingsPane } from './SettingsPane'
+import { SEND_ACCENTS, SettingsPane, type SettingsCategory } from './SettingsPane'
+import { agentPriority } from './PoolSettings'
 import { FreebuffPane, TerminalPane, type TerminalCommands } from './TerminalPane'
+import { AgentIcon } from './AgentIcon'
 import { TaskSearch } from './TaskSearch'
 import { DeleteTaskDialog, ReviewArchiveDialog, TaskRows } from './TaskRows'
 import { ErrorNotifications } from './ErrorNotifications'
@@ -29,7 +33,8 @@ import { recordDiagnostic, reportError } from './diagnostics'
 
 type CoreEvent = bridge.Event
 type TerminalBell = Extract<CoreEvent, { type: 'terminalBell' }>['data']
-type TurnSelection = { codex?: bridge.CodexTurnOptions; mode?: string; model?: string }
+type TurnSelection = { codex?: bridge.CodexTurnOptions; mode?: string; modeReset?: string; model?: string }
+type FallbackSkill = { id: string; name: string; agent: bridge.Agent }
 type PaletteKind = 'commands' | 'projects' | 'tasks'
 
 const LIVE_STATES: bridge.TaskState[] = ['starting', 'queued', 'working', 'waiting']
@@ -177,6 +182,8 @@ export function App() {
   const [claudeConfigured, setClaudeConfigured] = createSignal(false)
   const [freebuffAvailability, setFreebuffAvailability] = createSignal<bridge.FreebuffAvailability>({ available: false, reason: null })
   const [newTaskAgent, setNewTaskAgent] = createSignal<bridge.Agent>('codex')
+  const [agentAvailability, setAgentAvailability] = createSignal<Record<bridge.Agent, boolean>>()
+  const [draftAgentManuallySelected, setDraftAgentManuallySelected] = createSignal(false)
   const [composingProjectId, setComposingProjectId] = createSignal<string>()
   const [selectedProjectId, setSelectedProjectId] = createSignal<string | null>(null)
   const [freebuffProjectId, setFreebuffProjectId] = createSignal<string>()
@@ -240,6 +247,7 @@ export function App() {
   const [headerMenu, setHeaderMenu] = createSignal<'actions' | 'context'>()
   const [diagnosticsOpen, setDiagnosticsOpen] = createSignal(false)
   const [compactingTaskId, setCompactingTaskId] = createSignal<string>()
+  const [modelPickerRequest, setModelPickerRequest] = createSignal(0)
   const [searchOpen, setSearchOpen] = createSignal(false)
   const [palette, setPalette] = createSignal<PaletteKind>()
   const [commandRegistry, setCommandRegistry] = createSignal<bridge.CommandRegistry>()
@@ -260,14 +268,26 @@ export function App() {
   let followTranscript = true
   let lastOpenTaskId: string | undefined
   const currentAgent = () => workspace()?.task.agent ?? newTaskAgent()
-  const currentAgentName = () => bridge.AGENT_LABELS[currentAgent()]
+  const currentAgentName = () => !workspace() && agentAvailability() && !agentAvailability()?.[newTaskAgent()] ? 'No agent available' : bridge.AGENT_LABELS[currentAgent()]
   const codexCatalog = () => {
     const configured = projectModel()
     return configured?.projectId === selectedProjectId() ? configured : undefined
   }
   const [projectMenuId, setProjectMenuId] = createSignal<string>()
-  const [settingsOpen, setSettingsOpen] = createSignal(false)
+  const [settingsOpen, setSettingsOpenValue] = createSignal(false)
+  const [settingsCategory, setSettingsCategory] = createSignal<SettingsCategory>('Workspace')
+  const [settingsProjectId, setSettingsProjectId] = createSignal<string>()
   const [preferences, setPreferences] = createSignal<bridge.SettingsSnapshot>()
+  createEffect(() => {
+    const available = agentAvailability()
+    const priority = agentPriority(preferences()?.app['agents.priority'])
+    if (!available || !preferences() || workspace() || selectedTaskId() || draftAgentManuallySelected()) return
+    const preferred = priority.find((agent) => available[agent])
+    if (preferred) {
+      setNewTaskAgent(preferred)
+      setDraftAgentManuallySelected(true)
+    }
+  })
   const prefersLight = window.matchMedia('(prefers-color-scheme: light)')
   const prefersContrast = window.matchMedia('(prefers-contrast: more)')
   const [systemLight, setSystemLight] = createSignal(prefersLight.matches)
@@ -304,7 +324,7 @@ export function App() {
   const notificationsEnabled = () => preferences()?.app['notifications.enabled'] ?? false
   const sendAccent = () => preferences()?.app['appearance.send_accent'] ?? 'Blue'
   const [projectSettingsRequest, setProjectSettingsRequest] = createSignal<{ id: string }>()
-  const [approvalChange, setApprovalChange] = createSignal<{ projectId: string }>()
+  const [approvalChange, setApprovalChange] = createSignal<{ projectId?: string }>()
   const showsArchived = (projectId: string | null) => {
     const path = projects().find((project) => project.id === projectId)?.path
     return (path ? preferences()?.projects[path]?.['tasks.show_archived'] : undefined)
@@ -319,6 +339,7 @@ export function App() {
   }
   const [terminalListEvent, setTerminalListEvent] = createSignal<Extract<CoreEvent, { type: 'terminalListChanged' }>['data']>()
   const [inspectorTabs, setInspectorTabs] = createSignal(new Map<string | null, bridge.InspectorTab>())
+  const [explorerMode, setExplorerMode] = createSignal<'files' | 'changes'>('files')
   const [fileRequest, setFileRequest] = createSignal<{ taskId: string; path: string }>()
   const inspectorTab = () => inspectorTabs().get(selectedProjectId()) ?? 'terminals'
   let pendingInspectorTabSave = Promise.resolve()
@@ -331,6 +352,7 @@ export function App() {
 
   function setInspectorTab(tab: bridge.InspectorTab) {
     const projectId = selectedProjectId()
+    if (tab === 'git') { setExplorerMode('changes'); tab = 'files' }
     setInspectorTabs((tabs) => new Map(tabs).set(projectId, tab))
     if (!projectId) return
     pendingInspectorTabSave = pendingInspectorTabSave
@@ -341,13 +363,85 @@ export function App() {
   }
 
   function restoreInspectorTab(projectId: string, tab: bridge.InspectorTab) {
+    if (tab === 'git') { setExplorerMode('changes'); tab = 'files' }
     if (!INSPECTOR_TABS.some((option) => option.id === tab && option.enabled)) return
     setInspectorTabs((tabs) => tabs.has(projectId) ? tabs : new Map(tabs).set(projectId, tab))
+  }
+
+  type ScreenPath = { settings: boolean; projectId: string | null; taskId: string | null; inspector: bridge.InspectorTab; category: SettingsCategory; settingsProjectId?: string }
+  const [history, setHistory] = createSignal<ScreenPath[]>([])
+  const [historyIndex, setHistoryIndex] = createSignal(-1)
+  let restoringHistory = false
+  let historyTimer: ReturnType<typeof setTimeout> | undefined
+  const currentScreen = (): ScreenPath => ({ settings: settingsOpen(), projectId: selectedProjectId(), taskId: selectedTaskId(), inspector: inspectorTab(), category: settingsCategory(), settingsProjectId: settingsProjectId() })
+  function sameScreen(left: ScreenPath, right: ScreenPath) {
+    if (left.settings !== right.settings) return false
+    return left.settings ? left.category === right.category && (left.category !== 'Projects' || left.settingsProjectId === right.settingsProjectId)
+      : left.projectId === right.projectId && left.taskId === right.taskId && left.inspector === right.inspector
+  }
+  function recordScreen(screen: ScreenPath) {
+    const entries = history()
+    const index = historyIndex()
+    if (entries[index] && sameScreen(entries[index], screen)) return
+    setHistory([...entries.slice(0, index + 1), screen])
+    setHistoryIndex(index + 1)
+  }
+  createEffect(() => {
+    const screen = currentScreen()
+    const loaded = projectsLoaded()
+    const busy = pending()
+    if (historyTimer) clearTimeout(historyTimer)
+    if (!loaded || busy || restoringHistory) return
+    historyTimer = setTimeout(() => { if (!restoringHistory) recordScreen(screen) }, 100)
+  })
+  onCleanup(() => { if (historyTimer) clearTimeout(historyTimer) })
+  function recordCurrentScreen() {
+    if (!restoringHistory && projectsLoaded()) {
+      if (historyTimer) clearTimeout(historyTimer)
+      recordScreen(currentScreen())
+    }
+  }
+  function setSettingsOpen(value: boolean | ((open: boolean) => boolean)) {
+    const next = typeof value === 'function' ? value(settingsOpen()) : value
+    if (next !== settingsOpen()) recordCurrentScreen()
+    setSettingsOpenValue(next)
+  }
+  function navigateHistory(direction: number) {
+    if (restoringHistory) return
+    if (historyTimer) clearTimeout(historyTimer)
+    recordScreen(currentScreen())
+    const index = historyIndex() + direction
+    const target = history()[index]
+    if (!target) return
+    restoringHistory = true
+    void (async () => {
+      if (target.projectId && target.projectId !== selectedProjectId()) {
+        const project = projects().find((entry) => entry.id === target.projectId)
+        if (!project) throw new Error('This project is no longer available.')
+        await selectProject(project, target.taskId ?? undefined)
+      } else if (target.taskId && target.taskId !== selectedTaskId()) {
+        await selectTask(target.taskId)
+      }
+      if (!target.taskId && target.projectId) {
+        setComposingProjectId(target.projectId)
+        setSelectedTaskId(null)
+        setWorkspace(null)
+      }
+      batch(() => {
+        setInspectorTab(target.inspector)
+        setProjectSettingsRequest(undefined)
+        setSettingsCategory(target.category)
+        setSettingsProjectId(target.settingsProjectId)
+        setSettingsOpen(target.settings)
+        setHistoryIndex(index)
+      })
+    })().catch((failure) => setError(describe(failure))).finally(() => { restoringHistory = false })
   }
 
   function openTaskFile(path: string) {
     const task = workspace()?.task
     if (!task?.worktreePath || task.id !== selectedTaskId()) return
+    setExplorerMode('files')
     setFileRequest({ taskId: task.id, path })
     setInspectorTab('files')
     inspectorTabList?.querySelector<HTMLButtonElement>('#inspector-tab-files')?.focus()
@@ -377,6 +471,8 @@ export function App() {
     if (id) setTerminalAttention((bells) => bells.filter((bell) => bell.terminalId !== id))
   }
   const [prompt, setPrompt] = createSignal('')
+  const [fallbackSkills, setFallbackSkills] = createSignal<FallbackSkill[]>([])
+  const activeFallbackSkills = () => fallbackSkills().filter((skill) => skill.agent === currentAgent())
   const [queuedFiles, setQueuedFiles] = createSignal(new Map<string, File[]>())
   const fileQueueKey = () => {
     const task = selectedTaskId()
@@ -388,19 +484,19 @@ export function App() {
   const turnOptions = () => queuedTurnOptions().get(fileQueueKey() ?? '')
   let promptSaveTimer: ReturnType<typeof setTimeout> | undefined
   let currentPromptScope: string | undefined
-  type StoredComposer = { text: string; options?: TurnSelection }
+  type StoredComposer = { text: string; options?: TurnSelection; fallbackSkills?: FallbackSkill[] }
   function readComposer(scope: string): StoredComposer | undefined {
     try {
       const stored = localStorage.getItem(`${COMPOSER_KEY_PREFIX}${scope}`)
       if (!stored) return undefined
       const value = JSON.parse(stored) as Partial<StoredComposer>
-      return { text: typeof value.text === 'string' ? value.text : '', options: value.options }
+      return { text: typeof value.text === 'string' ? value.text : '', options: value.options, fallbackSkills: Array.isArray(value.fallbackSkills) ? value.fallbackSkills.filter((skill) => typeof skill?.id === 'string' && typeof skill?.name === 'string' && typeof skill?.agent === 'string') : [] }
     } catch {
       return undefined
     }
   }
   function persistComposer(scope: string) {
-    const stored: StoredComposer = { text: prompt(), options: turnOptions() }
+    const stored: StoredComposer = { text: prompt(), options: queuedTurnOptions().get(scope), fallbackSkills: fallbackSkills() }
     try {
       localStorage.setItem(`${COMPOSER_KEY_PREFIX}${scope}`, JSON.stringify(stored))
     } catch (error) {
@@ -424,11 +520,13 @@ export function App() {
   createEffect(() => {
     const scope = fileQueueKey()
     if (scope === currentPromptScope) return
+    if (promptSaveTimer) { clearTimeout(promptSaveTimer); promptSaveTimer = undefined }
     if (currentPromptScope) untrack(() => persistComposer(currentPromptScope!))
     currentPromptScope = scope
     const stored = scope ? readComposer(scope) : undefined
     batch(() => {
       setPrompt(stored?.text ?? '')
+      setFallbackSkills(stored?.fallbackSkills ?? [])
       if (scope) {
         if (stored?.options) setQueuedTurnOptions((queued) => new Map(queued).set(scope, stored.options!))
         else setQueuedTurnOptions((queued) => { const next = new Map(queued); next.delete(scope); return next })
@@ -447,7 +545,7 @@ export function App() {
     })
   })
   const codexOptions = () => turnOptions()?.codex
-  const pendingMode = () => currentAgent() === 'opencode' ? turnOptions()?.mode : undefined
+  const pendingMode = () => turnOptions()?.mode ?? turnOptions()?.modeReset
   const [projectModes, { refetch: refetchProjectModes }] = createResource(
     () => {
       const project = selectedProject()
@@ -465,18 +563,34 @@ export function App() {
   )
   const composerModes = (): bridge.AgentModes | undefined => {
     const current = workspace()
-    if (currentAgent() !== 'opencode') return
     const selected = pendingMode() ?? current?.task.mode ?? undefined
     if (current?.modes) return selected ? { ...current.modes, current: selected } : current.modes
+    if (currentAgent() !== 'opencode') return
     const catalog = projectModes()
     const options = catalog && catalog.projectId === selectedProjectId() ? catalog.options : []
     return { current: selected ?? null, options }
   }
   const modeCatalogError = () => {
-    const current = workspace()
-    if (current?.modes) return undefined
+    if (workspace()?.modes || currentAgent() !== 'opencode') return undefined
     const catalog = projectModes()
     return catalog?.projectId === selectedProjectId() && catalog.failed ? 'Mode catalog unavailable.' : undefined
+  }
+  const skillSource = createMemo(() => {
+    const project = selectedProject()
+    if (!project || project.missing) return false
+    const task = workspace()?.task
+    return JSON.stringify([project.id, task?.projectId === project.id && task.worktreePath ? task.id : null, currentAgent()])
+  })
+  const [agentSkills, { refetch: refetchAgentSkills }] = createResource(skillSource, async (key) => {
+    const [projectId, taskId, agent] = JSON.parse(key) as [string, string | null, bridge.Agent]
+    try { return { projectId, taskId, agent, skills: await bridge.agentSkills(projectId, taskId, agent), error: '' } }
+    catch (error) { return { projectId, taskId, agent, skills: [], error: describe(error) } }
+  })
+  const currentSkills = () => {
+    const result = agentSkills()
+    const task = workspace()?.task
+    const taskId = task?.projectId === selectedProjectId() && task.worktreePath ? task.id : null
+    return result?.projectId === selectedProjectId() && result.taskId === taskId && result.agent === currentAgent() ? result : undefined
   }
   const [projectModels, { refetch: refetchProjectModels }] = createResource(
     () => {
@@ -525,7 +639,7 @@ export function App() {
 
   function patchTurnOptions(patch: TurnSelection) {
     setTurnOptions({ ...turnOptions(), ...patch })
-    if (fileQueueKey()?.startsWith('project:')) saveComposerSoon()
+    saveComposerSoon()
   }
 
   function clearTurnOptions(taskId: string) {
@@ -585,7 +699,7 @@ export function App() {
   let allowClose = false
 
   const agentConfigured = (agent: bridge.Agent) => {
-    if (agent === 'codex') return true
+    if (agent === 'codex') return agentAvailability()?.codex ?? false
     if (agent === 'opencode') return opencodeConfigured()
     if (agent === 'pi') return piConfigured()
     if (agent === 'claude') return claudeConfigured()
@@ -599,7 +713,7 @@ export function App() {
     const canChange = canOpen && (!task || task.state === 'draft')
     return AGENT_OPTIONS.map((agent) => {
       if (agent.id === 'freebuff-terminal') return { ...agent, disabled: !canOpen }
-      if (agent.id === 'codex') return { ...agent, disabled: !canChange }
+      if (agent.id === 'codex') return { ...agent, disabled: !canChange || !agentConfigured('codex'), detail: agentConfigured('codex') ? undefined : 'Codex is unavailable' }
       if (agent.id === 'opencode' || agent.id === 'pi' || agent.id === 'claude') return {
         ...agent,
         disabled: !canChange || !agentConfigured(agent.id),
@@ -699,6 +813,7 @@ export function App() {
     if (freebuffProjectId()) setFreebuffProjectId(undefined)
     const task = workspace()?.task
     if (!task) {
+      setDraftAgentManuallySelected(true)
       setNewTaskAgent(agent)
     } else if (task.state === 'draft' && task.agent !== agent) {
       void run(async () => {
@@ -781,6 +896,7 @@ export function App() {
       ? task.worktreePath : null
   })
   const [worktreeGit, setWorktreeGit] = createSignal<bridge.WorkspaceGitStatus>()
+  const [worktreeFileRevision, setWorktreeFileRevision] = createSignal(0)
   const [gitStatusError, setGitStatusError] = createSignal<string>()
   createEffect(() => {
     const path = worktreePath()
@@ -793,6 +909,7 @@ export function App() {
     const watch = bridge.watchWorkspaceFiles(projectId, taskId, (update) => {
       if (closed) return
       setWorktreeGit(update.type === 'changes' ? update.git ?? undefined : undefined)
+      if (update.type === 'changes') setWorktreeFileRevision((revision) => revision + 1)
       setGitStatusError(update.type === 'error' ? update.message : update.git ? undefined : 'The task worktree has no Git metadata.')
     })
     void watch.catch((failure) => { if (!closed) setGitStatusError(describe(failure)) })
@@ -883,7 +1000,7 @@ export function App() {
   }
   const bindingsById = createMemo(() => new Map(commandRegistry()?.commands.map((binding) => [binding.id, binding])))
   const chordFor = (id: string) => bindingsById().get(id)?.chord ?? undefined
-  const canSend = () => (canCompose() || canQueuePrompt()) && !pending() && (!!prompt().trim() || !!promptFiles().length)
+  const canSend = () => (!!workspace() || !!agentAvailability()?.[newTaskAgent()]) && (canCompose() || canQueuePrompt()) && !pending() && (!!prompt().trim() || !!promptFiles().length || !!activeFallbackSkills().length)
   const canUseGit = () => {
     const task = workspace()?.task
     return !!task?.worktreePath && task.state !== 'done' && !LIVE_STATES.includes(task.state)
@@ -994,12 +1111,12 @@ export function App() {
   }
 
   function focusPane(target: unknown, step: number) {
-    const tab = inspectorTabList?.querySelector<HTMLButtonElement>('button[aria-selected="true"]')
-    const terminalStops = inspectorTab() === 'terminals' && inspector
+    const tab = settingsOpen() ? undefined : inspectorTabList?.querySelector<HTMLButtonElement>('button[aria-selected="true"]')
+    const terminalStops = !settingsOpen() && inspectorTab() === 'terminals' && inspector
       ? Array.from(inspector.querySelectorAll<HTMLTextAreaElement>('.terminal-view__input')) : []
     const inspectorStops = tab ? [tab, ...terminalStops] : terminalStops
-    const sidebarStop = sidebarHidden() ? undefined
-      : sidebar?.querySelector<HTMLElement>('.project[aria-current="true"], .sidebar__settings')
+    const sidebarStop = sidebarHidden() || settingsOpen() ? undefined
+      : sidebar?.querySelector<HTMLElement>('.project[aria-current="true"]')
     const chatStop = settingsOpen() ? document.querySelector<HTMLElement>('.settings__nav button[aria-current="true"]')
       : promptInput?.disabled ? transcript : promptInput
     const stops = terminalStops.length && inspectorStops.some((stop) => stop === target) ? inspectorStops
@@ -1035,7 +1152,7 @@ export function App() {
       case 'terminals': setInspectorTab('terminals'); break
       case 'git': setInspectorTab('git'); break
       case 'preview': setInspectorTab('preview'); break
-      case 'files': setInspectorTab('files'); break
+      case 'files': setExplorerMode('files'); setInspectorTab('files'); break
       case 'forwardKey':
         if (workspaceTerminal(target)) {
           forwardNextKeyTo = target
@@ -1256,6 +1373,7 @@ export function App() {
   }
 
   async function selectProject(project: bridge.ProjectSnapshot, taskId?: string) {
+    setDraftAgentManuallySelected(false)
     setFreebuffProjectId(undefined)
     setComposingProjectId(undefined)
     setSearchJump(undefined)
@@ -1288,6 +1406,7 @@ export function App() {
   }
 
   function openProject(project: bridge.ProjectSnapshot, useReviewFilter = reviewOnly()) {
+    recordCurrentScreen()
     setSettingsOpen(false)
     const reviewed = useReviewFilter ? filteredReviewTasks(project.id) : []
     const target = reviewed.find((task) => task.id === project.lastTaskId) ?? reviewed[0]
@@ -1297,6 +1416,7 @@ export function App() {
   }
 
   function openTaskRow(task: bridge.TaskSummary) {
+    recordCurrentScreen()
     setSettingsOpen(false)
     setFreebuffProjectId(undefined)
     void run(async () => {
@@ -1321,6 +1441,7 @@ export function App() {
   }
 
   function openSearchHit(hit: bridge.TaskSearchHit) {
+    recordCurrentScreen()
     closeTaskSearch(false)
     setSettingsOpen(false)
     setFreebuffProjectId(undefined)
@@ -1514,8 +1635,7 @@ export function App() {
           if (taskList && !updates.taskLists.has(projectId)) setTasks(taskList.tasks)
           setLoadedTasksFor(projectId)
         }
-        const settingsProjectId = settingsProject()?.id
-        if (settingsProjectId) setApprovalChange({ projectId: settingsProjectId })
+        setApprovalChange({})
         if (taskWorkspace && taskId && !updates.workspaces.has(taskId)) setWorkspace(taskWorkspace)
         if (terminalList && projectId && !updates.terminalLists.has(projectId)) setTerminalListEvent(terminalList)
         if (reviewLists) {
@@ -1630,6 +1750,7 @@ export function App() {
   }
 
   onMount(() => {
+    void bridge.agentAvailability().then(setAgentAvailability).catch((failure) => setError(describe(failure)))
     void bridge.archivedWorktreeIssues().then(setWorktreeIssues).catch((failure) => setError(describe(failure)))
     void homeDir().then(setHomeDirectory).catch((error) => console.warn('Could not resolve the home directory', error))
     void reloadKeybindings().catch((failure) => setError(describe(failure)))
@@ -1721,6 +1842,9 @@ export function App() {
         errors.push(describe(failure))
       }
     }
+    if (target) {
+      try { await reloadPreferences() } catch (failure) { errors.push(describe(failure)) }
+    }
     if (target && (selectAdded || !selectedProjectId())) {
       if (selectAdded) setSettingsOpen(false)
       await selectProject(target)
@@ -1729,6 +1853,8 @@ export function App() {
   }
 
   function newTask(projectId: string) {
+    recordCurrentScreen()
+    setDraftAgentManuallySelected(false)
     setFreebuffProjectId(undefined)
     setSettingsOpen(false)
     setComposingProjectId(projectId)
@@ -1855,10 +1981,15 @@ export function App() {
     const current = workspace()
     const text = prompt().trim()
     const files = promptFiles()
+    const selectedSkills = activeFallbackSkills()
+    const skillPrefix = selectedSkills.length === 1
+      ? `use skill ${selectedSkills[0].id}. `
+      : selectedSkills.length > 1 ? `Use skills ${selectedSkills.map((skill) => skill.id).join(', ')}. ` : ''
+    const message = (skillPrefix + text).trimEnd()
     const codex = currentAgent() === 'codex' ? codexOptions() : undefined
     const mode = pendingMode()
     const model = currentAgent() !== 'codex' ? turnOptions()?.model : undefined
-    if (!projectId || (!text && !files.length) || (!canCompose() && !canQueuePrompt()) || pending()) return
+    if ((!current && !agentAvailability()?.[newTaskAgent()]) || !projectId || (!text && !files.length && !selectedSkills.length) || (!canCompose() && !canQueuePrompt()) || pending()) return
     const projectScope = `project:${projectId}`
     void run(async () => {
       let updated: bridge.TaskWorkspace
@@ -1866,23 +1997,24 @@ export function App() {
         const task = current.task
         const attachmentIds: string[] = []
         for (const file of files) attachmentIds.push(await bridge.savePromptFile(task.id, file))
-        updated = await bridge.sendPrompt(task.id, text, attachmentIds, codex, mode, model)
+        updated = await bridge.sendPrompt(task.id, message, attachmentIds, codex, mode, model)
         clearPromptFiles(task.id)
         clearTurnOptions(task.id)
         forgetComposer(`task:${task.id}`)
         if (selectedTaskId() === task.id) {
           setPrompt((value) => value.trim() === text ? '' : value)
+          setFallbackSkills((skills) => skills.filter((skill) => skill.agent !== task.agent))
           setWorkspace(updated)
         }
       } else {
-        if (files.length) {
+        if (files.length || selectedSkills.length) {
           const title = text.split(/\r?\n/).find((line) => line.trim())?.trim().slice(0, 80) || 'New task'
           const created = await bridge.createDraft(projectId, title, newTaskAgent())
           try {
             await bridge.setTaskOptions(created.task.id, model ?? null, mode ?? null)
             const attachmentIds: string[] = []
             for (const file of files) attachmentIds.push(await bridge.savePromptFile(created.task.id, file))
-            updated = await bridge.sendPrompt(created.task.id, text, attachmentIds, codex, mode, model)
+            updated = await bridge.sendPrompt(created.task.id, message, attachmentIds, codex, mode, model)
           } catch (failure) {
             try {
               await bridge.deleteTask(created.task.id, true)
@@ -1892,13 +2024,14 @@ export function App() {
             throw failure
           }
         } else {
-          updated = await bridge.startTask(projectId, text, codex, mode, model, newTaskAgent())
+          updated = await bridge.startTask(projectId, message, codex, mode, model, newTaskAgent())
         }
         forgetComposer(projectScope)
         setQueuedTurnOptions((queued) => { const next = new Map(queued); next.delete(projectScope); return next })
         setComposingProjectId(undefined)
         currentPromptScope = `task:${updated.task.id}`
         setPrompt((value) => value.trim() === text ? '' : value)
+        setFallbackSkills([])
         setSelectedTaskId(updated.task.id)
         setWorkspace(updated)
       }
@@ -1906,10 +2039,34 @@ export function App() {
     })
   }
 
+  function storedDefaultMode(taskId: string): string | undefined {
+    try { return localStorage.getItem(`shepherd.mode-default.${taskId}`) ?? undefined }
+    catch (error) { console.warn('Could not read the default mode', error); return undefined }
+  }
+  createEffect(() => {
+    const current = workspace()
+    if (!current?.defaultMode || storedDefaultMode(current.task.id)) return
+    try { localStorage.setItem(`shepherd.mode-default.${current.task.id}`, current.defaultMode) }
+    catch (error) { console.warn('Could not save the default mode', error) }
+  })
+  const selectedMode = () => turnOptions()?.modeReset ? undefined : turnOptions()?.mode ?? workspace()?.task.mode ?? undefined
+
   function chooseMode(mode: string) {
     const current = workspace()
     if (pending()) return
-    patchTurnOptions({ mode: mode || undefined })
+    if (mode && current && !current.task.mode && !storedDefaultMode(current.task.id) && current.modes?.current) {
+      try { localStorage.setItem(`shepherd.mode-default.${current.task.id}`, current.modes.current) }
+      catch (error) { console.warn('Could not save the default mode', error) }
+    }
+    const reportedMode = current?.modes?.current
+    const defaultMode = !mode && current
+      ? storedDefaultMode(current.task.id) ?? current.defaultMode ?? (reportedMode !== current.task.mode ? reportedMode ?? undefined : undefined)
+      : undefined
+    if (!mode && current?.modes && !defaultMode && current.task.mode) {
+      setError('The agent did not report its default mode. Select another mode instead.')
+      return
+    }
+    patchTurnOptions({ mode: mode || undefined, modeReset: defaultMode })
     if (!current) return
     const taskId = current.task.id
     const model = turnOptions()?.model ?? current.task.model
@@ -2115,7 +2272,7 @@ export function App() {
             }
             aria-selected={tab.id === inspectorTab()}
             tabIndex={tab.id === inspectorTab() ? 0 : -1}
-            onClick={() => setInspectorTab(tab.id)}
+            onClick={() => { recordCurrentScreen(); setInspectorTab(tab.id) }}
             aria-disabled={!tab.enabled}
             aria-controls={`inspector-panel-${tab.id}`}
             disabled={!tab.enabled}
@@ -2219,7 +2376,7 @@ export function App() {
 
   return (
     <>
-      <WorkspaceFrame taskId={selectedTaskId()} inspectorWidth={inspectorWidth()} onInspectorWidthChange={resizeInspector}
+      <WorkspaceFrame canGoBack={historyIndex() > 0} canGoForward={historyIndex() < history().length - 1} onBack={() => navigateHistory(-1)} onForward={() => navigateHistory(1)} taskId={selectedTaskId()} inspectorWidth={inspectorWidth()} onInspectorWidthChange={resizeInspector} settingsOpen={settingsOpen()}
         search={<TaskSearch open={searchOpen()} disabled={pending() || !projects().length} shortcut={chordFor('searchTasks')}
           mac={mac}
           inputRef={(input) => { searchInput = input }}
@@ -2230,8 +2387,9 @@ export function App() {
           onBlur={() => { setSearchOpen(false); searchOpener = undefined }}
           onEscape={() => closeTaskSearch(true)} onSelect={openSearchHit} />}
         sidebarHidden={sidebarHidden()} onCommands={() => openPalette('commands')} paletteShortcut={chordFor('commandPalette')}
+        onSettings={() => { setProjectSettingsRequest(undefined); setSettingsOpen((open) => !open) }}
         footer={workspaceFooter}>
-        <aside ref={sidebar} class="sidebar" aria-label="Workspace navigation" hidden={sidebarHidden()}>
+        <aside ref={sidebar} class="sidebar" aria-label="Workspace navigation" hidden={sidebarHidden() || settingsOpen()}>
           <header class="sidebar__header">
             <h2 class="sidebar__title">Projects</h2>
             <button
@@ -2307,27 +2465,13 @@ export function App() {
               }}
             </For>
           </ul>
-          <div class="sidebar__footer">
-            <button
-              type="button"
-              class="nav-item sidebar__settings"
-              aria-pressed={settingsOpen()}
-              onClick={() => {
-                setProjectSettingsRequest(undefined)
-                setSettingsOpen((open) => !open)
-              }}
-            >
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                <circle cx="12" cy="12" r="4" />
-                <path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.7 1.7 0 0 0-1.88-.34 1.7 1.7 0 0 0-1.03 1.55V21a2 2 0 1 1-4 0v-.08A1.7 1.7 0 0 0 8.97 19.4a1.7 1.7 0 0 0-1.88.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-1.55-1H3a2 2 0 1 1 0-4h.08A1.7 1.7 0 0 0 4.6 8.97a1.7 1.7 0 0 0-.34-1.88l-.06-.06A2 2 0 1 1 7.03 4.2l.06.06A1.7 1.7 0 0 0 8.97 4.6 1.7 1.7 0 0 0 10 3.05V3a2 2 0 1 1 4 0v.08A1.7 1.7 0 0 0 15.03 4.6a1.7 1.7 0 0 0 1.88-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.7 1.7 0 0 0 19.4 8.97 1.7 1.7 0 0 0 20.95 10H21a2 2 0 1 1 0 4h-.08A1.7 1.7 0 0 0 19.4 15Z" />
-              </svg>
-              Settings
-            </button>
-          </div>
         </aside>
 
         <Show when={settingsOpen()}>
           <SettingsPane
+            category={settingsCategory()} onCategoryChange={(category) => { recordCurrentScreen(); setSettingsCategory(category) }}
+            settingsProjectId={settingsProjectId()} onSettingsProjectChange={(projectId) => { recordCurrentScreen(); setSettingsProjectId(projectId) }}
+            onBack={() => { setSettingsOpen(false) }}
             keybindings={commandRegistry()}
             mac={mac}
             onReloadKeybindings={reloadKeybindings}
@@ -2350,9 +2494,10 @@ export function App() {
             pending={pending()}
             projectImports={<ProjectImportSources codexDisabled={pending() || !codexAvailable()} note={importNote()} onImportCodex={importProjects} />}
             project={settingsProject()}
+            projects={projects()}
             projectSettingsRequest={projectSettingsRequest()}
             approvalChange={approvalChange()}
-            showProjectArchived={showsArchived(settingsProject()?.id ?? null)}
+            showProjectArchived={showsArchived}
             onShowProjectArchived={(projectId, visible) => requestPreference('tasks.show_archived', visible, projectId)}
             onSavePreviewUrl={async (projectId, url) => {
               const { projects: updated } = await bridge.setProjectPreviewUrl(projectId, url)
@@ -2645,12 +2790,13 @@ export function App() {
                 </li>}</For>
               </ul>
             </Show>
+            <Show when={!workspace() && selectedProjectId() && agentAvailability() && !agentAvailability()?.[newTaskAgent()]}><p class="empty" role="status">No agent is available. Configure a harness in Settings → Harnesses.</p></Show>
             <ComposerInput
               inputRef={(element) => { promptInput = element }}
               projectId={selectedProjectId()}
               taskId={workspace()?.task.worktreePath ? selectedTaskId() : null}
               placeholder={freebuffProjectId() ? 'Freebuff terminal is open — choose another agent to chat'
-                : canCompose() || canQueuePrompt() ? 'Send a prompt' : 'Select a draft or ready task'}
+                : canCompose() || canQueuePrompt() ? 'Ask anything, @ to mention files, / for commands' : 'Select a draft or ready task'}
               value={prompt()}
               disabled={pending() || !!freebuffProjectId() || (!canCompose() && !canQueuePrompt())}
               onInput={(text, composing) => {
@@ -2658,6 +2804,30 @@ export function App() {
                 else updatePrompt(text)
               }}
               onSend={sendPrompt}
+              modes={composerModes()?.options ?? []} onModeChange={chooseMode}
+              modeLabel={selectedMode() ? composerModes()?.options.find((option) => option.id === selectedMode())?.name ?? selectedMode() : undefined}
+              onRemoveMode={() => chooseMode('')}
+              skills={currentSkills()?.skills ?? []} skillError={currentSkills()?.error} onRetrySkills={() => void refetchAgentSkills()}
+              skillAtStart={currentAgent() === 'claude' || currentAgent() === 'pi'}
+              skillToken={(skill) => currentAgent() === 'codex' ? `$${skill.name} `
+                : currentAgent() === 'claude' ? `/${skill.name} `
+                : currentAgent() === 'pi' ? `/skill:${skill.name} ` : null}
+              fallbackSkills={activeFallbackSkills()}
+              onSelectFallbackSkill={(skill) => {
+                const agent = currentAgent()
+                setFallbackSkills((skills) => skills.some((entry) => entry.agent === agent && entry.id === skill.id)
+                  ? skills : [...skills, { id: skill.id, name: skill.name, agent }])
+                saveComposerSoon()
+              }}
+              onRemoveFallbackSkill={(id) => {
+                setFallbackSkills((skills) => skills.filter((skill) => skill.agent !== currentAgent() || skill.id !== id))
+                saveComposerSoon()
+              }}
+              commands={[
+                { id: 'compact', name: 'Compact context', description: canCompact() ? 'Compact the current conversation' : 'Available for an idle conversation with compaction support', disabled: !canCompact() },
+                { id: 'model', name: 'Choose model', description: 'Choose a model for the conversation', disabled: pending() || cancellingTurn() || !!freebuffProjectId() || (currentAgent() !== 'codex' && !(composerModels()?.options.length || composerModels()?.current)) },
+              ]} onCommand={(command) => { if (command === 'compact') compactSession(); else if (command === 'model') setModelPickerRequest((request) => request + 1) }}
+              modeError={modeCatalogError()} onRetryModes={() => void refetchProjectModes()}
             />
             <div class="composer__actions">
               <ComposerPickers
@@ -2669,22 +2839,16 @@ export function App() {
                 canAttach={(canCompose() || canQueuePrompt()) && !pending() && !!attachmentLimit() && !freebuffProjectId()}
                 onAttach={() => fileInput?.click()} />
               <div class="composer__send-actions">
-                <Show when={composerModes()}>
-                  {                  (modes) => <ComposerModePicker modes={modes()} onChange={chooseMode}
-                    defaultOption={workspace()?.modes ? pendingMode() ? 'Use session mode' : undefined : 'Default mode'}
-                    disabled={pending() || cancellingTurn() || !!freebuffProjectId()}
-                    unavailable={modeCatalogError()} onRetry={() => void refetchProjectModes()} />}
-                </Show>
                 <Show when={currentAgent() === 'codex'}>
                   <ComposerModelPicker model={composerModel()} effort={composerEffort()} models={codexCatalog()?.models ?? []}
                     disabled={pending() || cancellingTurn() || !!freebuffProjectId()}
-                    options={codexOptions()} onChange={(codex) => patchTurnOptions({ codex })} />
+                    options={codexOptions()} onChange={(codex) => patchTurnOptions({ codex })} openRequest={modelPickerRequest()} />
                 </Show>
                 <Show when={currentAgent() !== 'codex' ? composerModels() : undefined}>
                   {(models) => <ComposerAgentModelPicker models={models()}
                     disabled={pending() || cancellingTurn() || !!freebuffProjectId()}
                     unavailable={modelCatalogError()} onRetry={() => void refetchProjectModels()}
-                    onChange={chooseModel} />}
+                    onChange={chooseModel} openRequest={modelPickerRequest()} />}
                 </Show>
                 <button
                   type="button"
@@ -2733,7 +2897,7 @@ export function App() {
                   taskHasWorktree={!!workspace()?.task.worktreePath}
                   transcript={workspace()?.transcript}
                   agentTerminals={workspace()?.task.id === selectedTaskId() && workspace()?.capabilities?.agentTerminals ? workspace()?.agentTerminals : undefined}
-                  listEvent={terminalListEvent()} shown={inspectorTab() === 'terminals'}
+                  listEvent={terminalListEvent()} shown={!settingsOpen() && inspectorTab() === 'terminals'}
                   freebuffFront={!!freebuffProjectId()} freebuffAttention={freebuffAttention()}
                   onOpenFreebuff={() => {
                     const projectId = selectedProjectId()
@@ -2750,7 +2914,7 @@ export function App() {
               <Show when={selectedProjectId()} keyed fallback={<p class="empty">Select a project to preview.</p>}>
                 {(projectId) => <PreviewPane projectId={projectId} url={selectedProject()?.previewUrl}
                   taskId={workspace()?.task.id}
-                  shown={inspectorTab() === 'preview'} canAddToPrompt={canAddPreviewNote()}
+                  shown={!settingsOpen() && inspectorTab() === 'preview'} canAddToPrompt={canAddPreviewNote()}
                   attachmentLimit={attachmentLimit()}
                   onAddToPrompt={addPreviewNote} onProjectSettings={() => openProjectSettings(projectId)} />}
               </Show>
@@ -2769,24 +2933,28 @@ export function App() {
                 />}
               </Show>
             </InspectorPanel>
-            <InspectorPanel id="git" active={inspectorTab()} lazy>
-              <Show when={workspace()?.task.worktreePath} fallback={<p class="empty">Select a task with a worktree.</p>}>
-                <Show when={workspace()?.task.id} keyed>
-                  {(taskId) => <GitPane openTerminal={() => setInspectorTab('terminals')} openFile={openTaskFile} taskId={taskId}
-                    revision={workspace()!.task.updatedAt} live={LIVE_STATES.includes(workspace()!.task.state) || workspace()!.task.state === 'done'}
-                    request={gitRequest()} onRequestHandled={(request) => setGitRequest((current) => current === request ? undefined : current)}
-                    commitShortcut={chordFor('commit')} />}
-                </Show>
-              </Show>
-            </InspectorPanel>
             <InspectorPanel id="files" active={inspectorTab()} lazy>
               <Show when={selectedProject()?.missing === false && selectedProjectId()} keyed
                 fallback={<p class="empty">Select an available project to browse its files.</p>}>
-                {(projectId) => <FilesPane projectId={projectId} initialFile={fileRequest()}
-                  worktreeTaskId={workspace()?.task.worktreePath && workspace()?.task.id === selectedTaskId() && workspace()?.task.projectId === selectedProjectId() ? selectedTaskId() : null}
-                  showDotfiles={preferences()?.app['files.show_dotfiles'] ?? preferences()?.defaults['files.show_dotfiles'] ?? true}
-                  settingsDisabled={!preferencesEditable() || savingPreference()}
-                  onShowDotfilesChange={(value) => void requestPreference('files.show_dotfiles', value)} />}
+                {(projectId) => {
+                  const files = <FilesPane projectId={projectId} initialFile={fileRequest()}
+                    worktreeTaskId={workspace()?.task.worktreePath && workspace()?.task.id === selectedTaskId() && workspace()?.task.projectId === selectedProjectId() ? selectedTaskId() : null}
+                    showDotfiles={preferences()?.app['files.show_dotfiles'] ?? preferences()?.defaults['files.show_dotfiles'] ?? true}
+                    settingsDisabled={!preferencesEditable() || savingPreference()}
+                    onShowDotfilesChange={(value) => void requestPreference('files.show_dotfiles', value)} />
+                  return <div class="explorer">
+                    <SegmentedControl label="File explorer view" value={explorerMode()} choices={[{ value: 'files', label: 'Files' }, { value: 'changes', label: 'Changes' }]} onChange={setExplorerMode} />
+                    <Show when={workspace()?.task.worktreePath && workspace()?.task.id} keyed fallback={
+                      <><div class="explorer__content" hidden={explorerMode() !== 'files'}>{files}</div><Show when={explorerMode() === 'changes'}><p class="empty">Select a task with a worktree to see changes.</p></Show></>
+                    }>
+                      {(taskId) => <GitPane openTerminal={() => setInspectorTab('terminals')} openFile={openTaskFile} taskId={taskId} fileRevision={worktreeFileRevision()}
+                        mode={explorerMode()} files={files} worktree={workspace()!.task.worktreePath!} worktreeLabel={worktreeLabel(workspace()!.task.worktreePath!, projectId)} baseBranch={workspace()!.task.baseBranch}
+                        revision={workspace()!.task.updatedAt} live={LIVE_STATES.includes(workspace()!.task.state) || workspace()!.task.state === 'done'}
+                        request={gitRequest()} onRequestHandled={(request) => setGitRequest((current) => current === request ? undefined : current)}
+                        commitShortcut={chordFor('commit')} />}
+                    </Show>
+                  </div>
+                }}
               </Show>
             </InspectorPanel>
           </div>
@@ -2842,6 +3010,12 @@ function WorkspaceFrame(props: {
   onInspectorWidthChange: (width: number) => Promise<void>
   search: JSX.Element
   sidebarHidden: boolean
+  settingsOpen: boolean
+  onSettings: () => void
+  canGoBack: boolean
+  canGoForward: boolean
+  onBack: () => void
+  onForward: () => void
   onCommands: () => void
   paletteShortcut?: string
 }) {
@@ -2895,17 +3069,22 @@ function WorkspaceFrame(props: {
       '--chat-min-width': `${CHAT_MIN_WIDTH}px`,
     }}>
       <header class="shell__header" aria-label="Workspace header">
+        <Show when={!props.settingsOpen}>
+          <span class="shell__header-divider shell__header-divider--rail" aria-hidden="true" />
+          <Show when={!props.sidebarHidden}><span class="shell__header-divider shell__header-divider--conversation" aria-hidden="true" /></Show>
+          <span class="shell__header-divider shell__header-divider--inspector" aria-hidden="true" />
+        </Show>
         <div class="shell__header-navigation" data-tauri-drag-region={dragRegion}>
           <Show when={macWindow}>
             <div class="shell__window-controls" data-tauri-drag-region="" aria-hidden="true" />
           </Show>
           <div class="shell__history" role="group" aria-label="Navigation history" data-tauri-drag-region={dragRegion}>
-            <button class="shell__icon-button" type="button" aria-label="Previous" title="Previous" disabled>
+            <button class="shell__icon-button" type="button" aria-label="Previous" title="Previous" disabled={!props.canGoBack} onClick={props.onBack}>
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                 <path d="m14 6-6 6 6 6" />
               </svg>
             </button>
-            <button class="shell__icon-button" type="button" aria-label="Next" title="Next" disabled>
+            <button class="shell__icon-button" type="button" aria-label="Next" title="Next" disabled={!props.canGoForward} onClick={props.onForward}>
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                 <path d="m10 6 6 6-6 6" />
               </svg>
@@ -2933,10 +3112,18 @@ function WorkspaceFrame(props: {
             <path d="m7 9 3 3-3 3m6 0h4" />
           </svg>
         </button>
+        <button class="shell__icon-button shell__rail-settings" type="button" aria-label="Settings"
+          aria-describedby="rail-settings-tooltip" aria-pressed={props.settingsOpen} onClick={props.onSettings}>
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <circle cx="12" cy="12" r="4" />
+            <path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.7 1.7 0 0 0-1.88-.34 1.7 1.7 0 0 0-1.03 1.55V21a2 2 0 1 1-4 0v-.08A1.7 1.7 0 0 0 8.97 19.4a1.7 1.7 0 0 0-1.88.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-1.55-1H3a2 2 0 1 1 0-4h.08A1.7 1.7 0 0 0 4.6 8.97a1.7 1.7 0 0 0-.34-1.88l-.06-.06A2 2 0 1 1 7.03 4.2l.06.06A1.7 1.7 0 0 0 8.97 4.6 1.7 1.7 0 0 0 10 3.05V3a2 2 0 1 1 4 0v.08A1.7 1.7 0 0 0 15.03 4.6a1.7 1.7 0 0 0 1.88-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.7 1.7 0 0 0 19.4 8.97 1.7 1.7 0 0 0 20.95 10H21a2 2 0 1 1 0 4h-.08A1.7 1.7 0 0 0 19.4 15Z" />
+          </svg>
+          <span class="shell__rail-tooltip" id="rail-settings-tooltip" role="tooltip">Settings</span>
+        </button>
       </nav>
       <div class="shell__body" ref={body}>
         {props.children}
-        <div class="workspace-divider" role="separator" aria-label="Resize inspector"
+        <div class="workspace-divider" role="separator" aria-label="Resize inspector" hidden={props.settingsOpen}
           aria-controls="workspace-inspector" aria-orientation="vertical" tabIndex={0}
           aria-valuemin={INSPECTOR_MIN_WIDTH} aria-valuemax={metrics().limit}
           aria-valuenow={Math.max(INSPECTOR_MIN_WIDTH, metrics().width)}
@@ -2978,35 +3165,10 @@ function WorkspaceFrame(props: {
   )
 }
 
-interface PickerOption {
-  id: string
-  name: string
-  detail?: string
-  disabled?: boolean
-  icon?: JSX.Element
-}
-
-interface PickerGroup {
-  label?: string
-  value?: string
-  options: PickerOption[]
-}
-
-interface PickerMenuProps {
-  label: string
-  text?: string
-  value?: string
-  options?: PickerOption[]
-  groups?: PickerGroup[]
-  onChange?: (value: string) => void
-  filterable?: boolean
-  disabled?: boolean
-}
-
-const DEFAULT_APPROVAL = { id: 'ask', name: 'Ask me' }
+const DEFAULT_APPROVAL = { id: 'ask', name: 'Ask me', description: 'Ask before running commands' }
 const APPROVAL_OPTIONS: PickerOption[] = [
   DEFAULT_APPROVAL,
-  { id: 'automatic', name: 'Approve for me (coming soon)', disabled: true },
+  { id: 'automatic', name: 'Auto', description: 'Decide for me', detail: 'Coming soon', disabled: true },
 ]
 
 function ComposerPickers(props: { agent: string; agentName: string; agents: PickerOption[]; onAgentChange: (value: string) => void; freebuffLive?: boolean; locked?: boolean; showShellApprovals: boolean; canAttach: boolean; onAttach: () => void }) {
@@ -3032,7 +3194,7 @@ function ComposerPickers(props: { agent: string; agentName: string; agents: Pick
       </Show>
       <PickerMenu label="Agent" text={props.agentName} value={props.agent}
         options={props.agents.map((option) => ({ ...option, icon: <AgentIcon agent={option.id} /> }))}
-        onChange={props.onAgentChange} triggerClass="composer__picker" above>
+        onChange={props.onAgentChange} triggerClass="composer__picker composer__picker--agent" above>
         <Show when={props.freebuffLive}>
           <span class="terminal-attention" role="img" aria-label="Freebuff terminal is live" />
         </Show>
@@ -3044,29 +3206,9 @@ function ComposerPickers(props: { agent: string; agentName: string; agents: Pick
   )
 }
 
-function ComposerModePicker(props: { modes: bridge.AgentModes; disabled: boolean; defaultOption?: string; unavailable?: string; onRetry?: () => void; onChange: (mode: string) => void }) {
-  const available = () => props.modes.options.length > 0 || !!props.modes.current
-  const label = () => props.modes.options.find((option) => option.id === props.modes.current)?.name
-    ?? props.modes.current ?? 'Default mode'
-  const options = () => [
-    ...(props.defaultOption ? [{ id: '', name: props.defaultOption, disabled: props.disabled }] : []),
-    ...props.modes.options.map((option) => ({
-      id: option.id, name: option.name, detail: option.description ?? undefined, disabled: props.disabled,
-    })),
-  ]
-  return (
-    <Show when={available()} fallback={<ComposerPickerFallback label="No mode available" detail={props.unavailable} onRetry={props.onRetry} />}>
-      <PickerMenu label="Mode" text={label()} value={props.modes.current ?? ''} options={options()}
-        onChange={props.onChange} triggerClass="composer__picker" disabled={props.disabled} above>
-        <span class="composer__picker-label">{label()}</span>
-        <PickerCaret />
-      </PickerMenu>
-    </Show>
-  )
-}
-
 function ComposerAgentModelPicker(props: {
   models: bridge.AgentModels
+  openRequest: number
   disabled: boolean
   unavailable?: string
   onRetry?: () => void
@@ -3089,7 +3231,7 @@ function ComposerAgentModelPicker(props: {
   return (
     <Show when={available()} fallback={<ComposerPickerFallback label="No model available" detail={props.unavailable} onRetry={props.onRetry} />}>
       <PickerMenu label="Model" text={label()} value={`model:${props.models.current ?? ''}`} options={options()}
-        onChange={choose} triggerClass="composer__picker" disabled={props.disabled} above filterable>
+        onChange={choose} triggerClass="composer__picker" disabled={props.disabled} openRequest={props.openRequest} above filterable>
         <span class="composer__picker-label">{label()}</span>
         <PickerCaret />
       </PickerMenu>
@@ -3120,6 +3262,7 @@ function ComposerModelPicker(props: {
   model: string | null
   effort?: string | null
   models: bridge.CodexModel[]
+  openRequest: number
   options?: bridge.CodexTurnOptions
   disabled: boolean
   onChange: (options: bridge.CodexTurnOptions) => void
@@ -3158,7 +3301,7 @@ function ComposerModelPicker(props: {
     }
   }
   return (
-    <PickerMenu label="Model / effort" text={modelLabel()} groups={groups()} onChange={choose} triggerClass="composer__picker" disabled={props.disabled} above>
+    <PickerMenu label="Model / effort" text={modelLabel()} groups={groups()} onChange={choose} triggerClass="composer__picker" disabled={props.disabled} openRequest={props.openRequest} above filterable>
       <span class="composer__picker-label">{modelLabel()}</span>
       <PickerCaret />
     </PickerMenu>
@@ -3171,249 +3314,6 @@ function HeadlinePicker(props: PickerMenuProps & { text: string }) {
       <span class="headline-picker__text">{props.text}</span>
       <PickerCaret />
     </PickerMenu>
-  )
-}
-
-function PickerCaret() {
-  return (
-    <svg class="picker-caret" width="0.45em" height="0.45em" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-      <path d="m2.5 4.5 3.5 3.5 3.5-3.5" />
-    </svg>
-  )
-}
-
-function fuzzyScore(query: string, text: string): number | null {
-  const needle = query.toLowerCase()
-  const haystack = text.toLowerCase()
-  let score = 0
-  let cursor = 0
-  let previous = -2
-  for (const character of needle) {
-    const found = haystack.indexOf(character, cursor)
-    if (found < 0) return null
-    score += found === previous + 1 ? 2 : 1
-    if (found === 0 || /[\s/_\-.:]/.test(haystack.charAt(found - 1))) score += 3
-    previous = found
-    cursor = found + 1
-  }
-  return score
-}
-
-function PickerMenu(props: PickerMenuProps & { triggerClass: string; above?: boolean; children: JSX.Element }) {
-  const menuId = createUniqueId()
-  const [open, setOpen] = createSignal(false)
-  const [filterQuery, setFilterQuery] = createSignal('')
-  const [activeId, setActiveId] = createSignal<string | null>(null)
-  const triggerLabel = () => props.text ? `${props.label}: ${props.text}` : props.label
-  let trigger!: HTMLButtonElement
-  let menu!: HTMLSpanElement
-  let filter!: HTMLInputElement
-  const sourceGroups = (): PickerGroup[] => props.groups ?? [{ value: props.value, options: props.options ?? [] }]
-  const visibleGroups = () => {
-    const query = filterQuery().trim()
-    if (!props.filterable || !query) return sourceGroups()
-    return sourceGroups()
-      .map((group) => ({
-        ...group,
-        options: group.options
-          .map((option) => ({ option, score: fuzzyScore(query, `${option.name} ${option.detail ?? ''}`) }))
-          .filter((entry): entry is { option: PickerOption; score: number } => entry.score !== null)
-          .sort((left, right) => right.score - left.score)
-          .map((entry) => entry.option),
-      }))
-      .filter((group) => group.options.length > 0)
-  }
-  const choices = () => visibleGroups().flatMap((group) =>
-    group.options.filter((option) => !option.disabled).map((option) => ({ group, option })))
-
-  function positionMenu() {
-    const bounds = trigger.getBoundingClientRect()
-    const viewportInset = 12
-    const gap = 6
-    const below = window.innerHeight - bounds.bottom - gap - viewportInset
-    const above = bounds.top - gap - viewportInset
-    menu.style.removeProperty('--picker-menu-room')
-    const opensAbove = props.above ? menu.offsetHeight <= above || above >= below : menu.offsetHeight > below && above > below
-    menu.style.setProperty('--picker-menu-room', `${Math.max(0, opensAbove ? above : below)}px`)
-    const left = Math.min(bounds.left, window.innerWidth - menu.offsetWidth - viewportInset)
-    menu.style.left = `${Math.max(viewportInset, left)}px`
-    menu.style.top = `${opensAbove ? bounds.top - gap - menu.offsetHeight : bounds.bottom + gap}px`
-  }
-
-  function closeMenu() {
-    menu.hidePopover()
-    trigger.focus({ preventScroll: true })
-  }
-
-  function chooseOption(group: PickerGroup, option: PickerOption) {
-    closeMenu()
-    if (option.id !== group.value) props.onChange?.(option.id)
-  }
-
-  createEffect(() => {
-    if (!props.filterable || !open()) return
-    const available = choices()
-    if (available.some((choice) => choice.option.id === activeId())) return
-    const checked = available.find((choice) => choice.group.value === choice.option.id)
-    setActiveId(checked?.option.id ?? available[0]?.option.id ?? null)
-  })
-
-  createEffect(() => {
-    if (!open()) return
-    const transcript = trigger.closest('.chat__transcript')
-    const dismiss = () => menu.hidePopover()
-    transcript?.addEventListener('scroll', dismiss)
-    window.addEventListener('resize', positionMenu)
-    onCleanup(() => {
-      transcript?.removeEventListener('scroll', dismiss)
-      window.removeEventListener('resize', positionMenu)
-    })
-  })
-
-  return (
-    <>
-      <button
-        ref={trigger}
-        class={props.triggerClass}
-        type="button"
-        disabled={props.disabled}
-        aria-label={triggerLabel()}
-        title={props.above ? triggerLabel() : undefined}
-        aria-haspopup="menu"
-        aria-controls={menuId}
-        aria-expanded={open()}
-        popovertarget={menuId}
-      >
-        {props.children}
-      </button>
-      <span
-        ref={menu}
-        id={menuId}
-        class="picker-menu"
-        popover="auto"
-        role="menu"
-        tabindex={-1}
-        aria-label={props.label}
-        on:toggle={(event) => {
-          const isOpen = event.newState === 'open'
-          setOpen(isOpen)
-          if (!isOpen) {
-            setFilterQuery('')
-            setActiveId(null)
-            return
-          }
-          positionMenu()
-          if (props.filterable) {
-            filter?.focus({ preventScroll: true })
-            return
-          }
-          const current = menu.querySelector<HTMLButtonElement>('button[aria-checked="true"]:enabled')
-            ?? menu.querySelector<HTMLButtonElement>('button:enabled')
-            ?? menu
-          current.focus()
-        }}
-        onKeyDown={(event) => {
-          if (event.key === 'Tab') {
-            closeMenu()
-            return
-          }
-          if (event.key === 'Escape') {
-            event.preventDefault()
-            closeMenu()
-            return
-          }
-          if (props.filterable) {
-            const available = choices()
-            if (event.key === 'Enter') {
-              event.preventDefault()
-              const choice = available.find((candidate) => candidate.option.id === activeId()) ?? available[0]
-              if (choice) chooseOption(choice.group, choice.option)
-              return
-            }
-            if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key) || available.length === 0) return
-            event.preventDefault()
-            const current = available.findIndex((candidate) => candidate.option.id === activeId())
-            const step = event.key === 'ArrowUp' ? -1 : 1
-            const next = event.key === 'Home'
-              ? 0
-              : event.key === 'End'
-                ? available.length - 1
-                : current < 0
-                  ? (step > 0 ? 0 : available.length - 1)
-                  : (current + step + available.length) % available.length
-            setActiveId(available[next]?.option.id ?? null)
-            return
-          }
-          if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return
-          event.preventDefault()
-          const items = Array.from(menu.querySelectorAll<HTMLButtonElement>('button:enabled'))
-          if (!items.length) return
-          const current = items.findIndex((item) => item === document.activeElement)
-          const step = event.key === 'ArrowUp' ? -1 : 1
-          let next = (current + step + items.length) % items.length
-          if (event.key === 'Home') next = 0
-          else if (event.key === 'End') next = items.length - 1
-          items[next]?.focus()
-        }}
-      >
-        <Show when={props.filterable}>
-          <span class="picker-menu__search">
-            <input
-              ref={filter}
-              class="picker-menu__filter"
-              type="text"
-              role="searchbox"
-              aria-label={`Filter ${props.label.toLowerCase()}`}
-              aria-controls={menuId}
-              autocomplete="off"
-              spellcheck={false}
-              placeholder="Filter models"
-              value={filterQuery()}
-              onInput={(event) => {
-                if (event.isComposing) return
-                setFilterQuery(event.currentTarget.value)
-                setActiveId(null)
-              }}
-              onCompositionEnd={(event) => {
-                setFilterQuery(event.currentTarget.value)
-                setActiveId(null)
-              }}
-            />
-          </span>
-          <Show when={choices().length === 0}>
-            <p class="picker-menu__empty" role="status">No matches.</p>
-          </Show>
-        </Show>
-        <For each={visibleGroups()}>{(group) =>
-          <span class="picker-menu__group" role={group.label ? 'group' : undefined} aria-label={group.label}>
-            <Show when={group.label}><span class="picker-menu__label" aria-hidden="true">{group.label}</span></Show>
-            <For each={group.options}>{(option) => (
-              <button
-                type="button"
-                class="nav-item"
-                role={group.value === undefined ? 'menuitem' : 'menuitemradio'}
-                tabindex={-1}
-                aria-checked={group.value === undefined ? undefined : group.value === option.id}
-                title={option.detail}
-                disabled={option.disabled}
-                classList={{ 'picker-menu__option--active': props.filterable && activeId() === option.id }}
-                onClick={() => chooseOption(group, option)}
-              >
-                <Show when={option.icon}>
-                  <span class="picker-menu__icon">{option.icon}</span>
-                </Show>
-                <span>{option.name}</span>
-                <Show when={group.value === option.id}>
-                  <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                    <path d="m3.5 8 3 3 6-6" />
-                  </svg>
-                </Show>
-              </button>
-            )}</For>
-          </span>
-        }</For>
-      </span>
-    </>
   )
 }
 
@@ -3461,68 +3361,11 @@ function WorktreeIcon() {
   )
 }
 
-const CLAUDE_MARK_RAYS = [0, 45, 90, 135, 180, 225, 270, 315]
-
-function ClaudeMark() {
-  return (
-    <>
-      {CLAUDE_MARK_RAYS.map((angle) => (
-        <path d="M12 2.4 13.25 9.9 12 11.7 10.75 9.9Z" transform={`rotate(${angle} 12 12)`} fill="#D97757" />
-      ))}
-    </>
-  )
-}
-
-function AgentIcon(props: { agent: string }) {
-  const frame = (children: JSX.Element, viewBox = '0 0 24 24', width = 14, height = 14) => (
-    <svg class="agent-mark" width={width} height={height} viewBox={viewBox} aria-hidden="true">
-      {children}
-    </svg>
-  )
-  switch (props.agent) {
-    case 'codex':
-      return frame(
-        <g fill="currentColor">
-          {[0, 60, 120, 180, 240, 300].map((angle) => (
-            <rect x="10.3" y="3" width="3.4" height="9" rx="1.7" transform={`rotate(${angle} 12 12)`} />
-          ))}
-        </g>,
-      )
-    case 'claude':
-      return frame(<ClaudeMark />)
-    case 'opencode':
-      return frame(
-        <g>
-          <path d="M18 30H6V18H18V30Z" fill="#CFCECD" />
-          <path d="M18 12H6V30H18V12ZM24 36H0V6H24V36Z" fill="#656363" />
-        </g>,
-        '0 0 24 30',
-        12,
-        15,
-      )
-    case 'pi':
-      return frame(
-        <g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M5.5 8.5h13" />
-          <path d="M8.8 8.5v9.5" />
-          <path d="M15.2 8.5v7c0 1.5.7 2.5 1.8 2.5" />
-        </g>,
-      )
-    default:
-      return frame(
-        <g>
-          <rect x="2.4" y="2.4" width="19.2" height="19.2" rx="5.6" fill="var(--accent)" />
-          <path d="M8.8 8.4 13 12l-4.2 3.6" fill="none" stroke="#fff" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" />
-        </g>,
-      )
-  }
-}
 
 const INSPECTOR_TABS: InspectorTabOption[] = [
   { id: 'terminals', label: 'Terminals', enabled: true, icon: 'M3 6a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Zm4 3 3 3-3 3m6 0h4' },
   { id: 'preview', label: 'Preview', enabled: true, icon: 'M2 12s3.6-6 10-6 10 6 10 6-3.6 6-10 6S2 12 2 12Zm13 0a3 3 0 1 1-6 0 3 3 0 0 1 6 0Z' },
   { id: 'review', label: 'Review', enabled: true, icon: 'M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Zm0 0v6h6M8 14l3 3 5-5' },
-  { id: 'git', label: 'Git', enabled: true, icon: 'M6 6a2 2 0 1 0 0-4 2 2 0 0 0 0 4Zm0 16a2 2 0 1 0 0-4 2 2 0 0 0 0 4ZM6 6v12M18 9a2 2 0 1 0 0-4 2 2 0 0 0 0 4Zm0 0c0 4-4 6-12 6' },
   { id: 'files', label: 'Files', enabled: true, icon: 'M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z' },
 ]
 
