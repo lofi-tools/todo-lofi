@@ -30,6 +30,7 @@ percent-encoding = "2"
 portable-pty = "0.9.0"
 serde.workspace = true
 serde_json.workspace = true
+serde_yaml = "0.9"
 sha2.workspace = true
 shep-core = { path = "../../../libs/shep-core" }
 shep-store = { path = "../../../libs/shep-store" }
