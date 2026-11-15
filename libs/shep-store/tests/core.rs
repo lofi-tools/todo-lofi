@@ -3186,6 +3186,7 @@ async fn a_fake_task_runs_through_approval_quit_and_resume()
             "approval: Run tests (Allow)",
             "agent: all done",
             "you: go again",
+            "approval: Write the file (pending)",
         ]
     );
     let saved = workspace.transcript;
