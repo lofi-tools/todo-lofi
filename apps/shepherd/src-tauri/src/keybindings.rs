@@ -16,6 +16,7 @@ use crate::config_files::{backup_path, encode_json, read_optional, write_atomic}
 pub struct KeybindingSettings {
     path: PathBuf,
     edits: Mutex<()>,
+    legacy_path: Option<PathBuf>,
 }
 
 #[derive(Serialize)]
@@ -82,9 +83,12 @@ fn parse_document(
 
 impl KeybindingSettings {
     pub fn new(path: PathBuf) -> Self {
+        let legacy_path = (path.file_name().is_some_and(|name| name == "keymap.json"))
+            .then(|| path.with_file_name("keybindings.json"));
         Self {
             path,
             edits: Mutex::new(()),
+            legacy_path,
         }
     }
 
@@ -96,10 +100,26 @@ impl KeybindingSettings {
         BridgeError::new("keybindings", self.message(cause))
     }
 
+    async fn read_document(&self) -> Result<(Option<Vec<u8>>, bool), BridgeError> {
+        let current = read_optional(&self.path)
+            .await
+            .map_err(|error| self.error(error))?;
+        if current.is_some() {
+            return Ok((current, false));
+        }
+        if let Some(path) = &self.legacy_path {
+            let legacy = read_optional(path)
+                .await
+                .map_err(|error| self.error(error))?;
+            return Ok((legacy, true));
+        }
+        Ok((None, false))
+    }
+
     async fn load(&self, platform: KeyPlatform) -> Result<KeybindingSnapshot, BridgeError> {
         let _edit = self.edits.lock().await;
-        let warning = match read_optional(&self.path).await {
-            Ok(bytes) => match parse_document(platform, bytes.as_deref()) {
+        let warning = match self.read_document().await {
+            Ok((bytes, _)) => match parse_document(platform, bytes.as_deref()) {
                 Ok((_, registry)) => {
                     return Ok(KeybindingSnapshot {
                         registry,
@@ -123,7 +143,7 @@ impl KeybindingSettings {
                     }
                 }
             },
-            Err(error) => self.message(error),
+            Err(error) => error.to_string(),
         };
         Ok(KeybindingSnapshot {
             registry: defaults(platform).map_err(|error| self.error(error))?,
@@ -137,9 +157,7 @@ impl KeybindingSettings {
         edit: KeybindingEdit,
     ) -> Result<KeybindingSnapshot, BridgeError> {
         let _edit = self.edits.lock().await;
-        let original = read_optional(&self.path)
-            .await
-            .map_err(|error| self.error(error))?;
+        let (original, from_legacy) = self.read_document().await?;
         let (mut document, registry) =
             parse_document(platform, original.as_deref()).map_err(|error| self.error(error))?;
         let binding = registry
@@ -179,14 +197,14 @@ impl KeybindingSettings {
         let (_, registry) =
             parse_document(platform, Some(&bytes)).map_err(|error| self.error(error))?;
 
-        if let Some(original) = &original {
-            write_atomic(&backup_path(&self.path), original).map_err(|error| self.error(error))?;
+        if !from_legacy {
+            if let Some(original) = &original {
+                write_atomic(&backup_path(&self.path), original)
+                    .map_err(|error| self.error(error))?;
+            }
         }
-        if read_optional(&self.path)
-            .await
-            .map_err(|error| self.error(error))?
-            != original
-        {
+        let (current, current_from_legacy) = self.read_document().await?;
+        if current != original || current_from_legacy != from_legacy {
             return Err(self.error("The file changed while saving. Retry the edit."));
         }
         write_atomic(&self.path, &bytes).map_err(|error| self.error(error))?;
@@ -224,6 +242,31 @@ mod tests {
             previous: previous.map(str::to_owned),
             chord: chord.map(str::to_owned),
         }
+    }
+
+    #[tokio::test]
+    async fn legacy_keybindings_are_read_and_first_edit_creates_keymap()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let old_path = directory.path().join("keybindings.json");
+        let new_path = directory.path().join("keymap.json");
+        let legacy = json!({"version": 1, "bindings": {"commandPalette": "F9"}});
+        write_atomic(&old_path, &encode_json(&legacy)?)?;
+        let settings = KeybindingSettings::new(new_path.clone());
+        let loaded = settings.load(KeyPlatform::Linux).await?;
+        assert!(loaded.registry.commands.iter().any(
+            |command| command.id == "commandPalette" && command.chord.as_deref() == Some("F9")
+        ));
+        settings
+            .edit(
+                KeyPlatform::Linux,
+                edit("commandPalette", Some("F9"), Some("F10")),
+            )
+            .await?;
+        let saved: Value = serde_json::from_slice(&std::fs::read(new_path)?)?;
+        assert_eq!(saved["bindings"]["commandPalette"], "F10");
+        assert_eq!(std::fs::read(old_path)?, encode_json(&legacy)?);
+        Ok(())
     }
 
     #[tokio::test]
