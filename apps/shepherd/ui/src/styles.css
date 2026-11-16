@@ -2667,6 +2667,12 @@ button.pool__agent-label { padding: 0; border: 0; background: transparent; color
   color: var(--text-disabled);
 }
 
+.terminal-restart { position: relative; margin-inline-start: auto; flex: none; }
+.terminal-pane__bar .terminal-restart__button { display: grid; place-items: center; width: 26px; height: 26px; padding: 0; border: 0; border-radius: 6px; background: transparent; color: var(--text-muted); cursor: pointer; }
+.terminal-pane__bar .terminal-restart__button:hover:enabled { background: var(--surface-raised); color: var(--text); }
+.terminal-restart__tooltip { min-width: 0; width: max-content; padding: 5px 8px; color: var(--text); font-size: 12px; white-space: nowrap; visibility: hidden; pointer-events: none; }
+.terminal-restart:hover .terminal-restart__tooltip, .terminal-restart:focus-within .terminal-restart__tooltip { visibility: visible; }
+
 .preview-pane__view {
   height: 100%;
 }

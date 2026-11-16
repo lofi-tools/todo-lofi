@@ -83,8 +83,9 @@ current layout and give future changes a point of comparison.
   panes. Use the same terminal input, resize, and hide controls as task
   shells. Released agent panes disappear when the turn settles.
   Show the project's standalone Freebuff session as one **Freebuff** row in the
-  Terms list with its live or ended state, an attention dot when it exits while
-  another agent is in front, **Open** in front and **Restart** when it ended.
+  Terms list with its live or ended state and an attention dot when it exits while
+  another agent is in front. An ended terminal has an icon-only **Restart**
+  control at the right end of its own header, with a menu-card tooltip.
   Down from the Terminals tab focuses the first live pane's **Hide pane**
   button. Arrow keys on live pane header buttons move between adjacent live
   panes. Up from a pane with no live pane above it returns to the Terminals
@@ -349,7 +350,7 @@ current layout and give future changes a point of comparison.
   are disabled with a placeholder that names the reason. Choosing another agent
   leaves the terminal running in the background and shows that agent's chat.
   **Back to chat** in the terminal's own bar does the same. An exited session
-  shows its exit code with **Restart**, and a **Freebuff** row in the Terminals
+  shows its exit code and a header **Restart** icon, and a **Freebuff** row in the Terminals
   tab brings the running session back to the front. The conversation terminal
   uses the same rounded border as the terminal panes, with an accent border
   while its input is focused and a muted border otherwise. Its focus highlight

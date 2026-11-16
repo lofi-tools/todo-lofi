@@ -25,6 +25,16 @@ interface TerminalSize {
 
 const DEFAULT_TERMINAL_SIZE: TerminalSize = { columns: 80, rows: 24 }
 
+function RestartButton(props: { disabled: boolean; onClick: () => void; buttonRef?: (button: HTMLButtonElement) => void }) {
+  const tooltipId = createUniqueId()
+  return <span class="terminal-restart">
+    <button type="button" ref={props.buttonRef} class="terminal-restart__button" aria-label="Restart" aria-describedby={tooltipId} disabled={props.disabled} onClick={props.onClick}>
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M19 8v4h-4" /><path d="M19 12a7 7 0 1 0-5.2 6.76" /><path d="m17 16 4 4m0-4-4 4" /></svg>
+    </button>
+    <span id={tooltipId} role="tooltip" class="chat__menu-card terminal-restart__tooltip">Restart</span>
+  </span>
+}
+
 export function FreebuffPane(props: {
   projectName: string
   entry: bridge.TerminalSnapshot | undefined
@@ -66,6 +76,9 @@ export function FreebuffPane(props: {
         <Show when={live()}>
           <button type="button" onClick={props.onStop} disabled={props.pending}>Stop process</button>
         </Show>
+        <Show when={props.entry && props.entry.endedAt !== null && !props.failure}>
+          <RestartButton buttonRef={(button) => { restart = button }} disabled={props.pending} onClick={props.onRestart} />
+        </Show>
       </div>
       <Show when={live() ? props.entry : undefined} keyed fallback={
         <div class="chat__terminal-state">
@@ -80,7 +93,6 @@ export function FreebuffPane(props: {
               {(entry) => <div class="terminal-ended">
                 <p>Ended{formatExit(entry().exitCode)}</p>
                 <p><code>{entry().command}</code> in <code>{entry().cwd}</code></p>
-                <button type="button" ref={restart} onClick={props.onRestart} disabled={props.pending}>Restart</button>
               </div>}
             </Show>
           }>
@@ -317,12 +329,6 @@ export function TerminalPane(props: TerminalPaneProps) {
     })
   }
 
-  function restartFreebuff(id: string) {
-    void run(async () => {
-      applyTerminalList(await bridge.restartTerminal(id, 80, 24))
-    })
-  }
-
   function splitActive(axis: bridge.SplitAxis) {
     const id = active()
     const entry = id && terminal(id)
@@ -445,9 +451,6 @@ export function TerminalPane(props: TerminalPaneProps) {
                   <span class="terminal-attention" role="img" aria-label="Freebuff terminal needs attention" />
                 </Show>
               </button>
-              <Show when={entry().endedAt !== null}>
-                <button type="button" onClick={() => restartFreebuff(entry().id)} disabled={pending()}>Restart</button>
-              </Show>
             </li>
           )}
         </Show>
@@ -728,12 +731,12 @@ function TerminalTree(props: TerminalTreeProps) {
                 <button type="button" title="Ends this shell process."
                   onClick={() => props.stop(entry().id)} disabled={props.pending}>Stop process</button>
               </Show>
+              <Show when={entry().endedAt !== null}><RestartButton disabled={props.pending} onClick={() => props.restart(entry().id)} /></Show>
             </div>
             <Show when={entry().endedAt === null} fallback={
               <div class="terminal-ended">
                 <p>Ended{formatExit(entry().exitCode)}</p>
                 <p><code>{entry().command}</code> in <code>{entry().cwd}</code></p>
-                <button type="button" onClick={() => props.restart(entry().id)} disabled={props.pending}>Restart</button>
               </div>
             }>
               <Show when={entry().id} keyed>

@@ -3952,12 +3952,21 @@ test('shows an ended Freebuff session instead of forwarding keys', async ({ page
   await page.evaluate(() => (window as unknown as { __endFreebuff: () => void }).__endFreebuff())
 
   await expect(freebuff).toContainText('Ended with exit code 130')
-  await expect(freebuff.getByRole('button', { name: 'Restart' })).toBeVisible()
+  const restart = freebuff.getByRole('button', { name: 'Restart' })
+  await expect(restart).toBeVisible()
+  await expect(page.getByRole('list', { name: 'Terminals' }).getByRole('button', { name: 'Restart' })).toHaveCount(0)
+  await restart.hover()
+  await expect(freebuff.getByRole('tooltip', { name: 'Restart' })).toBeVisible()
+  const restartBounds = await restart.boundingBox()
+  const terminalBounds = await freebuff.boundingBox()
+  if (!restartBounds || !terminalBounds) throw new Error('Missing terminal restart control')
+  expect(terminalBounds.x + terminalBounds.width - (restartBounds.x + restartBounds.width)).toBeLessThan(20)
+  expect(restartBounds.y - terminalBounds.y).toBeLessThan(20)
   await expect(freebuff.getByRole('textbox', { name: 'Terminal', exact: true })).toHaveCount(0)
   await expect(page.locator('.error-toast')).toHaveCount(0)
   await expect(chat.getByLabel('Prompt')).toBeDisabled()
 
-  await freebuff.getByRole('button', { name: 'Restart' }).click()
+  await restart.click()
   await expect(freebuff.getByRole('textbox', { name: 'Terminal', exact: true })).toBeVisible()
 })
 
