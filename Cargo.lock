@@ -11257,6 +11257,7 @@ dependencies = [
  "toasty",
  "toasty-driver-turso",
  "tokio",
+ "toml 0.8.23",
  "tracing",
  "uuid",
 ]

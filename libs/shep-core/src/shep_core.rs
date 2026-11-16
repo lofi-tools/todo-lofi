@@ -105,6 +105,10 @@ pub enum CoreError {
     EmptyPrompt,
     #[error("Agent pool settings are unavailable: {0}. Reload settings after fixing the file.")]
     PoolConfigurationUnavailable(String),
+    #[error("{0}")]
+    ProjectSetup(String),
+    #[error("{message}")]
+    StartTaskSetup { task_id: String, message: String },
     #[error("Codex model and effort options require a Codex task.")]
     CodexOptionsForOtherAgent,
     #[error("Could not resolve mentioned file {path}. {source}")]
@@ -228,6 +232,7 @@ pub struct Core {
     #[doc(hidden)]
     pub project_order: Vec<ProjectId>,
     project_preview_overrides: BTreeMap<ProjectId, url::Url>,
+    project_setups: BTreeMap<PathBuf, ProjectSetup>,
     #[doc(hidden)]
     pub tasks: BTreeMap<TaskId, Task>,
     workspace_layouts: BTreeMap<TaskId, WorkspaceLayout>,
@@ -269,6 +274,12 @@ pub struct TaskGitRead {
     base_branch: Option<String>,
     branch: Option<String>,
     approved_tip_sha: Option<String>,
+}
+
+#[derive(Clone)]
+pub struct ProjectSetup {
+    pub script: String,
+    pub approved: bool,
 }
 
 impl TaskGitRead {
@@ -349,6 +360,14 @@ fn archived_worktree_cutoff() -> u64 {
 }
 
 impl Core {
+    pub fn set_project_setup(&mut self, project: PathBuf, setup: Option<ProjectSetup>) {
+        if let Some(setup) = setup {
+            self.project_setups.insert(project, setup);
+        } else {
+            self.project_setups.remove(&project);
+        }
+    }
+
     /// A core with in-memory persistence and no agent adapter. Project and draft
     /// commands work; send and resume report [`CoreError::HarnessUnavailable`].
     pub fn new() -> Self {
@@ -366,6 +385,7 @@ impl Core {
             projects: BTreeMap::new(),
             project_order: Vec::new(),
             project_preview_overrides: BTreeMap::new(),
+            project_setups: BTreeMap::new(),
             tasks: BTreeMap::new(),
             workspace_layouts: BTreeMap::new(),
             sessions: BTreeMap::new(),
@@ -1884,6 +1904,13 @@ impl Core {
         .await;
         match started {
             Ok(result) => Ok(result),
+            Err(CoreError::ProjectSetup(message)) => {
+                self.publish_task(&task_id)?;
+                Err(CoreError::StartTaskSetup {
+                    task_id: task_id.to_string(),
+                    message,
+                })
+            }
             Err(error) => {
                 let remove_worktree = self
                     .task(&task_id)
@@ -2426,6 +2453,38 @@ impl Core {
             self.queued_prompts.insert(task_id.clone(), prompts);
             return Ok(CommandResult::TaskWorkspace(self.publish_task(task_id)?));
         }
+        let project_path = self.task_project_path(task_id)?;
+        let setup = self.project_setups.get(&project_path).cloned();
+        let repository = GitService::discover(&project_path)?;
+        let setup_marker = repository
+            .git_dir
+            .join("shepherd")
+            .join("setup")
+            .join(task_id.as_str());
+        let setup_pending = setup_marker.exists();
+        if state == TaskState::Draft || setup_pending {
+            if let Some(setup) = setup
+                .as_ref()
+                .filter(|setup| !setup.script.trim().is_empty())
+            {
+                if !setup.approved {
+                    return Err(CoreError::ProjectSetup("Review and approve the worktree setup script in Project settings before starting this task.".into()));
+                }
+                if state == TaskState::Draft {
+                    let directory = setup_marker.parent().ok_or_else(|| {
+                        CoreError::ProjectSetup("Invalid setup state path.".into())
+                    })?;
+                    std::fs::create_dir_all(directory).map_err(|error| {
+                        CoreError::ProjectSetup(format!("Could not save setup state: {error}"))
+                    })?;
+                    std::fs::write(&setup_marker, b"pending").map_err(|error| {
+                        CoreError::ProjectSetup(format!("Could not save setup state: {error}"))
+                    })?;
+                }
+            } else if setup_pending {
+                return Err(CoreError::ProjectSetup("The pending worktree setup is unavailable. Restore it in Project settings before retrying.".into()));
+            }
+        }
         match state {
             TaskState::Draft => self.create_worktree(task_id).await?,
             TaskState::Ready | TaskState::Review | TaskState::Interrupted | TaskState::Failed => {
@@ -2437,6 +2496,50 @@ impl Core {
                     state: state.as_str(),
                 });
             }
+        }
+
+        if setup_marker.exists() {
+            let setup = setup.ok_or_else(|| {
+                CoreError::ProjectSetup("The worktree setup is unavailable.".into())
+            })?;
+            let directory = self.task(task_id)?.worktree_path.as_ref().ok_or_else(|| {
+                CoreError::ProjectSetup("The task has no worktree for setup.".into())
+            })?;
+            #[cfg(not(target_os = "windows"))]
+            let mut command = tokio::process::Command::new("/bin/sh");
+            #[cfg(target_os = "windows")]
+            let mut command = tokio::process::Command::new("powershell.exe");
+            #[cfg(not(target_os = "windows"))]
+            command.arg("-c");
+            #[cfg(target_os = "windows")]
+            command.args(["-NoProfile", "-Command"]);
+            let output = command
+                .arg(&setup.script)
+                .current_dir(directory)
+                .output()
+                .await
+                .map_err(|error| {
+                    CoreError::ProjectSetup(format!("Could not start worktree setup: {error}"))
+                })?;
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                let detail = if stderr.trim().is_empty() {
+                    stdout.trim()
+                } else {
+                    stderr.trim()
+                };
+                let detail: String = detail.chars().take(4000).collect();
+                return Err(CoreError::ProjectSetup(format!(
+                    "Worktree setup failed ({}). {detail}",
+                    output.status
+                )));
+            }
+            std::fs::remove_file(&setup_marker).map_err(|error| {
+                CoreError::ProjectSetup(format!(
+                    "Setup completed but its state could not be saved: {error}"
+                ))
+            })?;
         }
 
         if let Some(path) = self.task(task_id)?.worktree_path.as_ref() {
@@ -4000,6 +4103,70 @@ pub async fn pause_worktree_deletion_fixture(
 mod terminal_layout_tests {
     use super::*;
     use crate::terminal::{SplitAxis, TerminalSplit};
+
+    #[cfg(feature = "git")]
+    #[tokio::test]
+    async fn worktree_setup_requires_approval_and_retries_before_the_agent()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let repository = crate::test_support::TestRepository::new()?;
+        let mut core = Core::new();
+        core.execute(Command::AddProject {
+            path: repository.path().to_path_buf(),
+        })
+        .await?;
+        let project = core
+            .project_order
+            .last()
+            .cloned()
+            .ok_or("missing project")?;
+        core.create_draft(&project, "setup test".into(), Agent::Codex)
+            .await?;
+        let task_id = core.tasks.keys().next().cloned().ok_or("missing task")?;
+        let project_path = core.task_project_path(&task_id)?;
+        let script = "if [ ! -f first-attempt ]; then touch first-attempt; exit 1; fi; printf x >> setup-count".to_string();
+        core.set_project_setup(
+            project_path.clone(),
+            Some(ProjectSetup {
+                script: script.clone(),
+                approved: false,
+            }),
+        );
+        assert!(matches!(
+            core.send_prompt(&task_id, PromptInput::text("hello")).await,
+            Err(CoreError::ProjectSetup(_))
+        ));
+        assert!(core.task(&task_id)?.worktree_path.is_none());
+        core.set_project_setup(
+            project_path,
+            Some(ProjectSetup {
+                script,
+                approved: true,
+            }),
+        );
+        assert!(matches!(
+            core.send_prompt(&task_id, PromptInput::text("hello")).await,
+            Err(CoreError::ProjectSetup(_))
+        ));
+        let worktree = core
+            .task(&task_id)?
+            .worktree_path
+            .clone()
+            .ok_or("missing worktree")?;
+        assert!(worktree.join("first-attempt").exists());
+        assert!(
+            core.send_prompt(&task_id, PromptInput::text("hello"))
+                .await
+                .is_err()
+        );
+        assert_eq!(std::fs::read_to_string(worktree.join("setup-count"))?, "x");
+        assert!(
+            core.send_prompt(&task_id, PromptInput::text("hello"))
+                .await
+                .is_err()
+        );
+        assert_eq!(std::fs::read_to_string(worktree.join("setup-count"))?, "x");
+        Ok(())
+    }
 
     #[tokio::test]
     async fn terminal_exit_publishes_list_and_layout_together()

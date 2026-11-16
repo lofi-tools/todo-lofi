@@ -239,6 +239,18 @@ These preference values take precedence over saved project and app values. Reloa
 settings after editing this file. When a value is supplied by this file, edit the
 file to change it; Shepherd leaves it untouched.
 
+Shepherd imports a detected `.codex/environments/environment.toml` into the
+project's `environment` setting. Project settings show the imported worktree
+setup script and actions. Review and approve a setup script before it runs;
+Shepherd runs it in each newly assigned task worktree before starting the agent.
+If setup fails, sending the prompt again retries it in the same worktree.
+Project action buttons open task terminals in that worktree. Shepherd remembers
+the source file's hash and offers an update when it changes; updating replaces
+the saved copy and changed setup scripts require a new approval. Shepherd
+supports version 1 setup scripts and named actions, including platform-specific
+variants; unsupported fields are reported instead of being silently imported.
+If a later source file is invalid, the saved copy remains available.
+
 In **Settings → Agent pool**, reorder installed agents to choose which available
 agent a new conversation uses first. You can change the agent in the draft.
 If none is available, the draft remains editable until a harness is configured.

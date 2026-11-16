@@ -65,6 +65,8 @@ pub struct BridgeError {
     causes: Vec<String>,
     #[serde(rename = "quitConfirmation", skip_serializing_if = "Option::is_none")]
     quit_confirmation: Option<QuitConfirmation>,
+    #[serde(rename = "taskId", skip_serializing_if = "Option::is_none")]
+    task_id: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -87,6 +89,7 @@ impl BridgeError {
             message: message.into(),
             causes: Vec::new(),
             quit_confirmation: None,
+            task_id: None,
         }
     }
 }
@@ -105,10 +108,18 @@ impl From<CoreError> for BridgeError {
     fn from(error: CoreError) -> Self {
         let code = if matches!(error, CoreError::TerminalLayoutChanged) {
             "terminal_layout_changed"
+        } else if matches!(
+            error,
+            CoreError::ProjectSetup(_) | CoreError::StartTaskSetup { .. }
+        ) {
+            "project_setup"
         } else {
             "core"
         };
         let mut bridge_error = Self::new(code, error.to_string());
+        if let CoreError::StartTaskSetup { task_id, .. } = &error {
+            bridge_error.task_id = Some(task_id.clone());
+        }
         bridge_error.causes = error_causes(&error);
         if let CoreError::QuitConfirmationRequired {
             live_tasks,
@@ -1541,6 +1552,20 @@ impl ShellState {
         .await
     }
 
+    async fn configure_project_setup(&self, project_path: PathBuf) -> Result<(), BridgeError> {
+        let (environment, _, _) = self.preferences.project_environment(&project_path).await?;
+        let setup = environment.map(|environment| shep_core::ProjectSetup {
+            approved: environment.approved_setup_hash.as_deref()
+                == Some(crate::project_environment::hash(environment.setup.as_bytes()).as_str()),
+            script: environment.setup,
+        });
+        self.core
+            .lock()
+            .await
+            .set_project_setup(project_path, setup);
+        Ok(())
+    }
+
     pub async fn start_task(
         &self,
         project_id: String,
@@ -1550,6 +1575,12 @@ impl ShellState {
         model: Option<String>,
         agent: Agent,
     ) -> Result<TaskWorkspace, BridgeError> {
+        let project_path = self
+            .core
+            .lock()
+            .await
+            .project_path(&ProjectId::new(&project_id))?;
+        self.configure_project_setup(project_path).await?;
         self.workspace(Command::StartTask {
             project_id: ProjectId::new(project_id),
             agent,
@@ -1793,6 +1824,12 @@ impl ShellState {
         mode: Option<String>,
         model: Option<String>,
     ) -> Result<TaskWorkspace, BridgeError> {
+        let project_path = self
+            .core
+            .lock()
+            .await
+            .task_project_path(&TaskId::new(&task_id))?;
+        self.configure_project_setup(project_path).await?;
         let mut input = PromptInput {
             text,
             codex,
@@ -2927,6 +2964,41 @@ impl ShellState {
             .lock()
             .await
             .terminal_list(&ProjectId::new(project_id))
+    }
+
+    async fn project_environment(
+        &self,
+        project_id: String,
+    ) -> Result<serde_json::Value, BridgeError> {
+        let project = self
+            .core
+            .lock()
+            .await
+            .project_path(&ProjectId::new(project_id))?;
+        let (current, source, warning) = self.preferences.project_environment(&project).await?;
+        let setup_hash = current
+            .as_ref()
+            .map(|environment| crate::project_environment::hash(environment.setup.as_bytes()));
+        Ok(
+            serde_json::json!({ "current": current, "source": source, "setupHash": setup_hash, "warning": warning }),
+        )
+    }
+
+    async fn save_project_environment(
+        &self,
+        project_id: String,
+        previous: Option<crate::project_environment::ProjectEnvironment>,
+        environment: crate::project_environment::ProjectEnvironment,
+    ) -> Result<serde_json::Value, BridgeError> {
+        let project = self
+            .core
+            .lock()
+            .await
+            .project_path(&ProjectId::new(project_id.clone()))?;
+        self.preferences
+            .save_project_environment(&project, previous, environment)
+            .await?;
+        self.project_environment(project_id).await
     }
 
     pub async fn start_terminal(
@@ -4676,6 +4748,26 @@ pub mod commands {
         project_id: String,
     ) -> Result<TerminalList, BridgeError> {
         Ok(state.inner().terminal_list(project_id).await)
+    }
+
+    #[tauri::command]
+    pub async fn project_environment(
+        state: State<'_, ShellState>,
+        project_id: String,
+    ) -> Result<serde_json::Value, BridgeError> {
+        state.project_environment(project_id).await
+    }
+
+    #[tauri::command]
+    pub async fn save_project_environment(
+        state: State<'_, ShellState>,
+        project_id: String,
+        previous: Option<crate::project_environment::ProjectEnvironment>,
+        environment: crate::project_environment::ProjectEnvironment,
+    ) -> Result<serde_json::Value, BridgeError> {
+        state
+            .save_project_environment(project_id, previous, environment)
+            .await
     }
 
     #[tauri::command]

@@ -39,6 +39,7 @@ tauri = { version = "2", features = [] }
 tempfile = "3"
 thiserror.workspace = true
 tokio.workspace = true
+toml = "0.8"
 tracing.workspace = true
 uuid.workspace = true
 

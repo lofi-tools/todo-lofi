@@ -18,6 +18,7 @@ mod keybindings;
 mod orphan_process;
 mod preview_annotations;
 mod preview_server;
+mod project_environment;
 mod pty_terminal;
 mod settings;
 mod skills;
@@ -397,6 +398,8 @@ pub fn run() -> Result<(), tauri::Error> {
             bridge::commands::agent_skills,
             bridge::commands::add_project,
             bridge::commands::set_project_preview_url,
+            bridge::commands::project_environment,
+            bridge::commands::save_project_environment,
             bridge::commands::open_project_preview,
             bridge::commands::open_project_annotation_wrapper,
             bridge::commands::validate_preview_annotations,

@@ -37,10 +37,12 @@ pub enum SettingKey {
     Scrollback,
     #[serde(rename = "files.show_dotfiles")]
     ShowDotfiles,
+    #[serde(rename = "environment")]
+    ProjectEnvironment,
 }
 
 impl SettingKey {
-    const ALL: [Self; 10] = [
+    const ALL: [Self; 11] = [
         Self::AgentPriority,
         Self::OnboardingCompleted,
         Self::Theme,
@@ -51,6 +53,7 @@ impl SettingKey {
         Self::AttachmentBytes,
         Self::Scrollback,
         Self::ShowDotfiles,
+        Self::ProjectEnvironment,
     ];
 
     fn name(self) -> &'static str {
@@ -65,6 +68,7 @@ impl SettingKey {
             Self::AttachmentBytes => "attachments.max_file_bytes",
             Self::Scrollback => "terminal.scrollback_lines",
             Self::ShowDotfiles => "files.show_dotfiles",
+            Self::ProjectEnvironment => "environment",
         }
     }
 
@@ -79,18 +83,30 @@ impl SettingKey {
             Self::SendAccent => json!("Blue"),
             Self::AttachmentBytes => json!(DEFAULT_ATTACHMENT_BYTES),
             Self::Scrollback => json!(DEFAULT_SCROLLBACK),
+            Self::ProjectEnvironment => Value::Null,
         }
     }
 
     fn project_scoped(self) -> bool {
         matches!(
             self,
-            Self::ShowArchived | Self::AttachmentBytes | Self::Scrollback
+            Self::ShowArchived
+                | Self::AttachmentBytes
+                | Self::Scrollback
+                | Self::ProjectEnvironment
         )
     }
 
     fn validate(self, value: &Value) -> Result<(), String> {
         let reason = match self {
+            Self::ProjectEnvironment
+                if serde_json::from_value::<crate::project_environment::ProjectEnvironment>(
+                    value.clone(),
+                )
+                .is_err() =>
+            {
+                "Enter a valid project environment."
+            }
             Self::AgentPriority
                 if !value.as_array().is_some_and(|agents| {
                     let mut seen = std::collections::BTreeSet::new();
@@ -603,6 +619,95 @@ impl Settings {
             .unwrap_or_else(|| key.default_value())
     }
 
+    pub(crate) async fn project_environment(
+        &self,
+        project: &Path,
+    ) -> Result<
+        (
+            Option<crate::project_environment::ProjectEnvironment>,
+            Option<crate::project_environment::ProjectEnvironment>,
+            Option<String>,
+        ),
+        BridgeError,
+    > {
+        let mut value = self
+            .value(Some(project), SettingKey::ProjectEnvironment)
+            .await;
+        let (source, warning) = match crate::project_environment::read(project) {
+            Ok(source) => (source, None),
+            Err(error) if !value.is_null() => (None, Some(error)),
+            Err(error) => return Err(BridgeError::new("project_environment", error)),
+        };
+        if value.is_null()
+            && self.has_path()
+            && let Some(environment) = &source
+        {
+            value = serde_json::to_value(environment)
+                .map_err(|error| BridgeError::new("project_environment", error.to_string()))?;
+            self.edit(
+                Some(project),
+                SettingsEdit {
+                    project_id: None,
+                    key: SettingKey::ProjectEnvironment,
+                    previous: None,
+                    value: Some(value.clone()),
+                },
+            )
+            .await?;
+        }
+        let imported = if value.is_null() {
+            None
+        } else {
+            Some(serde_json::from_value(value).map_err(|error| {
+                BridgeError::new(
+                    "project_environment",
+                    format!("Invalid project environment: {error}"),
+                )
+            })?)
+        };
+        Ok((imported, source, warning))
+    }
+
+    pub(crate) async fn save_project_environment(
+        &self,
+        project: &Path,
+        previous: Option<crate::project_environment::ProjectEnvironment>,
+        environment: crate::project_environment::ProjectEnvironment,
+    ) -> Result<(), BridgeError> {
+        if !environment.source_hash.is_empty()
+            && previous.as_ref().map(|value| value.source_hash.as_str())
+                != Some(environment.source_hash.as_str())
+        {
+            let source = crate::project_environment::read(project)
+                .map_err(|error| BridgeError::new("project_environment", error))?;
+            if source.as_ref().map(|value| value.source_hash.as_str())
+                != Some(environment.source_hash.as_str())
+            {
+                return Err(BridgeError::new(
+                    "settings_conflict",
+                    "The Codex environment changed again. Reload it before updating.",
+                ));
+            }
+        }
+        let previous = previous
+            .map(serde_json::to_value)
+            .transpose()
+            .map_err(|error| BridgeError::new("project_environment", error.to_string()))?;
+        let value = serde_json::to_value(environment)
+            .map_err(|error| BridgeError::new("project_environment", error.to_string()))?;
+        self.edit(
+            Some(project),
+            SettingsEdit {
+                project_id: None,
+                key: SettingKey::ProjectEnvironment,
+                previous,
+                value: Some(value),
+            },
+        )
+        .await?;
+        Ok(())
+    }
+
     async fn edit(
         &self,
         project: Option<&Path>,
@@ -722,6 +827,58 @@ pub async fn set_setting(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn codex_environment_import_keeps_edits_when_source_changes()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let project = directory.path().join("project");
+        let source = project.join(".codex/environments/environment.toml");
+        std::fs::create_dir_all(source.parent().ok_or("missing parent")?)?;
+        std::fs::write(&source, "version = 1\n[setup]\nscript = 'first'\n")?;
+        let settings = Settings::new(directory.path().join("settings.json"));
+        settings.reload().await;
+        let (current, _, _) = settings.project_environment(&project).await?;
+        let current = current.ok_or("missing import")?;
+        let mut edited = current.clone();
+        edited.setup = "user edit".into();
+        settings
+            .save_project_environment(&project, Some(current.clone()), edited.clone())
+            .await?;
+        std::fs::write(&source, "version = 1\n[setup]\nscript = 'second'\n")?;
+        let (current, updated, _) = settings.project_environment(&project).await?;
+        let current = current.ok_or("missing saved environment")?;
+        let updated = updated.ok_or("missing updated source")?;
+        assert_eq!(current.setup, "user edit");
+        assert_ne!(current.source_hash, updated.source_hash);
+        assert!(
+            settings
+                .save_project_environment(&project, Some(current.clone()), updated.clone())
+                .await
+                .is_ok()
+        );
+        assert_eq!(
+            settings
+                .project_environment(&project)
+                .await?
+                .0
+                .ok_or("missing update")?
+                .setup,
+            "second"
+        );
+        assert!(
+            settings
+                .save_project_environment(&project, Some(current), edited)
+                .await
+                .is_err()
+        );
+        std::fs::write(&source, "version = 2")?;
+        let (current, source, warning) = settings.project_environment(&project).await?;
+        assert_eq!(current.ok_or("missing saved environment")?.setup, "second");
+        assert!(source.is_none());
+        assert!(warning.is_some());
+        Ok(())
+    }
 
     fn edit(key: SettingKey, previous: Option<Value>, value: Option<Value>) -> SettingsEdit {
         SettingsEdit {
