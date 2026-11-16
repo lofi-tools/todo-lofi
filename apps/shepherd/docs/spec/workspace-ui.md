@@ -66,10 +66,11 @@ current layout and give future changes a point of comparison.
   project-shared terminal and a branch for a task terminal; the Freebuff row
   reuses the composer picker's Freebuff brand mark (`FreebuffMark`) rather than a
   separate glyph. Keep the scope and view state out of the row
-  text: name it in the row's tooltip instead. Beside the creation actions, a
-  segmented **Both / Project / Task** filter narrows the instance list and the
-  panes; starting a terminal the filter hides returns it to **Both**. The
-  A single icon-only **New terminal** button creates the selected scope; **Both**
+  text: name it in the row's tooltip instead. A static **Terminals** heading
+  shares its row with a segmented **Both / Project / Task** filter and the
+  icon-only **New terminal** button at the right. The filter narrows the always-visible instance list and
+  the panes; starting a terminal the filter hides returns it to **Both**.
+  **New terminal** creates the selected scope; **Both**
   creates a task terminal and is disabled until a worktree exists. A task
   terminal can be shared with the project while retaining its working directory.
   The segmented control is the reusable `SegmentedControl` component: a weak track

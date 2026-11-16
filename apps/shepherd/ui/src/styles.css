@@ -2643,6 +2643,10 @@ button.pool__agent-label { padding: 0; border: 0; background: transparent; color
   font-size: 12px;
 }
 
+.terminal-pane__heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.terminal-pane__heading h2 { margin: 0; font-size: 13px; }
+.terminal-pane__heading .terminal-pane__new { margin-inline-start: auto; }
+
 .terminal-pane__bar button,
 .terminal-ended button {
   padding: 4px 10px;

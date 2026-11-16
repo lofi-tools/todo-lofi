@@ -380,7 +380,10 @@ export function TerminalPane(props: TerminalPaneProps) {
 
   return (
     <div class="terminal-pane">
-      <div class="terminal-pane__bar">
+      <div class="terminal-pane__heading">
+        <h2>Terminals</h2>
+        <SegmentedControl label="Terminal types" value={scopeFilter()} choices={TERMINAL_TYPES}
+          onChange={setScopeFilter} />
         <button type="button" class="terminal-pane__new" aria-label="New terminal"
           title={scopeFilter() === 'project' ? 'New project terminal' : 'New task terminal'}
           disabled={pending() || (scopeFilter() !== 'project' && !props.taskHasWorktree)}
@@ -390,9 +393,9 @@ export function TerminalPane(props: TerminalPaneProps) {
             <path d="M15.5 12.5v6m-3-3h6" />
           </svg>
         </button>
-        <SegmentedControl label="Terminal types" value={scopeFilter()} choices={TERMINAL_TYPES}
-          onChange={setScopeFilter} />
-        <Show when={attached().length > 1}>
+      </div>
+      <Show when={attached().length > 1}>
+        <div class="terminal-pane__bar">
           <Show when={attachedVisible().length > 1}>
             <button type="button" onClick={single} disabled={pending()}>Single</button>
           </Show>
@@ -401,10 +404,8 @@ export function TerminalPane(props: TerminalPaneProps) {
           <Show when={attachedVisible().length === 4}>
             <button type="button" onClick={quad} disabled={pending()}>Quad</button>
           </Show>
-        </Show>
-      </div>
-      <details open>
-        <summary>Terminals</summary>
+        </div>
+      </Show>
         <ul class="terminal-list" aria-label="Terminals">
         <For each={listed()}>
           {(entry) => (
@@ -462,7 +463,6 @@ export function TerminalPane(props: TerminalPaneProps) {
           )}
         </For>
         </ul>
-      </details>
       <Show when={props.taskId} keyed>
         <Show when={commands().size > 0}>
           <CommandTerminals commands={commands()} shown={props.shown} agent={props.agent} />
