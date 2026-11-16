@@ -170,6 +170,7 @@ pub struct TerminalList {
     pub project_id: ProjectId,
     pub revision: u64,
     pub terminals: Vec<TerminalSnapshot>,
+    pub layout: TerminalLayout,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

@@ -532,6 +532,7 @@ export interface TerminalList {
   projectId: string
   revision: number
   terminals: TerminalSnapshot[]
+  layout?: TerminalLayout
 }
 
 export interface FrameCell {
@@ -833,8 +834,12 @@ export function terminalLayout(projectId: string): Promise<TerminalLayout> {
   return invoke('terminal_layout', { projectId })
 }
 
-export function saveTerminalLayout(projectId: string, layout: TerminalLayout): Promise<TerminalLayout> {
-  return invoke('save_terminal_layout', { projectId, layout })
+export async function saveTerminalLayout(projectId: string, layout: TerminalLayout): Promise<TerminalLayout> {
+  try { return await nativeInvoke('save_terminal_layout', { projectId, layout }) }
+  catch (failure) {
+    if ((failure as BridgeError | null)?.code !== 'terminal_layout_changed') reportError('save_terminal_layout', failure)
+    throw failure
+  }
 }
 
 export function saveInspectorTab(projectId: string, tab: InspectorTab): Promise<void> {

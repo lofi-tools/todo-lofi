@@ -73,6 +73,10 @@ current layout and give future changes a point of comparison.
   **New terminal** creates the selected scope; **Both**
   creates a task terminal and is disabled until a worktree exists. A task
   terminal can be shared with the project while retaining its working directory.
+  Terminal exit removes the record and updates its saved layout in one transaction;
+  terminal list updates carry the matching saved layout in one snapshot. If an
+  edit races a newer snapshot, reload it and automatically reapply safe actions
+  without replacing concurrent pane changes.
   The segmented control is the reusable `SegmentedControl` component: a weak track
   with a strong selected option, no separate borders between options.
   Split from the pane rather than the toolbar: a full-height **+** on the right

@@ -2255,13 +2255,34 @@ impl Store for TursoStore {
         Ok(())
     }
 
-    async fn delete_terminal(&self, terminal_id: &TerminalId) -> Result<(), StoreError> {
+    async fn delete_terminal(
+        &self,
+        terminal_id: &TerminalId,
+        layout: Option<(&ProjectId, &TerminalLayout)>,
+    ) -> Result<(), StoreError> {
         let mut db = self.db.lock().await;
-        toasty::sql::statement("DELETE FROM terminals WHERE id = ?1")
-            .bind(terminal_id.as_str())
-            .exec(&mut *db)
-            .await
-            .map_err(StoreError::database)?;
+        let mut transaction = db.transaction().await.map_err(StoreError::database)?;
+        let result = async {
+            toasty::sql::statement("DELETE FROM terminals WHERE id = ?1")
+                .bind(terminal_id.as_str())
+                .exec(&mut transaction)
+                .await
+                .map_err(StoreError::database)?;
+            if let Some((project_id, layout)) = layout {
+                write_terminal_layout(&mut transaction, project_id, layout).await?;
+            }
+            Ok::<(), StoreError>(())
+        }
+        .await;
+        if let Err(error) = result {
+            if let Err(rollback_error) = transaction.rollback().await {
+                return Err(StoreError::Backend(format!(
+                    "terminal deletion failed: {error}; rollback failed: {rollback_error}"
+                )));
+            }
+            return Err(error);
+        }
+        transaction.commit().await.map_err(StoreError::database)?;
         Ok(())
     }
 
@@ -5282,6 +5303,62 @@ mod tests {
         verify(&MemoryStore::new(), directory.path()).await?;
         verify(
             &TursoStore::open_at(&directory.join("workspace-owner.db")).await?,
+            directory.path(),
+        )
+        .await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn terminal_deletion_and_layout_update_are_atomic()
+    -> Result<(), Box<dyn std::error::Error>> {
+        async fn verify(store: &dyn Store, root: &Path) -> Result<(), Box<dyn std::error::Error>> {
+            let project = Project::new(root.join("present"));
+            let missing = Project::new(root.join("missing"));
+            let terminal = TerminalRecord::project_shared(
+                TerminalId::new("atomic-terminal"),
+                project.id.clone(),
+                "Terminal",
+                root.to_path_buf(),
+                "shell",
+                1,
+            );
+            let original = TerminalLayout {
+                revision: 1,
+                ..TerminalLayout::default()
+            };
+            let updated = TerminalLayout {
+                revision: 2,
+                ..TerminalLayout::default()
+            };
+            store.save_project(&project).await?;
+            store.save_terminal(&terminal).await?;
+            store.save_terminal_layout(&project.id, &original).await?;
+            assert!(matches!(
+                store
+                    .delete_terminal(&terminal.id, Some((&missing.id, &updated)))
+                    .await,
+                Err(StoreError::TerminalLayoutOwnerMissing { .. })
+            ));
+            assert_eq!(store.load_terminals().await?.len(), 1);
+            assert_eq!(
+                store.load_terminal_layouts().await?,
+                vec![(project.id.clone(), original)]
+            );
+            store
+                .delete_terminal(&terminal.id, Some((&project.id, &updated)))
+                .await?;
+            assert!(store.load_terminals().await?.is_empty());
+            assert_eq!(
+                store.load_terminal_layouts().await?,
+                vec![(project.id, updated)]
+            );
+            Ok(())
+        }
+        let directory = TestDirectory::new()?;
+        verify(&MemoryStore::new(), directory.path()).await?;
+        verify(
+            &TursoStore::open_at(&directory.join("atomic-terminal.db")).await?,
             directory.path(),
         )
         .await?;

@@ -205,9 +205,16 @@ export function TerminalPane(props: TerminalPaneProps) {
   function applyTerminalList(snapshot: bridge.TerminalList) {
     if (snapshot.projectId !== props.projectId) return
     const current = terminalList()
-    if (current && current.revision >= snapshot.revision) return
+    if (current && current.revision >= snapshot.revision) {
+      if (snapshot.layout && snapshot.layout.revision > layout().revision) setLayout(snapshot.layout)
+      return
+    }
     const previous = current ? new Set(current.terminals.map((terminal) => terminal.id)) : undefined
-    setTerminalList(snapshot)
+    batch(() => {
+      setTerminalList(snapshot)
+      if (snapshot.layout && snapshot.layout.revision > layout().revision) setLayout(snapshot.layout)
+    })
+    if (snapshot.layout) return
     if (!previous) return
     // A shell that exits while the app runs is deleted by the core, which also
     // drops its pane; mirror that here so no unavailable placeholder appears.
@@ -231,17 +238,39 @@ export function TerminalPane(props: TerminalPaneProps) {
     }
   }
 
-  async function save(root: bridge.TerminalSplit | null) {
-    setLayout(await bridge.saveTerminalLayout(props.projectId, { ...layout(), root }))
+  async function save(update: (root: bridge.TerminalSplit | null) => bridge.TerminalSplit | null, safelyRebase = false) {
+    const original = root()
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const current = root()
+      const next = update(current)
+      if (next === current) return
+      try {
+        const saved = await bridge.saveTerminalLayout(props.projectId, { ...layout(), root: next })
+        if (saved.revision >= layout().revision) setLayout(saved)
+        return
+      } catch (failure) {
+        if ((failure as bridge.BridgeError | null)?.code !== 'terminal_layout_changed' || attempt === 2) throw failure
+        const list = await bridge.terminalList(props.projectId)
+        applyTerminalList(list)
+        const latest = list.layout ?? await bridge.terminalLayout(props.projectId)
+        if (latest.revision >= layout().revision) setLayout(latest)
+        if (!safelyRebase && JSON.stringify(root()) !== JSON.stringify(original)) {
+          throw new Error('The terminal layout changed while applying this action. The latest layout is now shown.')
+        }
+      }
+    }
   }
 
   async function show(terminalId: string, axis: bridge.SplitAxis = 'vertical', splitFrom?: string) {
     if (!contains(root(), terminalId)) {
-      const previous = root()
       const added = leaf(terminalId)
-      const target = previous && splitFrom && contains(previous, splitFrom) ? splitFrom : active()
+      const requestedTarget = splitFrom ?? active()
       const split = (first: bridge.TerminalSplit) => splitInHalf(axis, first, added)
-      await save(previous ? (target ? replacePane(previous, target, split) : split(previous)) : added)
+      await save((previous) => {
+        if (contains(previous, terminalId)) return previous
+        const target = previous && requestedTarget && contains(previous, requestedTarget) ? requestedTarget : firstMatchingPane(previous, (id) => !!terminal(id))
+        return previous ? (target ? replacePane(previous, target, split) : split(previous)) : added
+      }, true)
     }
     setSelectedId(terminalId)
     setFocusRequest({ id: terminalId })
@@ -249,22 +278,24 @@ export function TerminalPane(props: TerminalPaneProps) {
 
   function detach(id: string) {
     const node = root()
-    if (node) void run(() => save(removePane(node, id)))
+    if (node) void run(() => save((current) => current && contains(current, id) ? removePane(current, id) : current, true))
   }
 
   function arrange(axis: bridge.SplitAxis) {
     const ids = attached()
-    if (ids.length > 1) void run(() => save(preset(ids, axis)))
+    if (ids.length > 1) void run(() => save((current) => {
+      const currentIds = paneIds(current)
+      return currentIds.length > 1 ? preset(currentIds, axis) : current
+    }, true))
   }
 
   function single() {
     const current = root()
     const id = active()
     if (!current || !id) return
-    const next = attachedVisible().filter((pane) => pane !== id)
-      .reduce<bridge.TerminalSplit | null>(removePane, current)
+    const hidden = attachedVisible().filter((pane) => pane !== id)
     void run(async () => {
-      await save(next)
+      await save((node) => hidden.reduce<bridge.TerminalSplit | null>(removePane, node), true)
       setFocusRequest({ id })
     })
   }
@@ -274,21 +305,23 @@ export function TerminalPane(props: TerminalPaneProps) {
     const ids = attachedVisible()
     const [topLeft, topRight, bottomLeft, bottomRight] = ids
     if (!current || ids.length !== 4) return
-    const retained = ids.slice(1).reduce<bridge.TerminalSplit | null>(removePane, current)
-    if (!retained) return
     const rows = splitInHalf('vertical',
       splitInHalf('horizontal', leaf(topLeft), leaf(topRight)),
       splitInHalf('horizontal', leaf(bottomLeft), leaf(bottomRight)))
     const id = active()
     void run(async () => {
-      await save(replacePane(retained, topLeft, () => rows))
+      await save((node) => {
+        if (!node || ids.some((pane) => !contains(node, pane))) return node
+        const retained = ids.slice(1).reduce<bridge.TerminalSplit | null>(removePane, node)
+        return retained ? replacePane(retained, topLeft, () => rows) : node
+      }, true)
       if (id) setFocusRequest({ id })
     })
   }
 
   function resizeSplit(path: SplitPath, ratio: number) {
     const node = root()
-    if (node) void run(() => save(updateSplit(node, path, ratio)))
+    if (node) void run(() => save(() => updateSplit(node, path, ratio)))
   }
 
   function start(taskId: string | null, axis: bridge.SplitAxis, splitFrom?: string) {
@@ -378,8 +411,9 @@ export function TerminalPane(props: TerminalPaneProps) {
       if (disposed) return
       batch(() => {
         applyTerminalList(list)
-        setLayout(saved)
-        props.onLayoutLoaded(saved)
+        const latest = [saved, ...(list.layout ? [list.layout] : []), layout()].reduce((current, candidate) => candidate.revision > current.revision ? candidate : current)
+        setLayout(latest)
+        props.onLayoutLoaded(latest)
         setLayoutLoaded(true)
       })
     })

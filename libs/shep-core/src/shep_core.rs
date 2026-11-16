@@ -836,6 +836,11 @@ impl Core {
             project_id: project_id.clone(),
             revision: self.terminal_list_revision,
             terminals: self.terminals_for(project_id),
+            layout: self
+                .terminal_layouts
+                .get(project_id)
+                .cloned()
+                .unwrap_or_default(),
         }
     }
 
@@ -901,13 +906,13 @@ impl Core {
             .get(project_id)
             .cloned()
             .unwrap_or_default();
+        if current.revision != layout.revision {
+            return Err(CoreError::TerminalLayoutChanged);
+        }
         if !self.valid_terminal_layout(project_id, &layout, |id| {
             current.root.as_ref().is_some_and(|root| root.contains(id))
         }) {
             return Err(CoreError::InvalidTerminalLayout);
-        }
-        if current.revision != layout.revision {
-            return Err(CoreError::TerminalLayoutChanged);
         }
         layout.inspector_tab = current.inspector_tab;
         layout.revision = layout
@@ -1196,31 +1201,26 @@ impl Core {
         }
 
         let project_id = seen.project_id.clone();
-        self.store.delete_terminal(terminal_id).await?;
-        self.terminals.remove(terminal_id);
-        self.remove_terminal_from_layout(&project_id, terminal_id)
-            .await?;
-        self.publish_terminal_list(&project_id);
-        Ok(())
-    }
-
-    async fn remove_terminal_from_layout(
-        &mut self,
-        project_id: &ProjectId,
-        terminal_id: &TerminalId,
-    ) -> Result<(), CoreError> {
-        let mut layout = self.terminal_layout(project_id)?;
+        let mut layout = self.terminal_layout(&project_id)?;
         let previous = layout.root.clone();
         let removed = std::collections::BTreeSet::from([terminal_id.as_str().to_owned()]);
         layout.root = layout.root.and_then(|root| root.without(&removed));
-        if layout.root == previous {
-            return Ok(());
+        let changed = layout.root != previous;
+        if changed {
+            layout.revision = layout
+                .revision
+                .checked_add(1)
+                .ok_or(CoreError::TerminalLayoutChanged)?;
         }
-        layout.revision = layout
-            .revision
-            .checked_add(1)
-            .ok_or(CoreError::TerminalLayoutChanged)?;
-        self.persist_terminal_layout(project_id, &layout).await
+        self.store
+            .delete_terminal(terminal_id, changed.then_some((&project_id, &layout)))
+            .await?;
+        self.terminals.remove(terminal_id);
+        if changed {
+            self.terminal_layouts.insert(project_id.clone(), layout);
+        }
+        self.publish_terminal_list(&project_id);
+        Ok(())
     }
 
     fn publish_terminal_list(&mut self, project_id: &ProjectId) {
@@ -3970,4 +3970,81 @@ pub async fn pause_worktree_deletion_fixture(
         std::future::pending::<()>().await;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod terminal_layout_tests {
+    use super::*;
+    use crate::terminal::{SplitAxis, TerminalSplit};
+
+    #[tokio::test]
+    async fn terminal_exit_publishes_list_and_layout_together()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut core = Core::new();
+        let directory = crate::test_support::TestDirectory::new()?;
+        core.execute(Command::AddProject {
+            path: directory.path().to_path_buf(),
+        })
+        .await?;
+        let project_id = core
+            .project_order
+            .last()
+            .cloned()
+            .ok_or("missing project")?;
+        for name in ["first", "second"] {
+            core.record_terminal(&TerminalRecord::project_shared(
+                TerminalId::new(name),
+                project_id.clone(),
+                name,
+                directory.path().to_path_buf(),
+                "/bin/sh",
+                1,
+            ))
+            .await?;
+        }
+        let pane = |name: &str| {
+            Box::new(TerminalSplit::Pane {
+                terminal_id: name.into(),
+            })
+        };
+        let initial = core
+            .save_terminal_layout(
+                &project_id,
+                TerminalLayout {
+                    root: Some(TerminalSplit::Split {
+                        axis: SplitAxis::Horizontal,
+                        ratio: 500,
+                        first: pane("first"),
+                        second: pane("second"),
+                    }),
+                    ..TerminalLayout::default()
+                },
+            )
+            .await?;
+        drop(core.drain_events());
+        core.end_terminal(&TerminalId::new("second"), None).await?;
+        let snapshot = core
+            .drain_events()
+            .into_iter()
+            .find_map(|event| match event {
+                Event::TerminalListChanged(snapshot) => Some(snapshot),
+                _ => None,
+            })
+            .ok_or("missing terminal update")?;
+        assert_eq!(snapshot.terminals.len(), 1);
+        assert_eq!(
+            snapshot
+                .terminals
+                .first()
+                .map(|terminal| terminal.id.as_str()),
+            Some("first")
+        );
+        assert_eq!(snapshot.layout.revision, initial.revision + 1);
+        assert_eq!(snapshot.layout.root, Some(*pane("first")));
+        assert!(matches!(
+            core.save_terminal_layout(&project_id, initial).await,
+            Err(CoreError::TerminalLayoutChanged)
+        ));
+        Ok(())
+    }
 }

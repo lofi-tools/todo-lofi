@@ -103,7 +103,12 @@ fn error_causes(error: &(dyn std::error::Error + 'static)) -> Vec<String> {
 
 impl From<CoreError> for BridgeError {
     fn from(error: CoreError) -> Self {
-        let mut bridge_error = Self::new("core", error.to_string());
+        let code = if matches!(error, CoreError::TerminalLayoutChanged) {
+            "terminal_layout_changed"
+        } else {
+            "core"
+        };
+        let mut bridge_error = Self::new(code, error.to_string());
         bridge_error.causes = error_causes(&error);
         if let CoreError::QuitConfirmationRequired {
             live_tasks,

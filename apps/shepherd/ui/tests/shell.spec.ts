@@ -421,6 +421,16 @@ test.beforeEach(async ({ context }) => {
     const workspaceLayouts = new Map<string, WorkspaceLayout>()
     const subscriptions: string[] = []
     let terminalRevision = 0
+    let terminalLayoutSaves = 0
+    if (options.has('terminal-layout-race')) {
+      terminals[1] = { ...terminals[1], endedAt: null, exitCode: null }
+      terminals.push({ ...terminals[0], id: 'terminal-3', title: 'Terminal 3' })
+      terminalLayout = { revision: 1, inspectorTab: 'terminals', root: {
+        type: 'split', axis: 'horizontal', ratio: 500,
+        first: { type: 'pane', terminalId: 'terminal-1' },
+        second: { type: 'pane', terminalId: 'terminal-2' },
+      } }
+    }
     if (options.has('missing-terminal')) {
       terminalLayout = {
         ...terminalLayout,
@@ -1285,6 +1295,10 @@ test.beforeEach(async ({ context }) => {
             return args.projectId === project.id ? terminalLayout
               : { revision: 0, root: null, inspectorTab: otherInspectorTabs.get(args.projectId) ?? 'terminals' }
           case 'save_terminal_layout':
+            terminalLayoutSaves++
+            if (options.has('terminal-layout-race') && args.layout.revision !== terminalLayout.revision) {
+              throw { code: 'terminal_layout_changed', message: 'the terminal layout changed; reload it before editing' }
+            }
             terminalLayout = { ...args.layout, revision: args.layout.revision + 1, inspectorTab: terminalLayout.inspectorTab }
             return terminalLayout
           case 'save_inspector_tab':
@@ -1296,7 +1310,7 @@ test.beforeEach(async ({ context }) => {
               failNextTerminalList = false
               throw new Error('Fixture terminal list failed')
             }
-            return { projectId: args.projectId, revision: 0, terminals: [...terminals] }
+            return { projectId: args.projectId, revision: terminalRevision, terminals: [...terminals], ...(options.has('terminal-layout-race') ? { layout: terminalLayout } : {}) }
           case 'start_terminal':
           case 'restart_terminal': {
             if (args.terminalId === 'freebuff-fixture') {
@@ -1515,6 +1529,23 @@ test.beforeEach(async ({ context }) => {
     } })
     window.__emitCoreEvent = (event: ShepherdEvent) =>
       callbacks.get(eventChannel)?.({ index: eventIndex++, message: event })
+    Object.assign(window, {
+      __terminalLayoutSaves: () => terminalLayoutSaves,
+      __endTerminalWithLayout: (publish: boolean) => {
+        const index = terminals.findIndex((terminal) => terminal.id === 'terminal-2')
+        if (index < 0) throw new Error('Missing fixture terminal')
+        terminals.splice(index, 1)
+        terminalLayout = { ...terminalLayout, revision: terminalLayout.revision + 1, root: { type: 'pane', terminalId: 'terminal-1' } }
+        terminalRevision++
+        if (publish) window.__emitCoreEvent({ type: 'terminalListChanged', data: { projectId: project.id, revision: terminalRevision, terminals: [...terminals], layout: terminalLayout } })
+      },
+      __addConcurrentTerminalPane: () => {
+        terminals.push({ ...terminals[0], id: 'terminal-4', title: 'Terminal 4' })
+        if (!terminalLayout.root) throw new Error('Missing fixture layout')
+        terminalLayout = { ...terminalLayout, revision: terminalLayout.revision + 1, root: { type: 'split', axis: 'vertical', ratio: 500, first: terminalLayout.root, second: { type: 'pane', terminalId: 'terminal-4' } } }
+        terminalRevision++
+      },
+    })
     Object.assign(window, {
       __pauseWorkspaceRead: () => { pauseNextWorkspaceRead = true },
       __workspaceReadPaused: () => pausedWorkspaceRead,
@@ -5244,6 +5275,34 @@ test('shows a live terminal and an ended one with a restart action', async ({ pa
   await expect(page.getByRole('button', { name: 'Restart' })).toBeVisible()
 })
 
+for (const publish of [true, false]) {
+  test(`opens another terminal after an exit ${publish ? 'with the atomic update' : 'before the update arrives'}`, async ({ page }) => {
+    await page.goto('/?terminal-layout-race')
+    const pane = page.getByRole('tabpanel', { name: 'Terminals' })
+    await expect(pane.getByRole('region', { name: 'Terminal 2' })).toBeVisible()
+    await page.evaluate((publish) => (window as unknown as { __endTerminalWithLayout: (publish: boolean) => void }).__endTerminalWithLayout(publish), publish)
+    if (publish) await expect(pane.getByRole('region', { name: 'Terminal 2' })).toHaveCount(0)
+    await pane.getByRole('button', { name: 'Terminal 3', exact: true }).click()
+    await expect(pane.getByRole('region', { name: 'Terminal 3' })).toBeVisible()
+    await expect(pane.getByRole('region', { name: 'Terminal 1' })).toBeVisible()
+    await expect(pane.getByRole('region', { name: 'Terminal 2' })).toHaveCount(0)
+    await expect(page.locator('.error-toast')).toHaveCount(0)
+    expect(await page.evaluate(() => (window as unknown as { __terminalLayoutSaves: () => number }).__terminalLayoutSaves())).toBe(publish ? 1 : 2)
+  })
+}
+
+test('keeps concurrently added panes while retrying a terminal open', async ({ page }) => {
+  await page.goto('/?terminal-layout-race')
+  const pane = page.getByRole('tabpanel', { name: 'Terminals' })
+  await expect(pane.getByRole('region', { name: 'Terminal 2' })).toBeVisible()
+  await page.evaluate(() => (window as unknown as { __addConcurrentTerminalPane: () => void }).__addConcurrentTerminalPane())
+  await pane.getByRole('button', { name: 'Terminal 3', exact: true }).click()
+  for (const name of ['Terminal 1', 'Terminal 2', 'Terminal 3', 'Terminal 4']) {
+    await expect(pane.getByRole('region', { name, exact: true })).toBeVisible()
+  }
+  await expect(page.locator('.error-toast')).toHaveCount(0)
+})
+
 for (const restart of [false, true]) {
   test(`keeps an immediate terminal exit after ${restart ? 'restart' : 'start'}`, async ({ page }) => {
     await page.goto('/?early-terminal-exit')
@@ -5577,7 +5636,7 @@ test('resizes a split and reopens a hidden terminal from the instance list', asy
 
   await scoped.getByRole('button', { name: 'Hide pane' }).click()
   await expect(scoped).toHaveCount(0)
-  await page.getByRole('button', { name: 'Task shell' }).click()
+  await page.getByRole('button', { name: 'Task shell', exact: true }).click()
   await expect(scoped.getByRole('textbox')).toBeFocused()
 })
 

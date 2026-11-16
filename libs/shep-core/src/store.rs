@@ -771,7 +771,11 @@ pub trait Store: Send + Sync {
     ) -> Result<(), StoreError>;
     async fn load_terminals(&self) -> Result<Vec<TerminalRecord>, StoreError>;
     async fn save_terminal(&self, terminal: &TerminalRecord) -> Result<(), StoreError>;
-    async fn delete_terminal(&self, terminal_id: &TerminalId) -> Result<(), StoreError>;
+    async fn delete_terminal(
+        &self,
+        terminal_id: &TerminalId,
+        layout: Option<(&ProjectId, &TerminalLayout)>,
+    ) -> Result<(), StoreError>;
     async fn load_terminal_layouts(&self) -> Result<Vec<(ProjectId, TerminalLayout)>, StoreError>;
     async fn save_terminal_layout(
         &self,
@@ -1339,8 +1343,25 @@ impl Store for MemoryStore {
         Ok(())
     }
 
-    async fn delete_terminal(&self, terminal_id: &TerminalId) -> Result<(), StoreError> {
-        self.terminals.write().await.remove(terminal_id.as_str());
+    async fn delete_terminal(
+        &self,
+        terminal_id: &TerminalId,
+        layout: Option<(&ProjectId, &TerminalLayout)>,
+    ) -> Result<(), StoreError> {
+        let projects = self.projects.read().await;
+        if let Some((project_id, _)) = layout
+            && !projects.contains_key(project_id.as_str())
+        {
+            return Err(StoreError::TerminalLayoutOwnerMissing {
+                project_id: project_id.clone(),
+            });
+        }
+        let mut layouts = self.terminal_layouts.write().await;
+        let mut terminals = self.terminals.write().await;
+        if let Some((project_id, layout)) = layout {
+            layouts.insert(project_id.clone(), layout.clone());
+        }
+        terminals.remove(terminal_id.as_str());
         Ok(())
     }
 
