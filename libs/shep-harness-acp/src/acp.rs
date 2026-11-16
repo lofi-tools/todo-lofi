@@ -2,7 +2,7 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::future::{Future, pending};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
@@ -36,6 +36,83 @@ const SESSION_TIMEOUT: Duration = Duration::from_secs(15);
 const ERROR_QUEUE_CAPACITY: usize = 64;
 const MAX_EARLY_TERMINAL_BUFFERS: usize = 64;
 const MAX_RELEASED_TERMINALS: usize = 256;
+
+pub const ANTIGRAVITY_CLI_BASELINE: &str = "1.5.9";
+
+pub fn discover_antigravity(
+    settings: &shep_harness_core::settings::AgentSettings,
+    path: &std::ffi::OsStr,
+    home: Option<&Path>,
+    user: Option<&std::ffi::OsStr>,
+) -> HarnessResult<Option<SpawnSpec>> {
+    let configured = settings.command("agents.antigravity")?;
+    let candidates = configured
+        .as_ref()
+        .map(|command| command.executable.clone())
+        .into_iter()
+        .chain(home.into_iter().flat_map(|home| {
+            [
+                home.join(".local/bin/agy"),
+                home.join(".nix-profile/bin/agy"),
+                home.join(".local/state/nix/profile/bin/agy"),
+            ]
+        }))
+        .chain(user.map(|user| {
+            PathBuf::from("/etc/profiles/per-user")
+                .join(user)
+                .join("bin/agy")
+        }))
+        .chain([
+            PathBuf::from("/run/current-system/sw/bin/agy"),
+            PathBuf::from("/nix/var/nix/profiles/default/bin/agy"),
+            PathBuf::from("/opt/homebrew/bin/agy"),
+            PathBuf::from("/usr/local/bin/agy"),
+        ])
+        .chain(
+            std::env::split_paths(path)
+                .filter(|directory| directory.is_absolute())
+                .map(|directory| directory.join("agy")),
+        );
+    for candidate in candidates {
+        let metadata = match std::fs::metadata(&candidate) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                tracing::debug!(path = %candidate.display(), %error, "could not inspect Antigravity candidate");
+                continue;
+            }
+        };
+        if !metadata.is_file() {
+            continue;
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if metadata.permissions().mode() & 0o111 == 0 {
+                continue;
+            }
+        }
+        let mut args = vec!["acp".to_string()];
+        if let Some(command) = configured
+            .as_ref()
+            .filter(|command| command.executable == candidate)
+        {
+            args.extend(command.args.iter().cloned().skip(usize::from(
+                command.args.first().is_some_and(|value| value == "acp"),
+            )));
+        }
+        let program = candidate
+            .to_str()
+            .ok_or_else(|| HarnessError::Protocol("Antigravity CLI path must be UTF-8".into()))?
+            .to_owned();
+        return Ok(Some(SpawnSpec {
+            program,
+            args,
+            ..SpawnSpec::default()
+        }));
+    }
+    Ok(None)
+}
 
 pub struct AcpHarness {
     connection: Option<AcpConnection>,
@@ -1623,6 +1700,46 @@ mod tests {
     };
 
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn antigravity_discovery_prefers_configured_cli_then_known_paths()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = tempfile::tempdir()?;
+        let configured = directory.path().join("configured-agy");
+        let local = directory.path().join(".local/bin/agy");
+        std::fs::create_dir_all(local.parent().ok_or("missing parent")?)?;
+        for path in [&configured, &local] {
+            std::fs::write(path, "#!/bin/sh\nexit 0\n")?;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))?;
+        }
+        let settings: shep_harness_core::settings::AgentSettings = serde_json::from_value(
+            serde_json::json!({
+                "app": { "agents.antigravity.executable": configured, "agents.antigravity.args": ["acp", "--sandbox"] }
+            }),
+        )?;
+        let launch = discover_antigravity(
+            &settings,
+            std::ffi::OsStr::new(""),
+            Some(directory.path()),
+            None,
+        )?
+        .ok_or("missing configured CLI")?;
+        assert_eq!(Path::new(&launch.program), configured);
+        assert_eq!(launch.args, ["acp", "--sandbox"]);
+        std::fs::remove_file(&configured)?;
+        let fallback = discover_antigravity(
+            &settings,
+            std::ffi::OsStr::new(""),
+            Some(directory.path()),
+            None,
+        )?
+        .ok_or("missing fallback CLI")?;
+        assert_eq!(Path::new(&fallback.program), local);
+        assert_eq!(fallback.args, ["acp"]);
+        Ok(())
+    }
 
     #[tokio::test]
     async fn agent_reported_errors_keep_the_agent_message_and_the_adapter_context()

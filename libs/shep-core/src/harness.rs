@@ -140,6 +140,9 @@ pub trait HarnessFactory: Send + Sync {
             Agent::Freebuff => Err(CoreError::HarnessMissing {
                 report: "Freebuff executable is unavailable".into(),
             }),
+            Agent::Antigravity => Err(CoreError::HarnessMissing {
+                report: "Antigravity ACP executable is unavailable".into(),
+            }),
         }
     }
 
@@ -1535,9 +1538,9 @@ mod tests {
     use shep_harness_core::{ApprovalId, Decision, FileDiff, ToolStatus};
 
     use super::*;
-    use crate::test_support::TestDirectory;
     #[cfg(feature = "git")]
     use crate::Project;
+    use crate::test_support::TestDirectory;
 
     #[tokio::test]
     async fn session_keeps_the_initial_mode_when_the_user_selects_another()

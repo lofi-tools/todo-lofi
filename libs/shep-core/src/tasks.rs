@@ -36,6 +36,7 @@ pub enum Agent {
     Pi,
     Claude,
     Freebuff,
+    Antigravity,
 }
 
 impl Agent {
@@ -46,6 +47,7 @@ impl Agent {
             "pi" => Some(Self::Pi),
             "claude" => Some(Self::Claude),
             "freebuff" => Some(Self::Freebuff),
+            "antigravity" => Some(Self::Antigravity),
             _ => None,
         }
     }
@@ -57,6 +59,7 @@ impl Agent {
             Self::Pi => "pi",
             Self::Claude => "claude",
             Self::Freebuff => "freebuff",
+            Self::Antigravity => "antigravity",
         }
     }
 
@@ -67,12 +70,13 @@ impl Agent {
             Self::Pi => "Pi",
             Self::Claude => "Claude Code",
             Self::Freebuff => "Freebuff",
+            Self::Antigravity => "Antigravity",
         }
     }
 
     pub fn default_tier(self) -> AgentTier {
         match self {
-            Self::Claude | Self::OpenCode => AgentTier::Acp,
+            Self::Claude | Self::OpenCode | Self::Antigravity => AgentTier::Acp,
             Self::Freebuff => AgentTier::TerminalWrapper,
             Self::Codex | Self::Pi => AgentTier::Native,
         }
@@ -405,5 +409,21 @@ mod tests {
             AgentTier::parse(Agent::Freebuff.default_tier().as_str()),
             Some(AgentTier::TerminalWrapper)
         );
+    }
+
+    #[test]
+    fn antigravity_has_a_stable_acp_identity() -> Result<(), serde_json::Error> {
+        assert_eq!(Agent::parse("antigravity"), Some(Agent::Antigravity));
+        assert_eq!(Agent::Antigravity.as_str(), "antigravity");
+        assert_eq!(Agent::Antigravity.default_tier(), AgentTier::Acp);
+        assert_eq!(
+            serde_json::to_string(&Agent::Antigravity)?,
+            "\"antigravity\""
+        );
+        assert_eq!(
+            serde_json::from_str::<Agent>("\"antigravity\"")?,
+            Agent::Antigravity
+        );
+        Ok(())
     }
 }

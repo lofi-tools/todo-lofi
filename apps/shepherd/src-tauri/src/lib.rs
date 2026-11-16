@@ -263,10 +263,11 @@ pub fn run() -> Result<(), tauri::Error> {
                 opencode_launch,
                 pi_configured,
                 claude_configured,
+                antigravity_launch,
                 freebuff_configured,
                 freebuff_reason,
-            ): (Box<dyn HarnessFactory>, _, _, _, _, _, _, _) = match dev_factory {
-                Some(factory) => (factory, None, false, None, false, false, false, None),
+            ): (Box<dyn HarnessFactory>, _, _, _, _, _, _, _, _) = match dev_factory {
+                Some(factory) => (factory, None, false, None, false, false, None, false, None),
                 None => {
                     let codex_path =
                         agents
@@ -308,6 +309,23 @@ pub fn run() -> Result<(), tauri::Error> {
                     if let Err(error) = &claude {
                         tracing::warn!(%error, "could not load Claude Code configuration");
                     }
+                    let antigravity = match &agents {
+                        Ok(settings) => agent_harness::acp::discover_antigravity(
+                            settings,
+                            std::env::var_os("PATH")
+                                .as_deref()
+                                .unwrap_or_else(|| std::ffi::OsStr::new("")),
+                            std::env::var_os("HOME")
+                                .as_deref()
+                                .map(std::path::Path::new),
+                            std::env::var_os("USER").as_deref(),
+                        ),
+                        Err(error) => Err(agent_harness::HarnessError::Protocol(error.to_string())),
+                    };
+                    if let Err(error) = &antigravity {
+                        tracing::warn!(%error, "could not load Antigravity configuration");
+                    }
+                    let antigravity_launch = antigravity.as_ref().ok().cloned().flatten();
                     let (freebuff, freebuff_configured, freebuff_reason) = match &agents {
                         Ok(settings) => match agent_harness::freebuff::discover_from_settings(
                             settings,
@@ -354,6 +372,7 @@ pub fn run() -> Result<(), tauri::Error> {
                             opencode,
                             pi,
                             claude,
+                            antigravity,
                             freebuff,
                             settings: agents.as_ref().cloned().map_err(ToString::to_string),
                             terminals: std::sync::Arc::new(terminals.clone()),
@@ -363,6 +382,7 @@ pub fn run() -> Result<(), tauri::Error> {
                         opencode_launch,
                         pi_configured,
                         claude_configured,
+                        antigravity_launch,
                         freebuff_configured,
                         freebuff_reason,
                     )
@@ -379,6 +399,7 @@ pub fn run() -> Result<(), tauri::Error> {
             state.opencode_launch = opencode_launch;
             state.pi_configured = pi_configured;
             state.claude_configured = claude_configured;
+            state.antigravity_launch = antigravity_launch;
             state.freebuff_configured = freebuff_configured;
             state.freebuff_reason = freebuff_reason;
             state.start_event_pump();

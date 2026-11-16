@@ -6607,6 +6607,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn antigravity_task_identity_survives_reopen() -> Result<(), Box<dyn std::error::Error>> {
+        let database = TestDatabase::new()?;
+        let uri = database.uri();
+        let project = Project::new(database.path().to_path_buf());
+        let mut task = Task::draft(project.id.clone(), "Antigravity", database.path());
+        task.agent = Agent::Antigravity;
+        task.tier = task.agent.default_tier();
+        {
+            let store = TursoStore::open(&uri).await?;
+            store.save_project(&project).await?;
+            store.save_task(&task).await?;
+        }
+        let reopened = TursoStore::open(&uri).await?;
+        let tasks = reopened.load_tasks().await?;
+        let saved = tasks
+            .iter()
+            .find(|saved| saved.id == task.id)
+            .ok_or("missing task")?;
+        assert_eq!(saved.agent, Agent::Antigravity);
+        assert_eq!(saved.tier, AgentTier::Acp);
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn unreadable_terminal_layouts_do_not_block_valid_projects()
     -> Result<(), Box<dyn std::error::Error>> {
         use shep_core::harness::UnavailableHarnessFactory;

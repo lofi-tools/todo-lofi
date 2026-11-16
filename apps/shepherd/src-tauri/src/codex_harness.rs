@@ -25,6 +25,7 @@ pub struct DesktopHarnessFactory {
     pub opencode: Result<Option<SpawnSpec>, HarnessError>,
     pub pi: Result<Option<ConfiguredCommand>, HarnessError>,
     pub claude: Result<Option<ConfiguredCommand>, HarnessError>,
+    pub antigravity: Result<Option<SpawnSpec>, HarnessError>,
     pub freebuff: Result<Option<PathBuf>, HarnessError>,
     pub settings: Result<AgentSettings, String>,
     pub terminals: Arc<crate::bridge::TerminalHost>,
@@ -86,6 +87,7 @@ impl HarnessFactory for DesktopHarnessFactory {
             Agent::Pi,
             Agent::Claude,
             Agent::Freebuff,
+            Agent::Antigravity,
         ]
         .into_iter()
         .filter(|agent| *agent != failed)
@@ -95,6 +97,7 @@ impl HarnessFactory for DesktopHarnessFactory {
             Agent::Pi => matches!(&self.pi, Ok(Some(_))),
             Agent::Claude => matches!(&self.claude, Ok(Some(_))),
             Agent::Freebuff => matches!(&self.freebuff, Ok(Some(_))),
+            Agent::Antigravity => matches!(&self.antigravity, Ok(Some(_))),
         })
         .collect()
     }
@@ -169,6 +172,17 @@ impl DesktopHarnessFactory {
                     executable,
                     Vec::new(),
                 )
+            }
+            Agent::Antigravity => {
+                let launch =
+                    require_configured(&self.antigravity, "agents.antigravity.executable")?;
+                return Ok((
+                    Box::new(AcpHarness::default().with_terminals(terminals)),
+                    SpawnSpec {
+                        cwd,
+                        ..launch.clone()
+                    },
+                ));
             }
         };
         let program = executable
@@ -355,6 +369,7 @@ mod tests {
             opencode: Ok(None),
             pi: Ok(None),
             claude: Ok(None),
+            antigravity: Ok(None),
             settings: Ok(settings),
             terminals: Arc::new(crate::bridge::TerminalHost::default()),
             freebuff: Ok(None),
@@ -398,6 +413,7 @@ mod tests {
             opencode: agent_harness::opencode::configured_launch(&settings),
             pi: Ok(None),
             claude: Ok(None),
+            antigravity: Ok(None),
             settings: Ok(settings),
             terminals: Arc::new(crate::bridge::TerminalHost::default()),
             freebuff: Ok(None),
@@ -425,6 +441,7 @@ mod tests {
             opencode: Ok(None),
             pi: Ok(None),
             claude: Ok(None),
+            antigravity: Ok(None),
             freebuff: Ok(Some(executable.clone())),
             settings: Ok(AgentSettings::default()),
             terminals: Arc::new(crate::bridge::TerminalHost::default()),
@@ -433,6 +450,34 @@ mod tests {
         let (harness, spec) = factory.launch(Agent::Freebuff, cwd.clone())?;
         assert_eq!(harness.tier(), agent_harness::AdapterTier::TerminalWrapper);
         assert_eq!(Path::new(&spec.program), executable);
+        assert_eq!(spec.cwd, cwd);
+        Ok(())
+    }
+
+    #[test]
+    fn launches_antigravity_using_acp_and_the_task_directory() -> Result<(), CoreError> {
+        let factory = DesktopHarnessFactory {
+            codex: Box::new(MissingCodexFactory::new(
+                "fixture".into(),
+                FailureKind::MissingBinary,
+            )),
+            opencode: Ok(None),
+            pi: Ok(None),
+            claude: Ok(None),
+            antigravity: Ok(Some(SpawnSpec {
+                program: "/nix/profile/bin/agy".into(),
+                args: vec!["acp".into()],
+                ..SpawnSpec::default()
+            })),
+            freebuff: Ok(None),
+            settings: Ok(AgentSettings::default()),
+            terminals: Arc::new(crate::bridge::TerminalHost::default()),
+        };
+        let cwd = PathBuf::from("/tmp/antigravity-worktree");
+        let (harness, spec) = factory.launch(Agent::Antigravity, cwd.clone())?;
+        assert_eq!(harness.tier(), agent_harness::AdapterTier::Acp);
+        assert_eq!(spec.program, "/nix/profile/bin/agy");
+        assert_eq!(spec.args, ["acp"]);
         assert_eq!(spec.cwd, cwd);
         Ok(())
     }
@@ -451,6 +496,7 @@ mod tests {
                 executable: executable.clone(),
                 args: vec!["--flag".into(), "value with spaces".into()],
             })),
+            antigravity: Ok(None),
             settings: Ok(AgentSettings::default()),
             terminals: Arc::new(crate::bridge::TerminalHost::default()),
             freebuff: Ok(None),

@@ -45,7 +45,7 @@ impl PoolResetPolicy {
             Agent::Claude => CLAUDE_WINDOWS,
             // OpenCode and Pi borrow another provider's quota, and Freebuff is
             // a terminal wrapper, so no window belongs to their harness.
-            Agent::OpenCode | Agent::Pi | Agent::Freebuff => &[],
+            Agent::OpenCode | Agent::Pi | Agent::Freebuff | Agent::Antigravity => &[],
         };
         Self { windows }
     }

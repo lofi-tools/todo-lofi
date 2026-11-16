@@ -54,6 +54,14 @@ pub fn discover(
             roots.push(home.join(".pi/agent/skills"));
             roots.push(home.join(".agents/skills"));
         }
+        Agent::Antigravity => {
+            roots.push(directory.join(".agents/skills"));
+            roots.push(directory.join(".agent/skills"));
+            roots.push(home.join(".gemini/config/skills"));
+            roots.push(home.join(".gemini/config/plugins"));
+            roots.push(home.join(".gemini/antigravity-cli/skills"));
+            roots.push(home.join(".gemini/skills"));
+        }
         Agent::Freebuff => return Ok(Vec::new()),
     }
     let mut skills = BTreeMap::new();

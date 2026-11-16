@@ -855,6 +855,7 @@ pub struct ShellState {
     pub(crate) opencode_launch: Option<SpawnSpec>,
     pub(crate) pi_configured: bool,
     pub(crate) claude_configured: bool,
+    pub(crate) antigravity_launch: Option<SpawnSpec>,
     pub(crate) freebuff_configured: bool,
     pub(crate) freebuff_reason: Option<String>,
     events: broadcast::Sender<Event>,
@@ -1024,6 +1025,7 @@ impl ShellState {
             opencode_launch: None,
             pi_configured: false,
             claude_configured: false,
+            antigravity_launch: None,
             freebuff_configured: false,
             freebuff_reason: None,
             events,
@@ -3931,6 +3933,7 @@ pub mod commands {
             ("opencode", state.opencode_launch.is_some()),
             ("pi", state.pi_configured),
             ("claude", state.claude_configured),
+            ("antigravity", state.antigravity_launch.is_some()),
             ("freebuff", state.freebuff_configured),
         ])
     }
