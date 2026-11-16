@@ -97,6 +97,8 @@ pub enum CoreError {
     InvalidWorkspaceLayout,
     #[error("terminal not found: {id}")]
     TerminalNotFound { id: String },
+    #[error("terminal is still running: {id}")]
+    TerminalStillRunning { id: String },
     #[error("task title cannot be empty")]
     EmptyTitle,
     #[error("the prompt is empty")]
@@ -1201,6 +1203,28 @@ impl Core {
         }
 
         let project_id = seen.project_id.clone();
+        self.remove_terminal_record(terminal_id, project_id).await
+    }
+
+    pub async fn remove_ended_terminal(
+        &mut self,
+        terminal_id: &TerminalId,
+    ) -> Result<(), CoreError> {
+        let terminal = self.terminal_record(terminal_id)?;
+        if terminal.ended_at.is_none() {
+            return Err(CoreError::TerminalStillRunning {
+                id: terminal_id.as_str().to_string(),
+            });
+        }
+        self.remove_terminal_record(terminal_id, terminal.project_id)
+            .await
+    }
+
+    async fn remove_terminal_record(
+        &mut self,
+        terminal_id: &TerminalId,
+        project_id: ProjectId,
+    ) -> Result<(), CoreError> {
         let mut layout = self.terminal_layout(&project_id)?;
         let previous = layout.root.clone();
         let removed = std::collections::BTreeSet::from([terminal_id.as_str().to_owned()]);
@@ -4045,6 +4069,53 @@ mod terminal_layout_tests {
             core.save_terminal_layout(&project_id, initial).await,
             Err(CoreError::TerminalLayoutChanged)
         ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn closing_an_ended_terminal_removes_its_record_and_pane()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut core = Core::new();
+        let directory = crate::test_support::TestDirectory::new()?;
+        core.execute(Command::AddProject {
+            path: directory.path().to_path_buf(),
+        })
+        .await?;
+        let project = core
+            .project_order
+            .last()
+            .cloned()
+            .ok_or("missing project")?;
+        let id = TerminalId::new("ended");
+        let mut terminal = TerminalRecord::project_shared(
+            id.clone(),
+            project.clone(),
+            "Terminal",
+            directory.path().to_path_buf(),
+            "/bin/sh",
+            1,
+        );
+        core.record_terminal(&terminal).await?;
+        assert!(matches!(
+            core.remove_ended_terminal(&id).await,
+            Err(CoreError::TerminalStillRunning { .. })
+        ));
+        terminal.ended_at = Some(2);
+        core.record_terminal(&terminal).await?;
+        core.save_terminal_layout(
+            &project,
+            TerminalLayout {
+                root: Some(TerminalSplit::Pane {
+                    terminal_id: id.as_str().to_string(),
+                }),
+                ..TerminalLayout::default()
+            },
+        )
+        .await?;
+        core.remove_ended_terminal(&id).await?;
+        let snapshot = core.terminal_list(&project);
+        assert!(snapshot.terminals.is_empty());
+        assert!(snapshot.layout.root.is_none());
         Ok(())
     }
 }

@@ -3331,9 +3331,25 @@ impl ShellState {
 
     pub async fn close_terminal(&self, terminal_id: String) -> Result<(), BridgeError> {
         let _guard = self.terminal_lifecycle.lock().await;
-        self.terminals
-            .stop_terminal_process(TerminalId::new(terminal_id))
-            .await
+        let id = TerminalId::new(terminal_id);
+        let ended = {
+            let core = self.core.lock().await;
+            match core.terminal_record(&id) {
+                Ok(terminal) => terminal.ended_at.is_some(),
+                Err(CoreError::TerminalNotFound { .. }) => false,
+                Err(error) => return Err(error.into()),
+            }
+        };
+        self.terminals.stop_terminal_process(id.clone()).await?;
+        if ended {
+            let mut core = self.core.lock().await;
+            match core.remove_ended_terminal(&id).await {
+                Ok(()) | Err(CoreError::TerminalNotFound { .. }) => {}
+                Err(error) => return Err(error.into()),
+            }
+            Self::broadcast_core_events(&mut core, &self.events);
+        }
+        Ok(())
     }
 
     pub async fn subscribe_terminal(
@@ -5970,6 +5986,54 @@ mod tests {
         ShellState::new(core)
     }
 
+    #[tokio::test]
+    async fn closing_an_ended_terminal_broadcasts_the_removed_pane()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use shep_core::terminal::{TerminalLayout, TerminalSplit};
+
+        let directory = TestDirectory::new()?;
+        let state = state_with(Core::new());
+        let projects = state
+            .add_project(directory.path().display().to_string())
+            .await?;
+        let project = projects.projects.first().ok_or("missing project")?;
+        let project_id = ProjectId::new(project.id.clone());
+        let id = TerminalId::new("ended-terminal");
+        let mut terminal = TerminalRecord::project_shared(
+            id.clone(),
+            project_id.clone(),
+            "Terminal",
+            directory.path().to_path_buf(),
+            "/bin/sh",
+            1,
+        );
+        terminal.ended_at = Some(2);
+        {
+            let mut core = state.core.lock().await;
+            core.record_terminal(&terminal).await?;
+            core.save_terminal_layout(
+                &project_id,
+                TerminalLayout {
+                    root: Some(TerminalSplit::Pane {
+                        terminal_id: id.as_str().to_string(),
+                    }),
+                    ..TerminalLayout::default()
+                },
+            )
+            .await?;
+            core.drain_events();
+        }
+        let mut events = state.subscribe();
+        state.close_terminal(id.as_str().to_string()).await?;
+        let event = tokio::time::timeout(Duration::from_secs(2), events.recv()).await??;
+        let Event::TerminalListChanged(snapshot) = event else {
+            return Err("expected a terminal list update".into());
+        };
+        assert!(snapshot.terminals.is_empty());
+        assert!(snapshot.layout.root.is_none());
+        Ok(())
+    }
+
     #[cfg(feature = "git")]
     #[tokio::test]
     async fn workspace_watch_continues_after_a_notification_error()
@@ -7982,12 +8046,11 @@ mod tests {
         })
         .await??;
         assert_eq!(ended.project_id.as_str(), project.id);
-        assert_eq!(
-            ended
+        assert!(
+            !ended
                 .terminals
-                .first()
-                .and_then(|terminal| terminal.exit_code),
-            Some(23)
+                .iter()
+                .any(|terminal| terminal.id == saved.id.as_str())
         );
         assert_eq!(
             state.terminal_list(project.id.clone()).await.revision,
