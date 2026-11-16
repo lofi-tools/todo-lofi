@@ -35,6 +35,16 @@ function RestartButton(props: { disabled: boolean; onClick: () => void; buttonRe
   </span>
 }
 
+function CloseTerminalButton(props: { disabled: boolean; live?: boolean; onClick: () => void }) {
+  const tooltipId = createUniqueId()
+  return <span class="terminal-close">
+    <button type="button" class="terminal-close__button" aria-label="Close terminal" aria-describedby={tooltipId} data-terminal-focus={props.live ? '' : undefined} disabled={props.disabled} onClick={props.onClick}>
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18" /></svg>
+    </button>
+    <span id={tooltipId} role="tooltip" class="chat__menu-card terminal-close__tooltip">Close terminal</span>
+  </span>
+}
+
 export function FreebuffPane(props: {
   projectName: string
   entry: bridge.TerminalSnapshot | undefined
@@ -153,6 +163,9 @@ export function TerminalPane(props: TerminalPaneProps) {
   }
   const [hiddenAgentTerminals, setHiddenAgentTerminals] = createSignal(new Set<string>())
   const [scopeFilter, setScopeFilter] = createSignal<'both' | 'project' | 'task'>('both')
+  const [terminalDrag, setTerminalDrag] = createSignal<{ source: string; target: string; edge: DropEdge }>()
+  let terminalPane!: HTMLDivElement
+  let dragPointer: { id: number; source: string; x: number; y: number; active: boolean } | undefined
   const scopeShown = (scope: 'project' | 'task') => scopeFilter() === 'both' || scopeFilter() === scope
   const agentTerminalIds = createMemo(() => (props.agentTerminals ?? []).map((terminal) => terminal.id))
   const agentTerminal = (id: string) => props.agentTerminals?.find((terminal) => terminal.id === id)
@@ -324,6 +337,74 @@ export function TerminalPane(props: TerminalPaneProps) {
     if (node) void run(() => save(() => updateSplit(node, path, ratio)))
   }
 
+  function beginDrag(event: PointerEvent, source: string) {
+    if (pending() || event.button !== 0 || !event.isPrimary || dragPointer) return
+    event.preventDefault()
+    dragPointer = { id: event.pointerId, source, x: event.clientX, y: event.clientY, active: false }
+    terminalPane.setPointerCapture(event.pointerId)
+  }
+
+  function dragMove(event: PointerEvent) {
+    const pointer = dragPointer
+    if (!pointer || pointer.id !== event.pointerId) return
+    if (!pointer.active && Math.hypot(event.clientX - pointer.x, event.clientY - pointer.y) < 4) return
+    pointer.active = true
+    event.preventDefault()
+    const slot = document.elementFromPoint(event.clientX, event.clientY)?.closest<HTMLElement>('.terminal-pane__slot[data-terminal-id]')
+    const target = slot?.dataset.terminalId
+    if (!slot || !target || target === pointer.source || !terminalPane.contains(slot)) { setTerminalDrag(undefined); return }
+    const bounds = slot.getBoundingClientRect()
+    const x = (event.clientX - bounds.left) / bounds.width
+    const y = (event.clientY - bounds.top) / bounds.height
+    const edge: DropEdge = x < .25 ? 'left' : x > .75 ? 'right' : y < .5 ? 'top' : 'bottom'
+    setTerminalDrag({ source: pointer.source, target, edge })
+  }
+
+  function finishDrag(commit: boolean) {
+    const pointer = dragPointer
+    if (!pointer) return
+    dragPointer = undefined
+    if (terminalPane.hasPointerCapture(pointer.id)) terminalPane.releasePointerCapture(pointer.id)
+    const drop = terminalDrag()
+    setTerminalDrag(undefined)
+    if (commit && pointer.active && drop) void run(async () => {
+      await save((current) => moveTerminal(current, drop.source, drop.target, drop.edge), true)
+      setSelectedId(drop.source)
+      setFocusRequest({ id: drop.source })
+    })
+  }
+
+  function moveWithKeyboard(event: KeyboardEvent, source: string) {
+    const edges: Record<string, DropEdge> = { ArrowLeft: 'left', ArrowRight: 'right', ArrowUp: 'top', ArrowDown: 'bottom' }
+    const edge = edges[event.key]
+    if (!event.altKey || !edge || pending()) return
+    event.preventDefault()
+    const slots = [...terminalPane.querySelectorAll<HTMLElement>('.terminal-pane__slot[data-terminal-id]')]
+    const origin = slots.find((slot) => slot.dataset.terminalId === source)?.getBoundingClientRect()
+    if (!origin) return
+    const centerX = origin.left + origin.width / 2
+    const centerY = origin.top + origin.height / 2
+    const candidates = slots.flatMap((slot) => {
+      const id = slot.dataset.terminalId
+      if (!id || id === source) return []
+      const bounds = slot.getBoundingClientRect()
+      const dx = bounds.left + bounds.width / 2 - centerX
+      const dy = bounds.top + bounds.height / 2 - centerY
+      if ((edge === 'left' && dx >= 0) || (edge === 'right' && dx <= 0) || (edge === 'top' && dy >= 0) || (edge === 'bottom' && dy <= 0)) return []
+      return [{ id, distance: Math.hypot(dx, dy) }]
+    }).sort((left, right) => left.distance - right.distance)
+    const target = candidates[0]?.id
+    if (!target) return
+    void run(async () => {
+      await save((current) => moveTerminal(current, source, target, edge), true)
+      setSelectedId(source)
+      requestAnimationFrame(() => {
+        const slot = [...terminalPane.querySelectorAll<HTMLElement>('.terminal-pane__slot[data-terminal-id]')].find((element) => element.dataset.terminalId === source)
+        slot?.querySelector<HTMLButtonElement>('.terminal-drag-handle')?.focus({ preventScroll: true })
+      })
+    })
+  }
+
   function start(taskId: string | null, axis: bridge.SplitAxis, splitFrom?: string) {
     const scope = taskId === null ? 'project' : 'task'
     // Starting a terminal the filter hides would look like nothing happened.
@@ -384,6 +465,11 @@ export function TerminalPane(props: TerminalPaneProps) {
   }
 
   onMount(() => {
+    const cancelDrag = (event: KeyboardEvent) => {
+      if (event.key === 'Escape' && dragPointer) { event.preventDefault(); finishDrag(false) }
+    }
+    window.addEventListener('keydown', cancelDrag)
+    onCleanup(() => window.removeEventListener('keydown', cancelDrag))
     const terminalReady = () => layoutLoaded() && !pending()
     props.onCommands({
       available: () => ({
@@ -421,7 +507,10 @@ export function TerminalPane(props: TerminalPaneProps) {
   })
 
   return (
-    <div class="terminal-pane">
+    <div ref={terminalPane} class="terminal-pane" onPointerMove={dragMove}
+      onPointerUp={(event) => { if (dragPointer?.id === event.pointerId) finishDrag(true) }}
+      onPointerCancel={(event) => { if (dragPointer?.id === event.pointerId) finishDrag(false) }}
+      onLostPointerCapture={(event) => { if (dragPointer?.id === event.pointerId) finishDrag(false) }}>
       <div class="terminal-pane__heading">
         <h2>Terminals</h2>
         <SegmentedControl label="Terminal types" value={scopeFilter()} choices={TERMINAL_TYPES}
@@ -436,18 +525,6 @@ export function TerminalPane(props: TerminalPaneProps) {
           </svg>
         </button>
       </div>
-      <Show when={attached().length > 1}>
-        <div class="terminal-pane__bar">
-          <Show when={attachedVisible().length > 1}>
-            <button type="button" onClick={single} disabled={pending()}>Single</button>
-          </Show>
-          <button type="button" onClick={() => arrange('horizontal')} disabled={pending()}>Side by side</button>
-          <button type="button" onClick={() => arrange('vertical')} disabled={pending()}>Stack</button>
-          <Show when={attachedVisible().length === 4}>
-            <button type="button" onClick={quad} disabled={pending()}>Quad</button>
-          </Show>
-        </div>
-      </Show>
         <ul class="terminal-list" aria-label="Terminals">
         <For each={listed()}>
           {(entry) => (
@@ -488,7 +565,7 @@ export function TerminalPane(props: TerminalPaneProps) {
             </li>
           )}
         </Show>
-        <For each={typeShown('task') ? props.agentTerminals : []}>
+        <For each={typeShown('task') ? props.agentTerminals?.filter((entry) => agentPaneVisible(entry.id)) : []}>
           {(entry) => (
             <li>
               <button type="button" class="terminal-list__item" onClick={() => {
@@ -514,11 +591,10 @@ export function TerminalPane(props: TerminalPaneProps) {
               <section class="terminal-tile" data-agent-terminal aria-label={`agent: ${entry().title}`}>
                 <div class="terminal-pane__bar">
                   <span>agent: {entry().title}</span>
-                  <button type="button" data-terminal-focus={entry().live ? '' : undefined}
-                    onClick={() => setAgentPaneVisible(id, false)}>Hide pane</button>
-                  <Show when={entry().live}>
-                    <button type="button" onClick={() => void run(() => bridge.closeTerminal(id))} disabled={pending()}>Stop process</button>
-                  </Show>
+                  <div class="terminal-header__actions"><CloseTerminalButton live={entry().live} disabled={pending()} onClick={() => void run(async () => {
+                    if (entry().live) await bridge.closeTerminal(id)
+                    setAgentPaneVisible(id, false)
+                  })} /></div>
                 </div>
                 <Show when={entry().live} fallback={
                   <div class="terminal-ended"><p>Process ended{formatExit(entry().exitCode)}</p></div>
@@ -535,8 +611,11 @@ export function TerminalPane(props: TerminalPaneProps) {
           <p class="empty">Open an instance or start a terminal.</p>
         </Show>
       }>
-                <TerminalTree node={root()!} terminal={terminal} paneVisible={paneVisible} active={props.freebuffFocused ? null : active()} shown={props.shown} select={setSelectedId} focusRequest={focusRequest()} onTerminalFocus={props.onTerminalFocus}
-          restart={restart} measure={(id, size) => measuredSizes.set(id, size)} path={[]} resize={resizeSplit} detach={detach} stop={(id) => void run(() => bridge.closeTerminal(id))} split={splitPane} pending={pending()} />
+        <div class="terminal-tree-root">
+          <TerminalTree node={root()!} terminal={terminal} paneVisible={paneVisible} active={props.freebuffFocused ? null : active()} shown={props.shown} select={setSelectedId} focusRequest={focusRequest()} onTerminalFocus={props.onTerminalFocus}
+            restart={restart} measure={(id, size) => measuredSizes.set(id, size)} path={[]} resize={resizeSplit} detach={detach} stop={(id) => void run(() => bridge.closeTerminal(id))} split={splitPane} beginDrag={beginDrag} moveWithKeyboard={moveWithKeyboard} pending={pending()} />
+          <Show when={terminalDrag()}>{(drop) => <div class="terminal-layout-preview" aria-hidden="true"><TerminalLayoutPreview node={moveTerminal(root(), drop().source, drop().target, drop().edge)} source={drop().source} paneVisible={paneVisible} /></div>}</Show>
+        </div>
       </Show>
     </div>
   )
@@ -665,6 +744,29 @@ function removePane(node: bridge.TerminalSplit | null, id: string): bridge.Termi
   return first && second ? { ...node, first, second } : first ?? second
 }
 
+type DropEdge = 'left' | 'right' | 'top' | 'bottom'
+
+function moveTerminal(node: bridge.TerminalSplit | null, source: string, target: string, edge: DropEdge): bridge.TerminalSplit | null {
+  if (!node || source === target || !contains(node, source) || !contains(node, target)) return node
+  const remaining = removePane(node, source)
+  if (!remaining || !contains(remaining, target)) return node
+  const axis = edge === 'left' || edge === 'right' ? 'horizontal' : 'vertical'
+  return replacePane(remaining, target, (pane) => edge === 'left' || edge === 'top'
+    ? splitInHalf(axis, leaf(source), pane) : splitInHalf(axis, pane, leaf(source)))
+}
+
+function TerminalLayoutPreview(props: { node: bridge.TerminalSplit | null; source: string; paneVisible: (id: string) => boolean }) {
+  const pane = () => props.node?.type === 'pane' ? props.node : undefined
+  const split = () => props.node?.type === 'split' ? props.node : undefined
+  return <Show when={pane()} fallback={<Show when={split()}>{(branch) => <div class={`terminal-split terminal-split--${branch().axis}`}>
+    <Show when={firstMatchingPane(branch().first, props.paneVisible)}><div class="terminal-split__child" style={{ flex: branch().ratio }}><TerminalLayoutPreview node={branch().first} source={props.source} paneVisible={props.paneVisible} /></div></Show>
+    <Show when={firstMatchingPane(branch().first, props.paneVisible) && firstMatchingPane(branch().second, props.paneVisible)}><div class="terminal-divider terminal-preview__divider" /></Show>
+    <Show when={firstMatchingPane(branch().second, props.paneVisible)}><div class="terminal-split__child" style={{ flex: 1000 - branch().ratio }}><TerminalLayoutPreview node={branch().second} source={props.source} paneVisible={props.paneVisible} /></div></Show>
+  </div>}</Show>}>
+    {(entry) => <div class="terminal-pane__slot"><div class="terminal-tile terminal-preview__tile" classList={{ 'terminal-preview__tile--target': entry().terminalId === props.source }} /></div>}
+  </Show>
+}
+
 function paneIds(node: bridge.TerminalSplit | null): string[] {
   if (!node) return []
   return node.type === 'pane' ? [node.terminalId] : [...paneIds(node.first), ...paneIds(node.second)]
@@ -715,6 +817,8 @@ interface TerminalTreeProps {
   stop: (id: string) => void
   detach: (id: string) => void
   split: (id: string, axis: bridge.SplitAxis) => void
+  beginDrag: (event: PointerEvent, id: string) => void
+  moveWithKeyboard: (event: KeyboardEvent, id: string) => void
   pending: boolean
 }
 
@@ -741,7 +845,7 @@ function TerminalTree(props: TerminalTreeProps) {
             <section class="terminal-tile" aria-label="Unavailable terminal">
               <div class="terminal-pane__bar">
                 <span>Unavailable terminal</span>
-                <button type="button" onClick={() => props.detach(id)} disabled={props.pending}>Hide pane</button>
+                <div class="terminal-header__actions"><CloseTerminalButton disabled={props.pending} onClick={() => props.detach(id)} /></div>
               </div>
               <div class="terminal-ended">
                 <p>The saved terminal no longer exists.</p>
@@ -751,21 +855,20 @@ function TerminalTree(props: TerminalTreeProps) {
         </Show>
       }>
         {(entry) => (
-          <div class="terminal-pane__slot">
+          <div class="terminal-pane__slot" data-terminal-id={entry().id}>
           <section class="terminal-tile" classList={{ 'terminal-tile--active': entry().id === props.active }}
             aria-label={entry().title} aria-description={entry().scope === 'project' ? 'Shared terminal' : 'Task terminal'}
             onFocusIn={() => props.select(entry().id)}>
             <div class="terminal-pane__bar">
+              <button type="button" class="terminal-drag-handle" aria-label={`Rearrange ${entry().title}`} title="Drag to rearrange, or use Alt and the arrow keys" disabled={props.pending} onPointerDown={(event) => props.beginDrag(event, entry().id)} onKeyDown={(event) => props.moveWithKeyboard(event, entry().id)}>
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="9" cy="5" r="1.5" /><circle cx="15" cy="5" r="1.5" /><circle cx="9" cy="12" r="1.5" /><circle cx="15" cy="12" r="1.5" /><circle cx="9" cy="19" r="1.5" /><circle cx="15" cy="19" r="1.5" /></svg>
+              </button>
               <ScopeIcon scope={entry().scope} />
               <span>{entry().title}</span>
-              <button type="button" data-terminal-focus={entry().endedAt === null ? '' : undefined}
-                title="The terminal keeps running; reopen it under Terminals."
-                onClick={() => props.detach(entry().id)} disabled={props.pending}>Hide pane</button>
-              <Show when={entry().endedAt === null}>
-                <button type="button" title="Ends this shell process."
-                  onClick={() => props.stop(entry().id)} disabled={props.pending}>Stop process</button>
-              </Show>
-              <Show when={entry().endedAt !== null}><RestartButton disabled={props.pending} onClick={() => props.restart(entry().id)} /></Show>
+              <div class="terminal-header__actions">
+                <Show when={entry().endedAt !== null}><RestartButton disabled={props.pending} onClick={() => props.restart(entry().id)} /></Show>
+                <CloseTerminalButton live={entry().endedAt === null} disabled={props.pending} onClick={() => props.stop(entry().id)} />
+              </div>
             </div>
             <Show when={entry().endedAt === null} fallback={
               <div class="terminal-ended">

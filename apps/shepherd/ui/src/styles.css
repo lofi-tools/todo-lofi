@@ -2672,6 +2672,13 @@ button.pool__agent-label { padding: 0; border: 0; background: transparent; color
 .terminal-pane__bar .terminal-restart__button:hover:enabled { background: var(--surface-raised); color: var(--text); }
 .terminal-restart__tooltip { min-width: 0; width: max-content; padding: 5px 8px; color: var(--text); font-size: 12px; white-space: nowrap; visibility: hidden; pointer-events: none; }
 .terminal-restart:hover .terminal-restart__tooltip, .terminal-restart:focus-within .terminal-restart__tooltip { visibility: visible; }
+.terminal-header__actions { display: flex; align-items: center; gap: 2px; margin-inline-start: auto; }
+.terminal-header__actions .terminal-restart { margin-inline-start: 0; }
+.terminal-close { position: relative; flex: none; }
+.terminal-pane__bar .terminal-close__button { display: grid; place-items: center; width: 26px; height: 26px; padding: 0; border: 0; border-radius: 6px; background: transparent; color: var(--text-muted); cursor: pointer; }
+.terminal-pane__bar .terminal-close__button:hover:enabled { background: var(--surface-raised); color: var(--text); }
+.terminal-close__tooltip { min-width: 0; width: max-content; padding: 5px 8px; color: var(--text); font-size: 12px; white-space: nowrap; visibility: hidden; pointer-events: none; }
+.terminal-close:hover .terminal-close__tooltip, .terminal-close:focus-within .terminal-close__tooltip { visibility: visible; }
 
 .preview-pane__view {
   height: 100%;
@@ -3359,6 +3366,13 @@ button.pool__agent-label { padding: 0; border: 0; background: transparent; color
   min-width: 0;
   min-height: 0;
 }
+.terminal-tree-root { position: relative; display: flex; flex: 1; min-width: 0; min-height: 0; }
+.terminal-layout-preview { position: absolute; inset: 0; z-index: 4; display: flex; pointer-events: none; }
+.terminal-preview__tile { border-color: transparent; background: transparent; }
+.terminal-preview__tile--target { border: 1px solid var(--accent); background: color-mix(in srgb, var(--accent) 24%, transparent); }
+.terminal-preview__divider { visibility: hidden; }
+.terminal-pane__bar .terminal-drag-handle { display: grid; place-items: center; padding: 2px; border: 0; background: transparent; color: var(--text-muted); cursor: grab; touch-action: none; }
+.terminal-pane__bar .terminal-drag-handle:active { cursor: grabbing; }
 
 /* Split affordances sit on the pane edges and stay out of the way until the
    pane is hovered or its controls take focus. */

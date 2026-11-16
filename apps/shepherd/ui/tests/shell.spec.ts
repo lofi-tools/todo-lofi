@@ -1454,6 +1454,22 @@ test.beforeEach(async ({ context }) => {
             return null
           case 'close_terminal':
             closedTerminals.push(args.terminalId)
+            {
+              const index = terminals.findIndex((terminal) => terminal.id === args.terminalId && terminal.scope !== 'freebuff')
+              if (index >= 0) {
+                terminals.splice(index, 1)
+                const remove = (node: TerminalSplit | null): TerminalSplit | null => {
+                  if (!node) return null
+                  if (node.type === 'pane') return node.terminalId === args.terminalId ? null : node
+                  const first = remove(node.first)
+                  const second = remove(node.second)
+                  return first && second ? { ...node, first, second } : first ?? second
+                }
+                const root = remove(terminalLayout.root)
+                terminalLayout = { ...terminalLayout, root, revision: terminalLayout.revision + (JSON.stringify(root) === JSON.stringify(terminalLayout.root) ? 0 : 1) }
+                window.__emitCoreEvent({ type: 'terminalListChanged', data: { projectId: project.id, revision: ++terminalRevision, terminals: [...terminals], layout: terminalLayout } })
+              }
+            }
             return null
           case 'quit':
             return { interruptedTasks: 0, liveTerminals: 0 }
@@ -5268,9 +5284,9 @@ test('shows a live terminal and an ended one with a restart action', async ({ pa
   expect(buttonBounds.x).toBeGreaterThan(filterBounds.x + filterBounds.width)
   expect(Math.abs(filterBounds.y + filterBounds.height / 2 - headingBounds.y - headingBounds.height / 2)).toBeLessThan(2)
   await expect(page.locator('summary').filter({ hasText: /^Terminals$/ })).toHaveCount(0)
-  await expect(page.getByRole('button', { name: /Terminal 1/ })).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Terminal 1', exact: true })).toBeVisible()
 
-  await page.getByRole('button', { name: /Terminal 2/ }).click()
+  await page.getByRole('button', { name: 'Terminal 2', exact: true }).click()
   await expect(page.getByText('ended with exit code 0', { exact: false })).toBeVisible()
   await expect(page.getByRole('button', { name: 'Restart' })).toBeVisible()
 })
@@ -5307,7 +5323,7 @@ for (const restart of [false, true]) {
   test(`keeps an immediate terminal exit after ${restart ? 'restart' : 'start'}`, async ({ page }) => {
     await page.goto('/?early-terminal-exit')
     if (restart) {
-      await page.getByRole('button', { name: 'Terminal 2' }).click()
+      await page.getByRole('button', { name: 'Terminal 2', exact: true }).click()
       await page.getByRole('button', { name: 'Restart' }).click()
     } else {
       await page.getByRole('button', { name: 'New terminal' }).click()
@@ -5352,14 +5368,14 @@ test('marks terminal scope with an icon and filters the list and panes by type',
   await expect(shared.locator('svg.terminal-scope-icon')).toHaveCount(1)
   await expect(scoped.locator('svg.terminal-scope-icon')).toHaveCount(1)
 
-  await expect(page.getByRole('button', { name: 'Terminal 1' })).toHaveAttribute('title', /Project shared terminal/)
+  await expect(page.getByRole('button', { name: 'Terminal 1', exact: true })).toHaveAttribute('title', /Project shared terminal/)
 
   const filter = page.getByRole('group', { name: 'Terminal types' })
   await expect(filter.getByRole('button', { name: 'Both' })).toHaveAttribute('aria-pressed', 'true')
   await filter.getByRole('button', { name: 'Task' }).click()
   await expect(shared).toHaveCount(0)
   await expect(scoped.getByRole('textbox')).toBeVisible()
-  await expect(page.getByRole('button', { name: 'Terminal 1' })).toHaveCount(0)
+  await expect(page.getByRole('button', { name: 'Terminal 1', exact: true })).toHaveCount(0)
 
   await filter.getByRole('button', { name: 'Project' }).click()
   await expect(shared.getByRole('textbox')).toBeVisible()
@@ -5432,19 +5448,16 @@ test('shows an interactive ACP terminal only for its owning task', async ({ page
   await input.press('x')
   await expect.poll(() => page.evaluate(() => window.__writes)).toContain('x')
 
-  await pane.getByRole('button', { name: 'Hide pane' }).click()
-  await expect(pane).toHaveCount(0)
-  await page.getByRole('button', { name: 'agent: Run tests' }).click()
-  await expect(input).toBeFocused()
-
   await page.getByRole('button', { name: /Other task/ }).click()
   await expect(pane).toHaveCount(0)
   await expect(shared).toBeVisible()
   await page.getByRole('button', { name: /Ship it/ }).click()
-  await pane.getByRole('button', { name: 'Stop process' }).click()
+  await pane.getByRole('button', { name: 'Close terminal' }).click()
   await expect.poll(() => page.evaluate(() => window.__closedTerminals)).toContain(terminal.id)
+  await expect(pane).toHaveCount(0)
+  await expect(page.getByRole('button', { name: 'agent: Run tests' })).toHaveCount(0)
   await publish([{ ...terminal, live: false, exitCode: 7 }])
-  await expect(pane).toContainText('Process ended with exit code 7')
+  await expect(pane).toHaveCount(0)
   await publish([])
   await expect(pane).toHaveCount(0)
 })
@@ -5589,12 +5602,89 @@ test('preserves the other terminal when a saved pane is missing', async ({ page 
   await expect(live.getByRole('textbox')).toBeVisible()
   await expect(unavailable).toContainText('The saved terminal no longer exists.')
   await expect(page.getByRole('separator', { name: 'Resize terminal split' })).toHaveAttribute('aria-valuenow', '65')
-  await unavailable.getByRole('button', { name: 'Hide pane' }).click()
+  await unavailable.getByRole('button', { name: 'Close terminal' }).click()
   await expect(unavailable).toHaveCount(0)
   await expect(live.getByRole('textbox')).toBeVisible()
   expect(await page.evaluate(() =>
     (window as unknown as { __terminalLayout: () => TerminalLayout }).__terminalLayout().root,
   )).toEqual({ type: 'pane', terminalId: 'terminal-1' })
+})
+
+test('closes a running terminal and removes its pane and tab', async ({ page }) => {
+  await page.goto('/?scoped-terminals')
+  const pane = page.getByRole('region', { name: 'Task shell', exact: true })
+  await pane.getByRole('button', { name: 'Close terminal' }).click()
+  await expect.poll(() => page.evaluate(() => window.__closedTerminals)).toContain('terminal-task')
+  await expect(pane).toHaveCount(0)
+  await expect(page.getByRole('button', { name: 'Task shell', exact: true })).toHaveCount(0)
+  await expect(page.getByRole('region', { name: 'Terminal 1', exact: true })).toBeVisible()
+  expect(await page.evaluate(() => (window as unknown as { __terminalLayout: () => TerminalLayout }).__terminalLayout().root)).toEqual({ type: 'pane', terminalId: 'terminal-1' })
+})
+
+test('closes an ended terminal with the cross after restart', async ({ page }) => {
+  await page.goto('/')
+  await page.getByRole('button', { name: 'Terminal 2', exact: true }).click()
+  const pane = page.getByRole('region', { name: 'Terminal 2', exact: true })
+  const restart = await pane.getByRole('button', { name: 'Restart' }).boundingBox()
+  const close = await pane.getByRole('button', { name: 'Close terminal' }).boundingBox()
+  if (!restart || !close) throw new Error('Missing terminal controls')
+  expect(close.x).toBeGreaterThan(restart.x + restart.width)
+  await pane.getByRole('button', { name: 'Close terminal' }).click()
+  await expect(pane).toHaveCount(0)
+  await expect(page.getByRole('button', { name: 'Terminal 2', exact: true })).toHaveCount(0)
+  await expect.poll(() => page.evaluate(() => window.__closedTerminals)).toContain('terminal-2')
+})
+
+test('rearranges terminals with a preview of the final drop area', async ({ page }) => {
+  await page.goto('/?scoped-terminals')
+  const source = page.getByRole('region', { name: 'Task shell', exact: true })
+  const target = page.getByRole('region', { name: 'Terminal 1', exact: true })
+  const layout = page.locator('.terminal-tree-root')
+  const readLayout = () => page.evaluate(() => (window as unknown as { __terminalLayout: () => TerminalLayout }).__terminalLayout().root)
+  const leaf = (id: string) => ({ type: 'pane', terminalId: id })
+  async function drag(edge: 'left' | 'right' | 'bottom') {
+    const handle = await source.getByRole('button', { name: 'Rearrange Task shell' }).boundingBox()
+    const targetBounds = await target.boundingBox()
+    const layoutBounds = await layout.boundingBox()
+    if (!handle || !targetBounds || !layoutBounds) throw new Error('Missing terminal drag bounds')
+    await page.mouse.move(handle.x + handle.width / 2, handle.y + handle.height / 2)
+    await page.mouse.down()
+    await page.mouse.move(targetBounds.x + targetBounds.width * (edge === 'left' ? .1 : edge === 'right' ? .9 : .5), targetBounds.y + targetBounds.height * (edge === 'bottom' ? .9 : .5), { steps: 5 })
+    const preview = page.locator('.terminal-preview__tile--target')
+    await expect(preview).toBeVisible()
+    const previewBounds = await preview.boundingBox()
+    if (!previewBounds) throw new Error('Missing terminal drop preview')
+    if (edge === 'bottom') {
+      expect(Math.abs(previewBounds.height - layoutBounds.height / 2)).toBeLessThan(8)
+      expect(Math.abs(previewBounds.y + previewBounds.height - layoutBounds.y - layoutBounds.height)).toBeLessThan(3)
+    } else {
+      expect(Math.abs(previewBounds.width - layoutBounds.width / 2)).toBeLessThan(8)
+      if (edge === 'left') expect(Math.abs(previewBounds.x - layoutBounds.x)).toBeLessThan(3)
+      else expect(Math.abs(previewBounds.x + previewBounds.width - layoutBounds.x - layoutBounds.width)).toBeLessThan(3)
+    }
+    await page.mouse.up()
+    await expect(preview).toHaveCount(0)
+  }
+  await drag('left')
+  await expect.poll(readLayout).toEqual({ type: 'split', axis: 'horizontal', ratio: 500, first: leaf('terminal-task'), second: leaf('terminal-1') })
+  await drag('right')
+  await expect.poll(readLayout).toEqual({ type: 'split', axis: 'horizontal', ratio: 500, first: leaf('terminal-1'), second: leaf('terminal-task') })
+  await drag('bottom')
+  await expect.poll(readLayout).toEqual({ type: 'split', axis: 'vertical', ratio: 500, first: leaf('terminal-1'), second: leaf('terminal-task') })
+  await source.getByRole('button', { name: 'Rearrange Task shell' }).press('Alt+ArrowUp')
+  await expect.poll(readLayout).toEqual({ type: 'split', axis: 'vertical', ratio: 500, first: leaf('terminal-task'), second: leaf('terminal-1') })
+  await expect(source.getByRole('button', { name: 'Rearrange Task shell' })).toBeFocused()
+  const handle = await source.getByRole('button', { name: 'Rearrange Task shell' }).boundingBox()
+  const targetBounds = await target.boundingBox()
+  if (!handle || !targetBounds) throw new Error('Missing terminal drag bounds')
+  await page.mouse.move(handle.x + handle.width / 2, handle.y + handle.height / 2)
+  await page.mouse.down()
+  await page.mouse.move(targetBounds.x + targetBounds.width * .9, targetBounds.y + targetBounds.height / 2, { steps: 5 })
+  await expect(page.locator('.terminal-preview__tile--target')).toBeVisible()
+  await page.keyboard.press('Escape')
+  await page.mouse.up()
+  await expect(page.locator('.terminal-layout-preview')).toHaveCount(0)
+  await expect.poll(readLayout).toEqual({ type: 'split', axis: 'vertical', ratio: 500, first: leaf('terminal-task'), second: leaf('terminal-1') })
 })
 
 test('resizes a split and reopens a hidden terminal from the instance list', async ({ page }) => {
@@ -5634,7 +5724,8 @@ test('resizes a split and reopens a hidden terminal from the instance list', asy
   await expect(terminalsTab).toBeFocused()
   await expect(terminalsTab).toHaveAttribute('aria-selected', 'true')
 
-  await scoped.getByRole('button', { name: 'Hide pane' }).click()
+  const hideShortcut = modifier === 'Meta' ? 'Meta+w' : 'Control+Shift+w'
+  await scopedInput.press(hideShortcut)
   await expect(scoped).toHaveCount(0)
   await page.getByRole('button', { name: 'Task shell', exact: true }).click()
   await expect(scoped.getByRole('textbox')).toBeFocused()
@@ -5698,25 +5789,34 @@ test('saves Quad and Single layouts while keeping the terminal instances', async
   const split = (axis: 'vertical' | 'horizontal', first: unknown, second: unknown) =>
     ({ type: 'split', axis, ratio: 500, first, second })
 
-  await page.getByRole('button', { name: 'Quad', exact: true }).click()
+  async function arrange(label: string) {
+    await page.getByRole('button', { name: 'Command palette' }).click()
+    const palette = page.getByRole('dialog', { name: 'Command palette' })
+    await palette.getByRole('combobox').fill(label)
+    await palette.getByRole('option', { name: label }).click()
+  }
+  await arrange('Terminal layout quad')
   await expect.poll(readLayout).toEqual(split('horizontal', split('vertical',
     split('horizontal', leaf(1), leaf(2)),
     split('horizontal', leaf(3), leaf(4))), leaf('later')))
-  await page.getByRole('button', { name: 'Terminal 3' }).click()
-  await page.getByRole('button', { name: 'Single', exact: true }).click()
+  await page.getByRole('button', { name: 'Terminal 3', exact: true }).click()
+  await arrange('Terminal layout single')
   await expect.poll(readLayout).toEqual(split('horizontal', leaf(3), leaf('later')))
   await expect(page.getByRole('region', { name: 'Terminal 3' }).getByRole('textbox')).toBeFocused()
-  await expect(page.getByRole('button', { name: 'Terminal 1' })).toHaveAttribute('title', /view closed/)
+  await expect(page.getByRole('button', { name: 'Terminal 1', exact: true })).toHaveAttribute('title', /view closed/)
   await page.getByRole('button', { name: /Other task/ }).click()
   await expect(page.getByRole('region', { name: 'Other shell' }).getByRole('textbox')).toBeVisible()
 })
 
 test('moves focus by direction between the Terminals tab and live splits', async ({ page }) => {
   await page.goto('/?terminal-presets')
-  await page.getByRole('button', { name: 'Quad', exact: true }).click()
+  await page.getByRole('button', { name: 'Command palette' }).click()
+  const palette = page.getByRole('dialog', { name: 'Command palette' })
+  await palette.getByRole('combobox').fill('Terminal layout quad')
+  await palette.getByRole('option', { name: 'Terminal layout quad' }).click()
 
   const pane = (number: number) => page.getByRole('region', { name: `Terminal ${number}` })
-  const header = (number: number) => pane(number).getByRole('button', { name: 'Hide pane' })
+  const header = (number: number) => pane(number).getByRole('button', { name: 'Close terminal' })
   const tab = page.getByRole('tab', { name: 'Terminals' })
   await tab.press('ArrowDown')
   await expect(header(1)).toBeFocused()
@@ -5787,7 +5887,7 @@ test('exposes current terminal output and lets keyboard users copy or leave the 
 
   await input.press(`${modifier}+Shift+x`)
   await page.keyboard.press('Shift+Tab')
-  await expect(page.getByRole('button', { name: 'Stop process' })).toBeFocused()
+  await expect(page.getByRole('button', { name: 'Close terminal' })).toBeFocused()
   await expect(copy).toHaveCount(0)
   expect(await page.evaluate(() => window.__writes)).toEqual(['\t'])
 })

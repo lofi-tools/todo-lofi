@@ -79,18 +79,25 @@ current layout and give future changes a point of comparison.
   without replacing concurrent pane changes.
   The segmented control is the reusable `SegmentedControl` component: a weak track
   with a strong selected option, no separate borders between options.
+  Each task or project terminal has a drag handle. Dropping it on an edge of
+  another terminal moves it to that side, with a preview of the resulting space;
+  Escape cancels the drag. Alt and the arrow keys move a focused handle toward a
+  neighbouring terminal. Preset arrangements remain available from the command
+  palette. A close icon at the right of each terminal header terminates a live
+  process and removes its pane; on an ended terminal it removes the saved record
+  and pane. The icon follows Restart when both are shown.
   Split from the pane rather than the toolbar: a full-height **+** on the right
   edge splits right and a full-width **+** on the bottom edge splits down. Reveal
   them while the pane is hovered or focused, keep them out of the Tab order, and
   keep the palette commands as the keyboard path.
   Show ACP terminals for the selected task as interactive **agent: <title>**
-  panes. Use the same terminal input, resize, and hide controls as task
-  shells. Released agent panes disappear when the turn settles.
+  panes. Use the same terminal input and a close control that stops the process
+  and removes the pane. Released agent panes disappear when the turn settles.
   Show the project's standalone Freebuff session as one **Freebuff** row in the
   Terms list with its live or ended state and an attention dot when it exits while
   another agent is in front. An ended terminal has an icon-only **Restart**
   control at the right end of its own header, with a menu-card tooltip.
-  Down from the Terminals tab focuses the first live pane's **Hide pane**
+  Down from the Terminals tab focuses the first live pane's **Close terminal**
   button. Arrow keys on live pane header buttons move between adjacent live
   panes. Up from a pane with no live pane above it returns to the Terminals
   tab. Arrow keys in the terminal input go to the shell.
