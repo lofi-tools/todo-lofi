@@ -2770,6 +2770,7 @@ export function App() {
                 onStart={() => void openFreebuff(projectId)}
                 onRestart={restartFreebuff}
                 onStop={stopFreebuff}
+                onTerminalFocus={focusTerminal}
               />
             )}
           </Show>
@@ -2900,7 +2901,7 @@ export function App() {
                   transcript={workspace()?.transcript}
                   agentTerminals={workspace()?.task.id === selectedTaskId() && workspace()?.capabilities?.agentTerminals ? workspace()?.agentTerminals : undefined}
                   listEvent={terminalListEvent()} shown={!settingsOpen() && inspectorTab() === 'terminals'}
-                  freebuffFront={!!freebuffProjectId()} freebuffAttention={freebuffAttention()}
+                  freebuffFront={!!freebuffProjectId()} freebuffFocused={!!freebuffTerminal() && focusedTerminal() === freebuffTerminal()?.id} freebuffAttention={freebuffAttention()}
                   onOpenFreebuff={() => {
                     const projectId = selectedProjectId()
                     if (projectId) void openFreebuff(projectId)

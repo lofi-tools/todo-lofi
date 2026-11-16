@@ -350,7 +350,10 @@ current layout and give future changes a point of comparison.
   leaves the terminal running in the background and shows that agent's chat.
   **Back to chat** in the terminal's own bar does the same. An exited session
   shows its exit code with **Restart**, and a **Freebuff** row in the Terminals
-  tab brings the running session back to the front. Other unavailable agents
+  tab brings the running session back to the front. The conversation terminal
+  uses the same rounded border as the terminal panes, with an accent border
+  while its input is focused and a muted border otherwise. Its focus highlight
+  and the terminal pane's active highlight are mutually exclusive. Other unavailable agents
   are disabled until their integrations are ready.
 - The planned [integrated Freebuff agent](./freebuff-adapter.md) is a separate
   picker choice that uses the normal task conversation; retain the standalone

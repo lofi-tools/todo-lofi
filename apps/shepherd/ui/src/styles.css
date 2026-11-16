@@ -1003,7 +1003,12 @@ textarea {
   flex-direction: column;
   min-height: 0;
   overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 6px;
 }
+
+.chat__terminal:has(.terminal-view:focus-within) { border-color: var(--accent); }
+.chat__terminal .terminal-view:focus-within .terminal-view__canvas { outline: none; }
 
 .chat__terminal > .terminal-view {
   flex: 1;

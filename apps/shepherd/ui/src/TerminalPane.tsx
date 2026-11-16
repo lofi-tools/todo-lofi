@@ -36,6 +36,7 @@ export function FreebuffPane(props: {
   onStart: () => void
   onRestart: () => void
   onStop: () => void
+  onTerminalFocus: (id: string | null) => void
 }) {
   let section: HTMLElement | undefined
   let restart: HTMLButtonElement | undefined
@@ -91,7 +92,7 @@ export function FreebuffPane(props: {
           </Show>
         </div>
       }>
-        {(entry) => <TerminalCanvas terminalId={entry.id} shown={props.front} focusRequest={focusRequest()} />}
+        {(entry) => <TerminalCanvas terminalId={entry.id} shown={props.front} focusRequest={focusRequest()} onFocus={props.onTerminalFocus} />}
       </Show>
     </section>
   )
@@ -113,6 +114,7 @@ interface TerminalPaneProps {
   onTerminalFocus: (id: string | null) => void
   listEvent: bridge.TerminalList | undefined
   freebuffFront: boolean
+  freebuffFocused: boolean
   freebuffAttention: boolean
   onOpenFreebuff: () => void
 }
@@ -496,7 +498,7 @@ export function TerminalPane(props: TerminalPaneProps) {
           <p class="empty">Open an instance or start a terminal.</p>
         </Show>
       }>
-                <TerminalTree node={root()!} terminal={terminal} paneVisible={paneVisible} active={active()} shown={props.shown} select={setSelectedId} focusRequest={focusRequest()} onTerminalFocus={props.onTerminalFocus}
+                <TerminalTree node={root()!} terminal={terminal} paneVisible={paneVisible} active={props.freebuffFocused ? null : active()} shown={props.shown} select={setSelectedId} focusRequest={focusRequest()} onTerminalFocus={props.onTerminalFocus}
           restart={restart} measure={(id, size) => measuredSizes.set(id, size)} path={[]} resize={resizeSplit} detach={detach} stop={(id) => void run(() => bridge.closeTerminal(id))} split={splitPane} pending={pending()} />
       </Show>
     </div>
