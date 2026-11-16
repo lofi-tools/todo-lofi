@@ -2,7 +2,7 @@ import { execFileSync } from 'node:child_process'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { createSnapshot } from '../src/snapshot'
 import { MODELS_DEV_SOURCE } from '../src/models-dev'
 import { planRebuild } from '../scripts/rebuild-from-artifact'
@@ -44,6 +44,7 @@ describe('rebuild from artifact', () => {
         now: FIXED_NOW,
       })
 
+      vi.setSystemTime(FIXED_NOW)
       const report = await planRebuild({ artifactDirectory: directory })
       expect(report).toMatchObject({
         status: 'ready',
@@ -53,6 +54,7 @@ describe('rebuild from artifact', () => {
       })
       expect(report.snapshotPath).toMatch(/providers-catalog-3-.*\.duckdb$/)
     } finally {
+      vi.useRealTimers()
       await rm(directory, { recursive: true, force: true })
     }
   })
