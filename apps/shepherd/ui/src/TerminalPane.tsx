@@ -4,7 +4,7 @@
  * stay listed with their exit code instead of pretending to still be live.
  */
 
-import { For, Match, Show, Switch, batch, createEffect, createMemo, createSignal, createUniqueId, onCleanup, onMount } from 'solid-js'
+import { For, Match, Show, Switch, batch, createEffect, createMemo, createResource, createSignal, createUniqueId, onCleanup, onMount } from 'solid-js'
 
 import * as bridge from './bridge'
 import { FreebuffMark } from './FreebuffMark'
@@ -150,6 +150,7 @@ export interface TerminalCommands {
 }
 
 export function TerminalPane(props: TerminalPaneProps) {
+  const [projectEnvironment] = createResource(() => props.shown ? props.projectId : undefined, bridge.projectEnvironment)
   const measuredSizes = new Map<string, TerminalSize>()
   const [terminalList, setTerminalList] = createSignal<bridge.TerminalList>()
   const terminals = () => terminalList()?.terminals ?? []
@@ -429,6 +430,22 @@ export function TerminalPane(props: TerminalPaneProps) {
     start(taskId, 'vertical')
   }
 
+  function runProjectAction(action: bridge.ProjectAction) {
+    const taskId = props.taskId
+    if (!taskId || !props.taskHasWorktree || pending()) return
+    if (!typeShown('task')) setScopeFilter('both')
+    void run(async () => {
+      const before = new Set(terminals().map((terminal) => terminal.id))
+      const list = await bridge.startTerminal(props.projectId, taskId, 80, 24)
+      applyTerminalList(list)
+      const created = list.terminals.find((terminal) => !before.has(terminal.id))
+      if (!created) throw new Error('The action terminal was not created.')
+      await show(created.id)
+      const quoted = `'${action.command.replace(/'/g, `'\\''`)}'`
+      await bridge.terminalWrite(created.id, `sh -c ${quoted}\n`)
+    })
+  }
+
   createEffect(() => {
     const event = props.listEvent
     if (event) applyTerminalList(event)
@@ -525,6 +542,12 @@ export function TerminalPane(props: TerminalPaneProps) {
           </svg>
         </button>
       </div>
+      <Show when={projectEnvironment.latest?.current?.actions.length}>
+        <div aria-label="Project actions">
+          <For each={projectEnvironment.latest?.current?.actions}>{(action) => <button class="project-action" type="button"
+            disabled={!props.taskHasWorktree || pending() || !action.command.trim()} onClick={() => runProjectAction(action)}>{action.name}</button>}</For>
+        </div>
+      </Show>
         <ul class="terminal-list" aria-label="Terminals">
         <For each={listed()}>
           {(entry) => (

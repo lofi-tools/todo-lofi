@@ -576,6 +576,7 @@ export type Event =
   | { type: 'error'; data: { taskId: string | null; message: string } }
 
 export interface BridgeError {
+  taskId?: string
   code: string
   message: string
   quitConfirmation?: QuitConfirmation
@@ -1250,6 +1251,19 @@ export interface SettingsValues {
   'attachments.max_file_bytes': number
   'terminal.scrollback_lines': number
   'files.show_dotfiles': boolean
+  environment: ProjectEnvironment | null
+}
+
+export interface ProjectAction { name: string; icon: string; command: string }
+export interface ProjectEnvironment { sourceHash: string; setup: string; approvedSetupHash: string | null; actions: ProjectAction[] }
+export interface ProjectEnvironmentSnapshot { current: ProjectEnvironment | null; source: ProjectEnvironment | null; setupHash: string | null; warning?: string | null }
+
+export function projectEnvironment(projectId: string): Promise<ProjectEnvironmentSnapshot> {
+  return invoke('project_environment', { projectId })
+}
+
+export function saveProjectEnvironment(projectId: string, previous: ProjectEnvironment | null, environment: ProjectEnvironment): Promise<ProjectEnvironmentSnapshot> {
+  return invoke('save_project_environment', { projectId, previous, environment })
 }
 
 export type SettingKey = keyof SettingsValues

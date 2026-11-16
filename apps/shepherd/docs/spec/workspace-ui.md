@@ -155,6 +155,13 @@ current layout and give future changes a point of comparison.
   Files tab and opens the matching worktree file.
   Git and Review file rows expose their change status in words. Diff text is
   a named, keyboard-focusable region.
+- Project settings include worktree setup and named project actions. Import a
+  detected `.codex/environments/environment.toml` into Shepherd's project
+  defaults and retain a hash of the source at import. If the source changes,
+  offer to replace the imported copy; do not silently overwrite project edits.
+  Let the user review the setup script for the project before it runs once in
+  each new task worktree, before starting the agent. Project actions run in
+  task terminals. Platform-specific commands use the current platform.
 - In Preview, offer **Project settings** when the selected project has no
   preview URL. A valid `preview.url` in the project's `.config/shepherd/settings.json`
   overrides the saved URL without changing it. **Settings → Projects** saves or clears that project's loopback

@@ -7,6 +7,7 @@ import { PoolSettings } from './PoolSettings'
 import { SettingsSelect } from './SettingsSelect'
 import { AgentIcon } from './AgentIcon'
 import { detectedHarnesses } from './bridge'
+import { projectEnvironment, saveProjectEnvironment, type ProjectEnvironment } from './bridge'
 
 export const categories = ['Workspace', 'Projects', 'Agent pool', 'Harnesses', 'Appearance', 'Keyboard shortcuts'] as const
 
@@ -85,6 +86,58 @@ function ProjectPreviewSetting(props: { url?: string | null; localOverride: bool
       <button type="submit" class="project-action" disabled={saving() || props.localOverride || url() === (props.url ?? '')}>Save preview URL</button>
     </form>
   )
+}
+
+function ProjectEnvironmentSettings(props: { projectId: string }) {
+  const [snapshot, { mutate, refetch }] = createResource(() => props.projectId, projectEnvironment)
+  const [draft, setDraft] = createSignal<ProjectEnvironment>()
+  const [error, setError] = createSignal('')
+  const [saving, setSaving] = createSignal(false)
+  createEffect(on(() => snapshot.latest, (value) => setDraft(value?.current ? structuredClone(value.current) : undefined)))
+
+  async function save(environment: ProjectEnvironment) {
+    const current = snapshot.latest?.current
+    if (saving()) return
+    setSaving(true)
+    setError('')
+    try { mutate(await saveProjectEnvironment(props.projectId, current ?? null, environment)) }
+    catch (failure) { setError(settingsError(failure)); reportError('project_environment', failure) }
+    finally { setSaving(false) }
+  }
+
+  return <section class="settings__project" aria-label="Project environment">
+    <h4>Worktree setup and project actions</h4>
+    <Show when={snapshot.error}><p class="empty">Could not load the project environment: {settingsError(snapshot.error)}</p><button class="project-action" onClick={() => void refetch()}>Retry</button></Show>
+    <Show when={error()}><p role="alert">{error()}</p></Show>
+    <Show when={snapshot.latest?.warning}>{(warning) => <p role="alert">Could not read the Codex environment: {warning()}</p>}</Show>
+    <Show when={snapshot.latest?.source && snapshot.latest?.current && snapshot.latest!.source!.sourceHash !== snapshot.latest!.current!.sourceHash}>
+      <p>The Codex environment changed. Updating replaces your Shepherd copy.</p>
+      <button class="project-action" disabled={saving()} onClick={() => {
+        const source = snapshot.latest?.source
+        const current = snapshot.latest?.current
+        if (source && current) void save({ ...source, approvedSetupHash: source.setup === current.setup ? current.approvedSetupHash : null })
+      }}>Update from Codex</button>
+    </Show>
+    <Show when={draft()} fallback={<><p class="empty">No Codex environment found in this project.</p><button class="project-action" disabled={saving() || snapshot.loading} onClick={() => void save({ sourceHash: '', setup: '', approvedSetupHash: null, actions: [] })}>Create project environment</button></>}>
+      {(environment) => <>
+        <label class="settings__row"><span>Worktree setup script</span><textarea value={environment().setup} onInput={(event) => setDraft({ ...environment(), setup: event.currentTarget.value, approvedSetupHash: null })} /></label>
+        <Show when={environment().setup.trim()}>
+          <p class="empty">Runs once in each new task worktree before the agent starts.</p>
+          <Show when={environment().approvedSetupHash === snapshot.latest?.setupHash && environment().setup === snapshot.latest?.current?.setup} fallback={<p>Review and approve this script before starting a task.</p>}><p class="empty">Setup script approved.</p></Show>
+        </Show>
+        <For each={environment().actions}>{(action, index) => <div class="settings__project">
+          <label class="settings__row"><span>Action name</span><input value={action.name} onInput={(event) => setDraft({ ...environment(), actions: environment().actions.map((item, position) => position === index() ? { ...item, name: event.currentTarget.value } : item) })} /></label>
+          <label class="settings__row"><span>Action command</span><input value={action.command} onInput={(event) => setDraft({ ...environment(), actions: environment().actions.map((item, position) => position === index() ? { ...item, command: event.currentTarget.value } : item) })} /></label>
+          <button class="project-action" onClick={() => setDraft({ ...environment(), actions: environment().actions.filter((_, position) => position !== index()) })}>Remove action</button>
+        </div>}</For>
+        <button class="project-action" onClick={() => setDraft({ ...environment(), actions: [...environment().actions, { name: '', icon: 'run', command: '' }] })}>Add action</button>
+        <button class="project-action" disabled={saving() || JSON.stringify(environment()) === JSON.stringify(snapshot.latest?.current)} onClick={() => void save(environment())}>Save environment</button>
+        <Show when={environment().setup.trim() && environment().setup === snapshot.latest?.current?.setup && environment().approvedSetupHash !== snapshot.latest?.setupHash}>
+          <button class="project-action" disabled={saving()} onClick={() => void save({ ...environment(), approvedSetupHash: snapshot.latest?.setupHash ?? null })}>Approve setup script</button>
+        </Show>
+      </>}
+    </Show>
+  </section>
 }
 
 function ApprovalGrantList(props: {
@@ -436,7 +489,7 @@ export function SettingsPane(props: SettingsPaneProps) {
   const query = () => search().trim().toLowerCase()
   const searchTerms: Record<(typeof categories)[number], string> = {
     Workspace: 'show archived tasks notify notifications when tasks need input attachment limit bytes terminal scrollback lines reload settings configuration',
-    Projects: 'project settings show archived tasks preview url attachment limit bytes terminal scrollback lines approvals saved live session add project import chatgpt',
+    Projects: 'project settings show archived tasks preview url attachment limit bytes terminal scrollback lines approvals saved live session add project import chatgpt worktree setup project actions codex environment',
     'Agent pool': 'agent pool priority installed agents reorder',
     Harnesses: 'harnesses codex chatgpt opencode pi claude code freebuff executable path refresh',
     Appearance: 'appearance theme system light dark density compact comfortable send button accent blue violet teal amber neutral',
@@ -579,6 +632,7 @@ export function SettingsPane(props: SettingsPaneProps) {
                       <Show when={showSetting('preview url')}><ProjectPreviewSetting url={project().previewUrl}
                         localOverride={typeof (props.preferences?.projects[project().path] as Record<string, unknown> | undefined)?.['preview.url'] === 'string'}
                         onSave={(url) => props.onSavePreviewUrl(projectId, url)} /></Show>
+                      <Show when={showSetting('worktree setup project actions codex environment')}><ProjectEnvironmentSettings projectId={projectId} /></Show>
                       <Show when={props.preferences}>
                         {(snapshot) => <NumberPreferences preferences={snapshot()} project={project()}
                           editable={props.preferencesEditable} onEdit={props.onEditPreference} query={narrowedQuery()} />}

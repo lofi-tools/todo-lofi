@@ -1993,6 +1993,15 @@ export function App() {
     if ((!current && !agentAvailability()?.[newTaskAgent()]) || !projectId || (!text && !files.length && !selectedSkills.length) || (!canCompose() && !canQueuePrompt()) || pending()) return
     const projectScope = `project:${projectId}`
     void run(async () => {
+      async function keepTaskForSetup(taskId: string) {
+        const task = await bridge.taskWorkspace(taskId)
+        setComposingProjectId(undefined)
+        currentPromptScope = `task:${taskId}`
+        setSelectedTaskId(taskId)
+        setWorkspace(task)
+        setPrompt(text)
+        await loadTasks(projectId!)
+      }
       let updated: bridge.TaskWorkspace
       if (current?.task) {
         const task = current.task
@@ -2017,6 +2026,10 @@ export function App() {
             for (const file of files) attachmentIds.push(await bridge.savePromptFile(created.task.id, file))
             updated = await bridge.sendPrompt(created.task.id, message, attachmentIds, codex, mode, model)
           } catch (failure) {
+            if ((failure as bridge.BridgeError)?.code === 'project_setup') {
+              await keepTaskForSetup(created.task.id)
+              throw failure
+            }
             try {
               await bridge.deleteTask(created.task.id, true)
             } catch (cleanup) {
@@ -2025,7 +2038,13 @@ export function App() {
             throw failure
           }
         } else {
-          updated = await bridge.startTask(projectId, message, codex, mode, model, newTaskAgent())
+          try {
+            updated = await bridge.startTask(projectId, message, codex, mode, model, newTaskAgent())
+          } catch (failure) {
+            const error = failure as bridge.BridgeError
+            if (error?.code === 'project_setup' && error.taskId) await keepTaskForSetup(error.taskId)
+            throw failure
+          }
         }
         forgetComposer(projectScope)
         setQueuedTurnOptions((queued) => { const next = new Map(queued); next.delete(projectScope); return next })

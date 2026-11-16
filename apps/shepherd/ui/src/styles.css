@@ -1139,7 +1139,9 @@ textarea {
 }
 
 .settings__row > input:not([type='checkbox']),
+.settings__row > textarea,
 .settings__row > select { width: 100%; min-width: 0; }
+.settings__row > textarea { min-height: 88px; resize: vertical; font-family: var(--font-mono, monospace); }
 .settings__row--checkbox > input { justify-self: start; }
 .settings__category > .settings__project,
 .settings__project > .settings__project { width: min(100%, 580px); }
