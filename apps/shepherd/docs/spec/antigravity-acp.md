@@ -9,6 +9,8 @@
   advertised Gemini 3.8 Flash and a native `auto` mode. The mode describes
   automatic approval of safe commands with review of irreversible actions.
   `--dangerously-skip-permissions` is a different, blanket permission bypass.
+  A separate prompt-free `session/set_config_option` check confirmed that the
+  installed server accepts `mode = auto` and `model = gemini-3.8-flash`.
 - Follow the existing ACP transport and terminal lifecycle; keep agent-owned
   permission requests visible and never implement Auto as unconditional allow.
 

@@ -19,7 +19,10 @@ use agent_harness::acp::{
     TerminalBackend, TerminalExitStatus, TerminalLaunch, TerminalProcessEvent,
 };
 use agent_harness::codex::CodexProjectModels;
-use agent_harness::{AgentMode, AgentModels, CodexTurnOptions, Decision, PromptInput, SpawnSpec};
+use agent_harness::{
+    AgentHarness, AgentMode, AgentModels, AgentModes, CodexTurnOptions, Decision, PromptInput,
+    SpawnSpec,
+};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use shep_core::files::{self, DirectoryListing, FileSearchQuery, FileSearchResult, TextFile};
@@ -80,6 +83,13 @@ struct QuitConfirmation {
 pub struct LocalCodexProject {
     name: String,
     path: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AntigravityProjectOptions {
+    modes: Option<AgentModes>,
+    models: Option<AgentModels>,
 }
 
 impl BridgeError {
@@ -2080,6 +2090,54 @@ impl ShellState {
             .map_err(|error| BridgeError::new("opencode_models", error.to_string()))
     }
 
+    async fn antigravity_project_options(
+        &self,
+        project_id: String,
+    ) -> Result<AntigravityProjectOptions, BridgeError> {
+        let launch = self
+            .antigravity_launch
+            .as_ref()
+            .ok_or_else(|| BridgeError::new("antigravity", "Antigravity CLI is unavailable."))?;
+        let spec = self
+            .discovery_spec(project_id, Agent::Antigravity, launch.clone())
+            .await?;
+        let has_environment = !spec.environment.is_empty();
+        let mut harness = agent_harness::acp::AcpHarness::default();
+        let result = async {
+            harness.start(spec).await?;
+            harness.open_session(None).await?;
+            Ok::<_, agent_harness::HarnessError>(AntigravityProjectOptions {
+                modes: harness.modes(),
+                models: harness.models(),
+            })
+        }
+        .await;
+        let shutdown = harness.shutdown().await;
+        match (result, shutdown) {
+            (Ok(options), Ok(())) => Ok(options),
+            (Err(error), Ok(())) => Err(BridgeError::new(
+                "antigravity",
+                if has_environment {
+                    "Could not discover Antigravity session options.".to_owned()
+                } else {
+                    error.to_string()
+                },
+            )),
+            (Ok(_), Err(error)) => Err(BridgeError::new(
+                "antigravity",
+                format!("Could not stop Antigravity discovery: {error}"),
+            )),
+            (Err(error), Err(cleanup)) => Err(BridgeError::new(
+                "antigravity",
+                if has_environment {
+                    "Antigravity discovery and cleanup failed.".to_owned()
+                } else {
+                    format!("{error}; cleanup failed: {cleanup}")
+                },
+            )),
+        }
+    }
+
     async fn discovery_spec(
         &self,
         project_id: String,
@@ -3787,15 +3845,23 @@ pub mod commands {
             applications.push(home.join("Applications/Home Manager Apps"));
             applications.push(home.join("Applications/NixTrampolines"));
         }
-        let configured = settings
-            .executable("agents.antigravity.executable")
-            .map_err(|error| error.to_string())?;
-        for app in configured.into_iter().chain(
-            applications
-                .into_iter()
-                .map(|directory| directory.join("Antigravity.app")),
-        ) {
-            if app.is_dir() || app.is_file() {
+        let home_path = home.as_deref();
+        let user = std::env::var_os("USER");
+        if let Some(launch) =
+            agent_harness::acp::discover_antigravity(&settings, &path, home_path, user.as_deref())
+                .map_err(|error| error.to_string())?
+        {
+            detected.push(DetectedHarness {
+                agent: "antigravity",
+                path: launch.program,
+                version: None,
+            });
+        }
+        for app in applications
+            .into_iter()
+            .map(|directory| directory.join("Antigravity.app"))
+        {
+            if app.is_dir() {
                 detected.push(DetectedHarness {
                     agent: "antigravity",
                     path: app.to_string_lossy().into_owned(),
@@ -3809,11 +3875,7 @@ pub mod commands {
             ("pi", "pi"),
             ("freebuff", "freebuff"),
             ("kilocode", "kilo"),
-            ("antigravity", "antigravity"),
         ] {
-            if agent == "antigravity" && detected.iter().any(|entry| entry.agent == agent) {
-                continue;
-            }
             let configured = settings
                 .executable(&format!("agents.{agent}.executable"))
                 .map_err(|error| error.to_string())?;
@@ -4304,6 +4366,14 @@ pub mod commands {
         project_id: String,
     ) -> Result<AgentModels, BridgeError> {
         state.opencode_project_models(project_id).await
+    }
+
+    #[tauri::command]
+    pub async fn antigravity_project_options(
+        state: State<'_, ShellState>,
+        project_id: String,
+    ) -> Result<AntigravityProjectOptions, BridgeError> {
+        state.antigravity_project_options(project_id).await
     }
 
     #[tauri::command]

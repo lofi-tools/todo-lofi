@@ -472,7 +472,7 @@ function HarnessSettings(props: { query?: string; agent?: PoolAgent }) {
       <Show when={harnesses.latest?.error}>{(error) => <p role="alert">{error()}</p>}</Show>
       <Show when={!harnesses.loading && harnesses.latest?.value && !harnesses.latest.value.some((harness) => !props.agent || harness.agent === props.agent)}><p class="empty">No harnesses detected.</p></Show>
       <For each={(harnesses.latest?.value ?? []).filter((harness) => (!props.agent || harness.agent === props.agent) && matchesSearch(`${AGENT_LABELS[harness.agent]} ${harness.path}`, props.query ?? ''))}>{(harness) => (
-        <div class="settings__harness"><div class="settings__harness-name"><AgentIcon agent={harness.agent} />{AGENT_LABELS[harness.agent]}{harness.path.includes('/ChatGPT.app/') ? ' · ChatGPT app' : harness.path.includes('/Codex.app/') ? ' · Codex app' : ''}</div><code>{harness.path}</code><span class="empty">{harnessVersionStatus(harness.agent, harness.version)}</span></div>
+        <div class="settings__harness"><div class="settings__harness-name"><AgentIcon agent={harness.agent} />{AGENT_LABELS[harness.agent]}{harness.path.includes('/ChatGPT.app/') ? ' · ChatGPT app' : harness.path.includes('/Codex.app/') ? ' · Codex app' : harness.agent === 'antigravity' ? (harness.path.endsWith('.app') ? ' · app' : ' · CLI') : ''}</div><code>{harness.path}</code><span class="empty">{harnessVersionStatus(harness.agent, harness.version, harness.path)}</span></div>
       )}</For>
     </section>
   )
@@ -491,7 +491,7 @@ export function SettingsPane(props: SettingsPaneProps) {
     Workspace: 'show archived tasks notify notifications when tasks need input attachment limit bytes terminal scrollback lines reload settings configuration',
     Projects: 'project settings show archived tasks preview url attachment limit bytes terminal scrollback lines approvals saved live session add project import chatgpt worktree setup project actions codex environment',
     'Agent pool': 'agent pool priority installed agents reorder',
-    Harnesses: 'harnesses codex chatgpt opencode pi claude code freebuff executable path refresh',
+    Harnesses: 'harnesses codex chatgpt opencode pi claude code freebuff antigravity kilocode executable path refresh',
     Appearance: 'appearance theme system light dark density compact comfortable send button accent blue violet teal amber neutral',
     'Keyboard shortcuts': 'keyboard shortcuts shortcut bindings commands reload configuration',
   }
@@ -649,7 +649,7 @@ export function SettingsPane(props: SettingsPaneProps) {
           <Show when={activeCategory() === 'Agent pool'}>
             <PoolSettings priority={props.preferences?.app['agents.priority']} selected={selectedHarness()} onSelect={(agent) => setSelectedHarness((current) => current === agent ? undefined : agent)} editable={props.preferencesEditable && !props.preferenceBusy} onChange={(priority) => props.onEditPreference('agents.priority', priority)} />
           </Show>
-          <Show when={activeCategory() === 'Harnesses'}><HarnessSettings query={['codex', 'chatgpt', 'opencode', 'pi', 'claude', 'freebuff'].some((name) => name.includes(query())) ? narrowedQuery() : ''} /></Show>
+          <Show when={activeCategory() === 'Harnesses'}><HarnessSettings query={['codex', 'chatgpt', 'opencode', 'pi', 'claude', 'freebuff', 'antigravity'].some((name) => name.includes(query())) ? narrowedQuery() : ''} /></Show>
           <Show when={activeCategory() === 'Appearance'}>
             <Show when={showSetting('theme system light dark')}><label class="settings__row">
               <span id="appearance-theme-label">Theme</span>
@@ -695,7 +695,7 @@ export function SettingsPane(props: SettingsPaneProps) {
         </section>
         <Show when={activeCategory() === 'Agent pool' && selectedHarness()}>{(agent) => <aside class="settings__detail" aria-label={`${AGENT_LABELS[agent()]} harness settings`}>
           <header class="settings__detail-header"><h3>{AGENT_LABELS[agent()]} settings</h3><button type="button" class="project-action project-action--icon" aria-label="Close harness settings" title="Close" onClick={() => setSelectedHarness(undefined)}><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18" /></svg></button></header>
-          <Show when={agent() === 'antigravity' || agent() === 'kilocode'} fallback={<p class="empty">Configure the executable path with <code>agents.{agent()}.executable</code> in settings.json.</p>}><p class="empty">This harness is not yet implemented in Shepherd.</p></Show>
+          <Show when={agent() === 'kilocode'} fallback={<p class="empty">Configure the executable path with <code>agents.{agent()}.executable</code> in settings.json.</p>}><p class="empty">This harness is not yet implemented in Shepherd.</p></Show>
           <Show when={agent() === 'codex'}><p class="empty">Codex environment overrides: <code>agents.codex.environment</code>.</p></Show>
           <Show when={agent() === 'opencode'}><p class="empty">OpenCode configuration file: <code>agents.opencode.config_file</code>.</p></Show>
           <HarnessSettings agent={agent()} />

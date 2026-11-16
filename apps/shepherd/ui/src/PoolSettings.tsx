@@ -2,7 +2,7 @@ import { For, Show, createMemo, createResource, createSignal, onCleanup, onMount
 import { AGENT_LABELS, agentAvailability, detectedHarnesses, harnessLabel, harnessVersionStatus, type Agent, type PoolAgent } from './bridge'
 import { AgentIcon } from './AgentIcon'
 
-export const DEFAULT_AGENT_PRIORITY: Agent[] = ['codex', 'opencode', 'pi', 'claude', 'freebuff']
+export const DEFAULT_AGENT_PRIORITY: Agent[] = ['codex', 'opencode', 'pi', 'claude', 'freebuff', 'antigravity']
 
 export function agentPriority(saved?: PoolAgent[]): PoolAgent[] {
   return [...new Set(saved ?? DEFAULT_AGENT_PRIORITY)]
@@ -28,9 +28,13 @@ export function PoolSettings(props: { priority?: PoolAgent[]; editable: boolean;
   })
   const priority = createMemo(() => draft() ?? agentPriority(props.priority))
   const installed = createMemo(() => priority().filter((agent) => discovery()?.installed.has(agent) && discovery()?.availability?.[agent as Agent]))
-  const unimplemented: PoolAgent[] = ['antigravity', 'kilocode']
+  const unimplemented: PoolAgent[] = ['kilocode']
   const notAdded = createMemo(() => DEFAULT_AGENT_PRIORITY.filter((agent) => discovery()?.installed.has(agent) && !priority().includes(agent)))
   const unavailable = createMemo(() => [...new Set([...priority().filter((agent) => discovery()?.installed.has(agent) && !discovery()?.availability?.[agent as Agent]), ...unimplemented])])
+  const detectedVersion = (agent: PoolAgent) => {
+    const harness = discovery()?.harnesses.find((entry) => entry.agent === agent)
+    return harnessVersionStatus(agent, harness?.version, harness?.path)
+  }
   const editable = () => props.editable && !saving()
 
   function reorder(agent: PoolAgent, target: PoolAgent, after: boolean) {
@@ -158,20 +162,20 @@ export function PoolSettings(props: { priority?: PoolAgent[]; editable: boolean;
           list.setPointerCapture(event.pointerId)
         }}>
         <span class="pool__drag-handle" aria-hidden="true">⠿</span>
-        <span class="pool__agent-label"><span class="settings__harness-name"><AgentIcon agent={agent} />{harnessLabel(agent, discovery()?.harnesses.filter((harness) => harness.agent === agent).map((harness) => harness.path) ?? [])}</span><span class="empty">{harnessVersionStatus(agent, discovery()?.harnesses.find((harness) => harness.agent === agent)?.version)}</span></span>
+        <span class="pool__agent-label"><span class="settings__harness-name"><AgentIcon agent={agent} />{harnessLabel(agent, discovery()?.harnesses.filter((harness) => harness.agent === agent).map((harness) => harness.path) ?? [])}</span><span class="empty">{detectedVersion(agent)}</span></span>
         <button type="button" class="pool__settings" aria-label={`${AGENT_LABELS[agent]} harness settings`} title="Harness settings" onClick={(event) => { event.stopPropagation(); props.onSelect(agent) }}><GearIcon /></button>
       </li>}</For>
     </ol>
     <Show when={notAdded().length > 0}><h4 class="pool__section-heading">Detected harnesses</h4><ul class="pool__list">
       <For each={notAdded()}>{(agent) => <li class="pool__agent" classList={{ 'pool__agent--selected': props.selected === agent }}>
-        <button type="button" class="pool__agent-label" onClick={() => props.onSelect(agent)}><span class="settings__harness-name"><AgentIcon agent={agent} />{harnessLabel(agent, discovery()?.harnesses.filter((harness) => harness.agent === agent).map((harness) => harness.path) ?? [])}</span><span class="empty">{harnessVersionStatus(agent, discovery()?.harnesses.find((harness) => harness.agent === agent)?.version)}</span></button>
+        <button type="button" class="pool__agent-label" onClick={() => props.onSelect(agent)}><span class="settings__harness-name"><AgentIcon agent={agent} />{harnessLabel(agent, discovery()?.harnesses.filter((harness) => harness.agent === agent).map((harness) => harness.path) ?? [])}</span><span class="empty">{detectedVersion(agent)}</span></button>
         <button type="button" class="project-action" disabled={!editable()} onClick={() => void add(agent)}>Add</button>
         <button type="button" class="pool__settings" aria-label={`${AGENT_LABELS[agent]} harness settings`} title="Harness settings" onClick={() => props.onSelect(agent)}><GearIcon /></button>
       </li>}</For>
     </ul></Show>
     <Show when={unavailable().length > 0}><h4 class="pool__section-heading">Unavailable</h4><ul class="pool__list">
       <For each={unavailable()}>{(agent) => <li class="pool__agent" classList={{ 'pool__agent--selected': props.selected === agent, 'pool__agent--unimplemented': unimplemented.includes(agent) }} onClick={() => props.onSelect(agent)}>
-        <button type="button" class="pool__agent-label" onClick={(event) => { event.stopPropagation(); props.onSelect(agent) }}><span class="settings__harness-name"><AgentIcon agent={agent} />{AGENT_LABELS[agent]}</span><span class="empty">{unimplemented.includes(agent) ? `Unimplemented${discovery()?.installed.has(agent) ? ' · Detected' : ''}` : 'Not available to Shepherd'}</span><Show when={discovery()?.installed.has(agent)}><span class="empty">{harnessVersionStatus(agent, discovery()?.harnesses.find((harness) => harness.agent === agent)?.version)}</span></Show></button>
+        <button type="button" class="pool__agent-label" onClick={(event) => { event.stopPropagation(); props.onSelect(agent) }}><span class="settings__harness-name"><AgentIcon agent={agent} />{AGENT_LABELS[agent]}</span><span class="empty">{unimplemented.includes(agent) ? `Unimplemented${discovery()?.installed.has(agent) ? ' · Detected' : ''}` : 'Not available to Shepherd'}</span><Show when={discovery()?.installed.has(agent)}><span class="empty">{detectedVersion(agent)}</span></Show></button>
         <Show when={unimplemented.includes(agent) && !priority().includes(agent)}><button type="button" class="project-action" disabled={!editable()} onClick={(event) => { event.stopPropagation(); void add(agent) }}>Add</button></Show>
         <button type="button" class="pool__settings" aria-label={`${AGENT_LABELS[agent]} harness settings`} title="Harness settings" onClick={(event) => { event.stopPropagation(); props.onSelect(agent) }}><GearIcon /></button>
       </li>}</For>

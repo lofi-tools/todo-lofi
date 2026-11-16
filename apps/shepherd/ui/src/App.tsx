@@ -78,6 +78,7 @@ const AGENT_OPTIONS: PickerOption[] = [
   { id: 'opencode', name: bridge.AGENT_LABELS.opencode },
   { id: 'pi', name: bridge.AGENT_LABELS.pi },
   { id: 'claude', name: bridge.AGENT_LABELS.claude },
+  { id: 'antigravity', name: bridge.AGENT_LABELS.antigravity },
   { id: 'freebuff', name: bridge.AGENT_LABELS.freebuff },
   { id: 'freebuff-terminal', name: 'Freebuff (terminal)' },
 ]
@@ -547,6 +548,16 @@ export function App() {
   })
   const codexOptions = () => turnOptions()?.codex
   const pendingMode = () => turnOptions()?.mode ?? turnOptions()?.modeReset
+  const [antigravityOptions, { refetch: refetchAntigravityOptions }] = createResource(
+    () => {
+      const project = selectedProject()
+      return agentAvailability()?.antigravity && currentAgent() === 'antigravity' && project && !project.missing ? project.id : false
+    },
+    async (projectId) => {
+      try { return { projectId, options: await bridge.antigravityProjectOptions(projectId), failed: false } }
+      catch (error) { console.warn('Could not read Antigravity session options', error); return { projectId, options: null, failed: true } }
+    },
+  )
   const [projectModes, { refetch: refetchProjectModes }] = createResource(
     () => {
       const project = selectedProject()
@@ -566,12 +577,21 @@ export function App() {
     const current = workspace()
     const selected = pendingMode() ?? current?.task.mode ?? undefined
     if (current?.modes) return selected ? { ...current.modes, current: selected } : current.modes
+    if (currentAgent() === 'antigravity') {
+      const catalog = antigravityOptions()
+      const modes = catalog?.projectId === selectedProjectId() ? catalog.options?.modes : undefined
+      return modes ? { ...modes, current: selected ?? modes.current } : undefined
+    }
     if (currentAgent() !== 'opencode') return
     const catalog = projectModes()
     const options = catalog && catalog.projectId === selectedProjectId() ? catalog.options : []
     return { current: selected ?? null, options }
   }
   const modeCatalogError = () => {
+    if (!workspace()?.modes && currentAgent() === 'antigravity') {
+      const catalog = antigravityOptions()
+      return catalog?.projectId === selectedProjectId() && catalog.failed ? 'Mode catalog unavailable.' : undefined
+    }
     if (workspace()?.modes || currentAgent() !== 'opencode') return undefined
     const catalog = projectModes()
     return catalog?.projectId === selectedProjectId() && catalog.failed ? 'Mode catalog unavailable.' : undefined
@@ -613,6 +633,11 @@ export function App() {
     const selected = turnOptions()?.model ?? current?.task.model ?? undefined
     if (currentAgent() === 'codex' || currentAgent() === 'freebuff') return
     if (current?.models) return selected ? { ...current.models, current: selected } : current.models
+    if (currentAgent() === 'antigravity') {
+      const catalog = antigravityOptions()
+      const models = catalog?.projectId === selectedProjectId() ? catalog.options?.models : undefined
+      return models ? { ...models, current: selected ?? models.current } : undefined
+    }
     const catalog = projectModels()
     const models = catalog && catalog.projectId === selectedProjectId()
       ? catalog.models : { current: null, options: [] }
@@ -621,6 +646,10 @@ export function App() {
   const modelCatalogError = () => {
     const current = workspace()
     if (current?.models) return undefined
+    if (currentAgent() === 'antigravity') {
+      const catalog = antigravityOptions()
+      return catalog?.projectId === selectedProjectId() && catalog.failed ? 'Model catalog unavailable.' : undefined
+    }
     const catalog = projectModels()
     return catalog?.projectId === selectedProjectId() && catalog.failed ? 'Model catalog unavailable.' : undefined
   }
@@ -704,6 +733,7 @@ export function App() {
     if (agent === 'opencode') return opencodeConfigured()
     if (agent === 'pi') return piConfigured()
     if (agent === 'claude') return claudeConfigured()
+    if (agent === 'antigravity') return agentAvailability()?.antigravity ?? false
     return freebuffAvailability().available
   }
 
@@ -715,7 +745,7 @@ export function App() {
     return AGENT_OPTIONS.map((agent) => {
       if (agent.id === 'freebuff-terminal') return { ...agent, disabled: !canOpen }
       if (agent.id === 'codex') return { ...agent, disabled: !canChange || !agentConfigured('codex'), detail: agentConfigured('codex') ? undefined : 'Codex is unavailable' }
-      if (agent.id === 'opencode' || agent.id === 'pi' || agent.id === 'claude') return {
+      if (agent.id === 'opencode' || agent.id === 'pi' || agent.id === 'claude' || agent.id === 'antigravity') return {
         ...agent,
         disabled: !canChange || !agentConfigured(agent.id),
         detail: agentConfigured(agent.id) ? undefined : 'Set the executable in settings.json',
@@ -809,8 +839,9 @@ export function App() {
       if (!freebuffProjectId()) void openFreebuff(project.id)
       return
     }
-    if (agent !== 'codex' && agent !== 'opencode' && agent !== 'pi' && agent !== 'claude' && agent !== 'freebuff') return
+    if (agent !== 'codex' && agent !== 'opencode' && agent !== 'pi' && agent !== 'claude' && agent !== 'freebuff' && agent !== 'antigravity') return
     if (!agentConfigured(agent)) return
+    if (agent !== currentAgent()) patchTurnOptions({ mode: undefined, modeReset: undefined, model: undefined })
     if (freebuffProjectId()) setFreebuffProjectId(undefined)
     const task = workspace()?.task
     if (!task) {
@@ -2849,7 +2880,7 @@ export function App() {
                 { id: 'compact', name: 'Compact context', description: canCompact() ? 'Compact the current conversation' : 'Available for an idle conversation with compaction support', disabled: !canCompact() },
                 { id: 'model', name: 'Choose model', description: 'Choose a model for the conversation', disabled: pending() || cancellingTurn() || !!freebuffProjectId() || (currentAgent() !== 'codex' && !(composerModels()?.options.length || composerModels()?.current)) },
               ]} onCommand={(command) => { if (command === 'compact') compactSession(); else if (command === 'model') setModelPickerRequest((request) => request + 1) }}
-              modeError={modeCatalogError()} onRetryModes={() => void refetchProjectModes()}
+              modeError={modeCatalogError()} onRetryModes={() => currentAgent() === 'antigravity' ? void refetchAntigravityOptions() : void refetchProjectModes()}
             />
             <div class="composer__actions">
               <ComposerPickers
@@ -2858,6 +2889,9 @@ export function App() {
                 agents={composerAgentOptions()} onAgentChange={chooseAgent}
                 freebuffLive={!!freebuffProjectId()} locked={!!freebuffProjectId()}
                 showShellApprovals={showShellApprovals() && !freebuffProjectId()}
+                approvalMode={currentAgent() === 'antigravity' && (pendingMode() ?? workspace()?.task.mode ?? composerModes()?.current) === 'auto' ? 'automatic' : 'ask'}
+                automaticAvailable={currentAgent() === 'antigravity' && !!composerModes()?.options.some((mode) => mode.id === 'auto')}
+                onApprovalChange={(value) => { if (currentAgent() === 'antigravity') chooseMode(value === 'automatic' ? 'auto' : 'default') }}
                 canAttach={(canCompose() || canQueuePrompt()) && !pending() && !!attachmentLimit() && !freebuffProjectId()}
                 onAttach={() => fileInput?.click()} />
               <div class="composer__send-actions">
@@ -2869,7 +2903,7 @@ export function App() {
                 <Show when={currentAgent() !== 'codex' ? composerModels() : undefined}>
                   {(models) => <ComposerAgentModelPicker models={models()}
                     disabled={pending() || cancellingTurn() || !!freebuffProjectId()}
-                    unavailable={modelCatalogError()} onRetry={() => void refetchProjectModels()}
+                    unavailable={modelCatalogError()} onRetry={() => currentAgent() === 'antigravity' ? void refetchAntigravityOptions() : void refetchProjectModels()}
                     onChange={chooseModel} openRequest={modelPickerRequest()} />}
                 </Show>
                 <button
@@ -3024,7 +3058,7 @@ function Onboarding(props: { priority?: bridge.PoolAgent[]; onComplete: (priorit
   const [error, setError] = createSignal('')
   createEffect(() => {
     if (!discovery() || selected()) return
-    setSelected(props.priority ? agents().filter((agent) => props.priority?.includes(agent)) : agents().filter((agent) => agent !== 'antigravity' && agent !== 'kilocode'))
+    setSelected(props.priority ? agents().filter((agent) => props.priority?.includes(agent)) : agents().filter((agent) => agent !== 'kilocode'))
   })
   async function complete() {
     setSaving(true)
@@ -3045,7 +3079,7 @@ function Onboarding(props: { priority?: bridge.PoolAgent[]; onComplete: (priorit
       <Show when={!discovery.loading && !discovery()?.error && !agents().length}><p class="empty">No harnesses detected.</p></Show>
       <ul class="pool__list">
         <For each={agents()}>{(agent) => {
-          const unimplemented = agent === 'antigravity' || agent === 'kilocode'
+          const unimplemented = agent === 'kilocode'
           const paths = () => discovery()?.harnesses.filter((harness) => harness.agent === agent).map((harness) => harness.path) ?? []
           return <li class="pool__agent" classList={{ 'pool__agent--unimplemented': unimplemented }}>
             <label class="onboarding__choice"><input type="checkbox" checked={selected()?.includes(agent) ?? false} onChange={(event) => setSelected((current) => event.currentTarget.checked ? [...(current ?? []), agent] : (current ?? []).filter((item) => item !== agent))} />
@@ -3237,12 +3271,9 @@ function WorkspaceFrame(props: {
 }
 
 const DEFAULT_APPROVAL = { id: 'ask', name: 'Ask me', description: 'Ask before running commands' }
-const APPROVAL_OPTIONS: PickerOption[] = [
-  DEFAULT_APPROVAL,
-  { id: 'automatic', name: 'Auto', description: 'Decide for me', detail: 'Coming soon', disabled: true },
-]
-
-function ComposerPickers(props: { agent: string; agentName: string; agents: PickerOption[]; onAgentChange: (value: string) => void; freebuffLive?: boolean; locked?: boolean; showShellApprovals: boolean; canAttach: boolean; onAttach: () => void }) {
+function ComposerPickers(props: { agent: string; agentName: string; agents: PickerOption[]; onAgentChange: (value: string) => void; freebuffLive?: boolean; locked?: boolean; showShellApprovals: boolean; approvalMode: 'ask' | 'automatic'; automaticAvailable: boolean; onApprovalChange: (value: string) => void; canAttach: boolean; onAttach: () => void }) {
+  const approval = () => props.approvalMode === 'automatic' ? 'Auto' : DEFAULT_APPROVAL.name
+  const options = () => [DEFAULT_APPROVAL, { id: 'automatic', name: 'Auto', description: 'Decide for me', detail: props.automaticAvailable ? undefined : 'Unavailable for this agent', disabled: !props.automaticAvailable }]
   return (
     <>
       <PickerMenu label="Attachments and commands" options={[
@@ -3253,12 +3284,12 @@ function ComposerPickers(props: { agent: string; agentName: string; agents: Pick
       </PickerMenu>
       <Show when={props.showShellApprovals}>
         <div class="composer__approval-slot">
-          <PickerMenu label="Shell approvals" text={DEFAULT_APPROVAL.name} value={DEFAULT_APPROVAL.id} options={APPROVAL_OPTIONS} triggerClass="composer__picker" above>
+          <PickerMenu label="Shell approvals" text={approval()} value={props.approvalMode} options={options()} onChange={props.onApprovalChange} triggerClass="composer__picker" above>
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
               <path d="M12 21s7-3.2 7-9V5l-7-3-7 3v7c0 5.8 7 9 7 9Z" />
               <path d="m8.5 9 2.5 2.5L8.5 14m4.5 0h2.5" />
             </svg>
-            <span class="composer__picker-label">{DEFAULT_APPROVAL.name}</span>
+            <span class="composer__picker-label">{approval()}</span>
             <PickerCaret />
           </PickerMenu>
         </div>

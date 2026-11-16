@@ -219,6 +219,14 @@ other preferences. Keyboard shortcuts use `keymap.json`. Agent priority is store
 `keybindings.json` files are read until a shortcut edit creates `keymap.json`;
 the old file is retained.
 
+Antigravity uses the separately installed `agy` CLI via `agy acp`. Shepherd
+detects it in common Nix profiles and on PATH; `agents.antigravity.executable`
+can select an absolute CLI path. The recorded CLI baseline is 1.5.9, while the
+Antigravity app has its own version. Sign in to the CLI separately if needed.
+When its ACP session advertises Auto, the Safety picker selects that native
+mode: the agent evaluates commands and can still ask for approval. Auto and
+the agent's other session modes are mutually exclusive.
+
 Project-local overrides can be read from `<project>/.config/shepherd/settings.json`:
 
 ```json

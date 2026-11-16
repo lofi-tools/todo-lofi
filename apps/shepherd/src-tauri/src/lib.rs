@@ -454,6 +454,7 @@ pub fn run() -> Result<(), tauri::Error> {
             bridge::commands::codex_project_models,
             bridge::commands::opencode_project_modes,
             bridge::commands::opencode_project_models,
+            bridge::commands::antigravity_project_options,
             bridge::commands::task_list,
             bridge::commands::pool_status,
             bridge::commands::pool_reorder_slots,

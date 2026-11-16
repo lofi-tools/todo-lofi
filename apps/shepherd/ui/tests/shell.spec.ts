@@ -599,7 +599,9 @@ test.beforeEach(async ({ context }) => {
             }
             return []
           case 'agent_availability':
-            return { codex: !options.has('no-agents'), opencode: options.has('agents-priority') || options.has('agents-priority-3') || options.has('configured-opencode'), pi: options.has('configured-pi') || options.has('agents-priority-3'), claude: options.has('configured-claude'), freebuff: options.has('configured-freebuff') }
+            return { codex: !options.has('no-agents'), opencode: options.has('agents-priority') || options.has('agents-priority-3') || options.has('configured-opencode'), pi: options.has('configured-pi') || options.has('agents-priority-3'), claude: options.has('configured-claude'), freebuff: options.has('configured-freebuff'), antigravity: options.has('configured-antigravity') }
+          case 'antigravity_project_options':
+            return { modes: { current: 'default', options: [{ id: 'default', name: 'Default', description: 'Ask before edits and commands.' }, ...(!options.has('antigravity-no-auto') ? [{ id: 'auto', name: 'Auto', description: 'Approve safe commands.' }] : []), { id: 'plan', name: 'Plan', description: 'Plan before acting.' }] }, models: { current: 'gemini-3.8-flash', options: [{ id: 'gemini-3.8-flash', name: 'Gemini 3.8 Flash', description: null }] } }
           case 'pool_status':
             poolStatusReads += 1
             if (options.has('pool-status-error') && poolStatusReads === 1) throw { message: 'Pool status unavailable.' }
@@ -1002,7 +1004,7 @@ test.beforeEach(async ({ context }) => {
             return []
           }
           case 'detected_harnesses':
-            return [{ agent: 'codex', path: '/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex', version: 'codex-cli 0.168.0' }, ...(options.has('unavailable-harness') ? [{ agent: 'claude', path: '/usr/local/bin/claude' }] : []), ...(options.has('onboarding') ? [{ agent: 'antigravity', path: '/Users/me/Applications/Antigravity.app' }, { agent: 'kilocode', path: '/etc/profiles/per-user/me/bin/kilo', version: '7.8.27' }] : [])]
+            return [{ agent: 'codex', path: '/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex', version: 'codex-cli 0.168.0' }, ...(options.has('unavailable-harness') ? [{ agent: 'claude', path: '/usr/local/bin/claude' }] : []), ...(options.has('configured-antigravity') ? [{ agent: 'antigravity', path: '/etc/profiles/per-user/me/bin/agy', version: options.has('antigravity-old') ? '1.5.8' : '1.5.9' }] : []), ...(options.has('onboarding') ? [{ agent: 'antigravity', path: '/Users/me/Applications/Antigravity.app' }, { agent: 'kilocode', path: '/etc/profiles/per-user/me/bin/kilo', version: '7.8.27' }] : [])]
           case 'git_snapshot':
             gitRequests.git++
             return gitState()
@@ -1170,7 +1172,7 @@ test.beforeEach(async ({ context }) => {
             if (args.codex) codexTurns.push({ taskId: id, ...args.codex })
             if (args.mode) sessionModes.set(id, args.mode)
             if (args.model) sessionModels.set(id, args.model)
-            sentPrompts.push({ taskId: id, text: args.text, ...(args.model ? { model: args.model } : {}) })
+            sentPrompts.push({ taskId: id, text: args.text, ...(args.model ? { model: args.model } : {}), ...(args.mode ? { mode: args.mode } : {}) })
             transcripts[id] = [
               entry(`entry-${id}-1`, 1, { type: 'userMessage', data: { text: args.text } }),
               entry(`entry-${id}-2`, 2, { type: 'agentText', data: { text: 'working on it' } }),
@@ -1995,6 +1997,50 @@ test('starts a task only on send, streams a reply and switches tasks', async ({ 
 
   await page.getByRole('button', { name: /Ship it/ }).click()
   await expect(page.getByText('ready to go')).toBeVisible()
+})
+
+test('selects Antigravity and sends its advertised Auto mode', async ({ page }) => {
+  await page.goto('/?two-projects&configured-antigravity')
+  await page.getByRole('button', { name: 'notes', exact: true }).click()
+  const composer = page.locator('.composer')
+  await composer.getByRole('button', { name: 'Agent: Codex' }).click()
+  await composer.getByRole('menuitemradio', { name: 'Antigravity', exact: true }).click()
+  await expect(composer.getByRole('button', { name: /Gemini 3.8 Flash/ })).toBeVisible()
+  await composer.getByRole('button', { name: 'Shell approvals: Ask me' }).click()
+  const automatic = composer.getByRole('menuitemradio', { name: 'Auto Decide for me' })
+  await expect(automatic).toBeEnabled()
+  await automatic.click()
+  await expect(composer.getByRole('button', { name: 'Shell approvals: Auto' })).toBeVisible()
+  await composer.getByLabel('Prompt').fill('Inspect the project')
+  await composer.getByRole('button', { name: 'Send', exact: true }).click()
+  await expect.poll(() => page.evaluate(() => window.__sentPrompts.at(-1))).toMatchObject({ text: 'Inspect the project', mode: 'auto' })
+})
+
+test('does not offer Auto when Antigravity does not advertise it', async ({ page }) => {
+  await page.goto('/?two-projects&configured-antigravity&antigravity-no-auto')
+  await page.getByRole('button', { name: 'notes', exact: true }).click()
+  const composer = page.locator('.composer')
+  await composer.getByRole('button', { name: 'Agent: Codex' }).click()
+  await composer.getByRole('menuitemradio', { name: 'Antigravity', exact: true }).click()
+  await expect(composer.getByRole('button', { name: /Gemini 3.8 Flash/ })).toBeVisible()
+  await composer.getByRole('button', { name: 'Shell approvals: Ask me' }).click()
+  await expect(composer.getByRole('menuitemradio', { name: /Auto Decide for me/ })).toBeDisabled()
+})
+
+test('uses Antigravity for a new conversation when it has first priority', async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem('fixture.settings', JSON.stringify({ app: { 'onboarding.completed': true, 'agents.priority': ['antigravity', 'codex'] } })))
+  await page.goto('/?two-projects&configured-antigravity')
+  await page.getByRole('button', { name: 'notes', exact: true }).click()
+  await expect(page.locator('.composer').getByRole('button', { name: 'Agent: Antigravity' })).toBeVisible()
+})
+
+test('recommends the installed Antigravity CLI baseline for older versions', async ({ page }) => {
+  await page.goto('/?configured-antigravity&antigravity-old')
+  await page.getByRole('button', { name: 'Settings', exact: true }).click()
+  await page.getByRole('navigation', { name: 'Settings categories' }).getByRole('button', { name: 'Harnesses' }).click()
+  const harness = page.getByRole('region', { name: 'Detected harnesses' }).locator('.settings__harness').filter({ hasText: 'Antigravity' })
+  await expect(harness).toContainText('Antigravity · CLI')
+  await expect(harness).toContainText('Update recommended (baseline 1.5.9)')
 })
 
 test('keeps the new task and prompt when worktree setup fails', async ({ page }) => {
@@ -4479,7 +4525,7 @@ test('opens harness details and separates unavailable harnesses', async ({ page 
   await page.getByRole('navigation', { name: 'Settings categories' }).getByRole('button', { name: 'Agent pool' }).click()
   const pool = page.getByRole('region', { name: 'Agent priority' })
   await expect(pool.getByRole('heading', { name: 'Unavailable' })).toBeVisible()
-  await expect(pool.locator('ul li')).toContainText(['Claude Code', 'Antigravity', 'Kilo Code'])
+  await expect(pool.locator('ul li')).toContainText(['Claude Code', 'Kilo Code'])
   await pool.locator('ul li').filter({ hasText: 'Kilo Code' }).getByRole('button', { name: 'Add' }).click()
   await expect(pool.locator('ul li').filter({ hasText: 'Kilo Code' }).getByRole('button', { name: 'Add' })).toHaveCount(0)
   await pool.getByRole('button', { name: 'Codex harness settings' }).click()
@@ -4501,7 +4547,7 @@ test('onboarding offers detected harnesses and saves the selection', async ({ pa
   await page.goto('/?onboarding')
   await expect(page.getByRole('heading', { name: 'Welcome to Shepherd' })).toBeVisible()
   await expect(page.getByText('Codex · ChatGPT app')).toBeVisible()
-  await expect(page.getByText('Unimplemented')).toHaveCount(2)
+  await expect(page.getByText('Unimplemented')).toHaveCount(1)
   await page.getByRole('checkbox', { name: /Antigravity/ }).check()
   await page.getByRole('checkbox', { name: /Kilo Code/ }).check()
   await page.getByRole('button', { name: 'Continue', exact: true }).click()

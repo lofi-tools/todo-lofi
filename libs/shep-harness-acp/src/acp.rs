@@ -2270,6 +2270,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn native_auto_mode_keeps_agent_permission_requests_visible()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let config = |current: &str| -> Result<schema::SessionConfigOption, serde_json::Error> {
+            serde_json::from_value(serde_json::json!({
+                "id": "mode", "name": "Mode", "category": "mode", "type": "select",
+                "currentValue": current,
+                "options": [{"value": "default", "name": "Default"}, {"value": "auto", "name": "Auto"}],
+            }))
+        };
+        let (mut harness, _, observed) = fake(FakeScript {
+            mode_config: Some((config("default")?, config("auto")?)),
+            permission: Some(ToolCallUpdate::new(
+                "command",
+                ToolCallUpdateFields::new()
+                    .kind(ToolKind::Execute)
+                    .title("Run command"),
+            )),
+            permission_options: vec![PermissionOption::new(
+                "deny",
+                "Deny",
+                PermissionOptionKind::RejectOnce,
+            )],
+            ..FakeScript::default()
+        })
+        .await?;
+        harness.open_session(None).await?;
+        harness.set_mode("auto").await?;
+        harness.prompt(PromptInput::text("fixture")).await?;
+        loop {
+            match next(&mut harness).await? {
+                HarnessEvent::ApprovalRequested { request } => {
+                    harness.respond(request.approval_id, Decision::Deny).await?
+                }
+                HarnessEvent::TurnFinished { .. } => break,
+                _ => {}
+            }
+        }
+        let observed = observed.lock().map_err(|_| "poisoned observations")?;
+        let [change] = observed.config_changes.as_slice() else {
+            return Err("expected one mode change".into());
+        };
+        assert_eq!(change["configId"], "mode");
+        assert_eq!(change["value"], "auto");
+        assert_eq!(observed.permission_responses.len(), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn selects_an_advertised_acp_model_before_the_next_turn()
     -> Result<(), Box<dyn std::error::Error>> {
         let (mut harness, _, observed) = fake(FakeScript::default()).await?;

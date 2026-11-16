@@ -244,10 +244,10 @@ current layout and give future changes a point of comparison.
   Detected but unavailable harnesses appear in a separate section. Selecting a
   harness or its settings gear opens its settings and detected paths in a pane to
   the right. Selecting the same harness again or using the pane's close button
-  closes it. Antigravity and Kilo Code are shown as unimplemented, with muted
+  closes it. Kilo Code is shown as unimplemented, with muted
   text and grayscale icons, and can be added to the saved priority without being
   selected to run a conversation. Offer detected harnesses that are not already
-  in the pool for addition. Detect the Antigravity app and Kilo CLI,
+  in the pool for addition. Detect the Antigravity app, its separate `agy` CLI, and Kilo CLI,
   including common Nix profile locations. Identify Codex from the ChatGPT app
   separately from a standalone installation.
   Probe discovered versions with a bounded check. Show an update recommendation
@@ -260,7 +260,7 @@ current layout and give future changes a point of comparison.
   [Pi 1.5.2](https://github.com/earendil-works/pi/releases/tag/v1.5.2),
   [Claude Code 2.1.325](https://github.com/anthropics/claude-code/releases/tag/v2.1.325),
   [Freebuff 0.2.36](https://www.npmjs.com/package/freebuff?activeTab=versions),
-  [Antigravity 2.32.0](https://antigravity.google/docs/changelog), and
+  [Antigravity app 2.32.1 and CLI 1.5.9](https://antigravity.google/docs/ide/extensions/acp), and
   [Kilo Code 7.8.27](https://github.com/Kilo-Org/kilocode/releases/tag/v7.8.27).
   A new conversation selects the first available agent in that order; the user
   can change the draft agent. If none is available, the draft remains editable
@@ -510,7 +510,9 @@ current layout and give future changes a point of comparison.
   positions stable. Inside that slot, fit the button and its hover and click
   areas to the shield, label, and caret. Show each option's name and description
   on one line. **Ask me** is the default. **Auto**, described as **Decide for me**,
-  is a disabled upcoming option. Show the picker in an empty chat or
+  selects Antigravity's native `auto` mode when the agent advertises it; other
+  agents leave it unavailable. That ACP mode replaces any other selected mode.
+  Show the picker in an empty chat or
   draft. For an existing session, show it when the adapter reports approval
   support. A legacy session can report its capabilities after reconnecting.
 - Show the selected model name on the model and effort trigger. Shepherd's
