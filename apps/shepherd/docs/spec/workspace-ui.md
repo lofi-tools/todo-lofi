@@ -98,7 +98,8 @@ current layout and give future changes a point of comparison.
   Resize the inspector at its left edge by dragging or with the arrow keys
   while the separator is focused. Save the chosen width with the task.
 - In Files, use the shared segmented control to switch between **Files** and
-  **Changes**. Show only changed files in the same tree and icon style, with
+  **Changes**. In Changes, place an icon-only refresh button at the right end
+  of the same row. Show only changed files in the same tree and icon style, with
   added and removed line counts per file and totals at the top. Keep the task
   Git card overlaid at the bottom with an upward shadow, its branch, worktree,
   and commit composer; show a PR only when one is attached. Its header shows the task and base

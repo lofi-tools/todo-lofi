@@ -3485,7 +3485,7 @@ button.pool__agent-label { padding: 0; border: 0; background: transparent; color
 .terminal-pane__new:enabled:hover { background: var(--surface-raised); color: var(--text); }
 .terminal-pane__new:disabled { color: var(--text-disabled); }
 
-.explorer > .segmented { align-self: flex-start; }
+.explorer__toolbar { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .explorer__git-header { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-width: 0; }
 .explorer__branches { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .explorer__merge,

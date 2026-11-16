@@ -5,6 +5,7 @@ import { GitDiffText } from './GitDiff'
 import { ChangedFiles } from './ChangedFiles'
 import { reportError } from './diagnostics'
 import { PickerCaret, PickerMenu } from './PickerMenu'
+import { SegmentedControl } from './SegmentedControl'
 
 interface GitRequest {
   taskId: string
@@ -14,7 +15,7 @@ interface GitRequest {
 export function GitPane(props: {
   taskId: string; revision: number; fileRevision: number; live: boolean; openTerminal: () => void; openFile: (path: string) => void
   request?: GitRequest; onRequestHandled: (request: GitRequest) => void; commitShortcut?: string
-  mode: 'files' | 'changes'; files: JSX.Element; worktree: string; worktreeLabel: string; baseBranch: string | null
+  mode: 'files' | 'changes'; onModeChange: (mode: 'files' | 'changes') => void; files: JSX.Element; worktree: string; worktreeLabel: string; baseBranch: string | null
 }) {
   const taskId = createMemo(() => props.taskId)
   const revision = createMemo(() => props.revision)
@@ -90,18 +91,23 @@ export function GitPane(props: {
 
   return (
     <section ref={gitContainer} class="explorer__git" aria-label="Git worktree">
+      <div class="explorer__toolbar">
+        <SegmentedControl label="File explorer view" value={props.mode} choices={[{ value: 'files', label: 'Files' }, { value: 'changes', label: 'Changes' }]} onChange={props.onModeChange} />
+        <Show when={props.mode === 'changes'}><button type="button" class="project-action project-action--icon" aria-label="Refresh changes" title="Refresh changes" disabled={git.loading} onClick={() => { void refetch(); if (selectedFile()) void refetchFile() }}>
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 7v5h-5" /><path d="M20 12a8 8 0 1 0-2.34 5.66" /></svg>
+        </button></Show>
+      </div>
       <div class="explorer__content" hidden={props.mode !== 'files'}>{props.files}</div>
       <div class="explorer__content explorer__changes" hidden={props.mode !== 'changes'}>
         <Show when={git.loading}><p class="empty" role="status">Loading Git status…</p></Show>
         <Show when={!git.error && git()}>{(snapshot) => <>
           <ChangedFiles files={snapshot().files} stats={snapshot().lineStats ?? []} selected={selectedFile()}
             onSelect={(path) => { setDiscardRequested(null); setSelectedFile(path) }} />
-          <div class="terminal-pane__bar">
-            <button type="button" onClick={() => { void refetch(); if (selectedFile()) void refetchFile() }} disabled={git.loading}>Refresh</button>
-            <Show when={snapshot().files.some((file) => file.worktree.trim())}>
+          <Show when={snapshot().files.some((file) => file.worktree.trim())}>
+            <div class="terminal-pane__bar">
               <button type="button" disabled={disabled()} onClick={() => void apply({ type: 'stage', path: null })}>Stage all</button>
-            </Show>
-          </div>
+            </div>
+          </Show>
           <Show when={selectedFile()}>{(name) => <>
             <Show when={snapshot().files.find((file) => file.path === name())}>{(file) => <div class="terminal-pane__bar">
               <Show when={file().actionable && file().worktree.trim()}><button type="button" disabled={disabled()} onClick={() => void apply({ type: 'stage', path: file().path })}>Stage</button></Show>

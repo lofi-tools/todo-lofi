@@ -2531,6 +2531,18 @@ test('shows changed files in the explorer tree with line counts', async ({ page 
   await expect(changed.getByRole('button', { name: 'worktree.txt' })).toHaveCount(0)
   await main.click()
   await expect(page.getByRole('region', { name: 'Unstaged diff' })).toHaveText('fixture diff')
+  const refresh = page.getByRole('button', { name: 'Refresh changes' })
+  const toolbar = page.getByRole('group', { name: 'File explorer view' })
+  const refreshBounds = await refresh.boundingBox()
+  const toolbarBounds = await toolbar.boundingBox()
+  if (!refreshBounds || !toolbarBounds) throw new Error('Missing file explorer toolbar')
+  expect(refreshBounds.x).toBeGreaterThan(toolbarBounds.x + toolbarBounds.width)
+  expect(Math.abs(refreshBounds.y + refreshBounds.height / 2 - toolbarBounds.y - toolbarBounds.height / 2)).toBeLessThan(2)
+  const counts = () => page.evaluate(() => (window as unknown as { __gitRequests: { git: number; gitDiff: number } }).__gitRequests)
+  const before = await counts()
+  await refresh.click()
+  await expect.poll(async () => (await counts()).git).toBeGreaterThan(before.git)
+  await expect.poll(async () => (await counts()).gitDiff).toBeGreaterThan(before.gitDiff)
 })
 
 test('refreshes the changed-file list when the worktree watcher reports changes', async ({ page }) => {
