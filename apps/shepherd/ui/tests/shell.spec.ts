@@ -1999,18 +1999,22 @@ test('starts a task only on send, streams a reply and switches tasks', async ({ 
   await expect(page.getByText('ready to go')).toBeVisible()
 })
 
-test('selects Antigravity and sends its advertised Auto mode', async ({ page }) => {
+test('selecting Antigravity Auto switches from Plan and sends Auto', async ({ page }) => {
   await page.goto('/?two-projects&configured-antigravity')
   await page.getByRole('button', { name: 'notes', exact: true }).click()
   const composer = page.locator('.composer')
   await composer.getByRole('button', { name: 'Agent: Codex' }).click()
   await composer.getByRole('menuitemradio', { name: 'Antigravity', exact: true }).click()
   await expect(composer.getByRole('button', { name: /Gemini 3.8 Flash/ })).toBeVisible()
+  await composer.getByLabel('Prompt').fill('/plan')
+  await composer.getByRole('option', { name: /plan/i }).click()
+  await expect(composer.getByText('Mode: Plan', { exact: true })).toBeVisible()
   await composer.getByRole('button', { name: 'Shell approvals: Ask me' }).click()
   const automatic = composer.getByRole('menuitemradio', { name: 'Auto Decide for me' })
   await expect(automatic).toBeEnabled()
   await automatic.click()
   await expect(composer.getByRole('button', { name: 'Shell approvals: Auto' })).toBeVisible()
+  await expect(composer.getByText('Mode: Plan', { exact: true })).toHaveCount(0)
   await composer.getByLabel('Prompt').fill('Inspect the project')
   await composer.getByRole('button', { name: 'Send', exact: true }).click()
   await expect.poll(() => page.evaluate(() => window.__sentPrompts.at(-1))).toMatchObject({ text: 'Inspect the project', mode: 'auto' })
