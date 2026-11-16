@@ -30,7 +30,7 @@ def capture(command):
     project.mkdir(parents=True, exist_ok=True)
     (project / "README.md").write_text("Shepherd ACP capture fixture.\n")
     (project.parent / "outside.txt").write_text("Neighboring ACP capture fixture.\n")
-    process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+    process = subprocess.Popen(command, cwd=project, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                stderr=subprocess.DEVNULL, text=True, bufsize=1)
     messages = queue.Queue()
 

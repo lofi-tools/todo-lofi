@@ -43,3 +43,20 @@
 - The live probe uses disposable files rather than another project or private
   home-directory files. Explicitly handling access outside the project must not
   weaken the ACP client's existing filesystem boundaries.
+
+## Single live run
+
+The one authorized prompt ran with Gemini 3.8 Flash and Auto. The server
+reported three tool calls: a successful README read, an outside-file read
+which requested approval and was denied by the capture client, and a failed
+`pwd && ls` command. It ended the turn without a final message. The raw ACP
+exchange and disposable files are retained under `.cache/shepherd-live/antigravity/`;
+the repository fixture contains only the seven path-redacted tool updates.
+
+The capture mistakenly started the CLI in the repository directory while
+passing the disposable project to `session/new`. The agent used its process
+directory and read the repository README rather than the intended fixture. The
+capture now starts the process in the disposable project and tests that the
+two directories match. Shepherd's normal launch already starts ACP processes
+in the task directory. No second prompt was sent, so command success, a final
+answer and an approved outside-file read remain unverified in a real run.

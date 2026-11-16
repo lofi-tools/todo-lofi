@@ -1735,6 +1735,24 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn antigravity_recorded_tool_updates_replay() -> Result<(), Box<dyn std::error::Error>> {
+        let exchange = include_str!("../fixtures/antigravity/tool-updates.jsonl");
+        let events = replay_recorded_updates(exchange)?;
+        assert_eq!(events.len(), 7);
+        assert!(events.iter().any(|event| matches!(event,
+            HarnessEvent::ToolCall { title, status: ToolStatus::Completed, .. } if title == "File README.md"
+        )));
+        assert!(events.iter().any(|event| matches!(event,
+            HarnessEvent::ToolCall { title, status: ToolStatus::Failed, .. } if title == "File ../outside.txt"
+        )));
+        assert!(events.iter().any(|event| matches!(event,
+            HarnessEvent::ToolCall { title, kind, status: ToolStatus::Failed, .. }
+                if title == "pwd && ls" && kind == "command"
+        )));
+        Ok(())
+    }
+
     #[cfg(unix)]
     #[test]
     fn antigravity_discovery_prefers_configured_cli_then_known_paths()

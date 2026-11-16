@@ -10,7 +10,7 @@ capture = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(capture)
 
 FAKE = r'''
-import json, sys
+import json, os, sys
 for line in sys.stdin:
     request = json.loads(line)
     method = request.get("method")
@@ -18,6 +18,7 @@ for line in sys.stdin:
         sys.exit(0)
     result = {}
     if method == "session/new":
+        assert os.path.samefile(os.getcwd(), request["params"]["cwd"])
         result = {"sessionId": "fixture"}
     elif method == "session/set_config_option":
         params = request["params"]
