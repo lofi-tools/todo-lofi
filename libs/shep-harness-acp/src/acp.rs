@@ -1701,6 +1701,40 @@ mod tests {
 
     use super::*;
 
+    fn replay_recorded_updates(
+        exchange: &str,
+    ) -> Result<Vec<HarnessEvent>, Box<dyn std::error::Error>> {
+        let mut updates = Updates::default();
+        let mut events = Vec::new();
+        for line in exchange.lines() {
+            let entry: serde_json::Value = serde_json::from_str(line)?;
+            if entry["direction"] != "agent" || entry["message"]["method"] != "session/update" {
+                continue;
+            }
+            let update: SessionUpdate =
+                serde_json::from_value(entry["message"]["params"]["update"].clone())?;
+            if let Some(event) = updates.apply(&update) {
+                events.push(event);
+            }
+        }
+        Ok(events)
+    }
+
+    #[test]
+    fn recorded_updates_replay_through_the_adapter() -> Result<(), Box<dyn std::error::Error>> {
+        let update = SessionUpdate::ToolCall(ToolCall::new("fixture-tool", "Read fixture"));
+        let exchange = serde_json::json!({"direction": "agent", "message": {
+            "method": "session/update", "params": {"update": update}
+        }})
+        .to_string();
+        let events = replay_recorded_updates(&exchange)?;
+        assert!(matches!(
+            events.first(),
+            Some(HarnessEvent::ToolCall { .. })
+        ));
+        Ok(())
+    }
+
     #[cfg(unix)]
     #[test]
     fn antigravity_discovery_prefers_configured_cli_then_known_paths()
