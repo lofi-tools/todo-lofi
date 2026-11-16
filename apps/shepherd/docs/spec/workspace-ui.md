@@ -381,8 +381,11 @@ current layout and give future changes a point of comparison.
   panel automatically when the task starts, and allow switching inspector tabs.
 - OpenCode and Claude Code are available when their executables are configured
   in `settings.json`.
-  The selection applies to the new draft. The composer can change a draft's
-  agent until its first prompt. The task then keeps its agent across restarts.
+  The selection applies to the new draft. A draft's agent can change directly.
+  Switching an existing conversation asks for confirmation, waits for an active
+  turn, and starts a fresh agent session while retaining the transcript and worktree.
+  Offer a handoff summary from the previous agent, selected by default; put the
+  resulting summary in the composer for review before the next prompt is sent.
 
 ## Conversation lifecycle
 

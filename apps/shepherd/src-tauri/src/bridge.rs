@@ -1640,6 +1640,18 @@ impl ShellState {
         .await
     }
 
+    pub async fn switch_task_agent(
+        &self,
+        task_id: String,
+        agent: Agent,
+    ) -> Result<TaskWorkspace, BridgeError> {
+        self.workspace(Command::SwitchTaskAgent {
+            task_id: TaskId::new(task_id),
+            agent,
+        })
+        .await
+    }
+
     pub async fn delete_task(
         &self,
         task_id: String,
@@ -4169,6 +4181,15 @@ pub mod commands {
         agent: Agent,
     ) -> Result<TaskWorkspace, BridgeError> {
         state.inner().set_draft_agent(task_id, agent).await
+    }
+
+    #[tauri::command]
+    pub async fn switch_task_agent(
+        state: State<'_, ShellState>,
+        task_id: String,
+        agent: Agent,
+    ) -> Result<TaskWorkspace, BridgeError> {
+        state.inner().switch_task_agent(task_id, agent).await
     }
 
     #[tauri::command]

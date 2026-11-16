@@ -671,6 +671,10 @@ export function setDraftAgent(taskId: string, agent: Agent): Promise<TaskWorkspa
   return invoke<TaskWorkspace>('set_draft_agent', { taskId, agent })
 }
 
+export function switchTaskAgent(taskId: string, agent: Agent): Promise<TaskWorkspace> {
+  return invoke<TaskWorkspace>('switch_task_agent', { taskId, agent })
+}
+
 export function opencodeConfigured(): Promise<boolean> {
   return invoke<boolean>('opencode_configured')
 }

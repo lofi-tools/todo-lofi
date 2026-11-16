@@ -1213,6 +1213,13 @@ test.beforeEach(async ({ context }) => {
             task.agent = args.agent
             return workspace(task.id)
           }
+          case 'switch_task_agent': {
+            const task = tasks.find((candidate) => candidate.id === args.taskId)
+            if (!task || ['starting', 'working', 'waiting', 'queued'].includes(task.state)) throw new Error('Task is busy')
+            task.agent = args.agent
+            task.model = null
+            return workspace(task.id)
+          }
           case 'set_session_mode': {
             const task = tasks.find((candidate) => candidate.id === args.taskId)
             if (task?.state !== 'ready' || args.mode !== 'plan') throw new Error('Unexpected mode change')
@@ -1222,6 +1229,19 @@ test.beforeEach(async ({ context }) => {
           case 'send_prompt': {
             if (options.has('send-prompt-fails')) throw { message: 'Sign in required', code: 'agent' }
             const task = tasks.find((candidate) => candidate.id === args.taskId)
+            if (args.text.includes('Handoff reference:')) {
+              if (options.has('handoff-fails')) throw { message: 'Handoff failed', code: 'agent' }
+              const rows = transcripts[task.id] ?? []
+              transcripts[task.id] = [...rows,
+                entry(`handoff-user-${rows.length}`, rows.length + 1, { type: 'userMessage', data: { text: args.text } }),
+                entry(`handoff-agent-${rows.length}`, rows.length + 2, { type: 'agentText', data: { text: 'Goal: finish the project.' } })]
+              task.state = 'ready'
+              if (options.has('handoff-fast')) {
+                window.__emitCoreEvent({ type: 'taskWorkspaceChanged', data: workspace(task.id) })
+                return { ...workspace(task.id), task: { ...task, state: 'working' }, transcript: rows }
+              }
+              return workspace(task.id)
+            }
             task.model = args.model ?? null
             if (args.codex) codexTurns.push({ taskId: args.taskId, ...args.codex })
             if (args.mode) sessionModes.set(args.taskId, args.mode)
@@ -3558,6 +3578,79 @@ test('uses saved priority for a new draft and allows changing its agent', async 
   await welcome.getByRole('button', { name: 'Agent: OpenCode' }).click()
   await welcome.getByRole('menuitemradio', { name: 'Codex' }).click()
   await expect(page.getByRole('heading', { name: 'What should Codex build in notes?' })).toBeVisible()
+})
+
+test('switches a conversation harness with an editable handoff', async ({ page }) => {
+  await page.goto('/?configured-opencode')
+  const composer = page.locator('.composer')
+  await composer.getByLabel('Prompt').fill('My next question')
+  await composer.getByRole('button', { name: 'Agent: Codex' }).click()
+  await composer.getByRole('menuitemradio', { name: 'OpenCode', exact: true }).click()
+  const dialog = page.getByRole('dialog', { name: 'Switch harness' })
+  await expect(dialog).toContainText('private context')
+  await expect(dialog.getByRole('checkbox', { name: /Summarize context/ })).toBeChecked()
+  await dialog.getByRole('button', { name: 'Switch harness' }).click()
+  await expect(composer.getByRole('button', { name: 'Agent: OpenCode' })).toBeVisible()
+  await expect(composer.getByLabel('Prompt')).toHaveValue('Context from Codex:\nGoal: finish the project.\n\nMy next question')
+  await expect(page.locator('.transcript')).toContainText('Goal: finish the project.')
+})
+
+test('can cancel a harness switch or switch without a summary', async ({ page }) => {
+  await page.goto('/?configured-opencode')
+  const composer = page.locator('.composer')
+  await composer.getByRole('button', { name: 'Agent: Codex' }).click()
+  await composer.getByRole('menuitemradio', { name: 'OpenCode', exact: true }).click()
+  let dialog = page.getByRole('dialog', { name: 'Switch harness' })
+  await dialog.getByRole('button', { name: 'Cancel' }).click()
+  await expect(composer.getByRole('button', { name: 'Agent: Codex' })).toBeVisible()
+  await composer.getByRole('button', { name: 'Agent: Codex' }).click()
+  await composer.getByRole('menuitemradio', { name: 'OpenCode', exact: true }).click()
+  dialog = page.getByRole('dialog', { name: 'Switch harness' })
+  await dialog.getByRole('checkbox', { name: /Summarize context/ }).uncheck()
+  await dialog.getByRole('button', { name: 'Switch harness' }).click()
+  await expect(composer.getByRole('button', { name: 'Agent: OpenCode' })).toBeVisible()
+  await expect(composer.getByLabel('Prompt')).toHaveValue('')
+})
+
+test('waits for an active response before switching harnesses', async ({ page }) => {
+  await page.goto('/?configured-opencode')
+  await page.evaluate(() => window.__setTaskState('task-1', 'working'))
+  const composer = page.locator('.composer')
+  await composer.getByRole('button', { name: 'Agent: Codex' }).click()
+  await composer.getByRole('menuitemradio', { name: 'OpenCode', exact: true }).click()
+  const dialog = page.getByRole('dialog', { name: 'Switch harness' })
+  await dialog.getByRole('checkbox', { name: /Summarize context/ }).uncheck()
+  await dialog.getByRole('button', { name: 'Switch harness' }).click()
+  await expect(dialog.getByRole('status')).toContainText('Waiting')
+  await page.evaluate(() => window.__setTaskState('task-1', 'waiting'))
+  await expect(dialog).toHaveCount(0)
+  await expect(composer.getByRole('status')).toContainText('after you respond')
+  await page.evaluate(() => window.__setTaskState('task-1', 'ready'))
+  await expect(composer.getByRole('button', { name: 'Agent: OpenCode' })).toBeVisible()
+})
+
+test('keeps the original harness when handoff generation fails', async ({ page }) => {
+  await page.goto('/?configured-opencode&handoff-fails')
+  const composer = page.locator('.composer')
+  await composer.getByRole('button', { name: 'Agent: Codex' }).click()
+  await composer.getByRole('menuitemradio', { name: 'OpenCode', exact: true }).click()
+  const dialog = page.getByRole('dialog', { name: 'Switch harness' })
+  await dialog.getByRole('button', { name: 'Switch harness' }).click()
+  await expect(dialog.getByRole('alert')).toContainText('Handoff failed')
+  await expect(composer.getByRole('button', { name: 'Agent: Codex' })).toBeVisible()
+  await dialog.getByRole('checkbox', { name: /Summarize context/ }).uncheck()
+  await dialog.getByRole('button', { name: 'Try again' }).click()
+  await expect(composer.getByRole('button', { name: 'Agent: OpenCode' })).toBeVisible()
+})
+
+test('keeps a handoff that finishes before the send request returns', async ({ page }) => {
+  await page.goto('/?configured-opencode&handoff-fast')
+  const composer = page.locator('.composer')
+  await composer.getByRole('button', { name: 'Agent: Codex' }).click()
+  await composer.getByRole('menuitemradio', { name: 'OpenCode', exact: true }).click()
+  await page.getByRole('dialog', { name: 'Switch harness' }).getByRole('button', { name: 'Switch harness' }).click()
+  await expect(composer.getByRole('button', { name: 'Agent: OpenCode' })).toBeVisible()
+  await expect(composer.getByLabel('Prompt')).toHaveValue(/Goal: finish the project\./)
 })
 
 test('keeps a draft editable when no agent is available', async ({ page }) => {

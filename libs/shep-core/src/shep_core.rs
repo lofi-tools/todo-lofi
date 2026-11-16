@@ -140,6 +140,8 @@ pub enum CoreError {
     TaskNotCancellable { id: String, state: &'static str },
     #[error("task {id} is {state}; stop its turn before compacting the conversation")]
     TaskCompactBusy { id: String, state: &'static str },
+    #[error("task {id} is {state}; wait for its active turn before switching agents")]
+    TaskAgentSwitchBusy { id: String, state: &'static str },
     #[error("task {id} has no pending approval")]
     NoPendingApproval { id: String },
     #[error("approval mismatch for task {id}: expected {expected}, got {actual}")]
@@ -1362,6 +1364,9 @@ impl Core {
             Command::SetDraftAgent { task_id, agent } => {
                 self.set_draft_agent(&task_id, agent).await
             }
+            Command::SwitchTaskAgent { task_id, agent } => {
+                self.switch_task_agent(&task_id, agent).await
+            }
             Command::DiscardDraft { task_id } => self.discard_draft(&task_id).await,
             Command::DeleteTask {
                 task_id,
@@ -1955,6 +1960,47 @@ impl Core {
         task.tier = agent.default_tier();
         self.store.save_task(&task).await?;
         self.tasks.insert(task_id.clone(), task);
+        Ok(CommandResult::TaskWorkspace(self.publish_task(task_id)?))
+    }
+
+    async fn switch_task_agent(
+        &mut self,
+        task_id: &TaskId,
+        agent: Agent,
+    ) -> Result<CommandResult, CoreError> {
+        let mut task = self.task(task_id)?.clone();
+        if task.state.is_live() {
+            return Err(CoreError::TaskAgentSwitchBusy {
+                id: task_id.as_str().to_owned(),
+                state: task.state.as_str(),
+            });
+        }
+        if task.agent == agent {
+            return Ok(CommandResult::TaskWorkspace(self.publish_task(task_id)?));
+        }
+        if let Some(session) = self.sessions.get_mut(task_id) {
+            session.shutdown().await?;
+        }
+        self.persist_task_transcript(task_id, true).await?;
+        self.end_session_record(task_id, &[]).await?;
+        if let Some(mut record) = self.session_records.get(task_id).cloned() {
+            record.adapter_session_id = None;
+            record.capabilities = None;
+            self.store.save_session(&record).await?;
+            self.session_records.insert(task_id.clone(), record);
+        }
+        task.agent = agent;
+        task.tier = agent.default_tier();
+        task.model = None;
+        task.mode = None;
+        self.store.save_task(&task).await?;
+        self.tasks.insert(task_id.clone(), task);
+        if let Some(session) = self.sessions.remove(task_id) {
+            let mut transcript = Transcript::default();
+            transcript.restore(session.transcript().entries().to_vec());
+            self.detached_transcripts
+                .insert(task_id.clone(), transcript);
+        }
         Ok(CommandResult::TaskWorkspace(self.publish_task(task_id)?))
     }
 

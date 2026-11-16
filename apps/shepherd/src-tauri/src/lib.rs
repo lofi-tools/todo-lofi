@@ -430,6 +430,7 @@ pub fn run() -> Result<(), tauri::Error> {
             bridge::commands::create_draft,
             bridge::commands::start_task,
             bridge::commands::set_draft_agent,
+            bridge::commands::switch_task_agent,
             bridge::commands::opencode_configured,
             bridge::commands::pi_configured,
             bridge::commands::claude_configured,

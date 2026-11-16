@@ -29,6 +29,7 @@ import { AgentIcon } from './AgentIcon'
 import { TaskSearch } from './TaskSearch'
 import { DeleteTaskDialog, ReviewArchiveDialog, TaskRows } from './TaskRows'
 import { ErrorNotifications } from './ErrorNotifications'
+import { SwitchHarnessDialog } from './SwitchHarnessDialog'
 import { recordDiagnostic, reportError } from './diagnostics'
 
 type CoreEvent = bridge.Event
@@ -473,6 +474,11 @@ export function App() {
     if (id) setTerminalAttention((bells) => bells.filter((bell) => bell.terminalId !== id))
   }
   const [prompt, setPrompt] = createSignal('')
+  const [harnessSwitch, setHarnessSwitch] = createSignal<{
+    taskId: string; from: bridge.Agent; to: bridge.Agent; summarize: boolean
+    phase: 'confirm' | 'waiting' | 'starting' | 'summarizing' | 'switching' | 'error'
+    marker?: string; error?: string
+  }>()
   const [fallbackSkills, setFallbackSkills] = createSignal<FallbackSkill[]>([])
   const activeFallbackSkills = () => fallbackSkills().filter((skill) => skill.agent === currentAgent())
   const [queuedFiles, setQueuedFiles] = createSignal(new Map<string, File[]>())
@@ -741,7 +747,7 @@ export function App() {
     const project = selectedProject()
     const task = workspace()?.task
     const canOpen = project && !project.missing && !pending()
-    const canChange = canOpen && (!task || task.state === 'draft')
+    const canChange = canOpen && (!task || task.state !== 'done')
     return AGENT_OPTIONS.map((agent) => {
       if (agent.id === 'freebuff-terminal') return { ...agent, disabled: !canOpen }
       if (agent.id === 'codex') return { ...agent, disabled: !canChange || !agentConfigured('codex'), detail: agentConfigured('codex') ? undefined : 'Codex is unavailable' }
@@ -841,19 +847,98 @@ export function App() {
     }
     if (agent !== 'codex' && agent !== 'opencode' && agent !== 'pi' && agent !== 'claude' && agent !== 'freebuff' && agent !== 'antigravity') return
     if (!agentConfigured(agent)) return
-    if (agent !== currentAgent()) patchTurnOptions({ mode: undefined, modeReset: undefined, model: undefined })
     if (freebuffProjectId()) setFreebuffProjectId(undefined)
     const task = workspace()?.task
     if (!task) {
+      if (agent !== currentAgent()) patchTurnOptions({ mode: undefined, modeReset: undefined, model: undefined })
       setDraftAgentManuallySelected(true)
       setNewTaskAgent(agent)
     } else if (task.state === 'draft' && task.agent !== agent) {
+      patchTurnOptions({ mode: undefined, modeReset: undefined, model: undefined })
       void run(async () => {
         const updated = await bridge.setDraftAgent(task.id, agent)
         if (selectedTaskId() === task.id) setWorkspace(updated)
       })
+    } else if (task.state !== 'draft' && task.state !== 'done' && task.agent !== agent) {
+      setHarnessSwitch({ taskId: task.id, from: task.agent, to: agent, summarize: true, phase: 'confirm' })
     }
   }
+
+  const handoffPrompt = 'Summarize the conversation for another coding agent taking over. Include the goal, decisions, relevant files, current state, and remaining work. Do not use tools. Respond only with the handoff.'
+  const taskIsActive = (state: string) => ['starting', 'working', 'waiting', 'queued'].includes(state)
+  const switchNeedsInput = () => {
+    const request = harnessSwitch()
+    return !!request && ['waiting', 'starting', 'summarizing'].includes(request.phase)
+      && workspace()?.task.id === request.taskId && workspace()?.task.state === 'waiting'
+  }
+
+  function switchHarness(request: NonNullable<ReturnType<typeof harnessSwitch>>, summary?: string) {
+    setHarnessSwitch({ ...request, phase: 'switching', error: undefined })
+    void bridge.switchTaskAgent(request.taskId, request.to).then((updated) => {
+      clearTurnOptions(request.taskId)
+      if (selectedTaskId() === request.taskId) {
+        setWorkspace(updated)
+        setFallbackSkills((skills) => skills.filter((skill) => skill.agent !== request.from))
+        if (summary) {
+          setPrompt((existing) => `Context from ${bridge.AGENT_LABELS[request.from]}:\n${summary}${existing.trim() ? `\n\n${existing}` : ''}`)
+          saveComposerSoon()
+        }
+      } else {
+        const scope = `task:${request.taskId}`
+        const stored = readComposer(scope)
+        const handoff = summary ? `Context from ${bridge.AGENT_LABELS[request.from]}:\n${summary}` : ''
+        const text = [handoff, stored?.text].filter((value) => value?.trim()).join('\n\n')
+        try {
+          localStorage.setItem(`${COMPOSER_KEY_PREFIX}${scope}`, JSON.stringify({
+            text, fallbackSkills: stored?.fallbackSkills?.filter((skill) => skill.agent !== request.from),
+          }))
+        } catch (error) {
+          setError(`Could not save the handoff draft: ${describe(error)}`)
+        }
+      }
+      setHarnessSwitch(undefined)
+    }).catch((failure) => {
+      setHarnessSwitch({ ...request, phase: 'error', error: describe(failure) })
+    })
+  }
+
+  createEffect(() => {
+    const request = harnessSwitch()
+    const current = workspace()
+    if (!request || !current || current.task.id !== request.taskId) return
+    if (request.phase === 'waiting' && !taskIsActive(current.task.state)) {
+      if (!request.summarize) {
+        switchHarness(request)
+        return
+      }
+      const marker = crypto.randomUUID()
+      const text = `${handoffPrompt}\nHandoff reference: ${marker}`
+      setHarnessSwitch({ ...request, phase: 'starting', marker })
+      void bridge.sendPrompt(request.taskId, text).then((updated) => {
+        const latest = harnessSwitch()
+        if (!latest || latest.marker !== marker) return
+        setHarnessSwitch({ ...latest, phase: 'summarizing' })
+        if (selectedTaskId() === request.taskId) {
+          const observed = workspace()
+          const finished = observed && !taskIsActive(observed.task.state)
+            && observed.transcript.some((entry) => entry.kind.type === 'userMessage' && entry.kind.data.text.includes(`Handoff reference: ${marker}`))
+          if (!finished) setWorkspace(updated)
+        }
+      }).catch((failure) => {
+        const latest = harnessSwitch()
+        if (latest?.marker === marker) setHarnessSwitch({ ...latest, phase: 'error', error: describe(failure) })
+      })
+    } else if (request.phase === 'summarizing' && !taskIsActive(current.task.state)) {
+      const start = current.transcript.findIndex((entry) => entry.kind.type === 'userMessage' && entry.kind.data.text.includes(`Handoff reference: ${request.marker}`))
+      if (start < 0) return
+      const summary = current.transcript.slice(start + 1).flatMap((entry) => entry.kind.type === 'agentText' ? [entry.kind.data.text] : []).join('\n').trim()
+      if (current.task.state === 'failed' || !summary) {
+        setHarnessSwitch({ ...request, phase: 'error', error: current.task.error || 'The harness did not produce a handoff summary.' })
+      } else {
+        switchHarness(request, summary)
+      }
+    }
+  })
 
   async function reloadPreferences() {
     if (savingPreference()) return
@@ -2826,6 +2911,9 @@ export function App() {
           </Show>
 
           <div class="composer">
+            <Show when={switchNeedsInput()}>
+              <p class="empty" role="status">The harness switch will continue after you respond. <button type="button" onClick={() => setHarnessSwitch(undefined)}>Cancel switch</button></p>
+            </Show>
             <Show when={workspace()?.task.state === 'waiting'}>
               <span class="terminal-attention composer__attention" role="img" aria-label="Task needs input" />
             </Show>
@@ -3031,6 +3119,13 @@ export function App() {
       <Show when={deleteRequest()} keyed>
         {(task) => <DeleteTaskDialog title={task.title} worktreePath={task.worktreePath} pending={pending()}
           onCancel={() => setDeleteRequest(undefined)} onConfirm={deleteTask} />}
+      </Show>
+      <Show when={harnessSwitch() && !switchNeedsInput() ? harnessSwitch() : undefined}>
+        {(request) => <SwitchHarnessDialog from={bridge.AGENT_LABELS[request().from]} to={bridge.AGENT_LABELS[request().to]}
+          summarize={request().summarize} phase={request().phase} error={request().error}
+          onSummarize={(summarize) => setHarnessSwitch((value) => value && { ...value, summarize })}
+          onCancel={() => { if (harnessSwitch()?.phase !== 'switching') setHarnessSwitch(undefined) }}
+          onConfirm={() => setHarnessSwitch((value) => value && { ...value, phase: 'waiting', error: undefined })} />}
       </Show>
 
       <Show when={pickerOpen()}>

@@ -737,6 +737,152 @@ async fn legacy_disabled_pool_slot_does_not_block_a_turn() -> Result<(), Box<dyn
     Ok(())
 }
 
+#[tokio::test]
+async fn switching_agents_keeps_the_transcript_and_starts_a_fresh_session()
+-> Result<(), Box<dyn std::error::Error>> {
+    struct SwitchingFactory(FakeHarnessFactory);
+    impl HarnessFactory for SwitchingFactory {
+        fn create(&self) -> Result<Box<dyn AgentHarness>, CoreError> {
+            self.0.create()
+        }
+
+        fn launch(
+            &self,
+            _agent: Agent,
+            cwd: PathBuf,
+        ) -> Result<(Box<dyn AgentHarness>, SpawnSpec), CoreError> {
+            Ok((self.create()?, self.spawn_spec(cwd)))
+        }
+    }
+    let repository = TestRepository::new()?;
+    let database = TestDatabase::new()?;
+    let uri = database.uri();
+    let factory = || {
+        SwitchingFactory(FakeHarnessFactory::new(vec![vec![FakeTurn::new(vec![
+            FakeStep::Message("First agent answer".into()),
+        ])]]))
+    };
+    let mut core =
+        Core::with_services(Box::new(TursoStore::open(&uri).await?), Box::new(factory()));
+    let project_id = add_project(&mut core, repository.path().to_path_buf()).await?;
+    let draft = workspace_of(
+        core.execute(Command::CreateDraft {
+            project_id,
+            title: "Switch harness".into(),
+            agent: Agent::Codex,
+        })
+        .await?,
+    );
+    let task_id = TaskId::new(draft.task.id);
+    let before = workspace_of(
+        core.execute(Command::SendPrompt {
+            task_id: task_id.clone(),
+            input: PromptInput::text("Original prompt"),
+        })
+        .await?,
+    );
+    let worktree = before.task.worktree_path.clone();
+    assert!(summaries(&before).join("\n").contains("First agent answer"));
+    let switched = workspace_of(
+        core.execute(Command::SwitchTaskAgent {
+            task_id: task_id.clone(),
+            agent: Agent::OpenCode,
+        })
+        .await?,
+    );
+    assert_eq!(switched.task.agent, Agent::OpenCode);
+    assert_eq!(switched.task.worktree_path, worktree);
+    assert!(
+        summaries(&switched)
+            .join("\n")
+            .contains("First agent answer")
+    );
+    assert!(
+        core.session_records
+            .get(&task_id)
+            .ok_or("missing old session")?
+            .resume_handle()
+            .is_none()
+    );
+    drop(core);
+
+    let mut reopened =
+        Core::load(Box::new(TursoStore::open(&uri).await?), Box::new(factory())).await?;
+    let restored = reopened.open_task_workspace(&task_id).await?;
+    assert_eq!(restored.task.agent, Agent::OpenCode);
+    assert_eq!(restored.task.worktree_path, worktree);
+    assert!(
+        summaries(&restored)
+            .join("\n")
+            .contains("First agent answer")
+    );
+    assert!(
+        reopened
+            .session_records
+            .get(&task_id)
+            .ok_or("missing old session")?
+            .resume_handle()
+            .is_none()
+    );
+    let after = workspace_of(
+        reopened
+            .execute(Command::SendPrompt {
+                task_id: task_id.clone(),
+                input: PromptInput::text("New agent prompt"),
+            })
+            .await?,
+    );
+    assert!(summaries(&after).join("\n").contains("First agent answer"));
+    assert_eq!(
+        reopened
+            .session_records
+            .get(&task_id)
+            .ok_or("missing new session")?
+            .adapter,
+        "opencode"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn switching_agents_rejects_an_active_turn() -> Result<(), Box<dyn std::error::Error>> {
+    let repository = TestRepository::new()?;
+    let mut core = Core::with_services(
+        Box::new(MemoryStore::new()),
+        Box::new(FakeHarnessFactory::new(vec![vec![FakeTurn::new(vec![
+            FakeStep::approval("approval", "Run tests"),
+        ])]])),
+    );
+    let project_id = add_project(&mut core, repository.path().to_path_buf()).await?;
+    let draft = workspace_of(
+        core.execute(Command::CreateDraft {
+            project_id,
+            title: "Wait before switching".into(),
+            agent: Agent::Codex,
+        })
+        .await?,
+    );
+    let task_id = TaskId::new(draft.task.id);
+    let waiting = workspace_of(
+        core.execute(Command::SendPrompt {
+            task_id: task_id.clone(),
+            input: PromptInput::text("Start work"),
+        })
+        .await?,
+    );
+    assert_eq!(waiting.task.state, TaskState::Waiting);
+    assert!(matches!(
+        core.execute(Command::SwitchTaskAgent {
+            task_id: task_id.clone(),
+            agent: Agent::OpenCode,
+        })
+        .await,
+        Err(CoreError::TaskAgentSwitchBusy { .. })
+    ));
+    assert_eq!(core.task_workspace(&task_id)?.task.agent, Agent::Codex);
+    Ok(())
+}
+
 struct FallingBackFactory {
     inner: FakeHarnessFactory,
     failed: Agent,

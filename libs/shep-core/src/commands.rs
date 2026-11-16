@@ -32,6 +32,10 @@ pub enum Command {
         task_id: TaskId,
         agent: Agent,
     },
+    SwitchTaskAgent {
+        task_id: TaskId,
+        agent: Agent,
+    },
     DiscardDraft {
         task_id: TaskId,
     },
