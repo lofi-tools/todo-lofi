@@ -36,10 +36,13 @@
 
 ## Decisions
 
-- The desktop app and CLI have independent versions and authentication state;
+- The desktop app and CLI have independent version numbers. Google describes
+  a unified authentication system, while ACP uses the CLI's cached sign-in;
   installing the desktop app alone does not establish that `agy acp` can run.
 - ACP exposes Auto as a session mode alongside Plan and Accept edits. Selecting
   one replaces the other; do not imply they can be enabled independently.
+- An ACP turn that ends without a substantive agent message reports an
+  incomplete response instead of silently appearing successful.
 - The live probe uses disposable files rather than another project or private
   home-directory files. Explicitly handling access outside the project must not
   weaken the ACP client's existing filesystem boundaries.

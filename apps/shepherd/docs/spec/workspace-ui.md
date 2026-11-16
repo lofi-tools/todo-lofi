@@ -442,6 +442,8 @@ current layout and give future changes a point of comparison.
 
 ## Conversation transcript
 
+- If an ACP turn ends without an agent response, show an incomplete-response
+  notice in the transcript.
 - Overlay the top of the transcript with a broad inset shadow using the same
   theme-aware shadow colours as the Git card, so messages scroll beneath it.
 - Render an agent's replies as formatted Markdown at the full transcript width,

@@ -950,6 +950,17 @@ async fn drive_session(
                     disconnect_deadline = Some(Instant::now() + Duration::from_secs(1));
                     continue;
                 }
+                if matches!(outcome, Ok(StopReason::EndTurn)) && !updates.has_message {
+                    let permit = error_capacity.clone().acquire_owned().await.map_err(|_| HarnessError::ChannelClosed)?;
+                    publish(&sender, HarnessEvent::TurnError {
+                        kind: FailureKind::AgentRejected,
+                        text: "The agent ended the turn without a final response.".into(),
+                        context: None,
+                        stream_permit: Some(Arc::new(permit)),
+                    })?;
+                    publish(&sender, HarnessEvent::TurnFinished { reason: TurnFinishReason::Failed })?;
+                    continue;
+                }
                 let reason = finish_turn(&sender, &error_capacity, outcome).await?;
                 publish(&sender, HarnessEvent::TurnFinished { reason })?;
             }
@@ -1432,6 +1443,7 @@ struct Updates {
     implicit: Option<(DeltaKind, ItemId)>,
     terminal_tools: HashMap<String, ToolCallId>,
     early_output: HashMap<String, String>,
+    has_message: bool,
 }
 
 impl Updates {
@@ -1443,6 +1455,12 @@ impl Updates {
     fn apply(&mut self, update: &SessionUpdate) -> Option<HarnessEvent> {
         match update {
             SessionUpdate::AgentMessageChunk(chunk) => {
+                if match &chunk.content {
+                    ContentBlock::Text(content) => !content.text.trim().is_empty(),
+                    _ => true,
+                } {
+                    self.has_message = true;
+                }
                 return self.chunk(DeltaKind::Message, chunk);
             }
             SessionUpdate::AgentThoughtChunk(chunk) => {
@@ -1456,6 +1474,9 @@ impl Updates {
         }
         let event = match update {
             SessionUpdate::ToolCall(_) | SessionUpdate::ToolCallUpdate(_) => {
+                if matches!(update, SessionUpdate::ToolCall(_)) {
+                    self.has_message = false;
+                }
                 let delta = self.tools.apply_update(update);
                 self.tools.entry(delta.changed?).and_then(tool_event)
             }
@@ -2370,9 +2391,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn empty_completed_turn_reports_incomplete_response()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (mut harness, _, _) = fake(FakeScript {
+            chunks: vec!["I will check that.".into()],
+            tool_call: Some(ToolCall::new("fixture-tool", "Read fixture")),
+            ..FakeScript::default()
+        })
+        .await?;
+        harness.open_session(None).await?;
+        harness.prompt(PromptInput::text("fixture")).await?;
+        let mut notice = false;
+        loop {
+            match next(&mut harness).await? {
+                HarnessEvent::TurnError { text, .. } => {
+                    assert!(text.contains("without a final response"));
+                    notice = true;
+                }
+                HarnessEvent::TurnFinished { reason } => {
+                    assert!(notice);
+                    assert_eq!(reason, TurnFinishReason::Failed);
+                    break;
+                }
+                _ => {}
+            }
+        }
+        harness.shutdown().await?;
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn selects_an_advertised_acp_model_before_the_next_turn()
     -> Result<(), Box<dyn std::error::Error>> {
-        let (mut harness, _, observed) = fake(FakeScript::default()).await?;
+        let (mut harness, _, observed) = fake(FakeScript {
+            chunks: vec!["Done".into()],
+            ..FakeScript::default()
+        })
+        .await?;
         timeout(Duration::from_secs(5), harness.open_session(None))
             .await
             .map_err(|_| "opening the ACP session timed out")??;
@@ -2437,6 +2492,7 @@ mod tests {
         std::fs::write(&neighbor, "other content")?;
         let (mut harness, _, observed) = fake_at(
             FakeScript {
+                chunks: vec!["Done".into()],
                 read_paths: vec![selected.clone(), neighbor],
                 write: Some((selected.clone(), "changed".into())),
                 ..FakeScript::default()
@@ -2486,6 +2542,7 @@ mod tests {
         std::fs::write(&file_path, "fixture text")?;
         for prompt_images in [true, false] {
             let (mut harness, capabilities, observed) = fake(FakeScript {
+                chunks: vec!["Done".into()],
                 prompt_images,
                 ..FakeScript::default()
             })
@@ -2884,6 +2941,7 @@ done
         let cwd = directory.path().to_path_buf();
         let (connection, _) = connect_fake_agent_with_terminals(
             FakeScript {
+                chunks: vec!["Done".into()],
                 terminal: Some(("fixture".into(), Vec::new())),
                 ..Default::default()
             },
@@ -3001,6 +3059,7 @@ done
         let cwd = std::env::temp_dir();
         let (connection, _) = connect_fake_agent_with_terminals(
             FakeScript {
+                chunks: vec!["Done".into()],
                 terminal: Some(("fixture".into(), Vec::new())),
                 release_terminal: true,
                 ..FakeScript::default()
@@ -3090,6 +3149,7 @@ done
     async fn a_project_grant_is_reused_until_reset_in_the_live_connection()
     -> Result<(), Box<dyn std::error::Error>> {
         let script = FakeScript {
+            chunks: vec!["Done".into()],
             permission: Some(ToolCallUpdate::new(
                 "tool-1",
                 ToolCallUpdateFields::new()
@@ -3273,7 +3333,7 @@ done
             let event = next(&mut harness).await?;
             transcript.apply(&event);
             if let HarnessEvent::TurnFinished { reason } = event {
-                assert_eq!(reason, TurnFinishReason::Completed);
+                assert_eq!(reason, TurnFinishReason::Failed);
                 break;
             }
         }
