@@ -1762,6 +1762,7 @@ button.pool__agent-label { padding: 0; border: 0; background: transparent; color
   left: calc(100% + 4px);
   right: auto;
   background: var(--prompt-card);
+  box-shadow: 0 8px 28px var(--menu-shadow), 0 2px 8px var(--menu-shadow);
   transform: translateY(-50%);
   min-width: 0;
   width: min(280px, 55vw);
@@ -1772,7 +1773,7 @@ button.pool__agent-label { padding: 0; border: 0; background: transparent; color
   padding: 8px 10px;
   overflow: hidden;
   color: var(--text);
-  font-size: 13px;
+  font-size: 14px;
   line-height: 1.4;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
