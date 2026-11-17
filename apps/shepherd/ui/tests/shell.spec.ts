@@ -416,6 +416,10 @@ test.beforeEach(async ({ context }) => {
       },
     ]
 
+    if (options.has('failed-preview-terminal')) {
+      terminals[0] = { ...terminals[0], id: 'shepherd-preview:task-1:failed', title: 'Preview: Web', scope: 'task', taskId: 'task-1', endedAt: 1_760_000_200_000, exitCode: 1 }
+    }
+
     let terminalLayout: TerminalLayout = { revision: 0, root: null, inspectorTab: 'terminals' }
     const otherInspectorTabs = new Map<string, InspectorTab>()
     const workspaceLayouts = new Map<string, WorkspaceLayout>()
@@ -803,6 +807,9 @@ test.beforeEach(async ({ context }) => {
           case 'set_setting': {
             const preferences = readPreferences()
             const edit = args.edit
+            if (edit.key === 'preview.url' && edit.value !== null && !String(edit.value).startsWith('http://localhost:')) {
+              throw { message: 'Enter a loopback HTTP or HTTPS URL without credentials.' }
+            }
             const path = projects.find((project) => project.id === edit.projectId)?.path
             const scope = path ? preferences.projects[path] ??= {} : preferences.app
             if (JSON.stringify(scope[edit.key] ?? null) !== JSON.stringify(edit.previous)) {
@@ -810,6 +817,10 @@ test.beforeEach(async ({ context }) => {
             }
             if (edit.value === null) delete scope[edit.key]
             else scope[edit.key] = edit.value
+            if (edit.key === 'preview.url') {
+              const index = projects.findIndex((project) => project.id === edit.projectId)
+              projects[index] = { ...projects[index], previewUrl: edit.value }
+            }
             localStorage.setItem('fixture.settings', JSON.stringify({ app: preferences.app, projects: preferences.projects }))
             return preferences
           }
@@ -1525,6 +1536,16 @@ test.beforeEach(async ({ context }) => {
               }
             }
             return null
+          case 'stop_project_terminals':
+            for (let index = terminals.length - 1; index >= 0; index -= 1) {
+              const terminal = terminals[index]
+              if (terminal.projectId === args.projectId && terminal.scope !== 'freebuff' && terminal.endedAt === null && (!args.taskId || terminal.taskId === args.taskId)) {
+                closedTerminals.push(terminal.id)
+                terminals.splice(index, 1)
+              }
+            }
+            terminalRevision += 1
+            return null
           case 'quit':
             return { interruptedTasks: 0, liveTerminals: 0 }
           case 'record_diagnostic': {
@@ -2059,6 +2080,12 @@ test('message rail previews and navigates user messages', async ({ page }) => {
   })
   const rail = page.getByRole('navigation', { name: 'Your messages' })
   await expect(rail.getByRole('button')).toHaveCount(20)
+  await page.emulateMedia({ reducedMotion: 'reduce' })
+  const second = rail.getByRole('button', { name: 'Go to your message 2', exact: true })
+  await second.hover()
+  await expect(second.locator('span')).toHaveCSS('width', '17px')
+  await expect(rail.getByRole('button', { name: 'Go to your message 1', exact: true }).locator('span')).toHaveCSS('width', '13px')
+  await expect(rail.getByRole('button', { name: 'Go to your message 3', exact: true }).locator('span')).toHaveCSS('width', '13px')
   const first = rail.getByRole('button', { name: 'Go to your message 1', exact: true })
   await first.hover()
   await expect(rail.getByRole('tooltip')).toHaveText('Question 1')
@@ -2074,7 +2101,9 @@ test('selecting Antigravity Auto switches from Plan and sends Auto', async ({ pa
   await page.getByRole('button', { name: 'notes', exact: true }).click()
   const composer = page.locator('.composer')
   await composer.getByRole('button', { name: 'Agent: Codex' }).click()
-  await composer.getByRole('menuitemradio', { name: 'Antigravity', exact: true }).click()
+  const antigravity = composer.getByRole('menuitemradio', { name: 'Antigravity', exact: true })
+  await expect(antigravity.locator('linearGradient stop')).toHaveCount(4)
+  await antigravity.click()
   await expect(composer.getByRole('button', { name: /Gemini 3.8 Flash/ })).toBeVisible()
   await composer.getByLabel('Prompt').fill('/plan')
   await composer.getByRole('option', { name: /plan/i }).click()
@@ -2186,6 +2215,40 @@ test('cancels stale task searches and focuses an archived hit across projects', 
   await input.fill('archive')
   await archived.click()
   await expect(row).toBeFocused()
+})
+
+test('keeps failed preview terminal output available read-only', async ({ page }) => {
+  await page.goto('/?failed-preview-terminal')
+  const terminal = page.getByRole('region', { name: 'Preview: Web' })
+  await expect(terminal.getByRole('textbox', { name: 'Terminal' })).toHaveAttribute('readonly', '')
+  await expect(terminal).toContainText('Ended')
+})
+
+test('project process indicator lists running terminals and stops them', async ({ page }) => {
+  await page.goto('/')
+  await page.getByRole('button', { name: /1 running process in/ }).click()
+  const dialog = page.getByRole('dialog', { name: 'Running processes' })
+  await expect(dialog).toContainText('Terminal 1')
+  await expect(dialog).not.toContainText('Terminal 2')
+  await dialog.getByRole('button', { name: 'Stop all' }).click()
+  await expect(dialog.getByRole('button', { name: 'Stop all' })).toBeDisabled()
+  await expect.poll(() => page.evaluate(() => window.__closedTerminals)).toContain('terminal-1')
+})
+
+test('configures multiple preview servers in project settings', async ({ page }) => {
+  await page.goto('/')
+  await page.getByRole('button', { name: 'Settings', exact: true }).click()
+  await page.getByRole('button', { name: 'Projects', exact: true }).click()
+  await page.getByRole('button', { name: 'Add server' }).click()
+  await page.getByLabel('Server 1 name').fill('Web')
+  await page.getByLabel('Server 1 command').fill('npm run dev')
+  await page.getByLabel('Server 1 port variable').fill('PORT')
+  await page.getByRole('button', { name: 'Add server' }).click()
+  await page.getByLabel('Server 2 name').fill('API')
+  await page.getByLabel('Server 2 command').fill('npm run api')
+  await page.getByLabel('Server 2 port variable').fill('API_PORT')
+  await page.getByRole('button', { name: 'Save servers' }).click()
+  await expect(page.getByRole('button', { name: 'Save servers' })).toBeDisabled()
 })
 
 test('saves a project preview URL and loads and reloads a sandboxed page', async ({ page }) => {

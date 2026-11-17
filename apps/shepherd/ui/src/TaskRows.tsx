@@ -10,6 +10,8 @@ export function TaskRows(props: {
   disabled?: boolean
   mac: boolean
   needsTerminalAttention: (taskId: string) => boolean
+  processCount: (taskId: string) => number
+  onProcesses: (taskId: string) => void
   isOutputUnread: (taskId: string) => boolean
   onOpen: (task: TaskSummary) => void
   onSelect: (taskId: string, extend: boolean) => void
@@ -49,6 +51,9 @@ export function TaskRows(props: {
                   </Show>
                 </Show>
               </button>
+              <Show when={props.processCount(task.id) > 0}>
+                <button type="button" class="process-indicator" aria-label={`${props.processCount(task.id)} running ${props.processCount(task.id) === 1 ? 'process' : 'processes'} in ${task.title}`} title="Running processes" onClick={() => props.onProcesses(task.id)}>{props.processCount(task.id)}</button>
+              </Show>
             </li>
           )}
         </For>

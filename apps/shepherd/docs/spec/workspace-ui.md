@@ -167,6 +167,12 @@ current layout and give future changes a point of comparison.
   overrides the saved URL without changing it. **Settings → Projects** saves or clears that project's loopback
   URL. When it is configured, show the address, **Reload**, **Open in browser**,
   **Open annotation wrapper**, and **Project settings** above the sandboxed page.
+  Project settings may define named preview commands and port variables. Opening
+  Preview starts them once per task worktree, assigns available ports and passes
+  all assigned variables to each command. A URL may use `${PORT}`. Keep these
+  processes running when Preview closes; show startup failures and terminal output.
+  Project and task rows show running-process counts that open a list with individual
+  and scope-wide stop controls for these commands and ordinary terminals.
   The preview uses a separate origin from the shell so the project can load its
   own modules and assets. **Open annotation wrapper** opens a token-scoped
   loopback page in the external browser; it embeds the same preview URL and is
@@ -448,7 +454,8 @@ current layout and give future changes a point of comparison.
 - When the transcript overflows, show a vertically centered right-hand
   navigation rail with one marker for each user message.
   Hovering or focusing a marker previews the message; activating it scrolls to
-  that message without changing the conversation.
+  that message without changing the conversation. Expand the active marker and
+  its immediate neighbours while it is hovered or focused.
 - If an ACP turn ends without an agent response, show an incomplete-response
   notice in the transcript.
 - Overlay the top of the transcript with a broad inset shadow using the same

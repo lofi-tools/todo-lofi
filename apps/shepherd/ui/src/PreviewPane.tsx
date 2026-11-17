@@ -1,33 +1,65 @@
-import { For, Show, createEffect, createSignal, onCleanup } from 'solid-js'
+import { For, Show, createEffect, createSignal, on, onCleanup } from 'solid-js'
 
-import { openProjectAnnotationWrapper, openProjectPreview, type AttachmentLimit } from './bridge'
+import { openProjectAnnotationWrapper, openProjectPreview, startPreviewServers, type AttachmentLimit, type PreviewService } from './bridge'
 import { reportError } from './diagnostics'
 
 interface PreviewPaneProps {
   projectId: string
   taskId?: string
+  taskHasWorktree: boolean
   url?: string | null
+  servers: PreviewService[]
   shown: boolean
   canAddToPrompt: boolean
   attachmentLimit?: AttachmentLimit
   onAddToPrompt: (annotations: PreviewAnnotation[]) => Promise<void>
   onProjectSettings: () => void
+  onShowTerminals: () => void
 }
 
 export function PreviewPane(props: PreviewPaneProps) {
   const [opened, setOpened] = createSignal(false)
+  const [runtimeUrl, setRuntimeUrl] = createSignal<string>()
+  const [starting, setStarting] = createSignal(false)
+  const [startError, setStartError] = createSignal('')
+  const [attempt, setAttempt] = createSignal(0)
+  let generation = 0
+  onCleanup(() => { generation += 1 })
   createEffect(() => { if (props.shown) setOpened(true) })
+  createEffect(on(() => [props.shown, props.projectId, props.taskId, props.taskHasWorktree, props.url, JSON.stringify(props.servers), attempt()] as const, ([shown, projectId, taskId, hasWorktree, url]) => {
+    const current = ++generation
+    if (!shown) return
+    setStartError('')
+    if (!props.servers.length) {
+      setRuntimeUrl(url?.includes('${PORT}') ? undefined : url ?? undefined)
+      if (url?.includes('${PORT}')) setStartError('Add a preview server with port variable PORT to use this URL.')
+      setStarting(false)
+      return
+    }
+    setRuntimeUrl(undefined)
+    if (!taskId || !hasWorktree) { setStarting(false); setStartError('Select a task with a worktree to start its preview servers.'); return }
+    setStarting(true)
+    void startPreviewServers(projectId, taskId).then((result) => {
+      if (current === generation) setRuntimeUrl(result.url)
+    }).catch((failure) => {
+      if (current === generation) setStartError(typeof failure === 'object' && failure !== null && 'message' in failure ? String(failure.message) : String(failure))
+    }).finally(() => { if (current === generation) setStarting(false) })
+  }))
 
   return (
     <Show when={opened() || props.shown}>
       <div class="preview-pane__view" hidden={!props.shown}>
-        <Show when={props.url} keyed fallback={
+        <Show when={!starting()} fallback={<p class="empty" role="status">Starting preview servers…</p>}>
+        <Show when={!startError()} fallback={<div class="terminal-pane__bar"><p class="entry__notice--error" role="alert">{startError()}</p><button type="button" onClick={props.onShowTerminals}>View terminals</button><button type="button" onClick={() => setAttempt((value) => value + 1)}>Retry</button></div>}>
+        <Show when={runtimeUrl()} keyed fallback={
           <div class="terminal-pane__bar preview-pane__bar">
             <p class="empty">Set a preview URL for this project.</p>
             <button type="button" onClick={props.onProjectSettings}>Project settings</button>
           </div>
         }>
           {(url) => <ProjectPreview {...props} url={url} />}
+        </Show>
+        </Show>
         </Show>
       </div>
     </Show>
@@ -165,7 +197,7 @@ function ProjectPreview(props: PreviewPaneProps & { url: string }) {
   async function open() {
     setOpening(true)
     try {
-      await openProjectPreview(props.projectId)
+      await openProjectPreview(props.projectId, props.taskId)
     } catch (failure) {
       reportError('open_project_preview', failure)
     } finally {

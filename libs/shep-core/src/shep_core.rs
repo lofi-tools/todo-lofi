@@ -1211,9 +1211,12 @@ impl Core {
         }
 
         // A quit keeps its ended records so the next launch can show the saved
-        // layout with a restart, and the Freebuff session is kept for the same
-        // reason. Every other exit removes the terminal and its pane.
-        if self.shutdown != ShutdownState::Running || seen.scope == TerminalScope::Freebuff {
+        // layout with a restart. Freebuff and preview sessions also retain
+        // their records so their output remains available after exit.
+        if self.shutdown != ShutdownState::Running
+            || seen.scope == TerminalScope::Freebuff
+            || seen.id.as_str().starts_with("shepherd-preview:")
+        {
             let mut terminal = seen.clone();
             terminal.ended_at = Some(crate::projects::now_millis());
             terminal.exit_code = exit_code;

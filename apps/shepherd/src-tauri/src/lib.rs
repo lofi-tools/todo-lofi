@@ -422,6 +422,8 @@ pub fn run() -> Result<(), tauri::Error> {
             bridge::commands::project_environment,
             bridge::commands::save_project_environment,
             bridge::commands::open_project_preview,
+            bridge::commands::start_preview_servers,
+            bridge::commands::stop_project_terminals,
             bridge::commands::open_project_annotation_wrapper,
             bridge::commands::validate_preview_annotations,
             bridge::commands::attachment_limit,

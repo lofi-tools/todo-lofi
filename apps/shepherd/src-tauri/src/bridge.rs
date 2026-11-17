@@ -520,7 +520,9 @@ impl TerminalHost {
                     Ok(None) => break,
                     Err(_) => {}
                     Ok(Some(TerminalEvent::Exited { exit_code, signal })) => {
-                        screens.lock().await.remove(id.as_str());
+                        if !id.as_str().starts_with("shepherd-preview:") {
+                            screens.lock().await.remove(id.as_str());
+                        }
                         if let Some(protocol) = &protocol
                             && protocol
                                 .send(TerminalProcessEvent::Exited(
@@ -876,12 +878,29 @@ pub struct ShellState {
     pending_quit: Mutex<Option<QuitSummary>>,
     terminals: TerminalHost,
     preview_server: Arc<crate::preview_server::PreviewServer>,
+    preview_runs: Mutex<BTreeMap<String, PreviewRun>>,
     previous_processes: Mutex<Vec<ProcessRecord>>,
     scan: Arc<Mutex<ProjectScanCache>>,
     file_searches: Mutex<BTreeMap<String, FileSearch>>,
     task_searches: Mutex<BTreeMap<String, TaskSearchRequest>>,
     file_watches: Arc<Mutex<BTreeMap<String, oneshot::Sender<()>>>>,
     file_watch_starts: Arc<Semaphore>,
+}
+
+#[derive(Clone)]
+struct PreviewRun {
+    project_id: String,
+    ports: BTreeMap<String, u16>,
+    terminal_ids: Vec<String>,
+    specs: BTreeMap<String, TerminalSpec>,
+    target: tauri::Url,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreviewLaunch {
+    url: String,
+    terminal_ids: Vec<String>,
 }
 
 struct ProjectScanCache {
@@ -1046,6 +1065,7 @@ impl ShellState {
             pending_quit: Mutex::new(None),
             terminals,
             preview_server: Arc::new(crate::preview_server::PreviewServer::default()),
+            preview_runs: Mutex::new(BTreeMap::new()),
             previous_processes: Mutex::new(Vec::new()),
             scan: Arc::new(Mutex::new(ProjectScanCache::default())),
             file_searches: Mutex::new(BTreeMap::new()),
@@ -1264,7 +1284,11 @@ impl ShellState {
                 .filter_map(|project| {
                     local
                         .get(&project.path)
-                        .and_then(|value| shep_core::projects::parse_preview_url(value))
+                        .and_then(|value| {
+                            (!value.contains("${PORT}"))
+                                .then(|| shep_core::projects::parse_preview_url(value))
+                                .flatten()
+                        })
                         .map(|url| (ProjectId::new(project.id), url))
                 })
                 .collect();
@@ -1314,13 +1338,236 @@ impl ShellState {
         Ok(projects)
     }
 
-    pub async fn open_project_preview(&self, project_id: String) -> Result<(), BridgeError> {
-        let url = self
+    async fn preview_target(
+        &self,
+        project_id: &str,
+        task_id: Option<&str>,
+    ) -> Result<tauri::Url, BridgeError> {
+        if let Some(task_id) = task_id
+            && let Some(run) = self.preview_runs.lock().await.get(task_id)
+            && run.project_id == project_id
+        {
+            return Ok(run.target.clone());
+        }
+        let project = self
             .core
             .lock()
             .await
+            .project_path(&ProjectId::new(project_id))?;
+        let configured = self
+            .preferences
+            .value(Some(&project), SettingKey::PreviewUrl)
+            .await;
+        if let Some(url) = configured.as_str() {
+            if url.contains("${PORT}") {
+                return Err(BridgeError::new(
+                    "preview",
+                    "Start the task's preview servers to resolve ${PORT}.",
+                ));
+            }
+            return crate::settings::preview_url_template(url, 1)
+                .ok_or_else(|| BridgeError::new("preview", "Invalid preview URL."));
+        }
+        self.core
+            .lock()
+            .await
             .project_preview_url(&ProjectId::new(project_id))?
-            .ok_or_else(|| BridgeError::new("preview", "Set the project preview URL first."))?;
+            .ok_or_else(|| BridgeError::new("preview", "Set the project preview URL first."))
+    }
+
+    pub async fn start_preview_servers(
+        &self,
+        project_id: String,
+        task_id: String,
+    ) -> Result<PreviewLaunch, BridgeError> {
+        let guard = self.terminal_lifecycle.lock().await;
+        let project = ProjectId::new(project_id.clone());
+        let task = TaskId::new(task_id.clone());
+        let (project_path, cwd) = {
+            let core = self.core.lock().await;
+            (
+                core.project_path(&project)?,
+                core.workspace_directory(&project, Some(&task))?,
+            )
+        };
+        let services: Vec<crate::settings::PreviewService> = serde_json::from_value(
+            self.preferences
+                .value(Some(&project_path), SettingKey::PreviewServers)
+                .await,
+        )
+        .map_err(|error| {
+            BridgeError::new("preview", format!("Invalid preview servers: {error}"))
+        })?;
+        if services.is_empty() {
+            let target = self.preview_target(&project_id, None).await?;
+            return Ok(PreviewLaunch {
+                url: target.to_string(),
+                terminal_ids: Vec::new(),
+            });
+        }
+        let mut existing = self.preview_runs.lock().await.get(&task_id).cloned();
+        if let Some(run) = &existing {
+            let list = self.core.lock().await.terminal_list(&project);
+            let live = list.terminals.iter().any(|terminal| {
+                run.terminal_ids.contains(&terminal.id) && terminal.ended_at.is_none()
+            });
+            if !live {
+                self.preview_runs.lock().await.remove(&task_id);
+                existing = None;
+            }
+        }
+        let run = if let Some(run) = existing {
+            if run.project_id != project_id {
+                return Err(BridgeError::new(
+                    "preview",
+                    "The task belongs to another project.",
+                ));
+            }
+            run
+        } else {
+            let mut ports = BTreeMap::new();
+            let mut listeners = Vec::new();
+            let used: BTreeSet<u16> = self
+                .preview_runs
+                .lock()
+                .await
+                .values()
+                .flat_map(|run| run.ports.values().copied())
+                .collect();
+            for service in &services {
+                if let Some(name) = &service.port_variable {
+                    let listener = loop {
+                        let candidate =
+                            std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+                                .map_err(|error| {
+                                    BridgeError::new(
+                                        "preview",
+                                        format!("Could not allocate a port: {error}"),
+                                    )
+                                })?;
+                        let port = candidate
+                            .local_addr()
+                            .map_err(|error| BridgeError::new("preview", error.to_string()))?
+                            .port();
+                        if !used.contains(&port) {
+                            ports.insert(name.clone(), port);
+                            break candidate;
+                        }
+                    };
+                    listeners.push(listener);
+                }
+            }
+            let configured = self
+                .preferences
+                .value(Some(&project_path), SettingKey::PreviewUrl)
+                .await;
+            let target = if let Some(template) = configured.as_str() {
+                if template.contains("${PORT}") && !ports.contains_key("PORT") {
+                    return Err(BridgeError::new(
+                        "preview",
+                        "The preview URL needs a server with port variable PORT.",
+                    ));
+                }
+                crate::settings::preview_url_template(
+                    template,
+                    ports.get("PORT").copied().unwrap_or(1),
+                )
+            } else {
+                self.core.lock().await.project_preview_url(&project)?
+            }
+            .ok_or_else(|| BridgeError::new("preview", "Set a valid project preview URL first."))?;
+            drop(listeners);
+            let mut terminal_ids = Vec::new();
+            let mut specs = BTreeMap::new();
+            for service in &services {
+                let id = format!("shepherd-preview:{}:{}", task_id, uuid::Uuid::new_v4());
+                let record = TerminalRecord::project_shared(
+                    TerminalId::new(id.clone()),
+                    project.clone(),
+                    format!("Preview: {}", service.name),
+                    cwd.clone(),
+                    "/bin/sh",
+                    now_millis(),
+                )
+                .for_task(task.clone());
+                let spec = TerminalSpec {
+                    id: TerminalId::new(id.clone()),
+                    columns: 80,
+                    rows: 24,
+                    cwd: cwd.clone(),
+                    command: "/bin/sh".into(),
+                    args: vec!["-lc".into(), service.command.clone()],
+                    environment: ports
+                        .iter()
+                        .map(|(name, port)| (name.clone(), port.to_string()))
+                        .collect(),
+                };
+                if let Err(error) = self.spawn_terminal(spec.clone(), Some(record)).await {
+                    for started in &terminal_ids {
+                        if let Err(cleanup) = self
+                            .terminals
+                            .stop_terminal_process(TerminalId::new(started))
+                            .await
+                        {
+                            tracing::error!(%cleanup, "Could not stop a preview process after startup failed");
+                        }
+                    }
+                    return Err(error);
+                }
+                specs.insert(id.clone(), spec);
+                terminal_ids.push(id);
+            }
+            let run = PreviewRun {
+                project_id: project_id.clone(),
+                ports,
+                terminal_ids,
+                specs,
+                target,
+            };
+            self.preview_runs
+                .lock()
+                .await
+                .insert(task_id.clone(), run.clone());
+            run
+        };
+        drop(guard);
+        let port = run
+            .target
+            .port_or_known_default()
+            .ok_or_else(|| BridgeError::new("preview", "Preview URL has no port."))?;
+        for _ in 0..480 {
+            let list = self.core.lock().await.terminal_list(&project);
+            if list.terminals.iter().any(|terminal| {
+                run.terminal_ids.contains(&terminal.id) && terminal.ended_at.is_some()
+            }) {
+                return Err(BridgeError::new(
+                    "preview",
+                    "A preview process exited. Open Terminals to inspect its output.",
+                ));
+            }
+            if tokio::net::TcpStream::connect((run.target.host_str().unwrap_or("localhost"), port))
+                .await
+                .is_ok()
+            {
+                return Ok(PreviewLaunch {
+                    url: run.target.to_string(),
+                    terminal_ids: run.terminal_ids,
+                });
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+        Err(BridgeError::new(
+            "preview",
+            "The preview server did not become ready. Open Terminals to inspect its output.",
+        ))
+    }
+
+    pub async fn open_project_preview(
+        &self,
+        project_id: String,
+        task_id: Option<String>,
+    ) -> Result<(), BridgeError> {
+        let url = self.preview_target(&project_id, task_id.as_deref()).await?;
         open_in_browser(url).await.map_err(|error| {
             BridgeError::new(
                 "preview",
@@ -1347,12 +1594,7 @@ impl ShellState {
                 ));
             }
         }
-        let target = self
-            .core
-            .lock()
-            .await
-            .project_preview_url(&ProjectId::new(project_id.clone()))?
-            .ok_or_else(|| BridgeError::new("preview", "Set the project preview URL first."))?;
+        let target = self.preview_target(&project_id, task_id.as_deref()).await?;
         self.preview_server
             .open(&project_id, task_id.as_deref(), &target)
             .await
@@ -1381,7 +1623,7 @@ impl ShellState {
     ) -> Result<AnnotationBatch, BridgeError> {
         let project_id = batch.project_id.clone();
         let task_id = batch.task_id.clone();
-        let target = {
+        {
             let core = self.core.lock().await;
             let workspace = core.task_workspace(&TaskId::new(task_id.clone()))?;
             if workspace.task.project_id != project_id {
@@ -1390,9 +1632,8 @@ impl ShellState {
                     "The selected task does not belong to this project.",
                 ));
             }
-            core.project_preview_url(&ProjectId::new(project_id.clone()))?
-                .ok_or_else(|| BridgeError::new("preview", "Set the project preview URL first."))?
-        };
+        }
+        let target = self.preview_target(&project_id, Some(&task_id)).await?;
         let attachment_root = self.task_attachment_directory(&task_id);
         let origin = target.origin().ascii_serialization();
         validate_batch(
@@ -3127,7 +3368,58 @@ impl ShellState {
         }
         record.ended_at = None;
         record.exit_code = None;
+        if let Some(mut spec) = self
+            .preview_runs
+            .lock()
+            .await
+            .values()
+            .find_map(|run| run.specs.get(record.id.as_str()).cloned())
+        {
+            spec.columns = columns;
+            spec.rows = rows;
+            let project = record.project_id.clone();
+            self.spawn_terminal(spec, Some(record)).await?;
+            return Ok(self.core.lock().await.terminal_list(&project));
+        }
+        if record.id.as_str().starts_with("shepherd-preview:") {
+            return Err(BridgeError::new(
+                "preview",
+                "Open Preview to start the configured servers again.",
+            ));
+        }
         self.launch_terminal(record, columns, rows).await
+    }
+
+    pub async fn stop_project_terminals(
+        &self,
+        project_id: String,
+        task_id: Option<String>,
+    ) -> Result<(), BridgeError> {
+        let project = ProjectId::new(project_id.clone());
+        let terminals = self.core.lock().await.terminal_list(&project).terminals;
+        let mut errors = Vec::new();
+        for terminal in terminals.into_iter().filter(|terminal| {
+            terminal.ended_at.is_none()
+                && terminal.scope != TerminalScope::Freebuff
+                && task_id
+                    .as_ref()
+                    .is_none_or(|task| terminal.task_id.as_ref() == Some(task))
+        }) {
+            if let Err(error) = self.close_terminal(terminal.id.clone()).await {
+                errors.push(format!("{}: {error}", terminal.title));
+            }
+        }
+        if errors.is_empty() {
+            self.preview_runs.lock().await.retain(|task, run| {
+                run.project_id != project_id || task_id.as_ref().is_some_and(|id| id != task)
+            });
+            Ok(())
+        } else {
+            Err(BridgeError::new(
+                "terminal",
+                format!("Could not stop all processes: {}", errors.join("; ")),
+            ))
+        }
     }
 
     pub async fn start_freebuff_terminal(
@@ -3492,6 +3784,7 @@ impl ShellState {
                 Err(error) => return Err(error.into()),
             }
             Self::broadcast_core_events(&mut core, &self.events);
+            self.terminals.screens.lock().await.remove(id.as_str());
         }
         Ok(())
     }
@@ -4033,8 +4326,36 @@ pub mod commands {
     pub async fn open_project_preview(
         state: State<'_, ShellState>,
         project_id: String,
+        task_id: Option<String>,
     ) -> Result<(), BridgeError> {
-        state.inner().open_project_preview(project_id).await
+        state
+            .inner()
+            .open_project_preview(project_id, task_id)
+            .await
+    }
+
+    #[tauri::command]
+    pub async fn start_preview_servers(
+        state: State<'_, ShellState>,
+        project_id: String,
+        task_id: String,
+    ) -> Result<PreviewLaunch, BridgeError> {
+        state
+            .inner()
+            .start_preview_servers(project_id, task_id)
+            .await
+    }
+
+    #[tauri::command]
+    pub async fn stop_project_terminals(
+        state: State<'_, ShellState>,
+        project_id: String,
+        task_id: Option<String>,
+    ) -> Result<(), BridgeError> {
+        state
+            .inner()
+            .stop_project_terminals(project_id, task_id)
+            .await
     }
 
     #[tauri::command]
@@ -8156,6 +8477,77 @@ mod tests {
 
     #[cfg(feature = "git")]
     #[tokio::test]
+    async fn preview_servers_are_reused_per_task_and_stop_independently()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let repository = TestRepository::new()?;
+        let config = repository.path().join(".config/shepherd");
+        std::fs::create_dir_all(&config)?;
+        std::fs::write(
+            config.join("settings.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "version": 1,
+                "settings": {
+                    "preview.url": "http://127.0.0.1:${PORT}/",
+                    "preview.servers": [
+                        {"name": "Web", "command": "python3 -m http.server $PORT --bind 127.0.0.1", "portVariable": "PORT"},
+                        {"name": "Worker", "command": "sleep 120", "portVariable": "API_PORT"}
+                    ]
+                }
+            }))?,
+        )?;
+        let state = state_with(Core::with_services(
+            Box::new(MemoryStore::new()),
+            Box::new(ScriptedHarnessFactory),
+        ));
+        let projects = state
+            .add_project(repository.path().display().to_string())
+            .await?;
+        let project = projects.projects.first().ok_or("missing project")?;
+        let mut tasks = Vec::new();
+        for title in ["first", "second"] {
+            let task = state
+                .create_draft(project.id.clone(), title.into(), Agent::Codex)
+                .await?;
+            let task_id = task.task.id;
+            state
+                .send_prompt(task_id.clone(), "create a worktree".into())
+                .await?;
+            tasks.push(task_id);
+        }
+        let [first_task, second_task] = tasks.as_slice() else {
+            return Err("missing tasks".into());
+        };
+        let first = state
+            .start_preview_servers(project.id.clone(), first_task.clone())
+            .await?;
+        let again = state
+            .start_preview_servers(project.id.clone(), first_task.clone())
+            .await?;
+        let second = state
+            .start_preview_servers(project.id.clone(), second_task.clone())
+            .await?;
+        assert_eq!(first.terminal_ids, again.terminal_ids);
+        assert_ne!(first.url, second.url);
+        assert_eq!(first.terminal_ids.len(), 2);
+        state
+            .stop_project_terminals(project.id.clone(), Some(first_task.clone()))
+            .await?;
+        let list = state.terminal_list(project.id.clone()).await;
+        assert!(
+            list.terminals
+                .iter()
+                .any(|terminal| second.terminal_ids.contains(&terminal.id)
+                    && terminal.ended_at.is_none())
+        );
+        state
+            .stop_project_terminals(project.id.clone(), None)
+            .await?;
+        state.quit(true).await?;
+        Ok(())
+    }
+
+    #[cfg(feature = "git")]
+    #[tokio::test]
     async fn restarting_a_task_terminal_reuses_its_record_and_worktree()
     -> Result<(), Box<dyn std::error::Error>> {
         let repository = TestRepository::new()?;
@@ -9056,7 +9448,12 @@ mod tests {
                 .and_then(|project| project.preview_url.as_deref()),
             None
         );
-        assert!(reopened.open_project_preview(project_id).await.is_err());
+        assert!(
+            reopened
+                .open_project_preview(project_id, None)
+                .await
+                .is_err()
+        );
         Ok(())
     }
 

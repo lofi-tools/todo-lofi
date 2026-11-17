@@ -600,8 +600,12 @@ export function setProjectPreviewUrl(projectId: string, url: string): Promise<Pr
   return invoke<ProjectList>('set_project_preview_url', { projectId, url })
 }
 
-export function openProjectPreview(projectId: string): Promise<void> {
-  return invoke<void>('open_project_preview', { projectId })
+export function openProjectPreview(projectId: string, taskId?: string): Promise<void> {
+  return invoke<void>('open_project_preview', { projectId, taskId: taskId ?? null })
+}
+
+export function startPreviewServers(projectId: string, taskId: string): Promise<{ url: string; terminalIds: string[] }> {
+  return invoke('start_preview_servers', { projectId, taskId })
 }
 
 export function openProjectAnnotationWrapper(projectId: string, taskId: string | null): Promise<string> {
@@ -918,6 +922,10 @@ export function terminalResize(
 
 export function closeTerminal(terminalId: string): Promise<void> {
   return invoke<void>('close_terminal', { terminalId })
+}
+
+export function stopProjectTerminals(projectId: string, taskId?: string): Promise<void> {
+  return invoke<void>('stop_project_terminals', { projectId, taskId: taskId ?? null })
 }
 
 function decodeTerminalFrame(buffer: ArrayBuffer, previous: TerminalFrame | undefined) {
@@ -1266,7 +1274,11 @@ export interface SettingsValues {
   'terminal.scrollback_lines': number
   'files.show_dotfiles': boolean
   environment: ProjectEnvironment | null
+  'preview.servers': PreviewService[]
+  'preview.url': string | null
 }
+
+export interface PreviewService { name: string; command: string; portVariable?: string | null }
 
 export interface ProjectAction { name: string; icon: string; command: string }
 export interface ProjectEnvironment { sourceHash: string; setup: string; approvedSetupHash: string | null; actions: ProjectAction[] }
@@ -1285,6 +1297,7 @@ export type SettingKey = keyof SettingsValues
 export interface SettingsSnapshot {
   app: Partial<SettingsValues>
   projects: Record<string, Partial<SettingsValues>>
+  projectLocal?: Record<string, Partial<SettingsValues>>
   defaults: SettingsValues
   warning: string | null
 }

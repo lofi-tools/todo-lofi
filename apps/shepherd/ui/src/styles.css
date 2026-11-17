@@ -725,6 +725,18 @@ textarea {
   color: inherit;
 }
 
+.process-indicator {
+  flex: none;
+  min-width: 20px;
+  padding: 2px 5px;
+  border: 0;
+  border-radius: 10px;
+  background: var(--surface-raised);
+  color: var(--text-secondary);
+  font-size: 10px;
+  cursor: pointer;
+}
+
 .project-row__action {
   display: grid;
   place-items: center;
@@ -1720,7 +1732,7 @@ button.pool__agent-label { padding: 0; border: 0; background: transparent; color
   flex: none;
   place-items: center;
   width: 24px;
-  height: 20px;
+  height: 14px;
   padding: 0;
   border: 0;
   border-radius: 4px;
@@ -1733,12 +1745,16 @@ button.pool__agent-label { padding: 0; border: 0; background: transparent; color
   height: 2px;
   border-radius: 2px;
   background: var(--text-muted);
+  transition: width 140ms ease, background-color 140ms ease;
 }
 
 .message-rail__item:hover,
 .message-rail__item:focus-visible { background: var(--surface-raised); }
 .message-rail__item:hover span,
-.message-rail__item:focus-visible span { background: var(--accent); }
+.message-rail__item:focus-visible span { width: 17px; background: var(--accent); }
+.message-rail__item:has(+ .message-rail__item:is(:hover, :focus-visible)) span,
+.message-rail__item:is(:hover, :focus-visible) + .message-rail__item span { width: 13px; }
+@media (prefers-reduced-motion: reduce) { .message-rail__item span { transition: none; } }
 
 .message-rail__preview {
   right: calc(100% + 4px);

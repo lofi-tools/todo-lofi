@@ -236,7 +236,11 @@ Project-local overrides can be read from `<project>/.config/shepherd/settings.js
     "tasks.show_archived": false,
     "attachments.max_file_bytes": 20000000,
     "terminal.scrollback_lines": 20000,
-    "preview.url": "http://localhost:3000"
+    "preview.url": "http://localhost:${PORT}",
+    "preview.servers": [
+      { "name": "API", "command": "./start-api", "portVariable": "API_PORT" },
+      { "name": "Web", "command": "./start-web", "portVariable": "PORT" }
+    ]
   }
 }
 ```
@@ -246,6 +250,14 @@ URL without replacing it; removing the local value restores the saved URL.
 These preference values take precedence over saved project and app values. Reload
 settings after editing this file. When a value is supplied by this file, edit the
 file to change it; Shepherd leaves it untouched.
+
+Opening Preview starts the configured commands in the task worktree and keeps
+them running when Preview closes. Shepherd assigns an available local port for
+each named port variable and passes all assigned variables to each command.
+The URL can reference `${PORT}` when a server declares `PORT`. Commands must
+honour their assigned ports. If a server fails, its terminal output is available
+in Terminals. Project and task process indicators open a list where servers and
+ordinary terminals can be stopped individually or together.
 
 Shepherd imports a detected `.codex/environments/environment.toml` into the
 project's `environment` setting. Project settings show the imported worktree

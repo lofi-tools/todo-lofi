@@ -893,14 +893,15 @@ function TerminalTree(props: TerminalTreeProps) {
                 <CloseTerminalButton live={entry().endedAt === null} disabled={props.pending} onClick={() => props.stop(entry().id)} />
               </div>
             </div>
-            <Show when={entry().endedAt === null} fallback={
+            <Show when={entry().endedAt === null || entry().id.startsWith('shepherd-preview:')} fallback={
               <div class="terminal-ended">
                 <p>Ended{formatExit(entry().exitCode)}</p>
                 <p><code>{entry().command}</code> in <code>{entry().cwd}</code></p>
               </div>
             }>
+              <Show when={entry().endedAt !== null}><p class="empty">Ended{formatExit(entry().exitCode)}</p></Show>
               <Show when={entry().id} keyed>
-                {(id) => <TerminalCanvas terminalId={id} shown={props.shown} focusRequest={props.focusRequest} onFocus={props.onTerminalFocus} onMeasure={(size) => props.measure(id, size)} />}
+                {(id) => <TerminalCanvas terminalId={id} shown={props.shown} readOnly={entry().endedAt !== null} focusRequest={props.focusRequest} onFocus={props.onTerminalFocus} onMeasure={(size) => props.measure(id, size)} />}
               </Show>
             </Show>
           </section>
@@ -1001,7 +1002,7 @@ function terminalPaintColors() {
   }
 }
 
-function TerminalCanvas(props: { terminalId: string; shown: boolean; focusRequest: { id: string } | undefined; onFocus?: (id: string | null) => void; onMeasure?: (size: TerminalSize) => void }) {
+function TerminalCanvas(props: { terminalId: string; shown: boolean; readOnly?: boolean; focusRequest: { id: string } | undefined; onFocus?: (id: string | null) => void; onMeasure?: (size: TerminalSize) => void }) {
   const mac = navigator.platform.startsWith('Mac')
   const linux = navigator.platform.startsWith('Linux')
   function setError(message: string | null) {
@@ -1326,6 +1327,7 @@ function TerminalCanvas(props: { terminalId: string; shown: boolean; focusReques
   }
 
   async function applySize() {
+    if (props.readOnly) return
     if (!container?.clientWidth || !container.clientHeight) return
     queuedSize = measure()
     if (resizing) return
@@ -1350,6 +1352,7 @@ function TerminalCanvas(props: { terminalId: string; shown: boolean; focusReques
   }
 
   function queueInput(send: () => Promise<void>, bytes = 0, reservesRelease = false): boolean {
+    if (props.readOnly) return false
     // A press accepted before the queue fills still needs room for its release.
     const reservedReleases = reportedKeys.size + Number(!!mouseCapture) + Number(reservesRelease)
     if (pendingInputWrites + reservedReleases >= MAX_PENDING_INPUT_WRITES ||
@@ -1690,6 +1693,7 @@ function TerminalCanvas(props: { terminalId: string; shown: boolean; focusReques
         autocapitalize="off"
         autocomplete="off"
         spellcheck={false}
+        readOnly={props.readOnly}
         onKeyDown={onKeyDown}
         onKeyUp={onKeyUp}
         onFocus={() => {

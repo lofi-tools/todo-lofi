@@ -175,6 +175,17 @@ function formatPreviewAnnotations(review: bridge.PreviewAnnotationBatch) {
 
 export function App() {
   const [projects, setProjects] = createSignal<bridge.ProjectSnapshot[]>([])
+  const [processLists, setProcessLists] = createSignal<Record<string, bridge.TerminalList>>({})
+  const [processDialog, setProcessDialog] = createSignal<{ projectId: string; taskId?: string }>()
+  const runningProcesses = (projectId: string, taskId?: string) => (processLists()[projectId]?.terminals ?? [])
+    .filter((terminal) => terminal.scope !== 'freebuff' && terminal.endedAt === null && (!taskId || terminal.taskId === taskId))
+  const updateProcessList = (list: bridge.TerminalList) => setProcessLists((current) =>
+    current[list.projectId]?.revision > list.revision ? current : { ...current, [list.projectId]: list })
+  createEffect(() => {
+    for (const project of projects()) {
+      void bridge.terminalList(project.id).then(updateProcessList).catch((failure) => setError(describe(failure)))
+    }
+  })
   const [worktreeIssues, setWorktreeIssues] = createSignal<bridge.ArchivedWorktreeIssue[]>([])
   const [worktreeNoticeDismissed, setWorktreeNoticeDismissed] = createSignal(false)
   const [homeDirectory, setHomeDirectory] = createSignal<string>()
@@ -975,6 +986,7 @@ export function App() {
     setError(null)
     try {
       setPreferences(await bridge.setSetting(edit))
+      if (key === 'preview.url') setProjects((await bridge.projectList()).projects)
       discardSettingsConflict(edit)
     } catch (failure) {
       if ((failure as bridge.BridgeError | null)?.code === 'settings_conflict') {
@@ -1874,6 +1886,7 @@ export function App() {
         setTerminalAttention((bells) => bells.some((bell) => bell.terminalId === event.data.terminalId) ? bells : [...bells, event.data])
         break
       case 'terminalListChanged':
+        updateProcessList(event.data)
         if (event.data.projectId === selectedProjectId()) {
           setTerminalListEvent((current) => current?.projectId === event.data.projectId &&
             current.revision >= event.data.revision ? current : event.data)
@@ -2600,6 +2613,8 @@ export function App() {
                       showArchived={showsArchived(project.id)}
                       archiveDisabled={!preferencesEditable()}
                       menuOpen={projectMenuId() === project.id}
+                      processCount={runningProcesses(project.id).length}
+                      onProcesses={() => setProcessDialog({ projectId: project.id })}
                       onSelect={() => openProject(project)}
                       onCompose={() => newTask(project.id)}
                       onMenuOpenChange={(open) => {
@@ -2615,6 +2630,8 @@ export function App() {
 
                     <Show when={listed().length}>
                       <TaskRows tasks={listed()} currentTaskId={selectedTaskId()} mac={mac} disabled={pending()}
+                        processCount={(id) => runningProcesses(project.id, id).length}
+                        onProcesses={(taskId) => setProcessDialog({ projectId: project.id, taskId })}
                         isOutputUnread={(id) => unreadTaskIds().has(id)}
                         selection={sidebarSelection}
                         needsTerminalAttention={(id) => terminalAttention().some((bell) => bell.taskId === id)}
@@ -3085,11 +3102,13 @@ export function App() {
             </InspectorPanel>
             <InspectorPanel id="preview" active={inspectorTab()}>
               <Show when={selectedProjectId()} keyed fallback={<p class="empty">Select a project to preview.</p>}>
-                {(projectId) => <PreviewPane projectId={projectId} url={selectedProject()?.previewUrl}
+                {(projectId) => <PreviewPane projectId={projectId} url={preferences()?.projects[selectedProject()?.path ?? '']?.['preview.url'] ?? selectedProject()?.previewUrl}
                   taskId={workspace()?.task.id}
+                  taskHasWorktree={!!workspace()?.task.worktreePath}
+                  servers={preferences()?.projects[selectedProject()?.path ?? '']?.['preview.servers'] ?? []}
                   shown={!settingsOpen() && inspectorTab() === 'preview'} canAddToPrompt={canAddPreviewNote()}
                   attachmentLimit={attachmentLimit()}
-                  onAddToPrompt={addPreviewNote} onProjectSettings={() => openProjectSettings(projectId)} />}
+                  onAddToPrompt={addPreviewNote} onProjectSettings={() => openProjectSettings(projectId)} onShowTerminals={() => setInspectorTab('terminals')} />}
               </Show>
             </InspectorPanel>
             <InspectorPanel id="review" active={inspectorTab()} lazy>
@@ -3136,6 +3155,21 @@ export function App() {
           await editPreference('onboarding.completed', true)
         }} /></Show>
       </WorkspaceFrame>
+
+      <Show when={processDialog()} keyed>
+        {(selection) => <div class="picker-backdrop" onClick={() => setProcessDialog(undefined)}>
+          <section class="picker picker-dialog" role="dialog" aria-modal="true" aria-label="Running processes" onClick={(event) => event.stopPropagation()}>
+            <header class="picker__header"><h3>Running processes</h3><button type="button" onClick={() => setProcessDialog(undefined)}>Close</button></header>
+            <div class="settings__project">
+              <For each={runningProcesses(selection.projectId, selection.taskId)}>{(terminal) => <div class="terminal-pane__bar">
+                <span>{terminal.title}</span>
+                <button type="button" onClick={() => void bridge.closeTerminal(terminal.id).then(() => bridge.terminalList(selection.projectId)).then(updateProcessList).catch((failure) => setError(describe(failure)))}>Stop</button>
+              </div>}</For>
+              <button type="button" disabled={!runningProcesses(selection.projectId, selection.taskId).length} onClick={() => void bridge.stopProjectTerminals(selection.projectId, selection.taskId).then(() => bridge.terminalList(selection.projectId)).then(updateProcessList).catch((failure) => setError(describe(failure)))}>Stop all</button>
+            </div>
+          </section>
+        </div>}
+      </Show>
 
       <Show when={palette()} keyed>
         {(kind) => <CommandPalette title={kind === 'commands' ? 'Command palette' : kind === 'projects' ? 'Switch project' : 'Switch task'}

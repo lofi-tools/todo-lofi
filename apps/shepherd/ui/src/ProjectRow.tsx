@@ -11,6 +11,8 @@ interface ProjectRowProps {
   showArchived: boolean
   archiveDisabled: boolean
   menuOpen: boolean
+  processCount: number
+  onProcesses: () => void
   onSelect: () => void
   onCompose: () => void
   onMenuOpenChange: (open: boolean) => void
@@ -134,6 +136,9 @@ export function ProjectRow(props: ProjectRowProps) {
           <WaitingIcon />
         </Show>
       </button>
+      <Show when={props.processCount > 0}>
+        <button type="button" class="process-indicator" aria-label={`${props.processCount} running ${props.processCount === 1 ? 'process' : 'processes'} in ${props.project.name}`} title="Running processes" onClick={props.onProcesses}>{props.processCount}</button>
+      </Show>
       <button
         type="button"
         class="project-row__action"

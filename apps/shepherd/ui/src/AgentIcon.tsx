@@ -1,7 +1,7 @@
-import { createMemo, type JSX } from 'solid-js'
+import { createMemo, createUniqueId, type JSX } from 'solid-js'
 import { FreebuffMark } from './FreebuffMark'
 
-function agentMark(agent: string) {
+function agentMark(agent: string, gradientId: string) {
   const frame = (children: JSX.Element, viewBox = '0 0 24 24', width = 14, height = 14) => (
     <svg class="agent-mark" width={width} height={height} viewBox={viewBox} aria-hidden="true">
       {children}
@@ -9,7 +9,13 @@ function agentMark(agent: string) {
   )
   switch (agent) {
     case 'antigravity':
-      return frame(<path fill="currentColor" d="M144.248 149.062C151.748 154.688 162.998 150.938 152.685 140.625C121.748 110.625 128.31 28.125 89.8727 28.125C51.4352 28.125 57.9977 110.625 27.0602 140.625C15.8102 151.875 27.9977 154.688 35.4977 149.062C64.5602 129.375 62.6852 94.6875 89.8727 94.6875C117.06 94.6875 115.185 129.375 144.248 149.062Z" />, '0 0 180 180')
+      return frame(<>
+        <defs><linearGradient id={gradientId} x1="0" y1="0" x2="1" y2="1">
+          <stop offset="0%" stop-color="#00B95C" /><stop offset="32%" stop-color="#FFE432" />
+          <stop offset="57%" stop-color="#FC413D" /><stop offset="100%" stop-color="#3186FF" />
+        </linearGradient></defs>
+        <path fill={`url(#${gradientId})`} d="M144.248 149.062C151.748 154.688 162.998 150.938 152.685 140.625C121.748 110.625 128.31 28.125 89.8727 28.125C51.4352 28.125 57.9977 110.625 27.0602 140.625C15.8102 151.875 27.9977 154.688 35.4977 149.062C64.5602 129.375 62.6852 94.6875 89.8727 94.6875C117.06 94.6875 115.185 129.375 144.248 149.062Z" />
+      </>, '0 0 180 180')
     case 'kilocode':
       return frame(<path fill="currentColor" d="M28 34.67h6.67V40h-8.38l-3.62-3.62V28H28v6.67ZM40 26.29l-3.62-3.62H28V28h6.67v6.67H40v-8.38Zm-22.67-3.62H12V28h5.33v-5.33ZM0 36.38 3.62 40h13.71v-5.33h-12v-12H0v13.71ZM33.96 12V3.62L30.34 0h-7.67v5.33h5.96V12h-5.96v5.33H40V12h-6.04ZM5.33 0H0v17.33h5.33v-6h6.67v6h5.33v-6L12 6H5.33V0Zm12 0H12v6h5.33V0Z" />, '0 0 40 40')
     case 'codex':
@@ -42,7 +48,8 @@ function agentMark(agent: string) {
 }
 
 export function AgentIcon(props: { agent: string }) {
-  const mark = createMemo(() => agentMark(props.agent))
+  const gradientId = `antigravity-${createUniqueId()}`
+  const mark = createMemo(() => agentMark(props.agent, gradientId))
   return <>{mark()}</>
 }
 

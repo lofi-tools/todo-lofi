@@ -15,6 +15,56 @@ pub use shep_terminal_renderer::DEFAULT_SCROLLBACK;
 pub const DEFAULT_ATTACHMENT_BYTES: usize = 50_000_000;
 const MAX_SCROLLBACK: u64 = 100_000;
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PreviewService {
+    pub name: String,
+    pub command: String,
+    #[serde(default)]
+    pub port_variable: Option<String>,
+}
+
+pub(crate) fn preview_url_template(input: &str, port: u16) -> Option<tauri::Url> {
+    if input.contains("${PORT}") {
+        if input.matches("${PORT}").count() != 1 || !input.contains(":${PORT}") {
+            return None;
+        }
+        let replaced = input.replace("${PORT}", &port.to_string());
+        let url = shep_core::projects::parse_preview_url(&replaced)?;
+        if url.port_or_known_default() != Some(port) {
+            return None;
+        }
+        Some(url)
+    } else {
+        shep_core::projects::parse_preview_url(input)
+    }
+}
+
+fn valid_preview_servers(value: &Value) -> bool {
+    let Ok(servers) = serde_json::from_value::<Vec<PreviewService>>(value.clone()) else {
+        return false;
+    };
+    let mut names = std::collections::BTreeSet::new();
+    let mut ports = std::collections::BTreeSet::new();
+    servers.len() <= 8
+        && servers.iter().all(|server| {
+            !server.name.trim().is_empty()
+                && server.name.len() <= 128
+                && names.insert(&server.name)
+                && !server.command.trim().is_empty()
+                && server.command.len() <= 65_536
+                && !server.command.contains('\0')
+                && server.port_variable.as_ref().is_none_or(|name| {
+                    (name == "PORT" || name.ends_with("_PORT"))
+                        && name.len() <= 64
+                        && name.bytes().all(|byte| {
+                            byte == b'_' || byte.is_ascii_uppercase() || byte.is_ascii_digit()
+                        })
+                        && ports.insert(name)
+                })
+        })
+}
+
 #[derive(Clone, Copy, Deserialize)]
 pub enum SettingKey {
     #[serde(rename = "agents.priority")]
@@ -39,10 +89,14 @@ pub enum SettingKey {
     ShowDotfiles,
     #[serde(rename = "environment")]
     ProjectEnvironment,
+    #[serde(rename = "preview.servers")]
+    PreviewServers,
+    #[serde(rename = "preview.url")]
+    PreviewUrl,
 }
 
 impl SettingKey {
-    const ALL: [Self; 11] = [
+    const ALL: [Self; 13] = [
         Self::AgentPriority,
         Self::OnboardingCompleted,
         Self::Theme,
@@ -54,6 +108,8 @@ impl SettingKey {
         Self::Scrollback,
         Self::ShowDotfiles,
         Self::ProjectEnvironment,
+        Self::PreviewServers,
+        Self::PreviewUrl,
     ];
 
     fn name(self) -> &'static str {
@@ -69,6 +125,8 @@ impl SettingKey {
             Self::Scrollback => "terminal.scrollback_lines",
             Self::ShowDotfiles => "files.show_dotfiles",
             Self::ProjectEnvironment => "environment",
+            Self::PreviewServers => "preview.servers",
+            Self::PreviewUrl => "preview.url",
         }
     }
 
@@ -83,7 +141,8 @@ impl SettingKey {
             Self::SendAccent => json!("Blue"),
             Self::AttachmentBytes => json!(DEFAULT_ATTACHMENT_BYTES),
             Self::Scrollback => json!(DEFAULT_SCROLLBACK),
-            Self::ProjectEnvironment => Value::Null,
+            Self::ProjectEnvironment | Self::PreviewUrl => Value::Null,
+            Self::PreviewServers => json!([]),
         }
     }
 
@@ -94,11 +153,23 @@ impl SettingKey {
                 | Self::AttachmentBytes
                 | Self::Scrollback
                 | Self::ProjectEnvironment
+                | Self::PreviewServers
+                | Self::PreviewUrl
         )
     }
 
     fn validate(self, value: &Value) -> Result<(), String> {
         let reason = match self {
+            Self::PreviewUrl
+                if !value
+                    .as_str()
+                    .is_some_and(|url| preview_url_template(url, 65535).is_some()) =>
+            {
+                "Enter a loopback HTTP(S) URL, optionally using ${PORT} as its port."
+            }
+            Self::PreviewServers if !valid_preview_servers(value) => {
+                "Enter valid server names, commands, and unique port variables."
+            }
             Self::ProjectEnvironment
                 if serde_json::from_value::<crate::project_environment::ProjectEnvironment>(
                     value.clone(),
@@ -238,6 +309,8 @@ struct CachedSettings {
 pub struct SettingsSnapshot {
     app: Map<String, Value>,
     projects: Map<String, Value>,
+    #[serde(rename = "projectLocal")]
+    project_local: BTreeMap<String, Map<String, Value>>,
     defaults: Map<String, Value>,
     warning: Option<String>,
 }
@@ -281,6 +354,7 @@ impl CachedSettings {
         SettingsSnapshot {
             app: preferences(&self.document["app"], false),
             projects,
+            project_local: self.project_local.clone(),
             defaults: SettingKey::ALL
                 .into_iter()
                 .map(|key| (key.name().to_owned(), key.default_value()))
@@ -463,15 +537,7 @@ impl Settings {
                     .and_then(Value::as_object)
                     .ok_or_else(|| "Expected a settings object.".to_string())?;
                 validate_scope(scope, true).map_err(|error| error.to_string())?;
-                if let Some(value) = scope.get("preview.url").filter(|value| !value.is_null()) {
-                    let raw = value
-                        .as_str()
-                        .ok_or_else(|| "preview.url must be a loopback HTTP(S) URL.".to_string())?;
-                    if shep_core::projects::parse_preview_url(raw).is_none() {
-                        return Err("preview.url must be a loopback HTTP(S) URL.".to_string());
-                    }
-                }
-                let mut values: Map<String, Value> = SettingKey::ALL
+                let values: Map<String, Value> = SettingKey::ALL
                     .into_iter()
                     .filter(|key| key.project_scoped())
                     .filter_map(|key| {
@@ -481,9 +547,6 @@ impl Settings {
                             .map(|value| (key.name().to_string(), value.clone()))
                     })
                     .collect();
-                if let Some(value) = scope.get("preview.url").filter(|value| !value.is_null()) {
-                    values.insert("preview.url".to_string(), value.clone());
-                }
                 Ok::<_, String>(Some(values))
             }
             .await;
@@ -508,18 +571,24 @@ impl Settings {
     }
 
     pub async fn project_preview_overrides(&self) -> BTreeMap<String, String> {
-        self.cached
-            .lock()
-            .await
-            .project_local
-            .iter()
-            .filter_map(|(path, values)| {
-                values
+        let cached = self.cached.lock().await;
+        let mut values: BTreeMap<String, String> = cached.document["projects"]
+            .as_object()
+            .into_iter()
+            .flatten()
+            .filter_map(|(path, scope)| {
+                scope
                     .get("preview.url")
                     .and_then(Value::as_str)
                     .map(|value| (path.clone(), value.to_string()))
             })
-            .collect()
+            .collect();
+        for (path, scope) in &cached.project_local {
+            if let Some(value) = scope.get("preview.url").and_then(Value::as_str) {
+                values.insert(path.clone(), value.to_string());
+            }
+        }
+        values
     }
 
     pub(crate) fn has_path(&self) -> bool {
@@ -821,12 +890,39 @@ pub async fn set_setting(
     {
         crate::attention::authorize_notifications().await?;
     }
-    state.preferences.edit(project.as_deref(), edit).await
+    let refresh_preview = matches!(edit.key, SettingKey::PreviewUrl);
+    let clear_preview = refresh_preview && edit.value.is_none();
+    let project_id = edit.project_id.clone();
+    let snapshot = state.preferences.edit(project.as_deref(), edit).await?;
+    if refresh_preview {
+        state.refresh_project_preview_overrides().await?;
+    }
+    if clear_preview && let Some(project_id) = project_id {
+        state
+            .set_project_preview_url(project_id, String::new())
+            .await?;
+    }
+    Ok(snapshot)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn preview_server_configuration_validates_ports_and_loopback_urls() {
+        assert!(valid_preview_servers(&json!([
+            {"name": "API", "command": "api", "portVariable": "API_PORT"},
+            {"name": "Web", "command": "web", "portVariable": "PORT"}
+        ])));
+        assert!(!valid_preview_servers(&json!([
+            {"name": "API", "command": "api", "portVariable": "PORT"},
+            {"name": "Web", "command": "web", "portVariable": "PORT"}
+        ])));
+        assert!(preview_url_template("http://127.0.0.1:${PORT}/", 32123).is_some());
+        assert!(preview_url_template("http://example.com:${PORT}/", 32123).is_none());
+        assert!(preview_url_template("http://localhost:3000/${PORT}", 32123).is_none());
+    }
 
     #[tokio::test]
     async fn codex_environment_import_keeps_edits_when_source_changes()
@@ -940,7 +1036,7 @@ mod tests {
         let global = json!({"version": 1, "app": {"terminal.scrollback_lines": 30}, "projects": {(project_path): {"terminal.scrollback_lines": 40}}});
         write_atomic(&settings_path, &encode_json(&global)?)?;
         let local_path = project.join(".config/shepherd/settings.json");
-        let local = json!({"version": 1, "settings": {"terminal.scrollback_lines": 50}});
+        let local = json!({"version": 1, "settings": {"terminal.scrollback_lines": 50, "preview.servers": [{"name": "Web", "command": "pnpm dev", "portVariable": "PORT"}]}});
         write_atomic(&local_path, &encode_json(&local)?)?;
         let settings = Settings::new(settings_path);
         settings.reload().await;
@@ -948,6 +1044,16 @@ mod tests {
             .load_project_preferences(std::slice::from_ref(&project))
             .await;
         assert!(snapshot.warning.is_none());
+        assert_eq!(
+            settings
+                .value(Some(&project), SettingKey::PreviewServers)
+                .await,
+            local["settings"]["preview.servers"]
+        );
+        assert_eq!(
+            snapshot.project_local[project.to_str().ok_or("project path")?]["preview.servers"],
+            local["settings"]["preview.servers"]
+        );
         assert_eq!(
             settings.value(Some(&project), SettingKey::Scrollback).await,
             json!(50)

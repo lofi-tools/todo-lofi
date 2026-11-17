@@ -1,6 +1,6 @@
-import { For, Show, createEffect, createMemo, createResource, createSignal, on, type JSX } from 'solid-js'
+import { For, Index, Show, createEffect, createMemo, createResource, createSignal, on, type JSX } from 'solid-js'
 
-import { AGENT_LABELS, harnessVersionStatus, projectApprovals, resetApprovalGrant, type PoolAgent, type CommandBinding, type CommandRegistry, type KeybindingEdit, type ProjectApproval, type ProjectSnapshot, type SessionApproval, type SettingsSnapshot, type SettingsEdit, type SettingKey } from './bridge'
+import { AGENT_LABELS, harnessVersionStatus, projectApprovals, resetApprovalGrant, type PoolAgent, type CommandBinding, type CommandRegistry, type KeybindingEdit, type ProjectApproval, type ProjectSnapshot, type PreviewService, type SessionApproval, type SettingsSnapshot, type SettingsEdit, type SettingKey } from './bridge'
 import { displayChord, normalizeChord } from './keybindings'
 import { reportError } from './diagnostics'
 import { PoolSettings } from './PoolSettings'
@@ -86,6 +86,36 @@ function ProjectPreviewSetting(props: { url?: string | null; localOverride: bool
       <button type="submit" class="project-action" disabled={saving() || props.localOverride || url() === (props.url ?? '')}>Save preview URL</button>
     </form>
   )
+}
+
+function ProjectPreviewServers(props: { value: PreviewService[]; localOverride: boolean; editable: boolean; onSave: (value: PreviewService[] | null) => Promise<void> }) {
+  const [servers, setServers] = createSignal<PreviewService[]>(structuredClone(props.value))
+  const [saving, setSaving] = createSignal(false)
+  createEffect(on(() => props.value, (value) => setServers(structuredClone(value))))
+  const valid = () => servers().every((server) => server.name.trim() && server.command.trim() && (!server.portVariable || /^(PORT|[A-Z][A-Z0-9_]*_PORT)$/.test(server.portVariable)))
+  async function save(event: SubmitEvent) {
+    event.preventDefault()
+    if (saving() || !valid()) return
+    setSaving(true)
+    try { await props.onSave(servers().length ? servers() : null) }
+    catch (failure) { reportError('save_preview_servers', failure) }
+    finally { setSaving(false) }
+  }
+  function update(index: number, patch: Partial<PreviewService>) {
+    setServers((current) => current.map((server, position) => position === index ? { ...server, ...patch } : server))
+  }
+  return <form class="settings__project" onSubmit={save}>
+    <h4>Preview servers and background commands</h4>
+    <Index each={servers()}>{(server, index) => <div class="settings__project">
+      <label class="settings__row"><span>Name</span><input aria-label={`Server ${index + 1} name`} value={server().name} disabled={saving() || !props.editable || props.localOverride} onInput={(event) => update(index, { name: event.currentTarget.value })} /></label>
+      <label class="settings__row"><span>Command</span><input aria-label={`Server ${index + 1} command`} value={server().command} disabled={saving() || !props.editable || props.localOverride} onInput={(event) => update(index, { command: event.currentTarget.value })} /></label>
+      <label class="settings__row"><span>Port variable</span><input aria-label={`Server ${index + 1} port variable`} value={server().portVariable ?? ''} disabled={saving() || !props.editable || props.localOverride} onInput={(event) => update(index, { portVariable: event.currentTarget.value || null })} placeholder="PORT" /></label>
+      <button type="button" class="project-action" disabled={saving() || !props.editable || props.localOverride} onClick={() => setServers((current) => current.filter((_, position) => position !== index))}>Remove</button>
+    </div>}</Index>
+    <Show when={props.localOverride}><p class="empty">Set in .config/shepherd/settings.json. Edit that file to change it.</p></Show>
+    <button type="button" class="project-action" disabled={saving() || !props.editable || props.localOverride} onClick={() => setServers((current) => [...current, { name: '', command: '', portVariable: null }])}>Add server</button>
+    <button type="submit" class="project-action" disabled={saving() || !props.editable || props.localOverride || !valid() || JSON.stringify(servers()) === JSON.stringify(props.value)}>Save servers</button>
+  </form>
 }
 
 function ProjectEnvironmentSettings(props: { projectId: string }) {
@@ -489,7 +519,7 @@ export function SettingsPane(props: SettingsPaneProps) {
   const query = () => search().trim().toLowerCase()
   const searchTerms: Record<(typeof categories)[number], string> = {
     Workspace: 'show archived tasks notify notifications when tasks need input attachment limit bytes terminal scrollback lines reload settings configuration',
-    Projects: 'project settings show archived tasks preview url attachment limit bytes terminal scrollback lines approvals saved live session add project import chatgpt worktree setup project actions codex environment',
+    Projects: 'project settings show archived tasks preview url server background command port attachment limit bytes terminal scrollback lines approvals saved live session add project import chatgpt worktree setup project actions codex environment',
     'Agent pool': 'agent pool priority installed agents reorder',
     Harnesses: 'harnesses codex chatgpt opencode pi claude code freebuff antigravity kilocode executable path refresh',
     Appearance: 'appearance theme system light dark density compact comfortable send button accent blue violet teal amber neutral',
@@ -629,9 +659,14 @@ export function SettingsPane(props: SettingsPaneProps) {
                   </Show>
                   <Show when={project().id} keyed>
                     {(projectId) => <>
-                      <Show when={showSetting('preview url')}><ProjectPreviewSetting url={project().previewUrl}
-                        localOverride={typeof (props.preferences?.projects[project().path] as Record<string, unknown> | undefined)?.['preview.url'] === 'string'}
-                        onSave={(url) => props.onSavePreviewUrl(projectId, url)} /></Show>
+                      <Show when={showSetting('preview url')}><ProjectPreviewSetting url={props.preferences?.projects[project().path]?.['preview.url'] ?? project().previewUrl}
+                        localOverride={typeof props.preferences?.projectLocal?.[project().path]?.['preview.url'] === 'string'}
+                        onSave={(url) => props.onEditPreference('preview.url', url.trim() || null, projectId)} /></Show>
+                      <Show when={showSetting('preview server command background')}><ProjectPreviewServers
+                        value={props.preferences?.projects[project().path]?.['preview.servers'] ?? []}
+                        localOverride={Array.isArray(props.preferences?.projectLocal?.[project().path]?.['preview.servers'])}
+                        editable={props.preferencesEditable}
+                        onSave={(value) => props.onEditPreference('preview.servers', value, projectId)} /></Show>
                       <Show when={showSetting('worktree setup project actions codex environment')}><ProjectEnvironmentSettings projectId={projectId} /></Show>
                       <Show when={props.preferences}>
                         {(snapshot) => <NumberPreferences preferences={snapshot()} project={project()}
