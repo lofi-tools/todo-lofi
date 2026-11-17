@@ -2019,6 +2019,34 @@ test('starts a task only on send, streams a reply and switches tasks', async ({ 
   await expect(page.getByText('ready to go')).toBeVisible()
 })
 
+test('message rail appears only for overflowing conversations and is centered', async ({ page }) => {
+  await page.goto('/')
+  const rail = page.getByRole('navigation', { name: 'Your messages' })
+  await page.evaluate(() => {
+    window.__setTranscript('task-1', Array.from({ length: 3 }, (_, index) => ({
+      id: `short-${index}`, sequence: index, kind: { type: 'userMessage', data: { text: `Short ${index}` } },
+    })))
+  })
+  await expect(rail).toHaveCount(0)
+  await page.evaluate(() => {
+    window.__setTranscript('task-1', [
+      { id: 'long-user', sequence: 0, kind: { type: 'userMessage', data: { text: 'One question' } } },
+      { id: 'long-answer', sequence: 1, kind: { type: 'agentText', data: { text: 'A long answer.\n\n'.repeat(80) } } },
+    ])
+  })
+  await expect(rail).toBeVisible()
+  const alignment = await rail.evaluate((element) => {
+    const rail = element.getBoundingClientRect()
+    const container = element.parentElement!.getBoundingClientRect()
+    return Math.abs((rail.top + rail.bottom) / 2 - (container.top + container.bottom) / 2)
+  })
+  expect(alignment).toBeLessThan(1)
+  await page.evaluate(() => window.__setTranscript('task-1', [
+    { id: 'short-again', sequence: 0, kind: { type: 'userMessage', data: { text: 'Short again' } } },
+  ]))
+  await expect(rail).toHaveCount(0)
+})
+
 test('message rail previews and navigates user messages', async ({ page }) => {
   await page.goto('/')
   await page.evaluate(() => {

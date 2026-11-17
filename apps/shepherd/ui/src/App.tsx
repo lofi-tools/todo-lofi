@@ -268,6 +268,7 @@ export function App() {
   let searchInput: HTMLInputElement | undefined
   let searchOpener: HTMLElement | undefined
   let transcript: HTMLDivElement | undefined
+  const [transcriptOverflows, setTranscriptOverflows] = createSignal(false)
   let followTranscript = true
   let lastOpenTaskId: string | undefined
   const currentAgent = () => workspace()?.task.agent ?? newTaskAgent()
@@ -1588,6 +1589,27 @@ export function App() {
     })
   })
 
+  onMount(() => {
+    const element = transcript
+    if (!element) return
+    let content: Element | null = null
+    const measure = () => {
+      const next = element.querySelector('.transcript')
+      if (next !== content) {
+        if (content) resize.unobserve(content)
+        content = next
+        if (content) resize.observe(content)
+      }
+      setTranscriptOverflows(element.clientHeight > 0 && element.scrollHeight > element.clientHeight + 1)
+    }
+    const resize = new ResizeObserver(measure)
+    const mutations = new MutationObserver(measure)
+    resize.observe(element)
+    mutations.observe(element, { childList: true, subtree: true, characterData: true })
+    measure()
+    onCleanup(() => { resize.disconnect(); mutations.disconnect() })
+  })
+
   const openTaskId = createMemo(() => workspace()?.task.id)
   createEffect(() => {
     // Another conversation, or returning to this one, starts at the latest row
@@ -2779,7 +2801,7 @@ export function App() {
           </Show>
 
           <div class="chat__transcript-wrap" hidden={!!freebuffProjectId()}>
-          <div class="chat__transcript" classList={{ 'chat__transcript--rail': !!workspace()?.transcript.some((entry) => entry.kind.type === 'userMessage') }} ref={transcript} tabIndex={-1} role="region" aria-label="Transcript"
+          <div class="chat__transcript" classList={{ 'chat__transcript--rail': transcriptOverflows() && !!workspace()?.transcript.some((entry) => entry.kind.type === 'userMessage') }} ref={transcript} tabIndex={-1} role="region" aria-label="Transcript"
             onScroll={(event) => {
               const element = event.currentTarget
               followTranscript = element.scrollHeight - element.scrollTop - element.clientHeight <= 24
@@ -2891,12 +2913,12 @@ export function App() {
               }}
             </Show>
           </div>
-          <MessageRail entries={workspace()?.transcript ?? []} onNavigate={(entryId) => {
+          <Show when={transcriptOverflows()}><MessageRail entries={workspace()?.transcript ?? []} onNavigate={(entryId) => {
             const entry = transcript?.querySelector<HTMLElement>(`[data-entry-id="${CSS.escape(entryId)}"]`)
             if (!entry || !transcript) return
             followTranscript = false
             transcript.scrollTo({ top: transcript.scrollTop + entry.getBoundingClientRect().top - transcript.getBoundingClientRect().top - 16, behavior: 'smooth' })
-          }} />
+          }} /></Show>
           </div>
 
           <Show when={freebuffProjectId()} keyed>

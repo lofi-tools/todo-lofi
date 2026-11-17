@@ -445,7 +445,8 @@ current layout and give future changes a point of comparison.
 
 ## Conversation transcript
 
-- Show a right-hand navigation rail with one marker for each user message.
+- When the transcript overflows, show a vertically centered right-hand
+  navigation rail with one marker for each user message.
   Hovering or focusing a marker previews the message; activating it scrolls to
   that message without changing the conversation.
 - If an ACP turn ends without an agent response, show an incomplete-response
