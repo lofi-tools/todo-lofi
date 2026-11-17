@@ -740,6 +740,8 @@ pub trait Store: Send + Sync {
     async fn remove_process(&self, id: &str) -> Result<(), StoreError>;
     async fn load_processes(&self) -> Result<Vec<ProcessRecord>, StoreError>;
     async fn load_projects(&self) -> Result<Vec<Project>, StoreError>;
+    async fn load_project_order(&self) -> Result<Vec<ProjectId>, StoreError>;
+    async fn save_project_order(&self, order: &[ProjectId]) -> Result<(), StoreError>;
     async fn save_project(&self, project: &Project) -> Result<(), StoreError>;
     async fn save_draft(&self, project: &Project, task: &Task) -> Result<(), StoreError>;
     async fn load_tasks(&self) -> Result<Vec<Task>, StoreError>;
@@ -925,6 +927,7 @@ pub struct MemoryStore {
     worktree_deletions: RwLock<BTreeMap<TaskId, WorktreeDeletion>>,
     processes: RwLock<BTreeMap<String, ProcessRecord>>,
     projects: RwLock<BTreeMap<String, Project>>,
+    project_order: RwLock<Vec<ProjectId>>,
     tasks: RwLock<BTreeMap<String, Task>>,
     workspace_layouts: RwLock<BTreeMap<TaskId, WorkspaceLayout>>,
     prompt_queues: RwLock<BTreeMap<TaskId, Vec<PromptInput>>>,
@@ -1111,6 +1114,15 @@ impl Store for MemoryStore {
     async fn load_projects(&self) -> Result<Vec<Project>, StoreError> {
         let projects = self.projects.read().await;
         Ok(projects.values().cloned().collect())
+    }
+
+    async fn load_project_order(&self) -> Result<Vec<ProjectId>, StoreError> {
+        Ok(self.project_order.read().await.clone())
+    }
+
+    async fn save_project_order(&self, order: &[ProjectId]) -> Result<(), StoreError> {
+        *self.project_order.write().await = order.to_vec();
+        Ok(())
     }
 
     async fn save_project(&self, project: &Project) -> Result<(), StoreError> {

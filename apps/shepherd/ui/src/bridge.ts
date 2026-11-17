@@ -793,6 +793,10 @@ export function projectList(): Promise<ProjectList> {
   return invoke<ProjectList>('project_list')
 }
 
+export function reorderProjects(order: string[]): Promise<ProjectList> {
+  return invoke<ProjectList>('reorder_projects', { order })
+}
+
 export function projectRemote(projectId: string): Promise<ProjectRemote | null> {
   return invoke('project_remote', { projectId })
 }

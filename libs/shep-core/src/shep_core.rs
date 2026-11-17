@@ -432,6 +432,18 @@ impl Core {
             core.projects.insert(project.id.clone(), project);
         }
 
+        let saved_order = core.store.load_project_order().await?;
+        let mut ordered = Vec::new();
+        for id in saved_order
+            .into_iter()
+            .chain(core.project_order.iter().cloned())
+        {
+            if core.projects.contains_key(&id) && !ordered.contains(&id) {
+                ordered.push(id);
+            }
+        }
+        core.project_order = ordered;
+
         for task in core.store.load_tasks().await? {
             core.tasks.insert(task.id.clone(), task);
         }
@@ -1505,6 +1517,25 @@ impl Core {
                 .map(|project| self.project_snapshot(project))
                 .collect(),
         }
+    }
+
+    pub async fn reorder_projects(
+        &mut self,
+        order: Vec<ProjectId>,
+    ) -> Result<ProjectList, CoreError> {
+        let current: std::collections::BTreeSet<_> = self.project_order.iter().collect();
+        let proposed: std::collections::BTreeSet<_> = order.iter().collect();
+        if order.len() != self.project_order.len() || current != proposed {
+            return Err(StoreError::Backend(
+                "Project list changed; reload before reordering.".into(),
+            )
+            .into());
+        }
+        self.store.save_project_order(&order).await?;
+        self.project_order = order;
+        let projects = self.project_list();
+        self.emit(Event::ProjectListChanged(projects.clone()));
+        Ok(projects)
     }
 
     pub fn task_search(&self) -> search::TaskSearch {

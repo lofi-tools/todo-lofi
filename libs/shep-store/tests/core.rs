@@ -49,6 +49,66 @@ async fn add_project(
 }
 
 #[tokio::test]
+async fn project_order_survives_restart_and_new_projects_append()
+-> Result<(), Box<dyn std::error::Error>> {
+    let database = TestDatabase::new()?;
+    let directory = TestDirectory::new()?;
+    let first_path = directory.path().join("first");
+    let second_path = directory.path().join("second");
+    let third_path = directory.path().join("third");
+    for path in [&first_path, &second_path, &third_path] {
+        std::fs::create_dir(path)?;
+    }
+    let uri = database.uri();
+    let mut core = Core::load(
+        Box::new(TursoStore::open(&uri).await?),
+        Box::new(UnavailableHarnessFactory),
+    )
+    .await?;
+    let first = add_project(&mut core, first_path).await?;
+    let second = add_project(&mut core, second_path).await?;
+    core.reorder_projects(vec![second.clone(), first.clone()])
+        .await?;
+    assert!(
+        core.reorder_projects(vec![first.clone(), first.clone()])
+            .await
+            .is_err()
+    );
+    drop(core);
+    let mut reopened = Core::load(
+        Box::new(TursoStore::open(&uri).await?),
+        Box::new(UnavailableHarnessFactory),
+    )
+    .await?;
+    assert_eq!(
+        reopened
+            .project_list()
+            .projects
+            .iter()
+            .map(|project| project.id.as_str())
+            .collect::<Vec<_>>(),
+        vec![second.as_str(), first.as_str()]
+    );
+    let third = add_project(&mut reopened, third_path).await?;
+    drop(reopened);
+    let reopened = Core::load(
+        Box::new(TursoStore::open(&uri).await?),
+        Box::new(UnavailableHarnessFactory),
+    )
+    .await?;
+    assert_eq!(
+        reopened
+            .project_list()
+            .projects
+            .iter()
+            .map(|project| project.id.as_str())
+            .collect::<Vec<_>>(),
+        vec![second.as_str(), first.as_str(), third.as_str()]
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn pool_controls_delegate_to_the_store_and_repeat_safely()
 -> Result<(), Box<dyn std::error::Error>> {
     let mut core = Core::new();

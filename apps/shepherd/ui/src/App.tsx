@@ -175,6 +175,39 @@ function formatPreviewAnnotations(review: bridge.PreviewAnnotationBatch) {
 
 export function App() {
   const [projects, setProjects] = createSignal<bridge.ProjectSnapshot[]>([])
+  const [draggedProject, setDraggedProject] = createSignal<string>()
+  const [projectDrop, setProjectDrop] = createSignal<{ id: string; after: boolean }>()
+  const [reorderingProjects, setReorderingProjects] = createSignal(false)
+  const projectRows = new Map<string, HTMLLIElement>()
+  async function moveProject(id: string, target: string, after: boolean, restoreFocus = false) {
+    if (reorderingProjects() || id === target) return
+    const order = projects().map((project) => project.id)
+    const from = order.indexOf(id)
+    if (from < 0 || !order.includes(target)) return
+    order.splice(from, 1)
+    const to = order.indexOf(target) + (after ? 1 : 0)
+    order.splice(to, 0, id)
+    if (order.every((entry, index) => entry === projects()[index]?.id)) return
+    const positions = new Map([...projectRows].map(([key, row]) => [key, row.getBoundingClientRect().top]))
+    setReorderingProjects(true)
+    try {
+      const result = await bridge.reorderProjects(order)
+      setProjects(result.projects)
+      queueMicrotask(() => {
+        if (restoreFocus) projectRows.get(id)?.querySelector<HTMLButtonElement>('.project')?.focus({ preventScroll: true })
+        if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return
+        for (const [key, row] of projectRows) {
+          const previous = positions.get(key)
+          if (previous === undefined) continue
+          const offset = previous - row.getBoundingClientRect().top
+          if (offset) row.animate([{ transform: `translateY(${offset}px)` }, { transform: 'translateY(0)' }], { duration: 160, easing: 'ease-out' })
+        }
+      })
+    } catch (failure) {
+      setError(describe(failure))
+      try { setProjects((await bridge.projectList()).projects) } catch (reloadFailure) { setError(`${describe(failure)} Could not reload projects: ${describe(reloadFailure)}`) }
+    } finally { setReorderingProjects(false) }
+  }
   const [processLists, setProcessLists] = createSignal<Record<string, bridge.TerminalList>>({})
   const [processDialog, setProcessDialog] = createSignal<{ projectId: string; taskId?: string }>()
   const runningProcesses = (projectId: string, taskId?: string) => (processLists()[projectId]?.terminals ?? [])
@@ -2587,7 +2620,9 @@ export function App() {
             </div>
           </Show>
 
-          <ul class="projects">
+          <ul class="projects" onDragLeave={(event) => {
+            if (!(event.relatedTarget instanceof Node) || !event.currentTarget.contains(event.relatedTarget)) setProjectDrop(undefined)
+          }}>
             <Show when={!reviewOnly() && projectsLoaded() && projects().length === 0}>
               <li class="projects__empty">
                 <button type="button" class="project-action projects__new" onClick={openPicker} disabled={pending()}>
@@ -2603,7 +2638,24 @@ export function App() {
                 const listed = () => reviewOnly() ? filteredReviewTasks(project.id)
                   : project.id === selectedProjectId() && visibleTasks().length > 1 ? visibleTasks() : []
                 return (
-                  <li>
+                  <li ref={(row) => { projectRows.set(project.id, row); onCleanup(() => projectRows.delete(project.id)) }}
+                    class="projects__row" classList={{ 'projects__row--drop-before': projectDrop()?.id === project.id && !projectDrop()?.after, 'projects__row--drop-after': projectDrop()?.id === project.id && !!projectDrop()?.after, 'projects__row--dragging': draggedProject() === project.id }}
+                    onDragOver={(event) => {
+                      if (!draggedProject()) return
+                      if (draggedProject() === project.id) { setProjectDrop(undefined); return }
+                      event.preventDefault()
+                      if (event.dataTransfer) event.dataTransfer.dropEffect = 'move'
+                      const heading = event.currentTarget.querySelector('.project-row')?.getBoundingClientRect()
+                      if (heading) setProjectDrop({ id: project.id, after: event.clientY >= heading.top + heading.height / 2 })
+                    }}
+                    onDrop={(event) => {
+                      event.preventDefault()
+                      const source = draggedProject()
+                      const target = projectDrop()
+                      setDraggedProject(undefined)
+                      setProjectDrop(undefined)
+                      if (source && target?.id === project.id) void moveProject(source, target.id, target.after)
+                    }}>
                     <ProjectRow
                       project={project}
                       homeDirectory={homeDirectory()}
@@ -2614,6 +2666,10 @@ export function App() {
                       archiveDisabled={!preferencesEditable()}
                       menuOpen={projectMenuId() === project.id}
                       processCount={runningProcesses(project.id).length}
+                      reorderDisabled={pending() || reorderingProjects() || projects().length < 2}
+                      onDragProject={(event) => { setProjectDrop(undefined); setDraggedProject(project.id); event.dataTransfer?.setData('text/plain', project.id); if (event.dataTransfer) event.dataTransfer.effectAllowed = 'move' }}
+                      onDragEnd={() => { setDraggedProject(undefined); setProjectDrop(undefined) }}
+                      onMoveProject={(direction) => { const rows = sidebarProjects(); const neighbor = rows[rows.findIndex((entry) => entry.id === project.id) + direction]; if (neighbor) void moveProject(project.id, neighbor.id, direction > 0, true) }}
                       onProcesses={() => setProcessDialog({ projectId: project.id })}
                       onSelect={() => openProject(project)}
                       onCompose={() => newTask(project.id)}

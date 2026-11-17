@@ -2280,6 +2280,15 @@ impl ShellState {
         self.core.lock().await.project_list()
     }
 
+    pub async fn reorder_projects(&self, order: Vec<String>) -> Result<ProjectList, BridgeError> {
+        let mut core = self.core.lock().await;
+        let result = core
+            .reorder_projects(order.into_iter().map(ProjectId::new).collect())
+            .await;
+        Self::broadcast_core_events(&mut core, &self.events);
+        result.map_err(BridgeError::from)
+    }
+
     pub async fn waiting_task_title(&self, task_id: TaskId) -> Result<Option<String>, BridgeError> {
         Ok(self
             .core
@@ -4663,6 +4672,14 @@ pub mod commands {
     #[tauri::command]
     pub async fn project_list(state: State<'_, ShellState>) -> Result<ProjectList, BridgeError> {
         Ok(state.inner().project_list().await)
+    }
+
+    #[tauri::command]
+    pub async fn reorder_projects(
+        state: State<'_, ShellState>,
+        order: Vec<String>,
+    ) -> Result<ProjectList, BridgeError> {
+        state.inner().reorder_projects(order).await
     }
 
     #[tauri::command]

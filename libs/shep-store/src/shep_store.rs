@@ -168,6 +168,10 @@ const MIGRATIONS: &[Migration] = &[
         name: "0028_pool_configuration_checkpoint.sql",
         sql: include_str!("../toasty/migrations/0028_pool_configuration_checkpoint.sql"),
     },
+    Migration {
+        name: "0029_project_order.sql",
+        sql: include_str!("../toasty/migrations/0029_project_order.sql"),
+    },
 ];
 
 /// The durable store used by the application. The database handle is guarded
@@ -1905,6 +1909,36 @@ impl Store for TursoStore {
         .await
         .map_err(StoreError::database)?;
         rows.into_iter().map(parse_project).collect()
+    }
+
+    async fn load_project_order(&self) -> Result<Vec<ProjectId>, StoreError> {
+        let mut db = self.db.lock().await;
+        let rows = toasty::sql::query("SELECT project_ids FROM project_order WHERE id = 1")
+            .column_types([Type::String])
+            .exec(&mut *db)
+            .await
+            .map_err(StoreError::database)?;
+        let Some(row) = rows.into_iter().next() else {
+            return Ok(Vec::new());
+        };
+        let Value::Record(record) = row else {
+            return Err(StoreError::InvalidRow(
+                "invalid project order record".into(),
+            ));
+        };
+        let ids: Vec<String> = serde_json::from_str(&required_string(record.first())?)
+            .map_err(|error| StoreError::InvalidRow(format!("invalid project order: {error}")))?;
+        Ok(ids.into_iter().map(ProjectId::new).collect())
+    }
+
+    async fn save_project_order(&self, order: &[ProjectId]) -> Result<(), StoreError> {
+        let ids: Vec<&str> = order.iter().map(ProjectId::as_str).collect();
+        let json =
+            serde_json::to_string(&ids).map_err(|error| StoreError::Backend(error.to_string()))?;
+        let mut db = self.db.lock().await;
+        toasty::sql::statement("INSERT INTO project_order (id, project_ids) VALUES (1, ?1) ON CONFLICT (id) DO UPDATE SET project_ids = excluded.project_ids")
+            .bind(json).exec(&mut *db).await.map_err(StoreError::database)?;
+        Ok(())
     }
 
     async fn save_project(&self, project: &Project) -> Result<(), StoreError> {

@@ -703,6 +703,22 @@ textarea {
   color: var(--text-muted);
 }
 
+.projects__row { position: relative; }
+.projects__row--dragging { opacity: .5; }
+.projects__row--drop-before::before,
+.projects__row--drop-after::after {
+  position: absolute;
+  z-index: 3;
+  inset-inline: 4px;
+  height: 2px;
+  border-radius: 2px;
+  background: var(--accent);
+  pointer-events: none;
+  content: '';
+}
+.projects__row--drop-before::before { top: -1px; }
+.projects__row--drop-after::after { bottom: -1px; }
+
 .project-row--selected {
   color: var(--text-secondary);
 }
@@ -724,6 +740,9 @@ textarea {
   background: transparent;
   color: inherit;
 }
+
+.project-row .project[draggable='true'] { cursor: grab; }
+.project-row .project[draggable='true']:active { cursor: grabbing; }
 
 .process-indicator {
   flex: none;

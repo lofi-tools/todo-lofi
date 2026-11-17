@@ -317,6 +317,9 @@ current layout and give future changes a point of comparison.
 ### Project rows and context cards
 
 - Show a small line folder icon, project name, and an icon-only Compose action.
+  Drag a project row to reorder projects, showing an insertion line and animating
+  the completed move. Alt+Up and Alt+Down provide keyboard reordering. Persist
+  the order in the database across restarts.
   Add a small branch badge to the folder for Git working trees. Use compact
   icons with light strokes. The text and icons share a colour. Use muted text
   for unselected projects and slightly brighter text for the selected project.

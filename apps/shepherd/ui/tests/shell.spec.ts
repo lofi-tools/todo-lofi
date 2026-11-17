@@ -155,6 +155,8 @@ test.beforeEach(async ({ context }) => {
       projects.push({ ...project, id: 'project-notes', path: '/tmp/notes', name: 'notes',
         isGitRepository: false, lastTaskId: null, unfinishedTaskCount: 0 })
     }
+    const savedProjectOrder: string[] = JSON.parse(localStorage.getItem('fixture.projectOrder') ?? '[]')
+    if (savedProjectOrder.length) projects.sort((left, right) => savedProjectOrder.indexOf(left.id) - savedProjectOrder.indexOf(right.id))
 
     const poolOperations: string[] = []
     let poolStatusReads = 0
@@ -780,6 +782,14 @@ test.beforeEach(async ({ context }) => {
             return '/tmp/home/'
           case 'project_list':
             return projectList()
+          case 'reorder_projects': {
+            if (options.has('project-order-fails')) throw { message: 'Could not save project order.' }
+            const ordered = args.order.map((id: string) => projects.find((project) => project.id === id))
+            if (ordered.some((entry: unknown) => !entry) || ordered.length !== projects.length) throw { message: 'Project list changed.' }
+            projects.splice(0, projects.length, ...ordered)
+            localStorage.setItem('fixture.projectOrder', JSON.stringify(args.order))
+            return projectList()
+          }
           case 'reload_settings':
             return readPreferences()
           case 'project_environment': {
@@ -4506,6 +4516,47 @@ test('shows project icons, opens archive controls on hover, and composes in anot
   await expect(page.locator('.chat__title')).toHaveCount(0)
   await expect(page.locator('.task-list')).toHaveCount(0)
   await expect(page.getByRole('button', { name: /Old chat/ })).toHaveCount(0)
+})
+
+test('reorders projects by dragging with an insertion line and keeps the order', async ({ page }) => {
+  await page.goto('/?two-projects')
+  const list = page.locator('.projects')
+  const names = list.locator('.project__name')
+  const demo = list.getByRole('button', { name: 'demo', exact: true })
+  const notes = list.getByRole('button', { name: 'notes', exact: true })
+  const source = await notes.boundingBox()
+  const target = await demo.boundingBox()
+  if (!source || !target) throw new Error('Project rows are not visible')
+  await page.mouse.move(source.x + source.width / 2, source.y + source.height / 2)
+  await page.mouse.down()
+  await page.mouse.move(source.x + source.width / 2, source.y + source.height / 2 - 8, { steps: 3 })
+  await page.mouse.move(target.x + target.width / 2, target.y + 3, { steps: 8 })
+  await expect(list.locator('.projects__row--drop-before')).toContainText('demo')
+  await page.mouse.up()
+  await expect(names).toHaveText(['notes', 'demo'])
+  await page.reload()
+  await expect(names).toHaveText(['notes', 'demo'])
+  const moved = await notes.boundingBox()
+  const below = await demo.boundingBox()
+  if (!moved || !below) throw new Error('Project rows are not visible after reload')
+  await page.mouse.move(moved.x + moved.width / 2, moved.y + moved.height / 2)
+  await page.mouse.down()
+  await page.mouse.move(moved.x + moved.width / 2, moved.y + moved.height / 2 + 8, { steps: 3 })
+  await page.mouse.move(below.x + below.width / 2, below.y + below.height - 3, { steps: 8 })
+  await expect(list.locator('.projects__row--drop-after')).toContainText('demo')
+  await page.mouse.up()
+  await expect(names).toHaveText(['demo', 'notes'])
+  await notes.press('Alt+ArrowUp')
+  await expect(names).toHaveText(['notes', 'demo'])
+  await expect(notes).toBeFocused()
+})
+
+test('keeps the project order and reports a failed save', async ({ page }) => {
+  await page.goto('/?two-projects&project-order-fails')
+  const list = page.locator('.projects')
+  await list.getByRole('button', { name: 'notes', exact: true }).press('Alt+ArrowUp')
+  await expect(page.locator('.error-toast')).toContainText('Could not save project order.')
+  await expect(list.locator('.project__name')).toHaveText(['demo', 'notes'])
 })
 
 test('batch imports local Codex projects from the empty Projects list', async ({ page }) => {
