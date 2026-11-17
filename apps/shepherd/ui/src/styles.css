@@ -1761,17 +1761,18 @@ button.pool__agent-label { padding: 0; border: 0; background: transparent; color
 .message-rail__preview {
   left: calc(100% + 4px);
   right: auto;
+  background: var(--prompt-card);
   transform: translateY(-50%);
   min-width: 0;
-  width: max-content;
-  max-width: min(280px, 55vw);
+  width: min(280px, 55vw);
+  box-sizing: border-box;
   display: -webkit-box;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 3;
   padding: 8px 10px;
   overflow: hidden;
   color: var(--text);
-  font-size: 12px;
+  font-size: 13px;
   line-height: 1.4;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
