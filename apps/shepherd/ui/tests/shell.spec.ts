@@ -2068,6 +2068,35 @@ test('message rail appears only for overflowing conversations and is centered', 
   await expect(rail).toHaveCount(0)
 })
 
+test('message rail highlights the preceding message while reading a long answer', async ({ page }) => {
+  await page.goto('/')
+  await page.evaluate(() => window.__setTranscript('task-1', [
+    { id: 'question-first', sequence: 0, kind: { type: 'userMessage', data: { text: 'First question' } } },
+    { id: 'answer-first', sequence: 1, kind: { type: 'agentText', data: { text: 'First answer paragraph.\n\n'.repeat(100) } } },
+    { id: 'question-second', sequence: 2, kind: { type: 'userMessage', data: { text: 'Second question' } } },
+    { id: 'answer-second', sequence: 3, kind: { type: 'agentText', data: { text: 'Second answer paragraph.\n\n'.repeat(100) } } },
+  ]))
+  const rail = page.getByRole('navigation', { name: 'Your messages' })
+  const first = rail.getByRole('button', { name: 'Go to your message 1', exact: true })
+  const second = rail.getByRole('button', { name: 'Go to your message 2', exact: true })
+  const transcript = page.getByRole('region', { name: 'Transcript' })
+  for (const [answer, expected, other] of [['answer-first', first, second], ['answer-second', second, first]] as const) {
+    await transcript.evaluate((element, id) => {
+      const answer = element.querySelector<HTMLElement>(`[data-entry-id="${id}"]`)!
+      element.scrollTop += answer.getBoundingClientRect().top - element.getBoundingClientRect().top + answer.offsetHeight / 2
+    }, answer)
+    await expect(expected).toHaveClass(/message-rail__item--visible/)
+    await expect(other).not.toHaveClass(/message-rail__item--visible/)
+    await expect.poll(() => transcript.evaluate((element) => {
+      const viewport = element.getBoundingClientRect()
+      return [...element.querySelectorAll<HTMLElement>('[data-entry-id^="question-"]')].some((message) => {
+        const bounds = message.getBoundingClientRect()
+        return bounds.bottom > viewport.top && bounds.top < viewport.bottom
+      })
+    })).toBe(false)
+  }
+})
+
 test('message rail previews and navigates user messages', async ({ page }) => {
   await page.goto('/')
   await page.evaluate(() => {

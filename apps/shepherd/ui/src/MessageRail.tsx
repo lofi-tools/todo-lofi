@@ -12,30 +12,37 @@ export function MessageRail(props: { entries: Entry[]; transcript: () => HTMLEle
   createEffect(() => {
     const transcript = props.transcript()
     const entries = messages()
-    setVisible(new Set<string>())
+    setVisible(new Set(entries[0] ? [entries[0].id] : []))
     if (!transcript) return
     let active = true
-    const observer = new IntersectionObserver((changes) => {
+    const measure = () => {
       if (!active) return
-      setVisible((current) => {
-        const next = new Set(current)
-        for (const change of changes) {
-          const id = (change.target as HTMLElement).dataset.entryId
-          if (!id) continue
-          if (change.isIntersecting && change.intersectionRect.height > 0) next.add(id)
-          else next.delete(id)
-        }
-        return next
-      })
-    }, { root: transcript })
-    queueMicrotask(() => {
-      if (!active) return
+      const viewport = transcript.getBoundingClientRect()
+      const next = new Set<string>()
+      let preceding: string | undefined
       for (const entry of entries) {
         const element = transcript.querySelector(`[data-entry-id="${CSS.escape(entry.id)}"]`)
-        if (element) observer.observe(element)
+        if (!element) continue
+        const bounds = element.getBoundingClientRect()
+        if (bounds.top <= viewport.top) preceding = entry.id
+        if (bounds.bottom > viewport.top && bounds.top < viewport.bottom) next.add(entry.id)
       }
+      if (!next.size) {
+        const fallback = preceding ?? entries[0]?.id
+        if (fallback) next.add(fallback)
+      }
+      setVisible(next)
+    }
+    const resize = new ResizeObserver(measure)
+    resize.observe(transcript)
+    queueMicrotask(() => {
+      if (!active) return
+      const content = transcript.querySelector('.transcript')
+      if (content) resize.observe(content)
+      measure()
     })
-    onCleanup(() => { active = false; observer.disconnect() })
+    transcript.addEventListener('scroll', measure, { passive: true })
+    onCleanup(() => { active = false; resize.disconnect(); transcript.removeEventListener('scroll', measure) })
   })
 
   function showPreview(entry: Entry, button: HTMLButtonElement) {
