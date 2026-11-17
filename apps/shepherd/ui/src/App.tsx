@@ -17,6 +17,7 @@ import { ComposerInput } from './ComposerInput'
 import { FilesPane } from './FilesPane'
 import { SegmentedControl } from './SegmentedControl'
 import { Markdown } from './Markdown'
+import { MessageRail } from './MessageRail'
 import { ProjectImportSources, ProjectPicker } from './ProjectPicker'
 import { ProjectRow } from './ProjectRow'
 import { PreviewPane, type PreviewAnnotation } from './PreviewPane'
@@ -2778,7 +2779,7 @@ export function App() {
           </Show>
 
           <div class="chat__transcript-wrap" hidden={!!freebuffProjectId()}>
-          <div class="chat__transcript" ref={transcript} tabIndex={-1} role="region" aria-label="Transcript"
+          <div class="chat__transcript" classList={{ 'chat__transcript--rail': !!workspace()?.transcript.some((entry) => entry.kind.type === 'userMessage') }} ref={transcript} tabIndex={-1} role="region" aria-label="Transcript"
             onScroll={(event) => {
               const element = event.currentTarget
               followTranscript = element.scrollHeight - element.scrollTop - element.clientHeight <= 24
@@ -2890,6 +2891,12 @@ export function App() {
               }}
             </Show>
           </div>
+          <MessageRail entries={workspace()?.transcript ?? []} onNavigate={(entryId) => {
+            const entry = transcript?.querySelector<HTMLElement>(`[data-entry-id="${CSS.escape(entryId)}"]`)
+            if (!entry || !transcript) return
+            followTranscript = false
+            transcript.scrollTo({ top: transcript.scrollTop + entry.getBoundingClientRect().top - transcript.getBoundingClientRect().top - 16, behavior: 'smooth' })
+          }} />
           </div>
 
           <Show when={freebuffProjectId()} keyed>

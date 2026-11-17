@@ -2019,6 +2019,28 @@ test('starts a task only on send, streams a reply and switches tasks', async ({ 
   await expect(page.getByText('ready to go')).toBeVisible()
 })
 
+test('message rail previews and navigates user messages', async ({ page }) => {
+  await page.goto('/')
+  await page.evaluate(() => {
+    const rows: Entry[] = []
+    for (let index = 0; index < 20; index += 1) {
+      rows.push({ id: `message-${index}`, sequence: index * 2, kind: { type: 'userMessage', data: { text: `Question ${index + 1}` } } })
+      rows.push({ id: `answer-${index}`, sequence: index * 2 + 1, kind: { type: 'agentText', data: { text: 'An answer with enough content to make the transcript scroll. '.repeat(12) } } })
+    }
+    window.__setTranscript('task-1', rows)
+  })
+  const rail = page.getByRole('navigation', { name: 'Your messages' })
+  await expect(rail.getByRole('button')).toHaveCount(20)
+  const first = rail.getByRole('button', { name: 'Go to your message 1', exact: true })
+  await first.hover()
+  await expect(rail.getByRole('tooltip')).toHaveText('Question 1')
+  await first.click()
+  const transcript = page.getByRole('region', { name: 'Transcript' })
+  await expect.poll(() => transcript.evaluate((element) => element.scrollTop)).toBeLessThan(100)
+  await first.focus()
+  await expect(rail.getByRole('tooltip')).toHaveText('Question 1')
+})
+
 test('selecting Antigravity Auto switches from Plan and sends Auto', async ({ page }) => {
   await page.goto('/?two-projects&configured-antigravity')
   await page.getByRole('button', { name: 'notes', exact: true }).click()
