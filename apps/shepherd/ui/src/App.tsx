@@ -2930,7 +2930,7 @@ export function App() {
               }}
             </Show>
           </div>
-          <Show when={transcriptOverflows()}><MessageRail entries={workspace()?.transcript ?? []} onNavigate={(entryId) => {
+          <Show when={transcriptOverflows()}><MessageRail entries={workspace()?.transcript ?? []} transcript={() => transcript} onNavigate={(entryId) => {
             const entry = transcript?.querySelector<HTMLElement>(`[data-entry-id="${CSS.escape(entryId)}"]`)
             if (!entry || !transcript) return
             followTranscript = false

@@ -1704,14 +1704,14 @@ button.pool__agent-label { padding: 0; border: 0; background: transparent; color
   overflow: auto;
 }
 
-.chat__transcript--rail { padding-inline-end: 42px; }
+.chat__transcript--rail { padding-inline-start: 32px; }
 
 .message-rail {
   position: absolute;
   z-index: 2;
   top: 50%;
-  right: 2px;
-  width: 28px;
+  left: 2px;
+  width: 20px;
   max-height: calc(100% - 24px);
   transform: translateY(-50%);
   display: flex;
@@ -1721,7 +1721,7 @@ button.pool__agent-label { padding: 0; border: 0; background: transparent; color
 .message-rail__items {
   display: flex;
   flex-direction: column;
-  align-items: center;
+  align-items: start;
   min-height: 0;
   overflow-y: auto;
   scrollbar-width: none;
@@ -1730,10 +1730,11 @@ button.pool__agent-label { padding: 0; border: 0; background: transparent; color
 .message-rail__item {
   display: grid;
   flex: none;
-  place-items: center;
-  width: 24px;
-  height: 14px;
-  padding: 0;
+  align-items: center;
+  justify-items: start;
+  width: 20px;
+  height: 10px;
+  padding: 0 0 0 3px;
   border: 0;
   border-radius: 4px;
   background: transparent;
@@ -1741,23 +1742,26 @@ button.pool__agent-label { padding: 0; border: 0; background: transparent; color
 }
 
 .message-rail__item span {
-  width: 9px;
+  width: 6px;
   height: 2px;
   border-radius: 2px;
-  background: var(--text-muted);
+  background: color-mix(in srgb, var(--text-muted) 45%, transparent);
   transition: width 140ms ease, background-color 140ms ease;
 }
+.message-rail__item--visible span { background: var(--text-secondary); }
 
 .message-rail__item:hover,
 .message-rail__item:focus-visible { background: var(--surface-raised); }
 .message-rail__item:hover span,
-.message-rail__item:focus-visible span { width: 17px; background: var(--accent); }
+.message-rail__item:focus-visible span { width: 14px; background: var(--accent); }
 .message-rail__item:has(+ .message-rail__item:is(:hover, :focus-visible)) span,
-.message-rail__item:is(:hover, :focus-visible) + .message-rail__item span { width: 13px; }
+.message-rail__item:is(:hover, :focus-visible) + .message-rail__item span { width: 10px; }
 @media (prefers-reduced-motion: reduce) { .message-rail__item span { transition: none; } }
 
 .message-rail__preview {
-  right: calc(100% + 4px);
+  left: calc(100% + 4px);
+  right: auto;
+  transform: translateY(-50%);
   min-width: 0;
   width: max-content;
   max-width: min(280px, 55vw);
