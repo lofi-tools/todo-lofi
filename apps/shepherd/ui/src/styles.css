@@ -1742,10 +1742,10 @@ button.pool__agent-label { padding: 0; border: 0; background: transparent; color
 }
 
 .message-rail__item span {
-  width: 6px;
-  height: 2px;
+  width: 7px;
+  height: 3px;
   border-radius: 2px;
-  background: color-mix(in srgb, var(--text-muted) 45%, transparent);
+  background: color-mix(in srgb, var(--text-muted) 80%, transparent);
   transition: width 140ms ease, background-color 140ms ease;
 }
 .message-rail__item--visible span { background: var(--text-secondary); }

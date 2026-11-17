@@ -2097,6 +2097,32 @@ test('message rail previews and navigates user messages', async ({ page }) => {
   await expect(first).toHaveClass(/message-rail__item--visible/)
   const last = rail.getByRole('button', { name: 'Go to your message 20', exact: true })
   await expect(last).not.toHaveClass(/message-rail__item--visible/)
+  await expect(last.locator('span')).toHaveCSS('width', '7px')
+  await expect(last.locator('span')).toHaveCSS('height', '3px')
+  for (const theme of ['dark', 'light']) {
+    const contrast = await last.locator('span').evaluate((marker, theme) => {
+      document.documentElement.dataset.theme = theme
+      const canvas = document.createElement('canvas')
+      canvas.width = 2
+      canvas.height = 1
+      const context = canvas.getContext('2d')!
+      context.fillStyle = getComputedStyle(document.documentElement).getPropertyValue('--surface').trim()
+      context.fillRect(0, 0, 2, 1)
+      context.fillStyle = getComputedStyle(marker).backgroundColor
+      context.fillRect(1, 0, 1, 1)
+      const pixels = context.getImageData(0, 0, 2, 1).data
+      const luminance = (offset: number) => [0, 1, 2].reduce((sum, index) => {
+        const value = pixels[offset + index] / 255
+        const linear = value <= 0.04045 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4
+        return sum + linear * [0.2126, 0.7152, 0.0722][index]
+      }, 0)
+      const background = luminance(0)
+      const foreground = luminance(4)
+      return (Math.max(background, foreground) + 0.05) / (Math.min(background, foreground) + 0.05)
+    }, theme)
+    expect(contrast).toBeGreaterThan(3)
+  }
+  await page.evaluate(() => { document.documentElement.dataset.theme = 'dark' })
   await last.hover()
   const positions = await rail.evaluate((element) => {
     const button = element.querySelectorAll('.message-rail__item')[19].getBoundingClientRect()
