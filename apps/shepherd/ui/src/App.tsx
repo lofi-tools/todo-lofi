@@ -177,8 +177,120 @@ export function App() {
   const [projects, setProjects] = createSignal<bridge.ProjectSnapshot[]>([])
   const [draggedProject, setDraggedProject] = createSignal<string>()
   const [projectDrop, setProjectDrop] = createSignal<{ id: string; after: boolean }>()
+  const [projectPreviewOrder, setProjectPreviewOrder] = createSignal<string[]>()
   const [reorderingProjects, setReorderingProjects] = createSignal(false)
   const projectRows = new Map<string, HTMLLIElement>()
+  const projectAnimations = new Map<string, Animation>()
+  let projectList: HTMLUListElement | undefined
+  let projectPointer: { id: number; projectId: string; x: number; y: number; active: boolean; inside: boolean } | undefined
+  let suppressProjectClick = false
+
+  function projectPositions() {
+    return new Map([...projectRows].map(([id, row]) => [id, row.getBoundingClientRect().top]))
+  }
+
+  function animateProjects(positions: Map<string, number>) {
+    queueMicrotask(() => {
+      if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return
+      for (const [id, row] of projectRows) {
+        const previous = positions.get(id)
+        if (previous === undefined) continue
+        const offset = previous - row.getBoundingClientRect().top
+        if (!offset) continue
+        projectAnimations.get(id)?.cancel()
+        projectAnimations.set(id, row.animate([{ transform: `translateY(${offset}px)` }, { transform: 'translateY(0)' }], { duration: 160, easing: 'ease-out' }))
+      }
+    })
+  }
+
+  function previewProjectMove(source: string, target: string, after: boolean) {
+    const current = projectPreviewOrder() ?? projects().map((project) => project.id)
+    const order = [...current]
+    const from = order.indexOf(source)
+    if (from < 0 || !order.includes(target)) return
+    order.splice(from, 1)
+    order.splice(order.indexOf(target) + (after ? 1 : 0), 0, source)
+    setProjectDrop((current) => current?.id === target && current.after === after ? current : { id: target, after })
+    if (order.every((id, index) => id === current[index])) return
+    const positions = projectPositions()
+    for (const animation of projectAnimations.values()) animation.cancel()
+    projectAnimations.clear()
+    setProjectPreviewOrder(order)
+    animateProjects(positions)
+  }
+
+  function clearProjectPreview() {
+    if (!projectPreviewOrder()) return
+    const positions = projectPositions()
+    for (const animation of projectAnimations.values()) animation.cancel()
+    projectAnimations.clear()
+    setProjectPreviewOrder(undefined)
+    animateProjects(positions)
+  }
+
+  function finishProjectDrag(commit: boolean) {
+    const pointer = projectPointer
+    if (!pointer) return
+    projectPointer = undefined
+    if (projectList?.hasPointerCapture(pointer.id)) projectList.releasePointerCapture(pointer.id)
+    const target = projectDrop()
+    setDraggedProject(undefined)
+    setProjectDrop(undefined)
+    if (!pointer.active) return
+    suppressProjectClick = true
+    setTimeout(() => { suppressProjectClick = false }, 0)
+    if (commit && pointer.inside && target) void moveProject(pointer.projectId, target.id, target.after).finally(clearProjectPreview)
+    else clearProjectPreview()
+  }
+
+  onMount(() => {
+    const move = (event: PointerEvent) => {
+      const pointer = projectPointer
+      if (!pointer || pointer.id !== event.pointerId || !projectList) return
+      if (!pointer.active) {
+        if (Math.hypot(event.clientX - pointer.x, event.clientY - pointer.y) < 4) return
+        pointer.active = true
+        setProjectMenuId(undefined)
+        setDraggedProject(pointer.projectId)
+        setProjectPreviewOrder(projects().map((project) => project.id))
+        try { projectList.setPointerCapture(pointer.id) } catch (failure) { console.warn('Could not capture project drag pointer', failure) }
+      }
+      event.preventDefault()
+      const bounds = projectList.getBoundingClientRect()
+      pointer.inside = event.clientX >= bounds.left && event.clientX <= bounds.right && event.clientY >= bounds.top && event.clientY <= bounds.bottom
+      if (!pointer.inside) { setProjectDrop(undefined); return }
+      if (event.clientY < bounds.top + 24) projectList.scrollTop -= 14
+      else if (event.clientY > bounds.bottom - 24) projectList.scrollTop += 14
+      const others = sidebarProjects().filter((project) => project.id !== pointer.projectId)
+      for (const project of others) {
+        const row = projectRows.get(project.id)
+        if (!row) continue
+        const rowBounds = row.getBoundingClientRect()
+        if (event.clientY < rowBounds.top + rowBounds.height / 2) {
+          previewProjectMove(pointer.projectId, project.id, false)
+          return
+        }
+      }
+      const last = others.at(-1)
+      if (last) previewProjectMove(pointer.projectId, last.id, true)
+    }
+    const end = (event: PointerEvent) => { if (projectPointer?.id === event.pointerId) finishProjectDrag(event.type === 'pointerup') }
+    const cancel = (event: KeyboardEvent) => { if (event.key === 'Escape' && projectPointer?.active) { event.preventDefault(); finishProjectDrag(false) } }
+    const blur = () => finishProjectDrag(false)
+    window.addEventListener('pointermove', move)
+    window.addEventListener('pointerup', end)
+    window.addEventListener('pointercancel', end)
+    window.addEventListener('keydown', cancel)
+    window.addEventListener('blur', blur)
+    onCleanup(() => {
+      window.removeEventListener('pointermove', move)
+      window.removeEventListener('pointerup', end)
+      window.removeEventListener('pointercancel', end)
+      window.removeEventListener('keydown', cancel)
+      window.removeEventListener('blur', blur)
+      for (const animation of projectAnimations.values()) animation.cancel()
+    })
+  })
   async function moveProject(id: string, target: string, after: boolean, restoreFocus = false) {
     if (reorderingProjects() || id === target) return
     const order = projects().map((project) => project.id)
@@ -1088,9 +1200,16 @@ export function App() {
   const reviewRows = () => projects().flatMap((project) => filteredReviewTasks(project.id))
   const selectedReviewIds = () => reviewRows().filter((task) => reviewSelection().has(task.id)).map((task) => task.id)
   const sidebarSelection = () => reviewOnly() ? reviewSelection() : undefined
-  const sidebarProjects = () => reviewOnly()
-    ? projects().filter((project) => filteredReviewTasks(project.id).length > 0)
-    : projects()
+  const sidebarProjects = () => {
+    const order = projectPreviewOrder()
+    const source = projects()
+    const ordered = order ? [...source].sort((left, right) => {
+      const leftIndex = order.indexOf(left.id)
+      const rightIndex = order.indexOf(right.id)
+      return (leftIndex < 0 ? order.length : leftIndex) - (rightIndex < 0 ? order.length : rightIndex)
+    }) : source
+    return reviewOnly() ? ordered.filter((project) => filteredReviewTasks(project.id).length > 0) : ordered
+  }
   const canStartTask = () => {
     const project = selectedProject()
     return !!project && !project.missing && loadedTasksFor() === project.id
@@ -2620,9 +2739,7 @@ export function App() {
             </div>
           </Show>
 
-          <ul class="projects" onDragLeave={(event) => {
-            if (!(event.relatedTarget instanceof Node) || !event.currentTarget.contains(event.relatedTarget)) setProjectDrop(undefined)
-          }}>
+          <ul ref={projectList} class="projects">
             <Show when={!reviewOnly() && projectsLoaded() && projects().length === 0}>
               <li class="projects__empty">
                 <button type="button" class="project-action projects__new" onClick={openPicker} disabled={pending()}>
@@ -2639,23 +2756,8 @@ export function App() {
                   : project.id === selectedProjectId() && visibleTasks().length > 1 ? visibleTasks() : []
                 return (
                   <li ref={(row) => { projectRows.set(project.id, row); onCleanup(() => projectRows.delete(project.id)) }}
-                    class="projects__row" classList={{ 'projects__row--drop-before': projectDrop()?.id === project.id && !projectDrop()?.after, 'projects__row--drop-after': projectDrop()?.id === project.id && !!projectDrop()?.after, 'projects__row--dragging': draggedProject() === project.id }}
-                    onDragOver={(event) => {
-                      if (!draggedProject()) return
-                      if (draggedProject() === project.id) { setProjectDrop(undefined); return }
-                      event.preventDefault()
-                      if (event.dataTransfer) event.dataTransfer.dropEffect = 'move'
-                      const heading = event.currentTarget.querySelector('.project-row')?.getBoundingClientRect()
-                      if (heading) setProjectDrop({ id: project.id, after: event.clientY >= heading.top + heading.height / 2 })
-                    }}
-                    onDrop={(event) => {
-                      event.preventDefault()
-                      const source = draggedProject()
-                      const target = projectDrop()
-                      setDraggedProject(undefined)
-                      setProjectDrop(undefined)
-                      if (source && target?.id === project.id) void moveProject(source, target.id, target.after)
-                    }}>
+                    data-project-id={project.id}
+                    class="projects__row" classList={{ 'projects__row--drop-before': draggedProject() === project.id && !!projectDrop(), 'projects__row--dragging': draggedProject() === project.id }}>
                     <ProjectRow
                       project={project}
                       homeDirectory={homeDirectory()}
@@ -2666,12 +2768,14 @@ export function App() {
                       archiveDisabled={!preferencesEditable()}
                       menuOpen={projectMenuId() === project.id}
                       processCount={runningProcesses(project.id).length}
-                      reorderDisabled={pending() || reorderingProjects() || projects().length < 2}
-                      onDragProject={(event) => { setProjectDrop(undefined); setDraggedProject(project.id); event.dataTransfer?.setData('text/plain', project.id); if (event.dataTransfer) event.dataTransfer.effectAllowed = 'move' }}
-                      onDragEnd={() => { setDraggedProject(undefined); setProjectDrop(undefined) }}
+                      reorderDisabled={reorderingProjects() || projects().length < 2}
+                      onPointerDownProject={(event) => {
+                        if (reorderingProjects() || projects().length < 2 || projectPointer || !event.isPrimary || event.button !== 0) return
+                        projectPointer = { id: event.pointerId, projectId: project.id, x: event.clientX, y: event.clientY, active: false, inside: true }
+                      }}
                       onMoveProject={(direction) => { const rows = sidebarProjects(); const neighbor = rows[rows.findIndex((entry) => entry.id === project.id) + direction]; if (neighbor) void moveProject(project.id, neighbor.id, direction > 0, true) }}
                       onProcesses={() => setProcessDialog({ projectId: project.id })}
-                      onSelect={() => openProject(project)}
+                      onSelect={() => { if (!suppressProjectClick) openProject(project) }}
                       onCompose={() => newTask(project.id)}
                       onMenuOpenChange={(open) => {
                         if (open) setProjectMenuId(project.id)

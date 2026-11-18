@@ -13,8 +13,7 @@ interface ProjectRowProps {
   menuOpen: boolean
   processCount: number
   reorderDisabled: boolean
-  onDragProject: (event: DragEvent) => void
-  onDragEnd: () => void
+  onPointerDownProject: (event: PointerEvent) => void
   onMoveProject: (direction: number) => void
   onProcesses: () => void
   onSelect: () => void
@@ -110,12 +109,12 @@ export function ProjectRow(props: ProjectRowProps) {
         ref={projectButton}
         type="button"
         class="project nav-item"
+        data-reorderable={!props.reorderDisabled}
         aria-expanded={props.expanded}
         aria-current={props.selected ? 'true' : undefined}
         aria-keyshortcuts="Shift+F10 Alt+ArrowUp Alt+ArrowDown"
-        draggable={!props.reorderDisabled}
-        onDragStart={(event) => { closeMenu(); props.onDragProject(event) }}
-        onDragEnd={props.onDragEnd}
+        onDragStart={(event) => event.preventDefault()}
+        onPointerDown={(event) => { closeMenu(); props.onPointerDownProject(event) }}
         onKeyDown={(event) => {
           if (event.altKey && (event.key === 'ArrowUp' || event.key === 'ArrowDown')) {
             event.preventDefault()

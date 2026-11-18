@@ -151,10 +151,11 @@ test.beforeEach(async ({ context }) => {
     }
 
     const projects = options.has('empty-projects') ? [] : [project]
-    if (options.has('two-projects') || options.has('task-search') || options.has('review-fixture')) {
+    if (options.has('two-projects') || options.has('three-projects') || options.has('task-search') || options.has('review-fixture')) {
       projects.push({ ...project, id: 'project-notes', path: '/tmp/notes', name: 'notes',
         isGitRepository: false, lastTaskId: null, unfinishedTaskCount: 0 })
     }
+    if (options.has('three-projects')) projects.push({ ...project, id: 'project-third', path: '/tmp/third', name: 'third', lastTaskId: null, unfinishedTaskCount: 0 })
     const savedProjectOrder: string[] = JSON.parse(localStorage.getItem('fixture.projectOrder') ?? '[]')
     if (savedProjectOrder.length) projects.sort((left, right) => savedProjectOrder.indexOf(left.id) - savedProjectOrder.indexOf(right.id))
 
@@ -4503,12 +4504,14 @@ test('shows project icons, opens archive controls on hover, and composes in anot
   await expect(settings.getByRole('heading', { name: 'Project settings' })).toBeVisible()
   await expect(settings.getByText('/tmp/notes')).toBeVisible()
   await expect(settings.getByLabel('Show archived tasks')).not.toBeChecked()
-  await expect(repository).toHaveAttribute('aria-current', 'true')
+  await expect(page.locator('.sidebar .project[aria-current="true"]')).toContainText('demo')
   await settings.getByRole('button', { name: 'Workspace' }).click()
+  await page.getByRole('button', { name: 'Back to app' }).click()
   await directory.hover()
   await projectSettings.click()
   await expect(settings.getByRole('heading', { name: 'Project settings' })).toBeVisible()
 
+  await page.getByRole('button', { name: 'Back to app' }).click()
   await directory.hover()
   await page.getByRole('button', { name: 'New chat in notes' }).click()
   await expect(directory).toHaveAttribute('aria-current', 'true')
@@ -4519,6 +4522,14 @@ test('shows project icons, opens archive controls on hover, and composes in anot
 })
 
 test('reorders projects by dragging with an insertion line and keeps the order', async ({ page }) => {
+  await page.addInitScript(() => {
+    const original = Element.prototype.animate
+    ;(window as unknown as { projectAnimations: string[] }).projectAnimations = []
+    Element.prototype.animate = function (...args) {
+      if (this.classList.contains('projects__row')) (window as unknown as { projectAnimations: string[] }).projectAnimations.push((this as HTMLElement).dataset.projectId ?? '')
+      return original.apply(this, args)
+    }
+  })
   await page.goto('/?two-projects')
   const list = page.locator('.projects')
   const names = list.locator('.project__name')
@@ -4531,7 +4542,10 @@ test('reorders projects by dragging with an insertion line and keeps the order',
   await page.mouse.down()
   await page.mouse.move(source.x + source.width / 2, source.y + source.height / 2 - 8, { steps: 3 })
   await page.mouse.move(target.x + target.width / 2, target.y + 3, { steps: 8 })
-  await expect(list.locator('.projects__row--drop-before')).toContainText('demo')
+  await expect(list.locator('.projects__row--drop-before')).toContainText('notes')
+  await expect(names).toHaveText(['notes', 'demo'])
+  await expect.poll(() => page.evaluate(() => (window as unknown as { projectAnimations: string[] }).projectAnimations)).toContain('project-1')
+  expect(await page.evaluate(() => localStorage.getItem('fixture.projectOrder'))).toBeNull()
   await page.mouse.up()
   await expect(names).toHaveText(['notes', 'demo'])
   await page.reload()
@@ -4543,12 +4557,52 @@ test('reorders projects by dragging with an insertion line and keeps the order',
   await page.mouse.down()
   await page.mouse.move(moved.x + moved.width / 2, moved.y + moved.height / 2 + 8, { steps: 3 })
   await page.mouse.move(below.x + below.width / 2, below.y + below.height - 3, { steps: 8 })
-  await expect(list.locator('.projects__row--drop-after')).toContainText('demo')
+  await expect(list.locator('.projects__row--drop-before')).toContainText('notes')
+  await expect(names).toHaveText(['demo', 'notes'])
   await page.mouse.up()
   await expect(names).toHaveText(['demo', 'notes'])
   await notes.press('Alt+ArrowUp')
   await expect(names).toHaveText(['notes', 'demo'])
   await expect(notes).toBeFocused()
+})
+
+test('cancels a project drag without saving or opening the project', async ({ page }) => {
+  await page.goto('/?two-projects')
+  const list = page.locator('.projects')
+  const demo = list.getByRole('button', { name: 'demo', exact: true })
+  const notes = list.getByRole('button', { name: 'notes', exact: true })
+  const source = await notes.boundingBox()
+  const target = await demo.boundingBox()
+  if (!source || !target) throw new Error('Project rows are not visible')
+  await page.mouse.move(source.x + source.width / 2, source.y + source.height / 2)
+  await page.mouse.down()
+  await page.mouse.move(target.x + target.width / 2, target.y + 3, { steps: 8 })
+  await expect(list.locator('.project__name')).toHaveText(['notes', 'demo'])
+  await page.keyboard.press('Escape')
+  await page.waitForTimeout(50)
+  await page.mouse.move(source.x + source.width / 2, source.y + source.height / 2)
+  await page.mouse.up()
+  await expect(list.locator('.project__name')).toHaveText(['demo', 'notes'])
+  await expect(demo).toHaveAttribute('aria-current', 'true')
+  expect(await page.evaluate(() => localStorage.getItem('fixture.projectOrder'))).toBeNull()
+})
+
+test('previews moving a project across multiple rows and cancels outside the list', async ({ page }) => {
+  await page.goto('/?three-projects')
+  const list = page.locator('.projects')
+  const source = await list.getByRole('button', { name: 'third', exact: true }).boundingBox()
+  const target = await list.getByRole('button', { name: 'demo', exact: true }).boundingBox()
+  if (!source || !target) throw new Error('Project rows are not visible')
+  await page.mouse.move(source.x + source.width / 2, source.y + source.height / 2)
+  await page.mouse.down()
+  await page.mouse.move(target.x + target.width / 2, target.y + 3, { steps: 10 })
+  await expect(list.locator('.project__name')).toHaveText(['third', 'demo', 'notes'])
+  await expect(list.locator('.projects__row--drop-before')).toContainText('third')
+  await page.mouse.move(target.x + target.width + 100, target.y)
+  await expect(list.locator('.projects__row--drop-before')).toHaveCount(0)
+  await page.mouse.up()
+  await expect(list.locator('.project__name')).toHaveText(['demo', 'notes', 'third'])
+  expect(await page.evaluate(() => localStorage.getItem('fixture.projectOrder'))).toBeNull()
 })
 
 test('keeps the project order and reports a failed save', async ({ page }) => {
@@ -4557,6 +4611,25 @@ test('keeps the project order and reports a failed save', async ({ page }) => {
   await list.getByRole('button', { name: 'notes', exact: true }).press('Alt+ArrowUp')
   await expect(page.locator('.error-toast')).toContainText('Could not save project order.')
   await expect(list.locator('.project__name')).toHaveText(['demo', 'notes'])
+})
+
+test('restores the original order if a dragged project cannot be saved', async ({ page }) => {
+  await page.goto('/?two-projects&project-order-fails')
+  const list = page.locator('.projects')
+  const demo = list.getByRole('button', { name: 'demo', exact: true })
+  const notes = list.getByRole('button', { name: 'notes', exact: true })
+  const source = await notes.boundingBox()
+  const target = await demo.boundingBox()
+  if (!source || !target) throw new Error('Project rows are not visible')
+  await page.mouse.move(source.x + source.width / 2, source.y + source.height / 2)
+  await page.mouse.down()
+  await page.mouse.move(target.x + target.width / 2, target.y + 3, { steps: 8 })
+  await expect(list.locator('.project__name')).toHaveText(['notes', 'demo'])
+  await page.mouse.up()
+  await expect(page.locator('.error-toast')).toContainText('Could not save project order.')
+  await expect(list.locator('.project__name')).toHaveText(['demo', 'notes'])
+  await notes.click()
+  await expect(notes).toHaveAttribute('aria-current', 'true')
 })
 
 test('batch imports local Codex projects from the empty Projects list', async ({ page }) => {

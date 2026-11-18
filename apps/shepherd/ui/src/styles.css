@@ -704,9 +704,8 @@ textarea {
 }
 
 .projects__row { position: relative; }
-.projects__row--dragging { opacity: .5; }
-.projects__row--drop-before::before,
-.projects__row--drop-after::after {
+.projects__row--dragging > .project-row { opacity: .5; }
+.projects__row--drop-before::before {
   position: absolute;
   z-index: 3;
   inset-inline: 4px;
@@ -717,7 +716,6 @@ textarea {
   content: '';
 }
 .projects__row--drop-before::before { top: -1px; }
-.projects__row--drop-after::after { bottom: -1px; }
 
 .project-row--selected {
   color: var(--text-secondary);
@@ -741,8 +739,8 @@ textarea {
   color: inherit;
 }
 
-.project-row .project[draggable='true'] { cursor: grab; }
-.project-row .project[draggable='true']:active { cursor: grabbing; }
+.project-row .project[data-reorderable='true'] { cursor: grab; }
+.project-row .project[data-reorderable='true']:active { cursor: grabbing; }
 
 .process-indicator {
   flex: none;
