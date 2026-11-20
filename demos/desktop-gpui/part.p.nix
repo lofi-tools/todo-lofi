@@ -35,13 +35,13 @@
         set -e
         repo_root=${wd}
         cd "$repo_root"
-        mkdir -p .cache/dev/desktop-gpui
+        mkdir -p .cache/desktop-gpui/dev
         cargo run -p desktop-gpui --features prototype -- \
           --config-path demos/desktop-gpui/config.example.json --use-test-seed-data
       '';
       dreset = ''
         repo_root=${wd} || exit 1
-        database="$repo_root/.cache/dev/desktop-gpui/todo.db"
+        database="$repo_root/.cache/desktop-gpui/dev/todo.db"
         rm -f -- "$database" "$database-wal" "$database-shm"
       '';
     };

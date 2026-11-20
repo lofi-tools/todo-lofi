@@ -91,7 +91,11 @@ class Recorder:
                                   "versions": self.versions, "tests": tests})
 
     def run_directory(self, suite, directory):
-        runs = self.root / ".cache/test-output/runs" / suite
+        package = directory.relative_to(self.root).parts[:2]
+        cache = ".cache/shepherd/test" if package in {
+            ("apps", "shepherd"), ("apps", "shep-docs-web")
+        } else ".cache/test-output"
+        runs = self.root / cache / "runs" / suite
         runs.mkdir(parents=True, exist_ok=True)
         return Path(tempfile.mkdtemp(prefix=f"{directory.name}.", dir=runs))
 

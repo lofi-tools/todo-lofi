@@ -27,6 +27,7 @@ apps/providers-catalog-web/*.duckdb.wal
 /.cache/checkout/
 /.cache/reference-docs/
 /.cache/dev/
+/.cache/desktop-gpui/
 /.cache/shepherd/
 /.cache/shepherd-live/
 /.cache/test-db/

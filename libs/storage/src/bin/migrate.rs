@@ -34,7 +34,7 @@ async fn main() -> anyhow::Result<()> {
     let db_url = match std::env::var("TURSO_DB_URL") {
         Ok(url) => url,
         Err(std::env::VarError::NotPresent) => {
-            let directory = REPO.join(".cache/dev/desktop-gpui");
+            let directory = REPO.join(".cache/desktop-gpui/dev");
             std::fs::create_dir_all(&directory)?;
             format!("turso:{}", directory.join("todo.db").display())
         }

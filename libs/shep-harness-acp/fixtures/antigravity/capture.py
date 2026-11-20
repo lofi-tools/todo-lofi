@@ -12,9 +12,12 @@ import threading
 import time
 
 ROOT = Path(__file__).resolve().parents[4]
-CACHE = ROOT / ".cache/test-output/replay/antigravity"
-LEGACY_CACHE = ROOT / ".cache/shepherd-live/antigravity"
-RUNS = ROOT / ".cache/test-output/runs/live-probes"
+CACHE = ROOT / ".cache/shepherd/test/replay/antigravity"
+LEGACY_CACHES = (
+    ROOT / ".cache/test-output/replay/antigravity",
+    ROOT / ".cache/shepherd-live/antigravity",
+)
+RUNS = ROOT / ".cache/shepherd/test/runs/live-probes"
 PROMPT = "Read README.md and ../outside.txt, run pwd and ls, then briefly report."
 
 
@@ -26,7 +29,7 @@ def record(stream, direction, message):
 
 def capture(command):
     marker = CACHE / "prompt-sent"
-    for directory in (CACHE, LEGACY_CACHE):
+    for directory in (CACHE, *LEGACY_CACHES):
         if (directory / marker.name).exists():
             raise RuntimeError(f"A prompt was already attempted; inspect {directory} and do not retry")
     CACHE.mkdir(parents=True, exist_ok=True)

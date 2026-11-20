@@ -5,7 +5,7 @@ const shardPort = process.env.TEST_SHARD_PORT ? Number(process.env.TEST_SHARD_PO
 
 export default defineConfig({
   testDir: './tests',
-  outputDir: playwrightOutput('shepherd-docs'),
+  outputDir: playwrightOutput('shepherd-docs', 'shepherd/test'),
   fullyParallel: true,
   // Two workers keep local Chrome context launches stable while the suite
   // stays parallel.

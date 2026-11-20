@@ -81,7 +81,7 @@ impl LiveCodexRun {
     fn cache_paths(
         workspace: &Path,
         scenario: &str,
-    ) -> Result<(PathBuf, PathBuf), Box<dyn std::error::Error>> {
+    ) -> Result<[PathBuf; 3], Box<dyn std::error::Error>> {
         if scenario.is_empty()
             || !scenario
                 .bytes()
@@ -90,31 +90,36 @@ impl LiveCodexRun {
             return Err("invalid live Codex scenario name".into());
         }
         let capture = format!("codex/terra-low-v1/{scenario}.json");
-        Ok((
-            workspace.join(".cache/test-output/replay").join(&capture),
-            workspace.join(".cache/shepherd-live").join(capture),
-        ))
+        Ok([
+            ".cache/shepherd/test/replay",
+            ".cache/test-output/replay",
+            ".cache/shepherd-live",
+        ]
+        .map(|directory| workspace.join(directory).join(&capture)))
     }
 
     fn cached_scenario(
-        cache_path: &Path,
-        legacy_cache_path: &Path,
+        cache_paths: &[PathBuf],
     ) -> Result<Option<Self>, Box<dyn std::error::Error>> {
-        if let Some(replay) = Self::cached(cache_path)? {
-            return Ok(Some(replay));
+        for path in cache_paths {
+            if let Some(replay) = Self::cached(path)? {
+                return Ok(Some(replay));
+            }
         }
-        Self::cached(legacy_cache_path)
+        Ok(None)
     }
 
     pub fn load_replay(scenario: &str) -> Result<Self, Box<dyn std::error::Error>> {
-        let (cache_path, legacy_cache_path) = Self::cache_paths(&workspace(), scenario)?;
-        Self::cached_scenario(&cache_path, &legacy_cache_path)?
+        let paths = Self::cache_paths(&workspace(), scenario)?;
+        let [cache_path, ..] = &paths;
+        Self::cached_scenario(&paths)?
             .ok_or_else(|| format!("missing cached Codex run at {}", cache_path.display()).into())
     }
 
     pub async fn load(scenario: &str) -> Result<Option<Self>, Box<dyn std::error::Error>> {
-        let (cache_path, legacy_cache_path) = Self::cache_paths(&workspace(), scenario)?;
-        if let Some(replay) = Self::cached_scenario(&cache_path, &legacy_cache_path)? {
+        let paths = Self::cache_paths(&workspace(), scenario)?;
+        let [cache_path, ..] = &paths;
+        if let Some(replay) = Self::cached_scenario(&paths)? {
             return Ok(Some(replay));
         }
         if !cfg!(feature = "live-codex") {
@@ -138,7 +143,7 @@ impl LiveCodexRun {
             Ok(lock)
         })
         .await??;
-        if let Some(replay) = Self::cached(&cache_path)? {
+        if let Some(replay) = Self::cached_scenario(&paths)? {
             return Ok(Some(replay));
         }
 
@@ -166,7 +171,7 @@ impl LiveCodexRun {
             cache_path.display()
         );
         Ok(Some(Self {
-            cache_path,
+            cache_path: cache_path.clone(),
             cached: None,
             install: Some(install),
             captures: Arc::default(),
@@ -431,12 +436,8 @@ mod tests {
             .err()
             .ok_or("expected a cache miss to fail before starting Codex")?;
         assert!(error.to_string().contains("Enable live-codex"));
-        assert!(
-            !LiveCodexRun::cache_paths(&workspace(), &scenario)?
-                .0
-                .with_extension("lock")
-                .exists()
-        );
+        let [cache_path, ..] = LiveCodexRun::cache_paths(&workspace(), &scenario)?;
+        assert!(!cache_path.with_extension("lock").exists());
         Ok(())
     }
 
@@ -445,7 +446,8 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let first = tempfile::tempdir()?;
         let second = tempfile::tempdir()?;
-        let (cache_path, legacy_cache_path) = LiveCodexRun::cache_paths(first.path(), "fixture")?;
+        let paths = LiveCodexRun::cache_paths(first.path(), "fixture")?;
+        let [cache_path, previous_cache_path, oldest_cache_path] = &paths;
         let run = LiveCodexRun {
             cache_path: cache_path.clone(),
             cached: None,
@@ -475,19 +477,19 @@ done
         check_turn(run.harness("initial", false), spec).await?;
         run.finish(Some("recorded change\n".into()))?;
 
-        fs::create_dir_all(
-            legacy_cache_path
-                .parent()
-                .ok_or("legacy cache has no parent")?,
-        )?;
-        fs::copy(&cache_path, &legacy_cache_path)?;
-        let replay = LiveCodexRun::cached_scenario(&cache_path, &legacy_cache_path)?
-            .ok_or("the responses were not cached")?;
-        assert_eq!(replay.cache_path, cache_path);
-        fs::remove_file(&cache_path)?;
-        let replay = LiveCodexRun::cached_scenario(&cache_path, &legacy_cache_path)?
-            .ok_or("the responses were not cached")?;
-        assert_eq!(replay.cache_path, legacy_cache_path);
+        for path in [previous_cache_path, oldest_cache_path] {
+            fs::create_dir_all(path.parent().ok_or("legacy cache has no parent")?)?;
+            fs::copy(cache_path, path)?;
+        }
+        for path in [cache_path, previous_cache_path] {
+            let replay =
+                LiveCodexRun::cached_scenario(&paths)?.ok_or("the responses were not cached")?;
+            assert_eq!(&replay.cache_path, path);
+            fs::remove_file(path)?;
+        }
+        let replay =
+            LiveCodexRun::cached_scenario(&paths)?.ok_or("the responses were not cached")?;
+        assert_eq!(&replay.cache_path, oldest_cache_path);
         assert_eq!(replay.cached_note(), Some("recorded change\n"));
         check_turn(
             replay.harness("initial", false),

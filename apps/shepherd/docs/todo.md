@@ -586,7 +586,7 @@ Tasks:
     and a disposable worktree with the existing login. Cache every response,
     including partial responses, raw PTY bytes, terminal-size changes and
     rendered terminal-state transitions in order, plus assertion-relevant
-    effects under `.cache/test-output/replay/freebuff/` for replay. Record version,
+    effects under `.cache/shepherd/test/replay/freebuff/` for replay. Record version,
     limitations, safe capture and replay instructions, and evidence for
     streaming, interactions, cancel and restart behavior.
 
@@ -966,7 +966,7 @@ Manual script on a throwaway repository:
 The network approval scenario passed live with GPT-6.1 Terra at `low` effort.
 Codex asked before running the command, Shepherd recorded the denial, and the
 turn completed. A second run passed by replaying the saved response sequence in
-`.cache/shepherd-live/codex/terra-low-v1/network-approval.json`.
+`.cache/shepherd/test/replay/codex/terra-low-v1/network-approval.json`.
 
 The macOS desktop smoke replays that same exchange through the real adapter
 and native webview. It sends a prompt from the composer, checks the approval
@@ -990,7 +990,7 @@ a follow-up in the same chat. The capture contains three turns and one
 `turn/interrupt`, with completion statuses `completed`, `interrupted`, and
 `completed`. The first successful run records the exchange with GPT-6.1 Terra
 at `low` effort in
-`.cache/shepherd-live/codex/terra-low-v1/desktop-approval-cancel.json`. Later
+`.cache/shepherd/test/replay/codex/terra-low-v1/desktop-approval-cancel.json`. Later
 runs replay it in a fresh disposable project and database.
 
 ```sh
@@ -1000,7 +1000,7 @@ direnv exec . ./scripts/smoke-shepherd-terminal.sh --codex-live
 The macOS worktree edit smoke sends a prompt from the composer and checks the
 streamed text, tool row, and one-file diff in the Review pane. The live run
 captured 70 message deltas and the verified patch in
-`.cache/shepherd-live/codex/terra-low-v1/desktop-worktree-edit.json`. Replay
+`.cache/shepherd/test/replay/codex/terra-low-v1/desktop-worktree-edit.json`. Replay
 applies the captured patch to a disposable worktree before the turn completes,
 so the core computes the review state from Git in both runs.
 
@@ -1469,7 +1469,7 @@ probe was skipped.
 falling back to a separate terminal app.
 
 Start the trial from the repository with `direnv exec . shep`. It preserves
-projects and terminal layout across relaunches in `.cache/test-db/shepherd.db`.
+projects and terminal layout across relaunches in `.cache/shepherd/dev/shepherd.db`.
 Use the shell and projects you normally work in. At the end of the day, record
 the commit, OS, shell, and whether you switched to another terminal. For any
 fallback, record the command or shortcut and what Shepherd did. Include the
@@ -3049,7 +3049,7 @@ implemented; no public deployment exists yet.
   data is published.
   Evidence (2026-11-09): `pnpm --dir apps/providers-catalog-web run
   export:pool` writes the uncommitted
-  `.cache/dev/shepherd/pool-catalog-advisory.v2.json`. The export is filtered to the
+  `.cache/shepherd/dev/pool-catalog-advisory.v2.json`. The export is filtered to the
   three harnesses Shepherd implements (Claude Code, Codex, OpenCode) and carries
   provider/model choices plus model-expanded limit records; Pi and the other
   catalog harnesses are excluded. The current snapshot has six provider choices

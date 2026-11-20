@@ -1637,7 +1637,7 @@ mod tests {
         drop(abandoned);
         assert!(
             read_complete_capture(
-                &cache.join(".cache/test-output/replay/freebuff/abandoned.jsonl")
+                &cache.join(".cache/shepherd/test/replay/freebuff/abandoned.jsonl")
             )
             .is_err()
         );
@@ -1651,7 +1651,7 @@ mod tests {
         )?;
         repository.write_file("README.md", "captured\n")?;
         capture.finish_after_drain()?;
-        let path = cache.join(".cache/test-output/replay/freebuff/lifecycle.jsonl");
+        let path = cache.join(".cache/shepherd/test/replay/freebuff/lifecycle.jsonl");
         let records = read_complete_capture(&path)?;
         assert!(records.iter().any(|record| matches!(&record.event, CaptureEvent::WorktreeFile { path, contents, .. } if path == std::path::Path::new("README.md") && contents == b"captured\n")));
         repository.write_file("README.md", "initial\n")?;
@@ -1691,7 +1691,7 @@ mod tests {
             || Ok(((), Vec::new())),
         )?;
         capture.finish()?;
-        let path = cache.join(".cache/test-output/replay/freebuff/replay.jsonl");
+        let path = cache.join(".cache/shepherd/test/replay/freebuff/replay.jsonl");
         let switched = std::process::Command::new("git")
             .arg("-C")
             .arg(repository.path())
@@ -1744,7 +1744,7 @@ mod tests {
         capture.finish()?;
         let error = replay_worktree_effects(
             repository.path(),
-            &cache.join(".cache/test-output/replay/freebuff/partial.jsonl"),
+            &cache.join(".cache/shepherd/test/replay/freebuff/partial.jsonl"),
         )
         .err()
         .ok_or("expected replay failure")?
@@ -1770,7 +1770,7 @@ mod tests {
         let directory = TestDirectory::new()?;
         let capture = CaptureSession::new(CaptureWriter::create(directory.path(), "plan")?);
         begin_worktree_capture(repository.path(), &capture)?;
-        let path = directory.join(".cache/test-output/replay/freebuff/plan.jsonl");
+        let path = directory.join(".cache/shepherd/test/replay/freebuff/plan.jsonl");
         capture.record_and_apply(
             CaptureEvent::WorktreeFile {
                 path: "file".into(),
@@ -1800,7 +1800,7 @@ mod tests {
         )?;
         valid.finish()?;
         let (_, effects) = plan_worktree_replay(
-            &directory.join(".cache/test-output/replay/freebuff/valid.jsonl"),
+            &directory.join(".cache/shepherd/test/replay/freebuff/valid.jsonl"),
         )?;
         assert_eq!(effects.len(), 1);
         Ok(())
@@ -1822,7 +1822,7 @@ mod tests {
         let capture = CaptureSession::new(CaptureWriter::create(cache.path(), "git-effects")?);
         capture_git_worktree_effects(repository.path(), &identity, &capture)?;
         let records =
-            read_capture(&cache.join(".cache/test-output/replay/freebuff/git-effects.jsonl"))?;
+            read_capture(&cache.join(".cache/shepherd/test/replay/freebuff/git-effects.jsonl"))?;
         assert!(records.iter().any(|record| matches!(&record.event, CaptureEvent::WorktreeFile { path, contents, .. } if path == std::path::Path::new("README.md") && contents == b"changed\n")));
         assert!(records.iter().any(|record| matches!(&record.event, CaptureEvent::WorktreeFile { path, contents, .. } if path == std::path::Path::new("new.txt") && contents == b"new\n")));
         Ok(())
@@ -1856,7 +1856,7 @@ mod tests {
         std::fs::remove_dir_all(repository.path().join(".freebuff"))?;
         replay_worktree_effects(
             repository.path(),
-            &cache.join(".cache/test-output/replay/freebuff/project-id.jsonl"),
+            &cache.join(".cache/shepherd/test/replay/freebuff/project-id.jsonl"),
         )?;
         assert_eq!(
             std::fs::read(repository.path().join(".freebuff/project-id"))?,
@@ -1939,7 +1939,7 @@ mod tests {
         )?;
         capture.finish()?;
         let records = read_complete_capture(
-            &directory.join(".cache/test-output/replay/freebuff/effects.jsonl"),
+            &directory.join(".cache/shepherd/test/replay/freebuff/effects.jsonl"),
         )?;
         assert!(records.iter().any(|record| matches!(&record.event, CaptureEvent::WorktreeFile { path, contents, .. } if path == std::path::Path::new("created.txt") && contents == b"created")));
         assert!(records.iter().any(|record| matches!(&record.event, CaptureEvent::WorktreeDeleted { path } if path == std::path::Path::new("deleted.txt"))));

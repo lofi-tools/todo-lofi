@@ -191,7 +191,7 @@ and report failures through Shepherd's normal diagnostics.
    Cache every live response, including partial responses, together with raw
    PTY bytes, terminal-size changes and rendered terminal-state transitions
    in their original order, plus external effects needed by assertions, under
-   `.cache/test-output/replay/freebuff/`; replay them on later runs.
+   `.cache/shepherd/test/replay/freebuff/`; replay them on later runs.
    Treat a capture write failure as a live-test failure and stop further
    submissions rather than continuing without a replayable record.
    Gate genuinely live Freebuff probes behind a separate `live-freebuff`
@@ -226,7 +226,8 @@ controls, not a substitute for user approval. This diagnostic does not yet
 classify the screen, test approval flows, or establish runtime compatibility.
 The ignored `replay_approved_freebuff_capture` diagnostic accepts
 `SHEPHERD_FREEBUFF_CAPTURE` and a clean disposable `SHEPHERD_FREEBUFF_WORKTREE`.
-The capture path can point to an earlier recording under `.cache/shepherd-live/freebuff/`.
+Set the capture path to the recording under `.cache/shepherd/test/replay/freebuff/`
+or to an earlier recording wherever it was saved.
 The diagnostic verifies the complete recording before applying its supported
 worktree effects. It makes no live agent call. Escaped descendant processes are not yet
 ruled out, so capture completeness remains limited by that check. The ignored

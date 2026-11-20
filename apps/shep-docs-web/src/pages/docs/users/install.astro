@@ -72,14 +72,14 @@ const build = `direnv exec . pnpm --dir apps/shepherd build
   <CodeBlock filename="terminal" code={run} showLineNumbers={false} />
   <p>
     <code>shep</code> starts the desktop app and its Vite server. Development data lives in
-    <code>.cache/test-db/shepherd.db</code>, so projects and chats survive a normal restart. Use
+    <code>.cache/shepherd/dev/shepherd.db</code>, so projects and chats survive a normal restart. Use
     <code>direnv exec . shep</code> when you need to launch it from a non-interactive runner.
   </p>
 
   <h2 id="test-mode">Test mode</h2>
   <p>
     <code>shep --test</code> starts on its own port with an empty database in a fresh directory
-    under <code>.cache/test-output/runs/shep-test/</code>. Changes survive Tauri reloads during that launch; closing the
+    under <code>.cache/shepherd/test/runs/shep-test/</code>. Changes survive Tauri reloads during that launch; closing the
     app discards the session database, and the next test launch starts empty again.
   </p>
   <CodeBlock filename="terminal" code={testRun} showLineNumbers={false} />

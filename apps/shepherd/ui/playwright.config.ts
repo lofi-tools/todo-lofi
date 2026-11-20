@@ -5,7 +5,7 @@ const shardPort = process.env.TEST_SHARD_PORT ? Number(process.env.TEST_SHARD_PO
 
 export default defineConfig({
   testDir: './tests',
-  outputDir: playwrightOutput('shepherd'),
+  outputDir: playwrightOutput('shepherd', 'shepherd/test'),
   // Shard individual tests while keeping the shared server and window serial.
   fullyParallel: true,
   workers: 1,

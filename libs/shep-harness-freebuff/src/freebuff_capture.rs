@@ -143,7 +143,7 @@ impl CaptureWriter {
                 "invalid Freebuff capture name".into(),
             ));
         }
-        let directory = workspace.join(".cache/test-output/replay/freebuff");
+        let directory = workspace.join(".cache/shepherd/test/replay/freebuff");
         fs::create_dir_all(&directory).map_err(|error| {
             HarnessError::Protocol(format!(
                 "could not create Freebuff capture directory {}: {error}",
@@ -747,7 +747,7 @@ mod tests {
         let restored = read_capture(
             &directory
                 .path()
-                .join(".cache/test-output/replay/freebuff/fixture.jsonl"),
+                .join(".cache/shepherd/test/replay/freebuff/fixture.jsonl"),
         )?;
         assert!(restored == records);
         assert!(CaptureWriter::create(directory.path(), "fixture").is_err());
@@ -783,7 +783,7 @@ mod tests {
         }
         let path = directory
             .path()
-            .join(".cache/test-output/replay/freebuff/replay.jsonl");
+            .join(".cache/shepherd/test/replay/freebuff/replay.jsonl");
         let mut observed = Vec::new();
         let result = visit_capture(&path, |record| {
             observed.push(record.elapsed_micros);

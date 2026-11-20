@@ -192,7 +192,7 @@
             shep = with bash; ''
               set -euo pipefail
               cd "${wd}"
-              test_database_root="$PWD/.cache/test-db"
+              shepherd_data="$PWD/.cache/shepherd/dev"
               ui_directory="$PWD/apps/shepherd/ui"
               ps_bin=/bin/ps
               [ -x "$ps_bin" ] || ps_bin=/usr/bin/ps
@@ -267,12 +267,16 @@
               }
               case "$*" in
                 "")
-                  export SHEPHERD_DEV_DATA_DIR="$test_database_root"
+                  legacy_data="$PWD/.cache/test-db"
+                  if [[ ! -e "$shepherd_data/shepherd.db" && -f "$legacy_data/shepherd.db" ]]; then
+                    shepherd_data="$legacy_data"
+                  fi
+                  export SHEPHERD_DEV_DATA_DIR="$shepherd_data"
                   reap_orphaned_ui_server 1420
                   watch_shepherd
                   ;;
                 --test)
-                  run_root="$PWD/.cache/test-output/runs/shep-test"
+                  run_root="$PWD/.cache/shepherd/test/runs/shep-test"
                   mkdir -p "$run_root"
                   session_data_directory=$(mktemp -d "$run_root/session.XXXXXX")
                   trap 'rm -rf -- "$session_data_directory"' EXIT
@@ -509,7 +513,7 @@
           myDevShell.cleanups.icons.script = ''rm -f target/debug/taskstream.app/Contents/Resources/taskstream.icns'';
           myDevShell.cleanups.shepherd-migration-backups.script = ''
             repo_root=$(${pkgs.git}/bin/git rev-parse --show-toplevel) || exit 1
-            shepherd_data="$repo_root/.cache/test-db"
+            shepherd_data="$repo_root/.cache/shepherd/dev"
             if [[ -d "$shepherd_data" && ! -L "$shepherd_data" ]]; then
               snapshot_pattern='^shepherd\.db\.pre-migration-[[:xdigit:]]{8}(-[[:xdigit:]]{4}){3}-[[:xdigit:]]{12}$'
               for snapshot in "$shepherd_data"/shepherd.db.pre-migration-*; do
@@ -521,12 +525,12 @@
           '';
           myDevShell.cleanups.test-output-runs.script = ''
             repo_root=$(${pkgs.git}/bin/git rev-parse --show-toplevel) || exit 1
-            rm -rf -- "$repo_root/.cache/test-output/runs"
+            rm -rf -- "$repo_root/.cache/shepherd/test/runs" "$repo_root/.cache/test-output/runs"
           '';
           myDevShell.cleanups.test-output-worktrees.script = ''
             (
               repo_root=$(${pkgs.git}/bin/git rev-parse --show-toplevel) || exit 1
-              worktrees="$repo_root/.cache/test-output/worktrees"
+              worktrees="$repo_root/.cache/shepherd/test/worktrees"
               if [[ -L "$worktrees" ]]; then
                 printf 'cleanup: expected a directory, found a symlink: %s\n' "$worktrees" >&2
                 exit 1

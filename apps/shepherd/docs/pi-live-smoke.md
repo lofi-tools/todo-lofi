@@ -34,8 +34,8 @@ argument to the installed Pi and tees its RPC stdout to a log:
 
 ```sh
 pi_path=$(command -v pi)
-mkdir -p "$PWD/.cache/test-output/runs/live-probes"
-run=$(mktemp -d "$PWD/.cache/test-output/runs/live-probes/pi.XXXXXX")
+mkdir -p "$PWD/.cache/shepherd/test/runs/live-probes"
+run=$(mktemp -d "$PWD/.cache/shepherd/test/runs/live-probes/pi.XXXXXX")
 wrapper="$run/pi-live-tee"
 cat > "$wrapper" <<EOF
 #!/usr/bin/env bash
@@ -54,7 +54,7 @@ Point Shepherd at the wrapper in `settings.json` (macOS:
 {
   "version": 1,
   "app": {
-    "agents.pi.executable": "/absolute/path/to/.cache/test-output/runs/live-probes/pi.XXXXXX/pi-live-tee",
+    "agents.pi.executable": "/absolute/path/to/.cache/shepherd/test/runs/live-probes/pi.XXXXXX/pi-live-tee",
     "agents.pi.args": []
   }
 }

@@ -32,7 +32,7 @@ class CaptureTest(unittest.TestCase):
     def test_partial_prompt_is_recorded_and_cannot_be_retried(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            with patch.multiple(capture, CACHE=root / "replay", LEGACY_CACHE=root / "legacy", RUNS=root / "runs"):
+            with patch.multiple(capture, CACHE=root / "replay", LEGACY_CACHES=(), RUNS=root / "runs"):
                 with self.assertRaisesRegex(RuntimeError, "closed its output"):
                     capture.capture([sys.executable, "-u", "-c", FAKE])
                 events = [json.loads(line) for line in (capture.CACHE / "exchange.jsonl").read_text().splitlines()]
@@ -49,7 +49,7 @@ class CaptureTest(unittest.TestCase):
             legacy = root / "legacy"
             legacy.mkdir()
             (legacy / "prompt-sent").touch()
-            with patch.multiple(capture, CACHE=root / "replay", LEGACY_CACHE=legacy, RUNS=root / "runs"):
+            with patch.multiple(capture, CACHE=root / "replay", LEGACY_CACHES=(legacy,), RUNS=root / "runs"):
                 with self.assertRaisesRegex(RuntimeError, "already attempted"):
                     capture.capture([sys.executable, "-u", "-c", FAKE])
             self.assertFalse((root / "runs").exists())

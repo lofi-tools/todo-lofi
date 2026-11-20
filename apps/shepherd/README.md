@@ -14,14 +14,15 @@ pnpm install
 shep
 ```
 
-`shep` starts Vite on port 1420 and uses `.cache/test-db/shepherd.db`. Projects
-and chats in that test database persist across launches.
+`shep` starts Vite on port 1420 and uses `.cache/shepherd/dev/shepherd.db`. Projects
+and chats in that development database persist across launches. If only the
+older `.cache/test-db/shepherd.db` exists, `shep` uses that database.
 Shepherd saves a rollback snapshot before migrating an existing database.
 `direnv exec . cleanup` removes completed pre-migration snapshots from this
 directory and preserves the active database.
 
 `shep --test` starts on port 1435 with an empty database in a fresh directory
-under `.cache/test-output/runs/shep-test/`. Changes survive Tauri reloads during that launch.
+under `.cache/shepherd/test/runs/shep-test/`. Changes survive Tauri reloads during that launch.
 Closing the app discards the session database. The next `shep --test` launch
 starts empty again.
 
@@ -88,14 +89,14 @@ to point the debug project picker at a fixture directory.
 
 Runtime error toasts link to **Error history** in the status bar. The structured
 log is `logs/errors.jsonl` in the active data directory (normally
-`.cache/test-db/logs/errors.jsonl` for `shep`). Use `tail -F` on that file to
+`.cache/shepherd/dev/logs/errors.jsonl` for `shep`). Use `tail -F` on that file to
 follow new diagnostics; the `shepherd-debug` repository skill describes the
 investigation workflow. Newly created log files are owner-only on Unix;
 existing file permissions are left unchanged. The log must be a regular file;
 on Unix, its final path must not be a symbolic link.
 
 The native terminal smoke uses a disposable Git project, database and scripted
-agent in a temporary directory under `.cache/test-output/runs/native-smoke/`. It requires `python3`.
+agent in a temporary directory under `.cache/shepherd/test/runs/native-smoke/`. It requires `python3`.
 The full suite also requires `vim`, `less` and `fzf`.
 
 ```sh
@@ -504,7 +505,7 @@ To return to a prototype deliberately, opt in, for example with
 prototypes can still fail. Demo browser tests are run separately through their
 own package commands.
 
-Repository-local test output is grouped under `.cache/test-output/`.
+Shepherd-specific test output is grouped under `.cache/shepherd/test/`.
 
 - `runs/` holds disposable browser artifacts, test reports, and isolated
   smoke-test and `shep --test` sessions. Each invocation gets its own directory.
@@ -514,14 +515,13 @@ Repository-local test output is grouped under `.cache/test-output/`.
 - `worktrees/` holds disposable linked Git worktrees. The cleanup command removes
   them through their owning Git repositories and reports any worktrees Git refuses
   to remove.
-- `history/runs.jsonl` records exact Rust, Vitest and Playwright test identities
-  and runner versions from successful shard invocations. The runner also reads
-  earlier records from `.cache/test-shards/runs.jsonl`.
-- `history/browser/` holds each Playwright suite's last-run state for
-  `--last-failed`.
+- `history/browser/` holds Shepherd's Playwright last-run state for `--last-failed`.
 
-Other test scripts contribute to the full-run result but do not supply
-individual identities.
+Shared test reports go under `.cache/test-output/runs/`. The workspace-wide
+shard history in `.cache/test-output/history/runs.jsonl` records exact Rust,
+Vitest and Playwright test identities and runner versions from successful shard
+invocations. The runner also reads earlier records from `.cache/test-shards/runs.jsonl`.
+Other test scripts contribute to the full-run result but do not supply individual identities.
 `--last-ran` only reports clean,
 successful runs on the current first-parent history; dirty runs, rewritten
 commits, a missing local history, and tests not yet present in an old revision
@@ -568,7 +568,8 @@ direnv exec . cargo test -p shep-harness-pi --features live-pi --lib pi::tests::
 ## Live Codex tests
 
 Codex scenarios replay the app-server responses and recorded worktree edits
-from `.cache/test-output/replay/codex/terra-low-v1/`. Existing captures under
+from `.cache/shepherd/test/replay/codex/terra-low-v1/`. Existing captures in
+`.cache/test-output/replay/codex/terra-low-v1/` and
 `.cache/shepherd-live/codex/terra-low-v1/` still replay when the new path has
 no capture. To record a missing scenario,
 add `--features live-codex` to the Cargo command or `--record` to the desktop
