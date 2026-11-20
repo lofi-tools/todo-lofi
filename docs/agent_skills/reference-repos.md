@@ -14,10 +14,12 @@ at `<taskstream-root>/.cache/checkout/<name>` regardless of the caller's directo
 within Taskstream. Existing checkouts are preserved, so they may be older than the
 remote default branch.
 
-For documentation, run `refs discover [name]` to list extra pages for review.
-Save approved URLs or checkout paths under their origin key in
-`reference-docs/<name>.json`. Run `refs sync [name]` to cache the configured
-entry pages and approved docs. Omitting the name selects all references.
+For documentation, run `refs discover [name] --plain` to list pages and saved
+decisions. In an interactive terminal, `refs discover [name]` lets users
+approve, reject, or reset a page or group. Saving updates
+`reference-docs/<name>.json` and syncs the affected references. Run
+`refs sync [name]` to refresh the cache independently. Omitting the name
+selects all references.
 Start reading at `.cache/reference-docs/<name>/index.md` and cite the source URL
 and fetch date or Git commit recorded in each cached page.
 

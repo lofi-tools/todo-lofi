@@ -48,7 +48,7 @@ A local-first task manager for macOS and Linux, built on [GPUI](https://github.c
 - `checkout-references` — shallow-clone all configured reference repositories into `.cache/checkout/<name>`
 - `checkout-references herdr-core pi` — download selected references by name
 - `checkout-references --list` — list configured names and URLs
-- `refs discover [name]` — list candidate docs and their approval status
+- `refs discover [name]` — review candidate docs and sync after saving decisions
 - `refs sync [name]` — cache configured entry pages and approved docs
 - `skills` — install local agent skills, including `reference-repos`, from `docs/agent_skills`
 
@@ -58,12 +58,12 @@ The reference list lives in `flake.nix` as `referenceRepos`: `pandacode`, `herdr
 the command does not refresh or reset them. The local skill lets agents inspect
 these checkouts by name.
 
-Omit the name from `refs` to process all references. Approve candidates by
-adding their exact URLs or checkout paths to a Git-tracked
-`reference-docs/<name>.json` file, keyed by origin. For example, a Traycer
-approval could read `{"docs":["https://docs.traycer.ai/concepts/worktrees.md"]}`.
-Run `refs sync` to write Markdown and a source index under
-`.cache/reference-docs/<name>/`.
+Omit the name from `refs` to process all references. In the discovery tree,
+press `a` to approve, `r` to reject, or `u` to reset a page or group to new.
+Press Enter to review your changes, then `y` to save and sync the affected
+references. Discovery remembers both decisions in Git-tracked
+`reference-docs/<name>.json` files. Use `--plain` to list the results.
+Sync writes Markdown and a source index under `.cache/reference-docs/<name>/`.
 
 The command comes from the `my-nix` reference docs module. While the locked
 input predates that module, use the local `my-nix` checkout through the direnv
