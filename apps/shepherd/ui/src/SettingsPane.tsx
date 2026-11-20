@@ -5,6 +5,7 @@ import { displayChord, normalizeChord } from './keybindings'
 import { reportError } from './diagnostics'
 import { PoolSettings } from './PoolSettings'
 import { SettingsSelect } from './SettingsSelect'
+import { AgentModelSettings, supportsModelSelection } from './AgentModelSettings'
 import { AgentIcon } from './AgentIcon'
 import { detectedHarnesses } from './bridge'
 import { projectEnvironment, saveProjectEnvironment, type ProjectEnvironment } from './bridge'
@@ -48,6 +49,7 @@ interface SettingsPaneProps {
   pending: boolean
   projectImports: JSX.Element
   projects: ProjectSnapshot[]
+  activeProjectId?: string | null
   projectSettingsRequest?: { id: string }
   approvalChange?: { projectId?: string }
   showProjectArchived: (projectId: string) => boolean
@@ -515,11 +517,15 @@ export function SettingsPane(props: SettingsPaneProps) {
   const settingsProject = createMemo(() => props.projects.find((project) => project.id === settingsProjectId()))
   const [search, setSearch] = createSignal('')
   const [selectedHarness, setSelectedHarness] = createSignal<PoolAgent>()
+  const selectedModelAgent = () => {
+    const agent = selectedHarness()
+    return agent && supportsModelSelection(agent) ? agent : undefined
+  }
   const query = () => search().trim().toLowerCase()
   const searchTerms: Record<(typeof categories)[number], string> = {
     Workspace: 'show archived tasks notify notifications when tasks need input attachment limit bytes terminal scrollback lines reload settings configuration',
     Projects: 'project settings show archived tasks preview url server background command port attachment limit bytes terminal scrollback lines approvals saved live session add project import chatgpt worktree setup project actions codex environment',
-    Agents: 'agent pool priority installed agents reorder harnesses codex chatgpt opencode pi claude code freebuff antigravity kilocode executable path refresh',
+    Agents: 'default model effort fallback chain agent pool priority installed agents reorder harnesses codex chatgpt opencode pi claude code freebuff antigravity kilocode executable path refresh',
     Appearance: 'appearance theme system light dark density compact comfortable send button accent blue violet teal amber neutral',
     'Keyboard shortcuts': 'keyboard shortcuts shortcut bindings commands reload configuration',
   }
@@ -730,6 +736,17 @@ export function SettingsPane(props: SettingsPaneProps) {
           <Show when={agent() === 'kilocode'} fallback={<p class="empty">Configure the executable path with <code>agents.{agent()}.executable</code> in settings.json.</p>}><p class="empty">This harness is not yet implemented in Shepherd.</p></Show>
           <Show when={agent() === 'codex'}><p class="empty">Codex environment overrides: <code>agents.codex.environment</code>.</p></Show>
           <Show when={agent() === 'opencode'}><p class="empty">OpenCode configuration file: <code>agents.opencode.config_file</code>.</p></Show>
+          <Show when={selectedModelAgent()} keyed>{(modelAgent) =>
+            <AgentModelSettings agent={modelAgent}
+              projectId={(props.projects.find((project) => project.id === props.activeProjectId && !project.missing)
+                ?? props.projects.find((project) => !project.missing))?.id}
+              saved={props.preferences?.app['agents.model_preferences']?.[modelAgent]}
+              editable={props.preferencesEditable && !props.preferenceBusy}
+              onSave={(value) => props.onEditPreference('agents.model_preferences', {
+                ...props.preferences?.app['agents.model_preferences'], [modelAgent]: value,
+              })} />
+          }</Show>
+          <Show when={agent() === 'freebuff'}><p class="empty">Freebuff manages its model in its own terminal.</p></Show>
           <HarnessSettings agent={agent()} />
         </aside>}</Show>
       </div>

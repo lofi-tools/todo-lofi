@@ -4886,6 +4886,68 @@ test('navigates backward and forward through settings and the workspace', async 
   await expect(page.getByRole('heading', { name: 'Settings', exact: true })).toHaveCount(0)
 })
 
+test('saves agent model defaults and an ordered cross-agent fallback chain', async ({ page }) => {
+  await page.goto('/?two-projects&agents-priority-3&agent-models')
+  await page.getByRole('button', { name: 'notes', exact: true }).click()
+
+  async function openCodexSettings() {
+    await page.getByRole('button', { name: 'Settings', exact: true }).click()
+    await page.getByRole('navigation', { name: 'Settings categories' }).getByRole('button', { name: 'Agents', exact: true }).click()
+    await page.getByRole('button', { name: 'Codex harness settings' }).click()
+    return page.getByRole('complementary', { name: 'Codex harness settings' })
+  }
+
+  let settings = await openCodexSettings()
+  async function chooseCustomModel(label: string, id: string) {
+    await settings.getByRole('button', { name: new RegExp(`^${label}:`) }).click()
+    const menu = page.getByRole('menu', { name: label, exact: true })
+    await menu.getByRole('searchbox').fill(id)
+    await menu.getByRole('menuitem', { name: `Use model ID “${id}”` }).click()
+  }
+
+  await expect(settings.getByRole('button', { name: /^Fallback 1 model:/ })).toHaveCount(0)
+  await settings.getByRole('button', { name: 'Default model: Agent default' }).click()
+  const modelMenu = page.getByRole('menu', { name: 'Default model', exact: true })
+  await modelMenu.getByRole('searchbox').fill('fxmdl')
+  const fixtureModel = modelMenu.getByRole('menuitemradio', { name: /fixture-model/ })
+  await expect(fixtureModel).toBeVisible()
+  const effortMenu = page.getByRole('menu', { name: 'Reasoning effort' })
+  await expect(effortMenu).toBeHidden()
+  await fixtureModel.hover()
+  await effortMenu.getByRole('menuitemradio', { name: 'High' }).click()
+  await settings.getByRole('button', { name: 'Add fallback' }).click()
+  await chooseCustomModel('Fallback 1 model', 'manual-codex-model')
+  await settings.getByRole('button', { name: 'Add fallback' }).click()
+  await settings.getByRole('combobox', { name: 'Fallback 2 agent' }).selectOption('opencode')
+  await chooseCustomModel('Fallback 2 model', 'manual-opencode-model')
+  await settings.getByRole('button', { name: 'Move fallback 2 up' }).click()
+  await settings.getByRole('button', { name: 'Save model settings' }).click()
+  await expect.poll(() => page.evaluate(() => JSON.parse(localStorage.getItem('fixture.settings') ?? '{}')
+    .app?.['agents.model_preferences']?.codex)).toEqual({
+      model: 'fixture-model', effort: 'high', fallbacks: [
+        { agent: 'opencode', model: 'manual-opencode-model', effort: null },
+        { agent: 'codex', model: 'manual-codex-model', effort: null },
+      ],
+    })
+
+  await page.reload()
+  const notes = page.getByRole('button', { name: 'notes', exact: true })
+  await expect(notes).toBeVisible()
+  await notes.click()
+  settings = await openCodexSettings()
+  await expect(settings.getByRole('button', { name: 'Default model: fixture-model · High' })).toBeVisible()
+  await expect(settings.getByRole('button', { name: 'Fallback 1 model: manual-opencode-model' })).toBeVisible()
+  await expect(settings.getByRole('button', { name: 'Fallback 2 model: manual-codex-model' })).toBeVisible()
+  await page.getByRole('button', { name: 'Back to app' }).click()
+
+  const composer = page.locator('.composer')
+  await expect(composer.getByRole('button', { name: 'Model / effort: fixture-model' })).toBeVisible()
+  await composer.getByLabel('Prompt', { exact: true }).fill('Use the configured model')
+  await composer.getByRole('button', { name: 'Send', exact: true }).click()
+  await expect.poll(() => page.evaluate(() => window.__codexTurns.at(-1)))
+    .toMatchObject({ model: 'fixture-model', effort: 'high' })
+})
+
 test('dragging agents reorders and persists their priority', async ({ page }) => {
   await page.goto('/?agents-priority-3')
   await page.getByRole('button', { name: 'Settings', exact: true }).click()
@@ -5230,10 +5292,17 @@ test('focuses the composer card and opens the toolbar menus above it', async ({ 
 
   await composer.getByRole('button', { name: 'Agent: Codex' }).click()
   await expect(composer.getByRole('menuitemradio', { name: 'Codex', checked: true })).toBeVisible()
-  await composer.getByRole('button', { name: 'Model / effort: gpt-6.1-terra' }).click()
+  const modelButton = composer.getByRole('button', { name: 'Model / effort: gpt-6.1-terra' })
+  await modelButton.click()
   const model = composer.getByRole('menu', { name: 'Model / effort' })
+  await expect(modelButton).toHaveAttribute('aria-expanded', 'true')
+  const buttonBounds = await modelButton.boundingBox()
+  const cardBounds = await model.boundingBox()
+  if (!buttonBounds || !cardBounds) throw new Error('The model picker should be visible')
+  expect(cardBounds.x + cardBounds.width).toBeCloseTo(buttonBounds.x + buttonBounds.width, 0)
   await expect(model.getByRole('menuitemradio', { name: 'gpt-6.1-terra', checked: true })).toBeVisible()
-  await expect(model.getByRole('menuitemradio', { name: 'Low', checked: true })).toBeVisible()
+  await model.getByRole('menuitemradio', { name: /gpt-6.1-terra/ }).hover()
+  await expect(page.getByRole('menu', { name: 'Reasoning effort' }).getByRole('menuitemradio', { name: 'Low', checked: true })).toBeVisible()
 })
 
 test('passes the model and its advertised effort from the empty composer to the first turn', async ({ page }) => {
@@ -5242,10 +5311,14 @@ test('passes the model and its advertised effort from the empty composer to the 
   const composer = page.locator('.composer')
   const menu = composer.getByRole('menu', { name: 'Model / effort' })
   await composer.getByRole('button', { name: 'Model / effort: gpt-6.1-terra' }).click()
-  await menu.getByRole('group', { name: 'Model', exact: true }).getByRole('menuitemradio', { name: 'fixture-model' }).click()
+  await menu.getByRole('menuitemradio', { name: /fixture-model/ }).click()
   const selected = composer.getByRole('button', { name: 'Model / effort: fixture-model' })
   await selected.click()
-  const effort = menu.getByRole('group', { name: 'Reasoning effort' })
+  const effort = page.getByRole('menu', { name: 'Reasoning effort' })
+  await expect(effort).toBeHidden()
+  const filter = menu.getByRole('searchbox')
+  await expect(filter).toBeFocused()
+  await filter.press('ArrowRight')
   await expect(effort.getByRole('menuitemradio', { name: 'Medium', checked: true })).toBeVisible()
   await expect(effort.getByRole('menuitemradio', { name: 'Low' })).toHaveCount(0)
   await effort.getByRole('menuitemradio', { name: 'High' }).click()

@@ -1266,7 +1266,24 @@ export function archiveReviewed(taskIds: string[]): Promise<void> {
   return invoke('archive_reviewed', { taskIds })
 }
 
+export type ModelAgent = Exclude<Agent, 'freebuff'>
+
+export interface AgentModelSelection {
+  model?: string | null
+  effort?: string | null
+}
+
+export interface AgentModelFallback extends AgentModelSelection {
+  agent: ModelAgent
+  model: string
+}
+
+export interface AgentModelPreferences extends AgentModelSelection {
+  fallbacks?: AgentModelFallback[]
+}
+
 export interface SettingsValues {
+  'agents.model_preferences': Partial<Record<ModelAgent, AgentModelPreferences>>
   'agents.priority': PoolAgent[]
   'onboarding.completed': boolean
   theme: 'system' | 'light' | 'dark'

@@ -65,10 +65,66 @@ fn valid_preview_servers(value: &Value) -> bool {
         })
 }
 
+#[derive(Deserialize)]
+struct ModelPreferences {
+    model: Option<String>,
+    effort: Option<String>,
+    #[serde(default)]
+    fallbacks: Vec<ModelFallback>,
+}
+
+#[derive(Deserialize)]
+struct ModelFallback {
+    agent: shep_core::Agent,
+    model: String,
+    effort: Option<String>,
+}
+
+fn valid_model_preferences(value: &Value) -> bool {
+    let Ok(preferences) =
+        serde_json::from_value::<BTreeMap<String, ModelPreferences>>(value.clone())
+    else {
+        return false;
+    };
+    fn valid_text(text: &str) -> bool {
+        !text.trim().is_empty() && text.len() <= 512 && !text.contains('\0')
+    }
+    fn valid_model(agent: shep_core::Agent, model: &str) -> bool {
+        valid_text(model)
+            && (agent != shep_core::Agent::Pi
+                || model.split_once('/').is_some_and(|(provider, id)| {
+                    !provider.trim().is_empty() && !id.trim().is_empty()
+                }))
+    }
+    preferences.iter().all(|(agent, preferences)| {
+        let Some(agent) = shep_core::Agent::parse(agent) else {
+            return false;
+        };
+        agent != shep_core::Agent::Freebuff
+            && preferences
+                .model
+                .as_deref()
+                .is_none_or(|model| valid_model(agent, model))
+            && preferences
+                .effort
+                .as_deref()
+                .is_none_or(|effort| agent == shep_core::Agent::Codex && valid_text(effort))
+            && preferences.fallbacks.iter().all(|entry| {
+                entry.agent != shep_core::Agent::Freebuff
+                    && valid_model(entry.agent, &entry.model)
+                    && entry.effort.as_deref().is_none_or(|effort| {
+                        entry.agent == shep_core::Agent::Codex && valid_text(effort)
+                    })
+            })
+    })
+}
+
 #[derive(Clone, Copy, Deserialize)]
 pub enum SettingKey {
     #[serde(rename = "agents.priority")]
     AgentPriority,
+    #[serde(rename = "agents.model_preferences")]
+    AgentModelPreferences,
     #[serde(rename = "onboarding.completed")]
     OnboardingCompleted,
     #[serde(rename = "theme")]
@@ -96,8 +152,9 @@ pub enum SettingKey {
 }
 
 impl SettingKey {
-    const ALL: [Self; 13] = [
+    const ALL: [Self; 14] = [
         Self::AgentPriority,
+        Self::AgentModelPreferences,
         Self::OnboardingCompleted,
         Self::Theme,
         Self::Density,
@@ -115,6 +172,7 @@ impl SettingKey {
     fn name(self) -> &'static str {
         match self {
             Self::AgentPriority => "agents.priority",
+            Self::AgentModelPreferences => "agents.model_preferences",
             Self::OnboardingCompleted => "onboarding.completed",
             Self::Theme => "theme",
             Self::Density => "appearance.density",
@@ -132,6 +190,7 @@ impl SettingKey {
 
     fn default_value(self) -> Value {
         match self {
+            Self::AgentModelPreferences => json!({}),
             Self::AgentPriority => json!(["codex", "opencode", "pi", "claude", "freebuff"]),
             Self::OnboardingCompleted => json!(false),
             Self::Theme => json!("system"),
@@ -177,6 +236,9 @@ impl SettingKey {
                 .is_err() =>
             {
                 "Enter a valid project environment."
+            }
+            Self::AgentModelPreferences if !valid_model_preferences(value) => {
+                "Enter supported agents, model IDs, and effort levels for Codex."
             }
             Self::AgentPriority
                 if !value.as_array().is_some_and(|agents| {

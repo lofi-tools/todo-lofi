@@ -271,13 +271,34 @@ supports version 1 setup scripts and named actions, including platform-specific
 variants; unsupported fields are reported instead of being silently imported.
 If a later source file is invalid, the saved copy remains available.
 
-In **Settings → Agent pool**, reorder installed agents to choose which available
+In **Settings → Agents**, reorder installed agents to choose which available
 agent a new conversation uses first. You can change the agent in the draft.
 If none is available, the draft remains editable until a harness is configured.
 The order can also be edited in `settings.json`:
 
 ```json
 { "app": { "agents.priority": ["codex", "opencode", "pi", "claude", "freebuff"] } }
+```
+
+Select an agent in **Settings → Agents** to set its default model for new
+conversations. The selector offers project catalog entries when available and
+accepts model IDs directly. For Pi, enter `provider/model-id`. Codex also
+accepts a default reasoning effort. The same pane saves a fallback list in the
+order you set. These settings are stored under
+`app["agents.model_preferences"]`, keyed by agent:
+
+```json
+{
+  "app": {
+    "agents.model_preferences": {
+      "codex": {
+        "model": "gpt-6.1-terra",
+        "effort": "low",
+        "fallbacks": []
+      }
+    }
+  }
+}
 ```
 
 ## Attachment limits

@@ -1165,7 +1165,7 @@ textarea {
   padding: 16px;
 }
 
-.settings__category .settings__row {
+.settings__category .settings__row, .settings__agent-models .settings__row {
   display: grid;
   grid-template-columns: minmax(140px, 1fr) minmax(0, 1fr);
   align-items: center;
@@ -1851,8 +1851,8 @@ button.pool__agent-label { padding: 0; border: 0; background: transparent; color
 .picker-menu {
   inset: auto;
   width: max-content;
-  min-width: 164px;
-  max-width: min(360px, calc(100vw - 24px));
+  min-width: min(164px, var(--picker-menu-width, 164px));
+  max-width: min(360px, calc(100vw - 24px), var(--picker-menu-width, 360px));
   max-height: min(280px, var(--picker-menu-room, 280px));
   margin: 0;
   overflow: auto;
@@ -3604,6 +3604,12 @@ button.pool__agent-label { padding: 0; border: 0; background: transparent; color
   font: inherit;
 }
 .settings-select:disabled { color: var(--text-disabled); opacity: .6; }
+.settings__agent-models { display: grid; gap: 10px; margin-block: 16px; min-width: 0; }
+.settings__agent-models h4 { margin: 0; }
+.settings__fallbacks { display: grid; gap: 8px; margin: 0; padding-inline-start: 24px; }
+.settings__fallbacks:empty { display: none; }
+.settings__fallback { padding: 8px; border: 1px solid var(--border); border-radius: 6px; }
+.settings__fallback-actions { display: flex; flex-wrap: wrap; gap: 6px; }
 .settings__harnesses { display: grid; gap: 12px; justify-items: start; min-width: 0; }
 .settings__harness { display: grid; gap: 4px; min-width: 0; }
 .settings__harness-name { display: flex; align-items: center; gap: 8px; }
@@ -3687,3 +3693,18 @@ button.pool__agent-label { padding: 0; border: 0; background: transparent; color
   opacity: 1;
   visibility: visible;
 }
+
+.picker-menu--submenu .picker-menu__label { white-space: nowrap; }
+.picker-menu__submenu-caret { margin-inline-start: auto; display: inline-flex; }
+.picker-menu__submenu-caret .picker-caret { transform: rotate(-90deg); }
+.settings-select--picker {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 5px;
+  min-width: 0;
+  padding-inline-end: 10px;
+  text-align: start;
+  background-image: none;
+}
+.model-picker__value { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

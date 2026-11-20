@@ -630,6 +630,20 @@ impl AgentHarness for PiHarness {
             return Err(protocol("Pi is already running a turn"));
         }
         let rpc = self.rpc.as_ref().ok_or(HarnessError::NotStarted)?;
+        if let Some(model) = input.model.as_deref() {
+            let (provider, model_id) = model
+                .split_once('/')
+                .filter(|(provider, model_id)| !provider.is_empty() && !model_id.is_empty())
+                .ok_or_else(|| protocol("Enter a Pi model as provider/model-id."))?;
+            rpc.request(
+                "set_model",
+                Map::from_iter([
+                    ("provider".into(), json!(provider)),
+                    ("modelId".into(), json!(model_id)),
+                ]),
+            )
+            .await?;
+        }
         let mut fields = Map::from_iter([("message".into(), json!(input.text))]);
         if !input.attachments.is_empty() {
             let mut images = Vec::with_capacity(input.attachments.len());
@@ -1828,6 +1842,12 @@ printf '%s\n' "$@" > "$ARGS_FILE"
 IFS= read -r state || exit 3
 state_id=$(printf '%s\n' "$state" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
 printf '{"type":"response","id":"%s","command":"get_state","success":true,"data":{"sessionId":"pi-bridge","isStreaming":false,"isCompacting":false,"pendingMessageCount":0}}\n' "$state_id"
+IFS= read -r model || exit 4
+case "$model" in *'"type":"set_model"'*) ;; *) exit 9;; esac
+case "$model" in *'"provider":"fixture"'*) ;; *) exit 10;; esac
+case "$model" in *'"modelId":"test/model"'*) ;; *) exit 11;; esac
+model_request_id=$(printf '%s\n' "$model" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
+printf '{"type":"response","id":"%s","command":"set_model","success":true}\n' "$model_request_id"
 IFS= read -r prompt || exit 4
 prompt_id=$(printf '%s\n' "$prompt" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
 printf '{"type":"response","id":"%s","command":"prompt","success":true,"data":{"disposition":"started"}}\n' "$prompt_id"
@@ -1860,7 +1880,12 @@ exec sleep 30
         let extension = std::fs::read_to_string(&extension_path)?;
         assert!(extension.contains("tool_call") && extension.contains("ctx.ui.confirm"));
         assert_eq!(harness.open_session(None).await?.as_str(), "pi-bridge");
-        harness.prompt(PromptInput::text("fixture")).await?;
+        harness
+            .prompt(PromptInput {
+                model: Some("fixture/test/model".into()),
+                ..PromptInput::text("fixture")
+            })
+            .await?;
         let first = wait_for_approval(&mut harness).await?;
         assert_eq!(first.title, "Allow Pi to run bash?");
         harness

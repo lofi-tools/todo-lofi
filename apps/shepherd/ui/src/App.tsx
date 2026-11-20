@@ -23,6 +23,8 @@ import { ProjectRow } from './ProjectRow'
 import { PreviewPane, type PreviewAnnotation } from './PreviewPane'
 import { GitPane } from './GitPane'
 import { ReviewPane } from './ReviewPane'
+import { supportsModelSelection } from './AgentModelSettings'
+import { ModelPicker, codexModelChoices } from './ModelPicker'
 import { SEND_ACCENTS, SettingsPane, type SettingsCategory } from './SettingsPane'
 import { agentPriority } from './PoolSettings'
 import { FreebuffPane, TerminalPane, type TerminalCommands } from './TerminalPane'
@@ -709,7 +711,20 @@ export function App() {
       if (promptSaveTimer) clearTimeout(promptSaveTimer)
     })
   })
-  const codexOptions = () => turnOptions()?.codex
+  const conversationModelDefaults = () => {
+    const agent = currentAgent()
+    const current = workspace()
+    if (!supportsModelSelection(agent) || (current && current.task.state !== 'draft'
+      && (current.task.state !== 'ready' || current.transcript.some((entry) => entry.kind.type === 'userMessage')))) return
+    return preferences()?.app['agents.model_preferences']?.[agent]
+  }
+  const codexOptions = () => {
+    const selected = turnOptions()?.codex
+    if (selected) return selected
+    const defaults = conversationModelDefaults()
+    if (!defaults?.model && !defaults?.effort) return
+    return { model: defaults.model ?? undefined, effort: defaults.effort ?? undefined }
+  }
   const pendingMode = () => turnOptions()?.mode ?? turnOptions()?.modeReset
   const [antigravityOptions, { refetch: refetchAntigravityOptions }] = createResource(
     () => {
@@ -793,13 +808,13 @@ export function App() {
   )
   const composerModels = (): bridge.AgentModels | undefined => {
     const current = workspace()
-    const selected = turnOptions()?.model ?? current?.task.model ?? undefined
+    const selected = turnOptions()?.model ?? current?.task.model ?? conversationModelDefaults()?.model ?? undefined
     if (currentAgent() === 'codex' || currentAgent() === 'freebuff') return
     if (current?.models) return selected ? { ...current.models, current: selected } : current.models
     if (currentAgent() === 'antigravity') {
       const catalog = antigravityOptions()
       const models = catalog?.projectId === selectedProjectId() ? catalog.options?.models : undefined
-      return models ? { ...models, current: selected ?? models.current } : undefined
+      return models ? { ...models, current: selected ?? models.current } : selected ? { current: selected, options: [] } : undefined
     }
     const catalog = projectModels()
     const models = catalog && catalog.projectId === selectedProjectId()
@@ -2292,7 +2307,9 @@ export function App() {
     const message = (skillPrefix + text).trimEnd()
     const codex = currentAgent() === 'codex' ? codexOptions() : undefined
     const mode = pendingMode()
-    const model = currentAgent() !== 'codex' ? turnOptions()?.model : undefined
+    const model = currentAgent() !== 'codex'
+      ? turnOptions()?.model ?? (current?.task.model ? undefined : conversationModelDefaults()?.model ?? undefined)
+      : undefined
     if ((!current && !agentAvailability()?.[newTaskAgent()]) || !projectId || (!text && !files.length && !selectedSkills.length) || (!canCompose() && !canQueuePrompt()) || pending()) return
     const projectScope = `project:${projectId}`
     void run(async () => {
@@ -2830,6 +2847,7 @@ export function App() {
             pending={pending()}
             projectImports={<ProjectImportSources codexDisabled={pending() || !codexAvailable()} note={importNote()} onImportCodex={importProjects} />}
             projects={projects()}
+            activeProjectId={selectedProjectId()}
             projectSettingsRequest={projectSettingsRequest()}
             approvalChange={approvalChange()}
             showProjectArchived={showsArchived}
@@ -3188,9 +3206,15 @@ export function App() {
                 onAttach={() => fileInput?.click()} />
               <div class="composer__send-actions">
                 <Show when={currentAgent() === 'codex'}>
-                  <ComposerModelPicker model={composerModel()} effort={composerEffort()} models={codexCatalog()?.models ?? []}
-                    disabled={pending() || cancellingTurn() || !!freebuffProjectId()}
-                    options={codexOptions()} onChange={(codex) => patchTurnOptions({ codex })} openRequest={modelPickerRequest()} />
+                  <ModelPicker label="Model / effort" emptyLabel="Codex default" triggerClass="composer__picker"
+                    model={composerModel()} effort={composerEffort()} models={codexModelChoices(codexCatalog()?.models ?? [])}
+                    disabled={pending() || cancellingTurn()} openRequest={modelPickerRequest()} above align="end" within=".chat"
+                    onChange={({ model, effort }) => patchTurnOptions({
+                      codex: {
+                        model: model ?? undefined,
+                        effort: effort ?? codexCatalog()?.models.find((entry) => entry.model === model)?.defaultReasoningEffort ?? undefined,
+                      },
+                    })} />
                 </Show>
                 <Show when={currentAgent() !== 'codex' ? composerModels() : undefined}>
                   {(models) => <ComposerAgentModelPicker models={models()}
@@ -3633,26 +3657,11 @@ function ComposerAgentModelPicker(props: {
   onChange: (model: string) => void
 }) {
   const available = () => props.models.options.length > 0 || !!props.models.current
-  const current = () => props.models.options.find((model) => model.id === props.models.current)
-  const label = () => current()?.name ?? props.models.current ?? 'Default model'
-  const options = () => [
-    ...(!current() && props.models.current
-      ? [{ id: `model:${props.models.current}`, name: props.models.current, disabled: true }]
-      : []),
-    ...props.models.options.map((model) => ({
-      id: `model:${model.id}`, name: model.name, detail: model.description ?? undefined, disabled: props.disabled,
-    })),
-  ]
-  function choose(id: string) {
-    if (id.startsWith('model:')) props.onChange(id.slice(6))
-  }
   return (
     <Show when={available()} fallback={<ComposerPickerFallback label="No model available" detail={props.unavailable} onRetry={props.onRetry} />}>
-      <PickerMenu label="Model" text={label()} value={`model:${props.models.current ?? ''}`} options={options()}
-        onChange={choose} triggerClass="composer__picker" disabled={props.disabled} openRequest={props.openRequest} above filterable>
-        <span class="composer__picker-label">{label()}</span>
-        <PickerCaret />
-      </PickerMenu>
+      <ModelPicker label="Model" emptyLabel="Default model" model={props.models.current} models={props.models.options}
+        displayNames triggerClass="composer__picker" disabled={props.disabled} openRequest={props.openRequest} above align="end" within=".chat"
+        onChange={({ model }) => { if (model) props.onChange(model) }} />
     </Show>
   )
 }
@@ -3673,56 +3682,6 @@ function ComposerPickerFallback(props: { label: string; detail?: string; onRetry
         <span class="composer__picker-label">{props.label}</span>
       </button>
     </span>
-  )
-}
-
-function ComposerModelPicker(props: {
-  model: string | null
-  effort?: string | null
-  models: bridge.CodexModel[]
-  openRequest: number
-  options?: bridge.CodexTurnOptions
-  disabled: boolean
-  onChange: (options: bridge.CodexTurnOptions) => void
-}) {
-  const modelLabel = () => props.model ?? 'Codex default'
-  const modelInfo = () => props.models.find((model) => model.model === props.model)
-  const modelOptions = () => [
-    ...(!modelInfo() ? [{ id: `model:${modelLabel()}`, name: modelLabel(), disabled: true }] : []),
-    ...props.models.map((model) => ({
-      id: `model:${model.model}`, name: model.model, detail: model.displayName, disabled: props.disabled,
-    })),
-  ]
-  const effortOptions = () => modelInfo()?.supportedReasoningEfforts.map(({ reasoningEffort, description }) => ({
-    id: `effort:${reasoningEffort}`,
-    name: reasoningEffort.charAt(0).toUpperCase() + reasoningEffort.slice(1),
-    detail: description,
-    disabled: props.disabled,
-  })) ?? []
-  const groups = () => {
-    const efforts = effortOptions()
-    return [
-      { label: 'Model', value: `model:${modelLabel()}`, options: modelOptions() },
-      {
-        label: 'Reasoning effort',
-        value: `effort:${props.effort ?? modelInfo()?.defaultReasoningEffort ?? ''}`,
-        options: efforts.length ? efforts : [{ id: 'unavailable', name: 'Effort unavailable', disabled: true }],
-      },
-    ]
-  }
-  function choose(id: string) {
-    if (id.startsWith('model:')) {
-      const model = props.models.find((item) => item.model === id.slice(6))
-      if (model) props.onChange({ model: model.model, effort: model.defaultReasoningEffort ?? undefined })
-    } else if (id.startsWith('effort:')) {
-      props.onChange({ ...props.options, effort: id.slice(7) })
-    }
-  }
-  return (
-    <PickerMenu label="Model / effort" text={modelLabel()} groups={groups()} onChange={choose} triggerClass="composer__picker" disabled={props.disabled} openRequest={props.openRequest} above filterable>
-      <span class="composer__picker-label">{modelLabel()}</span>
-      <PickerCaret />
-    </PickerMenu>
   )
 }
 

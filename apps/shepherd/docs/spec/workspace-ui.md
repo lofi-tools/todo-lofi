@@ -251,7 +251,13 @@ current layout and give future changes a point of comparison.
   Detected but unavailable harnesses appear in a separate section. Selecting a
   harness or its settings gear opens its settings and detected paths in a pane to
   the right. Selecting the same harness again or using the pane's close button
-  closes it. Kilo Code is shown as unimplemented, with muted
+  closes it. For agents with model selection, the pane saves a default model for
+  new conversations. Choose from the active project's catalog when available or
+  enter a model ID in the searchable model picker. Hover a Codex model or press
+  Right Arrow on it to open its effort submenu. Explicit
+  composer selections take precedence. The pane saves an optional, ordered
+  list of fallback agents and models, with an effort for Codex entries.
+  Kilo Code is shown as unimplemented, with muted
   text and grayscale icons, and can be added to the saved priority without being
   selected to run a conversation. Offer detected harnesses that are not already
   in the pool for addition. Detect the Antigravity app, its separate `agy` CLI, and Kilo CLI,
@@ -543,8 +549,10 @@ current layout and give future changes a point of comparison.
   the model resolved from Shepherd's launch configuration. Once a session
   starts, use the model reported by that session. List the visible models
   advertised by Codex and the reasoning efforts available for the chosen
-  model. The model filter fills the menu’s inner width without an extra inset.
-  Choosing a model also selects its advertised default effort. A
+  model. The composer menu aligns its right edge with the picker button. The
+  model filter fills the menu’s inner width without an extra inset.
+  Choosing a model also selects its advertised default effort. Hover a model or
+  press Right Arrow on it to choose a different effort in the submenu. A
   choice in the composer applies to the next turn. Use **Codex default** if
   the model name is unavailable. OpenCode and Claude Code use their own
   model configuration and do not show this picker.
