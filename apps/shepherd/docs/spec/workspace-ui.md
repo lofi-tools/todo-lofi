@@ -253,8 +253,9 @@ current layout and give future changes a point of comparison.
   the right. Selecting the same harness again or using the pane's close button
   closes it. For agents with model selection, the pane saves a default model for
   new conversations. Choose from the active project's catalog when available or
-  enter a model ID in the searchable model picker. Hover a Codex model or press
-  Right Arrow on it to open its effort submenu. Explicit
+  enter a model ID in the searchable model picker. When the selected model
+  advertises reasoning effort, the picker shows a slider below the model list.
+  Explicit
   composer selections take precedence. The pane saves an optional, ordered
   list of fallback agents and models, with an effort for Codex entries.
   Kilo Code is shown as unimplemented, with muted
@@ -551,8 +552,9 @@ current layout and give future changes a point of comparison.
   advertised by Codex and the reasoning efforts available for the chosen
   model. The composer menu aligns its right edge with the picker button. The
   model filter fills the menu’s inner width without an extra inset.
-  Choosing a model also selects its advertised default effort. Hover a model or
-  press Right Arrow on it to choose a different effort in the submenu. A
+  Choosing a model also selects its advertised default effort. Adjust effort
+  with the slider at the bottom of the card. It shows the model and current
+  effort, with stops ordered from lowest to highest. A
   choice in the composer applies to the next turn. Use **Codex default** if
   the model name is unavailable. OpenCode and Claude Code use their own
   model configuration and do not show this picker.

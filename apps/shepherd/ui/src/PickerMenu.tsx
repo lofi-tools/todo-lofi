@@ -1,4 +1,4 @@
-import { For, Show, createEffect, createSignal, createUniqueId, on, onCleanup, type JSX } from 'solid-js'
+import { For, Show, createEffect, createMemo, createSignal, createUniqueId, on, onCleanup, type JSX } from 'solid-js'
 import { fuzzyScore } from './fuzzy'
 
 export interface PickerOption {
@@ -8,7 +8,7 @@ export interface PickerOption {
   description?: string
   disabled?: boolean
   icon?: JSX.Element
-  submenu?: { label: string; value?: string; options: PickerOption[] }
+  keepOpen?: boolean
 }
 
 export interface PickerGroup {
@@ -27,6 +27,7 @@ export interface PickerMenuProps {
   filterable?: boolean
   customOption?: (query: string) => PickerOption | undefined
   disabled?: boolean
+  footer?: JSX.Element
 }
 
 export function PickerCaret() {
@@ -39,9 +40,7 @@ export function PickerCaret() {
 
 export function PickerMenu(props: PickerMenuProps & { triggerClass: string; above?: boolean; openRequest?: number; align?: 'start' | 'end'; within?: string; children: JSX.Element }) {
   const menuId = createUniqueId()
-  const submenuId = createUniqueId()
-  const [submenuOwner, setSubmenuOwner] = createSignal<{ id: string; row: HTMLButtonElement }>()
-  let submenu!: HTMLSpanElement
+  const footer = createMemo(() => props.footer)
   const [open, setOpen] = createSignal(false)
   const [filterQuery, setFilterQuery] = createSignal('')
   const [activeId, setActiveId] = createSignal<string | null>(null)
@@ -90,55 +89,20 @@ export function PickerMenu(props: PickerMenuProps & { triggerClass: string; abov
     menu.style.top = `${opensAbove ? bounds.top - gap - menu.offsetHeight : bounds.bottom + gap}px`
   }
 
-  const activeSubmenu = () => choices().find(({ option }) => option.id === submenuOwner()?.id)?.option.submenu
-
-  function positionSubmenu() {
-    const owner = submenuOwner()
-    if (!owner || !submenu.matches(':popover-open')) return
-    const bounds = owner.row.getBoundingClientRect()
-    const inset = 12
-    const width = submenu.offsetWidth
-    const right = bounds.right
-    const left = bounds.left - width
-    const x = right + width <= window.innerWidth - inset || left < inset ? right : left
-    submenu.style.left = `${Math.max(inset, Math.min(x, window.innerWidth - width - inset))}px`
-    submenu.style.top = `${Math.max(inset, Math.min(bounds.top, window.innerHeight - submenu.offsetHeight - inset))}px`
-  }
-
-  function closeSubmenu() {
-    if (submenu?.matches(':popover-open')) submenu.hidePopover()
-    setSubmenuOwner(undefined)
-  }
-
-  function showSubmenu(option: PickerOption, row: HTMLButtonElement, focus = false) {
-    if (!option.submenu) {
-      closeSubmenu()
-      return
-    }
-    setSubmenuOwner({ id: option.id, row })
-    if (!submenu.matches(':popover-open')) submenu.showPopover()
-    positionSubmenu()
-    if (focus) {
-      const selected = submenu.querySelector<HTMLButtonElement>('[aria-checked="true"]:enabled')
-      const first = selected ?? submenu.querySelector<HTMLButtonElement>('button:enabled')
-      first?.focus()
-    }
-  }
-
-  createEffect(() => {
-    if (submenuOwner() && !activeSubmenu()) closeSubmenu()
-  })
-
   function closeMenu(restoreFocus = true) {
-    closeSubmenu()
-    menu.hidePopover()
+    if (menu.matches(':popover-open')) menu.hidePopover()
     if (restoreFocus) trigger.focus({ preventScroll: true })
     else queueMicrotask(() => { if (document.activeElement === trigger) trigger.blur() })
   }
 
   function chooseOption(group: PickerGroup, option: PickerOption, restoreFocus = true) {
-    closeMenu(restoreFocus)
     if (option.id !== group.value) props.onChange?.(option.id)
+    if (option.keepOpen) {
+      setActiveId(option.id)
+      filter?.focus({ preventScroll: true })
+    } else {
+      closeMenu(restoreFocus)
+    }
   }
 
   createEffect(() => {
@@ -154,11 +118,14 @@ export function PickerMenu(props: PickerMenuProps & { triggerClass: string; abov
     const scrollPane = trigger.closest('.chat__transcript, .settings__detail')
     const dismiss = () => menu.hidePopover()
     scrollPane?.addEventListener('scroll', dismiss)
-    const reposition = () => { positionMenu(); positionSubmenu() }
+    const reposition = () => positionMenu()
+    const resizeObserver = footer() ? new ResizeObserver(reposition) : undefined
+    resizeObserver?.observe(menu)
     window.addEventListener('resize', reposition)
     onCleanup(() => {
       scrollPane?.removeEventListener('scroll', dismiss)
       window.removeEventListener('resize', reposition)
+      resizeObserver?.disconnect()
     })
   })
 
@@ -182,18 +149,15 @@ export function PickerMenu(props: PickerMenuProps & { triggerClass: string; abov
         ref={menu}
         id={menuId}
         class="picker-menu"
+        classList={{ 'picker-menu--footer': !!footer() }}
         popover="auto"
         role="menu"
         tabindex={-1}
         aria-label={props.label}
-        onPointerLeave={(event) => {
-          if (event.pointerType === 'mouse' && !submenu.contains(document.activeElement)) closeSubmenu()
-        }}
         on:toggle={(event) => {
           const isOpen = event.newState === 'open'
           setOpen(isOpen)
           if (!isOpen) {
-            closeSubmenu()
             setFilterQuery('')
             setActiveId(null)
             return
@@ -208,9 +172,14 @@ export function PickerMenu(props: PickerMenuProps & { triggerClass: string; abov
             ?? menu
           current.focus()
         }}
+        onFocusOut={(event) => {
+          if (footer() && open() && event.relatedTarget instanceof Node && !menu.contains(event.relatedTarget)) {
+            closeMenu(false)
+          }
+        }}
         onKeyDown={(event) => {
           if (event.key === 'Tab') {
-            closeMenu()
+            if (!footer()) closeMenu()
             return
           }
           if (event.key === 'Escape') {
@@ -219,19 +188,8 @@ export function PickerMenu(props: PickerMenuProps & { triggerClass: string; abov
             return
           }
           if (props.filterable) {
+            if (event.target !== filter && footer()) return
             const available = choices()
-            if (event.key === 'ArrowRight') {
-              const choice = available.find(({ option }) => option.id === activeId())
-                ?? available.find(({ group, option }) => group.value === option.id)
-                ?? available[0]
-              const row = Array.from(menu.querySelectorAll<HTMLButtonElement>('[data-picker-option]'))
-                .find((candidate) => candidate.dataset.pickerOption === choice?.option.id)
-              if (choice?.option.submenu && row) {
-                event.preventDefault()
-                showSubmenu(choice.option, row, true)
-              }
-              return
-            }
             if (event.key === 'Enter') {
               event.preventDefault()
               const choice = available.find((candidate) => candidate.option.id === activeId()) ?? available[0]
@@ -249,7 +207,6 @@ export function PickerMenu(props: PickerMenuProps & { triggerClass: string; abov
                 : current < 0
                   ? (step > 0 ? 0 : available.length - 1)
                   : (current + step + available.length) % available.length
-            closeSubmenu()
             setActiveId(available[next]?.option.id ?? null)
             return
           }
@@ -266,7 +223,7 @@ export function PickerMenu(props: PickerMenuProps & { triggerClass: string; abov
         }}
       >
         <Show when={props.filterable}>
-          <span class="picker-menu__search" onPointerEnter={(event) => { if (event.pointerType === 'mouse') closeSubmenu() }}>
+          <span class="picker-menu__search">
             <input
               ref={filter}
               class="picker-menu__filter"
@@ -280,94 +237,51 @@ export function PickerMenu(props: PickerMenuProps & { triggerClass: string; abov
               value={filterQuery()}
               onInput={(event) => {
                 if (event.isComposing) return
-                closeSubmenu()
                 setFilterQuery(event.currentTarget.value)
                 setActiveId(null)
               }}
               onCompositionEnd={(event) => {
-                closeSubmenu()
                 setFilterQuery(event.currentTarget.value)
                 setActiveId(null)
               }}
             />
           </span>
-          <Show when={choices().length === 0}>
+        </Show>
+        <span class="picker-menu__options">
+          <Show when={props.filterable && choices().length === 0}>
             <p class="picker-menu__empty" role="status">No matches.</p>
           </Show>
-        </Show>
-        <For each={visibleGroups()}>{(group) =>
-          <span class="picker-menu__group" role={group.label ? 'group' : undefined} aria-label={group.label}>
-            <Show when={group.label}><span class="picker-menu__label" aria-hidden="true">{group.label}</span></Show>
-            <For each={group.options}>{(option) => (
-              <button
-                type="button"
-                class="nav-item"
-                role={group.value === undefined ? 'menuitem' : 'menuitemradio'}
-                tabindex={-1}
-                aria-checked={group.value === undefined ? undefined : group.value === option.id}
-                data-picker-option={option.submenu ? option.id : undefined}
-                aria-haspopup={option.submenu ? 'menu' : undefined}
-                aria-expanded={option.submenu ? submenuOwner()?.id === option.id : undefined}
-                aria-controls={option.submenu ? submenuId : undefined}
-                title={option.detail}
-                disabled={option.disabled}
-                classList={{ 'picker-menu__option--active': props.filterable && activeId() === option.id }}
-                onPointerEnter={(event) => {
-                  if (event.pointerType === 'mouse' && !option.disabled) showSubmenu(option, event.currentTarget)
-                }}
-                onClick={(event) => chooseOption(group, option, event.detail === 0)}
-              >
-                <Show when={option.icon}>
-                  <span class="picker-menu__icon">{option.icon}</span>
-                </Show>
-                <span>{option.name}</span>
-                <Show when={option.description}><span class="picker-menu__description">{option.description}</span></Show>
-                <Show when={option.submenu}>
-                  <span class="picker-menu__submenu-caret"><PickerCaret /></span>
-                </Show>
-                <Show when={group.value === option.id}>
-                  <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                    <path d="m3.5 8 3 3 6-6" />
-                  </svg>
-                </Show>
-              </button>
-            )}</For>
-          </span>
-        }</For>
-        <span ref={submenu} id={submenuId} class="picker-menu picker-menu--submenu" popover="manual"
-          role="menu" aria-label={activeSubmenu()?.label}
-          onKeyDown={(event) => {
-            if (event.key === 'ArrowLeft' || event.key === 'Escape') {
-              event.preventDefault()
-              event.stopPropagation()
-              closeSubmenu()
-              filter?.focus({ preventScroll: true })
-            } else if (['ArrowUp', 'ArrowDown', 'Home', 'End'].includes(event.key)) {
-              event.preventDefault()
-              event.stopPropagation()
-              const items = Array.from(submenu.querySelectorAll<HTMLButtonElement>('button:enabled'))
-              if (!items.length) return
-              const current = items.findIndex((item) => item === document.activeElement)
-              const next = event.key === 'Home' ? 0 : event.key === 'End' ? items.length - 1
-                : (current + (event.key === 'ArrowDown' ? 1 : -1) + items.length) % items.length
-              items[next]?.focus()
-            } else if (event.key === 'Enter' || event.key === ' ') {
-              event.stopPropagation()
-            }
-          }}>
-          <Show when={activeSubmenu()}>{(group) =>
-            <span class="picker-menu__group">
-              <span class="picker-menu__label">{group().label}</span>
-              <For each={group().options}>{(option) =>
-                <button type="button" class="nav-item" role="menuitemradio" tabindex={-1}
-                  aria-checked={group().value === option.id} disabled={option.disabled}
-                  onClick={() => chooseOption(group(), option)}>
+          <For each={visibleGroups()}>{(group) =>
+            <span class="picker-menu__group" role={group.label ? 'group' : undefined} aria-label={group.label}>
+              <Show when={group.label}><span class="picker-menu__label" aria-hidden="true">{group.label}</span></Show>
+              <For each={group.options}>{(option) => (
+                <button
+                  type="button"
+                  class="nav-item"
+                  role={group.value === undefined ? 'menuitem' : 'menuitemradio'}
+                  tabindex={-1}
+                  aria-checked={group.value === undefined ? undefined : group.value === option.id}
+                  title={option.detail}
+                  disabled={option.disabled}
+                  classList={{ 'picker-menu__option--active': props.filterable && activeId() === option.id }}
+                  onClick={(event) => chooseOption(group, option, event.detail === 0)}
+                >
+                  <Show when={option.icon}>
+                    <span class="picker-menu__icon">{option.icon}</span>
+                  </Show>
                   <span>{option.name}</span>
+                  <Show when={option.description}><span class="picker-menu__description">{option.description}</span></Show>
+                  <Show when={group.value === option.id}>
+                    <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                      <path d="m3.5 8 3 3 6-6" />
+                    </svg>
+                  </Show>
                 </button>
-              }</For>
+              )}</For>
             </span>
-          }</Show>
+          }</For>
         </span>
+        {footer()}
       </span>
     </>
   )

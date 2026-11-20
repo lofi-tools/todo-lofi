@@ -911,8 +911,8 @@ test.beforeEach(async ({ context }) => {
               { model: 'gpt-6.1-terra', displayName: 'GPT-6.1 Terra', defaultReasoningEffort: 'low',
                 supportedReasoningEfforts: [{ reasoningEffort: 'low', description: 'Low effort' }] },
               { model: 'fixture-model', displayName: 'Fixture model', defaultReasoningEffort: 'medium',
-                supportedReasoningEfforts: [{ reasoningEffort: 'medium', description: 'Default effort' },
-                  { reasoningEffort: 'high', description: 'High effort' }] },
+                supportedReasoningEfforts: [{ reasoningEffort: 'high', description: 'High effort' },
+                  { reasoningEffort: 'medium', description: 'Default effort' }] },
             ] }
           case 'opencode_configured':
             return options.has('configured-opencode')
@@ -4911,10 +4911,14 @@ test('saves agent model defaults and an ordered cross-agent fallback chain', asy
   await modelMenu.getByRole('searchbox').fill('fxmdl')
   const fixtureModel = modelMenu.getByRole('menuitemradio', { name: /fixture-model/ })
   await expect(fixtureModel).toBeVisible()
-  const effortMenu = page.getByRole('menu', { name: 'Reasoning effort' })
-  await expect(effortMenu).toBeHidden()
-  await fixtureModel.hover()
-  await effortMenu.getByRole('menuitemradio', { name: 'High' }).click()
+  await fixtureModel.click()
+  const effortSlider = modelMenu.getByRole('slider', { name: 'Reasoning effort' })
+  await expect(effortSlider).toHaveAttribute('aria-valuetext', 'Medium')
+  await modelMenu.getByRole('searchbox').press('Tab')
+  await expect(effortSlider).toBeFocused()
+  await effortSlider.press('ArrowRight')
+  await expect(effortSlider).toHaveAttribute('aria-valuetext', 'High')
+  await effortSlider.press('Escape')
   await settings.getByRole('button', { name: 'Add fallback' }).click()
   await chooseCustomModel('Fallback 1 model', 'manual-codex-model')
   await settings.getByRole('button', { name: 'Add fallback' }).click()
@@ -5301,8 +5305,7 @@ test('focuses the composer card and opens the toolbar menus above it', async ({ 
   if (!buttonBounds || !cardBounds) throw new Error('The model picker should be visible')
   expect(cardBounds.x + cardBounds.width).toBeCloseTo(buttonBounds.x + buttonBounds.width, 0)
   await expect(model.getByRole('menuitemradio', { name: 'gpt-6.1-terra', checked: true })).toBeVisible()
-  await model.getByRole('menuitemradio', { name: /gpt-6.1-terra/ }).hover()
-  await expect(page.getByRole('menu', { name: 'Reasoning effort' }).getByRole('menuitemradio', { name: 'Low', checked: true })).toBeVisible()
+  await expect(model.getByRole('slider', { name: 'Reasoning effort' })).toHaveAttribute('aria-valuetext', 'Low')
 })
 
 test('passes the model and its advertised effort from the empty composer to the first turn', async ({ page }) => {
@@ -5313,15 +5316,20 @@ test('passes the model and its advertised effort from the empty composer to the 
   await composer.getByRole('button', { name: 'Model / effort: gpt-6.1-terra' }).click()
   await menu.getByRole('menuitemradio', { name: /fixture-model/ }).click()
   const selected = composer.getByRole('button', { name: 'Model / effort: fixture-model' })
-  await selected.click()
-  const effort = page.getByRole('menu', { name: 'Reasoning effort' })
-  await expect(effort).toBeHidden()
-  const filter = menu.getByRole('searchbox')
-  await expect(filter).toBeFocused()
-  await filter.press('ArrowRight')
-  await expect(effort.getByRole('menuitemradio', { name: 'Medium', checked: true })).toBeVisible()
-  await expect(effort.getByRole('menuitemradio', { name: 'Low' })).toHaveCount(0)
-  await effort.getByRole('menuitemradio', { name: 'High' }).click()
+  const slider = menu.getByRole('slider', { name: 'Reasoning effort' })
+  await expect(slider).toHaveAttribute('aria-valuetext', 'Medium')
+  await expect(slider).toHaveValue('0')
+  await expect(menu.locator('.level-picker__stop')).toHaveCount(2)
+  await expect(menu.locator('.model-picker__effort')).toContainText('Fixture model')
+  const sliderBounds = await slider.boundingBox()
+  if (!sliderBounds) throw new Error('The effort slider should be visible')
+  const y = sliderBounds.y + sliderBounds.height / 2
+  await page.mouse.move(sliderBounds.x + 7, y)
+  await page.mouse.down()
+  await page.mouse.move(sliderBounds.x + sliderBounds.width - 7, y, { steps: 5 })
+  await page.mouse.up()
+  await expect(slider).toHaveAttribute('aria-valuetext', 'High')
+  await slider.press('Escape')
 
   await composer.getByLabel('Prompt', { exact: true }).fill('Use the selected model')
   await composer.getByRole('button', { name: 'Send', exact: true }).click()
