@@ -77,7 +77,7 @@ For Shepherd's pool, export a filtered local copy instead of fetching the site:
 pnpm --dir apps/providers-catalog-web run export:pool
 ```
 
-It writes `.cache/shepherd/pool-catalog-advisory.v2.json` with only Claude Code,
+It writes `.cache/dev/shepherd/pool-catalog-advisory.v2.json` with only Claude Code,
 Codex and OpenCode, model-expanded limit records and provider/model choices.
 The file is not committed. Shepherd reads it when present and never opens DuckDB
 at runtime; adding a slot stays an explicit user action.

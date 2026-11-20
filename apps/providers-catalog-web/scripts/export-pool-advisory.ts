@@ -9,7 +9,7 @@ import { buildShepherdPoolCatalog } from '../src/lib/pool-export'
 const workspace = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..')
 const target = process.env.SHEPHERD_POOL_CATALOG
   ? path.resolve(process.env.SHEPHERD_POOL_CATALOG)
-  : path.join(workspace, '.cache/shepherd/pool-catalog-advisory.v2.json')
+  : path.join(workspace, '.cache/dev/shepherd/pool-catalog-advisory.v2.json')
 
 const catalog = await loadCatalog()
 const payload = buildShepherdPoolCatalog(catalog)

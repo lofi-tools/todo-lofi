@@ -3049,7 +3049,7 @@ implemented; no public deployment exists yet.
   data is published.
   Evidence (2026-11-09): `pnpm --dir apps/providers-catalog-web run
   export:pool` writes the uncommitted
-  `.cache/shepherd/pool-catalog-advisory.v2.json`. The export is filtered to the
+  `.cache/dev/shepherd/pool-catalog-advisory.v2.json`. The export is filtered to the
   three harnesses Shepherd implements (Claude Code, Codex, OpenCode) and carries
   provider/model choices plus model-expanded limit records; Pi and the other
   catalog harnesses are excluded. The current snapshot has six provider choices

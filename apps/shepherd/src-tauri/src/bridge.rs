@@ -2897,7 +2897,7 @@ impl ShellState {
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| {
                 std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                    .join("../../../.cache/shepherd/pool-catalog-advisory.v2.json")
+                    .join("../../../.cache/dev/shepherd/pool-catalog-advisory.v2.json")
             });
         match std::fs::read_to_string(&path) {
             Ok(text) => Ok(Some(text)),
