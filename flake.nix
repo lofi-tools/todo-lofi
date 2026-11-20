@@ -511,6 +511,31 @@
             repo_root=$(${pkgs.git}/bin/git rev-parse --show-toplevel) || exit 1
             rm -rf -- "$repo_root/.cache/test-output/runs"
           '';
+          myDevShell.cleanups.test-output-worktrees.script = ''
+            (
+              repo_root=$(${pkgs.git}/bin/git rev-parse --show-toplevel) || exit 1
+              worktrees="$repo_root/.cache/test-output/worktrees"
+              if [[ -L "$worktrees" ]]; then
+                printf 'cleanup: expected a directory, found a symlink: %s\n' "$worktrees" >&2
+                exit 1
+              fi
+              shopt -s nullglob dotglob
+              failed=0
+              for worktree in "$worktrees"/*; do
+                if [[ -L "$worktree" || ! -f "$worktree/.git" ]]; then
+                  printf 'cleanup: expected a linked worktree: %s\n' "$worktree" >&2
+                  failed=1
+                  continue
+                fi
+                if ! common_dir=$(${pkgs.git}/bin/git -C "$worktree" rev-parse --path-format=absolute --git-common-dir) ||
+                   ! ${pkgs.git}/bin/git --git-dir="$common_dir" worktree remove -- "$worktree"; then
+                  printf 'cleanup: kept worktree: %s\n' "$worktree" >&2
+                  failed=1
+                fi
+              done
+              exit "$failed"
+            )
+          '';
 
           # my-nix's `configure-editors` hook shells out to `code` unguarded,
           # so entering the devshell where VSCode is not installed prints

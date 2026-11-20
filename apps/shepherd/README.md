@@ -508,6 +508,9 @@ Repository-local test output is grouped under `.cache/test-output/`.
   Run `direnv exec . cleanup` from the repository root to clear this directory
   along with the other dev-shell cleanup targets.
 - `replay/` holds live-agent captures needed to replay tests offline.
+- `worktrees/` holds disposable linked Git worktrees. The cleanup command removes
+  them through their owning Git repositories and reports any worktrees Git refuses
+  to remove.
 - `history/runs.jsonl` records exact Rust, Vitest and Playwright test identities
   and runner versions from successful shard invocations. The runner also reads
   earlier records from `.cache/test-shards/runs.jsonl`.
