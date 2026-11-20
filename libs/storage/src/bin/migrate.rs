@@ -31,8 +31,15 @@ async fn main() -> anyhow::Result<()> {
     storage::tracing_setup::init_tracing();
 
     let toasty_config = Config::load_from(&REPO.join("libs/storage/Toasty.toml"))?;
-    let db_url = std::env::var("TURSO_DB_URL")
-        .unwrap_or_else(|_| format!("turso:{}/.cache/todo.db", REPO.display()));
+    let db_url = match std::env::var("TURSO_DB_URL") {
+        Ok(url) => url,
+        Err(std::env::VarError::NotPresent) => {
+            let directory = REPO.join(".cache/dev/desktop-gpui");
+            std::fs::create_dir_all(&directory)?;
+            format!("turso:{}", directory.join("todo.db").display())
+        }
+        Err(error) => return Err(error.into()),
+    };
     let db = toasty::Db::builder()
         .models(toasty::models!(Task))
         .connect(&db_url)
