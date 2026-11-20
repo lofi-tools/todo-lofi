@@ -1,0 +1,10 @@
+export function BranchIcon() {
+  return (
+    <svg class="chat__chip-icon" width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <path d="M4.5 13C5.32843 13 6 12.3284 6 11.5C6 10.6716 5.32843 10 4.5 10C3.67157 10 3 10.6716 3 11.5C3 12.3284 3.67157 13 4.5 13Z" />
+      <path d="M11.5 6C12.3284 6 13 5.3284 13 4.5C13 3.6716 12.3284 3 11.5 3C10.6716 3 10 3.6716 10 4.5C10 5.3284 10.6716 6 11.5 6Z" />
+      <path d="M4.5 10L4.5 3" />
+      <path d="M10 4.44133C8.54131 4.44133 7.14236 5.02697 6.11091 6.06943C5.07946 7.11188 4.5 8.52575 4.5 10" />
+    </svg>
+  )
+}

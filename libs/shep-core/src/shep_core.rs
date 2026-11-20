@@ -315,10 +315,30 @@ impl TaskGitRead {
         Ok(GitService.file_diff(&self.worktree_path, file)?)
     }
 
+    pub fn sync_git(&self, request: &git::GitSyncRequest) -> Result<(), CoreError> {
+        self.repository()?;
+        let branch = self.branch.as_deref().ok_or(CoreError::TaskBranchFixed)?;
+        GitService.sync(
+            &self.worktree_path,
+            branch,
+            self.base_branch.as_deref(),
+            request,
+        )?;
+        Ok(())
+    }
+
     pub fn git_snapshot(&self) -> Result<git::GitSnapshot, CoreError> {
         let repository = self.repository()?;
         let mut snapshot = GitService.snapshot(&self.worktree_path)?;
         snapshot.project_root = Some(GitService.checkout_status(&repository.root)?);
+        if let Some(branch) = self
+            .branch
+            .as_deref()
+            .filter(|branch| snapshot.branch.as_deref() == Some(*branch))
+        {
+            snapshot.sync =
+                GitService.sync_status(&self.worktree_path, branch, self.base_branch.as_deref())?;
+        }
         snapshot.merge_blocked = match (&self.base_branch, &self.branch) {
             (Some(base), Some(branch)) => {
                 GitService.merge_blocked(&repository.root, &self.worktree_path, base, branch)?
@@ -1605,6 +1625,42 @@ impl Core {
         let repository = GitService::discover(&self.project_path(&task.project_id)?)?;
         GitService.validate_worktree(&repository, path)?;
         Ok((task, repository, path))
+    }
+
+    pub fn task_git_sync(&self, task_id: &TaskId) -> Result<TaskGitRead, CoreError> {
+        let task = self.task(task_id)?;
+        if self.shutdown != ShutdownState::Running {
+            return Err(CoreError::NotRunning {
+                state: self.shutdown,
+            });
+        }
+        if task.state.is_live() || task.state == TaskState::Done {
+            return Err(CoreError::TaskNotReady {
+                id: task_id.to_string(),
+                state: task.state.as_str(),
+            });
+        }
+        self.task_git_read(task_id)
+    }
+
+    pub fn finish_git_pull(
+        &self,
+        task_id: &TaskId,
+        request: &git::GitSyncRequest,
+    ) -> Result<(), CoreError> {
+        let context = self.task_git_sync(task_id)?;
+        context.repository()?;
+        let branch = context
+            .branch
+            .as_deref()
+            .ok_or(CoreError::TaskBranchFixed)?;
+        GitService.finish_pull(
+            &context.worktree_path,
+            branch,
+            context.base_branch.as_deref(),
+            request,
+        )?;
+        Ok(())
     }
 
     pub fn task_git_read(&self, task_id: &TaskId) -> Result<TaskGitRead, CoreError> {

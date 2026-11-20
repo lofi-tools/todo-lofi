@@ -1,8 +1,10 @@
 import { Show, createEffect, createMemo, createResource, createSignal, onCleanup, onMount, type JSX } from 'solid-js'
 
-import { gitFileDiff, gitSnapshot, mutateGit, type GitMutation, type GitSnapshot } from './bridge'
+import { gitFileDiff, gitSnapshot, mutateGit, syncGit, type GitMutation, type GitSnapshot, type GitSyncAction, type GitSyncStatus } from './bridge'
 import { GitDiffText } from './GitDiff'
 import { ChangedFiles } from './ChangedFiles'
+import { BranchIcon } from './BranchIcon'
+import { Modal, ModalActions } from './Modal'
 import { reportError } from './diagnostics'
 import { PickerCaret, PickerMenu } from './PickerMenu'
 import { SegmentedControl } from './SegmentedControl'
@@ -17,7 +19,7 @@ const GIT_PANE_CACHE_KEY = 'shepherd.git-pane.v1'
 const GIT_PANE_CACHE_LIMIT = 16
 const GIT_PANE_ENTRY_LIMIT = 48_000
 
-type GitPaneDisplay = Pick<GitSnapshot, 'branch'> & Partial<Pick<GitSnapshot, 'files' | 'lineStats'>>
+type GitPaneDisplay = Pick<GitSnapshot, 'branch'> & Partial<Pick<GitSnapshot, 'files' | 'lineStats'>> & { pushCount?: number }
 type CachedGitPane = { scope: string; display: GitPaneDisplay }
 
 function readGitPaneCache(): CachedGitPane[] {
@@ -26,6 +28,7 @@ function readGitPaneCache(): CachedGitPane[] {
     return Array.isArray(entries) ? entries.filter((entry): entry is CachedGitPane =>
       typeof entry?.scope === 'string' && entry.display &&
       (typeof entry.display.branch === 'string' || entry.display.branch === null) &&
+      (entry.display.pushCount === undefined || (Number.isSafeInteger(entry.display.pushCount) && entry.display.pushCount >= 0)) &&
       (entry.display.files === undefined || (Array.isArray(entry.display.files) &&
         entry.display.files.every((file: unknown) => {
           const item = file as Partial<GitSnapshot['files'][number]> | null
@@ -43,8 +46,9 @@ function readGitPaneCache(): CachedGitPane[] {
 
 function saveGitPaneDisplay(scope: string, snapshot: GitSnapshot): GitPaneDisplay {
   const { branch, files, lineStats } = snapshot
-  const display = { branch, files, lineStats }
-  const stored = JSON.stringify(display).length <= GIT_PANE_ENTRY_LIMIT ? display : { branch }
+  const pushCount = snapshot.sync?.ahead ?? 0
+  const display = { branch, files, lineStats, pushCount }
+  const stored = JSON.stringify(display).length <= GIT_PANE_ENTRY_LIMIT ? display : { branch, pushCount }
   try {
     const previous = readGitPaneCache()
     if (previous[0]?.scope !== scope || JSON.stringify(previous[0].display) !== JSON.stringify(stored)) {
@@ -74,7 +78,16 @@ export function GitPane(props: {
 
   const fresh = () => git.error || git.loading ? undefined : git.latest
   const display = () => fresh() ?? cached()
+  const pushCount = () => {
+    const snapshot = fresh()
+    return snapshot ? snapshot.sync?.ahead ?? 0 : cached()?.pushCount ?? 0
+  }
   const syncFailed = () => !git.loading && !!git.error
+  const visibleMergeBlocker = () => {
+    const reason = fresh()?.mergeBlocked
+    return reason !== 'The project root has uncommitted changes.' && reason !== 'The task has no recorded branch.'
+      ? reason : undefined
+  }
   createEffect(() => {
     const snapshot = fresh()
     if (snapshot) setCached(saveGitPaneDisplay(cacheScope, snapshot))
@@ -93,9 +106,20 @@ export function GitPane(props: {
     ([taskId, , path]) => gitFileDiff(taskId, path),
   )
   const [pending, setPending] = createSignal(false)
+  const [forcePush, setForcePush] = createSignal<GitSyncStatus>()
+  let cancelForcePush: HTMLButtonElement | undefined
   const [notice, setNotice] = createSignal('')
   const [mergeMethod, setMergeMethod] = createSignal<'squashMerge' | 'mergeEach'>('squashMerge')
   const disabled = () => props.live || pending() || !fresh()
+  const syncStatus = () => fresh()?.sync ?? undefined
+  const canPush = () => !disabled() && !!syncStatus()?.ahead && syncStatus()?.behind === 0
+  const syncUnavailable = () => !display()?.branch ? 'Check out the task branch first'
+    : !fresh() ? 'Waiting for Git status'
+    : !syncStatus() ? 'No remote configured'
+    : syncStatus()?.behind ? 'Pull remote commits before pushing'
+    : !syncStatus()?.ahead ? 'No commits to push'
+    : disabled() ? 'Git actions are currently unavailable'
+    : undefined
   let commitMessage: HTMLTextAreaElement | undefined
   let gitContainer: HTMLElement | undefined
   let gitBlock: HTMLDivElement | undefined
@@ -145,17 +169,35 @@ export function GitPane(props: {
     }
   }
 
+  const syncLabels: Record<GitSyncAction, string> = {
+    fetch: 'Fetched remote changes.', pull: 'Pulled remote changes.', push: 'Pushed commits.', forcePush: 'Force-pushed commits.',
+  }
+  async function sync(action: GitSyncAction, expected = syncStatus()) {
+    if (disabled() || !expected) return
+    setPending(true)
+    setNotice('')
+    try {
+      mutate(await syncGit(props.taskId, action, expected))
+      setNotice(syncLabels[action])
+    } catch (failure) {
+      reportError('sync_git', failure)
+      void refetch()
+    } finally {
+      setPending(false)
+    }
+  }
+
   return (
     <section ref={gitContainer} class="explorer__git" aria-label="Git worktree">
       <div class="explorer__toolbar">
         <SegmentedControl label="File explorer view" value={props.mode} choices={[{ value: 'files', label: 'Files' }, { value: 'changes', label: 'Changes' }]} onChange={props.onModeChange} />
         <div class="explorer__toolbar-actions">
           <Show when={display()}>
-            <div class="explorer__merge" role="group" aria-label="Merge controls">
+            <div class="explorer__merge explorer__compact-action" role="group" aria-label="Merge controls">
               <button type="button" aria-label={`Merge into ${props.baseBranch ?? 'base branch'}`} title={`Merge into ${props.baseBranch ?? 'base branch'}`}
                 disabled={disabled() || !!fresh()?.mergeBlocked}
                 onClick={() => void apply({ type: mergeMethod() })}>
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="5" cy="6" r="3"/><path d="M5 9v12"/><circle cx="19" cy="18" r="3"/><path d="m15 9l-3-3l3-3"/><path d="M12 6h5a2 2 0 0 1 2 2v7"/></svg>
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="5" cy="6" r="3"/><path d="M5 9v12"/><circle cx="19" cy="18" r="3"/><path d="m15 9l-3-3l3-3"/><path d="M12 6h5a2 2 0 0 1 2 2v7"/></svg>
                 <span class="explorer__merge-label">{mergeMethod() === 'squashMerge' ? 'Squash-merge' : 'Merge each'}</span>
               </button>
               <PickerMenu label="Merge method" value={mergeMethod()} options={[
@@ -212,7 +254,27 @@ export function GitPane(props: {
       <Show when={display()}>{(snapshot) => (
         <div ref={(element) => { gitBlock = element; gitObserver?.observe(element) }} class="explorer__git-block">
           <div class="explorer__git-details">
-            <p class="explorer__branches" title={`${snapshot().branch ?? '(no branch)'} → ${props.baseBranch ?? 'base branch'}`}><strong>{snapshot().branch ?? '(no branch)'}</strong> <span aria-hidden="true">→</span> {props.baseBranch ?? 'base branch'}</p>
+            <div class="explorer__branch-row">
+              <p class="explorer__branches" title={`${snapshot().branch ?? '(no branch)'} → ${props.baseBranch ?? 'base branch'}`}>
+                <BranchIcon /><strong>{snapshot().branch ?? '(no branch)'}</strong><span aria-hidden="true">→</span><span>{props.baseBranch ?? 'base branch'}</span>
+              </p>
+              <div class="explorer__push" role="group" aria-label="Remote actions">
+                <button type="button" aria-label={`Push ${pushCount()} ${pushCount() === 1 ? 'commit' : 'commits'}`}
+                  title={syncUnavailable() ?? `Push to ${syncStatus()?.remote}`} disabled={!canPush()} onClick={() => void sync('push')}>
+                  <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 13V3m-4 4 4-4 4 4" /></svg>
+                  {pushCount()} Push
+                </button>
+                <PickerMenu label="Remote options" options={[
+                  { id: 'fetch', name: 'Fetch' },
+                  { id: 'pull', name: 'Pull', detail: 'Fast-forward only', disabled: !syncStatus()?.tracked },
+                  { id: 'push', name: 'Push', disabled: !canPush() },
+                  { id: 'forcePush', name: 'Force push', detail: 'Use force-with-lease', disabled: !syncStatus()?.tracked || !syncStatus()?.remoteTip || !syncStatus()?.ahead },
+                ]} disabled={disabled() || !syncStatus()} onChange={(action) => {
+                  if (action === 'forcePush') setForcePush(syncStatus())
+                  else if (action === 'fetch' || action === 'pull' || action === 'push') void sync(action)
+                }} triggerClass="explorer__split-toggle" above align="end"><PickerCaret /></PickerMenu>
+              </div>
+            </div>
             <p class="empty explorer__worktree" title={props.worktree}>{props.worktreeLabel}</p>
             <Show when={!fresh()}>
               <Show when={syncFailed()} fallback={<p class="empty" role="status">Refreshing Git status…</p>}>
@@ -222,7 +284,7 @@ export function GitPane(props: {
                 </div>
               </Show>
             </Show>
-            <Show when={fresh()?.mergeBlocked === 'The project root has uncommitted changes.' ? undefined : fresh()?.mergeBlocked}>{(reason) => <p class="empty">{reason()}</p>}</Show>
+            <Show when={visibleMergeBlocker()}>{(reason) => <p class="empty">{reason()}</p>}</Show>
             <Show when={notice()}>{(message) => <p class="empty" role="status">{message()}</p>}</Show>
           </div>
           <form class="explorer__commit" data-git-commit onSubmit={(event) => {
@@ -234,10 +296,10 @@ export function GitPane(props: {
               void apply({ type: 'commit', message: message(), expected: current.stagedRevision })
             }
           }}>
-            <textarea ref={commitMessage} aria-label="Commit message" placeholder="Commit message" value={message()} onInput={(event) => setMessage(event.currentTarget.value)} />
+            <textarea ref={commitMessage} aria-label="Commit message" placeholder="Enter commit message..." value={message()} onInput={(event) => setMessage(event.currentTarget.value)} />
             <div class="explorer__commit-footer">
               <Show when={commitMethod() === 'amend' && amendRequested() !== null && amendRequested() === fresh()?.stagedRevision} fallback={
-                <div class="explorer__commit-actions" role="group" aria-label="Commit controls" data-send-accent={props.sendAccent}>
+                <div class="explorer__commit-actions explorer__compact-action" role="group" aria-label="Commit controls" data-send-accent={props.sendAccent}>
                   <button type="submit" aria-keyshortcuts={props.commitShortcut}
                     disabled={disabled() || !message().trim() || (commitMethod() === 'commit' ? !fresh()?.stagedDiff : !fresh()?.branch)}>
                     {commitMethod() === 'commit' ? 'Commit' : 'Amend'}
@@ -265,6 +327,16 @@ export function GitPane(props: {
           </form>
         </div>
       )}</Show>
+      <Show when={forcePush()} keyed>{(expected) =>
+        <Modal label="Force push" title="Force push this branch?" onClose={() => setForcePush(undefined)} initialFocus={() => cancelForcePush}>
+          <p>Replace the history of {expected.remote}/{expected.target.replace(/^refs\/heads\//, '')} with this branch. The push will stop if the remote branch has changed.</p>
+          <ModalActions>
+            <button type="button" class="project-action" ref={cancelForcePush} onClick={() => setForcePush(undefined)}>Cancel</button>
+            <button type="button" class="project-action" disabled={disabled() || syncStatus()?.localTip !== expected.localTip || syncStatus()?.remoteTip !== expected.remoteTip}
+              onClick={() => { setForcePush(undefined); void sync('forcePush', expected) }}>Force push</button>
+          </ModalActions>
+        </Modal>
+      }</Show>
     </section>
   )
 }

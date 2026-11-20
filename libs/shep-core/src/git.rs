@@ -63,6 +63,8 @@ pub enum GitError {
         "squash merge has conflicts in: {paths}. Resolve them in a project terminal.\n{detail}"
     )]
     MergeConflicts { paths: String, detail: String },
+    #[error("Git sync is unavailable: {reason}")]
+    SyncUnavailable { reason: &'static str },
     #[error("Git is in detached HEAD state at {path}")]
     DetachedHead { path: String },
 }
@@ -665,6 +667,7 @@ impl GitService {
             project_root: None,
             staged_revision: self.staged_revision(path)?,
             merge_blocked: None,
+            sync: None,
             branches: branches.lines().map(str::to_string).collect(),
             line_stats: self.line_stats(path, &checkout.files)?,
             files: checkout.files,
@@ -675,6 +678,205 @@ impl GitService {
             )?,
             unstaged_diff: run_git(path, &["diff", "--no-ext-diff", "--no-textconv", "--"])?,
         })
+    }
+
+    pub fn sync_status(
+        &self,
+        path: &Path,
+        branch: &str,
+        base_branch: Option<&str>,
+    ) -> Result<Option<GitSyncStatus>, GitError> {
+        let upstream = run_git(
+            path,
+            &[
+                "for-each-ref",
+                "--format=%(upstream:remotename)%00%(upstream:remoteref)%00%(upstream)",
+                &format!("refs/heads/{branch}"),
+            ],
+        )?;
+        let mut fields = upstream.split('\0');
+        let configured_remote = fields
+            .next()
+            .filter(|name| !name.is_empty() && *name != ".");
+        let target = fields
+            .next()
+            .filter(|reference| reference.starts_with("refs/heads/"));
+        let upstream_ref = fields.next().filter(|reference| !reference.is_empty());
+        let tracked = configured_remote.is_some() && target.is_some() && upstream_ref.is_some();
+        let remote = if tracked {
+            configured_remote.map(str::to_owned)
+        } else {
+            let remotes = run_git(path, &["remote"])?;
+            let mut names = remotes.lines();
+            names
+                .clone()
+                .find(|name| *name == "origin")
+                .or_else(|| names.next().filter(|_| names.next().is_none()))
+                .map(str::to_owned)
+        };
+        let Some(remote) = remote else {
+            return Ok(None);
+        };
+        let target = target
+            .filter(|_| tracked)
+            .map_or_else(|| format!("refs/heads/{branch}"), str::to_owned);
+        let tracking_ref = if let Some(reference) = upstream_ref.filter(|_| tracked) {
+            reference.to_owned()
+        } else {
+            let remote_branch = target.strip_prefix("refs/heads/").unwrap_or(&target);
+            format!("refs/remotes/{remote}/{remote_branch}")
+        };
+        let local_tip = run_git(path, &["rev-parse", "HEAD"])?;
+        let remote_tip = optional_git_ref(path, &tracking_ref)?;
+        let (ahead, behind) = if let Some(tip) = &remote_tip {
+            let counts = run_git(
+                path,
+                &[
+                    "rev-list",
+                    "--left-right",
+                    "--count",
+                    &format!("{tip}...{local_tip}"),
+                ],
+            )?;
+            let mut counts = counts.split_whitespace().map(str::parse::<u64>);
+            let (Some(Ok(behind)), Some(Ok(ahead))) = (counts.next(), counts.next()) else {
+                return Err(GitError::InvalidStatus);
+            };
+            (ahead, behind)
+        } else if let Some(base) = base_branch {
+            let reference = format!("refs/heads/{base}");
+            if let Some(tip) = optional_git_ref(path, &reference)? {
+                let count = run_git(
+                    path,
+                    &["rev-list", "--count", &format!("{tip}..{local_tip}")],
+                )?;
+                (count.parse().map_err(|_| GitError::InvalidStatus)?, 0)
+            } else {
+                (0, 0)
+            }
+        } else {
+            (0, 0)
+        };
+        Ok(Some(GitSyncStatus {
+            remote,
+            target,
+            ahead,
+            behind,
+            tracked,
+            remote_tip,
+            local_tip,
+        }))
+    }
+
+    pub fn sync(
+        &self,
+        path: &Path,
+        branch: &str,
+        base_branch: Option<&str>,
+        request: &GitSyncRequest,
+    ) -> Result<(), GitError> {
+        let head = self.checked_out_tip(path, branch)?;
+        let status =
+            self.sync_status(path, branch, base_branch)?
+                .ok_or(GitError::SyncUnavailable {
+                    reason: "configure a remote first",
+                })?;
+        if status.remote != request.remote || status.target != request.target {
+            return Err(GitError::SyncUnavailable {
+                reason: "the remote branch changed; refresh Git status",
+            });
+        }
+        if request.action != GitSyncAction::Fetch
+            && (status.local_tip != request.local_tip || head != request.local_tip)
+        {
+            return Err(GitError::SyncUnavailable {
+                reason: "the local commit changed; refresh Git status",
+            });
+        }
+        let remote = &status.remote;
+        let target = &status.target;
+        let branch_refspec = format!("refs/heads/{branch}:{target}");
+        match request.action {
+            GitSyncAction::Fetch => run_remote_git(path, &["fetch", "--", remote]),
+            GitSyncAction::Pull => {
+                if !status.tracked {
+                    return Err(GitError::SyncUnavailable {
+                        reason: "push this branch first to set its upstream",
+                    });
+                }
+                if self.has_changes(path)? {
+                    return Err(GitError::DirtyWorktree {
+                        path: path.to_path_buf(),
+                    });
+                }
+                run_remote_git(path, &["fetch", "--", remote, target])
+            }
+            GitSyncAction::Push => {
+                if status.ahead == 0 || status.behind != 0 {
+                    return Err(GitError::SyncUnavailable {
+                        reason: "there are no commits ready to push; fetch or pull first",
+                    });
+                }
+                if status.tracked {
+                    run_remote_git(path, &["push", "--", remote, &branch_refspec])
+                } else {
+                    run_remote_git(
+                        path,
+                        &["push", "--set-upstream", "--", remote, &branch_refspec],
+                    )
+                }
+            }
+            GitSyncAction::ForcePush => {
+                let expected = request
+                    .remote_tip
+                    .as_ref()
+                    .filter(|tip| status.remote_tip.as_ref() == Some(*tip));
+                let Some(expected) = expected.filter(|_| status.tracked && status.ahead != 0)
+                else {
+                    return Err(GitError::SyncUnavailable {
+                        reason: "the remote tip changed or is unknown; fetch and review before retrying",
+                    });
+                };
+                let lease = format!("--force-with-lease={target}:{expected}");
+                let refspec = format!("{head}:{target}");
+                run_remote_git(path, &["push", &lease, "--", remote, &refspec])
+            }
+        }
+    }
+
+    pub fn finish_pull(
+        &self,
+        path: &Path,
+        branch: &str,
+        base_branch: Option<&str>,
+        request: &GitSyncRequest,
+    ) -> Result<(), GitError> {
+        let head = self.checked_out_tip(path, branch)?;
+        let status =
+            self.sync_status(path, branch, base_branch)?
+                .ok_or(GitError::SyncUnavailable {
+                    reason: "configure a remote first",
+                })?;
+        if !status.tracked
+            || status.remote != request.remote
+            || status.target != request.target
+            || head != request.local_tip
+            || status.local_tip != request.local_tip
+        {
+            return Err(GitError::SyncUnavailable {
+                reason: "the checkout or upstream changed during fetch",
+            });
+        }
+        if self.has_changes(path)? {
+            return Err(GitError::DirtyWorktree {
+                path: path.to_path_buf(),
+            });
+        }
+        let tip = status.remote_tip.ok_or(GitError::SyncUnavailable {
+            reason: "the remote branch no longer exists",
+        })?;
+        run_git(path, &["merge", "--ff-only", "--", &tip])?;
+        Ok(())
     }
 
     fn line_stats(&self, path: &Path, files: &[GitFile]) -> Result<Vec<GitLineStats>, GitError> {
@@ -1192,7 +1394,39 @@ pub struct GitSnapshot {
     pub staged_diff: String,
     pub staged_revision: String,
     pub merge_blocked: Option<String>,
+    pub sync: Option<GitSyncStatus>,
     pub unstaged_diff: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitSyncStatus {
+    pub remote: String,
+    pub target: String,
+    pub ahead: u64,
+    pub behind: u64,
+    pub tracked: bool,
+    pub remote_tip: Option<String>,
+    pub local_tip: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitSyncRequest {
+    pub action: GitSyncAction,
+    pub remote: String,
+    pub target: String,
+    pub remote_tip: Option<String>,
+    pub local_tip: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum GitSyncAction {
+    Fetch,
+    Pull,
+    Push,
+    ForcePush,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1375,6 +1609,33 @@ fn hash_untracked_file(
 }
 
 #[doc(hidden)]
+fn optional_git_ref(path: &Path, reference: &str) -> Result<Option<String>, GitError> {
+    match run_git(path, &["rev-parse", "--verify", "--quiet", reference]) {
+        Ok(tip) => Ok(Some(tip)),
+        Err(GitError::CommandFailed { status, .. }) if status.code() == Some(1) => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+fn run_remote_git(path: &Path, args: &[&str]) -> Result<(), GitError> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(path)
+        .args(args)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|source| GitError::Io { source })?;
+    if !output.status.success() {
+        return Err(GitError::CommandFailed {
+            command: format!("git {}", args.join(" ")),
+            status: output.status,
+            stderr: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+        });
+    }
+    Ok(())
+}
+
 pub fn run_git(cwd: &Path, args: &[&str]) -> Result<String, GitError> {
     Ok(String::from_utf8_lossy(&git_bytes(cwd, args)?)
         .trim()
@@ -1814,6 +2075,107 @@ mod tests {
     }
 
     #[cfg(feature = "git")]
+    #[test]
+    fn syncs_a_task_branch_and_rejects_a_stale_force_push_lease()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fixture = TestRepository::new()?;
+        let remote = tempfile::tempdir()?;
+        let remote_path = remote
+            .path()
+            .to_str()
+            .ok_or("temporary remote path is not UTF-8")?;
+        let path = fixture.path();
+        run_git(remote.path(), &["init", "--bare"])?;
+        run_git(path, &["remote", "add", "origin", remote_path])?;
+        run_git(path, &["switch", "-c", "task-sync"])?;
+        run_git(path, &["commit", "--allow-empty", "-m", "Task commit"])?;
+
+        let status = || -> Result<GitSyncStatus, Box<dyn std::error::Error>> {
+            GitService
+                .sync_status(path, "task-sync", Some("main"))?
+                .ok_or("remote status is missing".into())
+        };
+        let request = |action, status: GitSyncStatus| GitSyncRequest {
+            action,
+            remote: status.remote,
+            target: status.target,
+            remote_tip: status.remote_tip,
+            local_tip: status.local_tip,
+        };
+        let before = status()?;
+        assert_eq!(before.ahead, 1);
+        assert!(!before.tracked);
+        GitService.sync(
+            path,
+            "task-sync",
+            Some("main"),
+            &request(GitSyncAction::Push, before),
+        )?;
+        let pushed = status()?;
+        assert!(pushed.tracked);
+        assert_eq!((pushed.ahead, pushed.behind), (0, 0));
+        assert_eq!(
+            pushed.remote_tip.as_deref(),
+            Some(pushed.local_tip.as_str())
+        );
+
+        let other = tempfile::tempdir()?;
+        run_git(
+            other.path(),
+            &["clone", "--branch", "task-sync", remote_path, "."],
+        )?;
+        run_git(
+            other.path(),
+            &[
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.invalid",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "Remote commit",
+            ],
+        )?;
+        run_git(other.path(), &["push"])?;
+        let pull = request(GitSyncAction::Pull, status()?);
+        GitService.sync(path, "task-sync", Some("main"), &pull)?;
+        GitService.finish_pull(path, "task-sync", Some("main"), &pull)?;
+        assert_eq!(
+            status()?.local_tip,
+            run_git(other.path(), &["rev-parse", "HEAD"])?
+        );
+
+        run_git(
+            path,
+            &["commit", "--allow-empty", "-m", "Another local commit"],
+        )?;
+        let force = request(GitSyncAction::ForcePush, status()?);
+        run_git(
+            other.path(),
+            &[
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.invalid",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "Another remote commit",
+            ],
+        )?;
+        run_git(other.path(), &["push"])?;
+        assert!(matches!(
+            GitService.sync(path, "task-sync", Some("main"), &force),
+            Err(GitError::CommandFailed { .. })
+        ));
+        assert_eq!(
+            run_git(remote.path(), &["rev-parse", "refs/heads/task-sync"])?,
+            run_git(other.path(), &["rev-parse", "HEAD"])?
+        );
+        Ok(())
+    }
+
     #[test]
     fn snapshot_counts_tracked_untracked_and_binary_changes()
     -> Result<(), Box<dyn std::error::Error>> {

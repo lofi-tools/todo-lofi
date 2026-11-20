@@ -3753,6 +3753,34 @@ button.pool__agent-label { padding: 0; border: 0; background: transparent; color
 .explorer__toolbar { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .explorer__toolbar-actions { display: flex; align-items: center; gap: 6px; min-width: 0; margin-inline-start: auto; }
 .explorer__branches { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.explorer__branch-row { display: flex; align-items: center; justify-content: space-between; gap: 6px; min-width: 0; }
+.explorer__branch-row .explorer__branches { display: flex; align-items: center; gap: 4px; }
+.explorer__branch-row .explorer__branches strong { overflow: hidden; text-overflow: ellipsis; }
+.explorer__branch-row .explorer__branches > span { flex: none; }
+.explorer__compact-action { font-size: 12px; line-height: 16px; }
+.explorer__push {
+  display: inline-flex;
+  flex: none;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  font-size: 11px;
+}
+.explorer__push > button {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 3px 5px;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  white-space: nowrap;
+}
+.explorer__push > button:disabled { color: var(--text-disabled); }
+.explorer__push > button:enabled { cursor: pointer; }
+.explorer__push > button:enabled:hover { background: var(--surface-raised); }
+.explorer__push > .explorer__split-toggle { width: 19px; justify-content: center; padding: 0; border-left: 1px solid var(--border); }
 .explorer__merge,
 .explorer__commit-actions { display: inline-flex; flex: none; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); }
 .explorer__toolbar-actions > button { flex: none; }
@@ -3788,7 +3816,6 @@ button.pool__agent-label { padding: 0; border: 0; background: transparent; color
   background: var(--commit-surface);
   border-color: var(--commit-surface);
   color: var(--commit-foreground);
-  font-size: 12px;
 }
 .explorer__commit-actions:has(> button:first-child:disabled) {
   --commit-surface: var(--send-accent-muted);

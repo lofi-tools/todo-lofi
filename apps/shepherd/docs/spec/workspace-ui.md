@@ -118,8 +118,11 @@ current layout and give future changes a point of comparison.
   and commit composer; show a PR only when one is attached. Show the last known
   branch and changed files for this checkout while fetching a fresh snapshot.
   If the refresh fails, keep the cached display and offer a retry. Enable Git
-  actions only after a successful refresh. Its header shows
-  the task and base branches. The merge control offers squash-merge or merge
+  actions only after a successful refresh. Its header shows the task branch
+  with a branch icon, the base branch, and a compact Push control with the
+  number of outgoing commits. The remote menu offers Fetch, fast-forward
+  Pull, Push, and confirmed Force push with an explicit lease on the last
+  observed remote tip. First push sets the upstream when one is missing. The merge control offers squash-merge or merge
   each commit. Its green fill is stronger when merging is available and muted
   when unavailable.
   Right-align the merge method menu with its button group. The commit message

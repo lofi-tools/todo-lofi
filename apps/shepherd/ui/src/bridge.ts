@@ -1115,8 +1115,26 @@ export function reviewSnapshot(taskId: string): Promise<ReviewSnapshot> {
   return invoke('review_snapshot', { taskId })
 }
 
+export interface GitSyncStatus {
+  remote: string
+  target: string
+  ahead: number
+  behind: number
+  tracked: boolean
+  remoteTip: string | null
+  localTip: string
+}
+
+export type GitSyncAction = 'fetch' | 'pull' | 'push' | 'forcePush'
+
+export function syncGit(taskId: string, action: GitSyncAction, status: GitSyncStatus): Promise<GitSnapshot> {
+  const { remote, target, remoteTip, localTip } = status
+  return invoke('sync_git', { taskId, request: { action, remote, target, remoteTip, localTip } })
+}
+
 export interface GitSnapshot {
   branch: string | null
+  sync?: GitSyncStatus | null
   tracking: string | null
   projectRoot: { branch: string | null; tracking: string | null; files: GitFile[] } | null
   branches: string[]

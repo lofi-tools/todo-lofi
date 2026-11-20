@@ -4744,6 +4744,32 @@ pub mod commands {
     }
 
     #[tauri::command]
+    pub async fn sync_git(
+        state: State<'_, ShellState>,
+        task_id: String,
+        request: shep_core::git::GitSyncRequest,
+    ) -> Result<shep_core::git::GitSnapshot, BridgeError> {
+        let task_id = TaskId::new(task_id);
+        let context = state.core.lock().await.task_git_sync(&task_id)?;
+        let remote_request = request.clone();
+        tokio::task::spawn_blocking(move || context.sync_git(&remote_request))
+            .await
+            .map_err(|error| {
+                BridgeError::new("git", format!("Could not finish Git sync: {error}"))
+            })??;
+        if request.action == shep_core::git::GitSyncAction::Pull {
+            state
+                .core
+                .lock()
+                .await
+                .finish_git_pull(&task_id, &request)?;
+        }
+        state
+            .git_read(task_id, |context| context.git_snapshot())
+            .await
+    }
+
+    #[tauri::command]
     pub async fn git_file_diff(
         state: State<'_, ShellState>,
         task_id: String,

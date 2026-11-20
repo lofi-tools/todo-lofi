@@ -43,6 +43,8 @@ test.beforeEach(async ({ context }) => {
     const archiveRequests: string[][] = []
     const deletions: Array<{ taskId: string; removeWorktree: boolean }> = []
     const gitMutations: GitMutation[] = []
+    const remoteActions: string[] = []
+    let outgoingCommits = 2
     const gitRequests = { git: 0, gitDiff: 0, review: 0, reviewDiff: 0 }
     const attachmentLimitRequests: string[] = []
     const taskRevisions = new Map<string, number>()
@@ -63,6 +65,10 @@ test.beforeEach(async ({ context }) => {
         branch: options.has('detached-checkout') ? null
           : options.has('hold-git-refresh') ? 'shepherd/rechecked' : 'shepherd/ship-it',
         tracking: null, projectRoot: null, branches: ['main'], history: [], files,
+        sync: options.has('remote-actions') ? {
+          remote: 'origin', target: 'refs/heads/shepherd/ship-it', ahead: outgoingCommits, behind: 0,
+          tracked: true, remoteTip: '4d6381c', localTip: '129ecfe',
+        } : null,
         lineStats: options.has('watch-git') ? watchedGitFiles.map((file) => ({ path: file.path, added: 2, removed: 1 })) : options.has('changes-fixture') ? [
           { path: 'src/main.rs', added: 3, removed: 1 }, { path: 'src/new.ts', added: 5, removed: 0 },
           { path: 'old.txt', added: 0, removed: 4 }, { path: 'assets/image.bin', added: null, removed: null },
@@ -1072,6 +1078,10 @@ test.beforeEach(async ({ context }) => {
               throw { message: 'Could not load review diff', code: 'git' }
             }
             return gitState()
+          case 'sync_git':
+            remoteActions.push(args.request.action)
+            if (args.request.action === 'push') outgoingCommits = 0
+            return gitState()
           case 'mutate_git':
             if (options.has('git-mutation-error')) throw { message: 'Git hook rejected this change', code: 'git' }
             gitMutations.push(args.mutation)
@@ -1665,7 +1675,7 @@ test.beforeEach(async ({ context }) => {
     window.__archiveRequests = archiveRequests
     window.__gitMutations = gitMutations
     Object.assign(window, { __attachmentLimitRequests: attachmentLimitRequests })
-    Object.assign(window, { __gitRequests: gitRequests, __setTaskRevision: (taskId: string, revision: number) => {
+    Object.assign(window, { __remoteActions: remoteActions, __gitRequests: gitRequests, __setTaskRevision: (taskId: string, revision: number) => {
       taskRevisions.set(taskId, revision)
       window.__emitCoreEvent({ type: 'taskWorkspaceChanged', data: workspace(taskId) })
     } })
@@ -2995,6 +3005,35 @@ test('refreshes the changed-file list when the worktree watcher reports changes'
   await page.evaluate(() => window.__publishFileChanges('file-watch-1', [{ path: 'src/new.rs', kind: 'modified', originalPath: null }]))
   await expect(changed.getByRole('button', { name: 'src/new.rs' })).toBeVisible()
   await expect(changed.getByRole('img', { name: '2 lines added, 1 lines removed' }).first()).toBeVisible()
+})
+
+test('shows outgoing commits and offers task branch remote actions', async ({ page }) => {
+  await page.goto('/?remote-actions')
+  await page.getByRole('tab', { name: 'Files', exact: true }).click()
+  const git = page.getByRole('region', { name: 'Git worktree' })
+  const branchRow = git.locator('.explorer__branch-row')
+  await expect(branchRow).toContainText('shepherd/ship-it')
+  const push = branchRow.getByRole('button', { name: 'Push 2 commits' })
+  await expect(push).toHaveText('2 Push')
+  await expect(git.getByPlaceholder('Enter commit message...')).toBeVisible()
+
+  const options = branchRow.getByRole('button', { name: 'Remote options' })
+  const menu = page.getByRole('menu', { name: 'Remote options' })
+  await options.click()
+  await menu.getByRole('menuitem', { name: 'Force push' }).click()
+  const confirmation = page.getByRole('dialog', { name: 'Force push' })
+  await expect(confirmation).toContainText('origin/shepherd/ship-it')
+  const actions = () => page.evaluate(() => (window as unknown as { __remoteActions: string[] }).__remoteActions)
+  expect(await actions()).toEqual([])
+  await confirmation.getByRole('button', { name: 'Cancel' }).click()
+
+  for (const action of ['Fetch', 'Pull']) {
+    await options.click()
+    await menu.getByRole('menuitem', { name: action, exact: true }).click()
+  }
+  await push.click()
+  await expect(branchRow.getByRole('button', { name: 'Push 0 commits' })).toBeDisabled()
+  expect(await actions()).toEqual(['fetch', 'pull', 'push'])
 })
 
 test('commits and confirms amends from the split button', async ({ page }) => {

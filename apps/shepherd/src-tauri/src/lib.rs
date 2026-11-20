@@ -501,6 +501,7 @@ pub fn run() -> Result<(), tauri::Error> {
             bridge::commands::search_workspace_files,
             bridge::commands::cancel_file_search,
             bridge::commands::mutate_git,
+            bridge::commands::sync_git,
             bridge::commands::terminal_layout,
             bridge::commands::save_terminal_layout,
             bridge::commands::save_inspector_tab,
