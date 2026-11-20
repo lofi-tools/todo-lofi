@@ -48,13 +48,26 @@ A local-first task manager for macOS and Linux, built on [GPUI](https://github.c
 - `checkout-references` — shallow-clone all configured reference repositories into `.cache/checkout/<name>`
 - `checkout-references herdr-core pi` — download selected references by name
 - `checkout-references --list` — list configured names and URLs
+- `refs discover [name]` — list candidate docs and their approval status
+- `refs sync [name]` — cache configured entry pages and approved docs
 - `skills` — install local agent skills, including `reference-repos`, from `docs/agent_skills`
 
 The reference list lives in `flake.nix` as `referenceRepos`: `pandacode`, `herdr`,
-`herdr-core`, `herdr-app`, `pi`, and `orca`. Run checkout commands inside the Nix dev shell
+`herdr-core`, `herdr-app`, `pi`, `orca`, and `traycer`. Run checkout commands inside the Nix dev shell
 (or use `nix develop -c checkout-references`). Existing checkouts are preserved;
 the command does not refresh or reset them. The local skill lets agents inspect
 these checkouts by name.
+
+Omit the name from `refs` to process all references. Approve candidates by
+adding their exact URLs or checkout paths to a Git-tracked
+`reference-docs/<name>.json` file, keyed by origin. For example, a Traycer
+approval could read `{"docs":["https://docs.traycer.ai/concepts/worktrees.md"]}`.
+Run `refs sync` to write Markdown and a source index under
+`.cache/reference-docs/<name>/`.
+
+The command comes from the `my-nix` reference docs module. While the locked
+input predates that module, use the local `my-nix` checkout through the direnv
+override.
 
 #### Testing
 - `ccheck` — cargo check all workspace packages (taskstream-desktop, storage, report_proc, agent-cli)

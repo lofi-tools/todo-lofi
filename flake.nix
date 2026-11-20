@@ -12,12 +12,71 @@
 
 
   outputs = inputs@{ self, parts, my-nix, ... }: parts.lib.mkFlake { inherit inputs; } ({ lib, ... }:
-    with builtins; {
+    with builtins;
+    let
+      referenceRepos = {
+        herdr.origins = {
+          home.url = "https://herdr.dev";
+          repo.url = "https://github.com/herdrdev/herdr";
+          docs = {
+            url = "https://herdr.dev/docs/";
+            discovery = { type = "checkout"; path = "docs/next/website/src/content/docs"; };
+          };
+        };
+        herdr-app.origins = {
+          repo.url = "https://github.com/herdrdev/herdr-app";
+          docs = {
+            path = "docs/commands.md";
+            discovery = { type = "checkout"; path = "docs"; };
+          };
+        };
+        herdr-core.origins = {
+          repo.url = "https://github.com/herdrdev/herdr-core";
+          docs = {
+            path = "docs/commands.md";
+            discovery = { type = "checkout"; path = "docs"; };
+          };
+        };
+        orca.origins = {
+          home.url = "https://orca.dev";
+          repo.url = "https://github.com/stablyai/orca";
+          docs = {
+            url = "https://orca.dev/docs";
+            discovery = { type = "checkout"; path = "docs/site/content/docs"; };
+          };
+        };
+        pandacode.origins = {
+          home.url = "https://pandacode.bambooed.ai";
+          repo.url = "https://github.com/aicodeking/pandacode";
+          docs = {
+            path = "docs/capabilities.md";
+            discovery = { type = "checkout"; path = "docs"; };
+          };
+        };
+        pi.origins = {
+          home.url = "https://pi.dev";
+          repo.url = "https://github.com/earendil-works/pi";
+          docs = {
+            url = "https://pi.dev/docs/latest";
+            discovery = { type = "checkout"; path = "packages/coding-agent/docs"; };
+          };
+        };
+        traycer.origins = {
+          home.url = "https://traycer.ai";
+          repo.url = "https://github.com/traycerai/traycer";
+          docs = {
+            url = "https://docs.traycer.ai";
+            discovery = { type = "llms-txt"; url = "https://docs.traycer.ai/llms.txt"; };
+          };
+        };
+      };
+    in {
       systems = [ "x86_64-linux" "aarch64-linux" "aarch64-darwin" "x86_64-darwin" ];
       imports = lib.flatten [
         (attrValues inputs.my-nix.flakeModuleGroups.essentials)
         inputs.my-nix.flakeModules.rust
         inputs.my-nix.flakeModules.web
+        (inputs.my-nix.flakeModules.referenceDocs or { })
         (inputs.my-nix.lib.findFlakePartFilesRec ./.)
       ];
       aiSkills.agentsMd.fragments.test-sharding = ''
@@ -78,20 +137,11 @@
           # signing, archives) lives in scripts/package-macos.sh, so the dev
           # bundle and the CI artifact are produced by one implementation.
 
-          referenceRepos = [
-            { name = "pandacode"; url = "https://github.com/aicodeking/pandacode"; }
-            { name = "herdr"; url = "https://github.com/herdrdev/herdr"; }
-            { name = "herdr-core"; url = "https://github.com/herdrdev/herdr-core"; }
-            { name = "herdr-app"; url = "https://github.com/herdrdev/herdr-app"; }
-            { name = "pi"; url = "https://github.com/earendil-works/pi"; }
-            { name = "orca"; url = "https://github.com/stablyai/orca"; }
-          ];
-
           bash.wd = "$(git rev-parse --show-toplevel)";
           scripts = mapAttrs pkgs.writeShellScriptBin {
             checkout-references = with bash; ''
               set -euo pipefail
-              repositories=(${lib.escapeShellArgs (map (repo: "${repo.name}|${repo.url}") referenceRepos)})
+              repositories=(${lib.escapeShellArgs (lib.mapAttrsToList (name: reference: "${name}|${reference.origins.repo.url}") referenceRepos)})
               if [ "''${1:-}" = "--list" ]; then
                 printf '%s\n' "''${repositories[@]}"
                 exit 0
@@ -711,6 +761,8 @@
                 };
             };
         };
+    } // lib.optionalAttrs (inputs.my-nix.flakeModules ? referenceDocs) {
+      inherit referenceRepos;
     });
 
 }

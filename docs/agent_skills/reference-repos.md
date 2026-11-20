@@ -1,6 +1,6 @@
 ---
 name: reference-repos
-description: Inspect Taskstream's named reference repositories (pandacode, herdr, herdr-core, herdr-app, pi, and orca) when using them as implementation examples or comparing designs.
+description: Inspect Taskstream's named reference repositories (pandacode, herdr, herdr-core, herdr-app, pi, orca, and traycer) when using them as implementation examples or comparing designs.
 ---
 
 Resolve reference names using `referenceRepos` in the repository root's `flake.nix`.
@@ -13,6 +13,13 @@ Outside the shell, use `nix develop -c checkout-references <name>`. Checkouts li
 at `<taskstream-root>/.cache/checkout/<name>` regardless of the caller's directory
 within Taskstream. Existing checkouts are preserved, so they may be older than the
 remote default branch.
+
+For documentation, run `refs discover [name]` to list extra pages for review.
+Save approved URLs or checkout paths under their origin key in
+`reference-docs/<name>.json`. Run `refs sync [name]` to cache the configured
+entry pages and approved docs. Omitting the name selects all references.
+Start reading at `.cache/reference-docs/<name>/index.md` and cite the source URL
+and fetch date or Git commit recorded in each cached page.
 
 Search only the requested checkout with `rg --files` and `rg`, then read relevant
 files. Treat the checkout as reference material: keep implementation changes in
