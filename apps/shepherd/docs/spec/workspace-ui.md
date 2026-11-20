@@ -117,12 +117,14 @@ current layout and give future changes a point of comparison.
   Git card overlaid at the bottom with an upward shadow, its branch, worktree,
   and commit composer; show a PR only when one is attached. Its header shows
   the task and base branches. The merge control offers squash-merge or merge
-  each commit.
+  each commit. Its green fill is stronger when merging is available and muted
+  when unavailable.
   Right-align the merge method menu with its button group. The commit message
   field fills the bottom of the Git card, separated by a single top divider.
   It has a fixed height and scrolls when the message overflows. Its bottom-row
-  split button offers Commit and Amend, and amending the tip still
-  requires confirmation. Review offers
+  split button offers Commit and Amend and uses the selected Send accent,
+  muted when the action is unavailable. Amending the tip still requires
+  confirmation. Review offers
   a separate approval that keeps the task open; approve a clean committed tree,
   and require renewed approval if its commit changes. The merge also requires
   the existing Git safety checks.

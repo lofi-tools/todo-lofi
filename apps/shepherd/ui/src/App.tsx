@@ -3357,7 +3357,7 @@ export function App() {
                         mode={explorerMode()} onModeChange={setExplorerMode} files={files} worktree={workspace()!.task.worktreePath!} worktreeLabel={worktreeLabel(workspace()!.task.worktreePath!, projectId)} baseBranch={workspace()!.task.baseBranch}
                         revision={workspace()!.task.updatedAt} live={LIVE_STATES.includes(workspace()!.task.state) || workspace()!.task.state === 'done'}
                         request={gitRequest()} onRequestHandled={(request) => setGitRequest((current) => current === request ? undefined : current)}
-                        commitShortcut={chordFor('commit')} />}
+                        commitShortcut={chordFor('commit')} sendAccent={sendAccent()} />}
                     </Show>
                   </div>
                 }}

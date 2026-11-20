@@ -1210,6 +1210,9 @@ textarea {
   box-shadow: 0 0 0 2px var(--background), 0 0 0 3px var(--text);
 }
 
+[data-send-accent] {
+  --send-accent-muted: color-mix(in srgb, var(--send-accent) 15%, var(--surface-raised));
+}
 [data-send-accent='Blue'] { --send-accent: var(--send-blue); }
 [data-send-accent='Violet'] { --send-accent: var(--send-violet); }
 [data-send-accent='Teal'] { --send-accent: var(--send-teal); }
@@ -2797,7 +2800,7 @@ button.pool__agent-label { padding: 0; border: 0; background: transparent; color
 }
 
 .composer__send--icon:disabled {
-  background: color-mix(in srgb, var(--send-accent) 15%, var(--surface-raised));
+  background: var(--send-accent-muted);
   color: color-mix(in srgb, var(--send-accent) 50%, var(--text-disabled));
 }
 
@@ -3764,8 +3767,37 @@ button.pool__agent-label { padding: 0; border: 0; background: transparent; color
 .explorer__commit-actions > button { display: inline-flex; align-items: center; gap: 4px; padding: 5px 7px; }
 .explorer__merge > .explorer__split-toggle,
 .explorer__commit-actions > .explorer__split-toggle { justify-content: center; width: 25px; padding: 0; border-left: 1px solid var(--border); }
-.explorer__merge button:disabled,
-.explorer__commit-actions button:disabled,
+.explorer__merge {
+  --merge-surface: #197548;
+  --merge-foreground: #ffffff;
+  background: var(--merge-surface);
+  border-color: var(--merge-surface);
+  color: var(--merge-foreground);
+}
+.explorer__merge:has(> button:first-child:disabled) {
+  --merge-surface: #202b25;
+  --merge-foreground: #aebcb3;
+}
+.explorer__merge > button { color: inherit; }
+.explorer__merge > .explorer__split-toggle { border-left-color: rgb(255 255 255 / 35%); }
+.explorer__merge > button:enabled:hover { background: rgb(0 0 0 / 12%); }
+.explorer__merge > button:disabled { cursor: default; }
+.explorer__commit-actions {
+  --commit-surface: var(--send-accent);
+  --commit-foreground: var(--on-send-accent);
+  background: var(--commit-surface);
+  border-color: var(--commit-surface);
+  color: var(--commit-foreground);
+  font-size: 12px;
+}
+.explorer__commit-actions:has(> button:first-child:disabled) {
+  --commit-surface: var(--send-accent-muted);
+  --commit-foreground: color-mix(in srgb, var(--send-accent) 30%, var(--text-secondary));
+}
+.explorer__commit-actions > button { color: inherit; }
+.explorer__commit-actions > .explorer__split-toggle { border-left-color: color-mix(in srgb, currentColor 32%, transparent); }
+.explorer__commit-actions > button:enabled:hover { background: color-mix(in srgb, var(--commit-surface) 86%, var(--send-hover-tint)); }
+.explorer__commit-actions > button:disabled { cursor: default; }
 .explorer__amend-confirmation button:disabled { color: var(--text-disabled); cursor: default; }
 .explorer__merge button:focus-visible,
 .explorer__commit-actions button:focus-visible { outline-offset: -2px; }

@@ -6,6 +6,7 @@ import { ChangedFiles } from './ChangedFiles'
 import { reportError } from './diagnostics'
 import { PickerCaret, PickerMenu } from './PickerMenu'
 import { SegmentedControl } from './SegmentedControl'
+import type { SendAccent } from './SettingsPane'
 
 interface GitRequest {
   taskId: string
@@ -14,7 +15,7 @@ interface GitRequest {
 
 export function GitPane(props: {
   taskId: string; revision: number; fileRevision: number; live: boolean; openTerminal: () => void; openFile: (path: string) => void
-  request?: GitRequest; onRequestHandled: (request: GitRequest) => void; commitShortcut?: string
+  request?: GitRequest; onRequestHandled: (request: GitRequest) => void; commitShortcut?: string; sendAccent: SendAccent
   mode: 'files' | 'changes'; onModeChange: (mode: 'files' | 'changes') => void; files: JSX.Element; worktree: string; worktreeLabel: string; baseBranch: string | null
 }) {
   const taskId = createMemo(() => props.taskId)
@@ -162,7 +163,7 @@ export function GitPane(props: {
             <textarea ref={commitMessage} aria-label="Commit message" placeholder="Commit message" value={message()} onInput={(event) => setMessage(event.currentTarget.value)} />
             <div class="explorer__commit-footer">
               <Show when={commitMethod() === 'amend' && amendRequested() === snapshot().stagedRevision} fallback={
-                <div class="explorer__commit-actions" role="group" aria-label="Commit controls">
+                <div class="explorer__commit-actions" role="group" aria-label="Commit controls" data-send-accent={props.sendAccent}>
                   <button type="submit" aria-keyshortcuts={props.commitShortcut}
                     disabled={disabled() || !message().trim() || (commitMethod() === 'commit' ? !snapshot().stagedDiff : !snapshot().branch)}>
                     {commitMethod() === 'commit' ? 'Commit' : 'Amend'}
