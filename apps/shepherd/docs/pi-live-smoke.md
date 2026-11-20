@@ -34,15 +34,16 @@ argument to the installed Pi and tees its RPC stdout to a log:
 
 ```sh
 pi_path=$(command -v pi)
-wrapper=.cache/pi-live-tee
-mkdir -p .cache
+mkdir -p "$PWD/.cache/test-output/runs/live-probes"
+run=$(mktemp -d "$PWD/.cache/test-output/runs/live-probes/pi.XXXXXX")
+wrapper="$run/pi-live-tee"
 cat > "$wrapper" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
-exec "$pi_path" "\$@" | tee -a "$PWD/.cache/pi-live-rpc.jsonl"
+exec "$pi_path" "\$@" | tee -a "$run/pi-live-rpc.jsonl"
 EOF
 chmod +x "$wrapper"
-rm -f .cache/pi-live-rpc.jsonl
+printf '%s\n' "$wrapper"
 ```
 
 Point Shepherd at the wrapper in `settings.json` (macOS:
@@ -53,7 +54,7 @@ Point Shepherd at the wrapper in `settings.json` (macOS:
 {
   "version": 1,
   "app": {
-    "agents.pi.executable": "/absolute/path/to/.cache/pi-live-tee",
+    "agents.pi.executable": "/absolute/path/to/.cache/test-output/runs/live-probes/pi.XXXXXX/pi-live-tee",
     "agents.pi.args": []
   }
 }
@@ -83,7 +84,7 @@ stdout connected to Shepherd; only stdout is duplicated into the log.
 jq -c 'select(
   .type == "agent_settled" or
   (.type == "extension_ui_request" and .method == "confirm")
-)' .cache/pi-live-rpc.jsonl
+)' "$run/pi-live-rpc.jsonl"
 ```
 
 The log must contain at least one real `extension_ui_request` with
@@ -108,8 +109,8 @@ All of the following must hold:
 | --- | --- | --- | --- | --- | --- | --- |
 | | | | | | Pending — human-gated | |
 
-Keep `.cache/pi-live-rpc.jsonl` and screenshots of the approval cards with the
-evidence. Until this row is filled, the live model-turn criterion is not
+Keep `pi-live-rpc.jsonl` and screenshots of the approval cards with the
+evidence in the run directory. Until this row is filled, the live model-turn criterion is not
 claimed as passed.
 
 ## If it fails

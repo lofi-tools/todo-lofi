@@ -56,6 +56,9 @@ class RecordingTests(unittest.TestCase):
             self.assertEqual(environments[0]["TEST_SHARD_PORT"], "45678")
             self.assertNotIn("ASTRO_PREVIEW_BACKGROUND", environments[0])
             self.assertNotIn("ASTRO_DEV_BACKGROUND", environments[0])
+            report = Path(environments[0]["PLAYWRIGHT_JSON_OUTPUT_FILE"])
+            self.assertEqual(report.parent.parent, root / ".cache/test-output/runs/browser")
+            self.assertTrue(report.is_file())
             save.assert_called_once_with([])
 
 

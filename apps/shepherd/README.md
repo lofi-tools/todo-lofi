@@ -18,7 +18,7 @@ shep
 and chats in that test database persist across launches.
 
 `shep --test` starts on port 1435 with an empty database in a fresh directory
-under `.cache/test-db/`. Changes survive Tauri reloads during that launch.
+under `.cache/test-output/runs/shep-test/`. Changes survive Tauri reloads during that launch.
 Closing the app discards the session database. The next `shep --test` launch
 starts empty again.
 
@@ -92,7 +92,7 @@ existing file permissions are left unchanged. The log must be a regular file;
 on Unix, its final path must not be a symbolic link.
 
 The native terminal smoke uses a disposable Git project, database and scripted
-agent in a temporary directory under `.cache/test-db/`. It requires `python3`.
+agent in a temporary directory under `.cache/test-output/runs/native-smoke/`. It requires `python3`.
 The full suite also requires `vim`, `less` and `fzf`.
 
 ```sh
@@ -501,9 +501,20 @@ To return to a prototype deliberately, opt in, for example with
 prototypes can still fail. Demo browser tests are run separately through their
 own package commands.
 
-Successful invocations record exact Rust, Vitest and Playwright identities
-and runner versions in `.cache/test-shards/runs.jsonl`. Other test scripts
-contribute to the full-run result but do not supply individual identities.
+Repository-local test output is grouped under `.cache/test-output/`.
+
+- `runs/` holds disposable browser artifacts, test reports, and isolated
+  smoke-test and `shep --test` sessions. Each invocation gets its own directory.
+  Clear this directory when you no longer need the run output.
+- `replay/` holds live-agent captures needed to replay tests offline.
+- `history/runs.jsonl` records exact Rust, Vitest and Playwright test identities
+  and runner versions from successful shard invocations. The runner also reads
+  earlier records from `.cache/test-shards/runs.jsonl`.
+- `history/browser/` holds each Playwright suite's last-run state for
+  `--last-failed`.
+
+Other test scripts contribute to the full-run result but do not supply
+individual identities.
 `--last-ran` only reports clean,
 successful runs on the current first-parent history; dirty runs, rewritten
 commits, a missing local history, and tests not yet present in an old revision
@@ -550,7 +561,9 @@ direnv exec . cargo test -p shep-harness-pi --features live-pi --lib pi::tests::
 ## Live Codex tests
 
 Codex scenarios replay the app-server responses and recorded worktree edits
-from `.cache/shepherd-live/codex/terra-low-v1/`. To record a missing scenario,
+from `.cache/test-output/replay/codex/terra-low-v1/`. Existing captures under
+`.cache/shepherd-live/codex/terra-low-v1/` still replay when the new path has
+no capture. To record a missing scenario,
 add `--features live-codex` to the Cargo command or `--record` to the desktop
 smoke command. Recording uses the ChatGPT login with `gpt-6.1-terra` at `low`
 effort. An existing capture takes precedence when recording is enabled. Cache

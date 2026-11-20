@@ -80,7 +80,7 @@ pnpm --dir apps/shep-docs-web run test:e2e`
     Installed-process probes are excluded by default and behind a per-agent feature. A replay would
     skip the process being tested, so a cache miss needs the feature rather than a silent pass.
     Codex scenarios replay app-server responses and recorded worktree edits under
-    <code>.cache/shepherd-live/codex/terra-low-v1/</code>. Recording uses
+    <code>.cache/test-output/replay/codex/terra-low-v1/</code>. Recording uses
     <code>gpt-6.1-terra</code> at <code>low</code> effort; captures with another model or effort, or
     an empty session, are rejected.
   </p>

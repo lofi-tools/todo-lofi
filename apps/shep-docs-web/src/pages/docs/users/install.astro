@@ -79,7 +79,7 @@ const build = `direnv exec . pnpm --dir apps/shepherd build
   <h2 id="test-mode">Test mode</h2>
   <p>
     <code>shep --test</code> starts on its own port with an empty database in a fresh directory
-    under <code>.cache/test-db/</code>. Changes survive Tauri reloads during that launch; closing the
+    under <code>.cache/test-output/runs/shep-test/</code>. Changes survive Tauri reloads during that launch; closing the
     app discards the session database, and the next test launch starts empty again.
   </p>
   <CodeBlock filename="terminal" code={testRun} showLineNumbers={false} />

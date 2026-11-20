@@ -1,9 +1,11 @@
 import { defineConfig, devices } from '@playwright/test'
+import { playwrightOutput } from '../../scripts/playwright-test-output'
 
 const shardPort = process.env.TEST_SHARD_PORT ? Number(process.env.TEST_SHARD_PORT) : undefined
 
 export default defineConfig({
   testDir: './tests',
+  outputDir: playwrightOutput('taskstream-docs'),
   fullyParallel: true,
   // Two workers keep local Chrome context launches stable while the suite
   // stays parallel.

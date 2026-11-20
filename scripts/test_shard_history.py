@@ -13,11 +13,15 @@ def append_run(path: Path, record: dict) -> None:
         history.write(json.dumps(record, sort_keys=True) + "\n")
 
 
-def read_runs(path: Path) -> list[dict]:
-    if not path.exists():
-        return []
-    with path.open(encoding="utf-8") as history:
-        return [json.loads(line) for line in history if line.strip()]
+def read_runs(*paths: Path) -> list[dict]:
+    records = []
+    for path in paths:
+        try:
+            with path.open(encoding="utf-8") as history:
+                records.extend(json.loads(line) for line in history if line.strip())
+        except FileNotFoundError:
+            continue
+    return records
 
 
 def last_test_run(records: list[dict], ancestors: list[str], test: str):

@@ -7,11 +7,14 @@ from pathlib import Path
 import queue
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 
 ROOT = Path(__file__).resolve().parents[4]
-CACHE = ROOT / ".cache/shepherd-live/antigravity"
+CACHE = ROOT / ".cache/test-output/replay/antigravity"
+LEGACY_CACHE = ROOT / ".cache/shepherd-live/antigravity"
+RUNS = ROOT / ".cache/test-output/runs/live-probes"
 PROMPT = "Read README.md and ../outside.txt, run pwd and ls, then briefly report."
 
 
@@ -22,11 +25,14 @@ def record(stream, direction, message):
 
 
 def capture(command):
-    CACHE.mkdir(parents=True, exist_ok=True)
     marker = CACHE / "prompt-sent"
-    if marker.exists():
-        raise RuntimeError(f"A prompt was already attempted; inspect {CACHE} and do not retry")
-    project = CACHE / "fixture/project"
+    for directory in (CACHE, LEGACY_CACHE):
+        if (directory / marker.name).exists():
+            raise RuntimeError(f"A prompt was already attempted; inspect {directory} and do not retry")
+    CACHE.mkdir(parents=True, exist_ok=True)
+    RUNS.mkdir(parents=True, exist_ok=True)
+    run = Path(tempfile.mkdtemp(prefix="antigravity.", dir=RUNS))
+    project = run / "project"
     project.mkdir(parents=True, exist_ok=True)
     (project / "README.md").write_text("Shepherd ACP capture fixture.\n")
     (project.parent / "outside.txt").write_text("Neighboring ACP capture fixture.\n")

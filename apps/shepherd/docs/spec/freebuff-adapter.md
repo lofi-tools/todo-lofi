@@ -191,7 +191,7 @@ and report failures through Shepherd's normal diagnostics.
    Cache every live response, including partial responses, together with raw
    PTY bytes, terminal-size changes and rendered terminal-state transitions
    in their original order, plus external effects needed by assertions, under
-   the repository `.cache/`; replay them on later runs.
+   `.cache/test-output/replay/freebuff/`; replay them on later runs.
    Treat a capture write failure as a live-test failure and stop further
    submissions rather than continuing without a replayable record.
    Gate genuinely live Freebuff probes behind a separate `live-freebuff`
@@ -225,9 +225,10 @@ an error or missing drain leaves the capture incomplete. Marker files are local
 controls, not a substitute for user approval. This diagnostic does not yet
 classify the screen, test approval flows, or establish runtime compatibility.
 The ignored `replay_approved_freebuff_capture` diagnostic accepts
-`SHEPHERD_FREEBUFF_CAPTURE` and a clean disposable `SHEPHERD_FREEBUFF_WORKTREE`;
-it verifies the complete recording before applying its supported worktree
-effects. It makes no live agent call. Escaped descendant processes are not yet
+`SHEPHERD_FREEBUFF_CAPTURE` and a clean disposable `SHEPHERD_FREEBUFF_WORKTREE`.
+The capture path can point to an earlier recording under `.cache/shepherd-live/freebuff/`.
+The diagnostic verifies the complete recording before applying its supported
+worktree effects. It makes no live agent call. Escaped descendant processes are not yet
 ruled out, so capture completeness remains limited by that check. The ignored
 `inspect_unfinished_freebuff_capture` diagnostic uses
 `SHEPHERD_FREEBUFF_CAPTURE` to verify and inspect available frames without

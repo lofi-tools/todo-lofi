@@ -55,6 +55,8 @@ which requested approval and was denied by the capture client, and a failed
 `pwd && ls` command. It ended the turn without a final message. The raw ACP
 exchange and disposable files are retained under `.cache/shepherd-live/antigravity/`;
 the repository fixture contains only the seven path-redacted tool updates.
+The capture script now writes transcripts under `.cache/test-output/replay/antigravity/`
+and disposable projects under `.cache/test-output/runs/live-probes/`.
 
 The capture mistakenly started the CLI in the repository directory while
 passing the disposable project to `session/new`. The agent used its process

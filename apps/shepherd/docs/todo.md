@@ -586,7 +586,7 @@ Tasks:
     and a disposable worktree with the existing login. Cache every response,
     including partial responses, raw PTY bytes, terminal-size changes and
     rendered terminal-state transitions in order, plus assertion-relevant
-    effects under `.cache/` for replay. Record version,
+    effects under `.cache/test-output/replay/freebuff/` for replay. Record version,
     limitations, safe capture and replay instructions, and evidence for
     streaming, interactions, cancel and restart behavior.
 

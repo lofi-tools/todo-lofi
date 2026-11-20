@@ -1862,7 +1862,7 @@ mod tests {
         );
         runtime(&session, &metadata, &executable)?;
         let recorded_capture_path = workspace
-            .join(".cache/shepherd-live/freebuff")
+            .join(".cache/test-output/replay/freebuff")
             .join(format!("{scenario}.jsonl"));
         verify_unfinished_screens(&recorded_capture_path)?;
         capture.finish_after_drain()?;
@@ -2067,7 +2067,7 @@ mod tests {
         result?;
         let completed_capture_path = workspace
             .path()
-            .join(".cache/shepherd-live/freebuff/fake-runner.jsonl");
+            .join(".cache/test-output/replay/freebuff/fake-runner.jsonl");
         verify_recorded_screens(&completed_capture_path)?;
         let records = read_complete_capture(&completed_capture_path)?;
         assert!(records.iter().any(|record| matches!(&record.event, CaptureEvent::Runtime { cached_runtime_sha256: Some(hash), .. } if hash == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")));
@@ -2379,7 +2379,7 @@ mod tests {
         let records = read_capture(
             &directory
                 .path()
-                .join(".cache/shepherd-live/freebuff/fake-pty.jsonl"),
+                .join(".cache/test-output/replay/freebuff/fake-pty.jsonl"),
         )?;
         let expected_updates: Vec<_> = records
             .windows(2)

@@ -155,8 +155,9 @@ if [[ ! $port =~ ^[1-9][0-9]{3,4}$ ]] || (( port < 1024 || port > 65535 )); then
 fi
 
 repo=$(cd "$(dirname "$0")/.." && pwd)
-mkdir -p "$repo/.cache/test-db"
-fixture=$(mktemp -d "$repo/.cache/test-db/smoke.XXXXXX")
+run_root="$repo/.cache/test-output/runs/native-smoke"
+mkdir -p "$run_root"
+fixture=$(mktemp -d "$run_root/smoke.XXXXXX")
 trap 'rm -rf -- "$fixture"' EXIT
 fixture=$(cd "$fixture" && pwd -P)
 mkdir "$fixture/project"

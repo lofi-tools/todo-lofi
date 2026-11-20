@@ -25,7 +25,7 @@ def main():
     patches = []
     patch_mode = os.environ.get("SHEPHERD_REPLAY_WORKTREE_PATCH")
     if patch_mode in ("1", "sequence"):
-        test_root = Path(__file__).resolve().parent.parent / ".cache/test-db"
+        test_root = Path(__file__).resolve().parent.parent / ".cache/test-output/runs/native-smoke"
         if not Path(cwd).resolve().is_relative_to(test_root.resolve()):
             raise ValueError("worktree patch replay requires a disposable project")
         note = cache.get("note")

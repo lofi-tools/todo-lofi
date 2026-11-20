@@ -1,9 +1,11 @@
 import { defineConfig, devices } from '@playwright/test'
+import { playwrightOutput } from '../../../scripts/playwright-test-output'
 
 const shardPort = process.env.TEST_SHARD_PORT ? Number(process.env.TEST_SHARD_PORT) : undefined
 
 export default defineConfig({
   testDir: './tests',
+  outputDir: playwrightOutput('shepherd'),
   // Shard individual tests while keeping the shared server and window serial.
   fullyParallel: true,
   workers: 1,

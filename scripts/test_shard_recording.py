@@ -90,28 +90,31 @@ class Recorder:
                                   "success": True, "clean": clean, "full": full,
                                   "versions": self.versions, "tests": tests})
 
+    def run_directory(self, suite, directory):
+        runs = self.root / ".cache/test-output/runs" / suite
+        runs.mkdir(parents=True, exist_ok=True)
+        return Path(tempfile.mkdtemp(prefix=f"{directory.name}.", dir=runs))
+
     def run(self, command, directory):
         if command[:3] == ["cargo", "nextest", "run"]:
             inventory = subprocess.check_output(rust_list_command(command), cwd=directory, text=True)
             subprocess.run(command, cwd=directory, check=True)
             self.save(rust_test_ids(json.loads(inventory)))
         elif command[:4] == ["pnpm", "exec", "playwright", "test"]:
-            self.history.parent.mkdir(parents=True, exist_ok=True)
-            with tempfile.TemporaryDirectory(dir=self.history.parent) as temporary:
-                report = Path(temporary) / "playwright.json"
-                environment = dict(os.environ, PLAYWRIGHT_JSON_OUTPUT_FILE=str(report),
-                                   TEST_SHARD_PORT=str(available_port()), SHEPHERD_UI_E2E="1")
-                environment.pop("ASTRO_PREVIEW_BACKGROUND", None)
-                environment.pop("ASTRO_DEV_BACKGROUND", None)
-                subprocess.run([*command, "--reporter=list,json"], cwd=directory, env=environment, check=True)
-                workspace = str(directory.relative_to(self.root))
-                self.save(ui_test_ids(json.loads(report.read_text(encoding="utf-8")), workspace))
+            run = self.run_directory("browser", directory)
+            report = run / "playwright.json"
+            environment = dict(os.environ, PLAYWRIGHT_JSON_OUTPUT_FILE=str(report),
+                               TEST_SHARD_PORT=str(available_port()), SHEPHERD_UI_E2E="1")
+            environment.pop("ASTRO_PREVIEW_BACKGROUND", None)
+            environment.pop("ASTRO_DEV_BACKGROUND", None)
+            subprocess.run([*command, "--reporter=list,json", "--output", str(run / "artifacts")],
+                           cwd=directory, env=environment, check=True)
+            workspace = str(directory.relative_to(self.root))
+            self.save(ui_test_ids(json.loads(report.read_text(encoding="utf-8")), workspace))
         elif command[:4] == ["pnpm", "exec", "vitest", "run"]:
-            self.history.parent.mkdir(parents=True, exist_ok=True)
-            with tempfile.TemporaryDirectory(dir=self.history.parent) as temporary:
-                report = Path(temporary) / "vitest.json"
-                subprocess.run([*command, "--reporter=default", "--reporter=json", f"--outputFile.json={report}"],
-                               cwd=directory, check=True)
-                self.save(vitest_ids(json.loads(report.read_text(encoding="utf-8")), self.root))
+            report = self.run_directory("vitest", directory) / "vitest.json"
+            subprocess.run([*command, "--reporter=default", "--reporter=json", f"--outputFile.json={report}"],
+                           cwd=directory, check=True)
+            self.save(vitest_ids(json.loads(report.read_text(encoding="utf-8")), self.root))
         else:
             subprocess.run(command, cwd=directory, check=True)

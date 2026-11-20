@@ -6,7 +6,8 @@ description: Investigate Shepherd desktop runtime errors using its local diagnos
 Shepherd writes structured JSON lines to `logs/errors.jsonl` in its active data
 directory. For the usual development launch, inspect
 `.cache/test-db/logs/errors.jsonl` from the repository root. `shep --test` uses a
-fresh launch directory under `.cache/test-db/`; use the active launch's directory.
+fresh launch directory under `.cache/test-output/runs/shep-test/`. Use the active
+launch's directory.
 Production uses the platform application data directory. `SHEPHERD_DEV_DATA_DIR`
 overrides the development data directory.
 

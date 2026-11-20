@@ -13,9 +13,13 @@ from test_sharding import affected_tests, excluded_packages, shard_for_revision
 
 ROOT = Path(__file__).resolve().parent.parent
 UI = ROOT / "apps/shepherd/ui"
-HISTORY = ROOT / ".cache/test-shards/runs.jsonl"
+HISTORY = ROOT / ".cache/test-output/history/runs.jsonl"
 RECORDER = None
 CONTEXT = None
+
+
+def recorded_runs():
+    return read_runs(ROOT / ".cache/test-shards/runs.jsonl", HISTORY)
 
 
 def web_workspace():
@@ -176,7 +180,7 @@ def main(argv=None):
         parser.error("--package requires --test")
     if args.last_ran:
         ancestors = first_parent_ancestors(ROOT, "HEAD")
-        record = last_test_run(read_runs(HISTORY), ancestors, args.last_ran)
+        record = last_test_run(recorded_runs(), ancestors, args.last_ran)
         if record is None:
             print("No recorded clean successful ancestor ran that exact test; history may be incomplete.")
             return
@@ -221,7 +225,7 @@ def main(argv=None):
         execute(["python3", "scripts/python-unit-shard.py", "--shard", f"{index}/{count}"], dry_run=args.dry_run)
         run_web_unit_tests(index, count, dry_run=args.dry_run)
         return
-    if full_suite_due(read_runs(HISTORY), first_parent_ancestors(ROOT, head)):
+    if full_suite_due(recorded_runs(), first_parent_ancestors(ROOT, head)):
         print("A full default-suite run is due: use --all.", file=sys.stderr)
     paths = [path for path in changed_paths() if not path.startswith("demos/")]
     web_roots, web_dependents, _ = web_workspace()

@@ -1,7 +1,9 @@
 import { defineConfig, devices } from '@playwright/test'
+import { playwrightOutput } from '../../scripts/playwright-test-output'
 
 export default defineConfig({
   testDir: './tests',
+  outputDir: playwrightOutput('design-system-showcase'),
   fullyParallel: true,
   reporter: process.env.CI ? 'github' : 'list',
   use: {

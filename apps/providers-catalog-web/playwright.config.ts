@@ -1,9 +1,11 @@
 import { defineConfig, devices } from '@playwright/test'
+import { playwrightOutput } from '../../scripts/playwright-test-output'
 
 const shardPort = process.env.TEST_SHARD_PORT ? Number(process.env.TEST_SHARD_PORT) : undefined
 
 export default defineConfig({
   testDir: './tests',
+  outputDir: playwrightOutput('providers-catalog'),
   testMatch: '**/*.spec.ts',
   fullyParallel: true,
   workers: 2,

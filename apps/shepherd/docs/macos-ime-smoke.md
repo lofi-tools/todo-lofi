@@ -32,7 +32,7 @@ direnv exec . ./scripts/smoke-shepherd-terminal.sh --macos-ime
 This builds and launches the **debug Tauri dev app** with
 `pnpm --dir apps/shepherd exec tauri dev --no-watch`, not the release app
 bundle. It uses the scripted harness, a disposable project and database under
-`.cache/test-db/`, a 300-second timeout, and writes the log to
+`.cache/test-output/runs/native-smoke/`, a 300-second timeout, and writes the log to
 `<fixture>/macos-ime.log`. The script prints the two prompt instructions before
 the window appears; wait for each prompt instead of typing ahead.
 

@@ -13,6 +13,9 @@ class HistoryTests(unittest.TestCase):
             append_run(path, {"revision": "abc", "success": True})
             self.assertEqual(read_runs(path)[0]["revision"], "abc")
             self.assertIn("timestamp", read_runs(path)[0])
+            legacy = Path(directory) / "legacy" / "runs.jsonl"
+            append_run(legacy, {"revision": "older", "success": True})
+            self.assertEqual([record["revision"] for record in read_runs(legacy, path)], ["older", "abc"])
 
     def test_last_run_requires_clean_successful_ancestor_and_exact_name(self):
         records = [

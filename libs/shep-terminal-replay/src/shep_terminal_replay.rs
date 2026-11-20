@@ -469,7 +469,7 @@ mod tests {
         }
         let path = directory
             .path()
-            .join(".cache/shepherd-live/freebuff/transient-warning.jsonl");
+            .join(".cache/test-output/replay/freebuff/transient-warning.jsonl");
         assert_eq!(freebuff_screen_warning(&screen.frame())?, None);
         let mut warnings = FreebuffWarningTracker::default();
         visit_unfinished_screen_changes(&path, |_, frame| warnings.observe(frame))?;
@@ -567,7 +567,7 @@ mod tests {
             }
             let path = directory
                 .path()
-                .join(format!(".cache/shepherd-live/freebuff/{name}.jsonl"));
+                .join(format!(".cache/test-output/replay/freebuff/{name}.jsonl"));
             assert_eq!(verify_unfinished_screens(&path).is_err(), tampered);
             writer.append(&CaptureRecord {
                 elapsed_micros: 100,
@@ -631,7 +631,7 @@ mod tests {
 
         let path = directory
             .path()
-            .join(".cache/shepherd-live/freebuff/terminal-replay.jsonl");
+            .join(".cache/test-output/replay/freebuff/terminal-replay.jsonl");
         let mut screen = Screen::new(10, 2);
         visit_capture(&path, |record| {
             match record.event {
@@ -686,7 +686,9 @@ mod tests {
                 })?;
             repository.write_file("README.md", "replayed\n")?;
             capture.finish_after_drain()?;
-            Ok(cache.join(format!(".cache/shepherd-live/freebuff/{scenario}.jsonl")))
+            Ok(cache.join(format!(
+                ".cache/test-output/replay/freebuff/{scenario}.jsonl"
+            )))
         }
 
         let repository = TestRepository::new()?;

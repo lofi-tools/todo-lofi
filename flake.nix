@@ -272,8 +272,9 @@
                   watch_shepherd
                   ;;
                 --test)
-                  mkdir -p "$test_database_root"
-                  session_data_directory=$(mktemp -d "$test_database_root/session.XXXXXX")
+                  run_root="$PWD/.cache/test-output/runs/shep-test"
+                  mkdir -p "$run_root"
+                  session_data_directory=$(mktemp -d "$run_root/session.XXXXXX")
                   trap 'rm -rf -- "$session_data_directory"' EXIT
                   export SHEPHERD_DEV_DATA_DIR="$session_data_directory"
                   export VITE_SHEPHERD_EPHEMERAL=1

@@ -54,7 +54,7 @@ def select(paths, roots, omitted, web_roots=None, omitted_web=frozenset()):
 
 def full_due():
     head = SHARDS.output("git", "rev-parse", "HEAD")
-    return SHARDS.full_suite_due(SHARDS.read_runs(SHARDS.HISTORY), SHARDS.first_parent_ancestors(ROOT, head))
+    return SHARDS.full_suite_due(SHARDS.recorded_runs(), SHARDS.first_parent_ancestors(ROOT, head))
 
 
 def main():
