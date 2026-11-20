@@ -236,17 +236,18 @@ current layout and give future changes a point of comparison.
 - Anchor an icon-only **Settings** gear at the bottom of the left icon rail.
   Show a **Settings** hover card and highlight the active button. Opening
   Settings replaces the Projects sidebar, conversation, and inspector. The settings subnavigation
-  groups controls under **Workspace**, **Projects**, **Appearance**, and
+  groups controls under **Workspace**, **Projects**, **Agents**, **Appearance**, and
   **Keyboard shortcuts**.
-  **Settings → Harnesses** lists configured and detected harness CLIs, including Codex in supported app bundles, with their brand marks and paths, and offers a refresh. Detection does not configure an integration.
-  **Settings → Projects** lists every project in a subnavigation. Each project
-  exposes the same project controls without changing the active workspace project.
-  It offers the same per-source import buttons even when the sidebar already
-  contains projects.
+  **Settings → Agents** shows detected harness CLIs and their paths in each agent's detail pane, including Codex in supported app bundles, and offers a refresh. Detection does not configure an integration.
+  **Settings → Projects** provides project-wide add and import controls and
+  lists every project in a subnavigation. Selecting a project opens its own
+  settings, with the same controls for each project, without changing the active
+  workspace project. Project-wide add and import controls stay on the overview.
   Setting labels and their inputs share a row across settings sections.
-  Settings section headings match the Settings heading. **Settings → Agent pool**
+  Settings section headings match the Settings heading. **Settings → Agents**
   shows available agents in a drag-reorderable priority list, with a card following
-  the pointer and animated movement. Alt-Up and Alt-Down reorder a focused card.
+  the pointer and animated movement. The moving card matches the original's
+  size, content, and selected state. Alt-Up and Alt-Down reorder a focused card.
   Detected but unavailable harnesses appear in a separate section. Selecting a
   harness or its settings gear opens its settings and detected paths in a pane to
   the right. Selecting the same harness again or using the pane's close button
@@ -393,8 +394,9 @@ current layout and give future changes a point of comparison.
   The selection applies to the new draft. A draft's agent can change directly.
   Switching an existing conversation asks for confirmation, waits for an active
   turn, and starts a fresh agent session while retaining the transcript and worktree.
-  Offer a handoff summary from the previous agent, selected by default; put the
-  resulting summary in the composer for review before the next prompt is sent.
+  Offer a handoff summary from the previous agent with a switch selected by
+  default; put the resulting summary in the composer for review before the next
+  prompt is sent. Use the shared modal header and padded body for confirmation.
 
 ## Conversation lifecycle
 

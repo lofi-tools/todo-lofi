@@ -8,6 +8,40 @@ export function agentPriority(saved?: PoolAgent[]): PoolAgent[] {
   return [...new Set(saved ?? DEFAULT_AGENT_PRIORITY)]
 }
 
+function HarnessCard(props: {
+  agent: PoolAgent
+  label: string
+  version: string
+  selected: boolean
+  editable: boolean
+  dragging?: boolean
+  preview?: { x: number; y: number; width: number }
+  rowRef?: (row: HTMLLIElement) => void
+  onSelect?: () => void
+  onSettings?: () => void
+  onMove?: (direction: number) => void
+  onPointerDown?: (event: PointerEvent) => void
+}) {
+  return <li ref={props.rowRef} class="pool__agent" classList={{
+    'pool__agent--editable': props.editable,
+    'pool__agent--dragging': props.dragging,
+    'pool__agent--selected': props.selected,
+    'pool__drag-card': !!props.preview,
+  }} style={props.preview ? { left: `${props.preview.x}px`, top: `${props.preview.y}px`, width: `${props.preview.width}px` } : undefined}
+    tabIndex={props.preview ? undefined : 0} onKeyDown={(event) => {
+      if (event.target !== event.currentTarget || props.preview) return
+      if (props.editable && event.altKey && (event.key === 'ArrowUp' || event.key === 'ArrowDown')) { event.preventDefault(); props.onMove?.(event.key === 'ArrowUp' ? -1 : 1) }
+      else if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); props.onSelect?.() }
+    }}
+    onClick={() => props.onSelect?.()}
+    onDragStart={(event) => event.preventDefault()}
+    onPointerDown={(event) => props.onPointerDown?.(event)}>
+    <span class="pool__drag-handle" aria-hidden="true">⠿</span>
+    <span class="pool__agent-label"><span class="settings__harness-name"><AgentIcon agent={props.agent} />{props.label}</span><span class="empty">{props.version}</span></span>
+    <button type="button" class="pool__settings" aria-label={`${AGENT_LABELS[props.agent]} harness settings`} title="Harness settings" onClick={(event) => { event.stopPropagation(); props.onSettings?.() }}><GearIcon /></button>
+  </li>
+}
+
 export function PoolSettings(props: { priority?: PoolAgent[]; editable: boolean; selected?: PoolAgent; onSelect: (agent: PoolAgent) => void; onChange: (priority: PoolAgent[]) => Promise<void> }) {
   const [failure, setFailure] = createSignal('')
   const [draft, setDraft] = createSignal<PoolAgent[]>()
@@ -35,6 +69,7 @@ export function PoolSettings(props: { priority?: PoolAgent[]; editable: boolean;
     const harness = discovery()?.harnesses.find((entry) => entry.agent === agent)
     return harnessVersionStatus(agent, harness?.version, harness?.path)
   }
+  const detectedLabel = (agent: PoolAgent) => harnessLabel(agent, discovery()?.harnesses.filter((harness) => harness.agent === agent).map((harness) => harness.path) ?? [])
   const editable = () => props.editable && !saving()
 
   function reorder(agent: PoolAgent, target: PoolAgent, after: boolean) {
@@ -148,23 +183,16 @@ export function PoolSettings(props: { priority?: PoolAgent[]; editable: boolean;
     }} onPointerUp={(event) => { if (pointer?.id === event.pointerId) finishDrag(true) }}
       onPointerCancel={(event) => { if (pointer?.id === event.pointerId) finishDrag(false) }}
       onLostPointerCapture={(event) => { if (pointer?.id === event.pointerId) finishDrag(false) }}>
-      <For each={installed()}>{(agent) => <li ref={(row) => rows.set(agent, row)} class="pool__agent" classList={{ 'pool__agent--editable': editable(), 'pool__agent--dragging': dragged() === agent, 'pool__agent--selected': props.selected === agent }}
-        tabIndex={0} onKeyDown={(event) => {
-          if (event.target !== event.currentTarget) return
-          if (editable() && event.altKey && (event.key === 'ArrowUp' || event.key === 'ArrowDown')) { event.preventDefault(); move(agent, event.key === 'ArrowUp' ? -1 : 1) }
-          else if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); props.onSelect(agent) }
-        }}
-        onClick={() => { if (!suppressClick) props.onSelect(agent) }}
-        onDragStart={(event) => event.preventDefault()} onPointerDown={(event) => {
+      <For each={installed()}>{(agent) => <HarnessCard agent={agent} label={detectedLabel(agent)} version={detectedVersion(agent)} selected={props.selected === agent} editable={editable()} dragging={dragged() === agent}
+        rowRef={(row) => rows.set(agent, row)} onSelect={() => { if (!suppressClick) props.onSelect(agent) }} onSettings={() => props.onSelect(agent)} onMove={(direction) => move(agent, direction)}
+        onPointerDown={(event) => {
           if (!editable() || pointer || !event.isPrimary || event.button !== 0 || (event.target instanceof Element && event.target.closest('button'))) return
-          const bounds = event.currentTarget.getBoundingClientRect()
+          const row = rows.get(agent)
+          if (!row) return
+          const bounds = row.getBoundingClientRect()
           pointer = { id: event.pointerId, agent, x: event.clientX, y: event.clientY, offsetX: event.clientX - bounds.left, offsetY: event.clientY - bounds.top, width: bounds.width, active: false, inside: true }
           list.setPointerCapture(event.pointerId)
-        }}>
-        <span class="pool__drag-handle" aria-hidden="true">⠿</span>
-        <span class="pool__agent-label"><span class="settings__harness-name"><AgentIcon agent={agent} />{harnessLabel(agent, discovery()?.harnesses.filter((harness) => harness.agent === agent).map((harness) => harness.path) ?? [])}</span><span class="empty">{detectedVersion(agent)}</span></span>
-        <button type="button" class="pool__settings" aria-label={`${AGENT_LABELS[agent]} harness settings`} title="Harness settings" onClick={(event) => { event.stopPropagation(); props.onSelect(agent) }}><GearIcon /></button>
-      </li>}</For>
+        }} />}</For>
     </ol>
     <Show when={notAdded().length > 0}><h4 class="pool__section-heading">Detected harnesses</h4><ul class="pool__list">
       <For each={notAdded()}>{(agent) => <li class="pool__agent" classList={{ 'pool__agent--selected': props.selected === agent }}>
@@ -180,7 +208,9 @@ export function PoolSettings(props: { priority?: PoolAgent[]; editable: boolean;
         <button type="button" class="pool__settings" aria-label={`${AGENT_LABELS[agent]} harness settings`} title="Harness settings" onClick={(event) => { event.stopPropagation(); props.onSelect(agent) }}><GearIcon /></button>
       </li>}</For>
     </ul></Show>
-    <Show when={dragged() && dragCard()}>{(card) => <div class="pool__agent pool__drag-card" style={{ left: `${card().x}px`, top: `${card().y}px`, width: `${card().width}px` }} aria-hidden="true"><span class="pool__drag-handle">⠿</span><span class="settings__harness-name"><AgentIcon agent={dragged()!} />{AGENT_LABELS[dragged()!]}</span></div>}</Show>
+    <Show when={dragged() && dragCard()}>{(card) => <ul class="pool__drag-layer" aria-hidden="true" inert>
+      <HarnessCard agent={dragged()!} label={detectedLabel(dragged()!)} version={detectedVersion(dragged()!)} selected={props.selected === dragged()} editable={editable()} preview={card()} />
+    </ul>}</Show>
   </section>
 }
 

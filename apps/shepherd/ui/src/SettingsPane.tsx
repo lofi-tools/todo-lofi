@@ -9,7 +9,7 @@ import { AgentIcon } from './AgentIcon'
 import { detectedHarnesses } from './bridge'
 import { projectEnvironment, saveProjectEnvironment, type ProjectEnvironment } from './bridge'
 
-export const categories = ['Workspace', 'Projects', 'Agent pool', 'Harnesses', 'Appearance', 'Keyboard shortcuts'] as const
+export const categories = ['Workspace', 'Projects', 'Agents', 'Appearance', 'Keyboard shortcuts'] as const
 
 function matchesSearch(text: string, query: string) {
   return !query || query.split(/\s+/).every((word) => text.toLowerCase().includes(word))
@@ -24,7 +24,7 @@ interface SettingsPaneProps {
   category: SettingsCategory
   onCategoryChange: (category: SettingsCategory) => void
   settingsProjectId?: string
-  onSettingsProjectChange: (projectId: string) => void
+  onSettingsProjectChange: (projectId?: string) => void
   onBack: () => void
   preferences?: SettingsSnapshot
   preferencesEditable: boolean
@@ -47,7 +47,6 @@ interface SettingsPaneProps {
   onAddProject: () => void
   pending: boolean
   projectImports: JSX.Element
-  project?: ProjectSnapshot
   projects: ProjectSnapshot[]
   projectSettingsRequest?: { id: string }
   approvalChange?: { projectId?: string }
@@ -489,7 +488,7 @@ function KeyboardShortcuts(props: {
   )
 }
 
-function HarnessSettings(props: { query?: string; agent?: PoolAgent }) {
+function HarnessSettings(props: { agent: PoolAgent }) {
   const [harnesses, { refetch }] = createResource(async () => {
     try { return { value: await detectedHarnesses(), error: '' } }
     catch (error) { return { value: undefined, error: settingsError(error) } }
@@ -500,8 +499,8 @@ function HarnessSettings(props: { query?: string; agent?: PoolAgent }) {
       <button type="button" class="project-action" disabled={harnesses.loading} onClick={() => void refetch()}>Refresh harnesses</button>
       <Show when={harnesses.loading}><p class="empty">Detecting harnesses…</p></Show>
       <Show when={harnesses.latest?.error}>{(error) => <p role="alert">{error()}</p>}</Show>
-      <Show when={!harnesses.loading && harnesses.latest?.value && !harnesses.latest.value.some((harness) => !props.agent || harness.agent === props.agent)}><p class="empty">No harnesses detected.</p></Show>
-      <For each={(harnesses.latest?.value ?? []).filter((harness) => (!props.agent || harness.agent === props.agent) && matchesSearch(`${AGENT_LABELS[harness.agent]} ${harness.path}`, props.query ?? ''))}>{(harness) => (
+      <Show when={!harnesses.loading && harnesses.latest?.value && !harnesses.latest.value.some((harness) => harness.agent === props.agent)}><p class="empty">No harnesses detected.</p></Show>
+      <For each={(harnesses.latest?.value ?? []).filter((harness) => harness.agent === props.agent)}>{(harness) => (
         <div class="settings__harness"><div class="settings__harness-name"><AgentIcon agent={harness.agent} />{AGENT_LABELS[harness.agent]}{harness.path.includes('/ChatGPT.app/') ? ' · ChatGPT app' : harness.path.includes('/Codex.app/') ? ' · Codex app' : harness.agent === 'antigravity' ? (harness.path.endsWith('.app') ? ' · app' : ' · CLI') : ''}</div><code>{harness.path}</code><span class="empty">{harnessVersionStatus(harness.agent, harness.version, harness.path)}</span></div>
       )}</For>
     </section>
@@ -511,7 +510,7 @@ function HarnessSettings(props: { query?: string; agent?: PoolAgent }) {
 export function SettingsPane(props: SettingsPaneProps) {
   const category = () => props.category
   const setCategory = props.onCategoryChange
-  const settingsProjectId = () => props.settingsProjectId ?? props.project?.id ?? props.projects[0]?.id
+  const settingsProjectId = () => props.settingsProjectId
   const setSettingsProjectId = props.onSettingsProjectChange
   const settingsProject = createMemo(() => props.projects.find((project) => project.id === settingsProjectId()))
   const [search, setSearch] = createSignal('')
@@ -520,8 +519,7 @@ export function SettingsPane(props: SettingsPaneProps) {
   const searchTerms: Record<(typeof categories)[number], string> = {
     Workspace: 'show archived tasks notify notifications when tasks need input attachment limit bytes terminal scrollback lines reload settings configuration',
     Projects: 'project settings show archived tasks preview url server background command port attachment limit bytes terminal scrollback lines approvals saved live session add project import chatgpt worktree setup project actions codex environment',
-    'Agent pool': 'agent pool priority installed agents reorder',
-    Harnesses: 'harnesses codex chatgpt opencode pi claude code freebuff antigravity kilocode executable path refresh',
+    Agents: 'agent pool priority installed agents reorder harnesses codex chatgpt opencode pi claude code freebuff antigravity kilocode executable path refresh',
     Appearance: 'appearance theme system light dark density compact comfortable send button accent blue violet teal amber neutral',
     'Keyboard shortcuts': 'keyboard shortcuts shortcut bindings commands reload configuration',
   }
@@ -552,13 +550,10 @@ export function SettingsPane(props: SettingsPaneProps) {
   createEffect(on(() => props.projectSettingsRequest, (request) => {
     if (request) { setSettingsProjectId(request.id); setSearch(''); setCategory('Projects') }
   }))
-  createEffect(() => {
-    if (!settingsProject() && props.projects.length) setSettingsProjectId(props.project?.id ?? props.projects[0]?.id)
-  })
 
   return (
     <section class="settings" aria-labelledby="settings-title">
-      <div class="settings__body" classList={{ 'settings__body--detail': activeCategory() === 'Agent pool' && !!selectedHarness() }}>
+      <div class="settings__body" classList={{ 'settings__body--detail': activeCategory() === 'Agents' && !!selectedHarness() }}>
         <nav class="settings__nav" aria-label="Settings categories">
           <button type="button" class="settings__back" onClick={props.onBack}><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M19 12H5m7-7-7 7 7 7" /></svg>Back to app</button>
           <header class="settings__header"><h2 id="settings-title">Settings</h2></header>
@@ -572,8 +567,8 @@ export function SettingsPane(props: SettingsPaneProps) {
                 <button
                   type="button"
                   class="nav-item"
-                  aria-current={activeCategory() === name ? 'true' : undefined}
-                  onClick={() => setCategory(name)}
+                  aria-current={activeCategory() === name && (name !== 'Projects' || !settingsProjectId()) ? 'true' : undefined}
+                  onClick={() => { if (name === 'Projects') setSettingsProjectId(undefined); setCategory(name) }}
                 >
                   {name}
                 </button>
@@ -678,13 +673,15 @@ export function SettingsPane(props: SettingsPaneProps) {
                 </div>
               )}
             </Show>
-            <Show when={showSetting('add project')}><button type="button" class="project-action" onClick={props.onAddProject} disabled={props.pending}>Add project</button></Show>
-            <Show when={showSetting('import projects chatgpt')}><p class="empty">Import all from</p>{props.projectImports}</Show>
+            <Show when={!settingsProject()}>
+              <Show when={showSetting('add project')}><button type="button" class="project-action" onClick={props.onAddProject} disabled={props.pending}>Add project</button></Show>
+              <Show when={showSetting('import projects chatgpt')}><p class="empty">Import all from</p>{props.projectImports}</Show>
+              <Show when={!!query() && !showSetting('add project') && !showSetting('import projects chatgpt')}><p class="empty">Select a project to view its settings.</p></Show>
+            </Show>
           </Show>
-          <Show when={activeCategory() === 'Agent pool'}>
+          <Show when={activeCategory() === 'Agents'}>
             <PoolSettings priority={props.preferences?.app['agents.priority']} selected={selectedHarness()} onSelect={(agent) => setSelectedHarness((current) => current === agent ? undefined : agent)} editable={props.preferencesEditable && !props.preferenceBusy} onChange={(priority) => props.onEditPreference('agents.priority', priority)} />
           </Show>
-          <Show when={activeCategory() === 'Harnesses'}><HarnessSettings query={['codex', 'chatgpt', 'opencode', 'pi', 'claude', 'freebuff', 'antigravity'].some((name) => name.includes(query())) ? narrowedQuery() : ''} /></Show>
           <Show when={activeCategory() === 'Appearance'}>
             <Show when={showSetting('theme system light dark')}><label class="settings__row">
               <span id="appearance-theme-label">Theme</span>
@@ -728,7 +725,7 @@ export function SettingsPane(props: SettingsPaneProps) {
               query={(props.keybindings?.commands ?? []).some((command) => matchesSearch(`keyboard shortcuts ${command.label} ${command.id} ${command.category} ${command.chord ?? ''}`, query())) ? narrowedQuery() : ''} />
           </Show>
         </section>
-        <Show when={activeCategory() === 'Agent pool' && selectedHarness()}>{(agent) => <aside class="settings__detail" aria-label={`${AGENT_LABELS[agent()]} harness settings`}>
+        <Show when={activeCategory() === 'Agents' && selectedHarness()}>{(agent) => <aside class="settings__detail" aria-label={`${AGENT_LABELS[agent()]} harness settings`}>
           <header class="settings__detail-header"><h3>{AGENT_LABELS[agent()]} settings</h3><button type="button" class="project-action project-action--icon" aria-label="Close harness settings" title="Close" onClick={() => setSelectedHarness(undefined)}><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18" /></svg></button></header>
           <Show when={agent() === 'kilocode'} fallback={<p class="empty">Configure the executable path with <code>agents.{agent()}.executable</code> in settings.json.</p>}><p class="empty">This harness is not yet implemented in Shepherd.</p></Show>
           <Show when={agent() === 'codex'}><p class="empty">Codex environment overrides: <code>agents.codex.environment</code>.</p></Show>

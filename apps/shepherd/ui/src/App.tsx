@@ -491,7 +491,6 @@ export function App() {
     return (path ? preferences()?.projects[path]?.['tasks.show_archived'] : undefined)
       ?? preferences()?.app['tasks.show_archived'] ?? false
   }
-  const settingsProject = () => projects().find((project) => project.id === (projectSettingsRequest()?.id ?? selectedProjectId()))
   const visibleTasks = () => tasks().filter((task) => showsArchived(selectedProjectId()) || task.state !== 'done')
 
   function openProjectSettings(projectId: string) {
@@ -2830,7 +2829,6 @@ export function App() {
             onAddProject={openPicker}
             pending={pending()}
             projectImports={<ProjectImportSources codexDisabled={pending() || !codexAvailable()} note={importNote()} onImportCodex={importProjects} />}
-            project={settingsProject()}
             projects={projects()}
             projectSettingsRequest={projectSettingsRequest()}
             approvalChange={approvalChange()}
@@ -3137,7 +3135,7 @@ export function App() {
                 </li>}</For>
               </ul>
             </Show>
-            <Show when={!workspace() && selectedProjectId() && agentAvailability() && !agentAvailability()?.[newTaskAgent()]}><p class="empty" role="status">No agent is available. Configure a harness in Settings → Harnesses.</p></Show>
+            <Show when={!workspace() && selectedProjectId() && agentAvailability() && !agentAvailability()?.[newTaskAgent()]}><p class="empty" role="status">No agent is available. Configure a harness in Settings → Agents.</p></Show>
             <ComposerInput
               inputRef={(element) => { promptInput = element }}
               projectId={selectedProjectId()}
@@ -3391,7 +3389,7 @@ function Onboarding(props: { priority?: bridge.PoolAgent[]; onComplete: (priorit
   return <section class="onboarding" aria-labelledby="onboarding-title">
     <div class="onboarding__content">
       <h1 id="onboarding-title">Welcome to Shepherd</h1>
-      <p>Choose the detected harnesses to add to your agent pool. You can change their priority later in Settings.</p>
+      <p>Choose the detected agents to add. You can change their priority later in Settings → Agents.</p>
       <Show when={discovery.loading}><p class="empty">Detecting harnesses…</p></Show>
       <Show when={discovery()?.error}>{(message) => <p role="alert">Could not detect harnesses: {message()}</p>}</Show>
       <Show when={!discovery.loading && !discovery()?.error && !agents().length}><p class="empty">No harnesses detected.</p></Show>

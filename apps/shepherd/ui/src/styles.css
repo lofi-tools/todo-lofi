@@ -487,6 +487,13 @@ textarea {
   background: var(--overlay);
 }
 
+.modal__body { display: grid; gap: 16px; padding: 16px; overflow: auto; }
+.modal__body p { margin: 0; }
+.modal__option { display: grid; gap: 6px; }
+.modal__switch { display: flex; align-items: center; gap: 12px; width: 100%; padding: 0; border: 0; background: transparent; color: var(--text); font: inherit; text-align: left; cursor: pointer; }
+.modal__switch:disabled { color: var(--text-disabled); cursor: default; }
+.modal__actions { display: flex; justify-content: flex-end; gap: 8px; }
+
 .palette__entry {
   display: grid;
   flex: 1;
@@ -1285,7 +1292,8 @@ textarea {
 .pool__agent--selected { border-color: var(--accent); }
 .pool__agent--unimplemented .pool__agent-label { color: var(--text-muted); }
 .pool__agent--unimplemented .agent-mark { filter: grayscale(1); }
-.pool__drag-card { position: fixed; z-index: 1000; pointer-events: none; opacity: .95; box-shadow: 0 8px 24px #0003; transition: none; }
+.pool__drag-layer { position: fixed; inset: 0; z-index: 1000; margin: 0; padding: 0; list-style: none; pointer-events: none; }
+.pool__drag-card { position: fixed; pointer-events: none; box-shadow: 0 8px 24px #0003; transition: none; }
 .pool__drag-handle { color: var(--text-muted); font-size: 18px; line-height: 1; touch-action: none; }
 .pool__agent-label { flex: 1; min-width: 0; }
 button.pool__agent-label { padding: 0; border: 0; background: transparent; color: inherit; font: inherit; text-align: left; cursor: pointer; }
