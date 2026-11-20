@@ -507,6 +507,10 @@
           myDevShell.buildInputs = buildDeps ++ devDeps ++ (attrValues scripts);
           myDevShell.shellHooks = { };
           myDevShell.cleanups.icons.script = ''rm -f target/debug/taskstream.app/Contents/Resources/taskstream.icns'';
+          myDevShell.cleanups.test-output-runs.script = ''
+            repo_root=$(${pkgs.git}/bin/git rev-parse --show-toplevel) || exit 1
+            rm -rf -- "$repo_root/.cache/test-output/runs"
+          '';
 
           # my-nix's `configure-editors` hook shells out to `code` unguarded,
           # so entering the devshell where VSCode is not installed prints

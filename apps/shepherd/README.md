@@ -505,7 +505,8 @@ Repository-local test output is grouped under `.cache/test-output/`.
 
 - `runs/` holds disposable browser artifacts, test reports, and isolated
   smoke-test and `shep --test` sessions. Each invocation gets its own directory.
-  Clear this directory when you no longer need the run output.
+  Run `direnv exec . cleanup` from the repository root to clear this directory
+  along with the other dev-shell cleanup targets.
 - `replay/` holds live-agent captures needed to replay tests offline.
 - `history/runs.jsonl` records exact Rust, Vitest and Playwright test identities
   and runner versions from successful shard invocations. The runner also reads
