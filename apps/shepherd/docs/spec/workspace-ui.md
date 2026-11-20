@@ -115,7 +115,10 @@ current layout and give future changes a point of comparison.
   place an icon-only refresh button at the right end. Show only changed files in the same tree and icon style, with
   added and removed line counts per file and totals at the top. Keep the task
   Git card overlaid at the bottom with an upward shadow, its branch, worktree,
-  and commit composer; show a PR only when one is attached. Its header shows
+  and commit composer; show a PR only when one is attached. Show the last known
+  branch and changed files for this checkout while fetching a fresh snapshot.
+  If the refresh fails, keep the cached display and offer a retry. Enable Git
+  actions only after a successful refresh. Its header shows
   the task and base branches. The merge control offers squash-merge or merge
   each commit. Its green fill is stronger when merging is available and muted
   when unavailable.

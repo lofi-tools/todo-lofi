@@ -47,6 +47,8 @@ test.beforeEach(async ({ context }) => {
     const attachmentLimitRequests: string[] = []
     const taskRevisions = new Map<string, number>()
     let failedReviewSnapshot = false
+    let firstGitRefresh: Promise<void> | undefined
+    let gitRefreshFailed = false
     let watchedGitFiles: FileChange[] = []
     const gitState = () => {
       const last = gitMutations.at(-1)?.type
@@ -58,7 +60,8 @@ test.beforeEach(async ({ context }) => {
       ] : [{ path: 'src/main.rs', originalPath: null, actionable: true,
         index: last === 'stage' ? 'M' : ' ', worktree: last === 'stage' ? ' ' : 'M' }]
       return {
-        branch: options.has('detached-checkout') ? null : 'shepherd/ship-it',
+        branch: options.has('detached-checkout') ? null
+          : options.has('hold-git-refresh') ? 'shepherd/rechecked' : 'shepherd/ship-it',
         tracking: null, projectRoot: null, branches: ['main'], history: [], files,
         lineStats: options.has('watch-git') ? watchedGitFiles.map((file) => ({ path: file.path, added: 2, removed: 1 })) : options.has('changes-fixture') ? [
           { path: 'src/main.rs', added: 3, removed: 1 }, { path: 'src/new.ts', added: 5, removed: 0 },
@@ -1053,6 +1056,14 @@ test.beforeEach(async ({ context }) => {
           }
           case 'git_snapshot':
             gitRequests.git++
+            if (options.has('hold-git-refresh') && !gitRefreshFailed) {
+              firstGitRefresh ??= new Promise<void>((resolve) => {
+                window.addEventListener('fixture:fail-git-refresh', () => resolve(), { once: true })
+              })
+              await firstGitRefresh
+              gitRefreshFailed = true
+              throw { message: 'Git is temporarily unavailable.', code: 'git' }
+            }
             return gitState()
           case 'review_snapshot':
             gitRequests.review++
@@ -2935,6 +2946,33 @@ test('shows changed files in the explorer tree with line counts', async ({ page 
   await refresh.click()
   await expect.poll(async () => (await counts()).git).toBeGreaterThan(before.git)
   await expect.poll(async () => (await counts()).gitDiff).toBeGreaterThan(before.gitDiff)
+})
+
+test('shows cached Git status after reload and replaces it after a successful retry', async ({ page }) => {
+  await page.goto('/')
+  await page.getByRole('tab', { name: 'Files', exact: true }).click()
+  const git = page.getByRole('region', { name: 'Git worktree' })
+  await expect(git.getByRole('button', { name: 'Merge into main' })).toBeEnabled()
+  await expect(git.locator('.explorer__branches')).toContainText('shepherd/ship-it')
+
+  await page.goto('/?hold-git-refresh')
+  await page.getByRole('tab', { name: 'Files', exact: true }).click()
+  await git.getByRole('button', { name: 'Changes', exact: true }).click()
+  await expect(git.locator('.explorer__branches')).toContainText('shepherd/ship-it')
+  await expect(git.getByRole('region', { name: 'Changed files' }).getByRole('button', { name: 'src/main.rs', exact: true })).toBeVisible()
+  await expect(git.getByRole('status')).toHaveText('Refreshing Git status…')
+  await expect(git.getByRole('button', { name: 'Merge into main' })).toBeDisabled()
+  await expect(git.getByRole('button', { name: 'Stage all' })).toBeDisabled()
+  await expect.poll(() => page.evaluate(() => (window as unknown as { __gitRequests: { git: number } }).__gitRequests.git)).toBeGreaterThan(0)
+  await page.evaluate(() => window.dispatchEvent(new Event('fixture:fail-git-refresh')))
+  await expect(git.getByRole('alert')).toHaveText('Could not refresh Git status. Showing last known status.')
+  await expect(git.locator('.explorer__branches')).toContainText('shepherd/ship-it')
+  await expect(git.getByRole('button', { name: 'Merge into main' })).toBeDisabled()
+
+  await git.getByRole('button', { name: 'Retry', exact: true }).click()
+  await expect(git.locator('.explorer__branches')).toContainText('shepherd/rechecked')
+  await expect(git.getByRole('button', { name: 'Merge into main' })).toBeEnabled()
+  await expect(git.getByRole('alert')).toHaveCount(0)
 })
 
 test('shows the detached checkout label in Git and the short commit below the composer', async ({ page }) => {

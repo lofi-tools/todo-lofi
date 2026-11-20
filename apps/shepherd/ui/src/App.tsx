@@ -1198,6 +1198,11 @@ export function App() {
     return task && task.id === selectedTaskId() && task.projectId === selectedProjectId() && !selectedProject()?.missing
       ? task.worktreePath : null
   })
+  const gitPaneCheckout = createMemo(() => {
+    const path = worktreePath()
+    const taskId = selectedTaskId()
+    return path && taskId ? { taskId, path } : undefined
+  })
   const checkoutPath = createMemo(() => {
     const project = selectedProject()
     if (!project || project.missing || !workspace() || workspace()?.task.id !== selectedTaskId()) return null
@@ -3350,11 +3355,11 @@ export function App() {
                     settingsDisabled={!preferencesEditable() || savingPreference()}
                     onShowDotfilesChange={(value) => void requestPreference('files.show_dotfiles', value)} />
                   return <div class="explorer">
-                    <Show when={workspace()?.task.worktreePath && workspace()?.task.id} keyed fallback={
+                    <Show when={gitPaneCheckout()} keyed fallback={
                       <><div class="explorer__toolbar"><SegmentedControl label="File explorer view" value={explorerMode()} choices={[{ value: 'files', label: 'Files' }, { value: 'changes', label: 'Changes' }]} onChange={setExplorerMode} /></div><div class="explorer__content" hidden={explorerMode() !== 'files'}>{files}</div><Show when={explorerMode() === 'changes'}><p class="empty">Select a task with a worktree to see changes.</p></Show></>
                     }>
-                      {(taskId) => <GitPane openTerminal={() => setInspectorTab('terminals')} openFile={openTaskFile} taskId={taskId} fileRevision={worktreeFileRevision()}
-                        mode={explorerMode()} onModeChange={setExplorerMode} files={files} worktree={workspace()!.task.worktreePath!} worktreeLabel={worktreeLabel(workspace()!.task.worktreePath!, projectId)} baseBranch={workspace()!.task.baseBranch}
+                      {({ taskId, path }) => <GitPane openTerminal={() => setInspectorTab('terminals')} openFile={openTaskFile} taskId={taskId} fileRevision={worktreeFileRevision()}
+                        mode={explorerMode()} onModeChange={setExplorerMode} files={files} worktree={path} worktreeLabel={worktreeLabel(path, projectId)} baseBranch={workspace()!.task.baseBranch}
                         revision={workspace()!.task.updatedAt} live={LIVE_STATES.includes(workspace()!.task.state) || workspace()!.task.state === 'done'}
                         request={gitRequest()} onRequestHandled={(request) => setGitRequest((current) => current === request ? undefined : current)}
                         commitShortcut={chordFor('commit')} sendAccent={sendAccent()} />}
