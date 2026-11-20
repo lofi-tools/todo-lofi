@@ -14,6 +14,7 @@ mod dev_harness;
 mod diagnostics;
 mod file_actions;
 mod file_watch;
+mod harness_discovery;
 mod keybindings;
 mod orphan_process;
 mod preview_annotations;
@@ -404,6 +405,9 @@ pub fn run() -> Result<(), tauri::Error> {
             state.freebuff_reason = freebuff_reason;
             state.start_event_pump();
             app.manage(state);
+            app.manage(harness_discovery::HarnessDiscovery::load(
+                data_directory.join("harness-discovery.json"),
+            ));
             app.manage(keybindings::KeybindingSettings::new(
                 preference_directory.join("keymap.json"),
             ));
@@ -416,6 +420,8 @@ pub fn run() -> Result<(), tauri::Error> {
             keybindings::set_keybinding,
             bridge::commands::agent_availability,
             bridge::commands::detected_harnesses,
+            bridge::commands::cached_harness_discovery,
+            bridge::commands::refresh_harness_discovery,
             bridge::commands::agent_skills,
             bridge::commands::add_project,
             bridge::commands::set_project_preview_url,

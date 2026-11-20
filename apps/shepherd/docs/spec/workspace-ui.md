@@ -245,7 +245,7 @@ current layout and give future changes a point of comparison.
   workspace project. Project-wide add and import controls stay on the overview.
   Setting labels and their inputs share a row across settings sections.
   Settings section headings match the Settings heading. **Settings → Agents**
-  shows available agents in a drag-reorderable priority list, with a card following
+  shows agents in the **Active agents** priority list, with a card following
   the pointer and animated movement. The moving card matches the original's
   size, content, and selected state. Alt-Up and Alt-Down reorder a focused card.
   Detected but unavailable harnesses appear in a separate section. Selecting a
@@ -259,11 +259,14 @@ current layout and give future changes a point of comparison.
   composer selections take precedence. The pane saves an optional, ordered
   list of fallback agents and models, with an effort for Codex entries.
   Kilo Code is shown as unimplemented, with muted
-  text and grayscale icons, and can be added to the saved priority without being
-  selected to run a conversation. Offer detected harnesses that are not already
-  in the pool for addition. Detect the Antigravity app, its separate `agy` CLI, and Kilo CLI,
+  text and grayscale icons, without an Add button. Offer supported, detected
+  harnesses that are not already in the pool for addition. Detect the Antigravity app, its separate `agy` CLI, and Kilo CLI,
   including common Nix profile locations. Identify Codex from the ChatGPT app
   separately from a standalone installation.
+  Display the last known detection results immediately in the list and detail
+  pane. Recheck executable paths and versions in the background using one shared
+  scan, with a manual refresh. A failed recheck keeps the row and its priority
+  and adds a warning. The cache is stored outside settings.json.
   Probe discovered versions with a bounded check. Show an update recommendation
   for versions below the recorded baseline, and report unknown versions without
   blocking an agent. In the absence of documented integration minimums, the

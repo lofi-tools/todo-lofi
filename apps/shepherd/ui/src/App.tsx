@@ -26,7 +26,7 @@ import { ReviewPane } from './ReviewPane'
 import { supportsModelSelection } from './AgentModelSettings'
 import { ModelPicker, codexModelChoices } from './ModelPicker'
 import { SEND_ACCENTS, SettingsPane, type SettingsCategory } from './SettingsPane'
-import { agentPriority } from './PoolSettings'
+import { agentPriority, createHarnessDiscovery } from './PoolSettings'
 import { FreebuffPane, TerminalPane, type TerminalCommands } from './TerminalPane'
 import { AgentIcon } from './AgentIcon'
 import { TaskSearch } from './TaskSearch'
@@ -343,7 +343,20 @@ export function App() {
   const [claudeConfigured, setClaudeConfigured] = createSignal(false)
   const [freebuffAvailability, setFreebuffAvailability] = createSignal<bridge.FreebuffAvailability>({ available: false, reason: null })
   const [newTaskAgent, setNewTaskAgent] = createSignal<bridge.Agent>('codex')
-  const [agentAvailability, setAgentAvailability] = createSignal<Record<bridge.Agent, boolean>>()
+  const [configuredAvailability, setAgentAvailability] = createSignal<Record<bridge.Agent, boolean>>()
+  const harnessDiscovery = createHarnessDiscovery()
+  const agentAvailability = createMemo(() => {
+    const configured = configuredAvailability()
+    const checked = harnessDiscovery.verified() ? harnessDiscovery.snapshot() : undefined
+    if (!configured || !checked) return configured
+    const result = { ...configured }
+    for (const agent of Object.keys(result) as bridge.Agent[]) {
+      const executables = checked.harnesses.filter((entry) => entry.agent === agent && !entry.path.endsWith('.app'))
+      if (checked.errors[agent] || (executables.length && executables.every((entry) =>
+        entry.issue === 'missing' || entry.issue === 'notExecutable'))) result[agent] = false
+    }
+    return result
+  })
   const [draftAgentManuallySelected, setDraftAgentManuallySelected] = createSignal(false)
   const [composingProjectId, setComposingProjectId] = createSignal<string>()
   const [selectedProjectId, setSelectedProjectId] = createSignal<string | null>(null)
@@ -448,7 +461,6 @@ export function App() {
     const preferred = priority.find((agent): agent is bridge.Agent => agent in available && available[agent as bridge.Agent])
     if (preferred) {
       setNewTaskAgent(preferred)
-      setDraftAgentManuallySelected(true)
     }
   })
   const prefersLight = window.matchMedia('(prefers-color-scheme: light)')
@@ -907,6 +919,7 @@ export function App() {
   let allowClose = false
 
   const agentConfigured = (agent: bridge.Agent) => {
+    if (agentAvailability()?.[agent] === false) return false
     if (agent === 'codex') return agentAvailability()?.codex ?? false
     if (agent === 'opencode') return opencodeConfigured()
     if (agent === 'pi') return piConfigured()
@@ -2069,6 +2082,7 @@ export function App() {
   }
 
   onMount(() => {
+    void harnessDiscovery.load()
     void bridge.agentAvailability().then(setAgentAvailability).catch((failure) => setError(describe(failure)))
     void bridge.archivedWorktreeIssues().then(setWorktreeIssues).catch((failure) => setError(describe(failure)))
     void homeDir().then(setHomeDirectory).catch((error) => console.warn('Could not resolve the home directory', error))
@@ -2829,6 +2843,8 @@ export function App() {
             mac={mac}
             onReloadKeybindings={reloadKeybindings}
             onEditKeybinding={editKeybinding}
+            discovery={harnessDiscovery}
+            agentAvailability={configuredAvailability()}
             preferences={preferences()}
             preferencesEditable={preferencesEditable()}
             preferenceBusy={savingPreference()}

@@ -7,7 +7,7 @@
 //! into [`HarnessEvent`]s and never writes to the store itself.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::process::Stdio;
@@ -578,6 +578,16 @@ const APP_BUNDLE_LAYOUTS: [&str; 2] = [
 /// `codex` on `PATH`, so an app-bundled binary is a normal installation, and
 /// "not installed" is a result rather than an error.
 pub async fn detect(profile_path: Option<&Path>, cwd: &Path) -> CodexDetection {
+    let (ordered_path, application_roots) = discovery_locations();
+    detect_in(profile_path, cwd, &ordered_path, &application_roots).await
+}
+
+pub fn installation_candidates(profile_path: Option<&Path>) -> Vec<(PathBuf, CodexInstallKind)> {
+    let (ordered_path, application_roots) = discovery_locations();
+    codex_candidates(profile_path, &ordered_path, &application_roots)
+}
+
+fn discovery_locations() -> (OsString, Vec<PathBuf>) {
     let path_env = std::env::var_os("PATH").unwrap_or_default();
     let home = std::env::var_os("HOME").map(PathBuf::from);
     let mut search_paths = Vec::new();
@@ -619,7 +629,7 @@ pub async fn detect(profile_path: Option<&Path>, cwd: &Path) -> CodexDetection {
             home.join("Applications/Home Manager Apps"),
         ]);
     }
-    detect_in(profile_path, cwd, &ordered_path, &application_roots).await
+    (ordered_path, application_roots)
 }
 
 async fn detect_in(

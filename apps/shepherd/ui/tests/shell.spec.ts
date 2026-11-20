@@ -1029,8 +1029,27 @@ test.beforeEach(async ({ context }) => {
             ]
             return []
           }
-          case 'detected_harnesses':
-            return [{ agent: 'codex', path: '/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex', version: 'codex-cli 0.168.0' }, ...(options.has('unavailable-harness') ? [{ agent: 'claude', path: '/usr/local/bin/claude' }] : []), ...(options.has('configured-antigravity') ? [{ agent: 'antigravity', path: '/etc/profiles/per-user/me/bin/agy', version: options.has('antigravity-old') ? '1.5.8' : '1.5.9' }] : []), ...(options.has('onboarding') ? [{ agent: 'antigravity', path: '/Users/me/Applications/Antigravity.app' }, { agent: 'kilocode', path: '/etc/profiles/per-user/me/bin/kilo', version: '7.8.27' }] : [])]
+          case 'cached_harness_discovery':
+          case 'refresh_harness_discovery':
+          case 'detected_harnesses': {
+            const harnesses = ([{ agent: 'codex', path: '/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex', version: 'codex-cli 0.168.0' }, ...(options.has('unavailable-harness') ? [{ agent: 'claude', path: '/usr/local/bin/claude' }] : []), ...(options.has('configured-antigravity') ? [{ agent: 'antigravity', path: '/etc/profiles/per-user/me/bin/agy', version: options.has('antigravity-old') ? '1.5.8' : '1.5.9' }] : []), ...(options.has('onboarding') ? [{ agent: 'antigravity', path: '/Users/me/Applications/Antigravity.app' }, { agent: 'kilocode', path: '/etc/profiles/per-user/me/bin/kilo', version: '7.8.27' }] : [])]).map((entry) => ({
+              ...entry, found: true, wasAvailable: entry.agent === 'codex' || (entry.agent === 'antigravity' && options.has('configured-antigravity')),
+            }))
+            if (command === 'detected_harnesses') return harnesses
+            if (options.has('cached-harness-recheck') && command === 'refresh_harness_discovery') {
+              await new Promise<void>((resolve) => {
+                const fixture = document.documentElement.dataset
+                fixture.fixtureHarnessCheck = args.force ? 'manual' : 'background'
+                fixture.fixtureHarnessCheckCount = String(Number(fixture.fixtureHarnessCheckCount ?? 0) + 1)
+                window.addEventListener('fixture:finish-harness-check', () => resolve(), { once: true })
+              })
+              if (!args.force) return {
+                checkedAt: 2, errors: {},
+                harnesses: harnesses.map((entry) => entry.agent === 'codex' ? { ...entry, found: false, issue: 'missing' } : entry),
+              }
+            }
+            return { checkedAt: 1, errors: {}, harnesses: command === 'refresh_harness_discovery' || options.has('cached-harness-recheck') ? harnesses : [] }
+          }
           case 'git_snapshot':
             gitRequests.git++
             return gitState()
@@ -5051,6 +5070,34 @@ test('reorders installed agents in settings', async ({ page }) => {
   await expect(page.getByRole('region', { name: 'Agent priority' }).locator('li').first()).toContainText('OpenCode')
 })
 
+test('shows cached active agents during a recheck and keeps their row on failure', async ({ page }) => {
+  await page.goto('/?cached-harness-recheck')
+  await page.getByRole('button', { name: 'Settings', exact: true }).click()
+  await page.getByRole('navigation', { name: 'Settings categories' }).getByRole('button', { name: 'Agents', exact: true }).click()
+  const pool = page.getByRole('region', { name: 'Agent priority' })
+  await expect(pool.getByRole('heading', { name: 'Active agents' })).toBeVisible()
+  const row = pool.locator('ol li').filter({ hasText: 'Codex' })
+  await expect(row).toContainText('0.168.0')
+  await expect(pool.getByRole('status')).toHaveText('Checking agents…')
+  await row.getByRole('button', { name: 'Codex harness settings' }).click()
+  const detail = page.getByRole('complementary', { name: 'Codex harness settings' })
+  await expect(detail).toContainText('/Applications/ChatGPT.app/')
+  await expect(page.locator('html')).toHaveAttribute('data-fixture-harness-check', 'background')
+  await expect(page.locator('html')).toHaveAttribute('data-fixture-harness-check-count', '1')
+  await page.evaluate(() => window.dispatchEvent(new Event('fixture:finish-harness-check')))
+  await expect(row).toContainText('Executable missing')
+  await expect(detail).toContainText('Executable missing')
+  await expect(detail).toContainText('0.168.0')
+
+  await pool.getByRole('button', { name: 'Refresh harnesses' }).click()
+  await expect(pool.getByRole('status')).toHaveText('Checking agents…')
+  await expect(page.locator('html')).toHaveAttribute('data-fixture-harness-check', 'manual')
+  await expect(page.locator('html')).toHaveAttribute('data-fixture-harness-check-count', '2')
+  await page.evaluate(() => window.dispatchEvent(new Event('fixture:finish-harness-check')))
+  await expect(row).not.toContainText('Executable missing')
+  await expect(detail).not.toContainText('Executable missing')
+})
+
 test('opens harness details and separates unavailable harnesses', async ({ page }) => {
   await page.goto('/?agents-priority&unavailable-harness')
   await page.getByRole('button', { name: 'Settings', exact: true }).click()
@@ -5058,7 +5105,6 @@ test('opens harness details and separates unavailable harnesses', async ({ page 
   const pool = page.getByRole('region', { name: 'Agent priority' })
   await expect(pool.getByRole('heading', { name: 'Unavailable' })).toBeVisible()
   await expect(pool.locator('ul li')).toContainText(['Claude Code', 'Kilo Code'])
-  await pool.locator('ul li').filter({ hasText: 'Kilo Code' }).getByRole('button', { name: 'Add' }).click()
   await expect(pool.locator('ul li').filter({ hasText: 'Kilo Code' }).getByRole('button', { name: 'Add' })).toHaveCount(0)
   await pool.getByRole('button', { name: 'Codex harness settings' }).click()
   const detail = page.getByRole('complementary', { name: 'Codex harness settings' })

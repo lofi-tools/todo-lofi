@@ -4053,13 +4053,6 @@ pub mod commands {
         Ok(())
     }
 
-    #[derive(serde::Serialize)]
-    pub struct DetectedHarness {
-        agent: &'static str,
-        path: String,
-        version: Option<String>,
-    }
-
     #[tauri::command]
     pub async fn agent_skills(
         state: State<'_, ShellState>,
@@ -4104,206 +4097,46 @@ pub mod commands {
     }
 
     #[tauri::command]
-    pub async fn detected_harnesses(
-        state: State<'_, ShellState>,
-    ) -> Result<Vec<DetectedHarness>, String> {
-        let path = std::env::var_os("PATH").unwrap_or_default();
-        let current_directory = std::env::current_dir().map_err(|error| error.to_string())?;
-        let settings = state.preferences.agent_settings().await;
-        let codex_path = settings
-            .executable("agents.codex.executable")
-            .map_err(|error| error.to_string())?;
-        let codex = agent_harness::codex::detect(codex_path.as_deref(), &current_directory).await;
-        let mut detected = Vec::new();
-        if let Some(install) = codex.install {
-            detected.push(DetectedHarness {
-                agent: "codex",
-                path: install.program.to_string_lossy().into_owned(),
-                version: install.probe.version,
-            });
-        }
-        for app in ["ChatGPT.app", "Codex.app"] {
-            for layout in [
-                "Contents/Resources/codex-cli/bin/codex",
-                "Contents/Resources/codex",
-            ] {
-                let candidate = PathBuf::from("/Applications").join(app).join(layout);
-                if !candidate.is_file()
-                    || detected
-                        .iter()
-                        .any(|entry| entry.path == candidate.to_string_lossy().as_ref())
-                {
-                    continue;
-                }
-                let detection =
-                    agent_harness::codex::detect(Some(&candidate), &current_directory).await;
-                if let Some(install) = detection
-                    .install
-                    .filter(|install| install.program == candidate)
-                {
-                    detected.push(DetectedHarness {
-                        agent: "codex",
-                        path: install.program.to_string_lossy().into_owned(),
-                        version: install.probe.version,
-                    });
-                }
-            }
-        }
-        let home = std::env::var_os("HOME").map(PathBuf::from);
-        let mut applications = vec![
-            PathBuf::from("/Applications"),
-            PathBuf::from("/Applications/Nix Apps"),
-        ];
-        if let Some(home) = &home {
-            applications.push(home.join("Applications"));
-            applications.push(home.join("Applications/Home Manager Apps"));
-            applications.push(home.join("Applications/NixTrampolines"));
-        }
-        let home_path = home.as_deref();
-        let user = std::env::var_os("USER");
-        if let Some(launch) =
-            agent_harness::acp::discover_antigravity(&settings, &path, home_path, user.as_deref())
-                .map_err(|error| error.to_string())?
-        {
-            detected.push(DetectedHarness {
-                agent: "antigravity",
-                path: launch.program,
-                version: None,
-            });
-        }
-        for app in applications
-            .into_iter()
-            .map(|directory| directory.join("Antigravity.app"))
-        {
-            if app.is_dir() {
-                detected.push(DetectedHarness {
-                    agent: "antigravity",
-                    path: app.to_string_lossy().into_owned(),
-                    version: None,
-                });
-            }
-        }
-        for (agent, executable) in [
-            ("claude", "claude"),
-            ("opencode", "opencode"),
-            ("pi", "pi"),
-            ("freebuff", "freebuff"),
-            ("kilocode", "kilo"),
-        ] {
-            let configured = settings
-                .executable(&format!("agents.{agent}.executable"))
-                .map_err(|error| error.to_string())?;
-            let known_candidates = {
-                std::env::var_os("HOME")
-                    .map(PathBuf::from)
-                    .into_iter()
-                    .flat_map(|home| {
-                        [
-                            home.join(".local/bin").join(executable),
-                            home.join(".nix-profile/bin").join(executable),
-                            home.join(".local/state/nix/profile/bin").join(executable),
-                        ]
-                    })
-                    .chain(std::env::var_os("USER").map(|user| {
-                        PathBuf::from("/etc/profiles/per-user")
-                            .join(user)
-                            .join("bin")
-                            .join(executable)
-                    }))
-                    .chain([
-                        PathBuf::from("/run/current-system/sw/bin").join(executable),
-                        PathBuf::from("/nix/var/nix/profiles/default/bin").join(executable),
-                        PathBuf::from("/opt/homebrew/bin").join(executable),
-                        PathBuf::from("/usr/local/bin").join(executable),
-                    ])
-                    .collect::<Vec<_>>()
-            };
-            let candidates = configured.into_iter().chain(known_candidates).chain(
-                std::env::split_paths(&path)
-                    .map(|directory| current_directory.join(directory).join(executable)),
-            );
-            for candidate in candidates {
-                let Ok(metadata) = candidate.metadata() else {
-                    continue;
-                };
-                if !metadata.is_file() {
-                    continue;
-                }
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::PermissionsExt;
-                    if metadata.permissions().mode() & 0o111 == 0 {
-                        continue;
-                    }
-                }
-                detected.push(DetectedHarness {
-                    agent,
-                    path: candidate.to_string_lossy().into_owned(),
-                    version: None,
-                });
-                break;
-            }
-        }
-        let mut version_checks = tokio::task::JoinSet::new();
-        for (index, harness) in detected.iter().enumerate() {
-            if harness.version.is_none() {
-                let path = harness.path.clone();
-                version_checks.spawn(async move { (index, harness_version(&path).await) });
-            }
-        }
-        while let Some(result) = version_checks.join_next().await {
-            match result {
-                Ok((index, version)) => {
-                    if let Some(harness) = detected.get_mut(index) {
-                        harness.version = version;
-                    }
-                }
-                Err(error) => tracing::warn!(%error, "harness version task failed"),
-            }
-        }
-        Ok(detected)
+    pub async fn cached_harness_discovery(
+        cache: State<'_, crate::harness_discovery::HarnessDiscovery>,
+    ) -> Result<crate::harness_discovery::DiscoverySnapshot, String> {
+        Ok(cache.snapshot().await)
     }
 
-    async fn harness_version(path: &str) -> Option<String> {
-        let mut command = if Path::new(path).is_dir() {
-            let mut command = tokio::process::Command::new("/usr/bin/plutil");
-            command.args(["-extract", "CFBundleShortVersionString", "raw", "-o", "-"]);
-            command.arg(Path::new(path).join("Contents/Info.plist"));
-            command
-        } else {
-            let mut command = tokio::process::Command::new(path);
-            command.arg("--version");
-            command
-        };
-        command
-            .stdin(std::process::Stdio::null())
-            .kill_on_drop(true);
-        match tokio::time::timeout(std::time::Duration::from_secs(3), command.output()).await {
-            Ok(Ok(output)) if output.status.success() => {
-                let version = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-                if version.is_empty() {
-                    None
-                } else {
-                    Some(version)
-                }
-            }
-            Ok(Ok(output)) => {
-                tracing::debug!(%path, status = %output.status, "harness version check failed");
-                None
-            }
-            Ok(Err(error)) => {
-                tracing::debug!(%path, %error, "could not read harness version");
-                None
-            }
-            Err(error) => {
-                tracing::debug!(%path, %error, "harness version check timed out");
-                None
-            }
-        }
+    #[tauri::command]
+    pub async fn refresh_harness_discovery(
+        state: State<'_, ShellState>,
+        cache: State<'_, crate::harness_discovery::HarnessDiscovery>,
+        force: bool,
+    ) -> Result<crate::harness_discovery::DiscoverySnapshot, String> {
+        let availability = configured_agents(&state);
+        cache
+            .refresh(&state.preferences, &availability, force)
+            .await
+    }
+
+    #[tauri::command]
+    pub async fn detected_harnesses(
+        state: State<'_, ShellState>,
+        cache: State<'_, crate::harness_discovery::HarnessDiscovery>,
+    ) -> Result<Vec<crate::harness_discovery::DetectedHarness>, String> {
+        let availability = configured_agents(&state);
+        let snapshot = cache
+            .refresh(&state.preferences, &availability, false)
+            .await?;
+        Ok(snapshot
+            .harnesses
+            .into_iter()
+            .filter(|entry| entry.found)
+            .collect())
     }
 
     #[tauri::command]
     pub fn agent_availability(state: State<'_, ShellState>) -> BTreeMap<&'static str, bool> {
+        configured_agents(&state)
+    }
+
+    fn configured_agents(state: &ShellState) -> BTreeMap<&'static str, bool> {
         BTreeMap::from([
             ("codex", state.codex_detected),
             ("opencode", state.opencode_launch.is_some()),

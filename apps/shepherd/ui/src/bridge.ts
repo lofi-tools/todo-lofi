@@ -101,7 +101,30 @@ export function setKeybinding(platform: KeyPlatform, edit: KeybindingEdit): Prom
   return invoke('set_keybinding', { platform, edit })
 }
 
-export type DetectedHarness = { agent: PoolAgent; path: string; version?: string | null }
+export type HarnessIssue = 'missing' | 'notExecutable' | 'checkFailed' | 'versionFailed' | 'versionTimedOut' | 'configuration'
+export type DetectedHarness = {
+  agent: PoolAgent
+  path: string
+  version?: string | null
+  issue?: HarnessIssue | null
+  found: boolean
+  wasAvailable: boolean
+  lastVerifiedAt?: number | null
+}
+
+export interface HarnessDiscoverySnapshot {
+  checkedAt: number
+  harnesses: DetectedHarness[]
+  errors: Partial<Record<PoolAgent, string>>
+}
+
+export function cachedHarnessDiscovery(): Promise<HarnessDiscoverySnapshot> {
+  return invoke('cached_harness_discovery')
+}
+
+export function refreshHarnessDiscovery(force: boolean): Promise<HarnessDiscoverySnapshot> {
+  return invoke('refresh_harness_discovery', { force })
+}
 export const HARNESS_BASELINE: Record<PoolAgent, string> = { codex: '0.169.0', opencode: '1.19.5', pi: '1.5.2', claude: '2.1.325', freebuff: '0.2.36', antigravity: '1.5.9', kilocode: '7.8.27' }
 
 export function harnessVersionStatus(agent: PoolAgent, version?: string | null, path?: string): string {
