@@ -93,9 +93,26 @@ export function GitPane(props: {
     <section ref={gitContainer} class="explorer__git" aria-label="Git worktree">
       <div class="explorer__toolbar">
         <SegmentedControl label="File explorer view" value={props.mode} choices={[{ value: 'files', label: 'Files' }, { value: 'changes', label: 'Changes' }]} onChange={props.onModeChange} />
-        <Show when={props.mode === 'changes'}><button type="button" class="project-action project-action--icon" aria-label="Refresh changes" title="Refresh changes" disabled={git.loading} onClick={() => { void refetch(); if (selectedFile()) void refetchFile() }}>
-          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 7v5h-5" /><path d="M20 12a8 8 0 1 0-2.34 5.66" /></svg>
-        </button></Show>
+        <div class="explorer__toolbar-actions">
+          <Show when={!git.error && git()}>{(snapshot) =>
+            <div class="explorer__merge" role="group" aria-label="Merge controls">
+              <button type="button" aria-label={`Merge into ${props.baseBranch ?? 'base branch'}`} title={`Merge into ${props.baseBranch ?? 'base branch'}`}
+                disabled={disabled() || !!snapshot().mergeBlocked}
+                onClick={() => void apply({ type: mergeMethod() })}>
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="5" cy="6" r="3"/><path d="M5 9v12"/><circle cx="19" cy="18" r="3"/><path d="m15 9l-3-3l3-3"/><path d="M12 6h5a2 2 0 0 1 2 2v7"/></svg>
+                <span class="explorer__merge-label">{mergeMethod() === 'squashMerge' ? 'Squash-merge' : 'Merge each'}</span>
+              </button>
+              <PickerMenu label="Merge method" value={mergeMethod()} options={[
+                { id: 'squashMerge', name: 'Squash-merge', detail: 'Squash commits into one' },
+                { id: 'mergeEach', name: 'Merge each', detail: 'Merge each commit' },
+              ]} disabled={disabled()} onChange={(method) => setMergeMethod(method === 'mergeEach' ? 'mergeEach' : 'squashMerge')}
+                triggerClass="explorer__split-toggle" align="end"><PickerCaret /></PickerMenu>
+            </div>
+          }</Show>
+          <Show when={props.mode === 'changes'}><button type="button" class="project-action project-action--icon" aria-label="Refresh changes" title="Refresh changes" disabled={git.loading} onClick={() => { void refetch(); if (selectedFile()) void refetchFile() }}>
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 7v5h-5" /><path d="M20 12a8 8 0 1 0-2.34 5.66" /></svg>
+          </button></Show>
+        </div>
       </div>
       <div class="explorer__content" hidden={props.mode !== 'files'}>{props.files}</div>
       <div class="explorer__content explorer__changes" hidden={props.mode !== 'changes'}>
@@ -131,54 +148,41 @@ export function GitPane(props: {
       </div>
       <Show when={!git.error && git()}>{(snapshot) => (
         <div ref={(element) => { gitBlock = element; gitObserver?.observe(element) }} class="explorer__git-block">
-          <div class="explorer__git-header">
-            <p class="explorer__branches" title={`${snapshot().branch ?? 'Detached HEAD'} → ${props.baseBranch ?? 'base branch'}`}><strong>{snapshot().branch ?? 'Detached HEAD'}</strong> <span aria-hidden="true">→</span> {props.baseBranch ?? 'base branch'}</p>
-            <div class="explorer__merge" role="group" aria-label="Merge controls">
-              <button type="button" aria-label={`Merge into ${props.baseBranch ?? 'base branch'}`} disabled={disabled() || !!snapshot().mergeBlocked}
-                onClick={() => void apply({ type: mergeMethod() })}>
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="5" cy="6" r="3"/><path d="M5 9v12"/><circle cx="19" cy="18" r="3"/><path d="m15 9l-3-3l3-3"/><path d="M12 6h5a2 2 0 0 1 2 2v7"/></svg>
-                {mergeMethod() === 'squashMerge' ? 'Squash-merge' : 'Merge each'}
-              </button>
-              <PickerMenu label="Merge method" value={mergeMethod()} options={[
-                { id: 'squashMerge', name: 'Squash-merge', detail: 'Squash commits into one' },
-                { id: 'mergeEach', name: 'Merge each', detail: 'Merge each commit' },
-              ]} disabled={disabled()} onChange={(method) => setMergeMethod(method === 'mergeEach' ? 'mergeEach' : 'squashMerge')}
-                triggerClass="explorer__split-toggle" above align="end"><PickerCaret /></PickerMenu>
-            </div>
-          </div>
-          <p class="empty explorer__worktree" title={props.worktree}>{props.worktreeLabel}</p>
-            <form class="explorer__commit" data-git-commit onSubmit={(event) => {
-              event.preventDefault()
-              if (commitMethod() === 'amend') setAmendRequested(snapshot().stagedRevision)
-              else void apply({ type: 'commit', message: message(), expected: snapshot().stagedRevision })
-            }}>
-              <textarea ref={commitMessage} aria-label="Commit message" placeholder="Commit message" value={message()} onInput={(event) => setMessage(event.currentTarget.value)} />
-              <div class="explorer__commit-footer">
-                <Show when={commitMethod() === 'amend' && amendRequested() === snapshot().stagedRevision} fallback={
-                  <div class="explorer__commit-actions" role="group" aria-label="Commit controls">
-                    <button type="submit" aria-keyshortcuts={props.commitShortcut}
-                      disabled={disabled() || !message().trim() || (commitMethod() === 'commit' ? !snapshot().stagedDiff : !snapshot().branch)}>
-                      {commitMethod() === 'commit' ? 'Commit' : 'Amend'}
-                    </button>
-                    <PickerMenu label="Commit action" value={commitMethod()} options={[
-                      { id: 'commit', name: 'Commit' }, { id: 'amend', name: 'Amend' },
-                    ]} disabled={disabled()} onChange={(method) => { setCommitMethod(method === 'amend' ? 'amend' : 'commit'); setAmendRequested(null) }}
-                      triggerClass="explorer__split-toggle" above align="end"><PickerCaret /></PickerMenu>
-                  </div>
-                }>
-                  <span class="explorer__amend-confirmation">
-                    <button type="button" disabled={disabled() || !message().trim() || !snapshot().branch}
-                      onClick={() => void apply({ type: 'amend', message: message(), expected: snapshot().stagedRevision })}>
-                      Replace tip on {snapshot().branch}
-                    </button>
-                    <button type="button" onClick={() => setAmendRequested(null)}>Cancel</button>
-                  </span>
-                </Show>
-              </div>
-            </form>
+          <div class="explorer__git-details">
+            <p class="explorer__branches" title={`${snapshot().branch ?? '(no branch)'} → ${props.baseBranch ?? 'base branch'}`}><strong>{snapshot().branch ?? '(no branch)'}</strong> <span aria-hidden="true">→</span> {props.baseBranch ?? 'base branch'}</p>
+            <p class="empty explorer__worktree" title={props.worktree}>{props.worktreeLabel}</p>
             <Show when={snapshot().mergeBlocked && snapshot().mergeBlocked !== 'The project root has uncommitted changes.'}>{(reason) => <p class="empty">{reason()}</p>}</Show>
-
-          <Show when={notice()}>{(message) => <p class="empty" role="status">{message()}</p>}</Show>
+            <Show when={notice()}>{(message) => <p class="empty" role="status">{message()}</p>}</Show>
+          </div>
+          <form class="explorer__commit" data-git-commit onSubmit={(event) => {
+            event.preventDefault()
+            if (commitMethod() === 'amend') setAmendRequested(snapshot().stagedRevision)
+            else void apply({ type: 'commit', message: message(), expected: snapshot().stagedRevision })
+          }}>
+            <textarea ref={commitMessage} aria-label="Commit message" placeholder="Commit message" value={message()} onInput={(event) => setMessage(event.currentTarget.value)} />
+            <div class="explorer__commit-footer">
+              <Show when={commitMethod() === 'amend' && amendRequested() === snapshot().stagedRevision} fallback={
+                <div class="explorer__commit-actions" role="group" aria-label="Commit controls">
+                  <button type="submit" aria-keyshortcuts={props.commitShortcut}
+                    disabled={disabled() || !message().trim() || (commitMethod() === 'commit' ? !snapshot().stagedDiff : !snapshot().branch)}>
+                    {commitMethod() === 'commit' ? 'Commit' : 'Amend'}
+                  </button>
+                  <PickerMenu label="Commit action" value={commitMethod()} options={[
+                    { id: 'commit', name: 'Commit' }, { id: 'amend', name: 'Amend' },
+                  ]} disabled={disabled()} onChange={(method) => { setCommitMethod(method === 'amend' ? 'amend' : 'commit'); setAmendRequested(null) }}
+                    triggerClass="explorer__split-toggle" above align="end"><PickerCaret /></PickerMenu>
+                </div>
+              }>
+                <span class="explorer__amend-confirmation">
+                  <button type="button" disabled={disabled() || !message().trim() || !snapshot().branch}
+                    onClick={() => void apply({ type: 'amend', message: message(), expected: snapshot().stagedRevision })}>
+                    Replace tip on {snapshot().branch}
+                  </button>
+                  <button type="button" onClick={() => setAmendRequested(null)}>Cancel</button>
+                </span>
+              </Show>
+            </div>
+          </form>
         </div>
       )}</Show>
     </section>

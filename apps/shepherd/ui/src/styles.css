@@ -3731,7 +3731,8 @@ button.pool__agent-label { padding: 0; border: 0; background: transparent; color
 .explorer__content { flex: 1; min-height: 0; overflow: auto; padding-bottom: var(--git-overlay-height, 0px); }
 .explorer__content[hidden] { display: none; }
 .explorer__changes { display: grid; align-content: start; gap: 10px; }
-.explorer__git-block { position: absolute; z-index: 1; inset-inline: 0; bottom: 0; display: grid; gap: 6px; max-height: 55%; overflow: auto; padding: 10px; border: 1px solid var(--border); border-radius: 8px; background: color-mix(in srgb, var(--surface) 92%, transparent); backdrop-filter: blur(8px); box-shadow: 0 -12px 36px var(--pane-shadow), 0 -12px 36px var(--pane-shadow-accent); }
+.explorer__git-block { position: absolute; z-index: 1; inset-inline: 0; bottom: 0; display: grid; max-height: 55%; overflow: auto; border: 1px solid var(--border); border-radius: 8px; background: color-mix(in srgb, var(--surface) 92%, transparent); backdrop-filter: blur(8px); box-shadow: 0 -12px 36px var(--pane-shadow), 0 -12px 36px var(--pane-shadow-accent); }
+.explorer__git-details { display: grid; gap: 6px; min-width: 0; padding: 10px; }
 .explorer__git-block p { margin: 0; }
 .changed-files { min-width: 0; }
 .changed-files__summary { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 4px 6px 8px; }
@@ -3747,10 +3748,15 @@ button.pool__agent-label { padding: 0; border: 0; background: transparent; color
 .terminal-pane__new:disabled { color: var(--text-disabled); }
 
 .explorer__toolbar { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
-.explorer__git-header { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-width: 0; }
+.explorer__toolbar-actions { display: flex; align-items: center; gap: 6px; min-width: 0; margin-inline-start: auto; }
 .explorer__branches { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .explorer__merge,
 .explorer__commit-actions { display: inline-flex; flex: none; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); }
+.explorer__toolbar-actions > button { flex: none; }
+.explorer__toolbar-actions > .explorer__merge { flex: 0 1 auto; min-width: 0; }
+.explorer__merge > button { min-width: 0; }
+.explorer__merge > button > svg, .explorer__merge > .explorer__split-toggle { flex: none; }
+.explorer__merge-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .explorer__merge > button,
 .explorer__commit-actions > button,
 .explorer__amend-confirmation button { border: 0; background: transparent; color: var(--text); font: inherit; cursor: pointer; }
@@ -3763,11 +3769,22 @@ button.pool__agent-label { padding: 0; border: 0; background: transparent; color
 .explorer__amend-confirmation button:disabled { color: var(--text-disabled); cursor: default; }
 .explorer__merge button:focus-visible,
 .explorer__commit-actions button:focus-visible { outline-offset: -2px; }
-.explorer__commit { display: flex; flex-direction: column; min-width: 0; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); overflow: hidden; }
+.explorer__commit { display: flex; flex-direction: column; min-width: 0; border-top: 1px solid var(--border); }
 .explorer__commit:focus-within { border-color: var(--focus); }
-.explorer__commit textarea { min-width: 0; width: 100%; min-height: 64px; padding: 8px 10px; border: 0; outline: 0; resize: vertical; background: transparent; color: var(--text); }
+.explorer__commit textarea {
+  min-width: 0;
+  width: 100%;
+  height: 64px;
+  padding: 8px 10px;
+  border: 0;
+  outline: 0;
+  resize: none;
+  overflow-y: auto;
+  background: transparent;
+  color: var(--text);
+}
 .explorer__commit textarea::placeholder { color: var(--text-muted); }
-.explorer__commit-footer { display: flex; justify-content: flex-end; gap: 6px; padding: 4px 6px 6px; }
+.explorer__commit-footer { display: flex; justify-content: flex-end; gap: 6px; padding: 4px 10px 8px; }
 .explorer__amend-confirmation { display: flex; align-items: center; gap: 6px; }
 .explorer__amend-confirmation button { padding: 5px 7px; border: 1px solid var(--border); border-radius: 6px; }
 

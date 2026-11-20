@@ -111,15 +111,18 @@ current layout and give future changes a point of comparison.
   Resize the inspector at its left edge by dragging or with the arrow keys
   while the separator is focused. Save the chosen width with the task.
 - In Files, use the shared segmented control to switch between **Files** and
-  **Changes**. In Changes, place an icon-only refresh button at the right end
-  of the same row. Show only changed files in the same tree and icon style, with
+  **Changes**. Put the task's merge control on the same row, and in Changes
+  place an icon-only refresh button at the right end. Show only changed files in the same tree and icon style, with
   added and removed line counts per file and totals at the top. Keep the task
   Git card overlaid at the bottom with an upward shadow, its branch, worktree,
-  and commit composer; show a PR only when one is attached. Its header shows the task and base
-  branches and a merge control offering squash-merge or merge each commit.
+  and commit composer; show a PR only when one is attached. Its header shows
+  the task and base branches. The merge control offers squash-merge or merge
+  each commit.
   Right-align the merge method menu with its button group. The commit message
-  field contains a bottom-row split button for Commit and Amend; amending the
-  tip still requires confirmation. Review offers
+  field fills the bottom of the Git card, separated by a single top divider.
+  It has a fixed height and scrolls when the message overflows. Its bottom-row
+  split button offers Commit and Amend, and amending the tip still
+  requires confirmation. Review offers
   a separate approval that keeps the task open; approve a clean committed tree,
   and require renewed approval if its commit changes. The merge also requires
   the existing Git safety checks.
@@ -422,8 +425,9 @@ current layout and give future changes a point of comparison.
   header has no bottom border.
 - Opening a task either renders its conversation or shows the failure with
   **Retry** in the conversation pane; never leave the pane on a loading state.
-- Show the task's branch below the composer once the branch exists, and its
-  worktree path relative to the project root once a worktree exists. Both are
+- Show the current checkout's branch below the composer, and the worktree path
+  relative to the project root. A detached checkout shows `(no branch)` in
+  the Git pane and `(no branch)` with the short commit hash below the composer. Both are
   muted labels that carry the full absolute value in their tooltip, and each
   carries a small icon before its text: a git branch and Zed's worktree mark.
   Label the task checkout as Worktree or Main checkout, and leave space below

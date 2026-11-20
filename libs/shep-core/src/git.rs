@@ -952,13 +952,13 @@ impl GitService {
     }
 
     pub(crate) fn status(&self, path: &Path) -> Result<Vec<GitFile>, GitError> {
-        Ok(self.status_with_branch(path)?.1)
+        Ok(self.status_with_head(path)?.1)
     }
 
-    pub(crate) fn status_with_branch(
+    pub(crate) fn status_with_head(
         &self,
         path: &Path,
-    ) -> Result<(Option<String>, Vec<GitFile>), GitError> {
+    ) -> Result<(GitHead, Vec<GitFile>), GitError> {
         let bytes = git_bytes(
             path,
             &[
@@ -976,14 +976,18 @@ impl GitService {
             .split(|byte| *byte == 0)
             .filter(|record| !record.is_empty());
         let mut files = Vec::new();
-        let mut branch = None;
+        let mut head = GitHead::default();
         while let Some(record) = records.next() {
             let (columns, original) = match record.first() {
                 Some(b'#') => {
-                    if let Some(head) = record.strip_prefix(b"# branch.head ")
-                        && head != b"(detached)"
+                    if let Some(branch) = record.strip_prefix(b"# branch.head ")
+                        && branch != b"(detached)"
                     {
-                        branch = Some(String::from_utf8_lossy(head).into_owned());
+                        head.branch = Some(String::from_utf8_lossy(branch).into_owned());
+                    } else if let Some(commit) = record.strip_prefix(b"# branch.oid ")
+                        && commit != b"(initial)"
+                    {
+                        head.commit = Some(String::from_utf8_lossy(commit).into_owned());
                     }
                     continue;
                 }
@@ -1003,7 +1007,7 @@ impl GitService {
             let path = fields.nth(columns - 3).ok_or(GitError::InvalidStatus)?;
             files.push(GitFile::from_status(path, original, codes)?);
         }
-        Ok((branch, files))
+        Ok((head, files))
     }
 
     /// True when the worktree has staged, unstaged or untracked changes.
@@ -1167,6 +1171,12 @@ fn parse_numstat(output: &[u8]) -> Result<Vec<GitLineStats>, GitError> {
         });
     }
     Ok(result)
+}
+
+#[derive(Default)]
+pub(crate) struct GitHead {
+    pub branch: Option<String>,
+    pub commit: Option<String>,
 }
 
 #[derive(Debug, Serialize)]

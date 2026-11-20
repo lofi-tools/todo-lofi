@@ -90,13 +90,15 @@ enum FileChangeKind {
 #[serde(rename_all = "camelCase")]
 pub struct WorkspaceGitStatus {
     pub branch: Option<String>,
+    pub commit: Option<String>,
     pub change_count: usize,
 }
 
 pub fn git_file_status(root: &Path) -> Result<(WorkspaceGitStatus, Vec<FileChange>), FileError> {
-    let (branch, status) = GitService.status_with_branch(root)?;
+    let (head, status) = GitService.status_with_head(root)?;
     let git = WorkspaceGitStatus {
-        branch,
+        branch: head.branch,
+        commit: head.commit,
         change_count: status.len(),
     };
     let mut changes = BTreeMap::new();
@@ -944,7 +946,9 @@ mod tests {
             ])
         );
         run_git(root, &["checkout", "--detach"])?;
-        assert_eq!(git_file_status(root)?.0.branch, None);
+        let (git, _) = git_file_status(root)?;
+        assert_eq!(git.branch, None);
+        assert_eq!(git.commit, Some(run_git(root, &["rev-parse", "HEAD"])?));
         Ok(())
     }
 

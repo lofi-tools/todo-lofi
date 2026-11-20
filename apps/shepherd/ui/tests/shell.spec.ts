@@ -58,7 +58,8 @@ test.beforeEach(async ({ context }) => {
       ] : [{ path: 'src/main.rs', originalPath: null, actionable: true,
         index: last === 'stage' ? 'M' : ' ', worktree: last === 'stage' ? ' ' : 'M' }]
       return {
-        branch: 'shepherd/ship-it', tracking: null, projectRoot: null, branches: ['main'], history: [], files,
+        branch: options.has('detached-checkout') ? null : 'shepherd/ship-it',
+        tracking: null, projectRoot: null, branches: ['main'], history: [], files,
         lineStats: options.has('watch-git') ? watchedGitFiles.map((file) => ({ path: file.path, added: 2, removed: 1 })) : options.has('changes-fixture') ? [
           { path: 'src/main.rs', added: 3, removed: 1 }, { path: 'src/new.ts', added: 5, removed: 0 },
           { path: 'old.txt', added: 0, removed: 4 }, { path: 'assets/image.bin', added: null, removed: null },
@@ -1624,7 +1625,12 @@ test.beforeEach(async ({ context }) => {
         }
       }
       watchedSourceFiles.set(watcher.taskId, paths)
-      const git = { branch: branch === undefined ? watcher.taskId ? 'shepherd/ship-it' : 'main' : branch, changeCount: files.length }
+      const currentBranch = options.has('detached-checkout') ? null : watcher.taskId ? 'shepherd/ship-it' : 'main'
+      const git = {
+        branch: branch === undefined ? currentBranch : branch,
+        commit: '4d6381c09d76d8fb5daf50fce8637afb883e6370',
+        changeCount: files.length,
+      }
       callbacks.get(watcher.channel)?.({ index: watcher.index++, message: { type: 'changes', files, git } })
     }
     window.__fileSearches = fileSearches
@@ -2931,6 +2937,17 @@ test('shows changed files in the explorer tree with line counts', async ({ page 
   await expect.poll(async () => (await counts()).gitDiff).toBeGreaterThan(before.gitDiff)
 })
 
+test('shows the detached checkout label in Git and the short commit below the composer', async ({ page }) => {
+  await page.goto('/?detached-checkout')
+  const chat = page.getByRole('region', { name: 'Task chat' })
+  const branch = chat.locator('.chat__workspace-details .chat__branch')
+  await expect(branch).toHaveText('(no branch) · 4d6381c')
+  await expect(branch).toHaveAttribute('title', '(no branch) · 4d6381c09d76d8fb5daf50fce8637afb883e6370')
+  await page.getByRole('tab', { name: 'Files', exact: true }).click()
+  const git = page.getByRole('region', { name: 'Git worktree' })
+  await expect(git.getByText('(no branch)', { exact: true })).toBeVisible()
+})
+
 test('refreshes the changed-file list when the worktree watcher reports changes', async ({ page }) => {
   await page.goto('/?watch-git')
   await page.getByRole('tab', { name: 'Files', exact: true }).click()
@@ -2976,7 +2993,9 @@ test('places commit actions inside the composer and aligns the merge menu', asyn
   const formBounds = await form.boundingBox()
   expect(commitBounds!.y).toBeGreaterThanOrEqual(messageBounds!.y + messageBounds!.height)
   expect(commitBounds!.y + commitBounds!.height).toBeLessThanOrEqual(formBounds!.y + formBounds!.height)
-  const mergeGroup = git.getByRole('group', { name: 'Merge controls' })
+  const toolbar = git.locator('.explorer__toolbar')
+  await expect(toolbar.getByRole('group', { name: 'File explorer view' })).toBeVisible()
+  const mergeGroup = toolbar.getByRole('group', { name: 'Merge controls' })
   const mergePicker = git.getByRole('button', { name: 'Merge method' })
   await mergePicker.click()
   const menu = page.getByRole('menu', { name: 'Merge method' })
@@ -3282,11 +3301,11 @@ test('updates the native title and clears worktree status when switching project
     fixture.__publishFileChanges('file-watch-1', [], null)
     window.__setTaskState('task-live-notes', 'ready')
   })
-  await expect(status).toContainText('Detached HEAD')
+  await expect(status).toContainText('(no branch)')
   await expect.poll(nativeTitle).toBe('demo — Shepherd')
   await page.getByRole('button', { name: 'notes', exact: true }).click()
   await expect.poll(nativeTitle).toBe('notes — Shepherd')
-  await expect(status).not.toContainText('Detached HEAD')
+  await expect(status).not.toContainText('(no branch)')
   await expect.poll(() => page.evaluate(() => window.__unwatchedFiles)).toContain('file-watch-1')
 })
 

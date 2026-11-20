@@ -1164,6 +1164,7 @@ export interface FileChange {
 
 export interface WorkspaceGitStatus {
   branch: string | null
+  commit: string | null
   changeCount: number
 }
 

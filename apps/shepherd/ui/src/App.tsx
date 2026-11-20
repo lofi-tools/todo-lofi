@@ -1198,22 +1198,39 @@ export function App() {
     return task && task.id === selectedTaskId() && task.projectId === selectedProjectId() && !selectedProject()?.missing
       ? task.worktreePath : null
   })
-  const [worktreeGit, setWorktreeGit] = createSignal<bridge.WorkspaceGitStatus>()
+  const checkoutPath = createMemo(() => {
+    const project = selectedProject()
+    if (!project || project.missing || !workspace() || workspace()?.task.id !== selectedTaskId()) return null
+    return worktreePath() ?? (project.isGitRepository ? project.path : null)
+  })
+  const [checkoutGit, setCheckoutGit] = createSignal<bridge.WorkspaceGitStatus>()
+  const composerBranch = () => {
+    const checkout = checkoutGit()
+    if (!checkout) return workspace()?.task.branch ?? undefined
+    if (checkout.branch) return checkout.branch
+    return checkout.commit ? `(no branch) · ${checkout.commit.slice(0, 7)}` : '(no branch)'
+  }
+  const composerBranchTitle = () => {
+    const checkout = checkoutGit()
+    const branch = checkout ? checkout.branch : workspace()?.task.branch
+    if (branch) return `Branch ${branch}`
+    return checkout?.commit ? `(no branch) · ${checkout.commit}` : composerBranch()
+  }
   const [worktreeFileRevision, setWorktreeFileRevision] = createSignal(0)
   const [gitStatusError, setGitStatusError] = createSignal<string>()
   createEffect(() => {
-    const path = worktreePath()
+    const path = checkoutPath()
     const taskId = selectedTaskId()
     const projectId = selectedProjectId()
-    setWorktreeGit(undefined)
+    setCheckoutGit(undefined)
     setGitStatusError(undefined)
     if (!path || !taskId || !projectId) return
     let closed = false
-    const watch = bridge.watchWorkspaceFiles(projectId, taskId, (update) => {
+    const watch = bridge.watchWorkspaceFiles(projectId, worktreePath() ? taskId : null, (update) => {
       if (closed) return
-      setWorktreeGit(update.type === 'changes' ? update.git ?? undefined : undefined)
+      setCheckoutGit(update.type === 'changes' ? update.git ?? undefined : undefined)
       if (update.type === 'changes') setWorktreeFileRevision((revision) => revision + 1)
-      setGitStatusError(update.type === 'error' ? update.message : update.git ? undefined : 'The task worktree has no Git metadata.')
+      setGitStatusError(update.type === 'error' ? update.message : update.git ? undefined : 'The checkout has no Git metadata.')
     })
     void watch.catch((failure) => { if (!closed) setGitStatusError(describe(failure)) })
     onCleanup(() => {
@@ -2706,10 +2723,10 @@ export function App() {
         </button>
         <Show when={worktreePath()}>
           <Dot />
-          <Show when={worktreeGit()} fallback={<span title={gitStatusError()}>{gitStatusError() ? 'Git status unavailable' : 'Reading Git status…'}</span>}>
+          <Show when={checkoutGit()} fallback={<span title={gitStatusError()}>{gitStatusError() ? 'Git status unavailable' : 'Reading Git status…'}</span>}>
             {(git) => <>
-              <span class="status-bar__branch" title={git().branch ?? 'Detached HEAD'}>
-                {git().branch ? `branch ${git().branch}` : 'Detached HEAD'}
+              <span class="status-bar__branch" title={git().branch ?? '(no branch)'}>
+                {git().branch ? `branch ${git().branch}` : '(no branch)'}
               </span>
               <Dot />
               <span>{git().changeCount} {git().changeCount === 1 ? 'changed file' : 'changed files'}</span>
@@ -3258,8 +3275,8 @@ export function App() {
           <Show when={workspace()}>
             {(current) => <Show when={current().task.branch || current().task.worktreePath || (selectedProject()?.isGitRepository && selectedProject()?.path)}>
               <div class="chat__workspace-details">
-                <Show when={current().task.branch}>
-                  {(branch) => <span class="chat__branch" title={`Branch ${branch()}`}>
+                <Show when={composerBranch()}>
+                  {(branch) => <span class="chat__branch" title={composerBranchTitle()}>
                     <BranchIcon /><span class="chat__chip-text">{branch()}</span>
                   </span>}
                 </Show>
