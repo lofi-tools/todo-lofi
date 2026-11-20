@@ -16,6 +16,9 @@ shep
 
 `shep` starts Vite on port 1420 and uses `.cache/test-db/shepherd.db`. Projects
 and chats in that test database persist across launches.
+Shepherd saves a rollback snapshot before migrating an existing database.
+`direnv exec . cleanup` removes completed pre-migration snapshots from this
+directory and preserves the active database.
 
 `shep --test` starts on port 1435 with an empty database in a fresh directory
 under `.cache/test-output/runs/shep-test/`. Changes survive Tauri reloads during that launch.

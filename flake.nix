@@ -507,6 +507,18 @@
           myDevShell.buildInputs = buildDeps ++ devDeps ++ (attrValues scripts);
           myDevShell.shellHooks = { };
           myDevShell.cleanups.icons.script = ''rm -f target/debug/taskstream.app/Contents/Resources/taskstream.icns'';
+          myDevShell.cleanups.shepherd-migration-backups.script = ''
+            repo_root=$(${pkgs.git}/bin/git rev-parse --show-toplevel) || exit 1
+            shepherd_data="$repo_root/.cache/test-db"
+            if [[ -d "$shepherd_data" && ! -L "$shepherd_data" ]]; then
+              snapshot_pattern='^shepherd\.db\.pre-migration-[[:xdigit:]]{8}(-[[:xdigit:]]{4}){3}-[[:xdigit:]]{12}$'
+              for snapshot in "$shepherd_data"/shepherd.db.pre-migration-*; do
+                if [[ -d "$snapshot" && ! -L "$snapshot" && "''${snapshot##*/}" =~ $snapshot_pattern ]]; then
+                  rm -rf -- "$snapshot" || exit 1
+                fi
+              done
+            fi
+          '';
           myDevShell.cleanups.test-output-runs.script = ''
             repo_root=$(${pkgs.git}/bin/git rev-parse --show-toplevel) || exit 1
             rm -rf -- "$repo_root/.cache/test-output/runs"
