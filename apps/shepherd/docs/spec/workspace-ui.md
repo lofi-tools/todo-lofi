@@ -364,10 +364,10 @@ current layout and give future changes a point of comparison.
   If a selected task leaves review while the dialog is open, close the dialog
   and ask for a fresh confirmation of the remaining selection. A failed
   archive keeps the eligible tasks selected for retry.
-- Highlight a row on hover and open a compact context card directly to its
-  right. The pointer can move onto the card. Right-click and Shift+F10 open the
-  same card. The row uses hover and these context actions as its menu entry
-  points.
+- On hover or Shift+F10, open the compact context card to the right of the row.
+  The pointer can move from the row onto the card. On right-click, anchor the
+  card just below the pointer, or above it if there is no room below. Use a
+  grayer surface and a neutral fill on focused options.
 - **Copy details**, with a copy icon on the left, is the first row in the
   context card for projects and their nested chat rows. Nested chat rows open
   the card with right-click or Shift+F10. Copy the row type, project and

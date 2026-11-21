@@ -1,9 +1,13 @@
-import { createSignal, onCleanup, onMount, type JSX } from 'solid-js'
+import { createEffect, createSignal, onCleanup, type JSX } from 'solid-js'
 
 import { sidebarCheckout, type ProjectSnapshot, type TaskSummary } from './bridge'
 import { reportError } from './diagnostics'
 
 const menuItems = 'button[role^="menuitem"]'
+const cursorGap = 4
+const viewportInset = 8
+
+export type SidebarMenuPoint = { x: number; y: number }
 
 export function isSidebarMenuKey(event: KeyboardEvent) {
   return event.key === 'ContextMenu' || (event.shiftKey && event.key === 'F10')
@@ -15,6 +19,7 @@ export function focusSidebarMenu(row: HTMLElement) {
 
 export function SidebarMenu(props: {
   row: HTMLElement
+  cursor?: SidebarMenuPoint
   label: string
   descriptionId?: string
   onClose: (restoreFocus: boolean) => void
@@ -24,13 +29,20 @@ export function SidebarMenu(props: {
   const [position, setPosition] = createSignal({ left: 0, top: 0 })
   let menu!: HTMLDivElement
 
-  onMount(() => {
+  createEffect(() => {
+    const cursor = props.cursor
     const place = () => {
-      const bounds = props.row.getBoundingClientRect()
-      setPosition({
-        left: bounds.right,
-        top: Math.max(0, Math.min(bounds.top, window.innerHeight - menu.offsetHeight)),
-      })
+      const height = menu.offsetHeight
+      if (cursor) {
+        const below = cursor.y + cursorGap
+        const top = below + height <= window.innerHeight - viewportInset
+          ? below : Math.max(viewportInset, cursor.y - cursorGap - height)
+        const left = Math.max(viewportInset, Math.min(cursor.x, window.innerWidth - menu.offsetWidth - viewportInset))
+        setPosition({ left, top })
+      } else {
+        const bounds = props.row.getBoundingClientRect()
+        setPosition({ left: bounds.right, top: Math.max(0, Math.min(bounds.top, window.innerHeight - height)) })
+      }
     }
     const list = props.row.closest('.projects')
     const dismiss = () => props.onClose(menu.contains(document.activeElement))
@@ -40,12 +52,13 @@ export function SidebarMenu(props: {
     const observer = new ResizeObserver(place)
     place()
     observer.observe(menu)
-    list?.addEventListener('scroll', dismiss)
+    const scrollEvent = cursor ? 'wheel' : 'scroll'
+    list?.addEventListener(scrollEvent, dismiss)
     window.addEventListener('resize', place)
     document.addEventListener('pointerdown', dismissOutside)
     onCleanup(() => {
       observer.disconnect()
-      list?.removeEventListener('scroll', dismiss)
+      list?.removeEventListener(scrollEvent, dismiss)
       window.removeEventListener('resize', place)
       document.removeEventListener('pointerdown', dismissOutside)
     })
@@ -66,6 +79,7 @@ export function SidebarMenu(props: {
 
   return (
     <div ref={menu} class="project-menu" role="menu" aria-label={props.label} aria-describedby={props.descriptionId}
+      classList={{ 'project-menu--at-cursor': !!props.cursor }}
       style={{ '--project-menu-left': `${position().left}px`, top: `${position().top}px` }}
       on:contextmenu={(event) => event.preventDefault()}
       onKeyDown={(event) => {

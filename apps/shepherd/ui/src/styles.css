@@ -819,15 +819,22 @@ textarea {
 }
 
 .project-menu {
+  --sidebar-menu-surface: color-mix(in srgb, var(--surface-raised) 90%, var(--text) 10%);
   z-index: 10;
   left: var(--project-menu-left);
   margin-left: 4px;
   min-width: 164px;
   width: max-content;
   max-width: calc(100vw - var(--project-menu-left) - 12px);
+  background: var(--sidebar-menu-surface);
 }
 
-.project-menu::before {
+.project-menu--at-cursor {
+  margin-left: 0;
+  max-width: calc(100vw - 16px);
+}
+
+.project-menu:not(.project-menu--at-cursor)::before {
   position: absolute;
   inset-block: 0;
   right: 100%;
@@ -850,8 +857,10 @@ textarea {
   white-space: nowrap;
 }
 
-.project-menu .nav-item:hover {
-  background: var(--surface-raised);
+.project-menu .nav-item:hover,
+.project-menu .nav-item:focus-visible {
+  outline: none;
+  background: color-mix(in srgb, var(--sidebar-menu-surface) 86%, var(--text) 14%);
 }
 
 .project-menu__details {

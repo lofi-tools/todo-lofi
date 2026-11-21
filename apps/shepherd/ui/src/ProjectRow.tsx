@@ -1,7 +1,7 @@
-import { Match, Show, Switch, createResource, createUniqueId } from 'solid-js'
+import { Match, Show, Switch, createResource, createSignal, createUniqueId } from 'solid-js'
 
 import { projectRemote, type ProjectRemote, type ProjectSnapshot } from './bridge'
-import { focusSidebarMenu, isSidebarMenuKey, SidebarMenu } from './SidebarMenu'
+import { focusSidebarMenu, isSidebarMenuKey, SidebarMenu, type SidebarMenuPoint } from './SidebarMenu'
 
 interface ProjectRowProps {
   project: ProjectSnapshot
@@ -26,6 +26,7 @@ interface ProjectRowProps {
 }
 
 export function ProjectRow(props: ProjectRowProps) {
+  const [menuCursor, setMenuCursor] = createSignal<SidebarMenuPoint>()
   const pathId = createUniqueId()
   const [remote] = createResource(
     () => props.menuOpen && props.project.isGitRepository && props.project.id,
@@ -49,7 +50,8 @@ export function ProjectRow(props: ProjectRowProps) {
     return path
   }
 
-  function openMenu(focus: boolean) {
+  function openMenu(focus: boolean, cursor?: SidebarMenuPoint) {
+    setMenuCursor(cursor)
     props.onMenuOpenChange(true)
     if (focus) focusSidebarMenu(row)
   }
@@ -73,7 +75,7 @@ export function ProjectRow(props: ProjectRowProps) {
       }}
       on:contextmenu={(event) => {
         event.preventDefault()
-        openMenu(true)
+        openMenu(true, { x: event.clientX, y: event.clientY })
       }}
       onKeyDown={(event) => {
         if (event.key !== 'Escape' || !props.menuOpen) return
@@ -144,7 +146,7 @@ export function ProjectRow(props: ProjectRowProps) {
         </svg>
       </button>
       <Show when={props.menuOpen}>
-        <SidebarMenu row={row} label={props.project.name} descriptionId={pathId}
+        <SidebarMenu row={row} cursor={menuCursor()} label={props.project.name} descriptionId={pathId}
           copyDetails={props.copyDetails} onClose={closeMenu}>
           <div class="project-menu__details" role="presentation">
             <p id={pathId} class="project-menu__location">

@@ -2,7 +2,7 @@ import { For, Show, createSignal, onCleanup, onMount } from 'solid-js'
 
 import type { ProjectSnapshot, TaskSummary } from './bridge'
 import { WaitingIcon } from './ProjectRow'
-import { focusSidebarMenu, isSidebarMenuKey, sidebarDetails, SidebarMenu } from './SidebarMenu'
+import { focusSidebarMenu, isSidebarMenuKey, sidebarDetails, SidebarMenu, type SidebarMenuPoint } from './SidebarMenu'
 
 export function TaskRows(props: {
   tasks: TaskSummary[]
@@ -25,10 +25,12 @@ export function TaskRows(props: {
       <ul class="task-list">
         <For each={props.tasks}>
           {(task) => {
+            const [menuCursor, setMenuCursor] = createSignal<SidebarMenuPoint>()
             let row!: HTMLLIElement
             let button!: HTMLButtonElement
-            const openMenu = (event: Event) => {
+            const openMenu = (event: Event, cursor?: SidebarMenuPoint) => {
               event.preventDefault()
+              setMenuCursor(cursor)
               props.onMenuOpenChange(task.id, true)
               focusSidebarMenu(row)
             }
@@ -37,7 +39,8 @@ export function TaskRows(props: {
               if (restoreFocus) button.focus({ preventScroll: true })
             }
             return (
-              <li ref={row} class="task-list__row" on:contextmenu={openMenu}
+              <li ref={row} class="task-list__row"
+                on:contextmenu={(event) => openMenu(event, { x: event.clientX, y: event.clientY })}
                 onFocusOut={(event) => {
                   if (!(event.relatedTarget instanceof Node && row.contains(event.relatedTarget))) closeMenu(false)
                 }}>
@@ -78,7 +81,7 @@ export function TaskRows(props: {
                   <button type="button" class="process-indicator" aria-label={`${props.processCount(task.id)} running ${props.processCount(task.id) === 1 ? 'process' : 'processes'} in ${task.title}`} title="Running processes" onClick={() => props.onProcesses(task.id)}>{props.processCount(task.id)}</button>
                 </Show>
                 <Show when={props.isMenuOpen(task.id)}>
-                  <SidebarMenu row={row} label={task.title} onClose={closeMenu}
+                  <SidebarMenu row={row} cursor={menuCursor()} label={task.title} onClose={closeMenu}
                     copyDetails={() => sidebarDetails(props.project, task, 'task')} />
                 </Show>
               </li>
