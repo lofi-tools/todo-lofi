@@ -1,6 +1,6 @@
 ---
 name: reference-repos
-description: Inspect Taskstream's named reference repositories (pandacode, herdr, herdr-core, herdr-app, pi, orca, and traycer) when using them as implementation examples or comparing designs.
+description: Inspect Taskstream's configured reference repositories when using them as implementation examples or comparing designs.
 ---
 
 Resolve reference names using `referenceRepos` in the repository root's `flake.nix`.

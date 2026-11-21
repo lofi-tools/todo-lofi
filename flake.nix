@@ -37,6 +37,14 @@
             discovery = { type = "checkout"; path = "docs"; };
           };
         };
+        komet.origins = {
+          home.url = "https://komet-eight.vercel.app";
+          repo.url = "https://github.com/jomvick/komet";
+          docs = {
+            path = "ARCHITECTURE.md";
+            discovery = { type = "checkout"; path = "docs"; };
+          };
+        };
         orca.origins = {
           home.url = "https://orca.dev";
           repo.url = "https://github.com/stablyai/orca";
