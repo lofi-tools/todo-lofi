@@ -17,7 +17,7 @@ remote default branch.
 For documentation, run `refs discover [name] --plain` to list pages and saved
 decisions. In an interactive terminal, `refs discover [name]` lets users
 approve, reject, or reset a page or group. Saving updates
-`reference-docs/<name>.json` and syncs the affected references. Run
+`docs/reference-docs/<name>.json` and syncs the affected references. Run
 `refs sync [name]` to refresh the cache independently. Omitting the name
 selects all references.
 Start reading at `.cache/reference-docs/<name>/index.md` and cite the source URL

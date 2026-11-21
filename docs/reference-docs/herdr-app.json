@@ -1,0 +1,10 @@
+{
+  "docs": {
+    "approved": [
+      "docs/labels.md",
+      "docs/mods.md",
+      "docs/security.md"
+    ],
+    "rejected": []
+  }
+}

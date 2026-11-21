@@ -817,6 +817,7 @@
         };
     } // lib.optionalAttrs (inputs.my-nix.flakeModules ? referenceDocs) {
       inherit referenceRepos;
+      referenceDocs.decisionsDirectory = "docs/reference-docs";
     });
 
 }

@@ -1,0 +1,10 @@
+{
+  "docs": {
+    "approved": [
+      "docs/machines.md",
+      "docs/security.md",
+      "docs/templates.md"
+    ],
+    "rejected": []
+  }
+}

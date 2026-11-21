@@ -63,7 +63,7 @@ Omit the name from `refs` to process all references. In the discovery tree,
 press `a` to approve, `r` to reject, or `u` to reset a page or group to new.
 Press Enter to review your changes, then `y` to save and sync the affected
 references. Discovery remembers both decisions in Git-tracked
-`reference-docs/<name>.json` files. Use `--plain` to list the results.
+`docs/reference-docs/<name>.json` files. Use `--plain` to list the results.
 Sync writes Markdown and a source index under `.cache/reference-docs/<name>/`.
 
 The command comes from the `my-nix` reference docs module. While the locked
