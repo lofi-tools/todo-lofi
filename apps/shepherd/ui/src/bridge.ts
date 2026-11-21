@@ -824,6 +824,10 @@ export function projectRemote(projectId: string): Promise<ProjectRemote | null> 
   return invoke('project_remote', { projectId })
 }
 
+export function sidebarCheckout(projectId: string, taskId: string | null): Promise<{ branch: string | null; linkedWorktree: boolean }> {
+  return invoke('sidebar_checkout', { projectId, taskId })
+}
+
 export interface CodexModel {
   model: string
   displayName: string

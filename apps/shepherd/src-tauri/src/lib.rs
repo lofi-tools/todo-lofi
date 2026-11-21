@@ -458,6 +458,7 @@ pub fn run() -> Result<(), tauri::Error> {
             bridge::commands::project_list,
             bridge::commands::reorder_projects,
             bridge::commands::project_remote,
+            bridge::commands::sidebar_checkout,
             bridge::commands::project_scan,
             bridge::commands::local_codex_available,
             bridge::commands::local_codex_projects,

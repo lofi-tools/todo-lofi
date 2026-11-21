@@ -368,8 +368,14 @@ current layout and give future changes a point of comparison.
   right. The pointer can move onto the card. Right-click and Shift+F10 open the
   same card. The row uses hover and these context actions as its menu entry
   points.
-- Order the card rows as the read-only local path, Git remote when available,
-  **Show archived**, and **Project settings**. Use matching row heights, text
+- **Copy details**, with a copy icon on the left, is the first row in the
+  context card for projects and their nested chat rows. Nested chat rows open
+  the card with right-click or Shift+F10. Copy the row type, project and
+  checkout paths, chat ID and title when present, checkout type, and current
+  branch or detached state. For a project row, use the open chat in that
+  project, or its remembered or sole visible chat when the project is inactive.
+- Follow **Copy details** in the project card with the read-only local path,
+  Git remote when available, **Show archived**, and **Project settings**. Use matching row heights, text
   sizes, and padding, with icons and text vertically centred. Show a folder
   beside the path and abbreviate the home directory as `~/`.
 - Show GitHub, GitLab, and Hugging Face remotes with monochrome line icons.

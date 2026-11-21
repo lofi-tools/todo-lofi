@@ -18,6 +18,13 @@ pub struct GitRepository {
     pub default_branch: String,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CheckoutIdentity {
+    pub branch: Option<String>,
+    pub linked_worktree: bool,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum GitError {
     #[error("not a Git repository: {path}")]
@@ -108,6 +115,20 @@ impl GitService {
     pub fn common_directory(path: &Path) -> Result<PathBuf, GitError> {
         let directory = run_git(path, &["rev-parse", "--git-common-dir"])?;
         canonicalize(&path.join(directory))
+    }
+
+    pub fn checkout_identity(path: &Path) -> Result<CheckoutIdentity, GitError> {
+        let git_dir = run_git(path, &["rev-parse", "--absolute-git-dir"])?;
+        let linked_worktree = canonicalize(Path::new(&git_dir))? != Self::common_directory(path)?;
+        let branch = match run_git(path, &["symbolic-ref", "--quiet", "--short", "HEAD"]) {
+            Ok(branch) => Some(branch),
+            Err(GitError::CommandFailed { status, .. }) if status.code() == Some(1) => None,
+            Err(error) => return Err(error),
+        };
+        Ok(CheckoutIdentity {
+            branch,
+            linked_worktree,
+        })
     }
 
     /// Create a task worktree from the repository's default branch. The caller
@@ -2017,6 +2038,28 @@ mod tests {
         let list =
             run_git(fixture.path(), &["worktree", "list", "--porcelain"]).expect("worktree list");
         assert!(list.contains(&worktree.display().to_string()));
+    }
+
+    #[cfg(feature = "git")]
+    #[test]
+    fn reads_checkout_identity() -> Result<(), Box<dyn std::error::Error>> {
+        let fixture = TestRepository::new()?;
+        let repository = fixture.repository();
+        let main = GitService::checkout_identity(fixture.path())?;
+        assert_eq!(main.branch.as_deref(), Some("main"));
+        assert!(!main.linked_worktree);
+
+        let worktree = repository.git_dir.join("shepherd/worktrees/identity");
+        GitService.create_worktree(repository, &worktree, "shepherd/identity", "main")?;
+        let linked = GitService::checkout_identity(&worktree)?;
+        assert_eq!(linked.branch.as_deref(), Some("shepherd/identity"));
+        assert!(linked.linked_worktree);
+
+        run_git(&worktree, &["checkout", "--detach"])?;
+        let detached = GitService::checkout_identity(&worktree)?;
+        assert!(detached.branch.is_none());
+        assert!(detached.linked_worktree);
+        Ok(())
     }
 
     #[cfg(feature = "git")]

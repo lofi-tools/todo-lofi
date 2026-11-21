@@ -20,6 +20,7 @@ import { Markdown } from './Markdown'
 import { MessageRail } from './MessageRail'
 import { ProjectImportSources, ProjectPicker } from './ProjectPicker'
 import { ProjectRow } from './ProjectRow'
+import { sidebarDetails } from './SidebarMenu'
 import { PreviewPane, type PreviewAnnotation } from './PreviewPane'
 import { GitPane } from './GitPane'
 import { BranchIcon } from './BranchIcon'
@@ -253,7 +254,7 @@ export function App() {
       if (!pointer.active) {
         if (Math.hypot(event.clientX - pointer.x, event.clientY - pointer.y) < 4) return
         pointer.active = true
-        setProjectMenuId(undefined)
+        setSidebarMenuId(undefined)
         setDraggedProject(pointer.projectId)
         setProjectPreviewOrder(projects().map((project) => project.id))
         try { projectList.setPointerCapture(pointer.id) } catch (failure) { console.warn('Could not capture project drag pointer', failure) }
@@ -449,7 +450,10 @@ export function App() {
     const configured = projectModel()
     return configured?.projectId === selectedProjectId() ? configured : undefined
   }
-  const [projectMenuId, setProjectMenuId] = createSignal<string>()
+  const [sidebarMenuId, setSidebarMenuId] = createSignal<string>()
+  const changeSidebarMenu = (id: string, open: boolean) => {
+    setSidebarMenuId((current) => open ? id : current === id ? undefined : current)
+  }
   const [settingsOpen, setSettingsOpenValue] = createSignal(false)
   const [settingsCategory, setSettingsCategory] = createSignal<SettingsCategory>('Workspace')
   const [settingsProjectId, setSettingsProjectId] = createSignal<string>()
@@ -1748,6 +1752,15 @@ export function App() {
     })
   }
 
+  async function copyProjectDetails(project: bridge.ProjectSnapshot) {
+    const isSelected = selectedProjectId() === project.id
+    const listed = isSelected && loadedTasksFor() === project.id ? tasks() : (await bridge.taskList(project.id)).tasks
+    if (isSelected) return sidebarDetails(project, listed.find((task) => task.id === selectedTaskId()), 'project')
+    const visible = listed.filter((task) => showsArchived(project.id) || task.state !== 'done')
+    const task = visible.find((entry) => entry.id === project.lastTaskId) ?? (visible.length === 1 ? visible[0] : undefined)
+    return sidebarDetails(project, task, 'project')
+  }
+
   function openTaskRow(task: bridge.TaskSummary) {
     recordCurrentScreen()
     setSettingsOpen(false)
@@ -2805,6 +2818,7 @@ export function App() {
             </Show>
             <For each={sidebarProjects()}>
               {(project) => {
+                const menuId = `project:${project.id}`
                 const listed = () => reviewOnly() ? filteredReviewTasks(project.id)
                   : project.id === selectedProjectId() && visibleTasks().length > 1 ? visibleTasks() : []
                 return (
@@ -2819,7 +2833,7 @@ export function App() {
                       pending={pending()}
                       showArchived={showsArchived(project.id)}
                       archiveDisabled={!preferencesEditable()}
-                      menuOpen={projectMenuId() === project.id}
+                      menuOpen={sidebarMenuId() === menuId}
                       processCount={runningProcesses(project.id).length}
                       reorderDisabled={reorderingProjects() || projects().length < 2}
                       onPointerDownProject={(event) => {
@@ -2830,19 +2844,19 @@ export function App() {
                       onProcesses={() => setProcessDialog({ projectId: project.id })}
                       onSelect={() => { if (!suppressProjectClick) openProject(project) }}
                       onCompose={() => newTask(project.id)}
-                      onMenuOpenChange={(open) => {
-                        if (open) setProjectMenuId(project.id)
-                        else if (projectMenuId() === project.id) setProjectMenuId(undefined)
-                      }}
+                      onMenuOpenChange={(open) => changeSidebarMenu(menuId, open)}
                       onToggleArchived={() => requestPreference('tasks.show_archived', !showsArchived(project.id), project.id)}
                       onProjectSettings={() => openProjectSettings(project.id)}
+                      copyDetails={() => copyProjectDetails(project)}
                     />
                     <Show when={project.missing}>
                       <p class="project__missing">path is missing</p>
                     </Show>
 
                     <Show when={listed().length}>
-                      <TaskRows tasks={listed()} currentTaskId={selectedTaskId()} mac={mac} disabled={pending()}
+                      <TaskRows tasks={listed()} project={project} currentTaskId={selectedTaskId()} mac={mac} disabled={pending()}
+                        isMenuOpen={(taskId) => sidebarMenuId() === `task:${taskId}`}
+                        onMenuOpenChange={(taskId, open) => changeSidebarMenu(`task:${taskId}`, open)}
                         processCount={(id) => runningProcesses(project.id, id).length}
                         onProcesses={(taskId) => setProcessDialog({ projectId: project.id, taskId })}
                         isOutputUnread={(id) => unreadTaskIds().has(id)}

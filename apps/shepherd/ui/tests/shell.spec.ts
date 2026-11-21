@@ -284,6 +284,9 @@ test.beforeEach(async ({ context }) => {
     if (options.has('two-projects')) {
       tasks.push({ ...tasks[0], id: 'task-archived', title: 'Old chat', state: 'done' })
     }
+    if (options.has('sidebar-details')) {
+      tasks.push({ ...tasks[0], id: 'task-main', title: 'Main chat', branch: null, worktreePath: null })
+    }
     if (options.has('two-tasks')) {
       tasks.push({ ...tasks[0], id: 'task-second', title: 'Second chat', state: 'ready' })
     }
@@ -943,6 +946,10 @@ test.beforeEach(async ({ context }) => {
             return args.projectId === 'project-alpha'
               ? { label: 'demo/alpha-a-repository-with-a-long-name-that-still-fits-on-one-line', forge: 'gitlab' }
               : { label: 'example/demo', forge: 'github' }
+          case 'sidebar_checkout':
+            return args.taskId === 'task-1'
+              ? { branch: 'shepherd/live-branch', linkedWorktree: true }
+              : { branch: null, linkedWorktree: false }
           case 'project_scan':
             if (options.has('project-scan-error')) throw { message: 'Cannot scan projects', code: 'scan' }
             return scan
@@ -4605,7 +4612,7 @@ test('shows project icons, opens archive controls on hover, and composes in anot
     const style = getComputedStyle(row)
     return [style.fontSize, style.padding, row.getBoundingClientRect().height]
   }))
-  expect(rowMetrics).toHaveLength(4)
+  expect(rowMetrics).toHaveLength(5)
   expect(rowMetrics.every((metrics) => metrics.join() === rowMetrics[0].join())).toBe(true)
   const rowBounds = await repository.locator('..').boundingBox()
   const cardBounds = await card.boundingBox()
@@ -4628,6 +4635,9 @@ test('shows project icons, opens archive controls on hover, and composes in anot
   await repository.click()
 
   await directory.press('Shift+F10')
+  const copy = page.getByRole('menuitem', { name: 'Copy details' })
+  await expect(copy).toBeFocused()
+  await copy.press('ArrowDown')
   await expect(archive).toBeFocused()
   await archive.press('ArrowDown')
   const projectSettings = page.getByRole('menuitem', { name: 'Project settings' })
@@ -4652,6 +4662,43 @@ test('shows project icons, opens archive controls on hover, and composes in anot
   await expect(page.locator('.chat__title')).toHaveCount(0)
   await expect(page.locator('.task-list')).toHaveCount(0)
   await expect(page.getByRole('button', { name: /Old chat/ })).toHaveCount(0)
+})
+
+test('copies project and subtask details from the sidebar context menu', async ({ page, context }) => {
+  await context.grantPermissions(['clipboard-read', 'clipboard-write'])
+  await page.goto('/?two-projects&sidebar-details')
+  const readClipboard = () => page.evaluate(() => navigator.clipboard.readText())
+
+  const project = page.getByRole('button', { name: 'demo', exact: true })
+  await project.click({ button: 'right' })
+  const projectMenu = page.getByRole('menu', { name: 'demo', exact: true })
+  const copyProject = projectMenu.getByRole('menuitem', { name: 'Copy details' })
+  await expect(copyProject).toBeFocused()
+  await expect(projectMenu.locator('button').first()).toHaveText('Copy details')
+  await expect(copyProject.locator('svg')).toBeVisible()
+  await copyProject.click()
+  await expect.poll(readClipboard).toMatch(/Row: Top-level project[\s\S]*Chat ID: task-1[\s\S]*Checkout: Worktree[\s\S]*Branch: shepherd\/live-branch/)
+  await expect(project).toBeFocused()
+
+  const task = page.getByRole('button', { name: 'Main chat', exact: true })
+  await task.click({ button: 'right' })
+  const taskMenu = page.getByRole('menu', { name: 'Main chat', exact: true })
+  const copyTask = taskMenu.getByRole('menuitem', { name: 'Copy details' })
+  await expect(copyTask).toBeFocused()
+  await copyTask.press('Escape')
+  await expect(taskMenu).toHaveCount(0)
+  await expect(task).toBeFocused()
+  await task.press('Shift+F10')
+  await copyTask.press('Enter')
+  await expect.poll(readClipboard).toMatch(/Row: Subtask[\s\S]*Chat ID: task-main[\s\S]*Checkout: Main checkout[\s\S]*Branch: \(no branch\)/)
+  await expect(project).toHaveAttribute('aria-current', 'true')
+  await expect(page.getByRole('button', { name: 'Ship it', exact: true })).toHaveAttribute('aria-current', 'true')
+
+  const notes = page.getByRole('button', { name: 'notes', exact: true })
+  await notes.click({ button: 'right' })
+  await page.getByRole('menu', { name: 'notes', exact: true }).getByRole('menuitem', { name: 'Copy details' }).click()
+  await expect.poll(readClipboard).toMatch(/Row: Top-level project[\s\S]*Chat ID: \(none\)[\s\S]*Checkout: Non-Git directory/)
+  await expect(project).toHaveAttribute('aria-current', 'true')
 })
 
 test('reorders projects by dragging with an insertion line and keeps the order', async ({ page }) => {

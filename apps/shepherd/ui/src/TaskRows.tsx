@@ -1,10 +1,14 @@
 import { For, Show, createSignal, onCleanup, onMount } from 'solid-js'
 
-import type { TaskSummary } from './bridge'
+import type { ProjectSnapshot, TaskSummary } from './bridge'
 import { WaitingIcon } from './ProjectRow'
+import { focusSidebarMenu, isSidebarMenuKey, sidebarDetails, SidebarMenu } from './SidebarMenu'
 
 export function TaskRows(props: {
   tasks: TaskSummary[]
+  project: ProjectSnapshot
+  isMenuOpen: (taskId: string) => boolean
+  onMenuOpenChange: (taskId: string, open: boolean) => void
   currentTaskId: string | null
   selection: () => Set<string> | undefined
   disabled?: boolean
@@ -20,42 +24,66 @@ export function TaskRows(props: {
     <div class="tasks">
       <ul class="task-list">
         <For each={props.tasks}>
-          {(task) => (
-            <li class="task-list__row">
-              <Show when={props.selection()}>
-                {(selection) => (
-                  <input type="checkbox" aria-label={`Select ${task.title}`} disabled={props.disabled}
-                    checked={selection().has(task.id)} onClick={(event) => props.onSelect(task.id, event.shiftKey)} />
-                )}
-              </Show>
-              <button type="button" class={`task task--${task.state}`}
-                aria-current={task.id === props.currentTaskId ? 'true' : undefined}
-                onClick={(event) => {
-                  if (props.selection() && (event.shiftKey || (props.mac ? event.metaKey : event.ctrlKey))) {
-                    if (!props.disabled) props.onSelect(task.id, event.shiftKey)
-                  } else {
-                    props.onOpen(task)
-                  }
+          {(task) => {
+            let row!: HTMLLIElement
+            let button!: HTMLButtonElement
+            const openMenu = (event: Event) => {
+              event.preventDefault()
+              props.onMenuOpenChange(task.id, true)
+              focusSidebarMenu(row)
+            }
+            const closeMenu = (restoreFocus: boolean) => {
+              props.onMenuOpenChange(task.id, false)
+              if (restoreFocus) button.focus({ preventScroll: true })
+            }
+            return (
+              <li ref={row} class="task-list__row" on:contextmenu={openMenu}
+                onFocusOut={(event) => {
+                  if (!(event.relatedTarget instanceof Node && row.contains(event.relatedTarget))) closeMenu(false)
                 }}>
-                <span class="task__state" aria-hidden="true" />
-                <span class="task__title">{task.title}</span>
-                <Show when={props.needsTerminalAttention(task.id)}>
-                  <span class="terminal-attention" role="img" aria-label="Terminal needs attention" />
+                <Show when={props.selection()}>
+                  {(selection) => (
+                    <input type="checkbox" aria-label={`Select ${task.title}`} disabled={props.disabled}
+                      checked={selection().has(task.id)} onClick={(event) => props.onSelect(task.id, event.shiftKey)} />
+                  )}
                 </Show>
-                <Show when={props.isOutputUnread(task.id)}>
-                  <span class="task__unread" role="img" aria-label="Unread output" />
-                </Show>
-                <Show when={task.state === 'review' || task.state === 'waiting'}>
-                  <Show when={task.state === 'review'} fallback={<WaitingIcon />}>
-                    <span class="task__attention-badge">Needs review</span>
+                <button ref={button} type="button" class={`task task--${task.state}`}
+                  aria-current={task.id === props.currentTaskId ? 'true' : undefined}
+                  aria-haspopup="menu"
+                  aria-keyshortcuts="Shift+F10"
+                  onKeyDown={(event) => { if (isSidebarMenuKey(event)) openMenu(event) }}
+                  onClick={(event) => {
+                    closeMenu(false)
+                    if (props.selection() && (event.shiftKey || (props.mac ? event.metaKey : event.ctrlKey))) {
+                      if (!props.disabled) props.onSelect(task.id, event.shiftKey)
+                    } else {
+                      props.onOpen(task)
+                    }
+                  }}>
+                  <span class="task__state" aria-hidden="true" />
+                  <span class="task__title">{task.title}</span>
+                  <Show when={props.needsTerminalAttention(task.id)}>
+                    <span class="terminal-attention" role="img" aria-label="Terminal needs attention" />
                   </Show>
+                  <Show when={props.isOutputUnread(task.id)}>
+                    <span class="task__unread" role="img" aria-label="Unread output" />
+                  </Show>
+                  <Show when={task.state === 'review' || task.state === 'waiting'}>
+                    <Show when={task.state === 'review'} fallback={<WaitingIcon />}>
+                      <span class="task__attention-badge">Needs review</span>
+                    </Show>
+                  </Show>
+                </button>
+                <Show when={props.processCount(task.id) > 0}>
+                  <button type="button" class="process-indicator" aria-label={`${props.processCount(task.id)} running ${props.processCount(task.id) === 1 ? 'process' : 'processes'} in ${task.title}`} title="Running processes" onClick={() => props.onProcesses(task.id)}>{props.processCount(task.id)}</button>
                 </Show>
-              </button>
-              <Show when={props.processCount(task.id) > 0}>
-                <button type="button" class="process-indicator" aria-label={`${props.processCount(task.id)} running ${props.processCount(task.id) === 1 ? 'process' : 'processes'} in ${task.title}`} title="Running processes" onClick={() => props.onProcesses(task.id)}>{props.processCount(task.id)}</button>
-              </Show>
-            </li>
-          )}
+                <Show when={props.isMenuOpen(task.id)}>
+                  <SidebarMenu row={row} label={task.title} onClose={closeMenu}
+                    copyDetails={() => sidebarDetails(props.project, task, 'task')} />
+                </Show>
+              </li>
+            )
+          }}
         </For>
       </ul>
     </div>

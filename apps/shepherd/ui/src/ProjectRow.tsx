@@ -1,6 +1,7 @@
-import { Match, Show, Switch, createEffect, createResource, createSignal, createUniqueId, onCleanup } from 'solid-js'
+import { Match, Show, Switch, createResource, createUniqueId } from 'solid-js'
 
 import { projectRemote, type ProjectRemote, type ProjectSnapshot } from './bridge'
+import { focusSidebarMenu, isSidebarMenuKey, SidebarMenu } from './SidebarMenu'
 
 interface ProjectRowProps {
   project: ProjectSnapshot
@@ -21,10 +22,10 @@ interface ProjectRowProps {
   onMenuOpenChange: (open: boolean) => void
   onToggleArchived: () => void
   onProjectSettings: () => void
+  copyDetails: () => Promise<string>
 }
 
 export function ProjectRow(props: ProjectRowProps) {
-  const [menuPosition, setMenuPosition] = createSignal({ left: 0, top: 0 })
   const pathId = createUniqueId()
   const [remote] = createResource(
     () => props.menuOpen && props.project.isGitRepository && props.project.id,
@@ -36,11 +37,8 @@ export function ProjectRow(props: ProjectRowProps) {
       }
     },
   )
-  let row: HTMLDivElement | undefined
-  let menu: HTMLDivElement | undefined
+  let row!: HTMLDivElement
   let projectButton: HTMLButtonElement | undefined
-  let archiveButton: HTMLButtonElement | undefined
-  let settingsButton: HTMLButtonElement | undefined
 
   function displayPath() {
     const path = props.project.path
@@ -51,17 +49,9 @@ export function ProjectRow(props: ProjectRowProps) {
     return path
   }
 
-  function positionMenu() {
-    const bounds = row?.getBoundingClientRect()
-    if (!bounds) return
-    const height = menu?.offsetHeight ?? 0
-    setMenuPosition({ left: bounds.right, top: Math.min(bounds.top, window.innerHeight - height) })
-  }
-
   function openMenu(focus: boolean) {
-    positionMenu()
     props.onMenuOpenChange(true)
-    if (focus) queueMicrotask(() => { if (props.menuOpen) archiveButton?.focus() })
+    if (focus) focusSidebarMenu(row)
   }
 
   function closeMenu(restoreFocus = false) {
@@ -69,40 +59,26 @@ export function ProjectRow(props: ProjectRowProps) {
     if (restoreFocus) projectButton?.focus({ preventScroll: true })
   }
 
-  createEffect(() => {
-    if (!props.menuOpen) return
-    positionMenu()
-    const list = row?.closest('.projects')
-    const dismiss = () => closeMenu(menu?.contains(document.activeElement))
-    const observer = new ResizeObserver(positionMenu)
-    if (menu) observer.observe(menu)
-    list?.addEventListener('scroll', dismiss)
-    window.addEventListener('resize', positionMenu)
-    onCleanup(() => {
-      list?.removeEventListener('scroll', dismiss)
-      window.removeEventListener('resize', positionMenu)
-      observer.disconnect()
-    })
-  })
-
   return (
     <div
       ref={row}
       class="project-row"
       classList={{ 'project-row--selected': props.selected }}
-      onPointerEnter={(event) => { if (event.pointerType === 'mouse') openMenu(false) }}
-      onPointerLeave={() => { if (!menu?.contains(document.activeElement)) closeMenu() }}
+      onPointerEnter={(event) => {
+        if (event.pointerType === 'mouse' && !document.activeElement?.closest('.project-menu')) openMenu(false)
+      }}
+      onPointerLeave={() => { if (!row.querySelector('.project-menu')?.contains(document.activeElement)) closeMenu() }}
       onFocusOut={(event) => {
         if (!(event.relatedTarget instanceof Node && event.currentTarget.contains(event.relatedTarget))) closeMenu()
       }}
-      onContextMenu={(event) => {
+      on:contextmenu={(event) => {
         event.preventDefault()
         openMenu(true)
       }}
       onKeyDown={(event) => {
         if (event.key !== 'Escape' || !props.menuOpen) return
         event.preventDefault()
-        closeMenu(menu?.contains(document.activeElement))
+        closeMenu()
       }}
     >
       <button
@@ -112,6 +88,7 @@ export function ProjectRow(props: ProjectRowProps) {
         data-reorderable={!props.reorderDisabled}
         aria-expanded={props.expanded}
         aria-current={props.selected ? 'true' : undefined}
+        aria-haspopup="menu"
         aria-keyshortcuts="Shift+F10 Alt+ArrowUp Alt+ArrowDown"
         onDragStart={(event) => event.preventDefault()}
         onPointerDown={(event) => { closeMenu(); props.onPointerDownProject(event) }}
@@ -121,7 +98,7 @@ export function ProjectRow(props: ProjectRowProps) {
             if (!props.reorderDisabled) props.onMoveProject(event.key === 'ArrowUp' ? -1 : 1)
             return
           }
-          if (event.key !== 'ContextMenu' && !(event.shiftKey && event.key === 'F10')) return
+          if (!isSidebarMenuKey(event)) return
           event.preventDefault()
           openMenu(true)
         }}
@@ -167,20 +144,8 @@ export function ProjectRow(props: ProjectRowProps) {
         </svg>
       </button>
       <Show when={props.menuOpen}>
-        <div
-          ref={menu}
-          class="project-menu"
-          style={{ '--project-menu-left': `${menuPosition().left}px`, top: `${menuPosition().top}px` }}
-          role="menu"
-          aria-label={props.project.name}
-          aria-describedby={pathId}
-          onKeyDown={(event) => {
-            if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return
-            event.preventDefault()
-            const next = document.activeElement === archiveButton ? settingsButton : archiveButton
-            next?.focus()
-          }}
-        >
+        <SidebarMenu row={row} label={props.project.name} descriptionId={pathId}
+          copyDetails={props.copyDetails} onClose={closeMenu}>
           <div class="project-menu__details" role="presentation">
             <p id={pathId} class="project-menu__location">
               <FolderIcon size={12} />
@@ -203,7 +168,6 @@ export function ProjectRow(props: ProjectRowProps) {
             </Show>
           </div>
           <button
-            ref={archiveButton}
             type="button"
             role="menuitemcheckbox"
             class="nav-item"
@@ -216,13 +180,12 @@ export function ProjectRow(props: ProjectRowProps) {
             <span class="project-menu__switch" aria-hidden="true" />
           </button>
           <button
-            ref={settingsButton}
             type="button"
             role="menuitem"
             class="nav-item"
             tabindex={-1}
-            onClick={() => {
-              closeMenu(document.activeElement === settingsButton)
+            onClick={(event) => {
+              closeMenu(document.activeElement === event.currentTarget)
               props.onProjectSettings()
             }}
           >
@@ -232,7 +195,7 @@ export function ProjectRow(props: ProjectRowProps) {
             </svg>
             Project settings
           </button>
-        </div>
+        </SidebarMenu>
       </Show>
     </div>
   )

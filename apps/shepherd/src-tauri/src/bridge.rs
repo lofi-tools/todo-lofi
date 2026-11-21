@@ -26,7 +26,7 @@ use agent_harness::{
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use shep_core::files::{self, DirectoryListing, FileSearchQuery, FileSearchResult, TextFile};
-use shep_core::git::GitService;
+use shep_core::git::{CheckoutIdentity, GitService};
 use shep_core::harness::HarnessFactory;
 use shep_core::store::{
     PoolCatalogAdvisory, PoolCatalogOutcome, PoolCooldownClearRequest, PoolQuotaCorrectionOutcome,
@@ -2437,6 +2437,35 @@ impl ShellState {
         .map_err(|error| BridgeError::new("git", error.to_string()))
     }
 
+    async fn sidebar_checkout(
+        &self,
+        project_id: String,
+        task_id: Option<String>,
+    ) -> Result<CheckoutIdentity, BridgeError> {
+        let project_id = ProjectId::new(project_id);
+        let path = {
+            let core = self.core.lock().await;
+            let root = core.project_path(&project_id)?;
+            if let Some(task_id) = task_id {
+                let task_id = TaskId::new(task_id);
+                let task = core.task(&task_id)?;
+                if task.project_id != project_id {
+                    return Err(CoreError::TaskNotFound {
+                        id: task_id.to_string(),
+                    }
+                    .into());
+                }
+                task.worktree_path.clone().unwrap_or(root)
+            } else {
+                root
+            }
+        };
+        tokio::task::spawn_blocking(move || GitService::checkout_identity(&path))
+            .await
+            .map_err(|error| BridgeError::new("git", error.to_string()))?
+            .map_err(|error| BridgeError::new("git", error.to_string()))
+    }
+
     /// The cached home-directory scan. `rescan` walks the tree again; otherwise
     /// the first call after startup does the work and later calls reuse it.
     pub async fn project_scan(
@@ -4521,6 +4550,15 @@ pub mod commands {
         project_id: String,
     ) -> Result<Option<ProjectRemote>, BridgeError> {
         state.inner().project_remote(project_id).await
+    }
+
+    #[tauri::command]
+    pub async fn sidebar_checkout(
+        state: State<'_, ShellState>,
+        project_id: String,
+        task_id: Option<String>,
+    ) -> Result<CheckoutIdentity, BridgeError> {
+        state.inner().sidebar_checkout(project_id, task_id).await
     }
 
     #[tauri::command]
