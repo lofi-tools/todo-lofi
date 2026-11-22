@@ -127,7 +127,7 @@ test.beforeEach(async ({ context }) => {
         '/tmp/demo': {
           'preview.url': 'http://localhost:3400/',
           'tasks.show_archived': false,
-          'worktree.setup': { useImportedSetup: false },
+          'worktree.setup': { useImportedSetup: false, launchWrapper: ['direnv', 'exec', '.'] },
           'attachments.max_file_bytes': 900,
         },
       } : {}
@@ -2513,17 +2513,17 @@ test('saves only the focused settings section and protects drafts when leaving',
   await page.getByRole('button', { name: 'Projects', exact: true }).click()
   await selectProjectSettings(page)
 
-  const commands = page.getByLabel('Setup configuration')
+  const importedScript = page.getByRole('checkbox', { name: 'Run saved setup script' })
   const servers = page.getByRole('region', { name: 'Preview servers and background commands' })
   const navigation = page.getByRole('navigation', { name: 'Settings categories' })
   const dialog = page.getByRole('dialog', { name: 'Unsaved edits' })
   const stored = () => page.evaluate(() => JSON.parse(localStorage.getItem('fixture.settings') ?? '{}').projects?.['/tmp/demo'])
-  await commands.fill('{"useImportedSetup":false}')
+  await importedScript.uncheck()
   await servers.getByRole('button', { name: 'Add server' }).click()
   await servers.getByLabel('Server 1 name').fill('Web')
   await servers.getByLabel('Server 1 command').fill('npm run dev')
   expect(await stored()).toBeUndefined()
-  await commands.press('Meta+Enter')
+  await importedScript.press('Meta+Enter')
   await expect.poll(stored).toEqual({ 'worktree.setup': { useImportedSetup: false } })
   await expect(servers.getByText('Unsaved edits')).toBeVisible()
 
@@ -2544,12 +2544,77 @@ test('saves only the focused settings section and protects drafts when leaving',
   await expect(dialog).toHaveCount(0)
   await expect.poll(stored).toMatchObject({ 'preview.servers': [{ name: 'Web', command: 'npm run dev' }] })
   await selectProjectSettings(page)
-  await commands.fill('{"useImportedSetup":true}')
+  await importedScript.check()
   await page.getByRole('button', { name: 'Back to app' }).click()
   await dialog.getByRole('button', { name: 'Discard' }).click()
   await expect(navigation).toHaveCount(0)
   await page.getByRole('button', { name: 'Settings', exact: true }).click()
-  await expect(commands).toHaveValue(JSON.stringify({ useImportedSetup: false }, null, 2))
+  await expect(importedScript).not.toBeChecked()
+})
+
+test('edits structured worktree commands and preserves argument boundaries', async ({ page }) => {
+  await page.goto('/')
+  await page.getByRole('button', { name: 'Settings', exact: true }).click()
+  await page.getByRole('button', { name: 'Projects', exact: true }).click()
+  await selectProjectSettings(page)
+
+  const section = page.getByRole('region', { name: 'Worktree commands' })
+  const first = section.getByRole('group', { name: 'Checkout command 1' })
+  const second = section.getByRole('group', { name: 'Checkout command 2' })
+  const readiness = section.getByRole('group', { name: 'Readiness check' })
+  const wrapper = section.getByRole('group', { name: 'Launch wrapper' })
+  const terminal = section.getByRole('group', { name: 'Setup terminal' })
+  async function command(group: typeof first, program: string, args: string[]) {
+    await group.getByLabel('Program').fill(program)
+    for (const [index, argument] of args.entries()) {
+      await group.getByRole('button', { name: 'Add argument' }).click()
+      await group.getByLabel(`Argument ${index + 1}`, { exact: true }).fill(argument)
+    }
+  }
+
+  const script = "printf '%s' 'hello world'\nprintf '%s' done"
+  await section.getByRole('button', { name: 'Add checkout command' }).click()
+  await first.getByLabel('Name', { exact: true }).fill('Prepare')
+  await command(first, 'sh', ['-c', script])
+  await first.getByRole('checkbox', { name: 'Required' }).uncheck()
+  await section.getByRole('button', { name: 'Add checkout command' }).click()
+  await second.getByLabel('Name', { exact: true }).fill('Allow direnv')
+  await command(second, 'direnv', ['allow', '.'])
+  await second.getByRole('button', { name: 'Move checkout command 2 up' }).click()
+  await expect(first.getByLabel('Name', { exact: true })).toHaveValue('Allow direnv')
+
+  await readiness.getByRole('button', { name: 'Add readiness check' }).click()
+  await readiness.getByLabel('Name', { exact: true }).fill('Check config')
+  await command(readiness, 'test', ['-f', 'path with spaces'])
+  await wrapper.getByRole('button', { name: 'Add launch wrapper' }).click()
+  await command(wrapper, 'direnv', ['exec', '.'])
+  await terminal.getByRole('button', { name: 'Customize setup terminal' }).click()
+  await terminal.getByLabel('Name', { exact: true }).fill('Development setup')
+  await terminal.getByLabel('Recovery instructions').fill('Fix the command and retry.')
+  await terminal.getByRole('button', { name: 'Add shell command' }).click()
+  await command(terminal, 'zsh', ['-i'])
+
+  const save = section.getByRole('button', { name: 'Save worktree commands' })
+  await save.click()
+  await expect(save).toBeDisabled()
+  const stored = () => page.evaluate(() => JSON.parse(localStorage.getItem('fixture.settings') ?? '{}').projects?.['/tmp/demo']?.['worktree.setup'])
+  await expect.poll(stored).toEqual({
+    afterCheckout: [
+      { name: 'Allow direnv', command: ['direnv', 'allow', '.'] },
+      { name: 'Prepare', command: ['sh', '-c', script], required: false },
+    ],
+    readinessCheck: { name: 'Check config', command: ['test', '-f', 'path with spaces'] },
+    launchWrapper: ['direnv', 'exec', '.'],
+    setupTerminal: { name: 'Development setup', instructions: 'Fix the command and retry.', command: ['zsh', '-i'] },
+  })
+  await page.reload()
+  await page.getByRole('button', { name: 'Settings', exact: true }).click()
+  await page.getByRole('button', { name: 'Projects', exact: true }).click()
+  await selectProjectSettings(page)
+  await expect(second.getByLabel('Argument 2', { exact: true })).toHaveValue(script)
+  await wrapper.getByRole('button', { name: 'Remove launch wrapper' }).click()
+  await save.click()
+  await expect.poll(async () => (await stored()).launchWrapper).toBeUndefined()
 })
 
 test('opens repository-managed settings in the editor and autosaves editable values', async ({ page }) => {
@@ -2568,7 +2633,12 @@ test('opens repository-managed settings in the editor and autosaves editable val
   await expect(script).toHaveAttribute('readonly', '')
   await expect(script).toHaveAccessibleDescription(/uses the commands under Worktree commands/)
   await expect(page.getByRole('textbox', { name: 'Action command' })).toBeEditable()
-  await expect(page.getByLabel('Setup configuration')).toHaveAttribute('readonly', '')
+  const commands = page.getByRole('region', { name: 'Worktree commands' })
+  await expect(commands.getByRole('checkbox', { name: 'Run saved setup script' })).toBeDisabled()
+  const wrapper = commands.getByRole('group', { name: 'Launch wrapper' })
+  await expect(wrapper.getByLabel('Program')).toHaveAttribute('readonly', '')
+  await expect(wrapper.getByLabel('Program')).toHaveValue('direnv')
+  await expect(wrapper.getByRole('button')).toHaveCount(0)
   await expect(page.getByRole('spinbutton', { name: 'Attachment limit (bytes)' })).toHaveValue('900')
   await page.getByRole('button', { name: 'Open config file' }).click()
   await expect.poll(() => page.evaluate(() => window.__fileActions)).toContainEqual({

@@ -1,5 +1,5 @@
 import { createSettingsDraft, SettingsSave } from './SettingsDraft'
-import { For, Index, Show, createEffect, createMemo, createResource, createSignal, on, type JSX } from 'solid-js'
+import { For, Index, Show, createEffect, createMemo, createResource, createSignal, createUniqueId, on, type JSX } from 'solid-js'
 
 import { AGENT_LABELS, harnessVersionStatus, projectApprovals, resetApprovalGrant, type PoolAgent, type CommandBinding, type CommandRegistry, type KeybindingEdit, type ProjectApproval, type ProjectSnapshot, type PreviewService, type SessionApproval, type SettingsSnapshot, type SettingsEdit, type SettingKey } from './bridge'
 import { displayChord, normalizeChord } from './keybindings'
@@ -147,6 +147,41 @@ function ProjectPreviewServers(props: { value: PreviewService[]; localOverride: 
   </section>
 }
 
+type CheckoutStep = NonNullable<WorktreeSetup['afterCheckout']>[number]
+
+function CommandArguments(props: { value: string[]; readOnly: boolean; onChange: (command: string[]) => void }) {
+  const argumentId = createUniqueId()
+  function update(index: number, value: string) {
+    const command = [...props.value]
+    command[index] = value
+    props.onChange(command)
+  }
+
+  return <>
+    <label class="settings__row"><span>Program</span>
+      <input value={props.value[0] ?? ''} placeholder="e.g. direnv" readOnly={props.readOnly}
+        onInput={(event) => update(0, event.currentTarget.value)} />
+    </label>
+    <Index each={props.value.slice(1)}>{(argument, index) => (
+      <div class="settings__row">
+        <label for={`worktree-argument-${argumentId}-${index}`}>Argument {index + 1}</label>
+        <div class="settings__command-argument">
+          <textarea id={`worktree-argument-${argumentId}-${index}`} rows={Math.min(5, argument().split('\n').length)}
+            value={argument()} readOnly={props.readOnly} onInput={(event) => update(index + 1, event.currentTarget.value)} />
+          <Show when={!props.readOnly}>
+            <button type="button" class="project-action" aria-label={`Remove argument ${index + 1}`}
+              onClick={() => props.onChange(props.value.filter((_, position) => position !== index + 1))}>Remove</button>
+          </Show>
+        </div>
+      </div>
+    )}</Index>
+    <Show when={!props.readOnly}>
+      <button type="button" class="project-action" disabled={props.value.length >= 64}
+        onClick={() => props.onChange([props.value[0] ?? '', ...props.value.slice(1), ''])}>Add argument</button>
+    </Show>
+  </>
+}
+
 function WorktreeSetupSettings(props: {
   projectId: string
   value?: WorktreeSetup | null
@@ -154,31 +189,149 @@ function WorktreeSetupSettings(props: {
   editable: boolean
   onEdit: SettingsPaneProps['onEditPreference']
 }) {
-  const formatted = () => JSON.stringify(props.value ?? {}, null, 2)
-  const [configuration, setConfiguration] = createSignal(formatted())
-  createEffect(on(formatted, (value, previous) => {
-    if (configuration() === previous) setConfiguration(value)
+  const [configuration, setConfiguration] = createSignal<WorktreeSetup>(structuredClone(props.value ?? {}))
+  const saved = () => JSON.stringify(props.value ?? {})
+  const serialized = () => JSON.stringify(configuration())
+  const reset = () => setConfiguration(structuredClone(props.value ?? {}))
+  createEffect(on(saved, (_, previous) => {
+    if (serialized() === previous) reset()
   }))
+
+  const update = (patch: Partial<WorktreeSetup>) => setConfiguration((current) => ({ ...current, ...patch }))
+  const steps = () => configuration().afterCheckout ?? []
+  function updateStep(index: number, patch: Partial<CheckoutStep>) {
+    update({ afterCheckout: steps().map((step, position) => position === index ? { ...step, ...patch } : step) })
+  }
+  function moveStep(index: number, offset: number) {
+    const next = [...steps()]
+    const destination = index + offset
+    if (destination < 0 || destination >= next.length) return
+    const [step] = next.splice(index, 1)
+    if (step) {
+      next.splice(destination, 0, step)
+      update({ afterCheckout: next })
+    }
+  }
+
   const draft = createSettingsDraft({
-    dirty: () => !props.localOverride && configuration() !== formatted(),
+    dirty: () => !props.localOverride && serialized() !== saved(),
     editable: () => props.editable && !props.localOverride,
-    discard: () => setConfiguration(formatted()),
+    discard: reset,
     async save() {
-      const value: unknown = JSON.parse(configuration())
-      if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Enter a JSON object for worktree commands.')
-      await props.onEdit('worktree.setup', value as WorktreeSetup, props.projectId)
-      setConfiguration(formatted())
+      const value = configuration()
+      for (const [index, step] of steps().entries()) {
+        if (!step.name.trim() || !step.command[0]?.trim()) throw new Error(`Enter a name and program for checkout command ${index + 1}.`)
+      }
+      if (value.readinessCheck && (!value.readinessCheck.name.trim() || !value.readinessCheck.command[0]?.trim())) {
+        throw new Error('Enter a name and program for the readiness check.')
+      }
+      if (value.launchWrapper?.length && !value.launchWrapper[0]?.trim()) throw new Error('Enter a program for the launch wrapper.')
+      if (value.setupTerminal && (!value.setupTerminal.name.trim() ||
+        (value.setupTerminal.command?.length && !value.setupTerminal.command[0]?.trim()))) {
+        throw new Error('Enter a name for the setup terminal and a program if you customize its shell.')
+      }
+      await props.onEdit('worktree.setup', serialized() === '{}' ? null : value, props.projectId)
+      reset()
     },
   })
+  const readOnly = () => !draft.editable() || draft.saving()
 
   return <section class="settings__project" aria-label="Worktree commands" data-settings-draft onKeyDown={draft.onKeyDown}>
     <h4>Worktree commands</h4>
-    <label class="settings__row"><span>Setup configuration</span>
-      <textarea value={configuration()} rows={8} readOnly={!draft.editable() || draft.saving()}
-        onInput={(event) => setConfiguration(event.currentTarget.value)} />
+    <Show when={props.localOverride}><p class="empty">Set in .config/shepherd/settings.json.</p></Show>
+    <label class="settings__row settings__row--checkbox"><span>Run saved setup script</span>
+      <input type="checkbox" checked={configuration().useImportedSetup !== false} disabled={readOnly()}
+        onChange={(event) => update({ useImportedSetup: event.currentTarget.checked ? undefined : false })} />
     </label>
-    <p class="empty">{props.localOverride ? 'Set in .config/shepherd/settings.json.' :
-      'Use afterCheckout, readinessCheck, launchWrapper, and setupTerminal. Commands are arrays of arguments.'}</p>
+    <fieldset class="settings__project settings__worktree-group">
+      <legend>After checkout</legend>
+      <Show when={!steps().length}><p class="empty">No checkout commands configured.</p></Show>
+      <Index each={steps()}>{(step, index) => (
+        <fieldset class="settings__project settings__worktree-group">
+          <legend>Checkout command {index + 1}</legend>
+          <label class="settings__row"><span>Name</span><input value={step().name} readOnly={readOnly()}
+            onInput={(event) => updateStep(index, { name: event.currentTarget.value })} /></label>
+          <CommandArguments value={step().command} readOnly={readOnly()} onChange={(command) => updateStep(index, { command })} />
+          <label class="settings__row settings__row--checkbox"><span>Required</span>
+            <input type="checkbox" checked={step().required !== false} disabled={readOnly()}
+              onChange={(event) => updateStep(index, { required: event.currentTarget.checked })} />
+          </label>
+          <Show when={!readOnly()}>
+            <div class="settings__save">
+              <button type="button" class="project-action" aria-label={`Move checkout command ${index + 1} up`}
+                disabled={index === 0} onClick={() => moveStep(index, -1)}>Move up</button>
+              <button type="button" class="project-action" aria-label={`Move checkout command ${index + 1} down`}
+                disabled={index + 1 >= steps().length} onClick={() => moveStep(index, 1)}>Move down</button>
+              <button type="button" class="project-action" aria-label={`Remove checkout command ${index + 1}`}
+                onClick={() => {
+                  const remaining = steps().filter((_, position) => position !== index)
+                  update({ afterCheckout: remaining.length ? remaining : undefined })
+                }}>Remove</button>
+            </div>
+          </Show>
+        </fieldset>
+      )}</Index>
+      <Show when={!readOnly()}>
+        <button type="button" class="project-action" disabled={steps().length >= 32}
+          onClick={() => update({ afterCheckout: [...steps(), { name: '', command: [''] }] })}>Add checkout command</button>
+      </Show>
+    </fieldset>
+    <fieldset class="settings__project settings__worktree-group">
+      <legend>Readiness check</legend>
+      <Show when={configuration().readinessCheck} fallback={
+        <Show when={!readOnly()} fallback={<p class="empty">No readiness check configured.</p>}>
+          <button type="button" class="project-action"
+            onClick={() => update({ readinessCheck: { name: '', command: [''] } })}>Add readiness check</button>
+        </Show>
+      }>{(check) => <>
+        <label class="settings__row"><span>Name</span><input value={check().name} readOnly={readOnly()}
+          onInput={(event) => update({ readinessCheck: { ...check(), name: event.currentTarget.value } })} /></label>
+        <CommandArguments value={check().command} readOnly={readOnly()}
+          onChange={(command) => update({ readinessCheck: { ...check(), command } })} />
+        <Show when={!readOnly()}><button type="button" class="project-action"
+          onClick={() => update({ readinessCheck: undefined })}>Remove readiness check</button></Show>
+      </>}</Show>
+    </fieldset>
+    <fieldset class="settings__project settings__worktree-group">
+      <legend>Launch wrapper</legend>
+      <Show when={!!configuration().launchWrapper?.length && configuration().launchWrapper} fallback={
+        <Show when={!readOnly()} fallback={<p class="empty">No launch wrapper configured.</p>}>
+          <button type="button" class="project-action" onClick={() => update({ launchWrapper: [''] })}>Add launch wrapper</button>
+        </Show>
+      }>{(command) => <>
+        <CommandArguments value={command()} readOnly={readOnly()} onChange={(launchWrapper) => update({ launchWrapper })} />
+        <Show when={!readOnly()}><button type="button" class="project-action"
+          onClick={() => update({ launchWrapper: undefined })}>Remove launch wrapper</button></Show>
+      </>}</Show>
+    </fieldset>
+    <fieldset class="settings__project settings__worktree-group">
+      <legend>Setup terminal</legend>
+      <Show when={configuration().setupTerminal} fallback={
+        <Show when={!readOnly()} fallback={<p class="empty">Uses the default setup terminal.</p>}>
+          <button type="button" class="project-action" onClick={() => update({ setupTerminal: { name: '' } })}>Customize setup terminal</button>
+        </Show>
+      }>{(terminal) => <>
+        <label class="settings__row"><span>Name</span><input value={terminal().name} readOnly={readOnly()}
+          onInput={(event) => update({ setupTerminal: { ...terminal(), name: event.currentTarget.value } })} /></label>
+        <label class="settings__row"><span>Recovery instructions</span>
+          <textarea value={terminal().instructions ?? ''} readOnly={readOnly()}
+            onInput={(event) => update({ setupTerminal: { ...terminal(), instructions: event.currentTarget.value } })} />
+        </label>
+        <Show when={!!terminal().command?.length && terminal().command} fallback={
+          <Show when={!readOnly()} fallback={<p class="empty">Uses the default shell.</p>}>
+            <button type="button" class="project-action"
+              onClick={() => update({ setupTerminal: { ...terminal(), command: [''] } })}>Add shell command</button>
+          </Show>
+        }>{(command) => <>
+          <CommandArguments value={command()} readOnly={readOnly()}
+            onChange={(value) => update({ setupTerminal: { ...terminal(), command: value } })} />
+          <Show when={!readOnly()}><button type="button" class="project-action"
+            onClick={() => update({ setupTerminal: { ...terminal(), command: undefined } })}>Use default shell</button></Show>
+        </>}</Show>
+        <Show when={!readOnly()}><button type="button" class="project-action"
+          onClick={() => update({ setupTerminal: undefined })}>Remove setup terminal customization</button></Show>
+      </>}</Show>
+    </fieldset>
     <Show when={!props.localOverride}><SettingsSave draft={draft} label="Save worktree commands" /></Show>
   </section>
 }
@@ -778,7 +931,7 @@ export function SettingsPane(props: SettingsPaneProps) {
                         localOverride={repoManaged('preview.servers')}
                         editable={props.preferencesEditable}
                         onSave={(value) => props.onEditPreference('preview.servers', value, projectId)} /></Show>
-                      <Show when={showSetting('worktree setup launch wrapper environment commands')}>
+                      <Show when={showSetting('worktree setup after checkout readiness check launch wrapper setup terminal arguments environment commands')}>
                         <WorktreeSetupSettings projectId={projectId}
                           value={props.preferences?.projects[project().path]?.['worktree.setup']}
                           localOverride={repoManaged('worktree.setup')}

@@ -193,6 +193,10 @@ current layout and give future changes a point of comparison.
 - A project can configure `worktree.setup` in Project settings or
   `.config/shepherd/settings.json`. Create the checkout and run its configured
   commands on Send, with a composer notice only if something fails.
+  The editor groups the script toggle, ordered checkout commands, readiness
+  check, launch wrapper, and setup terminal. Edit each program and its
+  arguments as separate fields so spaces and multiline arguments are
+  preserved. The section saves as one unit.
   `afterCheckout` lists named argument arrays. Required steps must succeed
   before the agent starts. Optional failures appear in the terminal and setup
   continues. Successful checkout steps are recorded and skipped on retry.

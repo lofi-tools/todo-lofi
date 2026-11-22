@@ -1233,6 +1233,40 @@ textarea {
   margin: 0;
 }
 
+.settings__worktree-group {
+  margin: 0;
+  padding: 6px 0 8px;
+  border: 0;
+  border-bottom: 1px solid var(--border);
+  justify-items: start;
+}
+
+.settings__worktree-group legend {
+  padding: 0;
+  font-weight: 600;
+}
+
+.settings__worktree-group > .settings__worktree-group {
+  width: 100%;
+  border-bottom: 0;
+  padding-bottom: 4px;
+}
+
+.settings__command-argument {
+  display: flex;
+  align-items: start;
+  gap: 6px;
+  min-width: 0;
+}
+
+.settings__command-argument textarea {
+  flex: 1;
+  min-width: 0;
+  resize: vertical;
+  font: inherit;
+  font-family: var(--font-mono, monospace);
+}
+
 .settings__project-path {
   overflow-wrap: anywhere;
 }
