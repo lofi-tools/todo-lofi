@@ -52,7 +52,7 @@ use crate::file_actions::{self, FileAction};
 use crate::file_watch::{FileWatchUpdate, WatchError, WorkspaceWatch};
 use crate::preview_annotations::{AnnotationBatch, validate_batch};
 use crate::pty_terminal::PtyTerminals;
-use crate::settings::{DEFAULT_ATTACHMENT_BYTES, DEFAULT_SCROLLBACK, SettingKey, Settings};
+use crate::settings::{DEFAULT_ATTACHMENT_BYTES, SettingKey, Settings};
 use crate::terminal_screen::{Screen, SearchDirection, TerminalAppearance, TerminalFrame};
 
 const FILE_WATCH_START_TIMEOUT: Duration = Duration::from_secs(5);
@@ -299,6 +299,7 @@ impl ScreenSlot {
 
 #[derive(Clone)]
 pub(crate) struct TerminalHost {
+    preferences: Settings,
     engine: Arc<Mutex<PtyTerminals>>,
     foreground_agents: Arc<Mutex<Vec<AgentLaunch>>>,
     #[cfg(unix)]
@@ -471,7 +472,14 @@ impl TerminalHost {
 
 impl Default for TerminalHost {
     fn default() -> Self {
+        Self::new(Settings::default())
+    }
+}
+
+impl TerminalHost {
+    pub(crate) fn new(preferences: Settings) -> Self {
         Self {
+            preferences,
             engine: Arc::new(Mutex::new(PtyTerminals::new())),
             foreground_agents: Arc::new(Mutex::new(Vec::new())),
             #[cfg(unix)]
@@ -544,7 +552,8 @@ impl TerminalHost {
             }
         }
         let mut reader = master.try_clone().map_err(|error| error.to_string())?;
-        let mut screen = Screen::with_scrollback(80, 24, DEFAULT_SCROLLBACK);
+        let mut screen =
+            Screen::with_scrollback(80, 24, self.preferences.terminal_scrollback().await);
         screen.set_appearance(*self.appearance.lock().await);
         let (frames, _) = watch::channel(Arc::new(screen.frame()));
         let slot = Arc::new(Mutex::new(ScreenSlot {
@@ -1031,7 +1040,7 @@ impl TerminalHost {
                     ],
                     environment: BTreeMap::from([("SHEPHERD_AGENT".into(), agent.as_str().into())]),
                 },
-                DEFAULT_SCROLLBACK,
+                self.preferences.terminal_scrollback().await,
             )
             .await?;
         let tracked =
@@ -1176,7 +1185,7 @@ impl TerminalHost {
                     args: launch.args,
                     environment: launch.environment,
                 },
-                DEFAULT_SCROLLBACK,
+                self.preferences.terminal_scrollback().await,
             )
             .await
             .map_err(|error| error.to_string())?;
@@ -1511,7 +1520,7 @@ impl ShellState {
             agent_events: Arc::new(tokio::sync::Notify::new()),
             pump_lifetime,
             attachment_root: None,
-            preferences: Settings::default(),
+            preferences: terminals.preferences.clone(),
             codex_program: None,
             codex_detected: false,
             opencode_launch: None,
@@ -2133,9 +2142,7 @@ impl ShellState {
         let core = self.core.lock().await;
         let task_id = TaskId::new(task_id);
         Self::ensure_durable_attachment_task(core.process_store(), &task_id).await?;
-        let limit = self
-            .attachment_limit_for(&core.task_project_path(&task_id)?)
-            .await;
+        let limit = self.attachment_limit().await;
         limit
             .check(bytes.len() as u64)
             .map_err(|error| BridgeError::new("preview", error.to_string()))?;
@@ -2199,10 +2206,10 @@ impl ShellState {
         }
     }
 
-    async fn attachment_limit_for(&self, path: &Path) -> AttachmentLimit {
+    async fn attachment_limit(&self) -> AttachmentLimit {
         let value = self
             .preferences
-            .value(Some(path), SettingKey::AttachmentBytes)
+            .value(None, SettingKey::AttachmentBytes)
             .await;
         let bytes = value
             .as_u64()
@@ -2213,15 +2220,6 @@ impl ShellState {
 
     pub(crate) async fn settings_project_path(&self, id: &str) -> Result<PathBuf, BridgeError> {
         Ok(self.core.lock().await.project_path(&ProjectId::new(id))?)
-    }
-
-    async fn attachment_limit(&self, project_id: String) -> Result<AttachmentLimit, BridgeError> {
-        let path = self
-            .core
-            .lock()
-            .await
-            .project_path(&ProjectId::new(project_id))?;
-        Ok(self.attachment_limit_for(&path).await)
     }
 
     pub async fn save_prompt_file(
@@ -2240,9 +2238,7 @@ impl ShellState {
         let core = self.core.lock().await;
         let task_id = TaskId::new(task_id);
         Self::ensure_durable_attachment_task(core.process_store(), &task_id).await?;
-        let limit = self
-            .attachment_limit_for(&core.task_project_path(&task_id)?)
-            .await;
+        let limit = self.attachment_limit().await;
         limit
             .check(bytes.len() as u64)
             .map_err(|error| BridgeError::new("attachments", error.to_string()))?;
@@ -2692,9 +2688,8 @@ impl ShellState {
             let core = self.core.lock().await;
             let id = TaskId::new(&task_id);
             Self::ensure_durable_attachment_task(core.process_store(), &id).await?;
-            let path = core.task_project_path(&id)?;
             drop(core);
-            let limit = self.attachment_limit_for(&path).await;
+            let limit = self.attachment_limit().await;
             let attachments = tokio::task::spawn_blocking(move || {
                 let _lock = attachment_lock;
                 ids.iter()
@@ -4248,27 +4243,17 @@ impl ShellState {
         record: Option<TerminalRecord>,
         recording: Option<Arc<crate::pty_terminal::TerminalRecording>>,
     ) -> Result<TerminalId, BridgeError> {
-        let (state, project, process_store) = {
+        let (state, process_store) = {
             let core = self.core.lock().await;
-            let project = record
-                .as_ref()
-                .map(|record| core.project_path(&record.project_id))
-                .transpose()?;
-            (core.shutdown_state(), project, core.process_store())
+            if let Some(record) = &record {
+                core.project_path(&record.project_id)?;
+            }
+            (core.shutdown_state(), core.process_store())
         };
         if state != shep_core::ShutdownState::Running {
             return Err(CoreError::NotRunning { state }.into());
         }
-        let scrollback = if let Some(project) = project {
-            self.preferences
-                .value(Some(&project), SettingKey::Scrollback)
-                .await
-                .as_u64()
-                .and_then(|lines| usize::try_from(lines).ok())
-                .unwrap_or(DEFAULT_SCROLLBACK)
-        } else {
-            DEFAULT_SCROLLBACK
-        };
+        let scrollback = self.preferences.terminal_scrollback().await;
         let terminal = self
             .terminals
             .prepare_recording(spec, scrollback, recording)
@@ -4993,9 +4978,8 @@ pub mod commands {
     #[tauri::command]
     pub async fn attachment_limit(
         state: State<'_, ShellState>,
-        project_id: String,
     ) -> Result<AttachmentLimit, BridgeError> {
-        state.inner().attachment_limit(project_id).await
+        Ok(state.attachment_limit().await)
     }
 
     #[tauri::command]
@@ -9846,7 +9830,7 @@ mod tests {
 
     #[cfg(feature = "git")]
     #[tokio::test]
-    async fn project_attachment_limit_applies_to_uploads_screenshots_and_cached_files()
+    async fn app_attachment_limit_applies_to_uploads_screenshots_and_cached_files()
     -> Result<(), Box<dyn std::error::Error>> {
         let directory = TestDirectory::new()?;
         let restricted = TestRepository::new()?;
@@ -9895,51 +9879,34 @@ mod tests {
             &settings_path,
             serde_json::to_vec(&serde_json::json!({
                 "version": 1,
-                "app": {"attachments.max_file_bytes": 24},
-                "projects": {(restricted.path.clone()): {"attachments.max_file_bytes": 8}}
+                "app": {"attachments.max_file_bytes": 8},
+                "projects": {(restricted.path.clone()): {"attachments.max_file_bytes": 24}}
             }))?,
         )?;
         state.preferences = Settings::new(settings_path);
         state.preferences.reload().await;
-        let limit = state.attachment_limit(restricted.id.clone()).await?;
+        let limit = state.attachment_limit().await;
         assert_eq!(limit.bytes, 8);
         assert_eq!(limit.label, "8 bytes");
-        assert_eq!(
-            state.attachment_limit(inherited.id.clone()).await?.bytes,
-            24
-        );
 
-        assert!(
-            state
-                .save_prompt_file(restricted_task.clone(), "ok.txt".into(), b"12345678")
-                .await
-                .is_ok()
-        );
-        let error = state
-            .save_prompt_file(restricted_task.clone(), "large.txt".into(), oversized)
-            .await
-            .err()
-            .ok_or("oversized upload was accepted")?;
-        assert!(error.message.contains("8 bytes"));
-        assert!(
-            state
-                .save_prompt_file(inherited_task.clone(), "ok.txt".into(), oversized)
-                .await
-                .is_ok()
-        );
         let image = b"\x89PNG\r\n\x1a\n\0";
-        assert!(
+        for task in [&restricted_task, &inherited_task] {
             state
-                .save_preview_screenshot(restricted_task.clone(), image)
+                .save_prompt_file(task.clone(), "ok.txt".into(), b"12345678")
+                .await?;
+            let error = state
+                .save_prompt_file(task.clone(), "large.txt".into(), oversized)
                 .await
-                .is_err()
-        );
-        assert!(
-            state
-                .save_preview_screenshot(inherited_task, image)
-                .await
-                .is_ok()
-        );
+                .err()
+                .ok_or("oversized upload was accepted")?;
+            assert!(error.message.contains("8 bytes"));
+            assert!(
+                state
+                    .save_preview_screenshot(task.clone(), image)
+                    .await
+                    .is_err()
+            );
+        }
         assert!(
             state
                 .send_prompt_with_files(

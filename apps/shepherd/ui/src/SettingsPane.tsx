@@ -584,11 +584,9 @@ function settingsError(error: unknown): string {
 
 function NumberPreference(props: {
   label: string
-  localOverride: boolean
   value: number
-  inherited: number
+  defaultValue: number
   overridden: boolean
-  project: boolean
   minimum: number
   maximum: number
   editable: boolean
@@ -598,7 +596,7 @@ function NumberPreference(props: {
   const number = () => field.draft().trim() ? Number(field.draft()) : NaN
   function save(retry = false) {
     const value = number()
-    if (props.editable && !props.localOverride && Number.isSafeInteger(value) &&
+    if (props.editable && Number.isSafeInteger(value) &&
       value >= props.minimum && value <= props.maximum && value !== props.value) void field.save(value, retry)
   }
 
@@ -607,13 +605,12 @@ function NumberPreference(props: {
       <label class="settings__row settings__preview-url">
         <span>{props.label}</span>
         <input type="number" min={props.minimum} max={props.maximum} step="1" value={field.draft()}
-          disabled={!props.editable} readOnly={props.localOverride || field.saving()}
+          disabled={!props.editable} readOnly={field.saving()}
           onInput={(event) => field.edit(event.currentTarget.value)} onBlur={() => save()} />
       </label>
-      <p class="empty settings__field-note">{props.localOverride ? 'From repository' :
-        `${props.project ? (props.overridden ? 'Workspace value' : 'Inherited from Workspace') : 'Built-in default'} ${props.inherited}`}</p>
+      <p class="empty">Built-in default {props.defaultValue}</p>
       <Show when={field.error()}><p role="alert">{field.error()}</p></Show>
-      <Show when={props.overridden && !props.localOverride}>
+      <Show when={props.overridden}>
         <button type="button" class="project-action settings__field-action" disabled={!props.editable || field.saving()}
           onClick={() => void field.save(null, true)}>Reset {props.label.toLowerCase()}</button>
       </Show>
@@ -628,19 +625,18 @@ const numberPreferences = [
 
 function NumberPreferences(props: {
   preferences: SettingsSnapshot
-  project?: ProjectSnapshot
   editable: boolean
   onEdit: SettingsPaneProps['onEditPreference']
   query?: string
 }) {
   return (
-    <For each={numberPreferences.filter(({ key, label }) => matchesSearch(`${props.project ? 'projects' : 'workspace'} ${key} ${label}`, props.query ?? ''))}>
+    <For each={numberPreferences.filter(({ key, label }) => matchesSearch(`workspace ${key} ${label}`, props.query ?? ''))}>
       {({ key, label, minimum, maximum }) => {
-        const scope = () => props.project ? props.preferences.projects[props.project.path] : props.preferences.app
-        const inherited = () => (props.project ? props.preferences.app[key] : undefined) ?? props.preferences.defaults[key]
-        return <NumberPreference label={label} localOverride={props.project ? Object.hasOwn(props.preferences.projectLocal?.[props.project.path] ?? {}, key) : false} minimum={minimum} maximum={maximum} editable={props.editable}
-          value={scope()?.[key] ?? inherited()} inherited={inherited()} overridden={scope()?.[key] !== undefined}
-          project={!!props.project} onSave={(value) => props.onEdit(key, value, props.project?.id)} />
+        const value = () => props.preferences.app[key]
+        const defaultValue = () => props.preferences.defaults[key]
+        return <NumberPreference label={label} minimum={minimum} maximum={maximum} editable={props.editable}
+          value={value() ?? defaultValue()} defaultValue={defaultValue()} overridden={value() !== undefined}
+          onSave={(value) => props.onEdit(key, value)} />
       }}
     </For>
   )
@@ -881,10 +877,8 @@ function ProjectSettings(props: { projectId: string; project: ProjectSnapshot; s
         }>Open config file</button>
       </Show>
     </header>
-    <Show when={show('general show archived tasks attachment limit bytes terminal scrollback lines')}>
-      <ProjectSettingsSection title="General" managed={[
-        repoManaged('tasks.show_archived'), ...numberPreferences.map(({ key }) => repoManaged(key)),
-      ]}>
+    <Show when={show('general show archived tasks')}>
+      <ProjectSettingsSection title="General" managed={[repoManaged('tasks.show_archived')]}>
         <div class="settings__project">
           <label class="settings__row settings__row--checkbox"><span>Show archived tasks</span>
             <input type="checkbox" checked={settings.showProjectArchived(projectId)}
@@ -895,16 +889,11 @@ function ProjectSettings(props: { projectId: string; project: ProjectSnapshot; s
                 settings.onShowProjectArchived(projectId, visible)
               }} />
           </label>
-          <p class="empty settings__field-note">{repoManaged('tasks.show_archived') ? 'From repository' :
-            `${archivedOverride() ? 'Workspace value' : 'Inherited from Workspace'} ${settings.showArchived ? 'On' : 'Off'}`}</p>
           <Show when={archivedOverride() && !repoManaged('tasks.show_archived')}>
             <button type="button" class="project-action settings__field-action" disabled={!editable()}
-              onClick={() => settings.onShowProjectArchived(projectId, null)}>Use workspace archive visibility</button>
+              onClick={() => settings.onShowProjectArchived(projectId, null)}>Reset archived task visibility</button>
           </Show>
         </div>
-        <Show when={settings.preferences}>{(snapshot) =>
-          <NumberPreferences preferences={snapshot()} project={props.project} editable={editable()} onEdit={settings.onEditPreference} />
-        }</Show>
       </ProjectSettingsSection>
     </Show>
     <Show when={show('worktrees & worktree setup after checkout readiness check launch wrapper setup terminal arguments environment commands script')}>
@@ -959,7 +948,7 @@ export function SettingsPane(props: SettingsPaneProps) {
   const query = () => search().trim().toLowerCase()
   const searchTerms: Record<(typeof categories)[number], string> = {
     Workspace: 'show archived tasks notify notifications when tasks need input attachment limit bytes terminal scrollback lines reload settings configuration',
-    Projects: 'project settings & general show archived tasks preview services url server background command port attachment limit bytes terminal scrollback lines approvals saved live session add project import chatgpt worktrees worktree setup after checkout readiness check launch wrapper setup terminal arguments script project actions codex environment',
+    Projects: 'project settings & general show archived tasks preview services url server background command port approvals saved live session add project import chatgpt worktrees worktree setup after checkout readiness check launch wrapper setup terminal arguments script project actions codex environment',
     Agents: 'default model effort fallback chain agent pool priority installed agents reorder harnesses codex chatgpt opencode pi claude code freebuff antigravity kilocode executable path refresh',
     Appearance: 'appearance theme system light dark density compact comfortable send button accent blue violet teal amber neutral',
     'Keyboard shortcuts': 'keyboard shortcuts shortcut bindings commands reload configuration',

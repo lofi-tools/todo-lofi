@@ -986,33 +986,17 @@ export function App() {
   function setError(message: string | null) {
     if (message) reportError('workspace', message)
   }
-  const attachmentLimitKey = createMemo(
-    () => {
-      const project = selectedProject()
-      if (!project) return undefined
-      const snapshot = preferences()
-      return [project.id, snapshot?.projects[project.path]?.['attachments.max_file_bytes'] ?? snapshot?.app['attachments.max_file_bytes']] as const
-    },
-    undefined,
-    { equals: (previous, next) => previous?.[0] === next?.[0] && previous?.[1] === next?.[1] },
-  )
-  const [projectAttachmentLimit] = createResource(
-    attachmentLimitKey,
-    async ([projectId]) => {
-      try {
-        return { projectId, limit: await bridge.attachmentLimit(projectId) }
-      } catch (failure) {
-        return { projectId, error: describe(failure) }
-      }
+  const [attachmentSettings] = createResource(
+    () => preferences()?.app['attachments.max_file_bytes'] ?? preferences()?.defaults['attachments.max_file_bytes'] ?? false,
+    async () => {
+      try { return { limit: await bridge.attachmentLimit() } }
+      catch (failure) { return { error: describe(failure) } }
     },
   )
-  const attachmentLimit = () => {
-    const settings = projectAttachmentLimit()
-    return settings && settings.projectId === selectedProjectId() ? settings.limit : undefined
-  }
+  const attachmentLimit = () => attachmentSettings()?.limit
   createEffect(() => {
-    const settings = projectAttachmentLimit()
-    if (settings?.projectId === selectedProjectId() && settings?.error) setError(settings.error)
+    const error = attachmentSettings()?.error
+    if (error) setError(error)
   })
   const [pending, setPending] = createSignal(false)
   const [cancelRequestTaskId, setCancelRequestTaskId] = createSignal<string>()

@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use agent_harness::settings::AgentSettings;
 use serde::{Deserialize, Serialize};
@@ -213,8 +214,6 @@ impl SettingKey {
         matches!(
             self,
             Self::ShowArchived
-                | Self::AttachmentBytes
-                | Self::Scrollback
                 | Self::ProjectEnvironment
                 | Self::WorktreeSetup
                 | Self::PreviewServers
@@ -367,10 +366,10 @@ impl ConfiguredPoolSlot {
     }
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct Settings {
     path: Option<PathBuf>,
-    cached: Mutex<CachedSettings>,
+    cached: Arc<Mutex<CachedSettings>>,
 }
 
 #[derive(Default)]
@@ -779,6 +778,14 @@ impl Settings {
             .unwrap_or_else(|| key.default_value())
     }
 
+    pub(crate) async fn terminal_scrollback(&self) -> usize {
+        self.value(None, SettingKey::Scrollback)
+            .await
+            .as_u64()
+            .and_then(|lines| usize::try_from(lines).ok())
+            .unwrap_or(DEFAULT_SCROLLBACK)
+    }
+
     pub(crate) async fn worktree_setup(
         &self,
         project: &Path,
@@ -1170,17 +1177,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn local_project_preferences_override_saved_values()
+    async fn local_project_preferences_override_saved_values_except_app_limits()
     -> Result<(), Box<dyn std::error::Error>> {
         let directory = tempfile::tempdir()?;
         let project = directory.path().join("project");
         std::fs::create_dir_all(&project)?;
         let settings_path = directory.path().join("settings.json");
         let project_path = project.to_str().ok_or("project path")?;
-        let global = json!({"version": 1, "app": {"terminal.scrollback_lines": 30}, "projects": {(project_path): {"terminal.scrollback_lines": 40}}});
+        let global = json!({"version": 1, "app": {"terminal.scrollback_lines": 30, "attachments.max_file_bytes": 300}, "projects": {(project_path): {"terminal.scrollback_lines": 40, "attachments.max_file_bytes": 400}}});
         write_atomic(&settings_path, &encode_json(&global)?)?;
         let local_path = project.join(".config/shepherd/settings.json");
-        let local = json!({"version": 1, "settings": {"terminal.scrollback_lines": 50, "preview.servers": [{"name": "Web", "command": "pnpm dev", "portVariable": "PORT"}]}});
+        let local = json!({"version": 1, "settings": {"terminal.scrollback_lines": 50, "attachments.max_file_bytes": 500, "preview.servers": [{"name": "Web", "command": "pnpm dev", "portVariable": "PORT"}]}});
         write_atomic(&local_path, &encode_json(&local)?)?;
         let settings = Settings::new(settings_path);
         settings.reload().await;
@@ -1198,29 +1205,33 @@ mod tests {
             snapshot.project_local[project.to_str().ok_or("project path")?]["preview.servers"],
             local["settings"]["preview.servers"]
         );
+        assert_eq!(settings.terminal_scrollback().await, 30);
         assert_eq!(
             settings.value(Some(&project), SettingKey::Scrollback).await,
-            json!(50)
+            json!(30)
         );
         assert_eq!(
-            snapshot.projects[project.to_str().ok_or("project path")?]["terminal.scrollback_lines"],
-            json!(50)
-        );
-        assert!(
             settings
-                .edit(
-                    Some(&project),
-                    edit(SettingKey::Scrollback, Some(json!(50)), Some(json!(60)))
-                )
-                .await
-                .is_err()
+                .value(Some(&project), SettingKey::AttachmentBytes)
+                .await,
+            json!(300)
         );
+        for key in [SettingKey::Scrollback, SettingKey::AttachmentBytes] {
+            assert!(snapshot.projects[project_path].get(key.name()).is_none());
+            assert!(!snapshot.project_local[project_path].contains_key(key.name()));
+            assert!(
+                settings
+                    .edit(Some(&project), edit(key, None, Some(json!(60))))
+                    .await
+                    .is_err()
+            );
+        }
         assert_eq!(std::fs::read(&local_path)?, encode_json(&local)?);
         Ok(())
     }
 
     #[tokio::test]
-    async fn migrates_legacy_settings_and_resolves_project_overrides_per_key()
+    async fn migrates_legacy_settings_and_preserves_inactive_project_limits()
     -> Result<(), Box<dyn std::error::Error>> {
         let directory = tempfile::tempdir()?;
         let path = directory.path().join("settings.json");
@@ -1253,7 +1264,7 @@ mod tests {
             settings
                 .value(Some(Path::new("/one")), SettingKey::AttachmentBytes)
                 .await,
-            json!(10)
+            json!(30)
         );
         assert_eq!(
             settings
@@ -1277,12 +1288,13 @@ mod tests {
             settings
                 .value(Some(Path::new("/two")), SettingKey::Scrollback)
                 .await,
-            json!(20)
+            json!(DEFAULT_SCROLLBACK)
         );
         assert_eq!(std::fs::read(backup_path(&path))?, original);
         let migrated: Value = serde_json::from_slice(&std::fs::read(&path)?)?;
         assert_eq!(migrated["version"], 1);
         assert_eq!(migrated["future"], old["future"]);
+        assert_eq!(migrated["projects"], old["projects"]);
         assert_eq!(
             migrated["projects"]["/one"]["future"],
             old["projects"]["/one"]["future"]
@@ -1310,26 +1322,30 @@ mod tests {
         write_atomic(&path, &encode_json(&external)?)?;
         settings
             .edit(
-                project,
-                edit(SettingKey::AttachmentBytes, None, Some(json!(20))),
+                None,
+                edit(
+                    SettingKey::AttachmentBytes,
+                    Some(json!(100)),
+                    Some(json!(20)),
+                ),
             )
             .await?;
         assert_eq!(
             settings.value(project, SettingKey::AttachmentBytes).await,
             20
         );
-        assert_eq!(settings.value(None, SettingKey::AttachmentBytes).await, 100);
+        assert_eq!(settings.value(None, SettingKey::AttachmentBytes).await, 20);
         let mut external: Value = serde_json::from_slice(&std::fs::read(&path)?)?;
         assert_eq!(
             external["app"]["agents.opencode.executable"],
             "/existing/bin/opencode"
         );
-        external["projects"]["/project"]["attachments.max_file_bytes"] = json!(40);
+        external["app"]["attachments.max_file_bytes"] = json!(40);
         let updated = encode_json(&external)?;
         write_atomic(&path, &updated)?;
         let result = settings
             .edit(
-                project,
+                None,
                 edit(
                     SettingKey::AttachmentBytes,
                     Some(json!(20)),
@@ -1350,13 +1366,13 @@ mod tests {
         settings.reload().await;
         settings
             .edit(
-                project,
+                None,
                 edit(SettingKey::AttachmentBytes, Some(json!(40)), None),
             )
             .await?;
         assert_eq!(
             settings.value(project, SettingKey::AttachmentBytes).await,
-            100
+            DEFAULT_ATTACHMENT_BYTES
         );
         assert!(
             settings

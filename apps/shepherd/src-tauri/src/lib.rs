@@ -226,7 +226,6 @@ pub fn run() -> Result<(), tauri::Error> {
             if let Some(window) = app.get_webview_window("main") {
                 schedule_window_control_alignment(&window);
             }
-            let terminals = bridge::TerminalHost::default();
             let override_directory = cfg!(debug_assertions)
                 .then(|| std::env::var_os("SHEPHERD_DEV_DATA_DIR"))
                 .flatten()
@@ -251,6 +250,7 @@ pub fn run() -> Result<(), tauri::Error> {
             };
             let preferences = settings::Settings::new(preference_directory.join("settings.json"));
             tauri::async_runtime::block_on(preferences.reload());
+            let terminals = bridge::TerminalHost::new(preferences.clone());
             let agents = if override_directory.is_some() {
                 AgentSettings::read(&config_directory.join("settings.json"))
             } else {
@@ -396,7 +396,6 @@ pub fn run() -> Result<(), tauri::Error> {
                 harness_factory,
                 terminals,
             ))?;
-            state.preferences = preferences;
             state.codex_program = codex_program;
             state.codex_detected = codex_detected;
             state.opencode_launch = opencode_launch;

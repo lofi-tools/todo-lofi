@@ -676,8 +676,8 @@ export interface AttachmentLimit {
   label: string
 }
 
-export function attachmentLimit(projectId: string): Promise<AttachmentLimit> {
-  return invoke<AttachmentLimit>('attachment_limit', { projectId })
+export function attachmentLimit(): Promise<AttachmentLimit> {
+  return invoke<AttachmentLimit>('attachment_limit')
 }
 
 export async function savePreviewScreenshot(taskId: string, file: File): Promise<string> {

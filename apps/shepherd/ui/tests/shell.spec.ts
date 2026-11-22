@@ -46,7 +46,7 @@ test.beforeEach(async ({ context }) => {
     const remoteActions: string[] = []
     let outgoingCommits = 2
     const gitRequests = { git: 0, gitDiff: 0, review: 0, reviewDiff: 0 }
-    const attachmentLimitRequests: string[] = []
+    const attachmentLimitRequests: number[] = []
     const taskRevisions = new Map<string, number>()
     let failedReviewSnapshot = false
     let firstGitRefresh: Promise<void> | undefined
@@ -122,7 +122,8 @@ test.beforeEach(async ({ context }) => {
         'attachments.max_file_bytes': 50_000_000, 'terminal.scrollback_lines': 10_000, 'files.show_dotfiles': true,
       }
       const stored = JSON.parse(localStorage.getItem('fixture.settings') ?? '{}')
-      const projects = stored.projects ?? (options.has('attachment-cap') ? { '/tmp/demo': { 'attachments.max_file_bytes': 8 } } : {})
+      const projects = stored.projects ?? (options.has('attachment-cap') ? { '/tmp/demo': { 'attachments.max_file_bytes': 24 } } : {})
+      const app = stored.app ?? (options.has('attachment-cap') ? { 'attachments.max_file_bytes': 8 } : {})
       const projectLocal = options.has('repo-settings') ? {
         '/tmp/demo': {
           'preview.url': 'http://localhost:3400/',
@@ -132,7 +133,6 @@ test.beforeEach(async ({ context }) => {
             afterCheckout: [{ name: 'Allow direnv', command: ['direnv', 'allow', '.'] }],
             launchWrapper: ['direnv', 'exec', '.'],
           },
-          'attachments.max_file_bytes': 900,
           ...(options.has('repo-environment') ? {
             environment: { sourceHash: '', setup: 'repo setup', actions: [{ name: 'Run', icon: 'run', command: 'repo command' }] },
           } : {}),
@@ -142,7 +142,7 @@ test.beforeEach(async ({ context }) => {
         projects[path] = { ...projects[path], ...scope }
       }
       return {
-        defaults, app: stored.app ?? {}, projects, projectLocal,
+        defaults, app, projects, projectLocal,
         warning: options.has('invalid-settings') ? 'Could not use /tmp/settings.json. A copy was saved to /tmp/settings.json.bak.' : null,
       }
     }
@@ -913,11 +913,9 @@ test.beforeEach(async ({ context }) => {
             return batch
           }
           case 'attachment_limit': {
-            attachmentLimitRequests.push(args.projectId)
             const settings = readPreferences()
-            const path = projects.find((project) => project.id === args.projectId)?.path
-            const bytes = settings.projects[path]?.['attachments.max_file_bytes']
-              ?? settings.app['attachments.max_file_bytes'] ?? settings.defaults['attachments.max_file_bytes']
+            const bytes = settings.app['attachments.max_file_bytes'] ?? settings.defaults['attachments.max_file_bytes']
+            attachmentLimitRequests.push(bytes)
             return { bytes, label: bytes === 50_000_000 ? '50 MB' : `${bytes} bytes` }
           }
           case 'save_preview_screenshot':
@@ -2609,11 +2607,11 @@ test('edits structured worktree commands and preserves argument boundaries', asy
   await terminal.getByLabel('Recovery instructions').fill('Fix the command and retry.')
   await shellCommand.fill('zsh -i')
 
-  const alignedControls = [page.getByLabel('Attachment limit (bytes)'), page.getByLabel('Preview URL'),
+  const alignedControls = [page.getByLabel('Preview URL'),
     readinessCommand, wrapperCommand, shellCommand, terminal.getByLabel('Recovery instructions')]
   const controls = await Promise.all(alignedControls.map((control) => control.boundingBox()))
   const column = controls[0]?.x
-  if (column === undefined) throw new Error('Missing attachment limit control')
+  if (column === undefined) throw new Error('Missing preview URL control')
   for (const control of controls) expect(control?.x).toBeCloseTo(column, 0)
 
   await save.click()
@@ -2657,7 +2655,7 @@ test('opens repository-managed settings in the editor and autosaves editable val
   await expect(project.locator('.settings__section-header h4')).toHaveText([
     'General', 'Worktrees & environment', 'Preview & services', 'Project actions', 'Approvals',
   ])
-  await expect(project.getByRole('region', { name: 'General' })).toContainText('Partly repo-managed')
+  await expect(project.getByRole('region', { name: 'General' })).toContainText('Repo-managed')
   await expect(project.getByRole('region', { name: 'Worktrees & environment' })).toContainText('Repo-managed')
   await expect(project.getByRole('region', { name: 'Preview & services' })).toContainText('Partly repo-managed')
   await expect(project.getByRole('region', { name: 'Project actions' })).not.toContainText('repo-managed')
@@ -2678,16 +2676,18 @@ test('opens repository-managed settings in the editor and autosaves editable val
   await expect(wrapper.getByLabel('Launch wrapper command')).toHaveAttribute('readonly', '')
   await expect(wrapper.getByLabel('Launch wrapper command')).toHaveValue('direnv exec .')
   await expect(wrapper.getByRole('button')).toHaveCount(0)
-  await expect(page.getByRole('spinbutton', { name: 'Attachment limit (bytes)' })).toHaveValue('900')
+  await expect(project.getByRole('spinbutton', { name: 'Attachment limit (bytes)' })).toHaveCount(0)
   await page.getByRole('button', { name: 'Open config file' }).click()
   await expect.poll(() => page.evaluate(() => window.__fileActions)).toContainEqual({
     projectId: 'project-1', taskId: null, path: '.config/shepherd/settings.json', action: 'edit',
   })
 
+  await expect(project.getByRole('spinbutton', { name: 'Terminal scrollback (lines)' })).toHaveCount(0)
+  await page.getByRole('navigation', { name: 'Settings categories' }).getByRole('button', { name: 'Workspace', exact: true }).click()
   const scrollback = page.getByRole('spinbutton', { name: 'Terminal scrollback (lines)' })
   await scrollback.fill('8000')
   await scrollback.press('Tab')
-  await expect(page.getByText('Saved Terminal scrollback for demo', { exact: true })).toBeVisible()
+  await expect(page.getByText('Saved Terminal scrollback', { exact: true })).toBeVisible()
   await page.getByRole('button', { name: 'Appearance', exact: true }).click()
   await page.getByRole('combobox', { name: 'Theme' }).selectOption('light')
   await expect(page.getByText('Saved Theme', { exact: true })).toBeVisible()
@@ -5369,9 +5369,16 @@ test('navigates project settings without changing the active project', async ({ 
   await expect(notes.getByText('Import all from')).toHaveCount(0)
   await expect(notes.getByRole('button', { name: 'Add project' })).toHaveCount(0)
   await expect(notes.getByLabel('Preview URL')).toBeVisible()
-  await expect(notes.getByLabel('Show archived tasks')).toBeVisible()
-  await expect(notes.getByLabel('Attachment limit (bytes)')).toBeVisible()
-  await expect(notes.getByLabel('Terminal scrollback (lines)')).toBeVisible()
+  const showArchived = notes.getByRole('checkbox', { name: 'Show archived tasks' })
+  await expect(showArchived).not.toBeChecked()
+  await expect(notes.getByText('Inherited from Workspace', { exact: false })).toHaveCount(0)
+  await showArchived.check()
+  await expect(showArchived).toBeChecked()
+  await expect(notes.getByText('Workspace value', { exact: false })).toHaveCount(0)
+  await notes.getByRole('button', { name: 'Reset archived task visibility' }).click()
+  await expect(showArchived).not.toBeChecked()
+  await expect(notes.getByLabel('Attachment limit (bytes)')).toHaveCount(0)
+  await expect(notes.getByLabel('Terminal scrollback (lines)')).toHaveCount(0)
   await expect(notes.getByRole('region', { name: 'Saved project approvals' })).toBeVisible()
   await expect(notes.getByText('Import all from')).toHaveCount(0)
   await page.getByRole('navigation', { name: 'Settings categories' }).getByRole('button', { name: 'Projects', exact: true }).click()
@@ -5381,8 +5388,8 @@ test('navigates project settings without changing the active project', async ({ 
   await expect(demo.getByText('/tmp/demo', { exact: true })).toBeVisible()
   await expect(demo.getByLabel('Preview URL')).toBeVisible()
   await expect(demo.getByLabel('Show archived tasks')).toBeVisible()
-  await expect(demo.getByLabel('Attachment limit (bytes)')).toBeVisible()
-  await expect(demo.getByLabel('Terminal scrollback (lines)')).toBeVisible()
+  await expect(demo.getByLabel('Attachment limit (bytes)')).toHaveCount(0)
+  await expect(demo.getByLabel('Terminal scrollback (lines)')).toHaveCount(0)
   await expect(demo.getByText('Import all from')).toHaveCount(0)
   await page.getByRole('button', { name: 'Settings', exact: true }).click()
   await expect(page.getByRole('button', { name: 'demo', exact: true })).toHaveAttribute('aria-current', 'true')
@@ -5693,10 +5700,11 @@ test('aligns settings labels and inputs in each section', async ({ page }) => {
   }
   await expectSameLine('Show archived tasks')
   await expectSameLine('Attachment limit (bytes)')
+  await expectSameLine('Terminal scrollback (lines)')
   await nav.getByRole('button', { name: 'Projects' }).click()
   await selectProjectSettings(page)
   await expectSameLine('Preview URL')
-  await expectSameLine('Terminal scrollback (lines)')
+  await expectSameLine('Show archived tasks')
   await nav.getByRole('button', { name: 'Appearance' }).click()
   await expectSameLine('Theme')
   await expectSameLine('Density')
@@ -5844,7 +5852,7 @@ test('applies the Send accent from Appearance and restores it after reload', asy
   await expect(nextWindow.getByRole('radio', { name: 'Teal' })).toBeChecked()
 })
 
-test('applies per-project limits and preserves a pending settings edit across reload', async ({ page }) => {
+test('applies the workspace attachment limit and preserves a pending edit across reload', async ({ page }) => {
   await page.goto('/')
   await page.getByRole('button', { name: 'Settings', exact: true }).click()
   const limit = page.getByRole('spinbutton', { name: 'Attachment limit (bytes)' })
@@ -5858,8 +5866,6 @@ test('applies per-project limits and preserves a pending settings edit across re
   await page.getByRole('button', { name: 'Retry setting change' }).click()
   await expect(page.getByText('Saved Attachment limit', { exact: true })).toBeVisible()
 
-  await page.getByRole('navigation', { name: 'Settings categories' }).getByRole('button', { name: 'Projects' }).click()
-  await selectProjectSettings(page)
   await expect(limit).toHaveValue('900')
   await limit.fill('8')
   await limit.press('Enter')
@@ -5869,10 +5875,8 @@ test('applies per-project limits and preserves a pending settings edit across re
   await expect(page.getByRole('alert')).toContainText('Attachments must be up to 8 bytes')
 
   await page.getByRole('button', { name: 'Settings', exact: true }).click()
-  await page.getByRole('navigation', { name: 'Settings categories' }).getByRole('button', { name: 'Projects' }).click()
-  await selectProjectSettings(page)
   await page.getByRole('button', { name: 'Reset attachment limit (bytes)' }).click()
-  await expect(limit).toHaveValue('900')
+  await expect(limit).toHaveValue('50000000')
 })
 
 test('reports the settings backup and keeps defaults usable with a malformed file', async ({ page }) => {
@@ -6559,7 +6563,7 @@ test('removes the unsent task when a first prompt with an attachment is rejected
 test('does not reload the attachment limit on streaming project snapshots', async ({ page }) => {
   await page.goto('/')
   await expect(page.getByRole('region', { name: 'Task chat' })).toContainText('ready to go')
-  const requests = () => page.evaluate(() => (window as unknown as { __attachmentLimitRequests: string[] }).__attachmentLimitRequests.slice())
+  const requests = () => page.evaluate(() => (window as unknown as { __attachmentLimitRequests: number[] }).__attachmentLimitRequests.slice())
   await expect.poll(async () => (await requests()).length).toBeGreaterThan(0)
   const before = await requests()
   await page.evaluate(async () => {
@@ -6575,7 +6579,7 @@ test('does not reload the attachment limit on streaming project snapshots', asyn
   await expect.poll(async () => (await requests()).length).toBe(before.length + 1)
 })
 
-test('uses the selected project attachment limit', async ({ page }) => {
+test('uses one attachment limit in both projects despite a legacy override', async ({ page }) => {
   await page.goto('/?two-projects&attachment-cap')
   const composer = page.locator('.composer')
   const file = { name: 'notes.txt', mimeType: 'text/plain', buffer: Buffer.from('nine-byte') }
@@ -6590,7 +6594,8 @@ test('uses the selected project attachment limit', async ({ page }) => {
   await expect(composer.getByRole('list', { name: 'Queued attachments' })).toHaveCount(0)
   await page.getByRole('button', { name: 'notes', exact: true }).click()
   await chooseFile()
-  await expect(composer.getByRole('list', { name: 'Queued attachments' })).toContainText('notes.txt')
+  await expect(page.getByRole('alert')).toContainText('Attachments must be up to 8 bytes each. notes.txt')
+  await expect(composer.getByRole('list', { name: 'Queued attachments' })).toHaveCount(0)
 })
 
 test('mentions a workspace file with the keyboard and cancels an outdated search', async ({ page }) => {

@@ -62,7 +62,7 @@ These were chosen explicitly and override the pre-interview draft.
 | Settings | Global defaults with per-project overrides, stored in versioned JSON files in the app config directory; keybindings are edited in-app with validation. |
 | v1 rendering | Diffs with `@pierre/diffs` and a Shiki worker; transcripts with `marked` + `DOMPurify` + `KaTeX`. |
 | Accessibility | The canvas terminal keeps an off-screen text mirror for assistive tech and a keyboard copy mode. |
-| Attachments | Copied into a per-task cache, capped at 50 MB per file (project override allowed), and deleted with the task. |
+| Attachments | Copied into a per-task cache, capped at 50 MB per file (app-wide override allowed), and deleted with the task. |
 | Subagents | Shown only when the child owns a terminal; not tracked as tasks. |
 | Resume | If an adapter cannot resume, the task says so and offers transcript replay with a new session instead of pretending to continue. |
 | CLI | None in v1. |
@@ -1028,7 +1028,7 @@ core is the only writer.
 | `layouts` | task_id (unique), workspace_json, updated_at |
 | `git_snapshots` | id, task_id, commit_sha, dirty, captured_at, summary_json |
 
-Rules: entry writes are batched per settled message or tool call, never per token; deleting a task deletes its entries, sessions, attachments, task-scoped terminals and workspace layout but never its worktree or branch without confirmation; deleting a project removes its shared terminals and terminal layout but no files; attachments are copied under the app data directory, capped at 50 MB each (or the project override), and deleted with the task; environment values beginning with `!` are resolved at spawn (not at save) with `/bin/sh -c`, a 5 s timeout and one trailing newline trimmed, failure blocks the spawn, and the output is never stored or logged; migrations never drop data within a major version.
+Rules: entry writes are batched per settled message or tool call, never per token; deleting a task deletes its entries, sessions, attachments, task-scoped terminals and workspace layout but never its worktree or branch without confirmation; deleting a project removes its shared terminals and terminal layout but no files; attachments are copied under the app data directory, capped at 50 MB each (or the app-wide override), and deleted with the task; environment values beginning with `!` are resolved at spawn (not at save) with `/bin/sh -c`, a 5 s timeout and one trailing newline trimmed, failure blocks the spawn, and the output is never stored or logged; migrations never drop data within a major version.
 
 `workspace_json` stores chat/inspector widths and chat scroll;
 `terminal_layouts.layout_json` stores the terminal split tree, the selected
@@ -1054,7 +1054,7 @@ in-memory model is still scoped key/value pairs, serialized per scope:
 ```json
 { "version": 1,
   "app": { "theme": "dark", "terminal.scrollback_lines": 10000 },
-  "projects": { "/Users/me/src/repo": { "terminal.scrollback_lines": 20000 } } }
+  "projects": { "/Users/me/src/repo": { "tasks.show_archived": true } } }
 ```
 
 - Both files carry an integer `version` and are written atomically with
@@ -1086,12 +1086,12 @@ in-memory model is still scoped key/value pairs, serialized per scope:
   directory.
 - **Settings → Workspace** edits the default archive visibility, attachment
   limit, terminal scrollback, and notification preference. **Settings →
-  Projects** can override archive visibility, attachment limit and terminal
-  scrollback. **Settings → Appearance** saves the Send accent in
+  Projects** can override archive visibility. Attachment limit and terminal
+  scrollback are app-wide. **Settings → Appearance** saves the Send accent in
   `app["appearance.send_accent"]` and imports the older webview preference
   if this key is absent.
 - `terminal.scrollback_lines` ranges from 0 to 100,000 and defaults to 10,000.
-  Workspace terminals read it when they start or restart.
+  Terminals read it when they start or restart.
 - Resolution is per key: project > app > built-in, with whole-value replacement
   and no deep merge. Reset deletes the override.
 - `attachments.max_file_bytes` is a positive integer in bytes. It applies to

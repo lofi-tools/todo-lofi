@@ -205,9 +205,7 @@ on macOS and from `$XDG_CONFIG_HOME/dev.shepherd.shell/` on Linux (normally
   },
   "projects": {
     "/absolute/path/to/project": {
-      "tasks.show_archived": false,
-      "attachments.max_file_bytes": 50000000,
-      "terminal.scrollback_lines": 10000
+      "tasks.show_archived": false
     }
   }
 }
@@ -238,8 +236,6 @@ Project-local overrides can be read from `<project>/.config/shepherd/settings.js
   "version": 1,
   "settings": {
     "tasks.show_archived": false,
-    "attachments.max_file_bytes": 20000000,
-    "terminal.scrollback_lines": 20000,
     "preview.url": "http://localhost:${PORT}",
     "preview.servers": [
       { "name": "API", "command": "./start-api", "portVariable": "API_PORT" },
@@ -307,20 +303,16 @@ order you set. These settings are stored under
 
 ## Attachment limits
 
-Shepherd allows up to 50 MB per attachment by default. Change the default in
-**Settings → Workspace**, or set a project override in **Settings → Projects**.
-The same limit applies to composer files and preview screenshots. To edit
-`settings.json` directly, put `attachments.max_file_bytes` under `app` or under
-`projects` and the project's absolute path. Choose **Reload settings** in
-Workspace to apply a file edit.
+Shepherd allows up to 50 MB per attachment by default. Change the app-wide
+limit in **Settings → Workspace**. The same limit applies to composer files
+and preview screenshots. To edit `settings.json` directly, put
+`attachments.max_file_bytes` under `app` and choose **Reload settings** in
+Workspace. Old per-project attachment and scrollback values are ignored.
 
 ```json
 {
   "version": 1,
-  "app": { "attachments.max_file_bytes": 50000000 },
-  "projects": {
-    "/Users/me/src/example": { "attachments.max_file_bytes": 20000000 }
-  }
+  "app": { "attachments.max_file_bytes": 50000000 }
 }
 ```
 

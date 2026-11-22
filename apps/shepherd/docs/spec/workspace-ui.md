@@ -182,8 +182,8 @@ current layout and give future changes a point of comparison.
   The setup script field starts at two lines and grows with its content,
   leaving one blank line for typing. It has no manual resize control.
   Show which sections the repository manages, including partial overrides.
-  Identify inherited defaults by their workspace value. Keep draft status,
-  save controls, and the save shortcut with their section.
+  Show the effective archived-task toggle with a reset action when overridden.
+  Keep draft status, save controls, and the save shortcut with their section.
 - Project settings include worktree setup and named project actions. Import a
   detected `.codex/environments/environment.toml` into Shepherd's project
   defaults and retain a hash of the source at import. If the source changes,
@@ -360,9 +360,9 @@ current layout and give future changes a point of comparison.
   option. Enabling it allows system notifications for new waits outside the
   focused task workspace. Review changes only affect the in-app indicators
   and Dock count.
-- **Settings → Workspace** edits the default attachment limit and terminal
-  scrollback. **Settings → Projects** shows the workspace values and lets
-  the selected project override them. Reset removes the project override.
+- **Settings → Workspace** edits the app-wide attachment limit and terminal
+  scrollback. The limit applies to all projects, and terminals read the
+  scrollback setting at launch.
   **Reload settings** reads the settings file and lets users review pending
   changes if a value changed on disk.
 - **Settings → Appearance** offers System, Light, and Dark, with System as the
@@ -616,7 +616,7 @@ current layout and give future changes a point of comparison.
 - **Attach files** opens a local file chooser. Show removable filename chips
   inside the composer while files are queued. On Send, Shepherd copies files
   into the selected task's attachment cache. The size limit is 50 MB per file
-  by default, with app and project overrides in `settings.json`. The prompt can
+  by default, with an app-wide override in `settings.json`. The prompt can
   be sent with files alone. It includes the paths in the transcript and
   passes supported images to the agent as image input.
 - Typing `@` at a word boundary opens a file picker above the composer and
