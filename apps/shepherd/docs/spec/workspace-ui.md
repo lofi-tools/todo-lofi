@@ -382,6 +382,7 @@ current layout and give future changes a point of comparison.
   directly in the conversation pane. Clicking the selected project keeps
   its chat rows mounted. Reserve the expanded area for task rows. Compose stays
   on the project row and the archive switch stays in the context card.
+  Snapshot updates keep existing project and chat rows mounted by ID.
 - Keep the state word out of a task row: the leading state dot, waiting icon and
   **Needs review** badge carry it. Put an accent dot at the end of the row when
   the task received conversation output since it was last open, and clear it

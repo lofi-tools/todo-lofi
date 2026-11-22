@@ -2149,10 +2149,9 @@ test('opts in to notifications for unfocused waits and shows waiting attention',
 test('starts a task only on send, streams a reply and switches tasks', async ({ page }) => {
   await page.goto('/')
 
-  const project = page.getByRole('button', { name: 'demo', exact: true })
-  await expect(project).toBeVisible()
-  await project.press('Tab')
+  await expect(page.getByText('ready to go')).toBeVisible()
   const compose = page.getByRole('button', { name: 'New chat in demo' })
+  await compose.focus()
   await expect(compose).toBeFocused()
   await expect(compose).toHaveCSS('opacity', '1')
   await compose.press('Enter')
@@ -3592,6 +3591,41 @@ test('never pairs the files pane with another project’s task when a remembered
   expect(afterSwitch.some((request) => request.projectId === 'project-notes' && request.taskId === null)).toBe(true)
   await expect(page.getByRole('alert')).toHaveCount(0)
   await expect(page.locator('.error-toast')).toHaveCount(0)
+})
+
+test('reuses sidebar and transcript rows when snapshots refresh', async ({ page }) => {
+  await page.goto('/?two-tasks')
+  const project = page.getByRole('button', { name: 'demo', exact: true })
+  const chat = page.getByRole('button', { name: 'Ship it', exact: true })
+  const transcript = page.getByRole('region', { name: 'Transcript' })
+  await expect(transcript).toContainText('ready to go')
+  const projectRow = await project.elementHandle()
+  const chatRow = await chat.elementHandle()
+  const messages = await transcript.locator('.entry').elementHandles()
+  await chat.click({ button: 'right' })
+  await expect(page.getByRole('menuitem', { name: 'Copy details' })).toBeFocused()
+
+  await page.evaluate(async () => {
+    const bridge = window.__TAURI_INTERNALS__
+    const projects = await bridge.invoke('project_list')
+    const tasks = await bridge.invoke('task_list', { projectId: 'project-1' })
+    const workspace = await bridge.invoke('task_workspace', { taskId: 'task-1' })
+    window.__emitCoreEvent({ type: 'projectListChanged', data: structuredClone(projects) })
+    window.__emitCoreEvent({ type: 'taskListChanged', data: structuredClone(tasks) })
+    window.__emitCoreEvent({ type: 'taskWorkspaceChanged', data: structuredClone(workspace) })
+
+    const entries = structuredClone(workspace.transcript) as Entry[]
+    const reply = entries.find((entry) => entry.kind.type === 'agentText')
+    if (!reply || reply.kind.type !== 'agentText') throw new Error('Missing fixture reply')
+    reply.kind.data.text += ' with another chunk'
+    window.__setTranscript('task-1', entries)
+  })
+
+  await expect(transcript).toContainText('with another chunk')
+  await expect(page.getByRole('menuitem', { name: 'Copy details' })).toBeFocused()
+  for (const row of [projectRow!, chatRow!, ...messages]) {
+    expect(await row.evaluate((node) => node.isConnected)).toBe(true)
+  }
 })
 
 test('reselecting the current chat keeps its composer and transcript', async ({ page }) => {

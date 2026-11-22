@@ -1,6 +1,7 @@
 import { For, Show, createSignal, onCleanup, onMount } from 'solid-js'
 
 import type { ProjectSnapshot, TaskSummary } from './bridge'
+import { createSnapshotRows } from './snapshotRows'
 import { WaitingIcon } from './ProjectRow'
 import { focusSidebarMenu, isSidebarMenuKey, isSidebarSelection, sidebarDetails, SidebarMenu, type SidebarMenuPoint } from './SidebarMenu'
 
@@ -20,10 +21,11 @@ export function TaskRows(props: {
   onOpen: (task: TaskSummary) => void
   onSelect: (taskId: string, extend: boolean) => void
 }) {
+  const rows = createSnapshotRows(() => props.tasks)
   return (
     <div class="tasks">
       <ul class="task-list">
-        <For each={props.tasks}>
+        <For each={rows()}>
           {(task) => {
             const [menuCursor, setMenuCursor] = createSignal<SidebarMenuPoint>()
             let row!: HTMLLIElement

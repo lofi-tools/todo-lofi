@@ -3,7 +3,9 @@ import { For, Show, createEffect, createMemo, createSignal, createUniqueId, onCl
 import type { Entry } from './bridge'
 
 export function MessageRail(props: { entries: Entry[]; transcript: () => HTMLElement | undefined; onNavigate: (entryId: string) => void }) {
-  const messages = createMemo(() => props.entries.filter((entry) => entry.kind.type === 'userMessage'))
+  const messages = createMemo(() => props.entries.filter((entry) => entry.kind.type === 'userMessage'), undefined, {
+    equals: (previous, next) => previous.length === next.length && previous.every((entry, index) => entry === next[index]),
+  })
   const [preview, setPreview] = createSignal<{ id: string; text: string; top: number; min: number; max: number }>()
   const [visible, setVisible] = createSignal<Set<string>>(new Set())
   const tooltipId = createUniqueId()

@@ -36,6 +36,7 @@ import { DeleteTaskDialog, ReviewArchiveDialog, TaskRows } from './TaskRows'
 import { ErrorNotifications } from './ErrorNotifications'
 import { SwitchHarnessDialog } from './SwitchHarnessDialog'
 import { recordDiagnostic, reportError } from './diagnostics'
+import { createSnapshotRows } from './snapshotRows'
 
 type CoreEvent = bridge.Event
 type TerminalBell = Extract<CoreEvent, { type: 'terminalBell' }>['data']
@@ -421,6 +422,7 @@ export function App() {
   const [loadedTasksFor, setLoadedTasksFor] = createSignal<string>()
   const [selectedTaskId, setSelectedTaskId] = createSignal<string | null>(null)
   const [workspace, setWorkspace] = createSignal<bridge.TaskWorkspace | null>(null)
+  const transcriptRows = createSnapshotRows(() => workspace()?.transcript ?? [])
   const [collapsedThoughts, setCollapsedThoughts] = createSignal<ReadonlySet<string>>(new Set())
   const [openReads, setOpenReads] = createSignal<ReadonlySet<string>>(new Set())
   const [openOutputs, setOpenOutputs] = createSignal<ReadonlyMap<string, boolean>>(new Map())
@@ -1272,6 +1274,7 @@ export function App() {
     }) : source
     return reviewOnly() ? ordered.filter((project) => filteredReviewTasks(project.id).length > 0) : ordered
   }
+  const projectRowsForView = createSnapshotRows(sidebarProjects)
   const canStartTask = () => {
     const project = selectedProject()
     return !!project && !project.missing && loadedTasksFor() === project.id
@@ -2924,7 +2927,7 @@ export function App() {
                 <ProjectImportSources codexDisabled={pending() || !codexAvailable()} note={importNote()} onImportCodex={importProjects} />
               </li>
             </Show>
-            <For each={sidebarProjects()}>
+            <For each={projectRowsForView()}>
               {(project) => {
                 const menuId = `project:${project.id}`
                 const listed = () => reviewOnly() ? filteredReviewTasks(project.id)
@@ -3208,7 +3211,7 @@ export function App() {
               }
             >
               {(current) => {
-                const entries = () => current().transcript
+                const entries = transcriptRows
                 const readCalls = createMemo(() => {
                   const calls = new Set<string>()
                   for (const entry of entries()) {
@@ -3250,18 +3253,19 @@ export function App() {
                     <ol class="transcript">
                       <For each={entries()}>
                         {(entry) => {
-                          if (entry.kind.type === 'permission' && readCalls().has(entry.kind.data.toolCallId)) return null
                           const target = () => {
                             const jump = searchJump()
                             return jump?.taskId === selectedTaskId() && jump?.entryId === entry.id ? jump : undefined
                           }
                           const match = () => target()?.snippet.field === 'entry' ? target()?.snippet.matched : undefined
-                          return <li class="entry" classList={{ 'entry--search-hit': !!target() }}
-                            data-entry-id={entry.id} tabIndex={-1}>
-                            {entry.kind.type === 'toolCall' && readCalls().has(entry.kind.data.toolCallId)
-                              ? <ReadRow toolCall={entry.kind.data} permission={readApprovals().get(entry.kind.data.toolCallId)} context={context} match={match} />
-                              : entryBody(entry, context, match)}
-                          </li>
+                          return <Show when={entry.kind.type !== 'permission' || !readCalls().has(entry.kind.data.toolCallId)}>
+                            <li class="entry" classList={{ 'entry--search-hit': !!target() }}
+                              data-entry-id={entry.id} tabIndex={-1}>
+                              {entry.kind.type === 'toolCall' && isReadToolCall(entry.kind.data)
+                                ? <ReadRow toolCall={entry.kind.data} permission={readApprovals().get(entry.kind.data.toolCallId)} context={context} match={match} />
+                                : entryBody(entry, context, match)}
+                            </li>
+                          </Show>
                         }}
                       </For>
                     </ol>
@@ -3270,7 +3274,7 @@ export function App() {
               }}
             </Show>
           </div>
-          <Show when={transcriptOverflows()}><MessageRail entries={workspace()?.transcript ?? []} transcript={() => transcript} onNavigate={(entryId) => {
+          <Show when={transcriptOverflows()}><MessageRail entries={transcriptRows()} transcript={() => transcript} onNavigate={(entryId) => {
             const entry = transcript?.querySelector<HTMLElement>(`[data-entry-id="${CSS.escape(entryId)}"]`)
             if (!entry || !transcript) return
             followTranscript = false
