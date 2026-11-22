@@ -1580,6 +1580,8 @@ impl Transcript {
 )]
 #[async_trait]
 pub trait AgentHarness: Send {
+    fn set_direnv_launch(&mut self) {}
+
     /// Receive adapter events. The receiver is owned by the harness and must
     /// remain available for the whole session.
     fn events(&mut self) -> &mut mpsc::UnboundedReceiver<HarnessEvent>;

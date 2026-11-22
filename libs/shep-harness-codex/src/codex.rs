@@ -54,6 +54,7 @@ const METHOD_NOT_FOUND: i64 = -32601;
 const MAX_PENDING_APPROVALS: usize = 64;
 const MAX_OUTBOUND_MESSAGES: usize = 128;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+const DIRENV_INITIALIZE_TIMEOUT: Duration = Duration::from_secs(180);
 const PROBE_TIMEOUT: Duration = Duration::from_secs(20);
 const STDERR_TAIL_LINES: usize = 20;
 const MAX_PROTOCOL_LINE_BYTES: usize = 8 * 1024 * 1024;
@@ -960,6 +961,16 @@ fn outbound_error(error: mpsc::error::TrySendError<OutboundMessage>) -> HarnessE
 #[cfg(any(test, feature = "live-test-support"))]
 use crate::live_codex::{WireCapture, WireEntry, without_api_credentials};
 
+fn codex_process(program: &str, direnv: bool) -> Command {
+    if direnv {
+        let mut command = Command::new("direnv");
+        command.args(["exec", ".", program]);
+        command
+    } else {
+        Command::new(program)
+    }
+}
+
 /// One `codex app-server` session.
 pub struct CodexHarness {
     #[cfg(any(test, feature = "live-test-support"))]
@@ -988,6 +999,7 @@ pub struct CodexHarness {
     command: String,
     protocol: String,
     version: Option<String>,
+    direnv: bool,
     started: bool,
 }
 
@@ -1024,6 +1036,7 @@ impl CodexHarness {
             command: String::new(),
             protocol: "app-server".to_string(),
             version: None,
+            direnv: false,
             started: false,
         }
     }
@@ -1143,6 +1156,11 @@ impl CodexHarness {
         let request_timeout = self.request_timeout;
         #[cfg(not(test))]
         let request_timeout = REQUEST_TIMEOUT;
+        let request_timeout = if self.direnv && method == "initialize" {
+            DIRENV_INITIALIZE_TIMEOUT
+        } else {
+            request_timeout
+        };
         let response = timeout(request_timeout, receiver).await;
         if response.is_ok()
             && let Some(guard) = &mut admission_guard
@@ -1200,7 +1218,10 @@ impl CodexHarness {
         }
 
         self.command = shep_harness_core::command_line(&spec);
-        let mut command = Command::new(&spec.program);
+        if self.direnv {
+            self.command = format!("direnv exec . {}", self.command);
+        }
+        let mut command = codex_process(&spec.program, self.direnv);
         command
             .args(&spec.args)
             .current_dir(&spec.cwd)
@@ -1403,6 +1424,10 @@ impl Default for CodexHarness {
 
 #[async_trait]
 impl AgentHarness for CodexHarness {
+    fn set_direnv_launch(&mut self) {
+        self.direnv = true;
+    }
+
     fn set_process_tracker(&mut self, tracker: Arc<dyn shep_harness_core::AgentProcessTracker>) {
         self.process_tracker = Some(tracker);
     }
@@ -1653,6 +1678,7 @@ impl AgentHarness for CodexHarness {
 /// turn's result only by exiting, and cannot answer approvals. Its capability
 /// set says so, so the core never offers the controls it lacks.
 pub struct ExecHarness {
+    direnv: bool,
     sender: mpsc::UnboundedSender<HarnessEvent>,
     receiver: mpsc::UnboundedReceiver<HarnessEvent>,
     stream_capacity: Arc<tokio::sync::Semaphore>,
@@ -1813,6 +1839,7 @@ impl ExecHarness {
     pub fn new() -> Self {
         let (sender, receiver) = mpsc::unbounded_channel();
         Self {
+            direnv: false,
             sender,
             receiver,
             stream_capacity: Arc::new(tokio::sync::Semaphore::new(EXEC_STREAM_CHUNKS)),
@@ -1871,6 +1898,10 @@ impl Default for ExecHarness {
 
 #[async_trait]
 impl AgentHarness for ExecHarness {
+    fn set_direnv_launch(&mut self) {
+        self.direnv = true;
+    }
+
     fn set_process_tracker(&mut self, tracker: Arc<dyn shep_harness_core::AgentProcessTracker>) {
         self.process_tracker = Some(tracker);
     }
@@ -1901,6 +1932,9 @@ impl AgentHarness for ExecHarness {
             .chain(spec.args.iter().map(String::as_str))
             .collect::<Vec<_>>()
             .join(" ");
+        if self.direnv {
+            self.command = format!("direnv exec . {}", self.command);
+        }
         self.program = spec.program;
         self.args = spec.args;
         self.cwd = spec.cwd;
@@ -1956,7 +1990,7 @@ impl AgentHarness for ExecHarness {
         }
         self.run = None;
 
-        let mut command = Command::new(&self.program);
+        let mut command = codex_process(&self.program, self.direnv);
         command.arg("exec").arg("--json").args(&self.args);
         for attachment in input
             .attachments
@@ -4903,6 +4937,56 @@ done
             .expect("the stub app-server starts");
         harness.open_session(None).await.expect("a thread opens");
         (harness, capabilities)
+    }
+
+    #[tokio::test]
+    async fn both_codex_tiers_launch_in_the_worktree_through_direnv()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = TempDir::new()?;
+        write_stub(
+            &directory,
+            "direnv",
+            r#"#!/bin/sh
+[ "$1" = exec ] && [ "$2" = . ] || exit 64
+shift 2
+export TEST_DEV_SHELL=loaded
+printf '%s\n' "$TEST_DEV_SHELL" > loaded-environment
+exec "$@"
+"#,
+        );
+        let app_server = write_stub(&directory, "codex-app-server", PROTOCOL_STUB);
+        let exec = write_stub(&directory, "codex-exec", EXEC_STUB);
+        let spawn_spec = |program: &str| {
+            let mut spec = spec(program, directory.path());
+            spec.environment.insert(
+                "PATH".to_owned(),
+                format!("{}:/usr/bin:/bin", directory.path().display()),
+            );
+            spec
+        };
+        let loaded = directory.path().join("loaded-environment");
+
+        let mut harness = CodexHarness::new();
+        harness.set_direnv_launch();
+        harness.start(spawn_spec(&app_server)).await?;
+        assert_eq!(std::fs::read_to_string(&loaded)?, "loaded\n");
+        harness.shutdown().await?;
+        std::fs::remove_file(&loaded)?;
+
+        let mut harness = ExecHarness::new();
+        harness.set_direnv_launch();
+        harness.start(spawn_spec(&exec)).await?;
+        harness.open_session(None).await?;
+        harness.prompt(PromptInput::text("fixture")).await?;
+        collect_until(&mut harness, |events| {
+            events
+                .iter()
+                .any(|event| matches!(event, HarnessEvent::TurnFinished { .. }))
+        })
+        .await;
+        assert_eq!(std::fs::read_to_string(&loaded)?, "loaded\n");
+        harness.shutdown().await?;
+        Ok(())
     }
 
     #[tokio::test]

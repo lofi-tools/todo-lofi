@@ -135,6 +135,7 @@ interface TerminalPaneProps {
   attention: string[]
   onTerminalFocus: (id: string | null) => void
   listEvent: bridge.TerminalList | undefined
+  setupTerminalRequest?: { id: string }
   freebuffFront: boolean
   freebuffFocused: boolean
   freebuffAttention: boolean
@@ -449,6 +450,16 @@ export function TerminalPane(props: TerminalPaneProps) {
   createEffect(() => {
     const event = props.listEvent
     if (event) applyTerminalList(event)
+  })
+
+  let shownSetupTerminal: { id: string } | undefined
+  createEffect(() => {
+    const request = props.setupTerminalRequest
+    if (!request || request === shownSetupTerminal || !props.shown || !layoutLoaded() || pending()) return
+    if (!terminals().some((entry) => entry.id === request.id && entry.taskId === props.taskId)) return
+    shownSetupTerminal = request
+    if (!typeShown('task')) setScopeFilter('both')
+    void run(() => show(request.id))
   })
 
   function restart(id: string) {

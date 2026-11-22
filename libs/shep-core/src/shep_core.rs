@@ -19,6 +19,7 @@ pub mod snapshots;
 pub mod store;
 pub mod tasks;
 pub mod terminal;
+pub mod worktree_environment;
 pub mod worktree_pool;
 
 #[cfg(any(test, feature = "test-support"))]
@@ -109,6 +110,12 @@ pub enum CoreError {
     ProjectSetup(String),
     #[error("{message}")]
     StartTaskSetup { task_id: String, message: String },
+    #[error("{message}")]
+    DevelopmentEnvironment {
+        task_id: String,
+        message: String,
+        awaiting_approval: bool,
+    },
     #[error("Codex model and effort options require a Codex task.")]
     CodexOptionsForOtherAgent,
     #[error("Could not resolve mentioned file {path}. {source}")]
@@ -282,6 +289,7 @@ pub struct TaskGitRead {
 pub struct ProjectSetup {
     pub script: String,
     pub approved: bool,
+    pub direnv: bool,
 }
 
 impl TaskGitRead {
@@ -2006,6 +2014,7 @@ impl Core {
                     message,
                 })
             }
+            Err(error @ CoreError::DevelopmentEnvironment { .. }) => Err(error),
             Err(error) => {
                 let remove_worktree = self
                     .task(&task_id)
@@ -2597,32 +2606,26 @@ impl Core {
             .join("shepherd")
             .join("setup")
             .join(task_id.as_str());
-        let setup_pending = setup_marker.exists();
-        if state == TaskState::Draft || setup_pending {
-            if let Some(setup) = setup
+        if state == TaskState::Draft
+            && setup
                 .as_ref()
-                .filter(|setup| !setup.script.trim().is_empty())
-            {
-                if !setup.approved {
-                    return Err(CoreError::ProjectSetup("Review and approve the worktree setup script in Project settings before starting this task.".into()));
-                }
-                if state == TaskState::Draft {
-                    let directory = setup_marker.parent().ok_or_else(|| {
-                        CoreError::ProjectSetup("Invalid setup state path.".into())
-                    })?;
-                    std::fs::create_dir_all(directory).map_err(|error| {
-                        CoreError::ProjectSetup(format!("Could not save setup state: {error}"))
-                    })?;
-                    std::fs::write(&setup_marker, b"pending").map_err(|error| {
-                        CoreError::ProjectSetup(format!("Could not save setup state: {error}"))
-                    })?;
-                }
-            } else if setup_pending {
-                return Err(CoreError::ProjectSetup("The pending worktree setup is unavailable. Restore it in Project settings before retrying.".into()));
-            }
+                .is_some_and(|setup| !setup.script.trim().is_empty())
+        {
+            let directory = setup_marker
+                .parent()
+                .ok_or_else(|| CoreError::ProjectSetup("Invalid setup state path.".into()))?;
+            std::fs::create_dir_all(directory).map_err(|error| {
+                CoreError::ProjectSetup(format!("Could not save setup state: {error}"))
+            })?;
+            std::fs::write(&setup_marker, b"pending").map_err(|error| {
+                CoreError::ProjectSetup(format!("Could not save setup state: {error}"))
+            })?;
         }
         match state {
-            TaskState::Draft => self.create_worktree(task_id).await?,
+            TaskState::Draft => {
+                self.create_worktree(task_id).await?;
+                self.publish_task(task_id)?;
+            }
             TaskState::Ready | TaskState::Review | TaskState::Interrupted | TaskState::Failed => {
                 self.repair_worktree(task_id).await?
             }
@@ -2634,10 +2637,27 @@ impl Core {
             }
         }
 
+        let use_direnv = setup.as_ref().is_some_and(|setup| setup.direnv);
+        if use_direnv && self.task(task_id)?.agent == Agent::Codex {
+            let directory = self
+                .task(task_id)?
+                .worktree_path
+                .as_deref()
+                .ok_or_else(|| {
+                    CoreError::ProjectSetup(
+                        "The task has no worktree for environment setup.".into(),
+                    )
+                })?;
+            worktree_environment::require_direnv(directory, task_id).await?;
+        }
+
         if setup_marker.exists() {
-            let setup = setup.ok_or_else(|| {
-                CoreError::ProjectSetup("The worktree setup is unavailable.".into())
+            let setup = setup.as_ref().filter(|setup| !setup.script.trim().is_empty()).ok_or_else(|| {
+                CoreError::ProjectSetup("The pending worktree setup is unavailable. Restore it in Project settings before retrying.".into())
             })?;
+            if !setup.approved {
+                return Err(CoreError::ProjectSetup("Review and approve the worktree setup script in Project settings before starting this task.".into()));
+            }
             let directory = self.task(task_id)?.worktree_path.as_ref().ok_or_else(|| {
                 CoreError::ProjectSetup("The task has no worktree for setup.".into())
             })?;
@@ -3398,7 +3418,7 @@ impl Core {
                 }
             }
         }
-        let (harness, mut spec, launched_agent) = match launched {
+        let (mut harness, mut spec, launched_agent) = match launched {
             Some(launch) => launch,
             None => {
                 let error = launch_error.unwrap_or(CoreError::HarnessUnavailable);
@@ -3417,6 +3437,15 @@ impl Core {
                 return Err(error);
             }
         };
+        if launched_agent == Agent::Codex
+            && task.worktree_path.is_some()
+            && self
+                .project_setups
+                .get(&project_path)
+                .is_some_and(|setup| setup.direnv)
+        {
+            harness.set_direnv_launch();
+        }
         let environment = self
             .harness_factory
             .environment_for_project(launched_agent, &project_path);
@@ -4265,18 +4294,20 @@ mod terminal_layout_tests {
             Some(ProjectSetup {
                 script: script.clone(),
                 approved: false,
+                direnv: false,
             }),
         );
         assert!(matches!(
             core.send_prompt(&task_id, PromptInput::text("hello")).await,
             Err(CoreError::ProjectSetup(_))
         ));
-        assert!(core.task(&task_id)?.worktree_path.is_none());
+        assert!(core.task(&task_id)?.worktree_path.is_some());
         core.set_project_setup(
             project_path,
             Some(ProjectSetup {
                 script,
                 approved: true,
+                direnv: false,
             }),
         );
         assert!(matches!(

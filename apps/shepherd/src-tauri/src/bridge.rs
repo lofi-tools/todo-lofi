@@ -58,6 +58,14 @@ use crate::terminal_screen::{Screen, SearchDirection, TerminalAppearance, Termin
 const FILE_WATCH_START_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_PENDING_FILE_WATCH_STARTS: usize = 4;
 const FILE_WATCH_RETRY_DELAY: Duration = Duration::from_secs(5);
+const ENVIRONMENT_TERMINAL_PREFIX: &str = "shepherd-environment:";
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetupTerminal {
+    terminal_id: String,
+    list: TerminalList,
+}
 
 #[derive(Debug, thiserror::Error, Serialize)]
 #[error("{message}")]
@@ -116,6 +124,23 @@ fn error_causes(error: &(dyn std::error::Error + 'static)) -> Vec<String> {
 
 impl From<CoreError> for BridgeError {
     fn from(error: CoreError) -> Self {
+        if let CoreError::DevelopmentEnvironment {
+            task_id,
+            message,
+            awaiting_approval,
+        } = error
+        {
+            let mut bridge_error = Self::new(
+                if awaiting_approval {
+                    "direnv_approval"
+                } else {
+                    "development_environment"
+                },
+                message,
+            );
+            bridge_error.task_id = Some(task_id);
+            return bridge_error;
+        }
         let code = if matches!(error, CoreError::TerminalLayoutChanged) {
             "terminal_layout_changed"
         } else if matches!(
@@ -1807,16 +1832,61 @@ impl ShellState {
 
     async fn configure_project_setup(&self, project_path: PathBuf) -> Result<(), BridgeError> {
         let (environment, _, _) = self.preferences.project_environment(&project_path).await?;
-        let setup = environment.map(|environment| shep_core::ProjectSetup {
-            approved: environment.approved_setup_hash.as_deref()
-                == Some(crate::project_environment::hash(environment.setup.as_bytes()).as_str()),
-            script: environment.setup,
+        let direnv = self.direnv_enabled(&project_path).await;
+        let setup = (direnv || environment.is_some()).then(|| {
+            let environment = environment.unwrap_or_default();
+            let approved = environment.approved_setup_hash.as_deref()
+                == Some(crate::project_environment::hash(environment.setup.as_bytes()).as_str());
+            let script = if direnv && environment.setup.trim() == "direnv reload" {
+                String::new()
+            } else {
+                environment.setup
+            };
+            shep_core::ProjectSetup {
+                script,
+                approved,
+                direnv,
+            }
         });
         self.core
             .lock()
             .await
             .set_project_setup(project_path, setup);
         Ok(())
+    }
+
+    async fn direnv_enabled(&self, project_path: &Path) -> bool {
+        self.preferences
+            .value(Some(project_path), SettingKey::Direnv)
+            .await
+            .as_bool()
+            == Some(true)
+    }
+
+    async fn task_environment_status(
+        &self,
+        task_id: String,
+    ) -> Result<Option<String>, BridgeError> {
+        let task_id = TaskId::new(task_id);
+        let (project, worktree) = {
+            let core = self.core.lock().await;
+            (
+                core.task_project_path(&task_id)?,
+                core.task(&task_id)?.worktree_path.clone(),
+            )
+        };
+        let Some(worktree) = worktree else {
+            return Ok(None);
+        };
+        if !self.direnv_enabled(&project).await {
+            return Ok(None);
+        }
+        Ok(
+            shep_core::worktree_environment::require_direnv(&worktree, &task_id)
+                .await
+                .err()
+                .map(|error| error.to_string()),
+        )
     }
 
     pub async fn start_task(
@@ -3383,6 +3453,47 @@ impl ShellState {
         self.launch_terminal(record, columns, rows).await
     }
 
+    async fn open_setup_terminal(&self, task_id: String) -> Result<SetupTerminal, BridgeError> {
+        let _guard = self.terminal_lifecycle.lock().await;
+        let task_id = TaskId::new(task_id);
+        let (project_id, project, cwd) = {
+            let core = self.core.lock().await;
+            let project_id = core.task(&task_id)?.project_id.clone();
+            let project = core.project_path(&project_id)?;
+            let cwd = core.workspace_directory(&project_id, Some(&task_id))?;
+            (project_id, project, cwd)
+        };
+        if !self.direnv_enabled(&project).await {
+            return Err(BridgeError::new(
+                "development_environment",
+                "This project does not use direnv.",
+            ));
+        }
+        let current = self.core.lock().await.terminal_list(&project_id);
+        if let Some(existing) = current.terminals.iter().find(|terminal| {
+            terminal.id.starts_with(ENVIRONMENT_TERMINAL_PREFIX)
+                && terminal.task_id.as_deref() == Some(task_id.as_str())
+                && terminal.ended_at.is_none()
+        }) {
+            return Ok(SetupTerminal {
+                terminal_id: existing.id.clone(),
+                list: current,
+            });
+        }
+        let terminal_id = format!("{ENVIRONMENT_TERMINAL_PREFIX}{}", uuid::Uuid::new_v4());
+        let record = TerminalRecord::project_shared(
+            TerminalId::new(&terminal_id),
+            project_id,
+            "Environment setup",
+            cwd,
+            std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string()),
+            now_millis(),
+        )
+        .for_task(task_id);
+        let list = self.launch_terminal(record, 80, 24).await?;
+        Ok(SetupTerminal { terminal_id, list })
+    }
+
     pub async fn restart_terminal(
         &self,
         terminal_id: String,
@@ -3513,12 +3624,27 @@ impl ShellState {
         rows: u16,
     ) -> Result<TerminalList, BridgeError> {
         let project_id = record.project_id.clone();
+        let mut command = record.command.clone();
+        let mut args = Vec::new();
         if let Some(task_id) = &record.task_id {
-            self.core
-                .lock()
-                .await
-                .touch_archived_worktree(task_id)
-                .await?;
+            let project = {
+                let mut core = self.core.lock().await;
+                core.touch_archived_worktree(task_id).await?;
+                core.project_path(&project_id)?
+            };
+            if record.id.as_str().starts_with(ENVIRONMENT_TERMINAL_PREFIX) {
+                args = vec![
+                    "-c".into(),
+                    "printf '%s\\n' 'Review .envrc, then run: direnv allow .' 'To enter the environment in this terminal, run: exec direnv exec . \"$SHELL\"'; exec \"$1\"".into(),
+                    "shepherd-environment".into(),
+                    command,
+                ];
+                command = "/bin/sh".into();
+            } else if self.direnv_enabled(&project).await {
+                shep_core::worktree_environment::require_direnv(&record.cwd, task_id).await?;
+                args = vec!["exec".into(), ".".into(), command];
+                command = "direnv".into();
+            }
         }
         self.spawn_terminal(
             TerminalSpec {
@@ -3526,8 +3652,8 @@ impl ShellState {
                 columns,
                 rows,
                 cwd: record.cwd.clone(),
-                command: record.command.clone(),
-                args: Vec::new(),
+                command,
+                args,
                 environment: BTreeMap::new(),
             },
             Some(record),
@@ -5110,6 +5236,22 @@ pub mod commands {
             .await
             .promote_terminal(&TerminalId::new(terminal_id))
             .await?)
+    }
+
+    #[tauri::command]
+    pub async fn task_environment_status(
+        state: State<'_, ShellState>,
+        task_id: String,
+    ) -> Result<Option<String>, BridgeError> {
+        state.task_environment_status(task_id).await
+    }
+
+    #[tauri::command]
+    pub async fn open_setup_terminal(
+        state: State<'_, ShellState>,
+        task_id: String,
+    ) -> Result<SetupTerminal, BridgeError> {
+        state.open_setup_terminal(task_id).await
     }
 
     #[tauri::command]

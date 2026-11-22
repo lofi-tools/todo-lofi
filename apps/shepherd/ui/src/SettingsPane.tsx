@@ -120,7 +120,7 @@ function ProjectPreviewServers(props: { value: PreviewService[]; localOverride: 
   </form>
 }
 
-function ProjectEnvironmentSettings(props: { projectId: string }) {
+function ProjectEnvironmentSettings(props: { projectId: string; direnv?: boolean }) {
   const [snapshot, { mutate, refetch }] = createResource(() => props.projectId, projectEnvironment)
   const [draft, setDraft] = createSignal<ProjectEnvironment>()
   const [error, setError] = createSignal('')
@@ -154,8 +154,12 @@ function ProjectEnvironmentSettings(props: { projectId: string }) {
       {(environment) => <>
         <label class="settings__row"><span>Worktree setup script</span><textarea value={environment().setup} onInput={(event) => setDraft({ ...environment(), setup: event.currentTarget.value, approvedSetupHash: null })} /></label>
         <Show when={environment().setup.trim()}>
-          <p class="empty">Runs once in each new task worktree before the agent starts.</p>
-          <Show when={environment().approvedSetupHash === snapshot.latest?.setupHash && environment().setup === snapshot.latest?.current?.setup} fallback={<p>Review and approve this script before starting a task.</p>}><p class="empty">Setup script approved.</p></Show>
+          <Show when={props.direnv && environment().setup.trim() === 'direnv reload'} fallback={<>
+            <p class="empty">Runs once in each new task worktree before the agent starts.</p>
+            <Show when={environment().approvedSetupHash === snapshot.latest?.setupHash && environment().setup === snapshot.latest?.current?.setup} fallback={<p>Review and approve this script before starting a task.</p>}><p class="empty">Setup script approved.</p></Show>
+          </>}>
+            <p class="empty">Shepherd loads direnv directly for Codex and task terminals.</p>
+          </Show>
         </Show>
         <For each={environment().actions}>{(action, index) => <div class="settings__project">
           <label class="settings__row"><span>Action name</span><input value={action.name} onInput={(event) => setDraft({ ...environment(), actions: environment().actions.map((item, position) => position === index() ? { ...item, name: event.currentTarget.value } : item) })} /></label>
@@ -164,7 +168,7 @@ function ProjectEnvironmentSettings(props: { projectId: string }) {
         </div>}</For>
         <button class="project-action" onClick={() => setDraft({ ...environment(), actions: [...environment().actions, { name: '', icon: 'run', command: '' }] })}>Add action</button>
         <button class="project-action" disabled={saving() || JSON.stringify(environment()) === JSON.stringify(snapshot.latest?.current)} onClick={() => void save(environment())}>Save environment</button>
-        <Show when={environment().setup.trim() && environment().setup === snapshot.latest?.current?.setup && environment().approvedSetupHash !== snapshot.latest?.setupHash}>
+        <Show when={environment().setup.trim() && !(props.direnv && environment().setup.trim() === 'direnv reload') && environment().setup === snapshot.latest?.current?.setup && environment().approvedSetupHash !== snapshot.latest?.setupHash}>
           <button class="project-action" disabled={saving()} onClick={() => void save({ ...environment(), approvedSetupHash: snapshot.latest?.setupHash ?? null })}>Approve setup script</button>
         </Show>
       </>}
@@ -676,7 +680,16 @@ export function SettingsPane(props: SettingsPaneProps) {
                         localOverride={Array.isArray(props.preferences?.projectLocal?.[project().path]?.['preview.servers'])}
                         editable={props.preferencesEditable}
                         onSave={(value) => props.onEditPreference('preview.servers', value, projectId)} /></Show>
-                      <Show when={showSetting('worktree setup project actions codex environment')}><ProjectEnvironmentSettings projectId={projectId} /></Show>
+                      <Show when={showSetting('development environment direnv nix')}>
+                        <label class="settings__row settings__row--checkbox"><span>Use direnv for Codex and task terminals</span>
+                          <input type="checkbox"
+                            checked={props.preferences?.projects[project().path]?.['environment.direnv'] ?? false}
+                            disabled={!props.preferencesEditable || props.preferences?.projectLocal?.[project().path]?.['environment.direnv'] !== undefined}
+                            onChange={(event) => void props.onEditPreference('environment.direnv', event.currentTarget.checked, projectId)} />
+                        </label>
+                      </Show>
+                      <Show when={showSetting('worktree setup project actions codex environment')}><ProjectEnvironmentSettings projectId={projectId}
+                        direnv={props.preferences?.projects[project().path]?.['environment.direnv']} /></Show>
                       <Show when={props.preferences}>
                         {(snapshot) => <NumberPreferences preferences={snapshot()} project={project()}
                           editable={props.preferencesEditable} onEdit={props.onEditPreference} query={narrowedQuery()} />}

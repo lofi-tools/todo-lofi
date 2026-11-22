@@ -176,6 +176,14 @@ current layout and give future changes a point of comparison.
   to Project settings. The user can resend from that chat after reviewing or
   correcting the script. Project actions run in task terminals.
   Platform-specific commands use the current platform.
+- Create the task checkout before asking for setup approval. Projects can set
+  `environment.direnv` in `.config/shepherd/settings.json` or Project
+  settings. On those projects, show a message and **Open setup terminal** when
+  the worktree's `.envrc` needs approval. The terminal opens in that checkout
+  so the user can review the file and run `direnv allow .`. Keep the first
+  prompt editable until the user sends it again. Run Codex and regular task
+  terminals through `direnv exec` from the checkout after approval. Treat
+  an imported standalone `direnv reload` as superseded when direnv is enabled.
 - In Preview, offer **Project settings** when the selected project has no
   preview URL. A valid `preview.url` in the project's `.config/shepherd/settings.json`
   overrides the saved URL without changing it. **Settings → Projects** saves or clears that project's loopback

@@ -145,6 +145,8 @@ pub enum SettingKey {
     ShowDotfiles,
     #[serde(rename = "environment")]
     ProjectEnvironment,
+    #[serde(rename = "environment.direnv")]
+    Direnv,
     #[serde(rename = "preview.servers")]
     PreviewServers,
     #[serde(rename = "preview.url")]
@@ -152,7 +154,7 @@ pub enum SettingKey {
 }
 
 impl SettingKey {
-    const ALL: [Self; 14] = [
+    const ALL: [Self; 15] = [
         Self::AgentPriority,
         Self::AgentModelPreferences,
         Self::OnboardingCompleted,
@@ -165,6 +167,7 @@ impl SettingKey {
         Self::Scrollback,
         Self::ShowDotfiles,
         Self::ProjectEnvironment,
+        Self::Direnv,
         Self::PreviewServers,
         Self::PreviewUrl,
     ];
@@ -183,6 +186,7 @@ impl SettingKey {
             Self::Scrollback => "terminal.scrollback_lines",
             Self::ShowDotfiles => "files.show_dotfiles",
             Self::ProjectEnvironment => "environment",
+            Self::Direnv => "environment.direnv",
             Self::PreviewServers => "preview.servers",
             Self::PreviewUrl => "preview.url",
         }
@@ -195,7 +199,7 @@ impl SettingKey {
             Self::OnboardingCompleted => json!(false),
             Self::Theme => json!("system"),
             Self::Density => json!("compact"),
-            Self::ShowArchived | Self::Notifications => json!(false),
+            Self::ShowArchived | Self::Notifications | Self::Direnv => json!(false),
             Self::ShowDotfiles => json!(true),
             Self::SendAccent => json!("Blue"),
             Self::AttachmentBytes => json!(DEFAULT_ATTACHMENT_BYTES),
@@ -212,6 +216,7 @@ impl SettingKey {
                 | Self::AttachmentBytes
                 | Self::Scrollback
                 | Self::ProjectEnvironment
+                | Self::Direnv
                 | Self::PreviewServers
                 | Self::PreviewUrl
         )
@@ -270,6 +275,7 @@ impl SettingKey {
             Self::ShowArchived
             | Self::Notifications
             | Self::ShowDotfiles
+            | Self::Direnv
             | Self::OnboardingCompleted
                 if !value.is_boolean() =>
             {

@@ -5,7 +5,7 @@ async function invoke<T>(command: string, args?: InvokeArgs, options?: InvokeOpt
   try {
     return await nativeInvoke<T>(command, args, options)
   } catch (failure) {
-    reportError(command, failure)
+    if ((failure as BridgeError | null)?.code !== 'direnv_approval') reportError(command, failure)
     throw failure
   }
 }
@@ -913,6 +913,14 @@ export function startTerminal(
   return invoke('start_terminal', { projectId, taskId, columns, rows })
 }
 
+export function taskEnvironmentStatus(taskId: string): Promise<string | null> {
+  return invoke('task_environment_status', { taskId })
+}
+
+export function openSetupTerminal(taskId: string): Promise<{ terminalId: string; list: TerminalList }> {
+  return invoke('open_setup_terminal', { taskId })
+}
+
 export function restartTerminal(terminalId: string, columns: number, rows: number): Promise<TerminalList> {
   return invoke('restart_terminal', { terminalId, columns, rows })
 }
@@ -1341,6 +1349,7 @@ export interface SettingsValues {
   'terminal.scrollback_lines': number
   'files.show_dotfiles': boolean
   environment: ProjectEnvironment | null
+  'environment.direnv': boolean
   'preview.servers': PreviewService[]
   'preview.url': string | null
 }
