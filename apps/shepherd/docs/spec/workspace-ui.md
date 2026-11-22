@@ -173,6 +173,15 @@ current layout and give future changes a point of comparison.
   Files tab and opens the matching worktree file.
   Git and Review file rows expose their change status in words. Diff text is
   a named, keyboard-focusable region.
+- Each project has its own settings pane with the project name and checkout
+  path in the header. **Open config file** appears there when the repository
+  supplies settings. Display **General**, **Worktrees & environment**,
+  **Preview & services**, **Project actions**, and **Approvals** in that order.
+  Align field labels and controls in two shared columns, separate sections
+  with dividers, and use cards for repeatable commands, servers, and actions.
+  Show which sections the repository manages, including partial overrides.
+  Identify inherited defaults by their workspace value. Keep draft status,
+  save controls, and the save shortcut with their section.
 - Project settings include worktree setup and named project actions. Import a
   detected `.codex/environments/environment.toml` into Shepherd's project
   defaults and retain a hash of the source at import. If the source changes,

@@ -129,6 +129,9 @@ test.beforeEach(async ({ context }) => {
           'tasks.show_archived': false,
           'worktree.setup': { useImportedSetup: false, launchWrapper: ['direnv', 'exec', '.'] },
           'attachments.max_file_bytes': 900,
+          ...(options.has('repo-environment') ? {
+            environment: { sourceHash: '', setup: 'repo setup', actions: [{ name: 'Run', icon: 'run', command: 'repo command' }] },
+          } : {}),
         },
       } : {}
       for (const [path, scope] of Object.entries(projectLocal)) {
@@ -2594,7 +2597,14 @@ test('edits structured worktree commands and preserves argument boundaries', asy
   await terminal.getByRole('button', { name: 'Add shell command' }).click()
   await command(terminal, 'zsh', ['-i'])
 
-  const save = section.getByRole('button', { name: 'Save worktree commands' })
+  const alignedControls = [page.getByLabel('Attachment limit (bytes)'), page.getByLabel('Preview URL'),
+    first.getByLabel('Program'), second.getByLabel('Argument 2', { exact: true }), terminal.getByLabel('Recovery instructions')]
+  const controls = await Promise.all(alignedControls.map((control) => control.boundingBox()))
+  const column = controls[0]?.x
+  if (column === undefined) throw new Error('Missing attachment limit control')
+  for (const control of controls) expect(control?.x).toBeCloseTo(column, 0)
+
+  const save = page.getByRole('region', { name: 'Worktrees & environment' }).getByRole('button', { name: 'Save worktree settings' })
   await save.click()
   await expect(save).toBeDisabled()
   const stored = () => page.evaluate(() => JSON.parse(localStorage.getItem('fixture.settings') ?? '{}').projects?.['/tmp/demo']?.['worktree.setup'])
@@ -2625,6 +2635,15 @@ test('opens repository-managed settings in the editor and autosaves editable val
   await page.getByRole('button', { name: 'Settings', exact: true }).click()
   await page.getByRole('button', { name: 'Projects', exact: true }).click()
   await selectProjectSettings(page)
+  const project = page.getByRole('region', { name: 'demo', exact: true })
+  await expect(project.locator('.settings__section-header h4')).toHaveText([
+    'General', 'Worktrees & environment', 'Preview & services', 'Project actions', 'Approvals',
+  ])
+  await expect(project.getByRole('region', { name: 'General' })).toContainText('Partly repo-managed')
+  await expect(project.getByRole('region', { name: 'Worktrees & environment' })).toContainText('Repo-managed')
+  await expect(project.getByRole('region', { name: 'Preview & services' })).toContainText('Partly repo-managed')
+  await expect(project.getByRole('region', { name: 'Project actions' })).not.toContainText('repo-managed')
+  await expect(project.getByRole('region', { name: 'Approvals', exact: true })).not.toContainText('repo-managed')
   await expect(page.getByRole('checkbox', { name: 'Show archived tasks' })).toBeDisabled()
   await expect(page.getByRole('textbox', { name: 'Preview URL' })).toHaveAttribute('readonly', '')
   await expect(page.getByRole('textbox', { name: 'Preview URL' })).toHaveValue('http://localhost:3400/')
@@ -2654,6 +2673,18 @@ test('opens repository-managed settings in the editor and autosaves editable val
   await expect(page.getByText('Saved Theme', { exact: true })).toBeVisible()
 })
 
+test('marks repository-defined project actions as read-only', async ({ page }) => {
+  await page.goto('/?repo-settings&repo-environment')
+  await page.getByRole('button', { name: 'Settings', exact: true }).click()
+  await page.getByRole('button', { name: 'Projects', exact: true }).click()
+  await selectProjectSettings(page)
+  const actions = page.getByRole('region', { name: 'Project actions' })
+  await expect(actions.getByText('Repo-managed', { exact: true })).toBeVisible()
+  await expect(actions.getByLabel('Action command')).toHaveValue('repo command')
+  await expect(actions.getByLabel('Action command')).toHaveAttribute('readonly', '')
+  await expect(actions.getByRole('button', { name: 'Add action' })).toHaveCount(0)
+})
+
 test('saves a project preview URL and loads and reloads a sandboxed page', async ({ page }) => {
   const url = 'http://localhost:1431/preview-fixture'
   let loads = 0
@@ -2678,7 +2709,7 @@ test('saves a project preview URL and loads and reloads a sandboxed page', async
   const setting = page.getByRole('textbox', { name: 'Preview URL' })
   await setting.fill('https://example.com')
   await setting.press('Enter')
-  await expect(page.getByRole('region', { name: 'Projects' }).getByRole('alert')).toContainText('Enter a loopback HTTP or HTTPS URL')
+  await expect(page.getByRole('region', { name: 'Preview & services' }).getByRole('alert')).toContainText('Enter a loopback HTTP or HTTPS URL')
   await setting.fill(url)
   await setting.press('Tab')
   await expect(page.getByText('Saved Preview URL for demo', { exact: true })).toBeVisible()
@@ -5306,31 +5337,33 @@ test('navigates project settings without changing the active project', async ({ 
   await page.getByRole('button', { name: 'Settings', exact: true }).click()
   await page.getByRole('navigation', { name: 'Settings categories' }).getByRole('button', { name: 'Projects', exact: true }).click()
   const projects = page.getByRole('group', { name: 'Project settings' })
-  const panel = page.getByRole('region', { name: 'Projects', exact: true })
-  await expect(panel.getByText('Import all from')).toBeVisible()
-  await expect(panel.getByRole('button', { name: 'Add project' })).toBeVisible()
-  await expect(panel.getByLabel('Preview URL')).toHaveCount(0)
+  const overview = page.getByRole('region', { name: 'Projects', exact: true })
+  const notes = page.getByRole('region', { name: 'notes', exact: true })
+  const demo = page.getByRole('region', { name: 'demo', exact: true })
+  await expect(overview.getByText('Import all from')).toBeVisible()
+  await expect(overview.getByRole('button', { name: 'Add project' })).toBeVisible()
+  await expect(overview.getByLabel('Preview URL')).toHaveCount(0)
   await projects.getByRole('button', { name: 'notes', exact: true }).click()
   await expect(projects.getByRole('button', { name: 'notes', exact: true })).toHaveAttribute('aria-current', 'true')
-  await expect(panel.getByText('/tmp/notes', { exact: true })).toBeVisible()
-  await expect(panel.getByText('Import all from')).toHaveCount(0)
-  await expect(panel.getByRole('button', { name: 'Add project' })).toHaveCount(0)
-  await expect(panel.getByLabel('Preview URL')).toBeVisible()
-  await expect(panel.getByLabel('Show archived tasks')).toBeVisible()
-  await expect(panel.getByLabel('Attachment limit (bytes)')).toBeVisible()
-  await expect(panel.getByLabel('Terminal scrollback (lines)')).toBeVisible()
-  await expect(panel.getByRole('region', { name: 'Saved project approvals' })).toBeVisible()
-  await expect(panel.getByText('Import all from')).toHaveCount(0)
+  await expect(notes.getByText('/tmp/notes', { exact: true })).toBeVisible()
+  await expect(notes.getByText('Import all from')).toHaveCount(0)
+  await expect(notes.getByRole('button', { name: 'Add project' })).toHaveCount(0)
+  await expect(notes.getByLabel('Preview URL')).toBeVisible()
+  await expect(notes.getByLabel('Show archived tasks')).toBeVisible()
+  await expect(notes.getByLabel('Attachment limit (bytes)')).toBeVisible()
+  await expect(notes.getByLabel('Terminal scrollback (lines)')).toBeVisible()
+  await expect(notes.getByRole('region', { name: 'Saved project approvals' })).toBeVisible()
+  await expect(notes.getByText('Import all from')).toHaveCount(0)
   await page.getByRole('navigation', { name: 'Settings categories' }).getByRole('button', { name: 'Projects', exact: true }).click()
-  await expect(panel.getByText('Import all from')).toBeVisible()
-  await expect(panel.getByLabel('Preview URL')).toHaveCount(0)
+  await expect(overview.getByText('Import all from')).toBeVisible()
+  await expect(overview.getByLabel('Preview URL')).toHaveCount(0)
   await projects.getByRole('button', { name: 'demo', exact: true }).click()
-  await expect(panel.getByText('/tmp/demo', { exact: true })).toBeVisible()
-  await expect(panel.getByLabel('Preview URL')).toBeVisible()
-  await expect(panel.getByLabel('Show archived tasks')).toBeVisible()
-  await expect(panel.getByLabel('Attachment limit (bytes)')).toBeVisible()
-  await expect(panel.getByLabel('Terminal scrollback (lines)')).toBeVisible()
-  await expect(panel.getByText('Import all from')).toHaveCount(0)
+  await expect(demo.getByText('/tmp/demo', { exact: true })).toBeVisible()
+  await expect(demo.getByLabel('Preview URL')).toBeVisible()
+  await expect(demo.getByLabel('Show archived tasks')).toBeVisible()
+  await expect(demo.getByLabel('Attachment limit (bytes)')).toBeVisible()
+  await expect(demo.getByLabel('Terminal scrollback (lines)')).toBeVisible()
+  await expect(demo.getByText('Import all from')).toHaveCount(0)
   await page.getByRole('button', { name: 'Settings', exact: true }).click()
   await expect(page.getByRole('button', { name: 'demo', exact: true })).toHaveAttribute('aria-current', 'true')
 })
@@ -5358,11 +5391,24 @@ test('imports a Codex environment and offers updates without overwriting edits',
   await page.getByRole('button', { name: 'Settings', exact: true }).click()
   await page.getByRole('navigation', { name: 'Settings categories' }).getByRole('button', { name: 'Projects', exact: true }).click()
   await selectProjectSettings(page)
-  const environment = page.getByRole('region', { name: 'Project environment' })
-  await expect(environment.getByLabel('Worktree setup script')).toHaveValue('install dependencies')
-  await environment.getByLabel('Action command').fill('npm run dev')
-  await environment.getByRole('button', { name: 'Save environment' }).click()
-  await expect(environment.getByLabel('Action command')).toHaveValue('npm run dev')
+  const worktree = page.getByRole('region', { name: 'Worktrees & environment' })
+  const actions = page.getByRole('region', { name: 'Project actions' })
+  const script = worktree.getByLabel('Worktree setup script')
+  const storedEnvironment = () => page.evaluate(() =>
+    JSON.parse(localStorage.getItem('fixture.settings') ?? '{}').projects?.['/tmp/demo']?.environment)
+  await expect(script).toHaveValue('install dependencies')
+  await expect(actions).toContainText('Imported from Codex')
+  await script.fill('install deps locally')
+  await actions.getByLabel('Action command').fill('npm run dev')
+  await actions.getByRole('button', { name: 'Save actions' }).click()
+  await expect.poll(storedEnvironment).toMatchObject({
+    setup: 'install dependencies', actions: [{ name: 'Run', command: 'npm run dev' }],
+  })
+  await expect(script).toHaveValue('install deps locally')
+  await worktree.getByRole('button', { name: 'Save worktree settings' }).click()
+  await expect.poll(storedEnvironment).toMatchObject({
+    setup: 'install deps locally', actions: [{ name: 'Run', command: 'npm run dev' }],
+  })
   await page.evaluate(() => localStorage.setItem('fixture.codexEnvironment', JSON.stringify({
     sourceHash: 'second', setup: 'new setup',
     actions: [{ name: 'Run', icon: 'run', command: 'npm start' }],
@@ -5371,10 +5417,10 @@ test('imports a Codex environment and offers updates without overwriting edits',
   await page.getByRole('button', { name: 'Settings', exact: true }).click()
   await page.getByRole('navigation', { name: 'Settings categories' }).getByRole('button', { name: 'Projects', exact: true }).click()
   await selectProjectSettings(page)
-  await expect(environment.getByLabel('Action command')).toHaveValue('npm run dev')
-  await environment.getByRole('button', { name: 'Update from Codex' }).click()
-  await expect(environment.getByLabel('Worktree setup script')).toHaveValue('new setup')
-  await expect(environment.getByRole('button', { name: 'Save environment' })).toBeDisabled()
+  await expect(actions.getByLabel('Action command')).toHaveValue('npm run dev')
+  await actions.getByRole('button', { name: 'Update from Codex' }).click()
+  await expect(script).toHaveValue('new setup')
+  await expect(actions.getByRole('button', { name: 'Save actions' })).toBeDisabled()
 })
 
 test('runs a project action in a new task terminal', async ({ page }) => {
