@@ -357,7 +357,9 @@ current layout and give future changes a point of comparison.
   icons with light strokes. The text and icons share a colour. Use muted text
   for unselected projects and slightly brighter text for the selected project.
   Unselected rows rest on the sidebar's background with a transparent fill.
-  The selected row has a raised fill and no visible border. On devices with
+  A selected project has a raised fill when it stands in for the open chat.
+  When the active chat has its own visible row, give that row a stronger fill
+  and weight and use a quieter project label with no persistent fill. On devices with
   hover, reveal Compose when the pointer is over the row or a row button has
   keyboard focus. Compose opens a draft in that project.
 - Show task rows beneath the selected project only when more than one task is
@@ -457,7 +459,9 @@ current layout and give future changes a point of comparison.
   carries a small icon before its text: a git branch and Zed's worktree mark.
   Label the task checkout as Worktree or Main checkout, and leave space below
   the row. The branch truncates; the worktree path omits the project prefix.
-- Keep the header to the title, adapter notes and **Cancel turn**. Put **Show
+- Show the project name and chat title separated by a slash in the conversation
+  header. Give the project name a muted colour. Keep the other header content
+  to adapter notes and **Cancel turn**. Put **Show
   diagnostics** and **Delete task…** behind a trailing ⋯ menu that closes on a
   second click, an outside click or Escape. Diagnostics open as a card at the
   top of the conversation pane instead of a permanent disclosure, and the ⋯

@@ -7,6 +7,7 @@ interface ProjectRowProps {
   project: ProjectSnapshot
   homeDirectory?: string
   selected: boolean
+  containsActiveChat: boolean
   expanded: boolean
   pending: boolean
   showArchived: boolean
@@ -65,7 +66,7 @@ export function ProjectRow(props: ProjectRowProps) {
     <div
       ref={row}
       class="project-row"
-      classList={{ 'project-row--selected': props.selected }}
+      classList={{ 'project-row--selected': props.selected, 'project-row--active-chat': props.containsActiveChat }}
       onPointerEnter={(event) => {
         if (event.pointerType === 'mouse' && !document.activeElement?.closest('.project-menu')) openMenu(false)
       }}

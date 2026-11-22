@@ -3317,6 +3317,13 @@ test('reports a failed task open and retries instead of staying on Opening task'
 test('shows the task branch and worktree below the composer and marks unread output', async ({ page }) => {
   await page.goto('/?two-tasks')
   const chat = page.getByRole('region', { name: 'Task chat' })
+  await expect(chat.locator('.chat__heading')).toHaveText('demo / Ship it')
+  const projectRow = page.locator('[data-project-id="project-1"] .project-row')
+  await page.getByLabel('Prompt').focus()
+  await expect(projectRow).toHaveCSS('background-color', 'rgba(0, 0, 0, 0)')
+  const activeChat = page.locator('.task[aria-current="true"]')
+  await expect(activeChat).toContainText('Ship it')
+  await expect(activeChat).toHaveCSS('font-weight', '600')
   await expect(chat.getByTitle('Branch shepherd/ship-it')).toHaveText('shepherd/ship-it')
   await expect(chat.getByTitle('Checkout /tmp/demo/.git/shepherd/worktrees/ship-it'))
     .toHaveText('Worktree: .git/shepherd/worktrees/ship-it')

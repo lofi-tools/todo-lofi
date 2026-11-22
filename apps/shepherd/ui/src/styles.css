@@ -728,7 +728,7 @@ textarea {
   color: var(--text-secondary);
 }
 
-.project-row--selected,
+.project-row--selected:not(.project-row--active-chat),
 .project-row:hover {
   --project-row-background: var(--surface-raised);
   background: var(--project-row-background);
@@ -977,7 +977,8 @@ textarea {
 
 .task[aria-current='true'] {
   border-color: var(--border);
-  background: var(--surface-raised);
+  background: var(--prompt-card);
+  font-weight: 600;
 }
 
 .task__title {
@@ -1553,13 +1554,32 @@ button.pool__agent-label { padding: 0; border: 0; background: transparent; color
   overflow-wrap: anywhere;
 }
 
-.chat__title {
+.chat__heading {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
   flex: 1;
   min-width: 0;
+}
+
+.chat__project,
+.chat__title {
   overflow: hidden;
-  font-weight: 600;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.chat__project,
+.chat__heading-separator {
+  color: var(--text-muted);
+}
+
+.chat__project {
+  max-width: 40%;
+}
+
+.chat__title {
+  font-weight: 600;
 }
 
 .chat__workspace-details {

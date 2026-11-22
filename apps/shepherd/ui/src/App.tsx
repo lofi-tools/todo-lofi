@@ -1334,7 +1334,6 @@ export function App() {
       })
     })
   }
-  const showsChatTitle = () => !!workspace()
   const canQueuePrompt = () => {
     const state = workspace()?.task.state
     return !!state && LIVE_STATES.includes(state) && !cancellingTurn()
@@ -2920,6 +2919,7 @@ export function App() {
                       project={project}
                       homeDirectory={homeDirectory()}
                       selected={project.id === selectedProjectId()}
+                      containsActiveChat={listed().some((task) => task.id === selectedTaskId())}
                       expanded={listed().length > 0}
                       pending={pending()}
                       showArchived={showsArchived(project.id)}
@@ -3010,10 +3010,12 @@ export function App() {
           <Show when={workspace()}>
             {(current) => (
               <header class="pane-header">
-                <Show when={showsChatTitle()}>
-                  <span class="chat__title"><SearchMark text={current().task.title}
+                <div class="chat__heading">
+                  <span class="chat__project" title={current().project.name}>{current().project.name}</span>
+                  <span class="chat__heading-separator">{' / '}</span>
+                  <span class="chat__title" title={current().task.title}><SearchMark text={current().task.title}
                     match={searchJump()?.taskId === current().task.id && searchJump()?.snippet.field === 'task' ? searchJump()?.snippet.matched : undefined} /></span>
-                </Show>
+                </div>
                 <Show when={current().capabilities?.unreviewedTools}>
                   <span class="chat__adapter" title="Pi's tools run under Pi's configuration; Shepherd cannot approve them">unreviewed tools</span>
                 </Show>
