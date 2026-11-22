@@ -163,7 +163,6 @@ interface TerminalPaneProps {
   setupTerminalRequest?: { id: string }
   launchingTaskId?: string
   freebuffFront: boolean
-  freebuffFocused: boolean
   freebuffAttention: boolean
   onOpenFreebuff: () => void
 }
@@ -766,7 +765,7 @@ export function TerminalPane(props: TerminalPaneProps) {
         </Show>
       }>
         <div class="terminal-tree-root">
-          <TerminalTree node={root()!} terminal={terminal} paneVisible={paneVisible} active={props.freebuffFocused ? null : active()} shown={props.shown} select={setSelectedId} focusRequest={focusRequest()} onTerminalFocus={props.onTerminalFocus}
+          <TerminalTree node={root()!} terminal={terminal} paneVisible={paneVisible} shown={props.shown} select={setSelectedId} focusRequest={focusRequest()} onTerminalFocus={props.onTerminalFocus}
             restart={restart} measure={(id, size) => measuredSizes.set(id, size)} path={[]} resize={resizeSplit} detach={detach} stop={(id) => void run(() => bridge.closeTerminal(id))} split={splitPane} beginDrag={beginDrag} moveWithKeyboard={moveWithKeyboard} pending={pending()}
             share={share} />
           <Show when={terminalDrag()}>{(drop) => <div class="terminal-layout-preview" aria-hidden="true"><TerminalLayoutPreview node={moveTerminal(root(), drop().source, drop().target, drop().edge)} source={drop().source} paneVisible={paneVisible} /></div>}</Show>
@@ -935,7 +934,6 @@ interface TerminalTreeProps {
   resize: (path: SplitPath, ratio: number) => void
   terminal: TerminalLookup
   paneVisible: (id: string) => boolean
-  active: string | null
   shown: boolean
   select: (id: string) => void
   onTerminalFocus: (id: string | null) => void
@@ -986,7 +984,7 @@ function TerminalTree(props: TerminalTreeProps) {
       }>
         {(entry) => (
           <div class="terminal-pane__slot" data-terminal-id={entry().id}>
-          <section class="terminal-tile" classList={{ 'terminal-tile--active': entry().id === props.active }}
+          <section class="terminal-tile"
             aria-label={entry().title} aria-description={entry().scope === 'project' ? 'Shared terminal' : 'Task terminal'}
             onFocusIn={() => props.select(entry().id)}>
             <div ref={header} class="terminal-pane__bar">

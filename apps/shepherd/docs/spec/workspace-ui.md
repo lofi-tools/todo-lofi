@@ -95,6 +95,7 @@ current layout and give future changes a point of comparison.
   Show ACP terminals for the selected task as interactive **agent: <title>**
   panes. Use the same terminal input and a close control that stops the process
   and removes the pane. Released agent panes disappear when the turn settles.
+  Terminal input focus accents the outer pane border, including its header.
   Show the project's standalone Freebuff session as one **Freebuff** row in the
   Terms list with its live or ended state and an attention dot when it exits while
   another agent is in front. An ended terminal has an icon-only **Restart**
@@ -440,8 +441,8 @@ current layout and give future changes a point of comparison.
   shows its exit code and a header **Restart** icon, and a **Freebuff** row in the Terminals
   tab brings the running session back to the front. The conversation terminal
   uses the same rounded border as the terminal panes, with an accent border
-  while its input is focused and a muted border otherwise. Its focus highlight
-  and the terminal pane's active highlight are mutually exclusive. Other unavailable agents
+  while its input is focused and a muted border otherwise. Only the focused
+  terminal can show that accent. Other unavailable agents
   are disabled until their integrations are ready.
 - The planned [integrated Freebuff agent](./freebuff-adapter.md) is a separate
   picker choice that uses the normal task conversation; retain the standalone

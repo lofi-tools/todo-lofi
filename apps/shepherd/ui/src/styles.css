@@ -1053,9 +1053,6 @@ textarea {
   border-radius: 6px;
 }
 
-.chat__terminal:has(.terminal-view:focus-within) { border-color: var(--accent); }
-.chat__terminal .terminal-view:focus-within .terminal-view__canvas { outline: none; }
-
 .chat__terminal > .terminal-view {
   flex: 1;
   min-height: 0;
@@ -3137,11 +3134,6 @@ button.pool__agent-label { padding: 0; border: 0; background: transparent; color
   outline: none;
 }
 
-.terminal-view:focus-within .terminal-view__canvas {
-  outline: 1px solid var(--accent);
-  outline-offset: 2px;
-}
-
 .terminal-view__input {
   position: absolute;
   top: 8px;
@@ -3694,7 +3686,8 @@ button.pool__agent-label { padding: 0; border: 0; background: transparent; color
   cursor: default;
 }
 
-.terminal-tile--active {
+.terminal-tile:has(.terminal-view:focus-within),
+.chat__terminal:has(.terminal-view:focus-within) {
   border-color: var(--accent);
 }
 

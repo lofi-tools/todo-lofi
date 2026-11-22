@@ -3438,7 +3438,7 @@ export function App() {
                   transcript={workspace()?.transcript}
                   agentTerminals={workspace()?.task.id === selectedTaskId() && workspace()?.capabilities?.agentTerminals ? workspace()?.agentTerminals : undefined}
                   listEvent={terminalListEvent()} setupTerminalRequest={setupTerminalRequest()} shown={!settingsOpen() && inspectorTab() === 'terminals'}
-                  freebuffFront={!!freebuffProjectId()} freebuffFocused={!!freebuffTerminal() && focusedTerminal() === freebuffTerminal()?.id} freebuffAttention={freebuffAttention()}
+                  freebuffFront={!!freebuffProjectId()} freebuffAttention={freebuffAttention()}
                   onOpenFreebuff={() => {
                     const projectId = selectedProjectId()
                     if (projectId) void openFreebuff(projectId)
