@@ -3420,6 +3420,31 @@ implemented; no public deployment exists yet.
 
 ---
 
+## Explore later
+
+### Copy-on-write worktrees
+
+Explore ways for each task to have a full, independently writable checkout
+while sharing the disk blocks for unchanged files.
+
+- [ ] **Check native Git support.** Follow the
+  [`git worktree add --reflink` proposal](https://gitlist.dev/t/65762).
+  Find which released Git versions, if any, support it and how to detect
+  support at runtime. The local Git 2.54.0 did not expose the flag.
+- [ ] **Prototype filesystem cloning.** Try same-volume APFS cloning on macOS
+  from a clean checkout of the requested base commit. Evaluate btrfs and XFS
+  reflinks on Linux and a regular Git checkout when cloning is unavailable.
+  Compare with [git-cow](https://github.com/gabrielkoerich/git-cow).
+- [ ] **Compare selective cloning.** Test copying only explicitly selected
+  ignored dependencies or build caches with copy-on-write, as
+  [Worktrunk does](https://worktrunk.dev/step/#copy-on-write). Check whether the
+  tools can reuse those files at a new path. Keep checkout-specific and
+  sensitive state out of the seed.
+- [ ] **Measure savings and verify isolation.** Compare setup time and
+  additional allocated disk space with normal checkout and worktree reuse, on
+  both `todo-lofi` and a larger repo. Verify that edits, renames, cleanup, and
+  interrupted creation leave the main checkout and other task worktrees intact.
+
 ## Parallel work rules
 
 - S0 must finish before any UI or adapter work.
