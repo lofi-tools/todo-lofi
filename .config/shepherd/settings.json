@@ -9,10 +9,7 @@
           "command": ["direnv", "allow", "."]
         }
       ],
-      "launchWrapper": ["direnv", "exec", "."],
-      "setupTerminal": {
-        "name": "Development environment setup"
-      }
+      "launchWrapper": ["direnv", "exec", "."]
     }
   }
 }

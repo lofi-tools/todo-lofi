@@ -172,7 +172,7 @@ function worktreeSetupDraft(value?: WorktreeSetup | null): WorktreeSetupDraft {
     readinessCheck: readinessCheck && { ...readinessCheck, command: formatWorktreeCommand(readinessCheck.command) },
     launchWrapper: launchWrapper?.length ? formatWorktreeCommand(launchWrapper) : undefined,
     setupTerminal: setupTerminal && {
-      ...setupTerminal,
+      instructions: setupTerminal.instructions,
       command: setupTerminal.command?.length ? formatWorktreeCommand(setupTerminal.command) : undefined,
     },
   }
@@ -242,7 +242,6 @@ function createWorktreeSetupEditor(props: {
     })
     const { readinessCheck, launchWrapper, setupTerminal, useImportedSetup } = configuration()
     if (readinessCheck && !readinessCheck.name.trim()) throw new Error('Enter a name for the readiness check.')
-    if (setupTerminal && !setupTerminal.name.trim()) throw new Error('Enter a name for the setup terminal.')
     const value: WorktreeSetup = {
       useImportedSetup,
       afterCheckout: afterCheckout.length ? afterCheckout : undefined,
@@ -335,11 +334,9 @@ function WorktreeSetupSettings(props: {
       <legend>Setup terminal</legend>
       <Show when={configuration().setupTerminal} fallback={
         <Show when={!readOnly()} fallback={<p class="empty">Uses the default setup terminal.</p>}>
-          <button type="button" class="project-action" onClick={() => update({ setupTerminal: { name: '' } })}>Customize setup terminal</button>
+          <button type="button" class="project-action" onClick={() => update({ setupTerminal: {} })}>Customize setup terminal</button>
         </Show>
       }>{(terminal) => <>
-        <label class="settings__row"><span>Name</span><input value={terminal().name} readOnly={readOnly()}
-          onInput={(event) => update({ setupTerminal: { ...terminal(), name: event.currentTarget.value } })} /></label>
         <label class="settings__row"><span>Recovery instructions</span>
           <textarea value={terminal().instructions ?? ''} readOnly={readOnly()}
             onInput={(event) => update({ setupTerminal: { ...terminal(), instructions: event.currentTarget.value } })} />

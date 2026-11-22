@@ -217,8 +217,9 @@ current layout and give future changes a point of comparison.
   continues. Successful checkout steps are recorded and skipped on retry.
   The optional `readinessCheck` runs before loading the environment.
   Run configured setup in a task terminal added to the Terminals list without
-  changing the inspector tab. The optional `setupTerminal` customizes its
-  name, shell command, and recovery instructions. A failure leaves the same
+  changing the inspector tab. It is titled **Development environment setup**.
+  The optional `setupTerminal` customizes its shell command and recovery
+  instructions. A failure leaves the same
   terminal open so the user can fix the issue and retry. Preserve an unsent
   prompt and offer **Open setup terminal**.
   `launchWrapper` loads the exported environment once for the active worktree.

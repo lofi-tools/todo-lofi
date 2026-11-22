@@ -943,7 +943,7 @@ export interface WorktreeSetup {
   afterCheckout?: Array<{ name: string; command: string[]; required?: boolean }>
   readinessCheck?: { name: string; command: string[] }
   launchWrapper?: string[]
-  setupTerminal?: { name: string; command?: string[]; instructions?: string }
+  setupTerminal?: { command?: string[]; instructions?: string }
   useImportedSetup?: boolean
 }
 

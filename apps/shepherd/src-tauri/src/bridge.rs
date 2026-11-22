@@ -311,10 +311,12 @@ pub(crate) struct TerminalHost {
 }
 
 #[cfg(unix)]
+const WORKTREE_SETUP_TERMINAL_TITLE: &str = "Development environment setup";
+
+#[cfg(unix)]
 #[derive(Clone)]
 struct WorktreeSetupTerminal {
     id: TerminalId,
-    title: String,
     checkout: PathBuf,
     fingerprint: String,
     directory: Arc<tempfile::TempDir>,
@@ -629,7 +631,7 @@ impl TerminalHost {
                 command: String::new(),
                 cwd: setup.checkout.clone(),
                 live: self.setup_is_running(&setup.id).await,
-                setup_title: Some(setup.title.clone()),
+                setup_title: Some(WORKTREE_SETUP_TERMINAL_TITLE.into()),
             });
         }
         launches.extend(
@@ -1049,11 +1051,6 @@ impl TerminalHost {
         self.observe(terminal, None, None, tracked, false);
         let entry = WorktreeSetupTerminal {
             id,
-            title: setup
-                .setup_terminal
-                .as_ref()
-                .map(|terminal| terminal.name.clone())
-                .unwrap_or_else(|| "Worktree setup".into()),
             checkout: checkout.to_owned(),
             fingerprint,
             directory,
@@ -4105,7 +4102,7 @@ impl ShellState {
                     && self.terminals.setup_is_running(&setup.id).await
                     && let Err(error) = self.terminals.stop_terminal_process(setup.id.clone()).await
                 {
-                    errors.push(format!("{}: {error}", setup.title));
+                    errors.push(format!("{WORKTREE_SETUP_TERMINAL_TITLE}: {error}"));
                 }
             }
         }

@@ -257,9 +257,9 @@ esac
                 "setup-fixture".into(),
             ],
             setup_terminal: Some(SetupTerminal {
-                name: "Setup".into(),
                 command: vec!["/bin/sh".into(), "-c".into(), "if [ ! -f fixed ]; then IFS= read -r fix && touch \"$fix\"; fi".into()],
                 instructions: "Enter the fix".into(),
+                ..SetupTerminal::default()
             }),
             ..WorktreeSetup::default()
         };

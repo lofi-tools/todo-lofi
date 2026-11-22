@@ -32,10 +32,11 @@ fn required() -> bool {
     true
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct SetupTerminal {
-    pub name: String,
+    #[serde(default, rename = "name", skip_serializing)]
+    pub legacy_name: Option<String>,
     #[serde(default)]
     pub command: Vec<String>,
     #[serde(default)]
@@ -65,9 +66,7 @@ impl WorktreeSetup {
                 })
             && (self.launch_wrapper.is_empty() || valid_command(&self.launch_wrapper))
             && self.setup_terminal.as_ref().is_none_or(|terminal| {
-                !terminal.name.trim().is_empty()
-                    && terminal.name.len() <= 200
-                    && terminal.instructions.len() <= 8192
+                terminal.instructions.len() <= 8192
                     && !terminal.instructions.contains('\0')
                     && (terminal.command.is_empty() || valid_command(&terminal.command))
             })
@@ -304,6 +303,25 @@ fn environment_error(task_id: &TaskId, message: String, setup: &WorktreeSetup) -
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legacy_terminal_names_do_not_affect_setup() -> Result<(), Box<dyn std::error::Error>> {
+        let setup = serde_json::json!({
+            "setupTerminal": {"command": ["zsh", "-i"], "instructions": "Try again"}
+        });
+        let mut legacy = setup.clone();
+        legacy["setupTerminal"]["name"] = serde_json::json!("Old setup name");
+        let current: WorktreeSetup = serde_json::from_value(setup)?;
+        let legacy: WorktreeSetup = serde_json::from_value(legacy)?;
+        assert!(current.validate() && legacy.validate());
+        assert_eq!(current.fingerprint()?, legacy.fingerprint()?);
+        assert!(
+            serde_json::to_value(legacy)?["setupTerminal"]
+                .get("name")
+                .is_none()
+        );
+        Ok(())
+    }
 
     #[tokio::test]
     async fn keeps_setup_output_and_retries_only_the_required_step()

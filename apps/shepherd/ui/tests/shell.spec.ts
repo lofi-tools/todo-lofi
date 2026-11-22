@@ -1478,7 +1478,7 @@ test.beforeEach(async ({ context }) => {
             const task = tasks.find((candidate) => candidate.id === args.taskId)
             if (!task?.worktreePath || task.id === 'task-1') return []
             return [
-              { id: 'terminal-setup', command: '', cwd: task.worktreePath, live: true, setupTitle: 'Environment setup' },
+              { id: 'terminal-setup', command: '', cwd: task.worktreePath, live: true, setupTitle: 'Development environment setup' },
               ...(sentPrompts.length ? [{
                 id: 'terminal-agent-launch', command: 'codex app-server',
                 cwd: task.worktreePath, live: true,
@@ -2399,13 +2399,13 @@ test('shows configured setup runs and the foreground agent terminal', async ({ p
   expect(await page.evaluate(() => window.__sentPrompts)).toEqual([])
   await expect(files).toHaveAttribute('aria-selected', 'true')
   await page.getByRole('tab', { name: 'Terminals' }).click()
-  await expect(page.getByRole('list', { name: 'Terminals' }).getByRole('button', { name: 'Environment setup Running' })).toBeVisible()
+  await expect(page.getByRole('list', { name: 'Terminals' }).getByRole('button', { name: 'Development environment setup Running' })).toBeVisible()
   await files.click()
   await composer.getByRole('button', { name: 'Open setup terminal' }).click()
   await expect(page.getByRole('tab', { name: 'Terminals' })).toHaveAttribute('aria-selected', 'true')
-  const setup = page.getByRole('region', { name: 'Environment setup' })
+  const setup = page.getByRole('region', { name: 'Development environment setup' })
   await expect(setup).toBeVisible()
-  await expect(page.getByRole('list', { name: 'Terminals' }).getByRole('button', { name: 'Environment setup Running' })).toBeVisible()
+  await expect(page.getByRole('list', { name: 'Terminals' }).getByRole('button', { name: 'Development environment setup Running' })).toBeVisible()
   const runs = page.locator('.terminal-setup-runs')
   await expect(runs).toContainText('Waiting for the project configuration')
   await page.evaluate(() => localStorage.setItem('fixture.setupReady', 'true'))
@@ -2414,7 +2414,7 @@ test('shows configured setup runs and the foreground agent terminal', async ({ p
   const agent = page.getByRole('list', { name: 'Terminals' }).getByRole('button', { name: 'Agent launch Running' })
   await agent.click()
   await expect(page.getByRole('region', { name: 'Agent launch terminal' })).toContainText('codex app-server')
-  await page.getByRole('list', { name: 'Terminals' }).getByRole('button', { name: 'Environment setup Running' }).click()
+  await page.getByRole('list', { name: 'Terminals' }).getByRole('button', { name: 'Development environment setup Running' }).click()
   await expect(setup).toBeVisible()
 })
 
@@ -2605,7 +2605,7 @@ test('edits structured worktree commands and preserves argument boundaries', asy
   await readinessCommand.fill("test -f 'path with spaces'")
   await wrapperCommand.fill('direnv exec .')
   await terminal.getByRole('button', { name: 'Customize setup terminal' }).click()
-  await terminal.getByLabel('Name', { exact: true }).fill('Development setup')
+  await expect(terminal.getByLabel('Name', { exact: true })).toHaveCount(0)
   await terminal.getByLabel('Recovery instructions').fill('Fix the command and retry.')
   await shellCommand.fill('zsh -i')
 
@@ -2626,7 +2626,7 @@ test('edits structured worktree commands and preserves argument boundaries', asy
     ],
     readinessCheck: { name: 'Check config', command: ['test', '-f', 'path with spaces'] },
     launchWrapper: ['direnv', 'exec', '.'],
-    setupTerminal: { name: 'Development setup', instructions: 'Fix the command and retry.', command: ['zsh', '-i'] },
+    setupTerminal: { instructions: 'Fix the command and retry.', command: ['zsh', '-i'] },
   })
   await page.reload()
   await page.getByRole('button', { name: 'Settings', exact: true }).click()
