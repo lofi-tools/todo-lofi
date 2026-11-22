@@ -1192,28 +1192,41 @@ function TerminalCanvas(props: { terminalId: string; shown: boolean; readOnly?: 
 
   function draw(changedRows: Iterable<number> | null) {
     const current = frame
-    if (!canvas || !current) return
+    if (!canvas || !container || !current) return
     const context = canvas.getContext('2d')
     if (!context) return
 
     const ratio = window.devicePixelRatio || 1
-    const width = Math.ceil(current.columns * cellWidth)
-    const height = current.rows * LINE_HEIGHT
-    const pixelWidth = Math.ceil(width * ratio)
-    const pixelHeight = Math.ceil(height * ratio)
+    const pixelWidth = Math.ceil(current.columns * cellWidth * ratio)
+    const pixelHeight = Math.ceil(current.rows * LINE_HEIGHT * ratio)
+    const width = pixelWidth / ratio
+    const height = pixelHeight / ratio
     if (canvas.width !== pixelWidth || canvas.height !== pixelHeight) {
       canvas.width = pixelWidth
       canvas.height = pixelHeight
       changedRows = null
     }
+
+    // Match the bitmap to the CSS size and align its origin to the display grid
+    // so a fractional scale or split position doesn't resample the entire image.
+    const bounds = container.getBoundingClientRect()
+    const style = getComputedStyle(container)
+    const snap = (position: number) => Math.round(position * ratio) / ratio
+    const insetLeft = snap(bounds.left + parseFloat(style.paddingLeft)) - bounds.left
+    const insetTop = snap(bounds.top + parseFloat(style.paddingTop)) - bounds.top
+    canvas.style.left = `${insetLeft}px`
+    canvas.style.top = `${insetTop}px`
     canvas.style.width = `${width}px`
     canvas.style.height = `${height}px`
     if (input) {
-      const left = `${8 + current.cursorColumn * cellWidth}px`
-      const top = `${8 + current.cursorRow * LINE_HEIGHT}px`
-      const moved = input.style.left !== left || input.style.top !== top
-      input.style.left = left
-      input.style.top = top
+      const left = insetLeft + current.cursorColumn * cellWidth
+      const top = insetTop + current.cursorRow * LINE_HEIGHT
+      const moved = !input.style.left || Math.abs(parseFloat(input.style.left) - left) > 0.001 ||
+        Math.abs(parseFloat(input.style.top) - top) > 0.001
+      if (moved) {
+        input.style.left = `${left}px`
+        input.style.top = `${top}px`
+      }
       if (linux && moved && !composing && !input.value && document.activeElement === input) {
         // WebKitGTK reports the previous IME caret after CSS-only moves.
         input.value = ' '
@@ -1232,7 +1245,7 @@ function TerminalCanvas(props: { terminalId: string; shown: boolean; readOnly?: 
       const y = row * LINE_HEIGHT
       const start = row * columns
       context.fillStyle = paintColors.background
-      context.fillRect(0, y, width, LINE_HEIGHT)
+      context.fillRect(0, snap(y), width, (row === current.rows - 1 ? height : snap(y + LINE_HEIGHT)) - snap(y))
       for (let column = 0; column < columns; column++) {
         const cell = current.cells[start + column]
         if (cell.background === paintColors.backgroundValue) continue
@@ -1256,7 +1269,7 @@ function TerminalCanvas(props: { terminalId: string; shown: boolean; readOnly?: 
         if (cell.text && cell.text !== ' ') {
           const font = `${cell.italic ? 'italic ' : ''}${cell.bold ? 'bold ' : ''}${FONT}`
           if (context.font !== font) context.font = font
-          context.fillText(cell.text, x, y + 1, width)
+          context.fillText(cell.text, snap(x), snap(y + 1), width)
         }
         if (cell.linked || cell.underline) context.fillRect(x, y + LINE_HEIGHT - 2, width, 1)
         if (cell.strikeout) context.fillRect(x, y + Math.floor(LINE_HEIGHT / 2), width, 1)
@@ -1655,11 +1668,12 @@ function TerminalCanvas(props: { terminalId: string; shown: boolean; readOnly?: 
     let resolution = window.matchMedia(`(resolution: ${displayScale}dppx)`)
     const onResolutionChange = () => {
       const nextScale = window.devicePixelRatio || 1
-      if (nextScale === displayScale) return
-      displayScale = nextScale
-      resolution.removeEventListener('change', onResolutionChange)
-      resolution = window.matchMedia(`(resolution: ${displayScale}dppx)`)
-      resolution.addEventListener('change', onResolutionChange)
+      if (nextScale !== displayScale) {
+        displayScale = nextScale
+        resolution.removeEventListener('change', onResolutionChange)
+        resolution = window.matchMedia(`(resolution: ${displayScale}dppx)`)
+        resolution.addEventListener('change', onResolutionChange)
+      }
       scheduleDraw()
     }
     resolution.addEventListener('change', onResolutionChange)
@@ -1779,6 +1793,7 @@ function TerminalCanvas(props: { terminalId: string; shown: boolean; readOnly?: 
 
     let resizeTimer: number | undefined
     const observer = new ResizeObserver(() => {
+      scheduleDraw([])
       window.clearTimeout(resizeTimer)
       resizeTimer = window.setTimeout(() => void applySize(), 75)
     })

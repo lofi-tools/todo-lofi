@@ -1054,11 +1054,6 @@ textarea {
   border-radius: 6px;
 }
 
-.chat__terminal > .terminal-view {
-  flex: 1;
-  min-height: 0;
-}
-
 .chat__terminal-bar {
   flex: none;
   padding: 4px 8px;
@@ -3112,23 +3107,20 @@ button.pool__agent-label { padding: 0; border: 0; background: transparent; color
   font-weight: 600;
 }
 
-.terminal-pane__view {
-  flex: 1;
-  min-height: 220px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: var(--terminal-background);
-  overflow: auto;
-}
-
 .terminal-view {
+  --terminal-inset: 4px;
   position: relative;
-  width: 100%;
-  height: 100%;
-  padding: 8px;
+  flex: 1;
+  min-height: 0;
+  padding: var(--terminal-inset);
+  overflow: hidden;
+  background: var(--terminal-background);
 }
 
 .terminal-view__canvas {
+  position: absolute;
+  top: var(--terminal-inset);
+  left: var(--terminal-inset);
   display: block;
   user-select: none;
   cursor: text;
@@ -3137,8 +3129,8 @@ button.pool__agent-label { padding: 0; border: 0; background: transparent; color
 
 .terminal-view__input {
   position: absolute;
-  top: 8px;
-  left: 8px;
+  top: var(--terminal-inset);
+  left: var(--terminal-inset);
   width: 1px;
   height: 1px;
   padding: 0;

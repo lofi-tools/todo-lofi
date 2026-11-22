@@ -96,8 +96,10 @@ current layout and give future changes a point of comparison.
   panes. Use the same terminal input and a close control that stops the process
   and removes the pane. Released agent panes disappear when the turn settles.
   Terminal input focus accents the outer pane border, including its header.
-  When the display scale changes, redraw the canvas at the new pixel density
-  even if the terminal has no new output. Keep its layout and text size.
+  The terminal surface fills the card below its header with a small inset
+  around the grid. When display scale changes, redraw the canvas at the new
+  pixel density even if the terminal has no new output. Align the bitmap to
+  physical pixels while preserving the terminal's grid and text size.
   Show the project's standalone Freebuff session as one **Freebuff** row in the
   Terms list with its live or ended state and an attention dot when it exits while
   another agent is in front. An ended terminal has an icon-only **Restart**

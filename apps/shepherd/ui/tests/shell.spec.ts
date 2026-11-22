@@ -6562,6 +6562,8 @@ test('redraws an idle terminal when display scaling changes', async ({ page }) =
     return {
       width: bounds.width,
       height: bounds.height,
+      left: bounds.left,
+      top: bounds.top,
       pixelWidth: element.width,
       pixelHeight: element.height,
       scale: element.getContext('2d')?.getTransform().a,
@@ -6578,10 +6580,14 @@ test('redraws an idle terminal when display scaling changes', async ({ page }) =
     } else {
       await page.evaluate(() => (window as unknown as { notifyResolutionChange: () => void }).notifyResolutionChange())
     }
-    await expect.poll(rendering).toEqual({
-      width, height, pixelWidth: Math.ceil(width * scale),
-      pixelHeight: Math.ceil(height * scale), scale,
-    })
+    await expect.poll(async () => (await rendering()).scale).toBe(scale)
+    const bitmap = await rendering()
+    expect(Math.abs(bitmap.width - width)).toBeLessThan(1)
+    expect(Math.abs(bitmap.height - height)).toBeLessThan(1)
+    expect(Math.abs(bitmap.width * scale - bitmap.pixelWidth)).toBeLessThan(0.025)
+    expect(Math.abs(bitmap.height * scale - bitmap.pixelHeight)).toBeLessThan(0.025)
+    expect(Math.abs(bitmap.left * scale - Math.round(bitmap.left * scale))).toBeLessThan(0.025)
+    expect(Math.abs(bitmap.top * scale - Math.round(bitmap.top * scale))).toBeLessThan(0.025)
   }
   await session.detach()
 })
@@ -6599,6 +6605,22 @@ test('accents only the outer border of the terminal receiving input', async ({ p
   await taskInput.press('x')
   await expect(task).toHaveCSS('border-color', focusedBorder)
   await expect(task.locator('.terminal-view__canvas')).toHaveCSS('outline-style', 'none')
+  const surface = task.locator('.terminal-view')
+  await expect(surface).toHaveCSS('padding', '4px')
+  const geometry = await surface.evaluate((element) => {
+    const card = element.parentElement!
+    const header = card.querySelector('.terminal-pane__bar')!.getBoundingClientRect()
+    const outer = card.getBoundingClientRect()
+    const body = element.getBoundingClientRect()
+    const border = parseFloat(getComputedStyle(card).borderBottomWidth)
+    return {
+      top: body.top - header.bottom,
+      right: outer.right - border - body.right,
+      bottom: outer.bottom - border - body.bottom,
+      left: body.left - outer.left - border,
+    }
+  })
+  for (const inset of Object.values(geometry)) expect(inset).toBeCloseTo(0, 1)
   await sharedInput.focus()
   await expect(shared).toHaveCSS('border-color', focusedBorder)
   await expect(task).toHaveCSS('border-color', idleBorder)
