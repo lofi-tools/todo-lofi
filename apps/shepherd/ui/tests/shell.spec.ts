@@ -6448,6 +6448,60 @@ for (const restart of [false, true]) {
   })
 }
 
+test('redraws an idle terminal when display scaling changes', async ({ page }) => {
+  await page.addInitScript(() => {
+    const queries = new Set<MediaQueryList>()
+    const matchMedia = window.matchMedia.bind(window)
+    window.matchMedia = (query) => {
+      const media = matchMedia(query)
+      if (query.startsWith('(resolution:')) queries.add(media)
+      return media
+    }
+    Object.assign(window, {
+      notifyResolutionChange: () => {
+        // CDP updates the ratio without dispatching the OS display notification.
+        for (const media of [...queries]) {
+          if (!media.matches) media.dispatchEvent(new MediaQueryListEvent('change', { matches: false, media: media.media }))
+        }
+      },
+    })
+  })
+  const session = await page.context().newCDPSession(page)
+  const scaleDisplay = (scale: number) => session.send('Emulation.setDeviceMetricsOverride', {
+    width: 1100, height: 780, deviceScaleFactor: scale, mobile: false,
+  })
+  await scaleDisplay(2)
+  await page.goto('/')
+  const canvas = page.getByRole('region', { name: 'Terminal 1', exact: true }).locator('canvas')
+  const rendering = () => canvas.evaluate((element: HTMLCanvasElement) => {
+    const bounds = element.getBoundingClientRect()
+    return {
+      width: bounds.width,
+      height: bounds.height,
+      pixelWidth: element.width,
+      pixelHeight: element.height,
+      scale: element.getContext('2d')?.getTransform().a,
+    }
+  })
+  await expect.poll(async () => (await rendering()).scale).toBe(2)
+  const { width, height } = await rendering()
+
+  for (const scale of [1, 2, 1.25]) {
+    await scaleDisplay(scale)
+    await expect.poll(() => page.evaluate(() => window.devicePixelRatio)).toBe(scale)
+    if (scale === 1.25) {
+      await page.evaluate(() => window.dispatchEvent(new Event('resize')))
+    } else {
+      await page.evaluate(() => (window as unknown as { notifyResolutionChange: () => void }).notifyResolutionChange())
+    }
+    await expect.poll(rendering).toEqual({
+      width, height, pixelWidth: Math.ceil(width * scale),
+      pixelHeight: Math.ceil(height * scale), scale,
+    })
+  }
+  await session.detach()
+})
+
 test('accents only the outer border of the terminal receiving input', async ({ page }) => {
   await page.goto('/?scoped-terminals')
   const shared = page.getByRole('region', { name: 'Terminal 1', exact: true })

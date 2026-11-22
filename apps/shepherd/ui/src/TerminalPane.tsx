@@ -1651,6 +1651,23 @@ function TerminalCanvas(props: { terminalId: string; shown: boolean; readOnly?: 
     })
     appearance.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme', 'data-contrast'] })
     onCleanup(() => appearance.disconnect())
+    let displayScale = window.devicePixelRatio || 1
+    let resolution = window.matchMedia(`(resolution: ${displayScale}dppx)`)
+    const onResolutionChange = () => {
+      const nextScale = window.devicePixelRatio || 1
+      if (nextScale === displayScale) return
+      displayScale = nextScale
+      resolution.removeEventListener('change', onResolutionChange)
+      resolution = window.matchMedia(`(resolution: ${displayScale}dppx)`)
+      resolution.addEventListener('change', onResolutionChange)
+      scheduleDraw()
+    }
+    resolution.addEventListener('change', onResolutionChange)
+    window.addEventListener('resize', onResolutionChange)
+    onCleanup(() => {
+      resolution.removeEventListener('change', onResolutionChange)
+      window.removeEventListener('resize', onResolutionChange)
+    })
     paintColors = terminalPaintColors()
     const context = canvas?.getContext('2d')
     if (context) {
