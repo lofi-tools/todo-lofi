@@ -2,7 +2,7 @@ import { For, Show, createSignal, onCleanup, onMount } from 'solid-js'
 
 import type { ProjectSnapshot, TaskSummary } from './bridge'
 import { WaitingIcon } from './ProjectRow'
-import { focusSidebarMenu, isSidebarMenuKey, sidebarDetails, SidebarMenu, type SidebarMenuPoint } from './SidebarMenu'
+import { focusSidebarMenu, isSidebarMenuKey, isSidebarSelection, sidebarDetails, SidebarMenu, type SidebarMenuPoint } from './SidebarMenu'
 
 export function TaskRows(props: {
   tasks: TaskSummary[]
@@ -56,6 +56,7 @@ export function TaskRows(props: {
                   aria-keyshortcuts="Shift+F10"
                   onKeyDown={(event) => { if (isSidebarMenuKey(event)) openMenu(event) }}
                   onClick={(event) => {
+                    if (!isSidebarSelection(event, props.mac)) return
                     closeMenu(false)
                     if (props.selection() && (event.shiftKey || (props.mac ? event.metaKey : event.ctrlKey))) {
                       if (!props.disabled) props.onSelect(task.id, event.shiftKey)

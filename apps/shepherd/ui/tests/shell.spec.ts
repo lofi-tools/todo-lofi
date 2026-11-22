@@ -4823,6 +4823,41 @@ test('shows project icons, opens archive controls on hover, and composes in anot
   await expect(page.getByRole('button', { name: /Old chat/ })).toHaveCount(0)
 })
 
+test('keeps sidebar context gestures separate from navigation', async ({ page }) => {
+  await page.addInitScript(() => Object.defineProperty(navigator, 'platform', { value: 'MacIntel' }))
+  await page.goto('/?two-tasks')
+  const project = page.getByRole('button', { name: 'demo', exact: true })
+  const chat = page.getByRole('button', { name: 'Ship it', exact: true })
+  await expect(chat).toHaveAttribute('aria-current', 'true')
+  const reads = await page.evaluateHandle(() => {
+    const commands: string[] = []
+    const bridge = window.__TAURI_INTERNALS__
+    const invoke = bridge.invoke
+    bridge.invoke = (command, ...args) => {
+      if (['project_remote', 'task_list', 'task_workspace'].includes(command)) commands.push(command)
+      return invoke.call(bridge, command, ...args)
+    }
+    return commands
+  })
+
+  await project.hover()
+  await expect(page.getByRole('menu', { name: 'demo', exact: true })).toBeVisible()
+  await project.click({ button: 'right' })
+  await expect(page.getByRole('menuitem', { name: 'Copy details' })).toBeFocused()
+  await project.dispatchEvent('click', { button: 2 })
+  await project.dispatchEvent('click', { button: 0, ctrlKey: true })
+  await expect(page.getByRole('menu', { name: 'demo', exact: true })).toBeVisible()
+  await page.keyboard.press('Escape')
+
+  await chat.click({ button: 'right' })
+  await expect(page.getByRole('menu', { name: 'Ship it', exact: true })).toBeVisible()
+  await chat.dispatchEvent('click', { button: 2 })
+  await chat.dispatchEvent('click', { button: 0, ctrlKey: true })
+  await expect(chat).toHaveAttribute('aria-current', 'true')
+  await expect(page.getByRole('menu', { name: 'Ship it', exact: true })).toBeVisible()
+  expect(await reads.jsonValue()).toEqual(['project_remote'])
+})
+
 test('copies project and subtask details from the sidebar context menu', async ({ page, context }) => {
   await context.grantPermissions(['clipboard-read', 'clipboard-write'])
   await page.goto('/?two-projects&sidebar-details')

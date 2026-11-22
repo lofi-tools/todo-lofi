@@ -13,6 +13,10 @@ export function isSidebarMenuKey(event: KeyboardEvent) {
   return event.key === 'ContextMenu' || (event.shiftKey && event.key === 'F10')
 }
 
+export function isSidebarSelection(event: MouseEvent, mac: boolean) {
+  return !event.defaultPrevented && event.button === 0 && !(mac && event.ctrlKey)
+}
+
 export function focusSidebarMenu(row: HTMLElement) {
   queueMicrotask(() => row.querySelector<HTMLButtonElement>(`.project-menu ${menuItems}`)?.focus({ preventScroll: true }))
 }

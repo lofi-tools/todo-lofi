@@ -2913,6 +2913,7 @@ export function App() {
                     class="projects__row" classList={{ 'projects__row--drop-before': draggedProject() === project.id && !!projectDrop(), 'projects__row--dragging': draggedProject() === project.id }}>
                     <ProjectRow
                       project={project}
+                      mac={mac}
                       homeDirectory={homeDirectory()}
                       selected={project.id === selectedProjectId()}
                       expanded={listed().length > 0}

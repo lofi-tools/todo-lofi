@@ -1,10 +1,11 @@
 import { Match, Show, Switch, createResource, createSignal, createUniqueId } from 'solid-js'
 
 import { projectRemote, type ProjectRemote, type ProjectSnapshot } from './bridge'
-import { focusSidebarMenu, isSidebarMenuKey, SidebarMenu, type SidebarMenuPoint } from './SidebarMenu'
+import { focusSidebarMenu, isSidebarMenuKey, isSidebarSelection, SidebarMenu, type SidebarMenuPoint } from './SidebarMenu'
 
 interface ProjectRowProps {
   project: ProjectSnapshot
+  mac: boolean
   homeDirectory?: string
   selected: boolean
   expanded: boolean
@@ -93,7 +94,11 @@ export function ProjectRow(props: ProjectRowProps) {
         aria-haspopup="menu"
         aria-keyshortcuts="Shift+F10 Alt+ArrowUp Alt+ArrowDown"
         onDragStart={(event) => event.preventDefault()}
-        onPointerDown={(event) => { closeMenu(); props.onPointerDownProject(event) }}
+        onPointerDown={(event) => {
+          if (!isSidebarSelection(event, props.mac)) return
+          closeMenu()
+          props.onPointerDownProject(event)
+        }}
         onKeyDown={(event) => {
           if (event.altKey && (event.key === 'ArrowUp' || event.key === 'ArrowDown')) {
             event.preventDefault()
@@ -104,7 +109,8 @@ export function ProjectRow(props: ProjectRowProps) {
           event.preventDefault()
           openMenu(true)
         }}
-        onClick={() => {
+        onClick={(event) => {
+          if (!isSidebarSelection(event, props.mac)) return
           closeMenu()
           props.onSelect()
         }}

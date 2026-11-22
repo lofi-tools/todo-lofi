@@ -395,7 +395,8 @@ current layout and give future changes a point of comparison.
 - On hover or Shift+F10, open the compact context card to the right of the row.
   The pointer can move from the row onto the card. On right-click, anchor the
   card just below the pointer, or above it if there is no room below. Use a
-  grayer surface and a neutral fill on focused options.
+  grayer surface and a neutral fill on focused options. Right-click and macOS
+  Control-click leave the open conversation selected.
 - **Copy details**, with a copy icon on the left, is the first row in the
   context card for projects and their nested chat rows. Nested chat rows open
   the card with right-click or Shift+F10. Copy the row type, project and
