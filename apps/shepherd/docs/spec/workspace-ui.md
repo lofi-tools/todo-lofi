@@ -204,8 +204,10 @@ current layout and give future changes a point of comparison.
   commands on Send, with a composer notice only if something fails.
   The editor groups the script toggle, ordered checkout commands, readiness
   check, launch wrapper, and setup terminal. Show checkout commands in
-  execution order, one editable command line per row. Parse shell quoting
-  into literal arguments. Use an explicit shell invocation for pipelines or
+  execution order, one editable command line per row. Use the same input for
+  the readiness check, launch wrapper, and setup terminal shell. An empty
+  launch wrapper uses no wrapper, and an empty shell command uses the
+  default shell. Parse shell quoting into literal arguments. Use an explicit shell invocation for pipelines or
   expansion. Preserve existing command names and required flags. The section
   saves as one unit.
   `afterCheckout` lists named argument arrays. Required steps must succeed

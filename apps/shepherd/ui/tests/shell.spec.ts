@@ -2582,13 +2582,9 @@ test('edits structured worktree commands and preserves argument boundaries', asy
   const readiness = section.getByRole('group', { name: 'Readiness check' })
   const wrapper = section.getByRole('group', { name: 'Launch wrapper' })
   const terminal = section.getByRole('group', { name: 'Setup terminal' })
-  async function command(group: typeof first, program: string, args: string[]) {
-    await group.getByLabel('Program').fill(program)
-    for (const [index, argument] of args.entries()) {
-      await group.getByRole('button', { name: 'Add argument' }).click()
-      await group.getByLabel(`Argument ${index + 1}`, { exact: true }).fill(argument)
-    }
-  }
+  const readinessCommand = readiness.getByRole('textbox', { name: 'Readiness check command' })
+  const wrapperCommand = wrapper.getByRole('textbox', { name: 'Launch wrapper command' })
+  const shellCommand = terminal.getByRole('textbox', { name: 'Setup terminal shell command' })
 
   const scriptLine = "sh -c $'printf hello\\nprintf done'"
   await expect(first).toHaveValue(scriptLine)
@@ -2606,17 +2602,15 @@ test('edits structured worktree commands and preserves argument boundaries', asy
 
   await readiness.getByRole('button', { name: 'Add readiness check' }).click()
   await readiness.getByLabel('Name', { exact: true }).fill('Check config')
-  await command(readiness, 'test', ['-f', 'path with spaces'])
-  await wrapper.getByRole('button', { name: 'Add launch wrapper' }).click()
-  await command(wrapper, 'direnv', ['exec', '.'])
+  await readinessCommand.fill("test -f 'path with spaces'")
+  await wrapperCommand.fill('direnv exec .')
   await terminal.getByRole('button', { name: 'Customize setup terminal' }).click()
   await terminal.getByLabel('Name', { exact: true }).fill('Development setup')
   await terminal.getByLabel('Recovery instructions').fill('Fix the command and retry.')
-  await terminal.getByRole('button', { name: 'Add shell command' }).click()
-  await command(terminal, 'zsh', ['-i'])
+  await shellCommand.fill('zsh -i')
 
   const alignedControls = [page.getByLabel('Attachment limit (bytes)'), page.getByLabel('Preview URL'),
-    readiness.getByLabel('Program'), wrapper.getByLabel('Argument 2', { exact: true }), terminal.getByLabel('Recovery instructions')]
+    readinessCommand, wrapperCommand, shellCommand, terminal.getByLabel('Recovery instructions')]
   const controls = await Promise.all(alignedControls.map((control) => control.boundingBox()))
   const column = controls[0]?.x
   if (column === undefined) throw new Error('Missing attachment limit control')
@@ -2640,9 +2634,14 @@ test('edits structured worktree commands and preserves argument boundaries', asy
   await selectProjectSettings(page)
   await expect(second).toHaveValue(scriptLine)
   await section.getByRole('button', { name: 'Remove command 1' }).click()
-  await wrapper.getByRole('button', { name: 'Remove launch wrapper' }).click()
+  await expect(readinessCommand).toHaveValue("test -f 'path with spaces'")
+  await expect(wrapperCommand).toHaveValue('direnv exec .')
+  await expect(shellCommand).toHaveValue('zsh -i')
+  await wrapperCommand.clear()
+  await shellCommand.clear()
   await save.click()
   await expect.poll(async () => (await stored()).launchWrapper).toBeUndefined()
+  await expect.poll(async () => (await stored()).setupTerminal.command).toBeUndefined()
   await expect.poll(async () => (await stored()).afterCheckout).toEqual([{ name: 'Prepare', command: ['sh', '-c', script], required: false }])
 })
 
@@ -2676,8 +2675,8 @@ test('opens repository-managed settings in the editor and autosaves editable val
   await expect(commands.getByRole('textbox', { name: 'Command 1' })).toHaveValue('direnv allow .')
   await expect(commands.getByRole('textbox', { name: 'Command 1' })).toHaveAttribute('readonly', '')
   const wrapper = commands.getByRole('group', { name: 'Launch wrapper' })
-  await expect(wrapper.getByLabel('Program')).toHaveAttribute('readonly', '')
-  await expect(wrapper.getByLabel('Program')).toHaveValue('direnv')
+  await expect(wrapper.getByLabel('Launch wrapper command')).toHaveAttribute('readonly', '')
+  await expect(wrapper.getByLabel('Launch wrapper command')).toHaveValue('direnv exec .')
   await expect(wrapper.getByRole('button')).toHaveCount(0)
   await expect(page.getByRole('spinbutton', { name: 'Attachment limit (bytes)' })).toHaveValue('900')
   await page.getByRole('button', { name: 'Open config file' }).click()

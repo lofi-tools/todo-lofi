@@ -159,37 +159,45 @@ function checkoutCommandDrafts(value?: WorktreeSetup | null): CheckoutCommandDra
   return (value?.afterCheckout ?? []).map(({ name, command, required }) => ({ name, required, line: formatWorktreeCommand(command) }))
 }
 
-function CommandArguments(props: { value: string[]; readOnly: boolean; onChange: (command: string[]) => void }) {
-  const argumentId = createUniqueId()
-  function update(index: number, value: string) {
-    const command = [...props.value]
-    command[index] = value
-    props.onChange(command)
-  }
+type WorktreeSetupDraft = Omit<WorktreeSetup, 'afterCheckout' | 'readinessCheck' | 'launchWrapper' | 'setupTerminal'> & {
+  readinessCheck?: Omit<NonNullable<WorktreeSetup['readinessCheck']>, 'command'> & { command: string }
+  launchWrapper?: string
+  setupTerminal?: Omit<NonNullable<WorktreeSetup['setupTerminal']>, 'command'> & { command?: string }
+}
 
-  return <>
-    <label class="settings__row"><span>Program</span>
-      <input value={props.value[0] ?? ''} placeholder="e.g. direnv" readOnly={props.readOnly}
-        onInput={(event) => update(0, event.currentTarget.value)} />
-    </label>
-    <Index each={props.value.slice(1)}>{(argument, index) => (
-      <div class="settings__row">
-        <label for={`worktree-argument-${argumentId}-${index}`}>Argument {index + 1}</label>
-        <div class="settings__command-argument">
-          <textarea id={`worktree-argument-${argumentId}-${index}`} rows={Math.min(5, argument().split('\n').length)}
-            value={argument()} readOnly={props.readOnly} onInput={(event) => update(index + 1, event.currentTarget.value)} />
-          <Show when={!props.readOnly}>
-            <button type="button" class="project-action" aria-label={`Remove argument ${index + 1}`}
-              onClick={() => props.onChange(props.value.filter((_, position) => position !== index + 1))}>Remove</button>
-          </Show>
-        </div>
-      </div>
-    )}</Index>
-    <Show when={!props.readOnly}>
-      <button type="button" class="project-action" disabled={props.value.length >= 64}
-        onClick={() => props.onChange([props.value[0] ?? '', ...props.value.slice(1), ''])}>Add argument</button>
-    </Show>
-  </>
+function worktreeSetupDraft(value?: WorktreeSetup | null): WorktreeSetupDraft {
+  const { readinessCheck, launchWrapper, setupTerminal, useImportedSetup } = value ?? {}
+  return {
+    useImportedSetup,
+    readinessCheck: readinessCheck && { ...readinessCheck, command: formatWorktreeCommand(readinessCheck.command) },
+    launchWrapper: launchWrapper?.length ? formatWorktreeCommand(launchWrapper) : undefined,
+    setupTerminal: setupTerminal && {
+      ...setupTerminal,
+      command: setupTerminal.command?.length ? formatWorktreeCommand(setupTerminal.command) : undefined,
+    },
+  }
+}
+
+function checkedWorktreeCommand(line: string, label: string): string[] {
+  try {
+    const command = parseWorktreeCommand(line)
+    if (!command[0]?.trim()) throw new Error('Enter a program.')
+    return command
+  } catch (failure) {
+    throw new Error(`${label}. ${settingsError(failure)}`)
+  }
+}
+
+function WorktreeCommandInput(props: {
+  label: string
+  line: string
+  readOnly: boolean
+  placeholder?: string
+  onChange: (line: string) => void
+}) {
+  return <input class="settings__worktree-command" aria-label={props.label} value={props.line}
+    readOnly={props.readOnly} placeholder={props.placeholder} spellcheck={false}
+    onInput={(event) => props.onChange(event.currentTarget.value)} />
 }
 
 function createWorktreeSetupEditor(props: {
@@ -198,19 +206,19 @@ function createWorktreeSetupEditor(props: {
   localOverride: boolean
   onEdit: SettingsPaneProps['onEditPreference']
 }) {
-  const [configuration, setConfiguration] = createSignal<WorktreeSetup>(structuredClone(props.value ?? {}))
+  const [configuration, setConfiguration] = createSignal(worktreeSetupDraft(props.value))
   const [steps, setSteps] = createSignal(checkoutCommandDrafts(props.value))
-  const saved = () => JSON.stringify([props.value ?? {}, checkoutCommandDrafts(props.value)])
+  const saved = () => JSON.stringify([worktreeSetupDraft(props.value), checkoutCommandDrafts(props.value)])
   const serialized = () => JSON.stringify([configuration(), steps()])
   function reset() {
-    setConfiguration(structuredClone(props.value ?? {}))
+    setConfiguration(worktreeSetupDraft(props.value))
     setSteps(checkoutCommandDrafts(props.value))
   }
   createEffect(on(saved, (_, previous) => {
     if (serialized() === previous) reset()
   }))
 
-  const update = (patch: Partial<WorktreeSetup>) => setConfiguration((current) => ({ ...current, ...patch }))
+  const update = (patch: Partial<WorktreeSetupDraft>) => setConfiguration((current) => ({ ...current, ...patch }))
   function updateStep(index: number, line: string) {
     setSteps((current) => current.map((step, position) => position === index ? { ...step, line } : step))
   }
@@ -227,24 +235,25 @@ function createWorktreeSetupEditor(props: {
 
   function validatedValue() {
     const afterCheckout = steps().map(({ name, required, line }, index): CheckoutStep => {
-      try {
-        const command = parseWorktreeCommand(line)
-        const program = command[0]
-        if (!program?.trim()) throw new Error('Enter a program or remove this row.')
-        const label = name || Array.from(program.split('/').at(-1) || program).slice(0, 50).join('')
-        return { name: label, command, required }
-      } catch (failure) {
-        throw new Error(`Command ${index + 1}. ${settingsError(failure)}`)
-      }
+      const command = checkedWorktreeCommand(line, `Command ${index + 1}`)
+      const program = command[0]
+      const label = name || Array.from(program.split('/').at(-1) || program).slice(0, 50).join('')
+      return { name: label, command, required }
     })
-    const value = { ...configuration(), afterCheckout: afterCheckout.length ? afterCheckout : undefined }
-    if (value.readinessCheck && (!value.readinessCheck.name.trim() || !value.readinessCheck.command[0]?.trim())) {
-      throw new Error('Enter a name and program for the readiness check.')
-    }
-    if (value.launchWrapper?.length && !value.launchWrapper[0]?.trim()) throw new Error('Enter a program for the launch wrapper.')
-    if (value.setupTerminal && (!value.setupTerminal.name.trim() ||
-      (value.setupTerminal.command?.length && !value.setupTerminal.command[0]?.trim()))) {
-      throw new Error('Enter a name for the setup terminal and a program if you customize its shell.')
+    const { readinessCheck, launchWrapper, setupTerminal, useImportedSetup } = configuration()
+    if (readinessCheck && !readinessCheck.name.trim()) throw new Error('Enter a name for the readiness check.')
+    if (setupTerminal && !setupTerminal.name.trim()) throw new Error('Enter a name for the setup terminal.')
+    const value: WorktreeSetup = {
+      useImportedSetup,
+      afterCheckout: afterCheckout.length ? afterCheckout : undefined,
+      readinessCheck: readinessCheck && {
+        ...readinessCheck, command: checkedWorktreeCommand(readinessCheck.command, 'Readiness check'),
+      },
+      launchWrapper: launchWrapper?.trim() ? checkedWorktreeCommand(launchWrapper, 'Launch wrapper') : undefined,
+      setupTerminal: setupTerminal && {
+        ...setupTerminal,
+        command: setupTerminal.command?.trim() ? checkedWorktreeCommand(setupTerminal.command, 'Setup terminal shell command') : undefined,
+      },
     }
     return JSON.stringify(value) === '{}' ? null : value
   }
@@ -279,9 +288,8 @@ function WorktreeSetupSettings(props: {
       <ol class="settings__checkout-commands" role="list">
         <Index each={steps()}>{(step, index) => (
           <li>
-            <input aria-label={`Command ${index + 1}`} value={step().line} readOnly={readOnly()}
-              placeholder="e.g. direnv allow ." spellcheck={false}
-              onInput={(event) => updateStep(index, event.currentTarget.value)} />
+            <WorktreeCommandInput label={`Command ${index + 1}`} line={step().line} readOnly={readOnly()}
+              placeholder="e.g. direnv allow ." onChange={(line) => updateStep(index, line)} />
             <Show when={!readOnly()}>
               <button type="button" class="project-action project-action--icon" aria-label={`Move command ${index + 1} up`}
                 title="Move up" disabled={index === 0} onClick={() => moveStep(index, -1)}>↑</button>
@@ -303,28 +311,25 @@ function WorktreeSetupSettings(props: {
       <Show when={configuration().readinessCheck} fallback={
         <Show when={!readOnly()} fallback={<p class="empty">No readiness check configured.</p>}>
           <button type="button" class="project-action"
-            onClick={() => update({ readinessCheck: { name: '', command: [''] } })}>Add readiness check</button>
+            onClick={() => update({ readinessCheck: { name: '', command: '' } })}>Add readiness check</button>
         </Show>
       }>{(check) => <>
         <label class="settings__row"><span>Name</span><input value={check().name} readOnly={readOnly()}
           onInput={(event) => update({ readinessCheck: { ...check(), name: event.currentTarget.value } })} /></label>
-        <CommandArguments value={check().command} readOnly={readOnly()}
-          onChange={(command) => update({ readinessCheck: { ...check(), command } })} />
+        <label class="settings__row"><span>Command</span>
+          <WorktreeCommandInput label="Readiness check command" line={check().command} readOnly={readOnly()}
+            onChange={(command) => update({ readinessCheck: { ...check(), command } })} />
+        </label>
         <Show when={!readOnly()}><button type="button" class="project-action"
           onClick={() => update({ readinessCheck: undefined })}>Remove readiness check</button></Show>
       </>}</Show>
     </fieldset>
     <fieldset class="settings__project settings__worktree-group">
       <legend>Launch wrapper</legend>
-      <Show when={!!configuration().launchWrapper?.length && configuration().launchWrapper} fallback={
-        <Show when={!readOnly()} fallback={<p class="empty">No launch wrapper configured.</p>}>
-          <button type="button" class="project-action" onClick={() => update({ launchWrapper: [''] })}>Add launch wrapper</button>
-        </Show>
-      }>{(command) => <>
-        <CommandArguments value={command()} readOnly={readOnly()} onChange={(launchWrapper) => update({ launchWrapper })} />
-        <Show when={!readOnly()}><button type="button" class="project-action"
-          onClick={() => update({ launchWrapper: undefined })}>Remove launch wrapper</button></Show>
-      </>}</Show>
+      <label class="settings__row"><span>Command</span>
+        <WorktreeCommandInput label="Launch wrapper command" line={configuration().launchWrapper ?? ''} readOnly={readOnly()}
+          placeholder={readOnly() ? 'None' : 'e.g. direnv exec .'} onChange={(line) => update({ launchWrapper: line || undefined })} />
+      </label>
     </fieldset>
     <fieldset class="settings__project settings__worktree-group">
       <legend>Setup terminal</legend>
@@ -339,17 +344,10 @@ function WorktreeSetupSettings(props: {
           <textarea value={terminal().instructions ?? ''} readOnly={readOnly()}
             onInput={(event) => update({ setupTerminal: { ...terminal(), instructions: event.currentTarget.value } })} />
         </label>
-        <Show when={!!terminal().command?.length && terminal().command} fallback={
-          <Show when={!readOnly()} fallback={<p class="empty">Uses the default shell.</p>}>
-            <button type="button" class="project-action"
-              onClick={() => update({ setupTerminal: { ...terminal(), command: [''] } })}>Add shell command</button>
-          </Show>
-        }>{(command) => <>
-          <CommandArguments value={command()} readOnly={readOnly()}
-            onChange={(value) => update({ setupTerminal: { ...terminal(), command: value } })} />
-          <Show when={!readOnly()}><button type="button" class="project-action"
-            onClick={() => update({ setupTerminal: { ...terminal(), command: undefined } })}>Use default shell</button></Show>
-        </>}</Show>
+        <label class="settings__row"><span>Shell command</span>
+          <WorktreeCommandInput label="Setup terminal shell command" line={terminal().command ?? ''} readOnly={readOnly()}
+            placeholder="Default shell" onChange={(line) => update({ setupTerminal: { ...terminal(), command: line || undefined } })} />
+        </label>
         <Show when={!readOnly()}><button type="button" class="project-action"
           onClick={() => update({ setupTerminal: undefined })}>Remove setup terminal customization</button></Show>
       </>}</Show>
