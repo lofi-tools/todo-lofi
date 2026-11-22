@@ -6081,6 +6081,84 @@ async fn diagnostics_name_the_command_and_protocol() -> Result<(), Box<dyn std::
 }
 
 #[tokio::test]
+async fn transcript_updates_do_not_republish_sidebar_lists()
+-> Result<(), Box<dyn std::error::Error>> {
+    use shep_harness_core::{DeltaKind, ItemId};
+
+    let repository = TestRepository::new()?;
+    let (sender, receiver) = mpsc::unbounded_channel();
+    let (prompts, mut sent) = mpsc::unbounded_channel();
+    let mut core = Core::with_services(
+        Box::new(MemoryStore::new()),
+        Box::new(LateHarnessFactory {
+            receiver: Mutex::new(Some(receiver)),
+            prompts,
+        }),
+    );
+    let project_id = add_project(&mut core, repository.path().to_path_buf()).await?;
+    let draft = workspace_of(
+        core.execute(Command::CreateDraft {
+            agent: Agent::Codex,
+            project_id,
+            title: "Stream without refreshing the sidebar".to_string(),
+        })
+        .await?,
+    );
+    let task_id = TaskId::new(draft.task.id);
+    core.execute(Command::SendPrompt {
+        task_id: task_id.clone(),
+        input: PromptInput::text("Go"),
+    })
+    .await?;
+    assert_eq!(sent.try_recv()?.1.text, "Go");
+    core.drain_events();
+
+    sender.send(HarnessEvent::Delta {
+        item_id: ItemId::new("stream"),
+        kind: DeltaKind::Message,
+        text: "A streamed".into(),
+        stream_permit: None,
+    })?;
+    assert!(core.pump().await?);
+    assert!(core.task(&task_id)?.branch.is_some());
+    core.drain_events();
+
+    sender.send(HarnessEvent::Delta {
+        item_id: ItemId::new("stream"),
+        kind: DeltaKind::Message,
+        text: " reply".into(),
+        stream_permit: None,
+    })?;
+    assert!(core.pump().await?);
+    let events = core.drain_events();
+    assert!(events.iter().any(|event| matches!(
+        event,
+        Event::TaskWorkspaceChanged(workspace) if summaries(workspace).iter().any(|row| row == "agent: A streamed reply")
+    )));
+    assert!(!events.iter().any(|event| matches!(
+        event,
+        Event::TaskChanged(_) | Event::TaskListChanged(_) | Event::ProjectListChanged(_)
+    )));
+
+    sender.send(HarnessEvent::TurnFinished {
+        reason: TurnFinishReason::Completed,
+    })?;
+    assert!(core.pump().await?);
+    let events = core.drain_events();
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, Event::TaskListChanged(_)))
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, Event::ProjectListChanged(_)))
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn prompts_queue_in_order_until_the_live_turn_finishes()
 -> Result<(), Box<dyn std::error::Error>> {
     let repository = TestRepository::new()?;

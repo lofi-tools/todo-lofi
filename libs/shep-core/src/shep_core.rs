@@ -1482,22 +1482,25 @@ impl Core {
             };
             if events.is_empty() {
                 if self.persist_task_transcript(&task_id, false).await? {
-                    self.publish_task(&task_id)?;
+                    self.emit(Event::TaskWorkspaceChanged(self.task_workspace(&task_id)?));
                     changed = true;
                 }
                 continue;
             }
-            let task = self.task(&task_id)?;
-            let before = (task.state, task.error.clone());
+            let before = TaskSummary::from(self.task(&task_id)?);
             self.apply_events(&task_id, &events)?;
             self.maybe_create_task_branch(&task_id, &events).await?;
-            let task = self.task(&task_id)?;
-            if (task.state, &task.error) != (before.0, &before.1) {
+            let after = TaskSummary::from(self.task(&task_id)?);
+            if (after.state, &after.error) != (before.state, &before.error) {
                 self.save_task(&task_id).await?;
             } else {
                 self.persist_task_transcript(&task_id, false).await?;
             }
-            self.publish_task(&task_id)?;
+            if after != before {
+                self.publish_task(&task_id)?;
+            } else {
+                self.emit(Event::TaskWorkspaceChanged(self.task_workspace(&task_id)?));
+            }
             changed = true;
         }
         if self.shutdown == ShutdownState::Running {
