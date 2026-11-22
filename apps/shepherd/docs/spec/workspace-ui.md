@@ -171,8 +171,11 @@ current layout and give future changes a point of comparison.
   defaults and retain a hash of the source at import. If the source changes,
   offer to replace the imported copy; do not silently overwrite project edits.
   Let the user review the setup script for the project before it runs once in
-  each new task worktree, before starting the agent. Project actions run in
-  task terminals. Platform-specific commands use the current platform.
+  each new task worktree, before starting the agent. If setup blocks a send,
+  keep the editable prompt in the same chat and show the reason with a shortcut
+  to Project settings. The user can resend from that chat after reviewing or
+  correcting the script. Project actions run in task terminals.
+  Platform-specific commands use the current platform.
 - In Preview, offer **Project settings** when the selected project has no
   preview URL. A valid `preview.url` in the project's `.config/shepherd/settings.json`
   overrides the saved URL without changing it. **Settings → Projects** saves or clears that project's loopback

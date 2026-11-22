@@ -2572,6 +2572,16 @@ button.pool__agent-label { padding: 0; border: 0; background: transparent; color
   border-color: var(--focus);
 }
 
+.composer__setup-notice {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  margin: 0 var(--composer-control-inset) 6px;
+  color: var(--banner-text);
+  font-size: 12px;
+}
+
 .composer__attention {
   position: absolute;
   inset-block-start: -4px;

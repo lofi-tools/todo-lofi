@@ -126,6 +126,12 @@ test.beforeEach(async ({ context }) => {
         warning: options.has('invalid-settings') ? 'Could not use /tmp/settings.json. A copy was saved to /tmp/settings.json.bak.' : null,
       }
     }
+    function setupNeedsApproval(projectId: string) {
+      if (!options.has('setup-approval')) return false
+      const path = projects.find((project) => project.id === projectId)?.path
+      const environment = path ? readPreferences().projects[path]?.environment : undefined
+      return environment?.setup && environment.approvedSetupHash !== `hash:${environment.setup}`
+    }
     const readKeybindings = (): Record<string, string> => JSON.parse(localStorage.getItem('fixture.keybindings') ?? '{}')
     function commandSnapshot(platform: string, overrides: Record<string, string>) {
       const reasons = {
@@ -1238,6 +1244,12 @@ test.beforeEach(async ({ context }) => {
               createdAt: 1_760_000_500_000,
             }
             tasks.unshift(task)
+            if (setupNeedsApproval(task.projectId)) {
+              task.state = 'draft'
+              task.worktreePath = null
+              transcripts[id] = []
+              throw { code: 'project_setup', message: 'Review and approve the worktree setup script in Project settings before starting this task.', taskId: id }
+            }
             if (options.has('setup-failure')) {
               task.state = 'ready'
               transcripts[id] = []
@@ -1303,6 +1315,9 @@ test.beforeEach(async ({ context }) => {
           case 'send_prompt': {
             if (options.has('send-prompt-fails')) throw { message: 'Sign in required', code: 'agent' }
             const task = tasks.find((candidate) => candidate.id === args.taskId)
+            if (task.state === 'draft' && setupNeedsApproval(task.projectId)) {
+              throw { code: 'project_setup', message: 'Review and approve the worktree setup script in Project settings before starting this task.' }
+            }
             if (args.text.includes('Handoff reference:')) {
               if (options.has('handoff-fails')) throw { message: 'Handoff failed', code: 'agent' }
               const rows = transcripts[task.id] ?? []
@@ -2294,9 +2309,41 @@ test('keeps the new task and prompt when worktree setup fails', async ({ page })
   await page.getByRole('button', { name: 'New chat in demo' }).press('Enter')
   await page.getByLabel('Prompt').fill('keep this prompt')
   await page.getByRole('button', { name: 'Send' }).click()
-  await expect(page.getByRole('alert')).toContainText('Worktree setup failed')
+  await expect(page.locator('.composer').getByRole('status')).toContainText('Worktree setup failed')
   await expect(page.getByLabel('Prompt')).toHaveValue('keep this prompt')
   await expect(page.getByRole('region', { name: 'Task chat' })).toContainText('keep this prompt')
+})
+
+test('retries the first Codex prompt in the same draft after approving worktree setup', async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem('fixture.settings', JSON.stringify({
+    projects: { '/tmp/demo': { environment: { sourceHash: 'fixture', setup: 'direnv reload', approvedSetupHash: null, actions: [] } } },
+  })))
+  await page.goto('/?setup-approval')
+  await page.getByRole('button', { name: 'demo', exact: true }).press('Tab')
+  await page.getByRole('button', { name: 'New chat in demo' }).press('Enter')
+  const composer = page.locator('.composer')
+  const prompt = composer.getByLabel('Prompt')
+  const send = composer.getByRole('button', { name: 'Send', exact: true })
+  await prompt.fill('Keep this Codex prompt')
+  await send.click()
+  const chat = page.getByRole('region', { name: 'Task chat' })
+  await expect(chat).toHaveAttribute('data-task-state', 'draft')
+  await expect(composer.getByRole('status')).toContainText('Review and approve the worktree setup script')
+  await expect(prompt).toHaveValue('Keep this Codex prompt')
+  await expect(prompt).toBeEditable()
+  expect(await page.evaluate(() => window.__sentPrompts)).toEqual([])
+
+  await composer.getByRole('button', { name: 'Open project settings' }).click()
+  const environment = page.getByRole('region', { name: 'Project environment' })
+  await expect(environment.getByLabel('Worktree setup script')).toHaveValue('direnv reload')
+  await environment.getByRole('button', { name: 'Approve setup script' }).click()
+  await expect(environment.getByText('Setup script approved.')).toBeVisible()
+  await page.getByRole('button', { name: 'Back to app' }).click()
+  await expect(composer.getByRole('button', { name: 'Open project settings' })).toHaveCount(0)
+  await expect(prompt).toHaveValue('Keep this Codex prompt')
+  await send.click()
+  await expect(chat.getByRole('region', { name: 'Transcript' })).toContainText('working on it')
+  expect(await page.evaluate(() => window.__sentPrompts)).toEqual([{ taskId: 'task-2', text: 'Keep this Codex prompt' }])
 })
 
 test('cancels stale task searches and focuses an archived hit across projects', async ({ page }) => {

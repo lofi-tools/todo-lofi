@@ -1272,7 +1272,28 @@ export function App() {
   const canCompose = () => {
     if (selectedProject()?.missing) return false
     const state = workspace()?.task.state
-    return state === 'ready' || state === 'failed' || state === 'interrupted' || canStartTask()
+    return state === 'draft' || state === 'ready' || state === 'failed' || state === 'interrupted' || canStartTask()
+  }
+  const [setupFailure, setSetupFailure] = createSignal<{ taskId: string; message: string }>()
+  const [draftEnvironment] = createResource(
+    () => !settingsOpen() && workspace()?.task.state === 'draft' && !selectedProject()?.missing && selectedProjectId(),
+    async (projectId) => {
+      const environment = await bridge.projectEnvironment(projectId).catch(() => undefined)
+      return { projectId, environment }
+    },
+  )
+  const setupNotice = () => {
+    const task = workspace()?.task
+    if (!task) return
+    const failure = setupFailure()
+    if (failure?.taskId === task.id) return failure.message
+    if (task.state !== 'draft') return
+    const result = draftEnvironment.latest
+    if (!result || result.projectId !== task.projectId) return
+    const environment = result.environment
+    if (environment?.current?.setup.trim() && environment.current.approvedSetupHash !== environment.setupHash) {
+      return 'Review and approve the worktree setup script before sending this prompt.'
+    }
   }
   const showsChatTitle = () => !!workspace()
   const canQueuePrompt = () => {
@@ -2348,7 +2369,8 @@ export function App() {
   function sendPrompt() {
     const projectId = selectedProjectId()
     const current = workspace()
-    const text = prompt().trim()
+    const draftText = prompt()
+    const text = draftText.trim()
     const files = promptFiles()
     const selectedSkills = activeFallbackSkills()
     const skillPrefix = selectedSkills.length === 1
@@ -2363,21 +2385,46 @@ export function App() {
     if ((!current && !agentAvailability()?.[newTaskAgent()]) || !projectId || (!text && !files.length && !selectedSkills.length) || (!canCompose() && !canQueuePrompt()) || pending()) return
     const projectScope = `project:${projectId}`
     void run(async () => {
-      async function keepTaskForSetup(taskId: string) {
+      setSetupFailure(undefined)
+      async function keepTaskForSetup(taskId: string, message: string) {
         const task = await bridge.taskWorkspace(taskId)
-        setComposingProjectId(undefined)
-        currentPromptScope = `task:${taskId}`
-        setSelectedTaskId(taskId)
-        setWorkspace(task)
-        setPrompt(text)
-        await loadTasks(projectId!)
+        const taskScope = `task:${taskId}`
+        const options = queuedTurnOptions().get(projectScope)
+        forgetComposer(projectScope)
+        currentPromptScope = taskScope
+        batch(() => {
+          if (options) setQueuedTurnOptions((queued) => {
+            const next = new Map(queued)
+            next.delete(projectScope)
+            return next.set(taskScope, options)
+          })
+          if (files.length) setQueuedFiles((queued) => {
+            const next = new Map(queued)
+            next.delete(projectScope)
+            return next.set(taskScope, files)
+          })
+          setComposingProjectId(undefined)
+          setSelectedTaskId(taskId)
+          setWorkspace(task)
+          setPrompt(draftText)
+          setSetupFailure({ taskId, message })
+        })
+        persistComposer(taskScope)
+        await loadTasks(task.task.projectId)
       }
       let updated: bridge.TaskWorkspace
       if (current?.task) {
         const task = current.task
         const attachmentIds: string[] = []
         for (const file of files) attachmentIds.push(await bridge.savePromptFile(task.id, file))
-        updated = await bridge.sendPrompt(task.id, message, attachmentIds, codex, mode, model)
+        try {
+          updated = await bridge.sendPrompt(task.id, message, attachmentIds, codex, mode, model)
+        } catch (failure) {
+          const error = failure as bridge.BridgeError
+          if (error?.code !== 'project_setup') throw failure
+          setSetupFailure({ taskId: task.id, message: error.message })
+          return
+        }
         clearPromptFiles(task.id)
         clearTurnOptions(task.id)
         forgetComposer(`task:${task.id}`)
@@ -2396,9 +2443,10 @@ export function App() {
             for (const file of files) attachmentIds.push(await bridge.savePromptFile(created.task.id, file))
             updated = await bridge.sendPrompt(created.task.id, message, attachmentIds, codex, mode, model)
           } catch (failure) {
-            if ((failure as bridge.BridgeError)?.code === 'project_setup') {
-              await keepTaskForSetup(created.task.id)
-              throw failure
+            const error = failure as bridge.BridgeError
+            if (error?.code === 'project_setup') {
+              await keepTaskForSetup(created.task.id, error.message)
+              return
             }
             try {
               await bridge.deleteTask(created.task.id, true)
@@ -2412,7 +2460,10 @@ export function App() {
             updated = await bridge.startTask(projectId, message, codex, mode, model, newTaskAgent())
           } catch (failure) {
             const error = failure as bridge.BridgeError
-            if (error?.code === 'project_setup' && error.taskId) await keepTaskForSetup(error.taskId)
+            if (error?.code === 'project_setup' && error.taskId) {
+              await keepTaskForSetup(error.taskId, error.message)
+              return
+            }
             throw failure
           }
         }
@@ -3186,6 +3237,17 @@ export function App() {
           </Show>
 
           <div class="composer">
+            <Show when={setupNotice()}>
+              {(notice) => <div class="composer__setup-notice">
+                <span role="status">{notice()}</span>
+                <button type="button" class="project-action" onClick={() => {
+                  const projectId = selectedProjectId()
+                  if (!projectId) return
+                  setSetupFailure(undefined)
+                  openProjectSettings(projectId)
+                }}>Open project settings</button>
+              </div>}
+            </Show>
             <Show when={switchNeedsInput()}>
               <p class="empty" role="status">The harness switch will continue after you respond. <button type="button" onClick={() => setHarnessSwitch(undefined)}>Cancel switch</button></p>
             </Show>
