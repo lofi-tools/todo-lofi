@@ -1741,6 +1741,10 @@ export function App() {
     return abbreviateHome(path)
   }
 
+  function isOpenTask(taskId: string) {
+    return selectedTaskId() === taskId && workspace()?.task.id === taskId
+  }
+
   async function selectTask(taskId: string) {
     setSearchJump(undefined)
     setSelectedTaskId(taskId)
@@ -1819,6 +1823,10 @@ export function App() {
     recordCurrentScreen()
     setSettingsOpen(false)
     setFreebuffProjectId(undefined)
+    if (task.projectId === selectedProjectId() && isOpenTask(task.id)) {
+      setSearchJump(undefined)
+      return
+    }
     void run(async () => {
       if (task.projectId === selectedProjectId()) {
         await selectTask(task.id)

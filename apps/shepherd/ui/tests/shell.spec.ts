@@ -3593,6 +3593,22 @@ test('never pairs the files pane with another project’s task when a remembered
   await expect(page.locator('.error-toast')).toHaveCount(0)
 })
 
+test('reselecting the current chat keeps its composer and transcript', async ({ page }) => {
+  await page.goto('/?two-tasks')
+  const active = page.getByRole('button', { name: 'Ship it', exact: true })
+  await expect(active).toHaveAttribute('aria-current', 'true')
+  const prompt = page.getByRole('textbox', { name: 'Prompt' })
+  await prompt.fill('Unsent prompt')
+  const row = await page.getByRole('region', { name: 'Transcript' }).locator('.entry').first().elementHandle()
+  const reads = () => page.evaluate(() => (window as unknown as { __workspaceReads: () => number }).__workspaceReads())
+  const before = await reads()
+
+  await active.click()
+  await expect(prompt).toHaveValue('Unsent prompt')
+  expect(await row!.evaluate((node) => node.isConnected)).toBe(true)
+  expect(await reads()).toEqual(before)
+})
+
 test('orders sidebar chats by creation date and opens the newest on project click', async ({ page }) => {
   await page.goto('/?newest-chat-first')
   const project = page.locator('[data-project-id="project-1"]')

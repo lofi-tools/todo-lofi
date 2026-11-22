@@ -384,7 +384,8 @@ current layout and give future changes a point of comparison.
 - Keep the state word out of a task row: the leading state dot, waiting icon and
   **Needs review** badge carry it. Put an accent dot at the end of the row when
   the task received conversation output since it was last open, and clear it
-  when the task opens.
+  when the task opens. Clicking the active chat keeps its transcript and
+  composer in place.
 - While the status-bar review filter is active, show waiting-for-review tasks
   under each matching project, including a sole review task. Checkboxes and
   modifier-clicks select rows across projects. **Archive selected** shows the
