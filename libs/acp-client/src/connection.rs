@@ -520,6 +520,14 @@ pub struct ConnectOptions {
 )]
 #[async_trait::async_trait]
 pub trait ProcessTracker: Send + Sync {
+    async fn open_foreground_terminal(
+        &self,
+        _command: &str,
+        _cwd: &std::path::Path,
+    ) -> Result<Option<(std::fs::File, tokio::io::DuplexStream)>, String> {
+        Ok(None)
+    }
+
     async fn started(&self, pid: u32) -> Result<String, String>;
     async fn stopped(&self, record_id: &str) -> Result<(), String>;
 }
@@ -1312,7 +1320,7 @@ impl ProjectAgent {
         self
     }
 
-    fn command(&self) -> std::process::Command {
+    fn command(&self, foreground: bool) -> std::process::Command {
         let mut command = std::process::Command::new(&self.spec.program);
         command
             .args(&self.spec.args)
@@ -1324,8 +1332,20 @@ impl ProjectAgent {
         #[cfg(unix)]
         {
             use std::os::unix::process::CommandExt as _;
-            // Own process group, so a wrapper launcher's children die with it.
-            command.process_group(0);
+            if foreground {
+                unsafe {
+                    command.pre_exec(|| {
+                        if libc::setsid() == -1
+                            || libc::ioctl(libc::STDERR_FILENO, libc::TIOCSCTTY as _, 0) == -1
+                        {
+                            return Err(std::io::Error::last_os_error());
+                        }
+                        Ok(())
+                    });
+                }
+            } else {
+                command.process_group(0);
+            }
         }
         command
     }
@@ -1335,22 +1355,22 @@ impl ProjectAgent {
     /// so the caller can reap it explicitly after it exits.
     #[cfg(any(test, feature = "test-support"))]
     pub fn spawn_for_test(spec: SpawnSpec) -> std::io::Result<u32> {
-        let child = ProjectAgent::new(spec).spawn_child()?;
+        let child = ProjectAgent::new(spec).spawn_child(None)?;
         let pid = child.id();
         std::mem::forget(child);
         Ok(pid)
     }
 
-    fn spawn_child(&self) -> std::io::Result<async_process::Child> {
+    fn spawn_child(&self, slave: Option<std::fs::File>) -> std::io::Result<async_process::Child> {
         // NB: `async_process::Command::from` resets its internal
         // stdin/stdout/stderr-configured flags, and `spawn()` overwrites any
         // unflagged stream with `inherit()`. Re-assert piped stdio through
         // the async API so the flags (and the pipes) survive.
-        let mut command = async_process::Command::from(self.command());
+        let mut command = async_process::Command::from(self.command(slave.is_some()));
         command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
+            .stderr(slave.map_or_else(Stdio::piped, Stdio::from))
             .kill_on_drop(true);
         command.spawn()
     }
@@ -1395,7 +1415,16 @@ impl Drop for StartupProcessGroup {
 
 impl ConnectTo<Client> for ProjectAgent {
     async fn connect_to(self, client: impl ConnectTo<Agent>) -> Result<(), acp::Error> {
-        let mut child = self.spawn_child().map_err(|error| {
+        let terminal = if let Some(tracker) = self.tracker.as_ref() {
+            tracker
+                .open_foreground_terminal(&self.spec.command_line(), &self.spec.cwd)
+                .await
+                .map_err(|error| acp::Error::internal_error().data(error))?
+        } else {
+            None
+        };
+        let (slave, mut terminal_output) = terminal.unzip();
+        let mut child = self.spawn_child(slave).map_err(|error| {
             acp::Error::internal_error().data(format!(
                 "failed to launch {}: {error}",
                 self.spec.command_line()
@@ -1429,41 +1458,47 @@ impl ConnectTo<Client> for ProjectAgent {
             .stdout
             .take()
             .ok_or_else(|| acp::Error::internal_error().data("agent stdout unavailable"))?;
-        let stderr = child.stderr.take();
+        let mut stderr = child.stderr.take();
 
-        let stderr_task = if let (Some(mut stderr), Some(events), Some(buffer)) =
-            (stderr, self.events.clone(), self.stderr.clone())
-        {
-            // stderr has no protocol framing, so it is drained on its own task:
-            // a full pipe from a chatty agent would otherwise stall the child.
-            Some(tokio::spawn(async move {
-                let mut lines = crate::bounded_lines::BoundedLines::default();
-                let mut bytes = [0u8; 4096];
-                let permits = Arc::new(tokio::sync::Semaphore::new(PENDING_STDERR_EVENTS));
-                let record = |line: crate::bounded_lines::BoundedLine| {
-                    record_agent_stderr(line.text, &buffer, &events, &permits);
-                };
-                loop {
-                    match stderr.read(&mut bytes).await {
-                        Ok(0) => break,
-                        Ok(count) => {
-                            for line in lines.push(&bytes[..count]) {
-                                record(line);
+        let stderr_task =
+            if let (Some(events), Some(buffer)) = (self.events.clone(), self.stderr.clone()) {
+                // stderr has no protocol framing, so it is drained on its own task:
+                // a full pipe from a chatty agent would otherwise stall the child.
+                Some(tokio::spawn(async move {
+                    let mut lines = crate::bounded_lines::BoundedLines::default();
+                    let mut bytes = [0u8; 4096];
+                    let permits = Arc::new(tokio::sync::Semaphore::new(PENDING_STDERR_EVENTS));
+                    let record = |line: crate::bounded_lines::BoundedLine| {
+                        record_agent_stderr(line.text, &buffer, &events, &permits);
+                    };
+                    loop {
+                        let received = if let Some(terminal) = terminal_output.as_mut() {
+                            tokio::io::AsyncReadExt::read(terminal, &mut bytes).await
+                        } else if let Some(stderr) = stderr.as_mut() {
+                            stderr.read(&mut bytes).await
+                        } else {
+                            break;
+                        };
+                        match received {
+                            Ok(0) => break,
+                            Ok(count) => {
+                                for line in lines.push(&bytes[..count]) {
+                                    record(line);
+                                }
+                            }
+                            Err(error) => {
+                                tracing::debug!(%error, "could not read ACP stderr");
+                                break;
                             }
                         }
-                        Err(error) => {
-                            tracing::debug!(%error, "could not read ACP stderr");
-                            break;
-                        }
                     }
-                }
-                if let Some(line) = lines.finish() {
-                    record(line);
-                }
-            }))
-        } else {
-            None
-        };
+                    if let Some(line) = lines.finish() {
+                        record(line);
+                    }
+                }))
+            } else {
+                None
+            };
 
         let protocol_events = self.events.clone();
         let incoming =
@@ -2279,7 +2314,7 @@ for line in sys.stdin:
                 "acp-launch-token".to_string(),
             )]),
         });
-        let mut child = agent.spawn_child()?;
+        let mut child = agent.spawn_child(None)?;
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
         let token = loop {
             match std::fs::read_to_string(&path) {
@@ -2323,7 +2358,7 @@ for line in sys.stdin:
             cwd: std::env::temp_dir(),
             env: Default::default(),
         });
-        let mut child = agent.spawn_child().expect("spawn cat");
+        let mut child = agent.spawn_child(None).expect("spawn cat");
         assert!(child.stdin.is_some(), "stdin must stay piped");
         assert!(child.stdout.is_some(), "stdout must stay piped");
         assert!(child.stderr.is_some(), "stderr must stay piped");

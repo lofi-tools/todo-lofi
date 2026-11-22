@@ -153,6 +153,17 @@ struct AcpProcessTracker(Arc<dyn shep_harness_core::AgentProcessTracker>);
 
 #[async_trait]
 impl acp_client::connection::ProcessTracker for AcpProcessTracker {
+    async fn open_foreground_terminal(
+        &self,
+        command: &str,
+        cwd: &std::path::Path,
+    ) -> Result<Option<(std::fs::File, tokio::io::DuplexStream)>, String> {
+        self.0
+            .open_foreground_terminal(command, cwd)
+            .await
+            .map(|terminal| terminal.map(|terminal| (terminal.slave, terminal.output)))
+    }
+
     async fn started(&self, pid: u32) -> Result<String, String> {
         self.0.started(pid).await
     }

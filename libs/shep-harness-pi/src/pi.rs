@@ -125,6 +125,18 @@ impl PiRpc {
         terminate: fn(&Child) -> std::io::Result<()>,
         wait: ChildWait,
     ) -> HarnessResult<(Self, PiSessionState)> {
+        Self::start_with_terminal(spec, terminate, wait, None).await
+    }
+
+    async fn start_with_terminal(
+        spec: &SpawnSpec,
+        terminate: fn(&Child) -> std::io::Result<()>,
+        wait: ChildWait,
+        terminal: Option<shep_harness_core::ForegroundTerminal>,
+    ) -> HarnessResult<(Self, PiSessionState)> {
+        let (slave, terminal_output) = terminal
+            .map(|terminal| (terminal.slave, terminal.output))
+            .unzip();
         let mut command = Command::new(&spec.program);
         command
             .args(&spec.args)
@@ -133,18 +145,21 @@ impl PiRpc {
             .envs(&spec.environment)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
             .kill_on_drop(true);
-        #[cfg(unix)]
-        command.process_group(0);
+        shep_harness_core::configure_foreground_terminal(&mut command, slave);
         let mut child = command.spawn().map_err(|source| HarnessError::Spawn {
             program: spec.program.clone(),
             source,
         })?;
-        let (Some(stdin), Some(stdout), Some(stderr)) =
-            (child.stdin.take(), child.stdout.take(), child.stderr.take())
-        else {
+        drop(command);
+        let (Some(stdin), Some(stdout)) = (child.stdin.take(), child.stdout.take()) else {
             return Err(protocol("Pi did not expose its RPC pipes"));
+        };
+        let stderr: Box<dyn AsyncRead + Unpin + Send> = match (terminal_output, child.stderr.take())
+        {
+            (Some(output), _) => Box::new(output),
+            (_, Some(stderr)) => Box::new(stderr),
+            _ => return Err(protocol("Pi did not expose its diagnostics")),
         };
         let (input, outgoing) = mpsc::channel(32);
         let (events, receiver) = mpsc::channel(MAX_QUEUED_EVENTS + 1);
@@ -491,6 +506,7 @@ fn bridge_lock(bridge: &Bridge) -> std::sync::MutexGuard<'_, PiBridge> {
 /// approval card; `start` installs the bundled extension that turns every tool
 /// call into that dialog.
 pub struct PiHarness {
+    process_tracker: Option<Arc<dyn shep_harness_core::AgentProcessTracker>>,
     rpc: Option<PiRpc>,
     events: mpsc::UnboundedReceiver<HarnessEvent>,
     sender: mpsc::UnboundedSender<HarnessEvent>,
@@ -526,6 +542,7 @@ impl PiHarness {
         let (sender, events) = mpsc::unbounded_channel();
         let (_dialogs, dialogs) = mpsc::unbounded_channel();
         Self {
+            process_tracker: None,
             rpc: None,
             events,
             sender,
@@ -549,6 +566,10 @@ impl PiHarness {
 
 #[async_trait]
 impl AgentHarness for PiHarness {
+    fn set_process_tracker(&mut self, tracker: Arc<dyn shep_harness_core::AgentProcessTracker>) {
+        self.process_tracker = Some(tracker);
+    }
+
     fn events(&mut self) -> &mut mpsc::UnboundedReceiver<HarnessEvent> {
         &mut self.events
     }
@@ -568,7 +589,16 @@ impl AgentHarness for PiHarness {
         }
         self.diagnostics.command = command_line(&spec);
         self.diagnostics.protocol = "pi rpc".into();
-        let (mut rpc, state) = PiRpc::start(&spec).await?;
+        let terminal = if let Some(tracker) = &self.process_tracker {
+            tracker
+                .open_foreground_terminal(&shep_harness_core::command_line(&spec), &spec.cwd)
+                .await
+                .map_err(HarnessError::Protocol)?
+        } else {
+            None
+        };
+        let (mut rpc, state) =
+            PiRpc::start_with_terminal(&spec, terminate, boxed_wait_for_child, terminal).await?;
         let events = rpc
             .take_events()
             .ok_or_else(|| protocol("Pi RPC events are already in use"))?;

@@ -659,8 +659,47 @@ pub const PROCESS_TOKEN_ENV: &str = "SHEPHERD_PROCESS_TOKEN";
 #[async_trait]
 
 pub trait AgentProcessTracker: Send + Sync {
+    async fn open_foreground_terminal(
+        &self,
+        _command: &str,
+        _cwd: &std::path::Path,
+    ) -> Result<Option<ForegroundTerminal>, String> {
+        Ok(None)
+    }
+
     async fn started(&self, pid: u32) -> Result<String, String>;
     async fn stopped(&self, record_id: &str) -> Result<(), String>;
+}
+
+pub struct ForegroundTerminal {
+    pub slave: std::fs::File,
+    pub output: tokio::io::DuplexStream,
+}
+
+pub fn configure_foreground_terminal(
+    command: &mut tokio::process::Command,
+    slave: Option<std::fs::File>,
+) {
+    use std::process::Stdio;
+
+    if let Some(slave) = slave {
+        command.stderr(Stdio::from(slave));
+        #[cfg(unix)]
+        unsafe {
+            command.pre_exec(|| {
+                if libc::setsid() == -1
+                    || libc::ioctl(libc::STDERR_FILENO, libc::TIOCSCTTY as _, 0) == -1
+                {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+    } else {
+        command.stderr(Stdio::piped());
+        #[cfg(unix)]
+        command.process_group(0);
+    }
 }
 
 /// Everything an adapter reports to the core, in one ordered stream.
@@ -1580,7 +1619,9 @@ impl Transcript {
 )]
 #[async_trait]
 pub trait AgentHarness: Send {
-    fn set_direnv_launch(&mut self) {}
+    fn set_launch_wrapper(&mut self, _wrapper: Vec<String>) -> bool {
+        false
+    }
 
     /// Receive adapter events. The receiver is owned by the harness and must
     /// remain available for the whole session.

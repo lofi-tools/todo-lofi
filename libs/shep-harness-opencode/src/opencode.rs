@@ -1814,7 +1814,12 @@ impl EventDecoder {
     }
 }
 
-fn server_command(spec: &SpawnSpec, directory: &str, password: &str) -> Command {
+fn server_command(
+    spec: &SpawnSpec,
+    directory: &str,
+    password: &str,
+    slave: Option<std::fs::File>,
+) -> Command {
     let mut command = Command::new(&spec.program);
     command
         .args(&spec.args)
@@ -1826,10 +1831,8 @@ fn server_command(spec: &SpawnSpec, directory: &str, password: &str) -> Command 
         .env("OPENCODE_DISABLE_AUTOUPDATE", "1")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
         .kill_on_drop(true);
-    #[cfg(unix)]
-    command.process_group(0);
+    shep_harness_core::configure_foreground_terminal(&mut command, slave);
     command
 }
 
@@ -1943,7 +1946,18 @@ impl OpenCodeServer {
             .build()
             .map_err(|error| protocol_error("could not configure OpenCode HTTP client", error))?;
         let password = uuid::Uuid::new_v4().to_string();
-        let mut child = server_command(spec, &directory, &password)
+        let terminal = if let Some(tracker) = &tracker {
+            tracker
+                .open_foreground_terminal(&shep_harness_core::command_line(spec), &spec.cwd)
+                .await
+                .map_err(HarnessError::Protocol)?
+        } else {
+            None
+        };
+        let (slave, terminal_output) = terminal
+            .map(|terminal| (terminal.slave, terminal.output))
+            .unzip();
+        let mut child = server_command(spec, &directory, &password, slave)
             .spawn()
             .map_err(|source| HarnessError::Spawn {
                 program: spec.program.clone(),
@@ -1980,7 +1994,13 @@ impl OpenCodeServer {
                 HarnessError::Protocol("OpenCode did not provide a startup pipe".into())
             })?;
             let stderr = Arc::new(Mutex::new(VecDeque::new()));
-            if let Some(mut output) = child.stderr.take() {
+            let stderr_output: Option<Box<dyn tokio::io::AsyncRead + Send + Unpin>> =
+                match (terminal_output, child.stderr.take()) {
+                    (Some(output), _) => Some(Box::new(output)),
+                    (_, Some(output)) => Some(Box::new(output)),
+                    _ => None,
+                };
+            if let Some(mut output) = stderr_output {
                 let stderr = stderr.clone();
                 let password = password.clone();
                 tokio::spawn(async move {
@@ -2608,6 +2628,7 @@ mod tests {
             &spec,
             directory.path().to_str().ok_or("non-UTF-8 path")?,
             "fixture",
+            None,
         )
         .spawn()?;
         tokio::time::timeout(Duration::from_secs(3), async {

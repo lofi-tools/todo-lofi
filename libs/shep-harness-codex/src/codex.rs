@@ -54,7 +54,7 @@ const METHOD_NOT_FOUND: i64 = -32601;
 const MAX_PENDING_APPROVALS: usize = 64;
 const MAX_OUTBOUND_MESSAGES: usize = 128;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
-const DIRENV_INITIALIZE_TIMEOUT: Duration = Duration::from_secs(180);
+const WRAPPED_INITIALIZE_TIMEOUT: Duration = Duration::from_secs(180);
 const PROBE_TIMEOUT: Duration = Duration::from_secs(20);
 const STDERR_TAIL_LINES: usize = 20;
 const MAX_PROTOCOL_LINE_BYTES: usize = 8 * 1024 * 1024;
@@ -961,14 +961,45 @@ fn outbound_error(error: mpsc::error::TrySendError<OutboundMessage>) -> HarnessE
 #[cfg(any(test, feature = "live-test-support"))]
 use crate::live_codex::{WireCapture, WireEntry, without_api_credentials};
 
-fn codex_process(program: &str, direnv: bool) -> Command {
-    if direnv {
-        let mut command = Command::new("direnv");
-        command.args(["exec", ".", program]);
+fn codex_process(program: &str, wrapper: &[String], foreground: bool) -> Command {
+    if foreground && !wrapper.is_empty() {
+        // Give the wrapper a terminal on all three streams. Only the final
+        // protocol process inherits Shepherd's stdin and stdout pipes.
+        let mut command = Command::new("/bin/sh");
+        command.args([
+            "-c",
+            r#"exec 3<&0 4>&1; exec </dev/tty >/dev/tty; exec "$@""#,
+            "agent-terminal",
+        ]);
+        command.args(wrapper).args([
+            "/bin/sh",
+            "-c",
+            r#"exec <&3 >&4 3<&- 4>&-; exec "$@""#,
+            "agent-protocol",
+            program,
+        ]);
+        command
+    } else if let Some((executable, args)) = wrapper.split_first() {
+        let mut command = Command::new(executable);
+        command.args(args).arg(program);
         command
     } else {
         Command::new(program)
     }
+}
+
+async fn foreground_terminal(
+    tracker: Option<&Arc<dyn shep_harness_core::AgentProcessTracker>>,
+    command: &str,
+    cwd: &Path,
+) -> HarnessResult<Option<shep_harness_core::ForegroundTerminal>> {
+    let Some(tracker) = tracker else {
+        return Ok(None);
+    };
+    tracker
+        .open_foreground_terminal(command, cwd)
+        .await
+        .map_err(HarnessError::Protocol)
 }
 
 /// One `codex app-server` session.
@@ -999,7 +1030,7 @@ pub struct CodexHarness {
     command: String,
     protocol: String,
     version: Option<String>,
-    direnv: bool,
+    launch_wrapper: Vec<String>,
     started: bool,
 }
 
@@ -1036,7 +1067,7 @@ impl CodexHarness {
             command: String::new(),
             protocol: "app-server".to_string(),
             version: None,
-            direnv: false,
+            launch_wrapper: Vec::new(),
             started: false,
         }
     }
@@ -1156,8 +1187,8 @@ impl CodexHarness {
         let request_timeout = self.request_timeout;
         #[cfg(not(test))]
         let request_timeout = REQUEST_TIMEOUT;
-        let request_timeout = if self.direnv && method == "initialize" {
-            DIRENV_INITIALIZE_TIMEOUT
+        let request_timeout = if !self.launch_wrapper.is_empty() && method == "initialize" {
+            WRAPPED_INITIALIZE_TIMEOUT
         } else {
             request_timeout
         };
@@ -1218,21 +1249,23 @@ impl CodexHarness {
         }
 
         self.command = shep_harness_core::command_line(&spec);
-        if self.direnv {
-            self.command = format!("direnv exec . {}", self.command);
+        if !self.launch_wrapper.is_empty() {
+            self.command = format!("{} {}", self.launch_wrapper.join(" "), self.command);
         }
-        let mut command = codex_process(&spec.program, self.direnv);
+        let terminal =
+            foreground_terminal(self.process_tracker.as_ref(), &self.command, &spec.cwd).await?;
+        let mut command = codex_process(&spec.program, &self.launch_wrapper, terminal.is_some());
+        let (slave, terminal_output) = terminal
+            .map(|terminal| (terminal.slave, terminal.output))
+            .unzip();
+        shep_harness_core::configure_foreground_terminal(&mut command, slave);
         command
             .args(&spec.args)
             .current_dir(&spec.cwd)
             .envs(&spec.environment)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
             .kill_on_drop(true);
-
-        #[cfg(unix)]
-        command.process_group(0);
 
         #[cfg(any(test, feature = "live-test-support"))]
         if let Some(capture) = self.wire_capture.as_mut() {
@@ -1243,6 +1276,7 @@ impl CodexHarness {
         let mut child = command
             .spawn()
             .map_err(|source| spawn_error(&spec.program, source))?;
+        drop(command);
         let Some(stdin) = child.stdin.take() else {
             return Err(HarnessError::Protocol(
                 "codex stdin was not captured".to_string(),
@@ -1253,10 +1287,15 @@ impl CodexHarness {
                 "codex stdout was not captured".to_string(),
             ));
         };
-        let Some(stderr) = child.stderr.take() else {
-            return Err(HarnessError::Protocol(
-                "codex stderr was not captured".to_string(),
-            ));
+        let stderr: Box<dyn AsyncRead + Unpin + Send> = match (terminal_output, child.stderr.take())
+        {
+            (Some(output), _) => Box::new(output),
+            (_, Some(stderr)) => Box::new(stderr),
+            _ => {
+                return Err(HarnessError::Protocol(
+                    "codex stderr was not captured".into(),
+                ));
+            }
         };
 
         self.cwd = spec.cwd;
@@ -1424,8 +1463,9 @@ impl Default for CodexHarness {
 
 #[async_trait]
 impl AgentHarness for CodexHarness {
-    fn set_direnv_launch(&mut self) {
-        self.direnv = true;
+    fn set_launch_wrapper(&mut self, wrapper: Vec<String>) -> bool {
+        self.launch_wrapper = wrapper;
+        true
     }
 
     fn set_process_tracker(&mut self, tracker: Arc<dyn shep_harness_core::AgentProcessTracker>) {
@@ -1678,7 +1718,7 @@ impl AgentHarness for CodexHarness {
 /// turn's result only by exiting, and cannot answer approvals. Its capability
 /// set says so, so the core never offers the controls it lacks.
 pub struct ExecHarness {
-    direnv: bool,
+    launch_wrapper: Vec<String>,
     sender: mpsc::UnboundedSender<HarnessEvent>,
     receiver: mpsc::UnboundedReceiver<HarnessEvent>,
     stream_capacity: Arc<tokio::sync::Semaphore>,
@@ -1839,7 +1879,7 @@ impl ExecHarness {
     pub fn new() -> Self {
         let (sender, receiver) = mpsc::unbounded_channel();
         Self {
-            direnv: false,
+            launch_wrapper: Vec::new(),
             sender,
             receiver,
             stream_capacity: Arc::new(tokio::sync::Semaphore::new(EXEC_STREAM_CHUNKS)),
@@ -1898,8 +1938,9 @@ impl Default for ExecHarness {
 
 #[async_trait]
 impl AgentHarness for ExecHarness {
-    fn set_direnv_launch(&mut self) {
-        self.direnv = true;
+    fn set_launch_wrapper(&mut self, wrapper: Vec<String>) -> bool {
+        self.launch_wrapper = wrapper;
+        true
     }
 
     fn set_process_tracker(&mut self, tracker: Arc<dyn shep_harness_core::AgentProcessTracker>) {
@@ -1932,8 +1973,8 @@ impl AgentHarness for ExecHarness {
             .chain(spec.args.iter().map(String::as_str))
             .collect::<Vec<_>>()
             .join(" ");
-        if self.direnv {
-            self.command = format!("direnv exec . {}", self.command);
+        if !self.launch_wrapper.is_empty() {
+            self.command = format!("{} {}", self.launch_wrapper.join(" "), self.command);
         }
         self.program = spec.program;
         self.args = spec.args;
@@ -1990,7 +2031,13 @@ impl AgentHarness for ExecHarness {
         }
         self.run = None;
 
-        let mut command = codex_process(&self.program, self.direnv);
+        let terminal =
+            foreground_terminal(self.process_tracker.as_ref(), &self.command, &self.cwd).await?;
+        let mut command = codex_process(&self.program, &self.launch_wrapper, terminal.is_some());
+        let (slave, terminal_output) = terminal
+            .map(|terminal| (terminal.slave, terminal.output))
+            .unzip();
+        shep_harness_core::configure_foreground_terminal(&mut command, slave);
         command.arg("exec").arg("--json").args(&self.args);
         for attachment in input
             .attachments
@@ -2008,14 +2055,12 @@ impl AgentHarness for ExecHarness {
             .envs(&self.environment)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
             .kill_on_drop(true);
-        #[cfg(unix)]
-        command.process_group(0);
 
         let mut child = command
             .spawn()
             .map_err(|source| spawn_error(&self.program, source))?;
+        drop(command);
         let mut startup_group = ExecStartupGroup::new(&child);
         let process_record: ExecProcessRecord = Arc::new(AsyncMutex::new(None));
         if let Some(tracker) = &self.process_tracker {
@@ -2032,10 +2077,15 @@ impl AgentHarness for ExecHarness {
                 "codex exec stdout was not captured".to_string(),
             ));
         };
-        let Some(stderr) = child.stderr.take() else {
-            return Err(HarnessError::Protocol(
-                "codex exec stderr was not captured".to_string(),
-            ));
+        let stderr: Box<dyn AsyncRead + Unpin + Send> = match (terminal_output, child.stderr.take())
+        {
+            (Some(output), _) => Box::new(output),
+            (_, Some(stderr)) => Box::new(stderr),
+            _ => {
+                return Err(HarnessError::Protocol(
+                    "codex exec stderr was not captured".into(),
+                ));
+            }
         };
 
         self.stderr = Arc::new(Mutex::new(VecDeque::new()));
@@ -4940,12 +4990,12 @@ done
     }
 
     #[tokio::test]
-    async fn both_codex_tiers_launch_in_the_worktree_through_direnv()
+    async fn both_codex_tiers_use_the_configured_launch_wrapper()
     -> Result<(), Box<dyn std::error::Error>> {
         let directory = TempDir::new()?;
         write_stub(
             &directory,
-            "direnv",
+            "environment-wrapper",
             r#"#!/bin/sh
 [ "$1" = exec ] && [ "$2" = . ] || exit 64
 shift 2
@@ -4967,14 +5017,22 @@ exec "$@"
         let loaded = directory.path().join("loaded-environment");
 
         let mut harness = CodexHarness::new();
-        harness.set_direnv_launch();
+        harness.set_launch_wrapper(vec![
+            "environment-wrapper".into(),
+            "exec".into(),
+            ".".into(),
+        ]);
         harness.start(spawn_spec(&app_server)).await?;
         assert_eq!(std::fs::read_to_string(&loaded)?, "loaded\n");
         harness.shutdown().await?;
         std::fs::remove_file(&loaded)?;
 
         let mut harness = ExecHarness::new();
-        harness.set_direnv_launch();
+        harness.set_launch_wrapper(vec![
+            "environment-wrapper".into(),
+            "exec".into(),
+            ".".into(),
+        ]);
         harness.start(spawn_spec(&exec)).await?;
         harness.open_session(None).await?;
         harness.prompt(PromptInput::text("fixture")).await?;
