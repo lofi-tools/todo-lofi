@@ -1,3 +1,4 @@
+import { formatWorktreeCommand, parseWorktreeCommand } from './worktreeCommandLine'
 import { createSettingsDraft, SettingsSave } from './SettingsDraft'
 import { For, Index, Show, createEffect, createMemo, createResource, createSignal, createUniqueId, on, type JSX } from 'solid-js'
 
@@ -152,6 +153,11 @@ function ProjectPreviewServers(props: { value: PreviewService[]; localOverride: 
 }
 
 type CheckoutStep = NonNullable<WorktreeSetup['afterCheckout']>[number]
+type CheckoutCommandDraft = Pick<CheckoutStep, 'name' | 'required'> & { line: string }
+
+function checkoutCommandDrafts(value?: WorktreeSetup | null): CheckoutCommandDraft[] {
+  return (value?.afterCheckout ?? []).map(({ name, command, required }) => ({ name, required, line: formatWorktreeCommand(command) }))
+}
 
 function CommandArguments(props: { value: string[]; readOnly: boolean; onChange: (command: string[]) => void }) {
   const argumentId = createUniqueId()
@@ -193,17 +199,20 @@ function createWorktreeSetupEditor(props: {
   onEdit: SettingsPaneProps['onEditPreference']
 }) {
   const [configuration, setConfiguration] = createSignal<WorktreeSetup>(structuredClone(props.value ?? {}))
-  const saved = () => JSON.stringify(props.value ?? {})
-  const serialized = () => JSON.stringify(configuration())
-  const reset = () => setConfiguration(structuredClone(props.value ?? {}))
+  const [steps, setSteps] = createSignal(checkoutCommandDrafts(props.value))
+  const saved = () => JSON.stringify([props.value ?? {}, checkoutCommandDrafts(props.value)])
+  const serialized = () => JSON.stringify([configuration(), steps()])
+  function reset() {
+    setConfiguration(structuredClone(props.value ?? {}))
+    setSteps(checkoutCommandDrafts(props.value))
+  }
   createEffect(on(saved, (_, previous) => {
     if (serialized() === previous) reset()
   }))
 
   const update = (patch: Partial<WorktreeSetup>) => setConfiguration((current) => ({ ...current, ...patch }))
-  const steps = () => configuration().afterCheckout ?? []
-  function updateStep(index: number, patch: Partial<CheckoutStep>) {
-    update({ afterCheckout: steps().map((step, position) => position === index ? { ...step, ...patch } : step) })
+  function updateStep(index: number, line: string) {
+    setSteps((current) => current.map((step, position) => position === index ? { ...step, line } : step))
   }
   function moveStep(index: number, offset: number) {
     const next = [...steps()]
@@ -212,15 +221,23 @@ function createWorktreeSetupEditor(props: {
     const [step] = next.splice(index, 1)
     if (step) {
       next.splice(destination, 0, step)
-      update({ afterCheckout: next })
+      setSteps(next)
     }
   }
 
   function validatedValue() {
-    const value = configuration()
-    for (const [index, step] of steps().entries()) {
-      if (!step.name.trim() || !step.command[0]?.trim()) throw new Error(`Enter a name and program for checkout command ${index + 1}.`)
-    }
+    const afterCheckout = steps().map(({ name, required, line }, index): CheckoutStep => {
+      try {
+        const command = parseWorktreeCommand(line)
+        const program = command[0]
+        if (!program?.trim()) throw new Error('Enter a program or remove this row.')
+        const label = name || Array.from(program.split('/').at(-1) || program).slice(0, 50).join('')
+        return { name: label, command, required }
+      } catch (failure) {
+        throw new Error(`Command ${index + 1}. ${settingsError(failure)}`)
+      }
+    })
+    const value = { ...configuration(), afterCheckout: afterCheckout.length ? afterCheckout : undefined }
     if (value.readinessCheck && (!value.readinessCheck.name.trim() || !value.readinessCheck.command[0]?.trim())) {
       throw new Error('Enter a name and program for the readiness check.')
     }
@@ -229,11 +246,11 @@ function createWorktreeSetupEditor(props: {
       (value.setupTerminal.command?.length && !value.setupTerminal.command[0]?.trim()))) {
       throw new Error('Enter a name for the setup terminal and a program if you customize its shell.')
     }
-    return serialized() === '{}' ? null : value
+    return JSON.stringify(value) === '{}' ? null : value
   }
 
   return {
-    configuration, update, steps, updateStep, moveStep, reset, validatedValue,
+    configuration, update, steps, setSteps, updateStep, moveStep, reset, validatedValue,
     dirty: () => !props.localOverride && serialized() !== saved(),
     async save(value: WorktreeSetup | null) {
       await props.onEdit('worktree.setup', value, props.projectId)
@@ -247,7 +264,7 @@ function WorktreeSetupSettings(props: {
   readOnly: boolean
   localOverride: boolean
 }) {
-  const { configuration, update, steps, updateStep, moveStep } = props.editor
+  const { configuration, update, steps, setSteps, updateStep, moveStep } = props.editor
   const readOnly = () => props.readOnly
   return <section class="settings__project" aria-label="Worktree commands">
     <h5>Worktree commands</h5>
@@ -259,34 +276,26 @@ function WorktreeSetupSettings(props: {
     <fieldset class="settings__project settings__worktree-group">
       <legend>After checkout</legend>
       <Show when={!steps().length}><p class="empty">No checkout commands configured.</p></Show>
-      <Index each={steps()}>{(step, index) => (
-        <fieldset class="settings__project settings__worktree-group settings__item">
-          <legend>Checkout command {index + 1}</legend>
-          <label class="settings__row"><span>Name</span><input value={step().name} readOnly={readOnly()}
-            onInput={(event) => updateStep(index, { name: event.currentTarget.value })} /></label>
-          <CommandArguments value={step().command} readOnly={readOnly()} onChange={(command) => updateStep(index, { command })} />
-          <label class="settings__row settings__row--checkbox"><span>Required</span>
-            <input type="checkbox" checked={step().required !== false} disabled={readOnly()}
-              onChange={(event) => updateStep(index, { required: event.currentTarget.checked })} />
-          </label>
-          <Show when={!readOnly()}>
-            <div class="settings__save">
-              <button type="button" class="project-action" aria-label={`Move checkout command ${index + 1} up`}
-                disabled={index === 0} onClick={() => moveStep(index, -1)}>Move up</button>
-              <button type="button" class="project-action" aria-label={`Move checkout command ${index + 1} down`}
-                disabled={index + 1 >= steps().length} onClick={() => moveStep(index, 1)}>Move down</button>
-              <button type="button" class="project-action" aria-label={`Remove checkout command ${index + 1}`}
-                onClick={() => {
-                  const remaining = steps().filter((_, position) => position !== index)
-                  update({ afterCheckout: remaining.length ? remaining : undefined })
-                }}>Remove</button>
-            </div>
-          </Show>
-        </fieldset>
-      )}</Index>
+      <ol class="settings__checkout-commands" role="list">
+        <Index each={steps()}>{(step, index) => (
+          <li>
+            <input aria-label={`Command ${index + 1}`} value={step().line} readOnly={readOnly()}
+              placeholder="e.g. direnv allow ." spellcheck={false}
+              onInput={(event) => updateStep(index, event.currentTarget.value)} />
+            <Show when={!readOnly()}>
+              <button type="button" class="project-action project-action--icon" aria-label={`Move command ${index + 1} up`}
+                title="Move up" disabled={index === 0} onClick={() => moveStep(index, -1)}>↑</button>
+              <button type="button" class="project-action project-action--icon" aria-label={`Move command ${index + 1} down`}
+                title="Move down" disabled={index + 1 >= steps().length} onClick={() => moveStep(index, 1)}>↓</button>
+              <button type="button" class="project-action project-action--icon" aria-label={`Remove command ${index + 1}`}
+                title="Remove command" onClick={() => setSteps((current) => current.filter((_, position) => position !== index))}>×</button>
+            </Show>
+          </li>
+        )}</Index>
+      </ol>
       <Show when={!readOnly()}>
         <button type="button" class="project-action" disabled={steps().length >= 32}
-          onClick={() => update({ afterCheckout: [...steps(), { name: '', command: [''] }] })}>Add checkout command</button>
+          onClick={() => setSteps((current) => [...current, { name: '', line: '' }])}>Add checkout command</button>
       </Show>
     </fieldset>
     <fieldset class="settings__project settings__worktree-group">

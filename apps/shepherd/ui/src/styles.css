@@ -1252,6 +1252,29 @@ textarea {
   padding-bottom: 4px;
 }
 
+.settings__checkout-commands {
+  display: grid;
+  width: 100%;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.settings__checkout-commands:empty { display: none; }
+
+.settings__checkout-commands li {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.settings__checkout-commands input {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--font-mono, monospace);
+}
+
 .settings__command-argument {
   display: flex;
   align-items: start;
@@ -1620,6 +1643,7 @@ button.pool__agent-label { padding: 0; border: 0; background: transparent; color
 }
 
 .settings__preview-url input,
+.settings__checkout-commands input,
 .settings__shortcut-row input {
   min-width: 0;
   padding: 4px 8px;

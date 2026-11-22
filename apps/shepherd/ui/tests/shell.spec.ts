@@ -127,7 +127,11 @@ test.beforeEach(async ({ context }) => {
         '/tmp/demo': {
           'preview.url': 'http://localhost:3400/',
           'tasks.show_archived': false,
-          'worktree.setup': { useImportedSetup: false, launchWrapper: ['direnv', 'exec', '.'] },
+          'worktree.setup': {
+            useImportedSetup: false,
+            afterCheckout: [{ name: 'Allow direnv', command: ['direnv', 'allow', '.'] }],
+            launchWrapper: ['direnv', 'exec', '.'],
+          },
           'attachments.max_file_bytes': 900,
           ...(options.has('repo-environment') ? {
             environment: { sourceHash: '', setup: 'repo setup', actions: [{ name: 'Run', icon: 'run', command: 'repo command' }] },
@@ -2556,14 +2560,25 @@ test('saves only the focused settings section and protects drafts when leaving',
 })
 
 test('edits structured worktree commands and preserves argument boundaries', async ({ page }) => {
+  const script = 'printf hello\nprintf done'
+  await page.addInitScript((setup) => {
+    if (!localStorage.getItem('fixture.settings')) {
+      localStorage.setItem('fixture.settings', JSON.stringify({
+        projects: { '/tmp/demo': { 'worktree.setup': { afterCheckout: [
+          { name: 'Prepare', command: ['sh', '-c', setup], required: false },
+        ] } } },
+      }))
+    }
+  }, script)
   await page.goto('/')
   await page.getByRole('button', { name: 'Settings', exact: true }).click()
   await page.getByRole('button', { name: 'Projects', exact: true }).click()
   await selectProjectSettings(page)
 
   const section = page.getByRole('region', { name: 'Worktree commands' })
-  const first = section.getByRole('group', { name: 'Checkout command 1' })
-  const second = section.getByRole('group', { name: 'Checkout command 2' })
+  const first = section.getByRole('textbox', { name: 'Command 1' })
+  const second = section.getByRole('textbox', { name: 'Command 2' })
+  const save = page.getByRole('region', { name: 'Worktrees & environment' }).getByRole('button', { name: 'Save worktree settings' })
   const readiness = section.getByRole('group', { name: 'Readiness check' })
   const wrapper = section.getByRole('group', { name: 'Launch wrapper' })
   const terminal = section.getByRole('group', { name: 'Setup terminal' })
@@ -2575,16 +2590,19 @@ test('edits structured worktree commands and preserves argument boundaries', asy
     }
   }
 
-  const script = "printf '%s' 'hello world'\nprintf '%s' done"
+  const scriptLine = "sh -c $'printf hello\\nprintf done'"
+  await expect(first).toHaveValue(scriptLine)
   await section.getByRole('button', { name: 'Add checkout command' }).click()
-  await first.getByLabel('Name', { exact: true }).fill('Prepare')
-  await command(first, 'sh', ['-c', script])
-  await first.getByRole('checkbox', { name: 'Required' }).uncheck()
-  await section.getByRole('button', { name: 'Add checkout command' }).click()
-  await second.getByLabel('Name', { exact: true }).fill('Allow direnv')
-  await command(second, 'direnv', ['allow', '.'])
-  await second.getByRole('button', { name: 'Move checkout command 2 up' }).click()
-  await expect(first.getByLabel('Name', { exact: true })).toHaveValue('Allow direnv')
+  await second.fill('direnv allow "unclosed')
+  await save.click()
+  await expect(page.getByRole('region', { name: 'Worktrees & environment' }).getByRole('alert')).toContainText('Close any open quotes')
+  await second.fill('direnv allow . | cat')
+  await save.click()
+  await expect(page.getByRole('region', { name: 'Worktrees & environment' }).getByRole('alert')).toContainText('Use sh -c')
+  const commandLine = "direnv allow \"path with spaces\" other\\ path ''"
+  await second.fill(commandLine)
+  await section.getByRole('button', { name: 'Move command 2 up' }).click()
+  await expect(first).toHaveValue(commandLine)
 
   await readiness.getByRole('button', { name: 'Add readiness check' }).click()
   await readiness.getByLabel('Name', { exact: true }).fill('Check config')
@@ -2598,19 +2616,18 @@ test('edits structured worktree commands and preserves argument boundaries', asy
   await command(terminal, 'zsh', ['-i'])
 
   const alignedControls = [page.getByLabel('Attachment limit (bytes)'), page.getByLabel('Preview URL'),
-    first.getByLabel('Program'), second.getByLabel('Argument 2', { exact: true }), terminal.getByLabel('Recovery instructions')]
+    readiness.getByLabel('Program'), wrapper.getByLabel('Argument 2', { exact: true }), terminal.getByLabel('Recovery instructions')]
   const controls = await Promise.all(alignedControls.map((control) => control.boundingBox()))
   const column = controls[0]?.x
   if (column === undefined) throw new Error('Missing attachment limit control')
   for (const control of controls) expect(control?.x).toBeCloseTo(column, 0)
 
-  const save = page.getByRole('region', { name: 'Worktrees & environment' }).getByRole('button', { name: 'Save worktree settings' })
   await save.click()
   await expect(save).toBeDisabled()
   const stored = () => page.evaluate(() => JSON.parse(localStorage.getItem('fixture.settings') ?? '{}').projects?.['/tmp/demo']?.['worktree.setup'])
   await expect.poll(stored).toEqual({
     afterCheckout: [
-      { name: 'Allow direnv', command: ['direnv', 'allow', '.'] },
+      { name: 'direnv', command: ['direnv', 'allow', 'path with spaces', 'other path', ''] },
       { name: 'Prepare', command: ['sh', '-c', script], required: false },
     ],
     readinessCheck: { name: 'Check config', command: ['test', '-f', 'path with spaces'] },
@@ -2621,10 +2638,12 @@ test('edits structured worktree commands and preserves argument boundaries', asy
   await page.getByRole('button', { name: 'Settings', exact: true }).click()
   await page.getByRole('button', { name: 'Projects', exact: true }).click()
   await selectProjectSettings(page)
-  await expect(second.getByLabel('Argument 2', { exact: true })).toHaveValue(script)
+  await expect(second).toHaveValue(scriptLine)
+  await section.getByRole('button', { name: 'Remove command 1' }).click()
   await wrapper.getByRole('button', { name: 'Remove launch wrapper' }).click()
   await save.click()
   await expect.poll(async () => (await stored()).launchWrapper).toBeUndefined()
+  await expect.poll(async () => (await stored()).afterCheckout).toEqual([{ name: 'Prepare', command: ['sh', '-c', script], required: false }])
 })
 
 test('opens repository-managed settings in the editor and autosaves editable values', async ({ page }) => {
@@ -2654,6 +2673,8 @@ test('opens repository-managed settings in the editor and autosaves editable val
   await expect(page.getByRole('textbox', { name: 'Action command' })).toBeEditable()
   const commands = page.getByRole('region', { name: 'Worktree commands' })
   await expect(commands.getByRole('checkbox', { name: 'Run saved setup script' })).toBeDisabled()
+  await expect(commands.getByRole('textbox', { name: 'Command 1' })).toHaveValue('direnv allow .')
+  await expect(commands.getByRole('textbox', { name: 'Command 1' })).toHaveAttribute('readonly', '')
   const wrapper = commands.getByRole('group', { name: 'Launch wrapper' })
   await expect(wrapper.getByLabel('Program')).toHaveAttribute('readonly', '')
   await expect(wrapper.getByLabel('Program')).toHaveValue('direnv')

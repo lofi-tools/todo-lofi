@@ -203,9 +203,11 @@ current layout and give future changes a point of comparison.
   `.config/shepherd/settings.json`. Create the checkout and run its configured
   commands on Send, with a composer notice only if something fails.
   The editor groups the script toggle, ordered checkout commands, readiness
-  check, launch wrapper, and setup terminal. Edit each program and its
-  arguments as separate fields so spaces and multiline arguments are
-  preserved. The section saves as one unit.
+  check, launch wrapper, and setup terminal. Show checkout commands in
+  execution order, one editable command line per row. Parse shell quoting
+  into literal arguments. Use an explicit shell invocation for pipelines or
+  expansion. Preserve existing command names and required flags. The section
+  saves as one unit.
   `afterCheckout` lists named argument arrays. Required steps must succeed
   before the agent starts. Optional failures appear in the terminal and setup
   continues. Successful checkout steps are recorded and skipped on retry.
