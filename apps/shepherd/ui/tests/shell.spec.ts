@@ -298,6 +298,14 @@ test.beforeEach(async ({ context }) => {
     if (options.has('two-tasks')) {
       tasks.push({ ...tasks[0], id: 'task-second', title: 'Second chat', state: 'ready' })
     }
+    if (options.has('newest-chat-first')) {
+      const first = tasks[0]
+      tasks.push(
+        { ...first, id: 'task-newest', title: 'Newest chat', createdAt: first.createdAt + 2_000 },
+        { ...first, id: 'task-oldest', title: 'Oldest chat', createdAt: first.createdAt - 2_000 },
+        { ...first, id: 'task-archived', title: 'Archived chat', state: 'done', createdAt: first.createdAt + 3_000 },
+      )
+    }
     if (options.has('task-search')) {
       tasks.push(
         { ...tasks[0], id: 'task-search-archived', projectId: 'project-notes', title: 'Archived answer', state: 'done' },
@@ -3583,6 +3591,25 @@ test('never pairs the files pane with another project’s task when a remembered
   expect(afterSwitch.some((request) => request.projectId === 'project-notes' && request.taskId === null)).toBe(true)
   await expect(page.getByRole('alert')).toHaveCount(0)
   await expect(page.locator('.error-toast')).toHaveCount(0)
+})
+
+test('orders sidebar chats by creation date and opens the newest on project click', async ({ page }) => {
+  await page.goto('/?newest-chat-first')
+  const project = page.locator('[data-project-id="project-1"]')
+  const chats = project.locator('button.task')
+  await expect(chats).toHaveText(['Newest chat', 'Ship it', 'Oldest chat'])
+  await expect(project.getByRole('button', { name: 'Ship it', exact: true })).toHaveAttribute('aria-current', 'true')
+
+  const projectButton = project.getByRole('button', { name: 'demo', exact: true })
+  const newest = project.getByRole('button', { name: 'Newest chat', exact: true })
+  await projectButton.click()
+  await expect(newest).toHaveAttribute('aria-current', 'true')
+
+  const oldest = project.getByRole('button', { name: 'Oldest chat', exact: true })
+  await oldest.click()
+  await expect(oldest).toHaveAttribute('aria-current', 'true')
+  await projectButton.click()
+  await expect(newest).toHaveAttribute('aria-current', 'true')
 })
 
 test('distinguishes unavailable projects from a missing saved task', async ({ page }) => {

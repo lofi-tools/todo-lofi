@@ -44,6 +44,11 @@ type FallbackSkill = { id: string; name: string; agent: bridge.Agent }
 type PaletteKind = 'commands' | 'projects' | 'tasks'
 
 const LIVE_STATES: bridge.TaskState[] = ['starting', 'queued', 'working', 'waiting']
+
+function newestChats(tasks: bridge.TaskSummary[]) {
+  return [...tasks].sort((first, second) => second.createdAt - first.createdAt)
+}
+
 const TIER_LABELS: Record<bridge.AgentTier, string> = {
   native: 'Native',
   acp: 'ACP',
@@ -511,6 +516,7 @@ export function App() {
       ?? preferences()?.app['tasks.show_archived'] ?? false
   }
   const visibleTasks = () => tasks().filter((task) => showsArchived(selectedProjectId()) || task.state !== 'done')
+  const sidebarTasks = createMemo(() => newestChats(visibleTasks()))
 
   function openProjectSettings(projectId: string) {
     setProjectSettingsRequest({ id: projectId })
@@ -1252,7 +1258,7 @@ export function App() {
     })
   })
   const reviewCount = createMemo(() => projects().reduce((count, project) => count + (project.reviewTaskCount ?? 0), 0))
-  const filteredReviewTasks = (projectId: string) => reviewLists().get(projectId) ?? []
+  const filteredReviewTasks = (projectId: string) => newestChats(reviewLists().get(projectId) ?? [])
   const reviewRows = () => projects().flatMap((project) => filteredReviewTasks(project.id))
   const selectedReviewIds = () => reviewRows().filter((task) => reviewSelection().has(task.id)).map((task) => task.id)
   const sidebarSelection = () => reviewOnly() ? reviewSelection() : undefined
@@ -1757,7 +1763,7 @@ export function App() {
     if (taskId) void run(() => selectTask(taskId))
   }
 
-  async function selectProject(project: bridge.ProjectSnapshot, taskId?: string) {
+  async function selectProject(project: bridge.ProjectSnapshot, taskId?: string, preferNewest = false) {
     setDraftAgentManuallySelected(false)
     setFreebuffProjectId(undefined)
     setComposingProjectId(undefined)
@@ -1784,18 +1790,19 @@ export function App() {
       return
     }
     const visible = listed.filter((task) => showsArchived(project.id) || task.state !== 'done')
-    const task = project.lastTaskId
-      ? visible.find((entry) => entry.id === project.lastTaskId)
-      : visible.length === 1 ? visible[0] : undefined
+    const task = preferNewest
+      ? newestChats(visible)[0]
+      : project.lastTaskId
+        ? visible.find((entry) => entry.id === project.lastTaskId)
+        : visible.length === 1 ? visible[0] : undefined
     if (task) await selectTask(task.id)
   }
 
   function openProject(project: bridge.ProjectSnapshot, useReviewFilter = reviewOnly()) {
     recordCurrentScreen()
     setSettingsOpen(false)
-    const reviewed = useReviewFilter ? filteredReviewTasks(project.id) : []
-    const target = reviewed.find((task) => task.id === project.lastTaskId) ?? reviewed[0]
-    void run(() => selectProject(project, target?.id)).then(() => {
+    const target = useReviewFilter ? filteredReviewTasks(project.id)[0] : undefined
+    void run(() => selectProject(project, target?.id, true)).then(() => {
       if (selectedProjectId() === project.id && canStartTask()) promptInput?.focus()
     })
   }
@@ -1805,8 +1812,7 @@ export function App() {
     const listed = isSelected && loadedTasksFor() === project.id ? tasks() : (await bridge.taskList(project.id)).tasks
     if (isSelected) return sidebarDetails(project, listed.find((task) => task.id === selectedTaskId()), 'project')
     const visible = listed.filter((task) => showsArchived(project.id) || task.state !== 'done')
-    const task = visible.find((entry) => entry.id === project.lastTaskId) ?? (visible.length === 1 ? visible[0] : undefined)
-    return sidebarDetails(project, task, 'project')
+    return sidebarDetails(project, newestChats(visible)[0], 'project')
   }
 
   function openTaskRow(task: bridge.TaskSummary) {
@@ -2900,7 +2906,7 @@ export function App() {
               {(project) => {
                 const menuId = `project:${project.id}`
                 const listed = () => reviewOnly() ? filteredReviewTasks(project.id)
-                  : project.id === selectedProjectId() && visibleTasks().length > 1 ? visibleTasks() : []
+                  : project.id === selectedProjectId() && sidebarTasks().length > 1 ? sidebarTasks() : []
                 return (
                   <li ref={(row) => { projectRows.set(project.id, row); onCleanup(() => projectRows.delete(project.id)) }}
                     data-project-id={project.id}

@@ -377,8 +377,9 @@ current layout and give future changes a point of comparison.
   hover, reveal Compose when the pointer is over the row or a row button has
   keyboard focus. Compose opens a draft in that project.
 - Show task rows beneath the selected project only when more than one task is
-  visible after applying the archive filter. A sole visible task opens directly
-  in the conversation pane. Reserve the expanded area for task rows. Compose
+  visible after applying the archive filter, ordered newest to oldest by
+  creation date. Clicking the project row opens its newest visible chat
+  directly in the conversation pane. Reserve the expanded area for task rows. Compose
   stays on the project row and the archive switch stays in the context card.
 - Keep the state word out of a task row: the leading state dot, waiting icon and
   **Needs review** badge carry it. Put an accent dot at the end of the row when
