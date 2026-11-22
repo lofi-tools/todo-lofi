@@ -179,6 +179,8 @@ current layout and give future changes a point of comparison.
   **Preview & services**, **Project actions**, and **Approvals** in that order.
   Align field labels and controls in two shared columns, separate sections
   with dividers, and use cards for repeatable commands, servers, and actions.
+  The setup script field starts at two lines and grows with its content,
+  leaving one blank line for typing. It has no manual resize control.
   Show which sections the repository manages, including partial overrides.
   Identify inherited defaults by their workspace value. Keep draft status,
   save controls, and the save shortcut with their section.

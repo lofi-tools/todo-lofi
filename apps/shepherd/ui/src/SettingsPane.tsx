@@ -398,10 +398,14 @@ function createProjectEnvironmentEditor(projectId: string) {
 
 function ProjectSetupScript(props: { editor: ReturnType<typeof createProjectEnvironmentEditor>; readOnly: boolean; disabled: boolean; localOverride: boolean }) {
   const descriptionId = createUniqueId()
+  const script = props.editor.script
+  const sizingText = () => script() + (script().endsWith('\n') ? ' ' : '\n ')
   return <Show when={props.editor.loaded()}>
     <label class="settings__row"><span>Worktree setup script</span>
-      <textarea value={props.editor.script()} readOnly={props.readOnly} aria-describedby={descriptionId}
-        onInput={(event) => props.editor.setScript(event.currentTarget.value)} />
+      <div class="settings__setup-script" data-sizing-text={sizingText()}>
+        <textarea rows={2} value={script()} readOnly={props.readOnly} aria-describedby={descriptionId}
+          onInput={(event) => props.editor.setScript(event.currentTarget.value)} />
+      </div>
     </label>
     <p class="empty settings__field-note" id={descriptionId}>{props.disabled
       ? 'This project disables this script and uses the commands under Worktree commands.'

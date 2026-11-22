@@ -5402,6 +5402,41 @@ test('navigates back and forward between project overview and a project', async 
   await expect(page.getByText('Import all from', { exact: true })).toHaveCount(0)
 })
 
+test('grows the worktree setup script from two lines without changing its text', async ({ page }) => {
+  await page.goto('/')
+  await page.getByRole('button', { name: 'Settings', exact: true }).click()
+  await page.getByRole('button', { name: 'Projects', exact: true }).click()
+  await selectProjectSettings(page)
+
+  const worktree = page.getByRole('region', { name: 'Worktrees & environment' })
+  const script = worktree.getByRole('textbox', { name: 'Worktree setup script' })
+  const contentHeight = () => script.evaluate((element) => {
+    const style = getComputedStyle(element)
+    const verticalInset = [style.paddingTop, style.paddingBottom, style.borderTopWidth, style.borderBottomWidth]
+      .reduce((total, size) => total + Number.parseFloat(size), 0)
+    return (element.getBoundingClientRect().height - verticalInset) / Number.parseFloat(style.lineHeight)
+  })
+  await expect(script).toHaveCSS('resize', 'none')
+  expect(await contentHeight()).toBeCloseTo(2, 1)
+  await script.fill('echo one')
+  expect(await contentHeight()).toBeCloseTo(2, 1)
+  await script.fill('echo one\necho two')
+  expect(await contentHeight()).toBeCloseTo(3, 1)
+  await script.fill('echo one\necho two\n')
+  expect(await contentHeight()).toBeCloseTo(3, 1)
+  await script.fill('echo ' + 'long'.repeat(100))
+  expect(await contentHeight()).toBeGreaterThan(3)
+  await script.clear()
+  expect(await contentHeight()).toBeCloseTo(2, 1)
+
+  const text = 'echo one\necho two\n'
+  await script.fill(text)
+  await worktree.getByRole('button', { name: 'Save worktree settings' }).click()
+  await expect.poll(() => page.evaluate(() => JSON.parse(localStorage.getItem('fixture.settings') ?? '{}')
+    .projects?.['/tmp/demo']?.environment?.setup)).toBe(text)
+  await expect(script).toHaveValue(text)
+})
+
 test('imports a Codex environment and offers updates without overwriting edits', async ({ page }) => {
   await page.addInitScript(() => localStorage.setItem('fixture.codexEnvironment', JSON.stringify({
     sourceHash: 'first', setup: 'install dependencies',
