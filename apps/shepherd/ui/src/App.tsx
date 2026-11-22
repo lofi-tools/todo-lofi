@@ -2919,7 +2919,6 @@ export function App() {
                       project={project}
                       homeDirectory={homeDirectory()}
                       selected={project.id === selectedProjectId()}
-                      containsActiveChat={listed().some((task) => task.id === selectedTaskId())}
                       expanded={listed().length > 0}
                       pending={pending()}
                       showArchived={showsArchived(project.id)}

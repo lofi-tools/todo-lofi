@@ -357,9 +357,8 @@ current layout and give future changes a point of comparison.
   icons with light strokes. The text and icons share a colour. Use muted text
   for unselected projects and slightly brighter text for the selected project.
   Unselected rows rest on the sidebar's background with a transparent fill.
-  A selected project has a raised fill when it stands in for the open chat.
-  When the active chat has its own visible row, give that row a stronger fill
-  and weight and use a quieter project label with no persistent fill. On devices with
+  A selected project has a subtle raised fill. When the active chat has its
+  own visible row, give the chat row a stronger fill and heavier type. On devices with
   hover, reveal Compose when the pointer is over the row or a row button has
   keyboard focus. Compose opens a draft in that project.
 - Show task rows beneath the selected project only when more than one task is

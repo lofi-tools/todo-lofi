@@ -728,7 +728,7 @@ textarea {
   color: var(--text-secondary);
 }
 
-.project-row--selected:not(.project-row--active-chat),
+.project-row--selected,
 .project-row:hover {
   --project-row-background: var(--surface-raised);
   background: var(--project-row-background);
