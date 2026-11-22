@@ -3545,6 +3545,7 @@ test('keeps the files pane on the selected project when switching project rows',
 
   await page.getByRole('button', { name: 'notes', exact: true }).click()
   await page.getByRole('tab', { name: 'Files', exact: true }).click()
+  await page.getByRole('button', { name: 'New chat in notes', exact: true }).press('Enter')
   await expect(files.getByRole('button', { name: /README\.md/ })).toBeVisible()
   await page.getByRole('button', { name: /Read notes/ }).click()
 
@@ -3618,14 +3619,21 @@ test('orders sidebar chats by creation date and opens the newest on project clic
 
   const projectButton = project.getByRole('button', { name: 'demo', exact: true })
   const newest = project.getByRole('button', { name: 'Newest chat', exact: true })
+  const newestRow = await newest.elementHandle()
   await projectButton.click()
   await expect(newest).toHaveAttribute('aria-current', 'true')
+  expect(await newestRow!.evaluate((node) => node.isConnected)).toBe(true)
 
   const oldest = project.getByRole('button', { name: 'Oldest chat', exact: true })
   await oldest.click()
   await expect(oldest).toHaveAttribute('aria-current', 'true')
   await projectButton.click()
   await expect(newest).toHaveAttribute('aria-current', 'true')
+
+  const reads = () => page.evaluate(() => (window as unknown as { __workspaceReads: () => number }).__workspaceReads())
+  const before = await reads()
+  await projectButton.click()
+  expect(await reads()).toBe(before)
 })
 
 test('distinguishes unavailable projects from a missing saved task', async ({ page }) => {

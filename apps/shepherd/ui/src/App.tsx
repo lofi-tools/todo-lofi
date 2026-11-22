@@ -1806,6 +1806,20 @@ export function App() {
     recordCurrentScreen()
     setSettingsOpen(false)
     const target = useReviewFilter ? filteredReviewTasks(project.id)[0] : undefined
+    if (selectedProjectId() === project.id && loadedTasksFor() === project.id) {
+      const cachedTarget = target ?? sidebarTasks()[0]
+      if (cachedTarget || selectedTaskId() === null) {
+        batch(() => {
+          setFreebuffProjectId(undefined)
+          setComposingProjectId(undefined)
+          setSearchJump(undefined)
+        })
+        if (cachedTarget) {
+          if (!isOpenTask(cachedTarget.id)) void run(() => selectTask(cachedTarget.id))
+        } else if (canStartTask()) promptInput?.focus()
+        return
+      }
+    }
     void run(() => selectProject(project, target?.id, true)).then(() => {
       if (selectedProjectId() === project.id && canStartTask()) promptInput?.focus()
     })
