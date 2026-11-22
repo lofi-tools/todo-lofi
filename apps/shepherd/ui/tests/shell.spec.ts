@@ -2553,6 +2553,9 @@ test('saves only the focused settings section and protects drafts when leaving',
 })
 
 test('opens repository-managed settings in the editor and autosaves editable values', async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem('fixture.codexEnvironment', JSON.stringify({
+    sourceHash: 'first', setup: 'direnv allow', actions: [{ name: 'Run', icon: 'run', command: 'npm start' }],
+  })))
   await page.goto('/?repo-settings')
   await page.getByRole('button', { name: 'Settings', exact: true }).click()
   await page.getByRole('button', { name: 'Projects', exact: true }).click()
@@ -2560,6 +2563,11 @@ test('opens repository-managed settings in the editor and autosaves editable val
   await expect(page.getByRole('checkbox', { name: 'Show archived tasks' })).toBeDisabled()
   await expect(page.getByRole('textbox', { name: 'Preview URL' })).toHaveAttribute('readonly', '')
   await expect(page.getByRole('textbox', { name: 'Preview URL' })).toHaveValue('http://localhost:3400/')
+  const script = page.getByRole('textbox', { name: 'Worktree setup script' })
+  await expect(script).toHaveValue('direnv allow')
+  await expect(script).toHaveAttribute('readonly', '')
+  await expect(script).toHaveAccessibleDescription(/uses the commands under Worktree commands/)
+  await expect(page.getByRole('textbox', { name: 'Action command' })).toBeEditable()
   await expect(page.getByLabel('Setup configuration')).toHaveAttribute('readonly', '')
   await expect(page.getByRole('spinbutton', { name: 'Attachment limit (bytes)' })).toHaveValue('900')
   await page.getByRole('button', { name: 'Open config file' }).click()

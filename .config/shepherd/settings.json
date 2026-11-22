@@ -3,10 +3,15 @@
   "settings": {
     "worktree.setup": {
       "useImportedSetup": false,
+      "afterCheckout": [
+        {
+          "name": "Allow direnv in the worktree",
+          "command": ["direnv", "allow", "."]
+        }
+      ],
       "launchWrapper": ["direnv", "exec", "."],
       "setupTerminal": {
-        "name": "Development environment setup",
-        "instructions": "Review .envrc in this worktree, then run direnv allow ."
+        "name": "Development environment setup"
       }
     }
   }

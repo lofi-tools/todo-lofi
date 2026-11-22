@@ -204,6 +204,7 @@ function ProjectEnvironmentSettings(props: { projectId: string; useImportedSetup
     },
   })
   const disabled = () => !section.editable() || section.saving()
+  const setupScriptDisabled = () => props.useImportedSetup === false
 
   async function save(environment: ProjectEnvironment) {
     const current = snapshot.latest?.current
@@ -229,11 +230,17 @@ function ProjectEnvironmentSettings(props: { projectId: string; useImportedSetup
     </Show>
     <Show when={draft()} fallback={<><p class="empty">No Codex environment found in this project.</p><Show when={!props.localOverride}><button class="project-action" disabled={disabled() || snapshot.loading} onClick={() => void save({ sourceHash: '', setup: '', actions: [] })}>Create project environment</button></Show></>}>
       {(environment) => <>
-        <label class="settings__row"><span>Worktree setup script</span><textarea value={environment().setup} readOnly={disabled()} onInput={(event) => setDraft({ ...environment(), setup: event.currentTarget.value })} /></label>
-        <Show when={environment().setup.trim()}>
-          <p class="empty">{props.useImportedSetup === false
-            ? 'This project uses its configured worktree setup.'
-            : 'Runs once in each new task worktree before the agent starts.'}</p>
+        <label class="settings__row"><span>Worktree setup script</span>
+          <textarea value={environment().setup} readOnly={disabled() || setupScriptDisabled()}
+            aria-describedby={setupScriptDisabled() ? 'setup-script-disabled' : undefined}
+            onInput={(event) => setDraft({ ...environment(), setup: event.currentTarget.value })} />
+        </label>
+        <Show when={setupScriptDisabled()} fallback={
+          <Show when={environment().setup.trim()}>
+            <p class="empty">Runs once in each new task worktree before the agent starts.</p>
+          </Show>
+        }>
+          <p class="empty" id="setup-script-disabled">This project disables this script and uses the commands under Worktree commands.</p>
         </Show>
         <Index each={environment().actions}>{(action, index) => <div class="settings__project">
           <label class="settings__row"><span>Action name</span><input value={action().name} readOnly={disabled()} onInput={(event) => setDraft({ ...environment(), actions: environment().actions.map((item, position) => position === index ? { ...item, name: event.currentTarget.value } : item) })} /></label>

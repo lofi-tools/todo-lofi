@@ -206,6 +206,8 @@ current layout and give future changes a point of comparison.
   New agent launches and task terminals use that environment in separate
   terminals. `SHEPHERD_AGENT` identifies the agent for project scripts. The
   project can set `useImportedSetup` to false to use its own checkout commands.
+  In this case, the saved setup script is read-only and project actions remain
+  editable unless the repository also manages the environment setting.
 - Show foreground agent launches in the Terminals list from process startup.
   Keep protocol streams separate from the interactive terminals, and keep
   ended launch scrollback available during the current app session. Show
