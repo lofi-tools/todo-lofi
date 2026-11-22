@@ -176,14 +176,27 @@ current layout and give future changes a point of comparison.
   to Project settings. The user can resend from that chat after reviewing or
   correcting the script. Project actions run in task terminals.
   Platform-specific commands use the current platform.
-- Create the task checkout before asking for setup approval. Projects can set
-  `environment.direnv` in `.config/shepherd/settings.json` or Project
-  settings. On those projects, show a message and **Open setup terminal** when
-  the worktree's `.envrc` needs approval. The terminal opens in that checkout
-  so the user can review the file and run `direnv allow .`. Keep the first
-  prompt editable until the user sends it again. Run Codex and regular task
-  terminals through `direnv exec` from the checkout after approval. Treat
-  an imported standalone `direnv reload` as superseded when direnv is enabled.
+- Create the checkout before asking for project setup approval. A project can
+  configure `worktree.setup` in Project settings or
+  `.config/shepherd/settings.json`. Approval of that configuration is saved
+  separately from the repository and applies to the version reviewed.
+  `afterCheckout` lists named argument arrays. Required steps must succeed
+  before the agent starts. Optional failures appear in the terminal and setup
+  continues. Successful checkout steps are recorded and skipped on retry.
+  The optional `readinessCheck` runs before loading the environment.
+  Run configured setup in a task terminal added to the Terminals list without
+  changing the inspector tab. The optional `setupTerminal` customizes its
+  name, shell command, and recovery instructions. A failure leaves the same
+  terminal open so the user can fix the issue and retry. Preserve an unsent
+  prompt and offer **Open setup terminal**.
+  `launchWrapper` loads the exported environment once for the active worktree.
+  New agent launches and task terminals use that environment in separate
+  terminals. `SHEPHERD_AGENT` identifies the agent for project scripts. The
+  project can set `useImportedSetup` to false to use its own checkout commands.
+- Show foreground agent launches in the Terminals list from process startup.
+  Keep protocol streams separate from the interactive terminals, and keep
+  ended launch scrollback available during the current app session. Show
+  historical captured output for imported setup commands in **Setup runs**.
 - In Preview, offer **Project settings** when the selected project has no
   preview URL. A valid `preview.url` in the project's `.config/shepherd/settings.json`
   overrides the saved URL without changing it. **Settings → Projects** saves or clears that project's loopback

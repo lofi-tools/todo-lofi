@@ -517,6 +517,7 @@ export function App() {
     setSettingsOpen(true)
   }
   const [terminalListEvent, setTerminalListEvent] = createSignal<Extract<CoreEvent, { type: 'terminalListChanged' }>['data']>()
+  const [startingTerminalTask, setStartingTerminalTask] = createSignal<{ projectId: string; taskId: string }>()
   const [setupTerminalRequest, setSetupTerminalRequest] = createSignal<{ id: string }>()
   const [inspectorTabs, setInspectorTabs] = createSignal(new Map<string | null, bridge.InspectorTab>())
   const [explorerMode, setExplorerMode] = createSignal<'files' | 'changes'>('files')
@@ -1275,21 +1276,7 @@ export function App() {
     const state = workspace()?.task.state
     return state === 'draft' || state === 'ready' || state === 'failed' || state === 'interrupted' || canStartTask()
   }
-  const [setupFailure, setSetupFailure] = createSignal<{ taskId: string; message: string; environment: boolean }>()
-  const [environmentStatus, { refetch: recheckEnvironment }] = createResource(
-    () => {
-      const project = selectedProject()
-      const task = workspace()?.task
-      return !settingsOpen() && project && task?.worktreePath &&
-        preferences()?.projects[project.path]?.['environment.direnv'] ? task.id : undefined
-    },
-    async (taskId) => ({ taskId, message: await bridge.taskEnvironmentStatus(taskId).catch(describe) }),
-  )
-  createEffect(() => {
-    if (!environmentStatus()?.message) return
-    const timer = setInterval(() => void recheckEnvironment(), 2000)
-    onCleanup(() => clearInterval(timer))
-  })
+  const [setupFailure, setSetupFailure] = createSignal<{ taskId: string; message: string; setupTerminal: boolean; runs?: boolean }>()
   const [draftEnvironment] = createResource(
     () => !settingsOpen() && workspace()?.task.state === 'draft' && !selectedProject()?.missing && selectedProjectId(),
     async (projectId) => {
@@ -1301,38 +1288,40 @@ export function App() {
     const task = workspace()?.task
     if (!task) return
     const failure = setupFailure()
-    const environment = environmentStatus.latest
-    if (environment?.taskId === task.id && environment.message) {
-      return { message: environment.message, environment: true }
-    }
-    if (failure?.taskId === task.id &&
-      (!failure.environment || environment?.taskId !== task.id || environmentStatus.loading)) return failure
+    if (failure?.taskId === task.id) return failure
     if (task.state !== 'draft') return
     const result = draftEnvironment.latest
     if (!result || result.projectId !== task.projectId) return
     const projectEnvironment = result.environment
     if (projectEnvironment?.current?.setup.trim() && projectEnvironment.current.approvedSetupHash !== projectEnvironment.setupHash) {
       const project = selectedProject()
-      if (projectEnvironment.current.setup.trim() === 'direnv reload' && project && preferences()?.projects[project.path]?.['environment.direnv']) return
-      return { message: 'Review and approve the worktree setup script before sending this prompt.', environment: false }
+      if (project && preferences()?.projects[project.path]?.['worktree.setup']?.useImportedSetup === false) return
+      return { message: 'Review and approve the worktree setup script before sending this prompt.', setupTerminal: false, runs: false }
     }
   }
   const isEnvironmentError = (error: bridge.BridgeError) =>
-    error?.code === 'direnv_approval' || error?.code === 'development_environment'
+    error?.code === 'setup_terminal_required' || error?.code === 'development_environment'
+
+  async function requestSetupTerminal(task: bridge.TaskDetail) {
+    const { terminalId, list } = await bridge.openSetupTerminal(task.id)
+    updateProcessList(list)
+    if (selectedTaskId() !== task.id) return
+    batch(() => {
+      setTerminalListEvent(list)
+      setSetupTerminalRequest({ id: terminalId })
+    })
+  }
+
+  function showSetupFailure(task: bridge.TaskDetail, error: bridge.BridgeError) {
+    const setupTerminal = error.code === 'setup_terminal_required'
+    setSetupFailure({ taskId: task.id, message: error.message, setupTerminal, runs: isEnvironmentError(error) })
+  }
 
   function openSetupTerminal() {
     const task = workspace()?.task
     if (!task?.worktreePath || pending()) return
     setInspectorTab('terminals')
-    void run(async () => {
-      const { terminalId, list } = await bridge.openSetupTerminal(task.id)
-      updateProcessList(list)
-      if (selectedTaskId() !== task.id) return
-      batch(() => {
-        setTerminalListEvent(list)
-        setSetupTerminalRequest({ id: terminalId })
-      })
-    })
+    void run(() => requestSetupTerminal(task))
   }
   const canQueuePrompt = () => {
     const state = workspace()?.task.state
@@ -2445,8 +2434,8 @@ export function App() {
           setSelectedTaskId(taskId)
           setWorkspace(task)
           setPrompt(draftText)
-          setSetupFailure({ taskId, message: error.message, environment: isEnvironmentError(error) })
         })
+        showSetupFailure(task.task, error)
         persistComposer(taskScope)
         await loadTasks(task.task.projectId)
       }
@@ -2460,8 +2449,7 @@ export function App() {
         } catch (failure) {
           const error = failure as bridge.BridgeError
           if (error?.code !== 'project_setup' && !isEnvironmentError(error)) throw failure
-          setSetupFailure({ taskId: task.id, message: error.message, environment: isEnvironmentError(error) })
-          if (isEnvironmentError(error)) void recheckEnvironment()
+          showSetupFailure(task, error)
           return
         }
         clearPromptFiles(task.id)
@@ -2476,6 +2464,7 @@ export function App() {
         if (files.length || selectedSkills.length) {
           const title = text.split(/\r?\n/).find((line) => line.trim())?.trim().slice(0, 80) || 'New task'
           const created = await bridge.createDraft(projectId, title, newTaskAgent())
+          setStartingTerminalTask({ projectId, taskId: created.task.id })
           try {
             await bridge.setTaskOptions(created.task.id, model ?? null, mode ?? null)
             const attachmentIds: string[] = []
@@ -2496,7 +2485,8 @@ export function App() {
           }
         } else {
           try {
-            updated = await bridge.startTask(projectId, message, codex, mode, model, newTaskAgent())
+            updated = await bridge.startTask(projectId, message, codex, mode, model, newTaskAgent(),
+              (taskId) => setStartingTerminalTask({ projectId, taskId }))
           } catch (failure) {
             const error = failure as bridge.BridgeError
             if ((error?.code === 'project_setup' || isEnvironmentError(error)) && error.taskId) {
@@ -2516,7 +2506,7 @@ export function App() {
         setWorkspace(updated)
       }
       await loadTasks(projectId)
-    })
+    }).finally(() => setStartingTerminalTask(undefined))
   }
 
   function storedDefaultMode(taskId: string): string | undefined {
@@ -3281,13 +3271,17 @@ export function App() {
             <Show when={setupNotice()}>
               {(notice) => <div class="composer__setup-notice">
                 <span role="status">{notice().message}</span>
-                <Show when={notice().environment} fallback={<button type="button" class="project-action" onClick={() => {
+                <Show when={notice().runs} fallback={<button type="button" class="project-action" onClick={() => {
                   const projectId = selectedProjectId()
                   if (!projectId) return
                   setSetupFailure(undefined)
                   openProjectSettings(projectId)
                 }}>Open project settings</button>}>
-                  <button type="button" class="project-action" disabled={pending()} onClick={openSetupTerminal}>Open setup terminal</button>
+                  <Show when={notice().setupTerminal} fallback={
+                    <button type="button" class="project-action" onClick={() => setInspectorTab('terminals')}>Show setup runs</button>
+                  }>
+                    <button type="button" class="project-action" disabled={pending()} onClick={openSetupTerminal}>Open setup terminal</button>
+                  </Show>
                 </Show>
               </div>}
             </Show>
@@ -3424,6 +3418,7 @@ export function App() {
               <Show when={selectedProjectId()} keyed fallback={<p class="empty">No terminals yet.</p>}>
                 {(projectId) => <TerminalPane
                   projectId={projectId} taskId={selectedTaskId()} agent={workspace()?.task.agent}
+                  launchingTaskId={startingTerminalTask()?.projectId === projectId ? startingTerminalTask()?.taskId : undefined}
                   taskHasWorktree={!!workspace()?.task.worktreePath}
                   transcript={workspace()?.transcript}
                   agentTerminals={workspace()?.task.id === selectedTaskId() && workspace()?.capabilities?.agentTerminals ? workspace()?.agentTerminals : undefined}

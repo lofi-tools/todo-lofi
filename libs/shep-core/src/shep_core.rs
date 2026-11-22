@@ -110,11 +110,13 @@ pub enum CoreError {
     ProjectSetup(String),
     #[error("{message}")]
     StartTaskSetup { task_id: String, message: String },
+    #[error("Worktree setup is still running.")]
+    WorktreeSetupPending { task_id: String },
     #[error("{message}")]
     DevelopmentEnvironment {
         task_id: String,
         message: String,
-        awaiting_approval: bool,
+        setup_terminal: bool,
     },
     #[error("Codex model and effort options require a Codex task.")]
     CodexOptionsForOtherAgent,
@@ -289,7 +291,8 @@ pub struct TaskGitRead {
 pub struct ProjectSetup {
     pub script: String,
     pub approved: bool,
-    pub direnv: bool,
+    pub environment: Option<worktree_environment::WorktreeSetup>,
+    pub environment_approved: bool,
 }
 
 impl TaskGitRead {
@@ -1380,6 +1383,14 @@ impl Core {
     /// bridge; it does not get a second copy of the state model. Git mutations
     /// run here under exclusive access to the core.
     pub async fn execute(&mut self, command: Command) -> Result<CommandResult, CoreError> {
+        self.execute_with_draft_observer(command, None).await
+    }
+
+    pub async fn execute_with_draft_observer(
+        &mut self,
+        command: Command,
+        observer: Option<&(dyn Fn(&TaskId) + Send + Sync)>,
+    ) -> Result<CommandResult, CoreError> {
         if self.shutdown != ShutdownState::Running
             && !(self.shutdown == ShutdownState::Draining
                 && matches!(&command, Command::Quit { .. }))
@@ -1403,7 +1414,7 @@ impl Core {
                 project_id,
                 agent,
                 input,
-            } => self.start_task(&project_id, agent, input).await,
+            } => self.start_task(&project_id, agent, input, observer).await,
             Command::SetDraftAgent { task_id, agent } => {
                 self.set_draft_agent(&task_id, agent).await
             }
@@ -1976,6 +1987,7 @@ impl Core {
         project_id: &ProjectId,
         agent: Agent,
         input: PromptInput,
+        observer: Option<&(dyn Fn(&TaskId) + Send + Sync)>,
     ) -> Result<CommandResult, CoreError> {
         if input.text.trim().is_empty() {
             return Err(CoreError::EmptyPrompt);
@@ -1999,6 +2011,9 @@ impl Core {
             });
         };
         let task_id = TaskId::new(workspace.task.id);
+        if let Some(observer) = observer {
+            observer(&task_id);
+        }
         let started = async {
             self.set_task_options(&task_id, input.model.clone(), input.mode.clone())
                 .await?;
@@ -2014,12 +2029,27 @@ impl Core {
                     message,
                 })
             }
-            Err(error @ CoreError::DevelopmentEnvironment { .. }) => Err(error),
+            Err(
+                error @ (CoreError::DevelopmentEnvironment { .. }
+                | CoreError::WorktreeSetupPending { .. }),
+            ) => Err(error),
             Err(error) => {
                 let remove_worktree = self
                     .task(&task_id)
                     .ok()
                     .is_some_and(|task| task.worktree_path.is_some());
+                if remove_worktree
+                    && let Some(setup) = self
+                        .project_setups
+                        .get(&self.project_path(project_id)?)
+                        .and_then(|setup| setup.environment.as_ref())
+                {
+                    return Err(CoreError::DevelopmentEnvironment {
+                        task_id: task_id.to_string(),
+                        message: error.to_string(),
+                        setup_terminal: setup.setup_terminal.is_some(),
+                    });
+                }
                 match self.delete_task(&task_id, remove_worktree).await {
                     Ok(_) => Err(error),
                     Err(cleanup) => {
@@ -2637,21 +2667,22 @@ impl Core {
             }
         }
 
-        let use_direnv = setup.as_ref().is_some_and(|setup| setup.direnv);
-        if use_direnv && self.task(task_id)?.agent == Agent::Codex {
-            let directory = self
-                .task(task_id)?
-                .worktree_path
-                .as_deref()
-                .ok_or_else(|| {
-                    CoreError::ProjectSetup(
-                        "The task has no worktree for environment setup.".into(),
-                    )
-                })?;
-            worktree_environment::require_direnv(directory, task_id).await?;
+        if setup
+            .as_ref()
+            .is_some_and(|setup| setup.environment.is_some() && !setup.environment_approved)
+        {
+            return Err(CoreError::ProjectSetup(
+                "Worktree ready. Review and approve the project’s worktree commands in Project settings.".into(),
+            ));
         }
 
-        if setup_marker.exists() {
+        if setup_marker.exists()
+            && setup
+                .as_ref()
+                .and_then(|setup| setup.environment.as_ref())
+                .and_then(|environment| environment.use_imported_setup)
+                != Some(false)
+        {
             let setup = setup.as_ref().filter(|setup| !setup.script.trim().is_empty()).ok_or_else(|| {
                 CoreError::ProjectSetup("The pending worktree setup is unavailable. Restore it in Project settings before retrying.".into())
             })?;
@@ -2661,41 +2692,65 @@ impl Core {
             let directory = self.task(task_id)?.worktree_path.as_ref().ok_or_else(|| {
                 CoreError::ProjectSetup("The task has no worktree for setup.".into())
             })?;
-            #[cfg(not(target_os = "windows"))]
-            let mut command = tokio::process::Command::new("/bin/sh");
-            #[cfg(target_os = "windows")]
-            let mut command = tokio::process::Command::new("powershell.exe");
-            #[cfg(not(target_os = "windows"))]
-            command.arg("-c");
-            #[cfg(target_os = "windows")]
-            command.args(["-NoProfile", "-Command"]);
-            let output = command
-                .arg(&setup.script)
-                .current_dir(directory)
-                .output()
-                .await
-                .map_err(|error| {
-                    CoreError::ProjectSetup(format!("Could not start worktree setup: {error}"))
-                })?;
-            if !output.status.success() {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                let detail = if stderr.trim().is_empty() {
-                    stdout.trim()
-                } else {
-                    stderr.trim()
-                };
-                let detail: String = detail.chars().take(4000).collect();
-                return Err(CoreError::ProjectSetup(format!(
-                    "Worktree setup failed ({}). {detail}",
-                    output.status
-                )));
+            let mut command: Vec<String> = if cfg!(target_os = "windows") {
+                vec![
+                    "powershell.exe".into(),
+                    "-NoProfile".into(),
+                    "-Command".into(),
+                ]
+            } else {
+                vec!["/bin/sh".into(), "-c".into()]
+            };
+            command.push(setup.script.clone());
+            let step = worktree_environment::SetupCommand {
+                name: "Imported worktree setup".into(),
+                command,
+                required: true,
+            };
+            if !worktree_environment::record_command(
+                &worktree_environment::runs_path(&repository.git_dir, task_id),
+                "imported-setup".into(),
+                &step,
+                directory,
+                false,
+                self.task(task_id)?.agent,
+            )
+            .await?
+            {
+                return Err(CoreError::DevelopmentEnvironment {
+                    task_id: task_id.to_string(),
+                    message: "Worktree setup failed. See Setup runs for output.".into(),
+                    setup_terminal: false,
+                });
             }
             std::fs::remove_file(&setup_marker).map_err(|error| {
                 CoreError::ProjectSetup(format!(
                     "Setup completed but its state could not be saved: {error}"
                 ))
             })?;
+        }
+
+        let mut prepared_environment = None;
+        if let Some(setup) = &setup
+            && let Some(environment) = &setup.environment
+        {
+            let directory = self
+                .task(task_id)?
+                .worktree_path
+                .as_deref()
+                .ok_or_else(|| {
+                    CoreError::ProjectSetup("The task has no worktree for setup.".into())
+                })?;
+            let runs_path = worktree_environment::runs_path(&repository.git_dir, task_id);
+            let agent = self.task(task_id)?.agent;
+            prepared_environment = self
+                .harness_factory
+                .prepare_worktree_environment(task_id, agent, directory, &runs_path, environment)
+                .await?;
+            if prepared_environment.is_none() {
+                worktree_environment::prepare(environment, &runs_path, directory, task_id, agent)
+                    .await?;
+            }
         }
 
         if let Some(path) = self.task(task_id)?.worktree_path.as_ref() {
@@ -2731,7 +2786,9 @@ impl Core {
             .get(task_id)
             .and_then(SessionRecord::resume_handle)
             .map(SessionId::new);
-        let opened = self.ensure_session(task_id, stored).await;
+        let opened = self
+            .ensure_session_with_environment(task_id, stored, prepared_environment)
+            .await;
         if let Ok(opened) = &opened
             && let Some(session) = self.sessions.get_mut(task_id)
         {
@@ -3362,6 +3419,16 @@ impl Core {
         task_id: &TaskId,
         resume: Option<SessionId>,
     ) -> Result<SessionOpened, CoreError> {
+        self.ensure_session_with_environment(task_id, resume, None)
+            .await
+    }
+
+    async fn ensure_session_with_environment(
+        &mut self,
+        task_id: &TaskId,
+        resume: Option<SessionId>,
+        prepared_environment: Option<Vec<String>>,
+    ) -> Result<SessionOpened, CoreError> {
         self.restore_task_transcript(task_id).await?;
         if let Some(session) = self.sessions.get_mut(task_id)
             && (session.has_failed() || session.is_closed())
@@ -3437,15 +3504,21 @@ impl Core {
                 return Err(error);
             }
         };
-        if launched_agent == Agent::Codex
-            && task.worktree_path.is_some()
-            && self
-                .project_setups
-                .get(&project_path)
-                .is_some_and(|setup| setup.direnv)
-        {
-            harness.set_direnv_launch();
-        }
+        let has_prepared_environment = prepared_environment.is_some();
+        let wrapper = prepared_environment.unwrap_or_else(|| {
+            task.worktree_path
+                .as_ref()
+                .and_then(|_| {
+                    self.project_setups
+                        .get(&project_path)
+                        .filter(|setup| setup.environment_approved)
+                        .and_then(|setup| setup.environment.as_ref())
+                        .map(|setup| setup.launch_wrapper.clone())
+                })
+                .unwrap_or_default()
+        });
+        let adapter_wraps_launch =
+            wrapper.is_empty() || harness.set_launch_wrapper(wrapper.clone());
         let environment = self
             .harness_factory
             .environment_for_project(launched_agent, &project_path);
@@ -3487,6 +3560,48 @@ impl Core {
                 .await
         {
             return Err(self.fail_session_start(task_id, session, error.into()));
+        }
+        if has_prepared_environment {
+            let names = spec.environment.keys().collect::<Vec<_>>();
+            let names = serde_json::to_string(&names)
+                .map_err(|error| CoreError::ProjectSetup(error.to_string()))?;
+            spec.environment
+                .insert("SHEPHERD_ENVIRONMENT_OVERRIDES".into(), names);
+        }
+        spec.environment
+            .insert("SHEPHERD_AGENT".into(), launched_agent.as_str().to_owned());
+        if !adapter_wraps_launch {
+            #[cfg(unix)]
+            {
+                let program = std::mem::replace(&mut spec.program, "/bin/sh".into());
+                let mut command = vec!["-c".into(), r#"exec "$@""#.into(), "agent-wrapper".into()];
+                if launched_agent != Agent::Freebuff {
+                    command[1] = r#"exec 3<&0 4>&1; if [ -t 2 ]; then exec </dev/tty >/dev/tty; else exec >&2; fi; exec "$@""#.into();
+                }
+                command.extend(wrapper);
+                if launched_agent != Agent::Freebuff {
+                    command.extend([
+                        "/bin/sh".into(),
+                        "-c".into(),
+                        r#"exec <&3 >&4 3<&- 4>&-; exec "$@""#.into(),
+                        "agent-protocol".into(),
+                    ]);
+                }
+                command.push(program);
+                command.extend(spec.args);
+                spec.args = command;
+            }
+            #[cfg(not(unix))]
+            {
+                let mut wrapper = wrapper.into_iter();
+                if let Some(program) = wrapper.next() {
+                    let original = std::mem::replace(&mut spec.program, program);
+                    spec.args = wrapper
+                        .chain(std::iter::once(original))
+                        .chain(spec.args)
+                        .collect();
+                }
+            }
         }
         let capabilities = match session.start(spec).await {
             Ok(capabilities) => capabilities,
@@ -4294,7 +4409,8 @@ mod terminal_layout_tests {
             Some(ProjectSetup {
                 script: script.clone(),
                 approved: false,
-                direnv: false,
+                environment: None,
+                environment_approved: false,
             }),
         );
         assert!(matches!(
@@ -4307,12 +4423,13 @@ mod terminal_layout_tests {
             Some(ProjectSetup {
                 script,
                 approved: true,
-                direnv: false,
+                environment: None,
+                environment_approved: false,
             }),
         );
         assert!(matches!(
             core.send_prompt(&task_id, PromptInput::text("hello")).await,
-            Err(CoreError::ProjectSetup(_))
+            Err(CoreError::DevelopmentEnvironment { .. })
         ));
         let worktree = core
             .task(&task_id)?

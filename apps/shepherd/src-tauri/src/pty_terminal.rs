@@ -909,6 +909,15 @@ impl PtyTerminals {
             .and_then(|session| session.process.clone()))
     }
 
+    #[cfg(unix)]
+    pub fn is_running(&self, terminal_id: &TerminalId) -> Result<bool, TerminalError> {
+        Ok(self
+            .sessions()?
+            .live
+            .get(terminal_id.as_str())
+            .is_some_and(|session| !session.closing))
+    }
+
     pub fn lingering_process_records(
         &self,
         terminal_id: &TerminalId,

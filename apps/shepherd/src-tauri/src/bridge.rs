@@ -124,15 +124,20 @@ fn error_causes(error: &(dyn std::error::Error + 'static)) -> Vec<String> {
 
 impl From<CoreError> for BridgeError {
     fn from(error: CoreError) -> Self {
+        if let CoreError::WorktreeSetupPending { task_id } = error {
+            let mut error = Self::new("worktree_setup_pending", "Worktree setup is still running.");
+            error.task_id = Some(task_id);
+            return error;
+        }
         if let CoreError::DevelopmentEnvironment {
             task_id,
             message,
-            awaiting_approval,
+            setup_terminal,
         } = error
         {
             let mut bridge_error = Self::new(
-                if awaiting_approval {
-                    "direnv_approval"
+                if setup_terminal {
+                    "setup_terminal_required"
                 } else {
                     "development_environment"
                 },
@@ -295,6 +300,9 @@ impl ScreenSlot {
 #[derive(Clone)]
 pub(crate) struct TerminalHost {
     engine: Arc<Mutex<PtyTerminals>>,
+    foreground_agents: Arc<Mutex<Vec<AgentLaunch>>>,
+    #[cfg(unix)]
+    worktree_setups: Arc<Mutex<BTreeMap<TaskId, WorktreeSetupTerminal>>>,
     screens: Arc<Mutex<BTreeMap<String, Arc<Mutex<ScreenSlot>>>>>,
     appearance: Arc<Mutex<TerminalAppearance>>,
     process_store: Arc<OnceLock<Arc<dyn Store>>>,
@@ -302,15 +310,71 @@ pub(crate) struct TerminalHost {
     core: Arc<OnceLock<std::sync::Weak<Mutex<Core>>>>,
 }
 
+#[cfg(unix)]
+#[derive(Clone)]
+struct WorktreeSetupTerminal {
+    id: TerminalId,
+    title: String,
+    checkout: PathBuf,
+    fingerprint: String,
+    directory: Arc<tempfile::TempDir>,
+    previous_directories: Vec<Arc<tempfile::TempDir>>,
+}
+
+#[derive(Clone)]
+struct AgentLaunch {
+    id: String,
+    task_id: String,
+    command: String,
+    cwd: PathBuf,
+    live: Arc<AtomicBool>,
+    #[cfg(unix)]
+    master: Arc<std::fs::File>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentLaunchSnapshot {
+    id: String,
+    command: String,
+    cwd: PathBuf,
+    live: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    setup_title: Option<String>,
+}
+
 struct AgentProcessStore {
+    terminal_host: Option<TerminalHost>,
     store: Arc<OnceLock<Arc<dyn Store>>>,
     task_id: String,
     leases: Option<Arc<crate::orphan_process::ProcessLeases>>,
     token: String,
+    command: String,
 }
 
 #[async_trait]
 impl agent_harness::AgentProcessTracker for AgentProcessStore {
+    async fn open_foreground_terminal(
+        &self,
+        _command: &str,
+        cwd: &Path,
+    ) -> Result<Option<agent_harness::ForegroundTerminal>, String> {
+        #[cfg(unix)]
+        {
+            let Some(host) = &self.terminal_host else {
+                return Ok(None);
+            };
+            host.open_agent_terminal(&self.task_id, &self.command, cwd)
+                .await
+                .map(Some)
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = cwd;
+            Ok(None)
+        }
+    }
+
     async fn started(&self, pid: u32) -> Result<String, String> {
         let store = self.store.get().ok_or("process storage is unavailable")?;
         #[cfg(unix)]
@@ -386,12 +450,15 @@ impl TerminalHost {
         &self,
         task_id: &TaskId,
         token: String,
+        command: String,
     ) -> Arc<dyn agent_harness::AgentProcessTracker> {
         Arc::new(AgentProcessStore {
+            terminal_host: Some(self.clone()),
             store: self.process_store.clone(),
             task_id: task_id.to_string(),
             leases: self.process_leases.get().cloned(),
             token,
+            command,
         })
     }
 
@@ -404,6 +471,9 @@ impl Default for TerminalHost {
     fn default() -> Self {
         Self {
             engine: Arc::new(Mutex::new(PtyTerminals::new())),
+            foreground_agents: Arc::new(Mutex::new(Vec::new())),
+            #[cfg(unix)]
+            worktree_setups: Arc::new(Mutex::new(BTreeMap::new())),
             screens: Arc::new(Mutex::new(BTreeMap::new())),
             appearance: Arc::new(Mutex::new(TerminalAppearance::default())),
             process_store: Arc::new(OnceLock::new()),
@@ -433,6 +503,162 @@ struct TrackedProcess {
 }
 
 impl TerminalHost {
+    #[cfg(unix)]
+    async fn open_agent_terminal(
+        &self,
+        task_id: &str,
+        command: &str,
+        cwd: &Path,
+    ) -> Result<agent_harness::ForegroundTerminal, String> {
+        use std::io::Read as _;
+        use std::os::fd::FromRawFd as _;
+        use tokio::io::AsyncWriteExt as _;
+
+        let mut master_fd = -1;
+        let mut slave_fd = -1;
+        let mut size = libc::winsize {
+            ws_row: 24,
+            ws_col: 80,
+            ws_xpixel: 0,
+            ws_ypixel: 0,
+        };
+        let opened = unsafe {
+            libc::openpty(
+                &mut master_fd,
+                &mut slave_fd,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                &mut size,
+            )
+        };
+        if opened == -1 {
+            return Err(std::io::Error::last_os_error().to_string());
+        }
+        let master = Arc::new(unsafe { std::fs::File::from_raw_fd(master_fd) });
+        let slave = unsafe { std::fs::File::from_raw_fd(slave_fd) };
+        for fd in [master_fd, slave_fd] {
+            if unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) } == -1 {
+                return Err(std::io::Error::last_os_error().to_string());
+            }
+        }
+        let mut reader = master.try_clone().map_err(|error| error.to_string())?;
+        let mut screen = Screen::with_scrollback(80, 24, DEFAULT_SCROLLBACK);
+        screen.set_appearance(*self.appearance.lock().await);
+        let (frames, _) = watch::channel(Arc::new(screen.frame()));
+        let slot = Arc::new(Mutex::new(ScreenSlot {
+            revision: 0,
+            screen,
+            frames,
+            task_id: None,
+            last_worktree_touch: None,
+            block_user_input: false,
+        }));
+        let id = format!("shepherd-agent:{}", uuid::Uuid::new_v4());
+        let live = Arc::new(AtomicBool::new(true));
+        let mut launches = self.foreground_agents.lock().await;
+        let mut screens = self.screens.lock().await;
+        while launches
+            .iter()
+            .filter(|launch| !launch.live.load(Ordering::Acquire))
+            .count()
+            >= 24
+        {
+            if let Some(index) = launches
+                .iter()
+                .position(|launch| !launch.live.load(Ordering::Acquire))
+            {
+                screens.remove(&launches.remove(index).id);
+            }
+        }
+        screens.insert(id.clone(), slot.clone());
+        launches.push(AgentLaunch {
+            id,
+            task_id: task_id.into(),
+            command: command.into(),
+            cwd: cwd.into(),
+            live: live.clone(),
+            master,
+        });
+        drop(screens);
+        drop(launches);
+
+        let (sender, mut bytes) = mpsc::channel::<Vec<u8>>(32);
+        std::thread::spawn(move || {
+            let mut buffer = [0; 8192];
+            loop {
+                match reader.read(&mut buffer) {
+                    Ok(0) => break,
+                    Ok(count) => {
+                        if sender.blocking_send(buffer[..count].to_vec()).is_err() {
+                            break;
+                        }
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(error) if error.raw_os_error() == Some(libc::EIO) => break,
+                    Err(error) => {
+                        tracing::debug!(%error, "could not read agent terminal");
+                        break;
+                    }
+                }
+            }
+        });
+        let (mut diagnostics, output) = tokio::io::duplex(65536);
+        tauri::async_runtime::spawn(async move {
+            let mut forward = true;
+            while let Some(chunk) = bytes.recv().await {
+                {
+                    let mut slot = slot.lock().await;
+                    slot.screen.process(&chunk);
+                    slot.publish();
+                }
+                if forward && diagnostics.write_all(&chunk).await.is_err() {
+                    forward = false;
+                }
+            }
+            live.store(false, Ordering::Release);
+        });
+        Ok(agent_harness::ForegroundTerminal { slave, output })
+    }
+
+    async fn agent_launches(&self, task_id: &str) -> Vec<AgentLaunchSnapshot> {
+        let mut launches = Vec::new();
+        #[cfg(unix)]
+        if let Some(setup) = self.worktree_setups.lock().await.get(&TaskId::new(task_id)) {
+            launches.push(AgentLaunchSnapshot {
+                id: setup.id.as_str().into(),
+                command: String::new(),
+                cwd: setup.checkout.clone(),
+                live: self.setup_is_running(&setup.id).await,
+                setup_title: Some(setup.title.clone()),
+            });
+        }
+        launches.extend(
+            self.foreground_agents
+                .lock()
+                .await
+                .iter()
+                .filter(|launch| launch.task_id == task_id)
+                .map(|launch| AgentLaunchSnapshot {
+                    id: launch.id.clone(),
+                    command: launch.command.clone(),
+                    cwd: launch.cwd.clone(),
+                    live: launch.live.load(Ordering::Acquire),
+                    setup_title: None,
+                }),
+        );
+        launches
+    }
+
+    #[cfg(unix)]
+    async fn agent_launch(&self, id: &str) -> Option<AgentLaunch> {
+        self.foreground_agents
+            .lock()
+            .await
+            .iter()
+            .find(|launch| launch.id == id)
+            .cloned()
+    }
+
     async fn prepare(
         &self,
         spec: TerminalSpec,
@@ -545,7 +771,9 @@ impl TerminalHost {
                     Ok(None) => break,
                     Err(_) => {}
                     Ok(Some(TerminalEvent::Exited { exit_code, signal })) => {
-                        if !id.as_str().starts_with("shepherd-preview:") {
+                        if !id.as_str().starts_with("shepherd-preview:")
+                            && !id.as_str().starts_with(ENVIRONMENT_TERMINAL_PREFIX)
+                        {
                             screens.lock().await.remove(id.as_str());
                         }
                         if let Some(protocol) = &protocol
@@ -711,6 +939,190 @@ impl TerminalHost {
     }
 }
 
+#[cfg(unix)]
+impl TerminalHost {
+    async fn setup_is_running(&self, id: &TerminalId) -> bool {
+        match self.engine.lock().await.is_running(id) {
+            Ok(running) => running,
+            Err(error) => {
+                tracing::warn!(%error, "could not check setup terminal");
+                false
+            }
+        }
+    }
+
+    async fn start_worktree_setup(
+        &self,
+        task_id: &TaskId,
+        agent: Agent,
+        checkout: &Path,
+        runs_path: &Path,
+        setup: &shep_core::worktree_environment::WorktreeSetup,
+    ) -> Result<WorktreeSetupTerminal, BridgeError> {
+        use crate::setup_terminal;
+        let error =
+            |failure: std::io::Error| BridgeError::new("project_setup", failure.to_string());
+        let fingerprint = setup
+            .fingerprint()
+            .map_err(|failure| BridgeError::new("project_setup", failure.to_string()))?;
+        let mut setups = self.worktree_setups.lock().await;
+        let mut previous_directories = Vec::new();
+        if let Some(entry) = setups.get(task_id) {
+            let running = self.setup_is_running(&entry.id).await;
+            if entry.checkout == checkout
+                && entry.fingerprint == fingerprint
+                && (running || entry.directory.path().join("ready").is_file())
+            {
+                return Ok(entry.clone());
+            }
+            if running {
+                self.stop_terminal_process(entry.id.clone()).await?;
+            }
+            self.screens.lock().await.remove(entry.id.as_str());
+            previous_directories.clone_from(&entry.previous_directories);
+            if entry.directory.path().join("ready").is_file() {
+                previous_directories.push(entry.directory.clone());
+            }
+        }
+        let directory = Arc::new(
+            tempfile::Builder::new()
+                .prefix("shepherd-setup-")
+                .tempdir()
+                .map_err(error)?,
+        );
+        let state = runs_path.with_extension("terminal-setup");
+        let previous_runs = shep_core::worktree_environment::read_runs(runs_path)?;
+        if !previous_runs.is_empty() {
+            std::fs::create_dir_all(&state).map_err(error)?;
+            for (index, step) in setup.after_checkout.iter().enumerate() {
+                let step_id = shep_core::worktree_environment::checkout_step_id(index, step)
+                    .map_err(|failure| BridgeError::new("project_setup", failure.to_string()))?;
+                if previous_runs.iter().any(|run| {
+                    run.id == step_id
+                        && (run.status == "Succeeded" || (!step.required && run.status == "Failed"))
+                }) {
+                    std::fs::write(state.join(step_id), []).map_err(error)?;
+                }
+            }
+        }
+        let script =
+            setup_terminal::write_script(directory.path(), &state, setup).map_err(error)?;
+        let id = TerminalId::new(format!(
+            "{ENVIRONMENT_TERMINAL_PREFIX}{}",
+            uuid::Uuid::new_v4()
+        ));
+        let terminal = self
+            .prepare(
+                TerminalSpec {
+                    id: id.clone(),
+                    columns: 80,
+                    rows: 24,
+                    cwd: checkout.to_owned(),
+                    command: "/bin/sh".into(),
+                    args: vec![
+                        script
+                            .to_str()
+                            .ok_or_else(|| {
+                                BridgeError::new("project_setup", "Invalid setup script path.")
+                            })?
+                            .to_owned(),
+                    ],
+                    environment: BTreeMap::from([("SHEPHERD_AGENT".into(), agent.as_str().into())]),
+                },
+                DEFAULT_SCROLLBACK,
+            )
+            .await?;
+        let tracked =
+            if let (Some(process), Some(store)) = (&terminal.process, self.process_store.get()) {
+                if let Err(error) = store.save_process(process).await {
+                    self.observe(terminal, None, None, None, false);
+                    self.stop_terminal_process(id).await?;
+                    return Err(error.into());
+                }
+                Some(TrackedProcess {
+                    id: Some(process.id.clone()),
+                    store: store.clone(),
+                })
+            } else {
+                None
+            };
+        self.observe(terminal, None, None, tracked, false);
+        let entry = WorktreeSetupTerminal {
+            id,
+            title: setup
+                .setup_terminal
+                .as_ref()
+                .map(|terminal| terminal.name.clone())
+                .unwrap_or_else(|| "Worktree setup".into()),
+            checkout: checkout.to_owned(),
+            fingerprint,
+            directory,
+            previous_directories,
+        };
+        setups.insert(task_id.clone(), entry.clone());
+        Ok(entry)
+    }
+
+    pub(crate) async fn prepare_worktree_environment(
+        &self,
+        task_id: &TaskId,
+        agent: Agent,
+        checkout: &Path,
+        runs_path: &Path,
+        setup: &shep_core::worktree_environment::WorktreeSetup,
+    ) -> Result<Vec<String>, CoreError> {
+        let entry = self
+            .start_worktree_setup(task_id, agent, checkout, runs_path, setup)
+            .await
+            .map_err(|error| CoreError::ProjectSetup(error.to_string()))?;
+        self.worktree_setup_result(task_id, &entry).await
+    }
+
+    async fn worktree_setup_result(
+        &self,
+        task_id: &TaskId,
+        entry: &WorktreeSetupTerminal,
+    ) -> Result<Vec<String>, CoreError> {
+        let directory = entry.directory.path();
+        if directory.join("ready").is_file() {
+            return crate::setup_terminal::wrapper(directory)
+                .map_err(|error| CoreError::ProjectSetup(error.to_string()));
+        }
+        let message = if directory.join("failed").is_file() {
+            "Worktree setup needs attention. Open the setup terminal to fix it, then resend your prompt once setup is ready."
+        } else if !self.setup_is_running(&entry.id).await {
+            "The setup terminal exited before the environment was ready. Open it to retry."
+        } else {
+            return Err(CoreError::WorktreeSetupPending {
+                task_id: task_id.to_string(),
+            });
+        };
+        Err(CoreError::DevelopmentEnvironment {
+            task_id: task_id.to_string(),
+            message: message.into(),
+            setup_terminal: true,
+        })
+    }
+
+    async fn wait_for_worktree_setup(&self, task_id: &TaskId) -> Result<Vec<String>, CoreError> {
+        let setup = self
+            .worktree_setups
+            .lock()
+            .await
+            .get(task_id)
+            .cloned()
+            .ok_or_else(|| CoreError::ProjectSetup("The setup terminal is unavailable.".into()))?;
+        loop {
+            match self.worktree_setup_result(task_id, &setup).await {
+                Err(CoreError::WorktreeSetupPending { .. }) => {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+                result => return result,
+            }
+        }
+    }
+}
+
 impl TerminalHost {
     pub(crate) fn for_task(&self, task_id: TaskId) -> Arc<dyn TerminalBackend> {
         Arc::new(TaskTerminalHost {
@@ -725,6 +1137,35 @@ impl TerminalHost {
         events: mpsc::Sender<TerminalProcessEvent>,
         task_id: Option<TaskId>,
     ) -> Result<(), String> {
+        #[cfg(unix)]
+        let launch = {
+            let mut launch = launch;
+            if !launch
+                .environment
+                .contains_key(crate::setup_terminal::OVERRIDES)
+                && let Some(task_id) = &task_id
+                && let Some(setup) = self.worktree_setups.lock().await.get(task_id)
+                && setup.directory.path().join("ready").is_file()
+            {
+                let mut wrapper = crate::setup_terminal::wrapper(setup.directory.path())
+                    .map_err(|error| error.to_string())?
+                    .into_iter();
+                if let Some(program) = wrapper.next() {
+                    let original = std::mem::replace(&mut launch.command, program);
+                    launch.args = wrapper
+                        .chain(std::iter::once(original))
+                        .chain(launch.args)
+                        .collect();
+                    let keys = launch.environment.keys().collect::<Vec<_>>();
+                    let overrides =
+                        serde_json::to_string(&keys).map_err(|error| error.to_string())?;
+                    launch
+                        .environment
+                        .insert(crate::setup_terminal::OVERRIDES.into(), overrides);
+                }
+            }
+            launch
+        };
         let observe_screen = launch.observe_screen;
         let block_user_input = launch.block_user_input;
         let terminal = self
@@ -1253,8 +1694,16 @@ impl ShellState {
     }
 
     async fn execute(&self, command: Command) -> Result<CommandResult, BridgeError> {
+        self.execute_with_draft_observer(command, None).await
+    }
+
+    async fn execute_with_draft_observer(
+        &self,
+        command: Command,
+        observer: Option<&(dyn Fn(&TaskId) + Send + Sync)>,
+    ) -> Result<CommandResult, BridgeError> {
         let mut core = self.core.lock().await;
-        let result = core.execute(command).await;
+        let result = core.execute_with_draft_observer(command, observer).await;
         Self::broadcast_core_events(&mut core, &self.events);
         core.arm_agent_events(&self.agent_events);
         if core.shutdown_state() == shep_core::ShutdownState::Closed {
@@ -1831,21 +2280,27 @@ impl ShellState {
     }
 
     async fn configure_project_setup(&self, project_path: PathBuf) -> Result<(), BridgeError> {
-        let (environment, _, _) = self.preferences.project_environment(&project_path).await?;
-        let direnv = self.direnv_enabled(&project_path).await;
-        let setup = (direnv || environment.is_some()).then(|| {
-            let environment = environment.unwrap_or_default();
-            let approved = environment.approved_setup_hash.as_deref()
-                == Some(crate::project_environment::hash(environment.setup.as_bytes()).as_str());
-            let script = if direnv && environment.setup.trim() == "direnv reload" {
-                String::new()
-            } else {
-                environment.setup
-            };
+        let configuration = self.preferences.worktree_setup(&project_path).await?;
+        let environment = if configuration
+            .as_ref()
+            .is_some_and(|(setup, _, _)| setup.use_imported_setup == Some(false))
+        {
+            None
+        } else {
+            self.preferences.project_environment(&project_path).await?.0
+        };
+        let setup = (configuration.is_some() || environment.is_some()).then(|| {
+            let imported = environment.unwrap_or_default();
+            let approved = imported.approved_setup_hash.as_deref()
+                == Some(crate::project_environment::hash(imported.setup.as_bytes()).as_str());
+            let (environment, environment_approved) = configuration
+                .map(|(setup, _, approved)| (Some(setup), approved))
+                .unwrap_or_default();
             shep_core::ProjectSetup {
-                script,
+                script: imported.setup,
                 approved,
-                direnv,
+                environment,
+                environment_approved,
             }
         });
         self.core
@@ -1855,41 +2310,39 @@ impl ShellState {
         Ok(())
     }
 
-    async fn direnv_enabled(&self, project_path: &Path) -> bool {
-        self.preferences
-            .value(Some(project_path), SettingKey::Direnv)
+    async fn worktree_setup_review(
+        &self,
+        project_id: String,
+    ) -> Result<Option<serde_json::Value>, BridgeError> {
+        let project = self
+            .core
+            .lock()
             .await
-            .as_bool()
-            == Some(true)
+            .project_path(&ProjectId::new(project_id))?;
+        Ok(self.preferences.worktree_setup(&project).await?.map(|(configuration, fingerprint, approved)| {
+            serde_json::json!({ "configuration": configuration, "fingerprint": fingerprint, "approved": approved })
+        }))
     }
 
-    async fn task_environment_status(
+    async fn setup_runs(
         &self,
         task_id: String,
-    ) -> Result<Option<String>, BridgeError> {
+    ) -> Result<Vec<shep_core::worktree_environment::SetupRun>, BridgeError> {
         let task_id = TaskId::new(task_id);
-        let (project, worktree) = {
-            let core = self.core.lock().await;
-            (
-                core.task_project_path(&task_id)?,
-                core.task(&task_id)?.worktree_path.clone(),
-            )
-        };
-        let Some(worktree) = worktree else {
-            return Ok(None);
-        };
-        if !self.direnv_enabled(&project).await {
-            return Ok(None);
-        }
-        Ok(
-            shep_core::worktree_environment::require_direnv(&worktree, &task_id)
-                .await
-                .err()
-                .map(|error| error.to_string()),
-        )
+        let project = self.core.lock().await.task_project_path(&task_id)?;
+        let runs = tokio::task::spawn_blocking(move || {
+            let repository = GitService::discover(&project).map_err(CoreError::from)?;
+            shep_core::worktree_environment::read_runs(&shep_core::worktree_environment::runs_path(
+                &repository.git_dir,
+                &task_id,
+            ))
+        })
+        .await
+        .map_err(|error| BridgeError::new("setup_runs", error.to_string()))??;
+        Ok(runs)
     }
 
-    pub async fn start_task(
+    async fn start_task_observed(
         &self,
         project_id: String,
         text: String,
@@ -1897,6 +2350,7 @@ impl ShellState {
         mode: Option<String>,
         model: Option<String>,
         agent: Agent,
+        created: Option<tauri::ipc::Channel<String>>,
     ) -> Result<TaskWorkspace, BridgeError> {
         let project_path = self
             .core
@@ -1904,7 +2358,14 @@ impl ShellState {
             .await
             .project_path(&ProjectId::new(&project_id))?;
         self.configure_project_setup(project_path).await?;
-        self.workspace(Command::StartTask {
+        let observer = |task: &TaskId| {
+            if let Some(channel) = &created
+                && let Err(error) = channel.send(task.to_string())
+            {
+                tracing::debug!(%error, "the draft observer disconnected");
+            }
+        };
+        let command = Command::StartTask {
             project_id: ProjectId::new(project_id),
             agent,
             input: PromptInput {
@@ -1914,8 +2375,56 @@ impl ShellState {
                 model,
                 ..PromptInput::default()
             },
-        })
-        .await
+        };
+        match self.send_after_setup(command, Some(&observer)).await? {
+            CommandResult::TaskWorkspace(workspace) => Ok(workspace),
+            other => Err(unexpected(&other)),
+        }
+    }
+
+    async fn send_after_setup(
+        &self,
+        command: Command,
+        observer: Option<&(dyn Fn(&TaskId) + Send + Sync)>,
+    ) -> Result<CommandResult, BridgeError> {
+        #[cfg(unix)]
+        {
+            let (input, new_task) = match &command {
+                Command::StartTask { input, .. } => (input.clone(), true),
+                Command::SendPrompt { input, .. } => (input.clone(), false),
+                _ => return self.execute_with_draft_observer(command, observer).await,
+            };
+            let mut result = self.execute_with_draft_observer(command, observer).await;
+            while let Err(error) = &result
+                && error.code == "worktree_setup_pending"
+                && let Some(id) = &error.task_id
+            {
+                let task_id = TaskId::new(id);
+                let resumed = async {
+                    self.terminals.wait_for_worktree_setup(&task_id).await?;
+                    let project = self.core.lock().await.task_project_path(&task_id)?;
+                    self.configure_project_setup(project).await?;
+                    self.execute(Command::SendPrompt {
+                        task_id: task_id.clone(),
+                        input: input.clone(),
+                    })
+                    .await
+                }
+                .await;
+                result = resumed.map_err(|mut error: BridgeError| {
+                    if new_task && error.task_id.is_none() {
+                        error.task_id = Some(task_id.to_string());
+                        if error.code == "core" {
+                            error.code = "development_environment";
+                        }
+                    }
+                    error
+                });
+            }
+            result
+        }
+        #[cfg(not(unix))]
+        self.execute_with_draft_observer(command, observer).await
     }
 
     pub async fn set_task_options(
@@ -2019,6 +2528,14 @@ impl ShellState {
                 .await?;
             core.end_terminal(&terminal, None).await?;
         }
+        #[cfg(unix)]
+        if let Some(setup) = self.terminals.worktree_setups.lock().await.get(&task_id)
+            && self.terminals.setup_is_running(&setup.id).await
+        {
+            self.terminals
+                .stop_terminal_process(setup.id.clone())
+                .await?;
+        }
         let staged = if let Some(path) = attachments.as_ref() {
             let path = path.clone();
             let lock = attachment_lock.take();
@@ -2045,6 +2562,8 @@ impl ShellState {
         let fixture_task_id = task_id.clone();
         #[cfg(test)]
         pause_attachment_deletion_fixture("staged", &fixture_task_id).await?;
+        #[cfg(unix)]
+        let setup_task_id = task_id.clone();
         let command = if draft_only {
             Command::DiscardDraft { task_id }
         } else {
@@ -2097,6 +2616,20 @@ impl ShellState {
                 Err(error)
             }
             outcome => {
+                #[cfg(unix)]
+                if let Some(setup) = self
+                    .terminals
+                    .worktree_setups
+                    .lock()
+                    .await
+                    .remove(&setup_task_id)
+                {
+                    self.terminals
+                        .screens
+                        .lock()
+                        .await
+                        .remove(setup.id.as_str());
+                }
                 if let Some(path) = staged {
                     let display = path.display().to_string();
                     let lock = attachment_lock.take();
@@ -2218,11 +2751,19 @@ impl ShellState {
             input.text = format!("{text}\n\nAttached files\n{references}");
             input.attachments = attachments;
         }
-        self.workspace(Command::SendPrompt {
-            task_id: TaskId::new(task_id),
-            input,
-        })
-        .await
+        match self
+            .send_after_setup(
+                Command::SendPrompt {
+                    task_id: TaskId::new(task_id),
+                    input,
+                },
+                None,
+            )
+            .await?
+        {
+            CommandResult::TaskWorkspace(workspace) => Ok(workspace),
+            other => Err(unexpected(&other)),
+        }
     }
 
     pub async fn resolve_approval(
@@ -2299,6 +2840,8 @@ impl ShellState {
 
     pub async fn quit(&self, force: bool) -> Result<QuitSummary, BridgeError> {
         let engine = self.terminals.engine.clone();
+        #[cfg(unix)]
+        let setups = self.terminals.worktree_setups.clone();
         let preview_server = self.preview_server.clone();
         self.quit_with_cleanup(force, || async move {
             preview_server
@@ -2315,7 +2858,10 @@ impl ShellState {
                 })?
                 .map_err(|error| {
                     BridgeError::new("terminal", format!("Could not stop terminals: {error}"))
-                })
+                })?;
+            #[cfg(unix)]
+            setups.lock().await.clear();
+            Ok(())
         })
         .await
     }
@@ -3454,44 +4000,60 @@ impl ShellState {
     }
 
     async fn open_setup_terminal(&self, task_id: String) -> Result<SetupTerminal, BridgeError> {
-        let _guard = self.terminal_lifecycle.lock().await;
         let task_id = TaskId::new(task_id);
-        let (project_id, project, cwd) = {
+        let (project_id, project, cwd, agent) = {
             let core = self.core.lock().await;
-            let project_id = core.task(&task_id)?.project_id.clone();
-            let project = core.project_path(&project_id)?;
-            let cwd = core.workspace_directory(&project_id, Some(&task_id))?;
-            (project_id, project, cwd)
+            let task = core.task(&task_id)?;
+            let project = core.project_path(&task.project_id)?;
+            let cwd = core.workspace_directory(&task.project_id, Some(&task_id))?;
+            (task.project_id.clone(), project, cwd, task.agent)
         };
-        if !self.direnv_enabled(&project).await {
+        let Some((configuration, _, true)) = self.preferences.worktree_setup(&project).await?
+        else {
             return Err(BridgeError::new(
-                "development_environment",
-                "This project does not use direnv.",
+                "project_setup",
+                "Review and approve the worktree configuration in Project settings.",
             ));
+        };
+        #[cfg(unix)]
+        {
+            let runs_path = self
+                .worktree_setup_runs_path(project, task_id.clone())
+                .await?;
+            let terminal = self
+                .terminals
+                .start_worktree_setup(&task_id, agent, &cwd, &runs_path, &configuration)
+                .await?;
+            Ok(SetupTerminal {
+                terminal_id: terminal.id.as_str().into(),
+                list: self.core.lock().await.terminal_list(&project_id),
+            })
         }
-        let current = self.core.lock().await.terminal_list(&project_id);
-        if let Some(existing) = current.terminals.iter().find(|terminal| {
-            terminal.id.starts_with(ENVIRONMENT_TERMINAL_PREFIX)
-                && terminal.task_id.as_deref() == Some(task_id.as_str())
-                && terminal.ended_at.is_none()
-        }) {
-            return Ok(SetupTerminal {
-                terminal_id: existing.id.clone(),
-                list: current,
-            });
+        #[cfg(not(unix))]
+        {
+            let _context = (project_id, project, cwd, agent, configuration);
+            Err(BridgeError::new(
+                "project_setup",
+                "Interactive worktree setup requires a Unix shell.",
+            ))
         }
-        let terminal_id = format!("{ENVIRONMENT_TERMINAL_PREFIX}{}", uuid::Uuid::new_v4());
-        let record = TerminalRecord::project_shared(
-            TerminalId::new(&terminal_id),
-            project_id,
-            "Environment setup",
-            cwd,
-            std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string()),
-            now_millis(),
-        )
-        .for_task(task_id);
-        let list = self.launch_terminal(record, 80, 24).await?;
-        Ok(SetupTerminal { terminal_id, list })
+    }
+
+    #[cfg(unix)]
+    async fn worktree_setup_runs_path(
+        &self,
+        project: PathBuf,
+        task_id: TaskId,
+    ) -> Result<PathBuf, BridgeError> {
+        tokio::task::spawn_blocking(move || {
+            let repository = GitService::discover(&project).map_err(CoreError::from)?;
+            Ok(shep_core::worktree_environment::runs_path(
+                &repository.git_dir,
+                &task_id,
+            ))
+        })
+        .await
+        .map_err(|error| BridgeError::new("project_setup", error.to_string()))?
     }
 
     pub async fn restart_terminal(
@@ -3556,6 +4118,22 @@ impl ShellState {
         }) {
             if let Err(error) = self.close_terminal(terminal.id.clone()).await {
                 errors.push(format!("{}: {error}", terminal.title));
+            }
+        }
+        #[cfg(unix)]
+        {
+            let tasks = self.core.lock().await.task_list(&project)?.tasks;
+            let setups = self.terminals.worktree_setups.lock().await;
+            for task in tasks
+                .iter()
+                .filter(|task| task_id.as_ref().is_none_or(|id| id == &task.id))
+            {
+                if let Some(setup) = setups.get(&TaskId::new(&task.id))
+                    && self.terminals.setup_is_running(&setup.id).await
+                    && let Err(error) = self.terminals.stop_terminal_process(setup.id.clone()).await
+                {
+                    errors.push(format!("{}: {error}", setup.title));
+                }
             }
         }
         if errors.is_empty() {
@@ -3626,24 +4204,54 @@ impl ShellState {
         let project_id = record.project_id.clone();
         let mut command = record.command.clone();
         let mut args = Vec::new();
+        let mut environment = BTreeMap::new();
         if let Some(task_id) = &record.task_id {
-            let project = {
+            let (project, agent) = {
                 let mut core = self.core.lock().await;
                 core.touch_archived_worktree(task_id).await?;
-                core.project_path(&project_id)?
+                (core.project_path(&project_id)?, core.task(task_id)?.agent)
             };
-            if record.id.as_str().starts_with(ENVIRONMENT_TERMINAL_PREFIX) {
-                args = vec![
-                    "-c".into(),
-                    "printf '%s\\n' 'Review .envrc, then run: direnv allow .' 'To enter the environment in this terminal, run: exec direnv exec . \"$SHELL\"'; exec \"$1\"".into(),
-                    "shepherd-environment".into(),
-                    command,
-                ];
-                command = "/bin/sh".into();
-            } else if self.direnv_enabled(&project).await {
-                shep_core::worktree_environment::require_direnv(&record.cwd, task_id).await?;
-                args = vec!["exec".into(), ".".into(), command];
-                command = "direnv".into();
+            environment.insert("SHEPHERD_AGENT".into(), agent.as_str().into());
+            if let Some((setup, _, approved)) = self.preferences.worktree_setup(&project).await? {
+                if !approved {
+                    return Err(BridgeError::new(
+                        "project_setup",
+                        "Review and approve the worktree configuration in Project settings.",
+                    ));
+                }
+                #[cfg(unix)]
+                let wrapper = {
+                    let runs_path = self
+                        .worktree_setup_runs_path(project, task_id.clone())
+                        .await?;
+                    match self
+                        .terminals
+                        .prepare_worktree_environment(
+                            task_id,
+                            agent,
+                            &record.cwd,
+                            &runs_path,
+                            &setup,
+                        )
+                        .await
+                    {
+                        Err(CoreError::WorktreeSetupPending { .. }) => {
+                            return Err(BridgeError::new(
+                                "setup_terminal_required",
+                                "Worktree setup is still running. Follow its progress in Terminals, then open a new terminal once setup is ready.",
+                            ));
+                        }
+                        result => result?,
+                    }
+                };
+                #[cfg(not(unix))]
+                let wrapper = setup.launch_wrapper;
+                let mut wrapper = wrapper.into_iter();
+                if let Some(program) = wrapper.next() {
+                    args = wrapper.collect();
+                    args.push(command);
+                    command = program;
+                }
             }
         }
         self.spawn_terminal(
@@ -3654,7 +4262,7 @@ impl ShellState {
                 cwd: record.cwd.clone(),
                 command,
                 args,
-                environment: BTreeMap::new(),
+                environment,
             },
             Some(record),
         )
@@ -3840,6 +4448,22 @@ impl ShellState {
         follow_output: bool,
     ) -> Result<(), BridgeError> {
         let slot = self.screen_slot(&terminal_id).await?;
+        #[cfg(unix)]
+        if let Some(launch) = self.terminals.agent_launch(&terminal_id).await {
+            use std::io::Write as _;
+            if !launch.live.load(Ordering::Acquire) {
+                return Ok(());
+            }
+            let bytes = data.into_bytes();
+            tokio::task::spawn_blocking(move || (&*launch.master).write_all(&bytes))
+                .await
+                .map_err(|error| BridgeError::new("terminal", error.to_string()))?
+                .map_err(|error| BridgeError::new("terminal", error.to_string()))?;
+            if follow_output {
+                slot.lock().await.follow_output();
+            }
+            return Ok(());
+        }
         let task_id = {
             let slot = slot.lock().await;
             if slot.block_user_input {
@@ -3916,7 +4540,34 @@ impl ShellState {
         rows: u16,
     ) -> Result<(), BridgeError> {
         let slot = self.screen_slot(&terminal_id).await?;
+        #[cfg(unix)]
+        let launch = self.terminals.agent_launch(&terminal_id).await;
         let mut slot = slot.lock().await;
+        #[cfg(unix)]
+        if let Some(launch) = launch {
+            use std::os::fd::AsRawFd as _;
+            if !(2..=512).contains(&columns) || !(1..=256).contains(&rows) {
+                return Err(BridgeError::new("terminal", "Invalid terminal size."));
+            }
+            let size = libc::winsize {
+                ws_row: rows,
+                ws_col: columns,
+                ws_xpixel: 0,
+                ws_ypixel: 0,
+            };
+            if launch.live.load(Ordering::Acquire)
+                && unsafe { libc::ioctl(launch.master.as_raw_fd(), libc::TIOCSWINSZ as _, &size) }
+                    == -1
+            {
+                return Err(BridgeError::new(
+                    "terminal",
+                    std::io::Error::last_os_error().to_string(),
+                ));
+            }
+            slot.screen.resize(usize::from(columns), usize::from(rows));
+            slot.publish();
+            return Ok(());
+        }
         self.terminals
             .engine
             .lock()
@@ -4460,16 +5111,18 @@ pub mod commands {
         mode: Option<String>,
         model: Option<String>,
         agent: Option<Agent>,
+        created: tauri::ipc::Channel<String>,
     ) -> Result<TaskWorkspace, BridgeError> {
         state
             .inner()
-            .start_task(
+            .start_task_observed(
                 project_id,
                 text,
                 codex.unwrap_or_default(),
                 mode,
                 model,
                 agent.unwrap_or_default(),
+                Some(created),
             )
             .await
     }
@@ -5239,11 +5892,27 @@ pub mod commands {
     }
 
     #[tauri::command]
-    pub async fn task_environment_status(
+    pub async fn agent_launches(
         state: State<'_, ShellState>,
         task_id: String,
-    ) -> Result<Option<String>, BridgeError> {
-        state.task_environment_status(task_id).await
+    ) -> Result<Vec<AgentLaunchSnapshot>, BridgeError> {
+        Ok(state.terminals.agent_launches(&task_id).await)
+    }
+
+    #[tauri::command]
+    pub async fn setup_runs(
+        state: State<'_, ShellState>,
+        task_id: String,
+    ) -> Result<Vec<shep_core::worktree_environment::SetupRun>, BridgeError> {
+        state.setup_runs(task_id).await
+    }
+
+    #[tauri::command]
+    pub async fn worktree_setup_review(
+        state: State<'_, ShellState>,
+        project_id: String,
+    ) -> Result<Option<serde_json::Value>, BridgeError> {
+        state.worktree_setup_review(project_id).await
     }
 
     #[tauri::command]
@@ -5455,6 +6124,54 @@ async fn pause_attachment_deletion_fixture(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn agent_launch_terminal_has_a_tty_separate_from_the_protocol_pipes()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use std::io::Write as _;
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+        let directory = tempfile::tempdir()?;
+        let host = TerminalHost::default();
+        let launch = host
+            .open_agent_terminal("test-task", "fixture", directory.path())
+            .await?;
+        let mut command = tokio::process::Command::new("/bin/sh");
+        command
+            .args(["-c", r#"test -t 2 || exit 4; printf 'wrapper ready\n' >/dev/tty; IFS= read -r typed </dev/tty; IFS= read -r message; printf '%s:%s\n' "$typed" "$message""#])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .current_dir(directory.path())
+            .kill_on_drop(true);
+        agent_harness::configure_foreground_terminal(&mut command, Some(launch.slave));
+        let mut child = command.spawn()?;
+        drop(command);
+        let mut protocol_input = child.stdin.take().ok_or("missing protocol input")?;
+        let mut protocol_output = child.stdout.take().ok_or("missing protocol output")?;
+        let mut terminal_output = launch.output;
+        let entries = host.agent_launches("test-task").await;
+        let entry = entries.first().ok_or("launch terminal missing")?;
+        let terminal = host
+            .agent_launch(&entry.id)
+            .await
+            .ok_or("terminal disappeared")?;
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let mut startup = [0; 14];
+            terminal_output.read_exact(&mut startup).await?;
+            assert!(String::from_utf8_lossy(&startup).contains("wrapper ready"));
+            (&*terminal.master).write_all(b"typed in terminal\n")?;
+            protocol_input.write_all(b"protocol request\n").await?;
+            let mut response = String::new();
+            protocol_output.read_to_string(&mut response).await?;
+            assert_eq!(response, "typed in terminal:protocol request\n");
+            assert!(child.wait().await?.success());
+            Ok::<_, std::io::Error>(())
+        })
+        .await??;
+        Ok(())
+    }
+
     #[tokio::test]
     async fn lagged_core_events_request_a_snapshot_reload_and_skip_stale_events() {
         let (sender, mut receiver) = tokio::sync::broadcast::channel(2);
@@ -5766,8 +6483,16 @@ mod tests {
                     return Err(CoreError::HarnessUnavailable);
                 }
                 let mut harness = self.run.harness("desktop", false);
-                harness.set_process_tracker(self.host.agent_process_tracker(task));
-                Ok((Box::new(harness), self.run.spec(cwd, "desktop", None)))
+                let mut spec = self.run.spec(cwd, "desktop", None);
+                let token = uuid::Uuid::new_v4().to_string();
+                spec.environment
+                    .insert(agent_harness::PROCESS_TOKEN_ENV.into(), token.clone());
+                harness.set_process_tracker(self.host.agent_process_tracker(
+                    task,
+                    token,
+                    agent_harness::command_line(&spec),
+                ));
+                Ok((Box::new(harness), spec))
             }
         }
 
@@ -7795,9 +8520,11 @@ mod tests {
         slot.set(store.clone() as Arc<dyn Store>)
             .map_err(|_| "store already set")?;
         let tracker = AgentProcessStore {
+            terminal_host: None,
             store: slot,
             task_id: "task-fixture".into(),
             token: String::new(),
+            command: String::new(),
             leases: Some(Arc::new(crate::orphan_process::ProcessLeases::new(
                 directory.path().join("leases"),
             )?)),
@@ -7826,9 +8553,11 @@ mod tests {
         slot.set(store.clone() as Arc<dyn Store>)
             .map_err(|_| "store already set")?;
         let tracker = AgentProcessStore {
+            terminal_host: None,
             store: slot,
             task_id: "task-fixture".into(),
             token: String::new(),
+            command: String::new(),
             leases: Some(Arc::new(crate::orphan_process::ProcessLeases::new(
                 directory.path().join("leases"),
             )?)),
@@ -7935,9 +8664,11 @@ mod tests {
         slot.set(store.clone() as Arc<dyn Store>)
             .map_err(|_| "store already set")?;
         let tracker = Arc::new(AgentProcessStore {
+            terminal_host: None,
             store: slot,
             task_id: "task-fixture".into(),
             token: String::new(),
+            command: String::new(),
             leases: Some(Arc::new(crate::orphan_process::ProcessLeases::new(
                 directory.path().join("leases"),
             )?)),
@@ -8081,9 +8812,11 @@ mod tests {
             slot.set(store.clone() as Arc<dyn Store>)
                 .map_err(|_| "store already set")?;
             let tracker = Arc::new(AgentProcessStore {
+                terminal_host: None,
                 store: slot,
                 task_id: "crash-task".into(),
                 token: String::new(),
+                command: String::new(),
                 leases: Some(Arc::new(crate::orphan_process::ProcessLeases::new(
                     data.join("leases"),
                 )?)),

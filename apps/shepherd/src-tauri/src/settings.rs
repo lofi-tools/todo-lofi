@@ -145,8 +145,10 @@ pub enum SettingKey {
     ShowDotfiles,
     #[serde(rename = "environment")]
     ProjectEnvironment,
-    #[serde(rename = "environment.direnv")]
-    Direnv,
+    #[serde(rename = "worktree.setup")]
+    WorktreeSetup,
+    #[serde(rename = "worktree.setup.approval")]
+    WorktreeSetupApproval,
     #[serde(rename = "preview.servers")]
     PreviewServers,
     #[serde(rename = "preview.url")]
@@ -154,7 +156,7 @@ pub enum SettingKey {
 }
 
 impl SettingKey {
-    const ALL: [Self; 15] = [
+    const ALL: [Self; 16] = [
         Self::AgentPriority,
         Self::AgentModelPreferences,
         Self::OnboardingCompleted,
@@ -167,7 +169,8 @@ impl SettingKey {
         Self::Scrollback,
         Self::ShowDotfiles,
         Self::ProjectEnvironment,
-        Self::Direnv,
+        Self::WorktreeSetup,
+        Self::WorktreeSetupApproval,
         Self::PreviewServers,
         Self::PreviewUrl,
     ];
@@ -186,7 +189,8 @@ impl SettingKey {
             Self::Scrollback => "terminal.scrollback_lines",
             Self::ShowDotfiles => "files.show_dotfiles",
             Self::ProjectEnvironment => "environment",
-            Self::Direnv => "environment.direnv",
+            Self::WorktreeSetup => "worktree.setup",
+            Self::WorktreeSetupApproval => "worktree.setup.approval",
             Self::PreviewServers => "preview.servers",
             Self::PreviewUrl => "preview.url",
         }
@@ -199,12 +203,15 @@ impl SettingKey {
             Self::OnboardingCompleted => json!(false),
             Self::Theme => json!("system"),
             Self::Density => json!("compact"),
-            Self::ShowArchived | Self::Notifications | Self::Direnv => json!(false),
+            Self::ShowArchived | Self::Notifications => json!(false),
             Self::ShowDotfiles => json!(true),
             Self::SendAccent => json!("Blue"),
             Self::AttachmentBytes => json!(DEFAULT_ATTACHMENT_BYTES),
             Self::Scrollback => json!(DEFAULT_SCROLLBACK),
-            Self::ProjectEnvironment | Self::PreviewUrl => Value::Null,
+            Self::ProjectEnvironment
+            | Self::PreviewUrl
+            | Self::WorktreeSetup
+            | Self::WorktreeSetupApproval => Value::Null,
             Self::PreviewServers => json!([]),
         }
     }
@@ -216,7 +223,8 @@ impl SettingKey {
                 | Self::AttachmentBytes
                 | Self::Scrollback
                 | Self::ProjectEnvironment
-                | Self::Direnv
+                | Self::WorktreeSetup
+                | Self::WorktreeSetupApproval
                 | Self::PreviewServers
                 | Self::PreviewUrl
         )
@@ -224,6 +232,21 @@ impl SettingKey {
 
     fn validate(self, value: &Value) -> Result<(), String> {
         let reason = match self {
+            Self::WorktreeSetup
+                if !serde_json::from_value::<shep_core::worktree_environment::WorktreeSetup>(
+                    value.clone(),
+                )
+                .is_ok_and(|setup| setup.validate()) =>
+            {
+                "Enter valid named setup commands and argument arrays."
+            }
+            Self::WorktreeSetupApproval
+                if !value.as_str().is_some_and(|hash| {
+                    hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit())
+                }) =>
+            {
+                "Invalid worktree setup approval."
+            }
             Self::PreviewUrl
                 if !value
                     .as_str()
@@ -275,7 +298,6 @@ impl SettingKey {
             Self::ShowArchived
             | Self::Notifications
             | Self::ShowDotfiles
-            | Self::Direnv
             | Self::OnboardingCompleted
                 if !value.is_boolean() =>
             {
@@ -607,7 +629,9 @@ impl Settings {
                 validate_scope(scope, true).map_err(|error| error.to_string())?;
                 let values: Map<String, Value> = SettingKey::ALL
                     .into_iter()
-                    .filter(|key| key.project_scoped())
+                    .filter(|key| {
+                        key.project_scoped() && !matches!(key, SettingKey::WorktreeSetupApproval)
+                    })
                     .filter_map(|key| {
                         scope
                             .get(key.name())
@@ -748,12 +772,39 @@ impl Settings {
             })
             .filter(|value| !value.is_null())
             .or_else(|| {
-                cached.document["app"]
-                    .get(key.name())
-                    .filter(|value| !value.is_null())
+                (!matches!(
+                    key,
+                    SettingKey::WorktreeSetup | SettingKey::WorktreeSetupApproval
+                ))
+                .then(|| cached.document["app"].get(key.name()))
+                .flatten()
+                .filter(|value| !value.is_null())
             })
             .cloned()
             .unwrap_or_else(|| key.default_value())
+    }
+
+    pub(crate) async fn worktree_setup(
+        &self,
+        project: &Path,
+    ) -> Result<Option<(shep_core::worktree_environment::WorktreeSetup, String, bool)>, BridgeError>
+    {
+        let value = self.value(Some(project), SettingKey::WorktreeSetup).await;
+        if value.is_null() {
+            return Ok(None);
+        }
+        let setup: shep_core::worktree_environment::WorktreeSetup =
+            serde_json::from_value(value)
+                .map_err(|error| BridgeError::new("settings", error.to_string()))?;
+        let fingerprint = setup
+            .fingerprint()
+            .map_err(|error| BridgeError::new("settings", error.to_string()))?;
+        let approved = self
+            .value(Some(project), SettingKey::WorktreeSetupApproval)
+            .await
+            .as_str()
+            == Some(fingerprint.as_str());
+        Ok(Some((setup, fingerprint, approved)))
     }
 
     pub(crate) async fn project_environment(

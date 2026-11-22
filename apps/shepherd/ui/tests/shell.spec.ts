@@ -112,8 +112,8 @@ test.beforeEach(async ({ context }) => {
     let releaseTerminalWrite: (() => void) | undefined
     let expiringTerminalSubscription: string | undefined
     const options = new URLSearchParams(window.location.search)
-    const direnvNotice = 'Worktree ready. Review this worktree’s .envrc and run direnv allow . in the setup terminal.'
-    const direnvBlocked = () => options.has('direnv-setup') && localStorage.getItem('fixture.direnvApproved') !== 'true'
+    const setupNotice = 'Worktree ready. Check the development environment has not passed. See Setup runs for output.'
+    const setupBlocked = () => options.has('custom-setup') && localStorage.getItem('fixture.setupReady') !== 'true'
     function readPreferences() {
       const defaults = {
         'onboarding.completed': !options.has('onboarding'),
@@ -1246,10 +1246,10 @@ test.beforeEach(async ({ context }) => {
               createdAt: 1_760_000_500_000,
             }
             tasks.unshift(task)
-            if (direnvBlocked()) {
+            if (setupBlocked()) {
               task.state = 'ready'
               transcripts[id] = []
-              throw { code: 'direnv_approval', message: direnvNotice, taskId: id }
+              throw { code: 'setup_terminal_required', message: setupNotice, taskId: id }
             }
             if (setupNeedsApproval(task.projectId)) {
               task.state = 'ready'
@@ -1321,7 +1321,7 @@ test.beforeEach(async ({ context }) => {
           case 'send_prompt': {
             if (options.has('send-prompt-fails')) throw { message: 'Sign in required', code: 'agent' }
             const task = tasks.find((candidate) => candidate.id === args.taskId)
-            if (direnvBlocked()) throw { code: 'direnv_approval', message: direnvNotice, taskId: task.id }
+            if (setupBlocked()) throw { code: 'setup_terminal_required', message: setupNotice, taskId: task.id }
             if (setupNeedsApproval(task.projectId)) {
               throw { code: 'project_setup', message: 'Review and approve the worktree setup script in Project settings before starting this task.' }
             }
@@ -1456,15 +1456,29 @@ test.beforeEach(async ({ context }) => {
               throw new Error('Fixture terminal list failed')
             }
             return { projectId: args.projectId, revision: terminalRevision, terminals: [...terminals], ...(options.has('terminal-layout-race') ? { layout: terminalLayout } : {}) }
-          case 'task_environment_status':
-            return direnvBlocked() ? direnvNotice : null
+          case 'setup_runs':
+            return options.has('custom-setup') ? [{
+              id: 'readiness', name: 'Check the development environment', command: ['env-check'], cwd: '/tmp/demo',
+              status: 'Failed', output: 'Waiting for the project configuration',
+            }] : []
+          case 'agent_launches': {
+            if (!options.has('custom-setup')) return []
+            const task = tasks.find((candidate) => candidate.id === args.taskId)
+            if (!task?.worktreePath || task.id === 'task-1') return []
+            return [
+              { id: 'terminal-setup', command: '', cwd: task.worktreePath, live: true, setupTitle: 'Environment setup' },
+              ...(sentPrompts.length ? [{
+                id: 'terminal-agent-launch', command: 'codex app-server',
+                cwd: task.worktreePath, live: true,
+              }] : []),
+            ]
+          }
+          case 'worktree_setup_review':
+            return null
           case 'open_setup_terminal': {
             const task = tasks.find((candidate) => candidate.id === args.taskId)
             if (!task?.worktreePath) throw new Error('The worktree must exist before opening a setup terminal')
-            const created = { ...terminals[0], id: 'terminal-direnv', projectId: task.projectId,
-              taskId: task.id, cwd: task.worktreePath, title: 'Environment setup', scope: 'task', endedAt: null }
-            terminals.push(created)
-            return { terminalId: created.id, list: { projectId: task.projectId, revision: ++terminalRevision, terminals: [...terminals] } }
+            return { terminalId: 'terminal-setup', list: { projectId: task.projectId, revision: terminalRevision, terminals: [...terminals] } }
           }
           case 'start_terminal':
           case 'restart_terminal': {
@@ -2363,28 +2377,42 @@ test('retries the first Codex prompt in the same chat after approving worktree s
   expect(await page.evaluate(() => window.__sentPrompts)).toEqual([{ taskId: 'task-2', text: 'Keep this Codex prompt' }])
 })
 
-test('creates the checkout before waiting for direnv and opens its setup terminal', async ({ page }) => {
+test('shows configured setup runs and the foreground agent terminal', async ({ page }) => {
   await page.addInitScript(() => localStorage.setItem('fixture.settings', JSON.stringify({
-    projects: { '/tmp/demo': { 'environment.direnv': true } },
+    projects: { '/tmp/demo': { 'worktree.setup': { launchWrapper: ['project-wrapper'], setupTerminal: { name: 'Environment setup' } } } },
   })))
-  await page.goto('/?direnv-setup')
+  await page.goto('/?custom-setup')
   await page.getByRole('button', { name: 'demo', exact: true }).press('Tab')
   await page.getByRole('button', { name: 'New chat in demo' }).press('Enter')
   const composer = page.locator('.composer')
   const prompt = composer.getByLabel('Prompt')
   const send = composer.getByRole('button', { name: 'Send', exact: true })
   await prompt.fill('Use the dev shell')
+  const files = page.getByRole('tab', { name: 'Files', exact: true })
+  await files.click()
   await send.click()
   await expect(composer.getByRole('status')).toContainText('Worktree ready.')
   await expect(prompt).toHaveValue('Use the dev shell')
   expect(await page.evaluate(() => window.__sentPrompts)).toEqual([])
+  await expect(files).toHaveAttribute('aria-selected', 'true')
+  await page.getByRole('tab', { name: 'Terminals' }).click()
+  await expect(page.getByRole('list', { name: 'Terminals' }).getByRole('button', { name: 'Environment setup Running' })).toBeVisible()
+  await files.click()
   await composer.getByRole('button', { name: 'Open setup terminal' }).click()
   await expect(page.getByRole('tab', { name: 'Terminals' })).toHaveAttribute('aria-selected', 'true')
-  await expect(page.locator('.terminal-pane__slot[data-terminal-id="terminal-direnv"]')).toBeVisible()
-  await page.evaluate(() => localStorage.setItem('fixture.direnvApproved', 'true'))
-  await expect(composer.getByRole('button', { name: 'Open setup terminal' })).toHaveCount(0)
+  const setup = page.getByRole('region', { name: 'Environment setup' })
+  await expect(setup).toBeVisible()
+  await expect(page.getByRole('list', { name: 'Terminals' }).getByRole('button', { name: 'Environment setup Running' })).toBeVisible()
+  const runs = page.locator('.terminal-setup-runs')
+  await expect(runs).toContainText('Waiting for the project configuration')
+  await page.evaluate(() => localStorage.setItem('fixture.setupReady', 'true'))
   await send.click()
   await expect.poll(() => page.evaluate(() => window.__sentPrompts)).toEqual([{ taskId: 'task-2', text: 'Use the dev shell' }])
+  const agent = page.getByRole('list', { name: 'Terminals' }).getByRole('button', { name: 'Agent launch Running' })
+  await agent.click()
+  await expect(page.getByRole('region', { name: 'Agent launch terminal' })).toContainText('codex app-server')
+  await page.getByRole('list', { name: 'Terminals' }).getByRole('button', { name: 'Environment setup Running' }).click()
+  await expect(setup).toBeVisible()
 })
 
 test('cancels stale task searches and focuses an archived hit across projects', async ({ page }) => {

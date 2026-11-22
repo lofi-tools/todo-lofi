@@ -3931,3 +3931,45 @@ button.pool__agent-label { padding: 0; border: 0; background: transparent; color
   background-image: none;
 }
 .model-picker__value { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.terminal-setup-runs {
+  flex: 0 0 auto;
+  max-height: 42%;
+  overflow: auto;
+  padding: 7px 9px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  font-size: 12px;
+}
+
+.terminal-setup-runs summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.terminal-setup-run {
+  margin-top: 6px;
+}
+
+.terminal-setup-run code,
+.terminal-setup-runs p,
+.terminal-agent-launch__command {
+  overflow-wrap: anywhere;
+}
+
+.terminal-setup-run pre {
+  max-height: 12em;
+  overflow: auto;
+  white-space: pre-wrap;
+}
+
+.terminal-agent-launch {
+  flex: 0 1 220px;
+  min-height: 140px;
+}
+
+.terminal-agent-launch__command {
+  color: var(--text-muted);
+  font-size: 11px;
+}

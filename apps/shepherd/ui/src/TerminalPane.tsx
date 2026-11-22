@@ -136,6 +136,7 @@ interface TerminalPaneProps {
   onTerminalFocus: (id: string | null) => void
   listEvent: bridge.TerminalList | undefined
   setupTerminalRequest?: { id: string }
+  launchingTaskId?: string
   freebuffFront: boolean
   freebuffFocused: boolean
   freebuffAttention: boolean
@@ -148,6 +149,31 @@ type TerminalAction = 'newSharedTerminal' | 'newTaskTerminal' | 'splitRight' | '
 export interface TerminalCommands {
   available: () => { terminalReady: boolean; terminalPane: boolean; terminalMultiple: boolean; terminalFour: boolean }
   actions: Record<TerminalAction, () => void>
+}
+
+function SetupRuns(props: { taskId: string }) {
+  const [runs, { refetch }] = createResource(() => props.taskId, async (taskId) => {
+    try { return { entries: await bridge.setupRuns(taskId) } }
+    catch (failure) { return { entries: [], error: describe(failure) } }
+  })
+  onMount(() => {
+    const timer = setInterval(() => { if (!runs.loading) void refetch() }, 1000)
+    onCleanup(() => clearInterval(timer))
+  })
+  return <Show when={runs.latest?.entries.length || runs.latest?.error}>
+    <details class="terminal-setup-runs" open>
+      <summary>Setup runs</summary>
+      <Show when={runs.latest?.error}>{(error) => <p role="alert">Could not load setup runs. {error()}</p>}</Show>
+      <For each={[...(runs.latest?.entries ?? [])].reverse()}>
+        {(run) => <details class="terminal-setup-run" open={run.status === 'Failed'}>
+          <summary>{run.name} · {run.status}</summary>
+          <code>{JSON.stringify(run.command)}</code>
+          <p class="empty">{run.cwd}</p>
+          <Show when={run.output}><pre tabindex={0}>{run.output}</pre></Show>
+        </details>}
+      </For>
+    </details>
+  </Show>
 }
 
 export function TerminalPane(props: TerminalPaneProps) {
@@ -163,6 +189,26 @@ export function TerminalPane(props: TerminalPaneProps) {
   function setError(message: string | null) {
     if (message) reportError('terminal', message)
   }
+  const launchTaskId = () => props.shown ? props.launchingTaskId ?? props.taskId : undefined
+  const [launches, { refetch: refreshLaunches }] = createResource(launchTaskId,
+    async (taskId) => {
+      try { return { taskId, entries: await bridge.agentLaunches(taskId) } }
+      catch (failure) { reportError('agent_launches', failure); return { taskId, entries: [] } }
+    })
+  const launchEntries = () => {
+    const snapshot = launches.latest
+    return snapshot && snapshot.taskId === launchTaskId() ? snapshot.entries : []
+  }
+  const [selectedLaunch, setSelectedLaunch] = createSignal<string>()
+  const visibleLaunch = () => typeShown('task')
+    ? launchEntries().find((entry) => entry.id === selectedLaunch()) ?? launchEntries().at(-1)
+    : undefined
+  onMount(() => {
+    const timer = setInterval(() => {
+      if (launchTaskId() && !launches.loading) void refreshLaunches()
+    }, 1000)
+    onCleanup(() => clearInterval(timer))
+  })
   const [hiddenAgentTerminals, setHiddenAgentTerminals] = createSignal(new Set<string>())
   const [scopeFilter, setScopeFilter] = createSignal<'both' | 'project' | 'task'>('both')
   const [terminalDrag, setTerminalDrag] = createSignal<{ source: string; target: string; edge: DropEdge }>()
@@ -455,7 +501,15 @@ export function TerminalPane(props: TerminalPaneProps) {
   let shownSetupTerminal: { id: string } | undefined
   createEffect(() => {
     const request = props.setupTerminalRequest
-    if (!request || request === shownSetupTerminal || !props.shown || !layoutLoaded() || pending()) return
+    if (!request || request === shownSetupTerminal || !props.shown) return
+    if (launchEntries().some((entry) => entry.id === request.id)) {
+      shownSetupTerminal = request
+      if (!typeShown('task')) setScopeFilter('both')
+      setSelectedLaunch(request.id)
+      setFocusRequest(request)
+      return
+    }
+    if (!layoutLoaded() || pending()) return
     if (!terminals().some((entry) => entry.id === request.id && entry.taskId === props.taskId)) return
     shownSetupTerminal = request
     if (!typeShown('task')) setScopeFilter('both')
@@ -612,7 +666,43 @@ export function TerminalPane(props: TerminalPaneProps) {
             </li>
           )}
         </For>
+        <For each={typeShown('task') ? launchEntries().map((entry) => entry.id) : []}>
+          {(id) => <Show when={launchEntries().find((entry) => entry.id === id)}>
+            {(entry) => {
+              return <li class="terminal-list__row">
+                <button type="button" class="terminal-list__item"
+                  aria-current={id === visibleLaunch()?.id ? 'true' : undefined}
+                  onClick={() => { setSelectedLaunch(id); if (entry().live) setFocusRequest({ id }) }}>
+                  <TaskTerminalIcon />
+                <span>{entry().setupTitle ?? 'Agent launch'}</span>
+                  <span class="terminal-list__state">{entry().live ? 'Running' : 'Ended'}</span>
+                </button>
+              </li>
+            }}
+          </Show>}
+        </For>
         </ul>
+      <Show when={typeShown('task') && props.shown && props.taskHasWorktree ? props.taskId : undefined} keyed>
+        {(taskId) => <SetupRuns taskId={taskId} />}
+      </Show>
+      <Show when={visibleLaunch()}>
+        {(entry) => {
+          return <section class="terminal-tile terminal-agent-launch" aria-label={entry().setupTitle ?? 'Agent launch terminal'}>
+            <div class="terminal-pane__bar">
+              <span>{entry().setupTitle ?? 'Agent launch'}</span>
+              <div class="terminal-header__actions">
+                <Show when={entry().setupTitle && entry().live}>
+                  <CloseTerminalButton disabled={pending()} live
+                    onClick={() => void run(async () => { await bridge.closeTerminal(entry().id); await refreshLaunches() })} />
+                </Show>
+              </div>
+            </div>
+            <Show when={entry().command}><code class="terminal-agent-launch__command" title={entry().cwd}>{entry().command}</code></Show>
+            <TerminalCanvas terminalId={entry().id} shown={props.shown} readOnly={!entry().live}
+              focusRequest={focusRequest()} onFocus={props.onTerminalFocus} />
+          </section>
+        }}
+      </Show>
       <Show when={props.taskId} keyed>
         <Show when={commands().size > 0}>
           <CommandTerminals commands={commands()} shown={props.shown} agent={props.agent} />

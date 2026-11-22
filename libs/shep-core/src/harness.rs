@@ -87,8 +87,20 @@ impl ProjectApprovalPolicy for ProjectApprovals {
 
 /// Creates one adapter instance for a task. The shell or test supplies the
 /// implementation; the core never chooses a concrete CLI here.
+#[async_trait]
 pub trait HarnessFactory: Send + Sync {
     fn create(&self) -> Result<Box<dyn AgentHarness>, CoreError>;
+
+    async fn prepare_worktree_environment(
+        &self,
+        _task_id: &crate::TaskId,
+        _agent: Agent,
+        _directory: &std::path::Path,
+        _runs_path: &std::path::Path,
+        _setup: &crate::worktree_environment::WorktreeSetup,
+    ) -> Result<Option<Vec<String>>, CoreError> {
+        Ok(None)
+    }
 
     fn environment_for_project(
         &self,

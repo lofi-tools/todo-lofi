@@ -31,9 +31,31 @@ pub struct DesktopHarnessFactory {
     pub terminals: Arc<crate::bridge::TerminalHost>,
 }
 
+#[async_trait::async_trait]
 impl HarnessFactory for DesktopHarnessFactory {
     fn create(&self) -> Result<Box<dyn AgentHarness>, CoreError> {
         self.codex.create()
+    }
+
+    async fn prepare_worktree_environment(
+        &self,
+        task_id: &shep_core::TaskId,
+        agent: Agent,
+        checkout: &Path,
+        runs_path: &Path,
+        setup: &shep_core::worktree_environment::WorktreeSetup,
+    ) -> Result<Option<Vec<String>>, CoreError> {
+        #[cfg(unix)]
+        return self
+            .terminals
+            .prepare_worktree_environment(task_id, agent, checkout, runs_path, setup)
+            .await
+            .map(Some);
+        #[cfg(not(unix))]
+        {
+            let _context = (task_id, agent, checkout, runs_path, setup);
+            Ok(None)
+        }
     }
 
     fn environment_for_project(
@@ -125,7 +147,11 @@ impl HarnessFactory for DesktopHarnessFactory {
         let token = uuid::Uuid::new_v4().to_string();
         spec.environment
             .insert(agent_harness::PROCESS_TOKEN_ENV.into(), token.clone());
-        harness.set_process_tracker(self.terminals.agent_process_tracker(task_id, token));
+        harness.set_process_tracker(self.terminals.agent_process_tracker(
+            task_id,
+            token,
+            agent_harness::command_line(&spec),
+        ));
         Ok((harness, spec))
     }
 }

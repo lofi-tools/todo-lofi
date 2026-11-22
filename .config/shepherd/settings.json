@@ -1,6 +1,13 @@
 {
   "version": 1,
   "settings": {
-    "environment.direnv": true
+    "worktree.setup": {
+      "useImportedSetup": false,
+      "launchWrapper": ["direnv", "exec", "."],
+      "setupTerminal": {
+        "name": "Development environment setup",
+        "instructions": "Review .envrc in this worktree, then run direnv allow ."
+      }
+    }
   }
 }

@@ -7,7 +7,7 @@ import { HarnessWarning, PoolSettings, type HarnessDiscovery } from './PoolSetti
 import { SettingsSelect } from './SettingsSelect'
 import { AgentModelSettings, supportsModelSelection } from './AgentModelSettings'
 import { AgentIcon } from './AgentIcon'
-import { projectEnvironment, saveProjectEnvironment, type ProjectEnvironment } from './bridge'
+import { projectEnvironment, saveProjectEnvironment, worktreeSetupReview, type ProjectEnvironment, type WorktreeSetup } from './bridge'
 
 export const categories = ['Workspace', 'Projects', 'Agents', 'Appearance', 'Keyboard shortcuts'] as const
 
@@ -120,7 +120,71 @@ function ProjectPreviewServers(props: { value: PreviewService[]; localOverride: 
   </form>
 }
 
-function ProjectEnvironmentSettings(props: { projectId: string; direnv?: boolean }) {
+function WorktreeSetupSettings(props: {
+  projectId: string
+  value?: WorktreeSetup | null
+  localOverride: boolean
+  editable: boolean
+  onEdit: SettingsPaneProps['onEditPreference']
+}) {
+  const [draft, setDraft] = createSignal('')
+  const [failure, setFailure] = createSignal('')
+  const [busy, setBusy] = createSignal(false)
+  const [review, { refetch }] = createResource(() => props.projectId, worktreeSetupReview)
+  const formatted = () => JSON.stringify(props.value ?? {}, null, 2)
+  createEffect(() => setDraft(formatted()))
+
+  async function save() {
+    setBusy(true)
+    setFailure('')
+    try {
+      const value = JSON.parse(draft())
+      await props.onEdit('worktree.setup', value as WorktreeSetup, props.projectId)
+      await refetch()
+    } catch (error) {
+      setFailure(settingsError(error))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function approve() {
+    const configuration = review.latest
+    if (!configuration || draft() !== formatted()) return
+    setBusy(true)
+    setFailure('')
+    try {
+      await props.onEdit('worktree.setup.approval', configuration.fingerprint, props.projectId)
+      await refetch()
+    } catch (error) {
+      setFailure(settingsError(error))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return <section class="settings__project" aria-label="Worktree commands">
+    <h4>Worktree commands</h4>
+    <label class="settings__row"><span>Setup configuration</span>
+      <textarea value={draft()} rows={8} readOnly={props.localOverride || !props.editable}
+        onInput={(event) => setDraft(event.currentTarget.value)} />
+    </label>
+    <p class="empty">{props.localOverride ? 'Set in .config/shepherd/settings.json.' :
+      'Use afterCheckout, readinessCheck, launchWrapper, and setupTerminal. Commands are arrays of arguments.'}</p>
+    <Show when={failure() || review.error}><p role="alert">{failure() || settingsError(review.error)}</p></Show>
+    <Show when={!props.localOverride}>
+      <button class="project-action" type="button" disabled={busy() || !props.editable || draft() === formatted()} onClick={() => void save()}>Save worktree commands</button>
+    </Show>
+    <Show when={review.latest}>
+      {(configuration) => <Show when={!configuration().approved} fallback={<p class="empty">Worktree commands approved.</p>}>
+        <button class="project-action" type="button" disabled={busy() || !props.editable || draft() !== formatted()}
+          onClick={() => void approve()}>Approve worktree commands</button>
+      </Show>}
+    </Show>
+  </section>
+}
+
+function ProjectEnvironmentSettings(props: { projectId: string; useImportedSetup?: boolean }) {
   const [snapshot, { mutate, refetch }] = createResource(() => props.projectId, projectEnvironment)
   const [draft, setDraft] = createSignal<ProjectEnvironment>()
   const [error, setError] = createSignal('')
@@ -154,11 +218,11 @@ function ProjectEnvironmentSettings(props: { projectId: string; direnv?: boolean
       {(environment) => <>
         <label class="settings__row"><span>Worktree setup script</span><textarea value={environment().setup} onInput={(event) => setDraft({ ...environment(), setup: event.currentTarget.value, approvedSetupHash: null })} /></label>
         <Show when={environment().setup.trim()}>
-          <Show when={props.direnv && environment().setup.trim() === 'direnv reload'} fallback={<>
+          <Show when={props.useImportedSetup === false} fallback={<>
             <p class="empty">Runs once in each new task worktree before the agent starts.</p>
             <Show when={environment().approvedSetupHash === snapshot.latest?.setupHash && environment().setup === snapshot.latest?.current?.setup} fallback={<p>Review and approve this script before starting a task.</p>}><p class="empty">Setup script approved.</p></Show>
           </>}>
-            <p class="empty">Shepherd loads direnv directly for Codex and task terminals.</p>
+            <p class="empty">This project uses its configured worktree setup.</p>
           </Show>
         </Show>
         <For each={environment().actions}>{(action, index) => <div class="settings__project">
@@ -168,7 +232,7 @@ function ProjectEnvironmentSettings(props: { projectId: string; direnv?: boolean
         </div>}</For>
         <button class="project-action" onClick={() => setDraft({ ...environment(), actions: [...environment().actions, { name: '', icon: 'run', command: '' }] })}>Add action</button>
         <button class="project-action" disabled={saving() || JSON.stringify(environment()) === JSON.stringify(snapshot.latest?.current)} onClick={() => void save(environment())}>Save environment</button>
-        <Show when={environment().setup.trim() && !(props.direnv && environment().setup.trim() === 'direnv reload') && environment().setup === snapshot.latest?.current?.setup && environment().approvedSetupHash !== snapshot.latest?.setupHash}>
+        <Show when={environment().setup.trim() && !(props.useImportedSetup === false) && environment().setup === snapshot.latest?.current?.setup && environment().approvedSetupHash !== snapshot.latest?.setupHash}>
           <button class="project-action" disabled={saving()} onClick={() => void save({ ...environment(), approvedSetupHash: snapshot.latest?.setupHash ?? null })}>Approve setup script</button>
         </Show>
       </>}
@@ -680,16 +744,14 @@ export function SettingsPane(props: SettingsPaneProps) {
                         localOverride={Array.isArray(props.preferences?.projectLocal?.[project().path]?.['preview.servers'])}
                         editable={props.preferencesEditable}
                         onSave={(value) => props.onEditPreference('preview.servers', value, projectId)} /></Show>
-                      <Show when={showSetting('development environment direnv nix')}>
-                        <label class="settings__row settings__row--checkbox"><span>Use direnv for Codex and task terminals</span>
-                          <input type="checkbox"
-                            checked={props.preferences?.projects[project().path]?.['environment.direnv'] ?? false}
-                            disabled={!props.preferencesEditable || props.preferences?.projectLocal?.[project().path]?.['environment.direnv'] !== undefined}
-                            onChange={(event) => void props.onEditPreference('environment.direnv', event.currentTarget.checked, projectId)} />
-                        </label>
+                      <Show when={showSetting('worktree setup launch wrapper environment commands')}>
+                        <WorktreeSetupSettings projectId={projectId}
+                          value={props.preferences?.projects[project().path]?.['worktree.setup']}
+                          localOverride={!!props.preferences?.projectLocal?.[project().path]?.['worktree.setup']}
+                          editable={props.preferencesEditable} onEdit={props.onEditPreference} />
                       </Show>
                       <Show when={showSetting('worktree setup project actions codex environment')}><ProjectEnvironmentSettings projectId={projectId}
-                        direnv={props.preferences?.projects[project().path]?.['environment.direnv']} /></Show>
+                        useImportedSetup={props.preferences?.projects[project().path]?.['worktree.setup']?.useImportedSetup} /></Show>
                       <Show when={props.preferences}>
                         {(snapshot) => <NumberPreferences preferences={snapshot()} project={project()}
                           editable={props.preferencesEditable} onEdit={props.onEditPreference} query={narrowedQuery()} />}

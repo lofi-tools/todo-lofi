@@ -22,6 +22,8 @@ mod preview_server;
 mod project_environment;
 mod pty_terminal;
 mod settings;
+#[cfg(unix)]
+pub mod setup_terminal;
 mod skills;
 pub use shep_terminal_renderer as terminal_screen;
 
@@ -512,7 +514,9 @@ pub fn run() -> Result<(), tauri::Error> {
             bridge::commands::stop_previous_process,
             bridge::commands::archived_worktree_issues,
             bridge::commands::start_terminal,
-            bridge::commands::task_environment_status,
+            bridge::commands::setup_runs,
+            bridge::commands::agent_launches,
+            bridge::commands::worktree_setup_review,
             bridge::commands::open_setup_terminal,
             bridge::commands::start_freebuff_terminal,
             bridge::commands::restart_terminal,

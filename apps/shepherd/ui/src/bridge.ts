@@ -5,7 +5,7 @@ async function invoke<T>(command: string, args?: InvokeArgs, options?: InvokeOpt
   try {
     return await nativeInvoke<T>(command, args, options)
   } catch (failure) {
-    if ((failure as BridgeError | null)?.code !== 'direnv_approval') reportError(command, failure)
+    if ((failure as BridgeError | null)?.code !== 'setup_terminal_required') reportError(command, failure)
     throw failure
   }
 }
@@ -690,8 +690,9 @@ export function createDraft(projectId: string, title: string, agent: Agent = 'co
   return invoke<TaskWorkspace>('create_draft', { projectId, title, agent })
 }
 
-export function startTask(projectId: string, text: string, codex: CodexTurnOptions | undefined, mode: string | undefined, model: string | undefined, agent: Agent): Promise<TaskWorkspace> {
-  return invoke<TaskWorkspace>('start_task', { projectId, text, codex, mode, model, agent })
+export function startTask(projectId: string, text: string, codex: CodexTurnOptions | undefined, mode: string | undefined, model: string | undefined, agent: Agent, onCreated?: (taskId: string) => void): Promise<TaskWorkspace> {
+  const created = new Channel<string>(onCreated)
+  return invoke<TaskWorkspace>('start_task', { projectId, text, codex, mode, model, agent, created })
 }
 
 export function setDraftAgent(taskId: string, agent: Agent): Promise<TaskWorkspace> {
@@ -913,8 +914,41 @@ export function startTerminal(
   return invoke('start_terminal', { projectId, taskId, columns, rows })
 }
 
-export function taskEnvironmentStatus(taskId: string): Promise<string | null> {
-  return invoke('task_environment_status', { taskId })
+export interface SetupRun {
+  id: string
+  name: string
+  command: string[]
+  cwd: string
+  status: string
+  output: string
+}
+
+export interface AgentLaunch {
+  setupTitle?: string
+  id: string
+  command: string
+  cwd: string
+  live: boolean
+}
+
+export function setupRuns(taskId: string): Promise<SetupRun[]> {
+  return invoke('setup_runs', { taskId })
+}
+
+export function agentLaunches(taskId: string): Promise<AgentLaunch[]> {
+  return invoke('agent_launches', { taskId })
+}
+
+export interface WorktreeSetup {
+  afterCheckout?: Array<{ name: string; command: string[]; required?: boolean }>
+  readinessCheck?: { name: string; command: string[] }
+  launchWrapper?: string[]
+  setupTerminal?: { name: string; command?: string[]; instructions?: string }
+  useImportedSetup?: boolean
+}
+
+export function worktreeSetupReview(projectId: string): Promise<{ configuration: WorktreeSetup; fingerprint: string; approved: boolean } | null> {
+  return invoke('worktree_setup_review', { projectId })
 }
 
 export function openSetupTerminal(taskId: string): Promise<{ terminalId: string; list: TerminalList }> {
@@ -1349,7 +1383,8 @@ export interface SettingsValues {
   'terminal.scrollback_lines': number
   'files.show_dotfiles': boolean
   environment: ProjectEnvironment | null
-  'environment.direnv': boolean
+  'worktree.setup': WorktreeSetup | null
+  'worktree.setup.approval': string | null
   'preview.servers': PreviewService[]
   'preview.url': string | null
 }
