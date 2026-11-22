@@ -62,17 +62,19 @@ current layout and give future changes a point of comparison.
   alongside the interactive terminal panes. Follow the latest command by
   default and let the user select an earlier command without shifting focus
   when new output arrives.
-  Give each instance row and pane header a scope icon: a folder for a
-  project-shared terminal and a branch for a task terminal; the Freebuff row
-  reuses the composer picker's Freebuff brand mark (`FreebuffMark`) rather than a
-  separate glyph. Keep the scope and view state out of the row
+  Show a folder in project-shared terminal rows and headers. Task terminals
+  display their title. The Freebuff row uses the composer's Freebuff brand mark
+  (`FreebuffMark`). Keep the scope and view state out of the row
   text: name it in the row's tooltip instead. A static **Terminals** heading
   shares its row with a segmented **Both / Project / Task** filter and the
   icon-only **New terminal** button at the right. The filter narrows the always-visible instance list and
   the panes; starting a terminal the filter hides returns it to **Both**.
   **New terminal** creates the selected scope; **Both**
   creates a task terminal and is disabled until a worktree exists. A task
-  terminal can be shared with the project while retaining its working directory.
+  terminal can be shared with the project through **Share** in its header menu
+  while retaining its working directory. The header menu also offers **Copy
+  working directory** for task and project terminals. Open the same menu with
+  the ellipsis button or by right-clicking the terminal tab or header.
   Terminal exit removes the record and updates its saved layout in one transaction;
   terminal list updates carry the matching saved layout in one snapshot. If an
   edit races a newer snapshot, reload it and automatically reapply safe actions

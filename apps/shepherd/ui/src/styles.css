@@ -2920,7 +2920,7 @@ button.pool__agent-label { padding: 0; border: 0; background: transparent; color
 .terminal-pane__heading h2 { margin: 0; font-size: 13px; }
 .terminal-pane__heading .terminal-pane__new { margin-inline-start: auto; }
 
-.terminal-pane__bar button,
+.terminal-pane__bar button:not(:where([role="menuitem"])),
 .terminal-ended button {
   padding: 4px 10px;
   border: 1px solid var(--border);
@@ -2943,7 +2943,9 @@ button.pool__agent-label { padding: 0; border: 0; background: transparent; color
 .terminal-header__actions { display: flex; align-items: center; gap: 2px; margin-inline-start: auto; }
 .terminal-header__actions .terminal-restart { margin-inline-start: 0; }
 .terminal-close { position: relative; flex: none; }
+.terminal-pane__bar .terminal-actions__button,
 .terminal-pane__bar .terminal-close__button { display: grid; place-items: center; width: 26px; height: 26px; padding: 0; border: 0; border-radius: 6px; background: transparent; color: var(--text-muted); cursor: pointer; }
+.terminal-pane__bar .terminal-actions__button:is(:hover, [aria-expanded="true"]):enabled,
 .terminal-pane__bar .terminal-close__button:hover:enabled { background: var(--surface-raised); color: var(--text); }
 .terminal-close__tooltip { min-width: 0; width: max-content; padding: 5px 8px; color: var(--text); font-size: 12px; white-space: nowrap; visibility: hidden; pointer-events: none; }
 .terminal-close:hover .terminal-close__tooltip, .terminal-close:focus-within .terminal-close__tooltip { visibility: visible; }

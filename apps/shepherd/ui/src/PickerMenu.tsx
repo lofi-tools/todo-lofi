@@ -38,7 +38,16 @@ export function PickerCaret() {
   )
 }
 
-export function PickerMenu(props: PickerMenuProps & { triggerClass: string; above?: boolean; openRequest?: number; align?: 'start' | 'end'; within?: string; children: JSX.Element }) {
+export function PickerMenu(props: PickerMenuProps & {
+  triggerClass: string
+  above?: boolean
+  openRequest?: number
+  align?: 'start' | 'end'
+  within?: string
+  contextTarget?: () => HTMLElement
+  contextOnly?: boolean
+  children: JSX.Element
+}) {
   const menuId = createUniqueId()
   const footer = createMemo(() => props.footer)
   const [open, setOpen] = createSignal(false)
@@ -48,6 +57,7 @@ export function PickerMenu(props: PickerMenuProps & { triggerClass: string; abov
   let trigger!: HTMLButtonElement
   let menu!: HTMLSpanElement
   let filter!: HTMLInputElement
+  let contextAnchor: { target: HTMLElement; x: number; y: number } | undefined
   createEffect(on(() => props.openRequest, (request) => {
     if (request && !props.disabled && !open()) trigger.click()
   }, { defer: true }))
@@ -72,28 +82,48 @@ export function PickerMenu(props: PickerMenuProps & { triggerClass: string; abov
     group.options.filter((option) => !option.disabled).map((option) => ({ group, option })))
 
   function positionMenu() {
-    const bounds = trigger.getBoundingClientRect()
     const viewportInset = 12
     const gap = 6
-    const boundary = props.within ? trigger.closest(props.within)?.getBoundingClientRect() : undefined
+    const target = contextAnchor?.target ?? trigger
+    const bounds = target.getBoundingClientRect()
+    const top = contextAnchor?.y ?? bounds.top
+    const bottom = contextAnchor?.y ?? bounds.bottom
+    const boundary = props.within ? target.closest(props.within)?.getBoundingClientRect() : undefined
     const leftInset = boundary ? Math.max(viewportInset, boundary.left + gap) : viewportInset
     if (boundary) menu.style.setProperty('--picker-menu-width', `${Math.max(0, bounds.right - leftInset)}px`)
-    const below = window.innerHeight - bounds.bottom - gap - viewportInset
-    const above = bounds.top - gap - viewportInset
+    const below = window.innerHeight - bottom - gap - viewportInset
+    const above = top - gap - viewportInset
     menu.style.removeProperty('--picker-menu-room')
     const opensAbove = props.above ? menu.offsetHeight <= above || above >= below : menu.offsetHeight > below && above > below
     menu.style.setProperty('--picker-menu-room', `${Math.max(0, opensAbove ? above : below)}px`)
-    const preferredLeft = props.align === 'end' ? bounds.right - menu.offsetWidth : bounds.left
+    const preferredLeft = contextAnchor?.x ?? (props.align === 'end' ? bounds.right - menu.offsetWidth : bounds.left)
     const left = Math.min(preferredLeft, window.innerWidth - menu.offsetWidth - viewportInset)
     menu.style.left = `${Math.max(leftInset, left)}px`
-    menu.style.top = `${opensAbove ? bounds.top - gap - menu.offsetHeight : bounds.bottom + gap}px`
+    menu.style.top = `${opensAbove ? top - gap - menu.offsetHeight : bottom + gap}px`
   }
 
   function closeMenu(restoreFocus = true) {
+    const focusTarget = props.contextOnly ? contextAnchor?.target : trigger
     if (menu.matches(':popover-open')) menu.hidePopover()
-    if (restoreFocus) trigger.focus({ preventScroll: true })
-    else queueMicrotask(() => { if (document.activeElement === trigger) trigger.blur() })
+    if (restoreFocus) focusTarget?.focus({ preventScroll: true })
+    else queueMicrotask(() => { if (document.activeElement === focusTarget) focusTarget?.blur() })
   }
+
+  createEffect(() => {
+    const target = props.contextTarget?.()
+    if (!target) return
+    const showContextMenu = (event: MouseEvent) => {
+      event.preventDefault()
+      if (props.disabled || (event.target instanceof Node && menu.contains(event.target))) return
+      const keyboard = event.clientX === 0 && event.clientY === 0
+      const bounds = target.getBoundingClientRect()
+      contextAnchor = { target, x: keyboard ? bounds.left : event.clientX, y: keyboard ? bounds.bottom : event.clientY }
+      if (menu.matches(':popover-open')) positionMenu()
+      else menu.showPopover()
+    }
+    target.addEventListener('contextmenu', showContextMenu)
+    onCleanup(() => target.removeEventListener('contextmenu', showContextMenu))
+  })
 
   function chooseOption(group: PickerGroup, option: PickerOption, restoreFocus = true) {
     if (option.id !== group.value) props.onChange?.(option.id)
@@ -115,7 +145,7 @@ export function PickerMenu(props: PickerMenuProps & { triggerClass: string; abov
 
   createEffect(() => {
     if (!open()) return
-    const scrollPane = trigger.closest('.chat__transcript, .settings__detail')
+    const scrollPane = (contextAnchor?.target ?? trigger).closest('.chat__transcript, .settings__detail, .terminal-list')
     const dismiss = () => menu.hidePopover()
     scrollPane?.addEventListener('scroll', dismiss)
     const reposition = () => positionMenu()
@@ -131,7 +161,7 @@ export function PickerMenu(props: PickerMenuProps & { triggerClass: string; abov
 
   return (
     <>
-      <button
+      <Show when={!props.contextOnly}><button
         ref={trigger}
         class={props.triggerClass}
         type="button"
@@ -144,7 +174,7 @@ export function PickerMenu(props: PickerMenuProps & { triggerClass: string; abov
         popovertarget={menuId}
       >
         {props.children}
-      </button>
+      </button></Show>
       <span
         ref={menu}
         id={menuId}
@@ -158,6 +188,7 @@ export function PickerMenu(props: PickerMenuProps & { triggerClass: string; abov
           const isOpen = event.newState === 'open'
           setOpen(isOpen)
           if (!isOpen) {
+            contextAnchor = undefined
             setFilterQuery('')
             setActiveId(null)
             return

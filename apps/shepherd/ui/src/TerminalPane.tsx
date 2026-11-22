@@ -4,10 +4,11 @@
  * stay listed with their exit code instead of pretending to still be live.
  */
 
-import { For, Match, Show, Switch, batch, createEffect, createMemo, createResource, createSignal, createUniqueId, onCleanup, onMount } from 'solid-js'
+import { For, Show, batch, createEffect, createMemo, createResource, createSignal, createUniqueId, onCleanup, onMount } from 'solid-js'
 
 import * as bridge from './bridge'
 import { FreebuffMark } from './FreebuffMark'
+import { PickerMenu } from './PickerMenu'
 import { SegmentedControl } from './SegmentedControl'
 import { KITTY_REPORT_EVENTS, encodeKittyKey, encodeLegacyKey, encodeTerminalText } from './terminal_keys'
 import { reportError } from './diagnostics'
@@ -43,6 +44,30 @@ function CloseTerminalButton(props: { disabled: boolean; live?: boolean; onClick
     </button>
     <span id={tooltipId} role="tooltip" class="chat__menu-card terminal-close__tooltip">Close terminal</span>
   </span>
+}
+
+function TerminalActionsMenu(props: {
+  title: string
+  cwd: string
+  disabled: boolean
+  contextTarget: () => HTMLElement
+  contextOnly?: boolean
+  onShare?: () => void
+}) {
+  return <PickerMenu label={`Actions for ${props.title}`} triggerClass="terminal-actions__button" align="end"
+    disabled={props.disabled} contextTarget={props.contextTarget} contextOnly={props.contextOnly}
+    options={[
+      ...(props.onShare ? [{ id: 'share', name: 'Share', detail: 'Share this terminal with the project and keep its working directory' }] : []),
+      { id: 'copy-directory', name: 'Copy working directory' },
+    ]}
+    onChange={(action) => {
+      if (action === 'share') props.onShare?.()
+      else void navigator.clipboard.writeText(props.cwd).catch((error) => reportError('copy_terminal_directory', error))
+    }}>
+    <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+      <circle cx="3" cy="8" r="1.25" /><circle cx="8" cy="8" r="1.25" /><circle cx="13" cy="8" r="1.25" />
+    </svg>
+  </PickerMenu>
 }
 
 export function FreebuffPane(props: {
@@ -337,6 +362,13 @@ export function TerminalPane(props: TerminalPaneProps) {
     setFocusRequest({ id: terminalId })
   }
 
+  function share(id: string) {
+    void run(async () => {
+      applyTerminalList(await bridge.promoteTerminal(id))
+      if (scopeFilter() === 'task') setScopeFilter('both')
+    })
+  }
+
   function detach(id: string) {
     const node = root()
     if (node) void run(() => save((current) => current && contains(current, id) ? removePane(current, id) : current, true))
@@ -615,28 +647,23 @@ export function TerminalPane(props: TerminalPaneProps) {
       </Show>
         <ul class="terminal-list" aria-label="Terminals">
         <For each={listed()}>
-          {(entry) => (
-            <li class="terminal-list__row">
-              <button type="button" class="terminal-list__item"
+          {(entry) => {
+            let tab!: HTMLButtonElement
+            return <li class="terminal-list__row">
+              <button ref={tab} type="button" class="terminal-list__item"
                 aria-current={entry.id === active() ? 'true' : undefined}
                 title={`${entry.scope === 'project' ? 'Project shared' : 'Task'} terminal · ${entry.endedAt === null ? 'live' : 'ended'}${contains(root(), entry.id) ? '' : ' · view closed'}`}
                 disabled={pending()} onClick={() => void run(() => show(entry.id))}>
-                <ScopeIcon scope={entry.scope} />
+                <Show when={entry.scope === 'project'}><ProjectTerminalIcon /></Show>
                 <span>{entry.title}</span>
                 <Show when={props.attention.includes(entry.id)}>
                   <span class="terminal-attention" role="img" aria-label="Terminal needs attention" />
                 </Show>
               </button>
-              <Show when={entry.scope === 'task'}>
-                <button type="button" disabled={pending()} aria-label={`Share ${entry.title}`}
-                  title="Share this terminal with the project; its working directory stays the same"
-                  onClick={() => void run(async () => {
-                    applyTerminalList(await bridge.promoteTerminal(entry.id))
-                    if (scopeFilter() === 'task') setScopeFilter('both')
-                  })}>Share</button>
-              </Show>
+              <TerminalActionsMenu title={entry.title} cwd={entry.cwd} disabled={pending()} contextTarget={() => tab}
+                contextOnly onShare={entry.scope === 'task' ? () => share(entry.id) : undefined} />
             </li>
-          )}
+          }}
         </For>
         <Show when={typeShown('freebuff') ? freebuff() : undefined}>
           {(entry) => (
@@ -660,7 +687,6 @@ export function TerminalPane(props: TerminalPaneProps) {
                 setAgentPaneVisible(entry.id, true)
                 if (entry.live) setFocusRequest({ id: entry.id })
               }}>
-                <TaskTerminalIcon />
                 <span>agent: {entry.title}</span>
               </button>
             </li>
@@ -669,14 +695,16 @@ export function TerminalPane(props: TerminalPaneProps) {
         <For each={typeShown('task') ? launchEntries().map((entry) => entry.id) : []}>
           {(id) => <Show when={launchEntries().find((entry) => entry.id === id)}>
             {(entry) => {
+              let tab!: HTMLButtonElement
               return <li class="terminal-list__row">
-                <button type="button" class="terminal-list__item"
+                <button ref={tab} type="button" class="terminal-list__item"
                   aria-current={id === visibleLaunch()?.id ? 'true' : undefined}
                   onClick={() => { setSelectedLaunch(id); if (entry().live) setFocusRequest({ id }) }}>
-                  <TaskTerminalIcon />
-                <span>{entry().setupTitle ?? 'Agent launch'}</span>
+                  <span>{entry().setupTitle ?? 'Agent launch'}</span>
                   <span class="terminal-list__state">{entry().live ? 'Running' : 'Ended'}</span>
                 </button>
+                <TerminalActionsMenu title={entry().setupTitle ?? 'Agent launch'} cwd={entry().cwd}
+                  disabled={pending()} contextOnly contextTarget={() => tab} />
               </li>
             }}
           </Show>}
@@ -687,10 +715,12 @@ export function TerminalPane(props: TerminalPaneProps) {
       </Show>
       <Show when={visibleLaunch()}>
         {(entry) => {
+          let header!: HTMLDivElement
           return <section class="terminal-tile terminal-agent-launch" aria-label={entry().setupTitle ?? 'Agent launch terminal'}>
-            <div class="terminal-pane__bar">
+            <div ref={header} class="terminal-pane__bar">
               <span>{entry().setupTitle ?? 'Agent launch'}</span>
               <div class="terminal-header__actions">
+                <TerminalActionsMenu title={entry().setupTitle ?? 'Agent launch'} cwd={entry().cwd} disabled={pending()} contextTarget={() => header} />
                 <Show when={entry().setupTitle && entry().live}>
                   <CloseTerminalButton disabled={pending()} live
                     onClick={() => void run(async () => { await bridge.closeTerminal(entry().id); await refreshLaunches() })} />
@@ -737,7 +767,8 @@ export function TerminalPane(props: TerminalPaneProps) {
       }>
         <div class="terminal-tree-root">
           <TerminalTree node={root()!} terminal={terminal} paneVisible={paneVisible} active={props.freebuffFocused ? null : active()} shown={props.shown} select={setSelectedId} focusRequest={focusRequest()} onTerminalFocus={props.onTerminalFocus}
-            restart={restart} measure={(id, size) => measuredSizes.set(id, size)} path={[]} resize={resizeSplit} detach={detach} stop={(id) => void run(() => bridge.closeTerminal(id))} split={splitPane} beginDrag={beginDrag} moveWithKeyboard={moveWithKeyboard} pending={pending()} />
+            restart={restart} measure={(id, size) => measuredSizes.set(id, size)} path={[]} resize={resizeSplit} detach={detach} stop={(id) => void run(() => bridge.closeTerminal(id))} split={splitPane} beginDrag={beginDrag} moveWithKeyboard={moveWithKeyboard} pending={pending()}
+            share={share} />
           <Show when={terminalDrag()}>{(drop) => <div class="terminal-layout-preview" aria-hidden="true"><TerminalLayoutPreview node={moveTerminal(root(), drop().source, drop().target, drop().edge)} source={drop().source} paneVisible={paneVisible} /></div>}</Show>
         </div>
       </Show>
@@ -798,37 +829,10 @@ function CommandOutput(props: { text: string | null | undefined; shown: boolean 
   )
 }
 
-function ScopeIcon(props: { scope: bridge.TerminalSnapshot['scope'] }) {
-  return <Switch fallback={<TerminalGlyphIcon />}>
-    <Match when={props.scope === 'project'}><ProjectTerminalIcon /></Match>
-    <Match when={props.scope === 'task'}><TaskTerminalIcon /></Match>
-  </Switch>
-}
-
 function ProjectTerminalIcon() {
   return (
     <svg class="terminal-scope-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
       <path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z" />
-    </svg>
-  )
-}
-
-function TaskTerminalIcon() {
-  return (
-    <svg class="terminal-scope-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-      <path d="M6 3v12" />
-      <circle cx="18" cy="6" r="3" />
-      <circle cx="6" cy="18" r="3" />
-      <path d="M18 9a9 9 0 0 1-9 9" />
-    </svg>
-  )
-}
-
-function TerminalGlyphIcon() {
-  return (
-    <svg class="terminal-scope-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-      <path d="m4 17 6-6-6-6" />
-      <path d="M12 19h8" />
     </svg>
   )
 }
@@ -939,6 +943,7 @@ interface TerminalTreeProps {
   restart: (id: string) => void
   measure: (id: string, size: TerminalSize) => void
   stop: (id: string) => void
+  share: (id: string) => void
   detach: (id: string) => void
   split: (id: string, axis: bridge.SplitAxis) => void
   beginDrag: (event: PointerEvent, id: string) => void
@@ -948,6 +953,7 @@ interface TerminalTreeProps {
 
 function TerminalTree(props: TerminalTreeProps) {
   const [preview, setPreview] = createSignal<number | null>(null)
+  let header!: HTMLDivElement
   let bounds: DOMRect | undefined
   let dragPointer: number | undefined
 
@@ -983,13 +989,15 @@ function TerminalTree(props: TerminalTreeProps) {
           <section class="terminal-tile" classList={{ 'terminal-tile--active': entry().id === props.active }}
             aria-label={entry().title} aria-description={entry().scope === 'project' ? 'Shared terminal' : 'Task terminal'}
             onFocusIn={() => props.select(entry().id)}>
-            <div class="terminal-pane__bar">
+            <div ref={header} class="terminal-pane__bar">
               <button type="button" class="terminal-drag-handle" aria-label={`Rearrange ${entry().title}`} title="Drag to rearrange, or use Alt and the arrow keys" disabled={props.pending} onPointerDown={(event) => props.beginDrag(event, entry().id)} onKeyDown={(event) => props.moveWithKeyboard(event, entry().id)}>
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="9" cy="5" r="1.5" /><circle cx="15" cy="5" r="1.5" /><circle cx="9" cy="12" r="1.5" /><circle cx="15" cy="12" r="1.5" /><circle cx="9" cy="19" r="1.5" /><circle cx="15" cy="19" r="1.5" /></svg>
               </button>
-              <ScopeIcon scope={entry().scope} />
+              <Show when={entry().scope === 'project'}><ProjectTerminalIcon /></Show>
               <span>{entry().title}</span>
               <div class="terminal-header__actions">
+                <TerminalActionsMenu title={entry().title} cwd={entry().cwd} disabled={props.pending} contextTarget={() => header}
+                  onShare={entry().scope === 'task' ? () => props.share(entry().id) : undefined} />
                 <Show when={entry().endedAt !== null}><RestartButton disabled={props.pending} onClick={() => props.restart(entry().id)} /></Show>
                 <CloseTerminalButton live={entry().endedAt === null} disabled={props.pending} onClick={() => props.stop(entry().id)} />
               </div>
