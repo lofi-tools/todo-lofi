@@ -265,13 +265,13 @@ ordinary terminals can be stopped individually or together.
 
 Shepherd imports a detected `.codex/environments/environment.toml` into the
 project's `environment` setting. Project settings show the imported worktree
-setup script and actions. Review and approve a setup script before it runs;
-Shepherd runs it in each newly assigned task worktree before starting the agent.
+setup script and actions. Shepherd runs configured setup automatically in each
+newly assigned task worktree before starting the agent.
 If setup fails, sending the prompt again retries it in the same worktree.
 Project action buttons open task terminals in that worktree. Shepherd remembers
-the source file's hash and offers an update when it changes; updating replaces
-the saved copy and changed setup scripts require a new approval. Shepherd
-supports version 1 setup scripts and named actions, including platform-specific
+the source file's hash and offers an update when it changes. Updating replaces
+the saved copy. Shepherd supports version 1 setup scripts and named actions,
+including platform-specific
 variants; unsupported fields are reported instead of being silently imported.
 If a later source file is invalid, the saved copy remains available.
 

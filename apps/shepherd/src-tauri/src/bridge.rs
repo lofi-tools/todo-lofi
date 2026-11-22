@@ -2283,45 +2283,24 @@ impl ShellState {
         let configuration = self.preferences.worktree_setup(&project_path).await?;
         let environment = if configuration
             .as_ref()
-            .is_some_and(|(setup, _, _)| setup.use_imported_setup == Some(false))
+            .is_some_and(|setup| setup.use_imported_setup == Some(false))
         {
             None
         } else {
             self.preferences.project_environment(&project_path).await?.0
         };
-        let setup = (configuration.is_some() || environment.is_some()).then(|| {
-            let imported = environment.unwrap_or_default();
-            let approved = imported.approved_setup_hash.as_deref()
-                == Some(crate::project_environment::hash(imported.setup.as_bytes()).as_str());
-            let (environment, environment_approved) = configuration
-                .map(|(setup, _, approved)| (Some(setup), approved))
-                .unwrap_or_default();
-            shep_core::ProjectSetup {
-                script: imported.setup,
-                approved,
-                environment,
-                environment_approved,
-            }
-        });
+        let setup =
+            (configuration.is_some() || environment.is_some()).then(|| shep_core::ProjectSetup {
+                script: environment
+                    .map(|environment| environment.setup)
+                    .unwrap_or_default(),
+                environment: configuration,
+            });
         self.core
             .lock()
             .await
             .set_project_setup(project_path, setup);
         Ok(())
-    }
-
-    async fn worktree_setup_review(
-        &self,
-        project_id: String,
-    ) -> Result<Option<serde_json::Value>, BridgeError> {
-        let project = self
-            .core
-            .lock()
-            .await
-            .project_path(&ProjectId::new(project_id))?;
-        Ok(self.preferences.worktree_setup(&project).await?.map(|(configuration, fingerprint, approved)| {
-            serde_json::json!({ "configuration": configuration, "fingerprint": fingerprint, "approved": approved })
-        }))
     }
 
     async fn setup_runs(
@@ -3943,12 +3922,7 @@ impl ShellState {
             .await
             .project_path(&ProjectId::new(project_id))?;
         let (current, source, warning) = self.preferences.project_environment(&project).await?;
-        let setup_hash = current
-            .as_ref()
-            .map(|environment| crate::project_environment::hash(environment.setup.as_bytes()));
-        Ok(
-            serde_json::json!({ "current": current, "source": source, "setupHash": setup_hash, "warning": warning }),
-        )
+        Ok(serde_json::json!({ "current": current, "source": source, "warning": warning }))
     }
 
     async fn save_project_environment(
@@ -4008,11 +3982,10 @@ impl ShellState {
             let cwd = core.workspace_directory(&task.project_id, Some(&task_id))?;
             (task.project_id.clone(), project, cwd, task.agent)
         };
-        let Some((configuration, _, true)) = self.preferences.worktree_setup(&project).await?
-        else {
+        let Some(configuration) = self.preferences.worktree_setup(&project).await? else {
             return Err(BridgeError::new(
                 "project_setup",
-                "Review and approve the worktree configuration in Project settings.",
+                "This project has no worktree commands configured.",
             ));
         };
         #[cfg(unix)]
@@ -4212,13 +4185,7 @@ impl ShellState {
                 (core.project_path(&project_id)?, core.task(task_id)?.agent)
             };
             environment.insert("SHEPHERD_AGENT".into(), agent.as_str().into());
-            if let Some((setup, _, approved)) = self.preferences.worktree_setup(&project).await? {
-                if !approved {
-                    return Err(BridgeError::new(
-                        "project_setup",
-                        "Review and approve the worktree configuration in Project settings.",
-                    ));
-                }
+            if let Some(setup) = self.preferences.worktree_setup(&project).await? {
                 #[cfg(unix)]
                 let wrapper = {
                     let runs_path = self
@@ -5905,14 +5872,6 @@ pub mod commands {
         task_id: String,
     ) -> Result<Vec<shep_core::worktree_environment::SetupRun>, BridgeError> {
         state.setup_runs(task_id).await
-    }
-
-    #[tauri::command]
-    pub async fn worktree_setup_review(
-        state: State<'_, ShellState>,
-        project_id: String,
-    ) -> Result<Option<serde_json::Value>, BridgeError> {
-        state.worktree_setup_review(project_id).await
     }
 
     #[tauri::command]

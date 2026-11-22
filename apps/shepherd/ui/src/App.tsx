@@ -1286,27 +1286,9 @@ export function App() {
     return state === 'draft' || state === 'ready' || state === 'failed' || state === 'interrupted' || canStartTask()
   }
   const [setupFailure, setSetupFailure] = createSignal<{ taskId: string; message: string; setupTerminal: boolean; runs?: boolean }>()
-  const [draftEnvironment] = createResource(
-    () => !settingsOpen() && workspace()?.task.state === 'draft' && !selectedProject()?.missing && selectedProjectId(),
-    async (projectId) => {
-      const environment = await bridge.projectEnvironment(projectId).catch(() => undefined)
-      return { projectId, environment }
-    },
-  )
   const setupNotice = () => {
-    const task = workspace()?.task
-    if (!task) return
     const failure = setupFailure()
-    if (failure?.taskId === task.id) return failure
-    if (task.state !== 'draft') return
-    const result = draftEnvironment.latest
-    if (!result || result.projectId !== task.projectId) return
-    const projectEnvironment = result.environment
-    if (projectEnvironment?.current?.setup.trim() && projectEnvironment.current.approvedSetupHash !== projectEnvironment.setupHash) {
-      const project = selectedProject()
-      if (project && preferences()?.projects[project.path]?.['worktree.setup']?.useImportedSetup === false) return
-      return { message: 'Review and approve the worktree setup script before sending this prompt.', setupTerminal: false, runs: false }
-    }
+    if (failure?.taskId === workspace()?.task.id) return failure
   }
   const isEnvironmentError = (error: bridge.BridgeError) =>
     error?.code === 'setup_terminal_required' || error?.code === 'development_environment'

@@ -172,16 +172,14 @@ current layout and give future changes a point of comparison.
   detected `.codex/environments/environment.toml` into Shepherd's project
   defaults and retain a hash of the source at import. If the source changes,
   offer to replace the imported copy; do not silently overwrite project edits.
-  Let the user review the setup script for the project before it runs once in
-  each new task worktree, before starting the agent. If setup blocks a send,
-  keep the editable prompt in the same chat and show the reason with a shortcut
-  to Project settings. The user can resend from that chat after reviewing or
-  correcting the script. Project actions run in task terminals.
-  Platform-specific commands use the current platform.
-- Create the checkout before asking for project setup approval. A project can
-  configure `worktree.setup` in Project settings or
-  `.config/shepherd/settings.json`. Approval of that configuration is saved
-  separately from the repository and applies to the version reviewed.
+  Run the saved setup script once in each new task worktree before starting
+  the agent. If setup fails, keep the editable prompt in the same chat and
+  show the error. The user can resend after correcting the script. Project
+  actions run in task terminals. Platform-specific commands use the current
+  platform.
+- A project can configure `worktree.setup` in Project settings or
+  `.config/shepherd/settings.json`. Create the checkout and run its configured
+  commands on Send, with a composer notice only if something fails.
   `afterCheckout` lists named argument arrays. Required steps must succeed
   before the agent starts. Optional failures appear in the terminal and setup
   continues. Successful checkout steps are recorded and skipped on retry.

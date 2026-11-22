@@ -947,10 +947,6 @@ export interface WorktreeSetup {
   useImportedSetup?: boolean
 }
 
-export function worktreeSetupReview(projectId: string): Promise<{ configuration: WorktreeSetup; fingerprint: string; approved: boolean } | null> {
-  return invoke('worktree_setup_review', { projectId })
-}
-
 export function openSetupTerminal(taskId: string): Promise<{ terminalId: string; list: TerminalList }> {
   return invoke('open_setup_terminal', { taskId })
 }
@@ -1384,7 +1380,6 @@ export interface SettingsValues {
   'files.show_dotfiles': boolean
   environment: ProjectEnvironment | null
   'worktree.setup': WorktreeSetup | null
-  'worktree.setup.approval': string | null
   'preview.servers': PreviewService[]
   'preview.url': string | null
 }
@@ -1392,8 +1387,8 @@ export interface SettingsValues {
 export interface PreviewService { name: string; command: string; portVariable?: string | null }
 
 export interface ProjectAction { name: string; icon: string; command: string }
-export interface ProjectEnvironment { sourceHash: string; setup: string; approvedSetupHash: string | null; actions: ProjectAction[] }
-export interface ProjectEnvironmentSnapshot { current: ProjectEnvironment | null; source: ProjectEnvironment | null; setupHash: string | null; warning?: string | null }
+export interface ProjectEnvironment { sourceHash: string; setup: string; actions: ProjectAction[] }
+export interface ProjectEnvironmentSnapshot { current: ProjectEnvironment | null; source: ProjectEnvironment | null; warning?: string | null }
 
 export function projectEnvironment(projectId: string): Promise<ProjectEnvironmentSnapshot> {
   return invoke('project_environment', { projectId })

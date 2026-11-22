@@ -8,7 +8,6 @@ use sha2::{Digest, Sha256};
 pub struct ProjectEnvironment {
     pub source_hash: String,
     pub setup: String,
-    pub approved_setup_hash: Option<String>,
     pub actions: Vec<ProjectAction>,
 }
 
@@ -19,7 +18,7 @@ pub struct ProjectAction {
     pub command: String,
 }
 
-pub fn hash(bytes: &[u8]) -> String {
+fn hash(bytes: &[u8]) -> String {
     Sha256::digest(bytes)
         .iter()
         .map(|byte| format!("{byte:02x}"))
@@ -141,7 +140,6 @@ fn parse(bytes: &[u8]) -> Result<ProjectEnvironment, String> {
     Ok(ProjectEnvironment {
         source_hash: hash(bytes),
         setup: script,
-        approved_setup_hash: None,
         actions: actions.into_iter().map(|(action, _)| action).collect(),
     })
 }
@@ -160,7 +158,6 @@ mod tests {
             "serve"
         );
         assert_eq!(environment.source_hash, hash(source));
-        assert!(environment.approved_setup_hash.is_none());
         assert!(parse(b"version = 2").is_err());
         assert!(parse(b"version = 1\n[cleanup]\nscript = 'unsupported'").is_err());
         Ok(())

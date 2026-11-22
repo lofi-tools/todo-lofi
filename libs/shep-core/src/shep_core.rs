@@ -290,9 +290,7 @@ pub struct TaskGitRead {
 #[derive(Clone)]
 pub struct ProjectSetup {
     pub script: String,
-    pub approved: bool,
     pub environment: Option<worktree_environment::WorktreeSetup>,
-    pub environment_approved: bool,
 }
 
 impl TaskGitRead {
@@ -2670,28 +2668,16 @@ impl Core {
             }
         }
 
-        if setup
-            .as_ref()
-            .is_some_and(|setup| setup.environment.is_some() && !setup.environment_approved)
-        {
-            return Err(CoreError::ProjectSetup(
-                "Worktree ready. Review and approve the project’s worktree commands in Project settings.".into(),
-            ));
-        }
-
         if setup_marker.exists()
-            && setup
-                .as_ref()
-                .and_then(|setup| setup.environment.as_ref())
-                .and_then(|environment| environment.use_imported_setup)
-                != Some(false)
+            && let Some(setup) = setup.as_ref().filter(|setup| {
+                !setup.script.trim().is_empty()
+                    && setup
+                        .environment
+                        .as_ref()
+                        .and_then(|environment| environment.use_imported_setup)
+                        != Some(false)
+            })
         {
-            let setup = setup.as_ref().filter(|setup| !setup.script.trim().is_empty()).ok_or_else(|| {
-                CoreError::ProjectSetup("The pending worktree setup is unavailable. Restore it in Project settings before retrying.".into())
-            })?;
-            if !setup.approved {
-                return Err(CoreError::ProjectSetup("Review and approve the worktree setup script in Project settings before starting this task.".into()));
-            }
             let directory = self.task(task_id)?.worktree_path.as_ref().ok_or_else(|| {
                 CoreError::ProjectSetup("The task has no worktree for setup.".into())
             })?;
@@ -3514,7 +3500,6 @@ impl Core {
                 .and_then(|_| {
                     self.project_setups
                         .get(&project_path)
-                        .filter(|setup| setup.environment_approved)
                         .and_then(|setup| setup.environment.as_ref())
                         .map(|setup| setup.launch_wrapper.clone())
                 })
@@ -4389,7 +4374,7 @@ mod terminal_layout_tests {
 
     #[cfg(feature = "git")]
     #[tokio::test]
-    async fn worktree_setup_requires_approval_and_retries_before_the_agent()
+    async fn worktree_setup_retries_before_starting_the_agent()
     -> Result<(), Box<dyn std::error::Error>> {
         let repository = crate::test_support::TestRepository::new()?;
         let mut core = Core::new();
@@ -4408,26 +4393,21 @@ mod terminal_layout_tests {
         let project_path = core.task_project_path(&task_id)?;
         let script = "if [ ! -f first-attempt ]; then touch first-attempt; exit 1; fi; printf x >> setup-count".to_string();
         core.set_project_setup(
-            project_path.clone(),
-            Some(ProjectSetup {
-                script: script.clone(),
-                approved: false,
-                environment: None,
-                environment_approved: false,
-            }),
-        );
-        assert!(matches!(
-            core.send_prompt(&task_id, PromptInput::text("hello")).await,
-            Err(CoreError::ProjectSetup(_))
-        ));
-        assert!(core.task(&task_id)?.worktree_path.is_some());
-        core.set_project_setup(
             project_path,
             Some(ProjectSetup {
                 script,
-                approved: true,
-                environment: None,
-                environment_approved: false,
+                environment: Some(worktree_environment::WorktreeSetup {
+                    after_checkout: vec![worktree_environment::SetupCommand {
+                        name: "Prepare environment".into(),
+                        command: vec![
+                            "/bin/sh".into(),
+                            "-c".into(),
+                            "printf x >> environment-count".into(),
+                        ],
+                        required: true,
+                    }],
+                    ..Default::default()
+                }),
             }),
         );
         assert!(matches!(
@@ -4452,6 +4432,10 @@ mod terminal_layout_tests {
                 .is_err()
         );
         assert_eq!(std::fs::read_to_string(worktree.join("setup-count"))?, "x");
+        assert_eq!(
+            std::fs::read_to_string(worktree.join("environment-count"))?,
+            "x"
+        );
         Ok(())
     }
 

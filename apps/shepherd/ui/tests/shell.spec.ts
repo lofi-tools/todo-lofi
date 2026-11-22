@@ -128,12 +128,6 @@ test.beforeEach(async ({ context }) => {
         warning: options.has('invalid-settings') ? 'Could not use /tmp/settings.json. A copy was saved to /tmp/settings.json.bak.' : null,
       }
     }
-    function setupNeedsApproval(projectId: string) {
-      if (!options.has('setup-approval')) return false
-      const path = projects.find((project) => project.id === projectId)?.path
-      const environment = path ? readPreferences().projects[path]?.environment : undefined
-      return environment?.setup && environment.approvedSetupHash !== `hash:${environment.setup}`
-    }
     const readKeybindings = (): Record<string, string> => JSON.parse(localStorage.getItem('fixture.keybindings') ?? '{}')
     function commandSnapshot(platform: string, overrides: Record<string, string>) {
       const reasons = {
@@ -836,7 +830,7 @@ test.beforeEach(async ({ context }) => {
               localStorage.setItem('fixture.settings', JSON.stringify({ app: preferences.app, projects: preferences.projects }))
             }
             const current = scope.environment ?? null
-            return { current, source, setupHash: current ? `hash:${current.setup}` : null }
+            return { current, source }
           }
           case 'save_project_environment': {
             const path = projects.find((project) => project.id === args.projectId)?.path
@@ -846,7 +840,7 @@ test.beforeEach(async ({ context }) => {
             scope.environment = args.environment
             localStorage.setItem('fixture.settings', JSON.stringify({ app: preferences.app, projects: preferences.projects }))
             const source = JSON.parse(localStorage.getItem('fixture.codexEnvironment') ?? 'null')
-            return { current: scope.environment, source, setupHash: `hash:${scope.environment.setup}` }
+            return { current: scope.environment, source }
           }
           case 'set_setting': {
             const preferences = readPreferences()
@@ -1259,11 +1253,6 @@ test.beforeEach(async ({ context }) => {
               transcripts[id] = []
               throw { code: 'setup_terminal_required', message: setupNotice, taskId: id }
             }
-            if (setupNeedsApproval(task.projectId)) {
-              task.state = 'ready'
-              transcripts[id] = []
-              throw { code: 'project_setup', message: 'Review and approve the worktree setup script in Project settings before starting this task.', taskId: id }
-            }
             if (options.has('setup-failure')) {
               task.state = 'ready'
               transcripts[id] = []
@@ -1330,9 +1319,6 @@ test.beforeEach(async ({ context }) => {
             if (options.has('send-prompt-fails')) throw { message: 'Sign in required', code: 'agent' }
             const task = tasks.find((candidate) => candidate.id === args.taskId)
             if (setupBlocked()) throw { code: 'setup_terminal_required', message: setupNotice, taskId: task.id }
-            if (setupNeedsApproval(task.projectId)) {
-              throw { code: 'project_setup', message: 'Review and approve the worktree setup script in Project settings before starting this task.' }
-            }
             if (args.text.includes('Handoff reference:')) {
               if (options.has('handoff-fails')) throw { message: 'Handoff failed', code: 'agent' }
               const rows = transcripts[task.id] ?? []
@@ -1481,8 +1467,6 @@ test.beforeEach(async ({ context }) => {
               }] : []),
             ]
           }
-          case 'worktree_setup_review':
-            return null
           case 'open_setup_terminal': {
             const task = tasks.find((candidate) => candidate.id === args.taskId)
             if (!task?.worktreePath) throw new Error('The worktree must exist before opening a setup terminal')
@@ -2359,36 +2343,23 @@ test('keeps the new task and prompt when worktree setup fails', async ({ page })
   await expect(page.getByRole('region', { name: 'Task chat' })).toContainText('keep this prompt')
 })
 
-test('retries the first Codex prompt in the same chat after approving worktree setup', async ({ page }) => {
+test('starts the first Codex prompt without a setup notice', async ({ page }) => {
   await page.addInitScript(() => localStorage.setItem('fixture.settings', JSON.stringify({
-    projects: { '/tmp/demo': { environment: { sourceHash: 'fixture', setup: 'direnv reload', approvedSetupHash: null, actions: [] } } },
+    projects: { '/tmp/demo': {
+      environment: { sourceHash: 'fixture', setup: 'prepare worktree', actions: [] },
+      'worktree.setup': { launchWrapper: ['project-wrapper'] },
+    } },
   })))
-  await page.goto('/?setup-approval')
-  await page.getByRole('button', { name: 'demo', exact: true }).press('Tab')
+  await page.goto('/')
   await page.getByRole('button', { name: 'New chat in demo' }).press('Enter')
   const composer = page.locator('.composer')
   const prompt = composer.getByLabel('Prompt')
-  const send = composer.getByRole('button', { name: 'Send', exact: true })
-  await prompt.fill('Keep this Codex prompt')
-  await send.click()
-  const chat = page.getByRole('region', { name: 'Task chat' })
-  await expect(chat).toHaveAttribute('data-task-state', 'ready')
-  await expect(composer.getByRole('status')).toContainText('Review and approve the worktree setup script')
-  await expect(prompt).toHaveValue('Keep this Codex prompt')
-  await expect(prompt).toBeEditable()
-  expect(await page.evaluate(() => window.__sentPrompts)).toEqual([])
-
-  await composer.getByRole('button', { name: 'Open project settings' }).click()
-  const environment = page.getByRole('region', { name: 'Project environment' })
-  await expect(environment.getByLabel('Worktree setup script')).toHaveValue('direnv reload')
-  await environment.getByRole('button', { name: 'Approve setup script' }).click()
-  await expect(environment.getByText('Setup script approved.')).toBeVisible()
-  await page.getByRole('button', { name: 'Back to app' }).click()
-  await expect(composer.getByRole('button', { name: 'Open project settings' })).toHaveCount(0)
-  await expect(prompt).toHaveValue('Keep this Codex prompt')
-  await send.click()
-  await expect(chat.getByRole('region', { name: 'Transcript' })).toContainText('working on it')
-  expect(await page.evaluate(() => window.__sentPrompts)).toEqual([{ taskId: 'task-2', text: 'Keep this Codex prompt' }])
+  await prompt.fill('Start with the configured environment')
+  await expect(composer.locator('.composer__setup-notice')).toHaveCount(0)
+  await composer.getByRole('button', { name: 'Send', exact: true }).click()
+  await expect(page.getByRole('region', { name: 'Transcript' })).toContainText('working on it')
+  await expect(composer.locator('.composer__setup-notice')).toHaveCount(0)
+  expect(await page.evaluate(() => window.__sentPrompts)).toEqual([{ taskId: 'task-2', text: 'Start with the configured environment' }])
 })
 
 test('shows configured setup runs and the foreground agent terminal', async ({ page }) => {
@@ -5215,7 +5186,7 @@ test('navigates back and forward between project overview and a project', async 
 
 test('imports a Codex environment and offers updates without overwriting edits', async ({ page }) => {
   await page.addInitScript(() => localStorage.setItem('fixture.codexEnvironment', JSON.stringify({
-    sourceHash: 'first', setup: 'install dependencies', approvedSetupHash: null,
+    sourceHash: 'first', setup: 'install dependencies',
     actions: [{ name: 'Run', icon: 'run', command: 'npm start' }],
   })))
   await page.goto('/')
@@ -5224,13 +5195,11 @@ test('imports a Codex environment and offers updates without overwriting edits',
   await selectProjectSettings(page)
   const environment = page.getByRole('region', { name: 'Project environment' })
   await expect(environment.getByLabel('Worktree setup script')).toHaveValue('install dependencies')
-  await environment.getByRole('button', { name: 'Approve setup script' }).click()
-  await expect(environment.getByText('Setup script approved.')).toBeVisible()
   await environment.getByLabel('Action command').fill('npm run dev')
   await environment.getByRole('button', { name: 'Save environment' }).click()
   await expect(environment.getByLabel('Action command')).toHaveValue('npm run dev')
   await page.evaluate(() => localStorage.setItem('fixture.codexEnvironment', JSON.stringify({
-    sourceHash: 'second', setup: 'new setup', approvedSetupHash: null,
+    sourceHash: 'second', setup: 'new setup',
     actions: [{ name: 'Run', icon: 'run', command: 'npm start' }],
   })))
   await page.getByRole('button', { name: 'Back to app' }).click()
@@ -5240,12 +5209,12 @@ test('imports a Codex environment and offers updates without overwriting edits',
   await expect(environment.getByLabel('Action command')).toHaveValue('npm run dev')
   await environment.getByRole('button', { name: 'Update from Codex' }).click()
   await expect(environment.getByLabel('Worktree setup script')).toHaveValue('new setup')
-  await expect(environment.getByRole('button', { name: 'Approve setup script' })).toBeVisible()
+  await expect(environment.getByRole('button', { name: 'Save environment' })).toBeDisabled()
 })
 
 test('runs a project action in a new task terminal', async ({ page }) => {
   await page.addInitScript(() => localStorage.setItem('fixture.codexEnvironment', JSON.stringify({
-    sourceHash: 'first', setup: '', approvedSetupHash: null,
+    sourceHash: 'first', setup: '',
     actions: [{ name: 'Run server', icon: 'run', command: "printf 'hello'" }],
   })))
   await page.goto('/?action-fixture')

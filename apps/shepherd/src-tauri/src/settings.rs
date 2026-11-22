@@ -147,8 +147,6 @@ pub enum SettingKey {
     ProjectEnvironment,
     #[serde(rename = "worktree.setup")]
     WorktreeSetup,
-    #[serde(rename = "worktree.setup.approval")]
-    WorktreeSetupApproval,
     #[serde(rename = "preview.servers")]
     PreviewServers,
     #[serde(rename = "preview.url")]
@@ -156,7 +154,7 @@ pub enum SettingKey {
 }
 
 impl SettingKey {
-    const ALL: [Self; 16] = [
+    const ALL: [Self; 15] = [
         Self::AgentPriority,
         Self::AgentModelPreferences,
         Self::OnboardingCompleted,
@@ -170,7 +168,6 @@ impl SettingKey {
         Self::ShowDotfiles,
         Self::ProjectEnvironment,
         Self::WorktreeSetup,
-        Self::WorktreeSetupApproval,
         Self::PreviewServers,
         Self::PreviewUrl,
     ];
@@ -190,7 +187,6 @@ impl SettingKey {
             Self::ShowDotfiles => "files.show_dotfiles",
             Self::ProjectEnvironment => "environment",
             Self::WorktreeSetup => "worktree.setup",
-            Self::WorktreeSetupApproval => "worktree.setup.approval",
             Self::PreviewServers => "preview.servers",
             Self::PreviewUrl => "preview.url",
         }
@@ -208,10 +204,7 @@ impl SettingKey {
             Self::SendAccent => json!("Blue"),
             Self::AttachmentBytes => json!(DEFAULT_ATTACHMENT_BYTES),
             Self::Scrollback => json!(DEFAULT_SCROLLBACK),
-            Self::ProjectEnvironment
-            | Self::PreviewUrl
-            | Self::WorktreeSetup
-            | Self::WorktreeSetupApproval => Value::Null,
+            Self::ProjectEnvironment | Self::PreviewUrl | Self::WorktreeSetup => Value::Null,
             Self::PreviewServers => json!([]),
         }
     }
@@ -224,7 +217,6 @@ impl SettingKey {
                 | Self::Scrollback
                 | Self::ProjectEnvironment
                 | Self::WorktreeSetup
-                | Self::WorktreeSetupApproval
                 | Self::PreviewServers
                 | Self::PreviewUrl
         )
@@ -239,13 +231,6 @@ impl SettingKey {
                 .is_ok_and(|setup| setup.validate()) =>
             {
                 "Enter valid named setup commands and argument arrays."
-            }
-            Self::WorktreeSetupApproval
-                if !value.as_str().is_some_and(|hash| {
-                    hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit())
-                }) =>
-            {
-                "Invalid worktree setup approval."
             }
             Self::PreviewUrl
                 if !value
@@ -485,13 +470,15 @@ fn parse_document(bytes: Option<&[u8]>) -> Result<(Value, bool), DocumentError> 
     let app = root
         .entry("app")
         .or_insert_with(|| json!({}))
-        .as_object()
+        .as_object_mut()
         .ok_or_else(shape)?;
+    let mut migrate = version == 0;
+    migrate |= remove_obsolete_setup_approvals(app);
     validate_scope(app, false)?;
     let projects = root
         .entry("projects")
         .or_insert_with(|| json!({}))
-        .as_object()
+        .as_object_mut()
         .ok_or_else(shape)?;
     for (path, scope) in projects {
         if !Path::new(path).is_absolute() {
@@ -499,10 +486,22 @@ fn parse_document(bytes: Option<&[u8]>) -> Result<(Value, bool), DocumentError> 
                 "Expected an absolute project path for {path}."
             )));
         }
-        validate_scope(scope.as_object().ok_or_else(shape)?, true)?;
+        let scope = scope.as_object_mut().ok_or_else(shape)?;
+        migrate |= remove_obsolete_setup_approvals(scope);
+        validate_scope(scope, true)?;
     }
     root.insert("version".into(), json!(1));
-    Ok((document, version == 0))
+    Ok((document, migrate))
+}
+
+fn remove_obsolete_setup_approvals(scope: &mut Map<String, Value>) -> bool {
+    let removed_setting = scope.remove("worktree.setup.approval").is_some();
+    let removed_hash = scope
+        .get_mut("environment")
+        .and_then(Value::as_object_mut)
+        .and_then(|environment| environment.remove("approvedSetupHash"))
+        .is_some();
+    removed_setting || removed_hash
 }
 
 fn validate_scope(scope: &Map<String, Value>, project: bool) -> Result<(), DocumentError> {
@@ -627,11 +626,9 @@ impl Settings {
                     .and_then(Value::as_object)
                     .ok_or_else(|| "Expected a settings object.".to_string())?;
                 validate_scope(scope, true).map_err(|error| error.to_string())?;
-                let values: Map<String, Value> = SettingKey::ALL
+                let mut values: Map<String, Value> = SettingKey::ALL
                     .into_iter()
-                    .filter(|key| {
-                        key.project_scoped() && !matches!(key, SettingKey::WorktreeSetupApproval)
-                    })
+                    .filter(|key| key.project_scoped())
                     .filter_map(|key| {
                         scope
                             .get(key.name())
@@ -639,6 +636,7 @@ impl Settings {
                             .map(|value| (key.name().to_string(), value.clone()))
                     })
                     .collect();
+                remove_obsolete_setup_approvals(&mut values);
                 Ok::<_, String>(Some(values))
             }
             .await;
@@ -772,13 +770,10 @@ impl Settings {
             })
             .filter(|value| !value.is_null())
             .or_else(|| {
-                (!matches!(
-                    key,
-                    SettingKey::WorktreeSetup | SettingKey::WorktreeSetupApproval
-                ))
-                .then(|| cached.document["app"].get(key.name()))
-                .flatten()
-                .filter(|value| !value.is_null())
+                (!matches!(key, SettingKey::WorktreeSetup))
+                    .then(|| cached.document["app"].get(key.name()))
+                    .flatten()
+                    .filter(|value| !value.is_null())
             })
             .cloned()
             .unwrap_or_else(|| key.default_value())
@@ -787,8 +782,7 @@ impl Settings {
     pub(crate) async fn worktree_setup(
         &self,
         project: &Path,
-    ) -> Result<Option<(shep_core::worktree_environment::WorktreeSetup, String, bool)>, BridgeError>
-    {
+    ) -> Result<Option<shep_core::worktree_environment::WorktreeSetup>, BridgeError> {
         let value = self.value(Some(project), SettingKey::WorktreeSetup).await;
         if value.is_null() {
             return Ok(None);
@@ -796,15 +790,7 @@ impl Settings {
         let setup: shep_core::worktree_environment::WorktreeSetup =
             serde_json::from_value(value)
                 .map_err(|error| BridgeError::new("settings", error.to_string()))?;
-        let fingerprint = setup
-            .fingerprint()
-            .map_err(|error| BridgeError::new("settings", error.to_string()))?;
-        let approved = self
-            .value(Some(project), SettingKey::WorktreeSetupApproval)
-            .await
-            .as_str()
-            == Some(fingerprint.as_str());
-        Ok(Some((setup, fingerprint, approved)))
+        Ok(Some(setup))
     }
 
     pub(crate) async fn project_environment(
@@ -1041,6 +1027,45 @@ mod tests {
         assert!(preview_url_template("http://127.0.0.1:${PORT}/", 32123).is_some());
         assert!(preview_url_template("http://example.com:${PORT}/", 32123).is_none());
         assert!(preview_url_template("http://localhost:3000/${PORT}", 32123).is_none());
+    }
+
+    #[tokio::test]
+    async fn removes_obsolete_setup_approvals_without_changing_commands()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let project = directory.path().join("project");
+        let path = directory.path().join("settings.json");
+        let document = json!({
+            "version": 1,
+            "projects": {
+                (project.to_string_lossy().as_ref()): {
+                    "worktree.setup": { "launchWrapper": ["direnv", "exec", "."] },
+                    "worktree.setup.approval": "obsolete",
+                    "environment": {
+                        "sourceHash": "",
+                        "setup": "prepare",
+                        "approvedSetupHash": "obsolete",
+                        "actions": []
+                    }
+                }
+            }
+        });
+        std::fs::write(&path, serde_json::to_vec(&document)?)?;
+        let settings = Settings::new(path.clone());
+        let snapshot = settings.reload().await;
+        assert!(snapshot.warning.is_none());
+        let setup = settings
+            .worktree_setup(&project)
+            .await?
+            .ok_or("setup missing")?;
+        assert_eq!(setup.launch_wrapper, ["direnv", "exec", "."]);
+        let (current, _, _) = settings.project_environment(&project).await?;
+        assert_eq!(current.ok_or("environment missing")?.setup, "prepare");
+        let migrated: Value = serde_json::from_slice(&std::fs::read(path)?)?;
+        let scope = &migrated["projects"][project.to_string_lossy().as_ref()];
+        assert!(scope.get("worktree.setup.approval").is_none());
+        assert!(scope["environment"].get("approvedSetupHash").is_none());
+        Ok(())
     }
 
     #[tokio::test]

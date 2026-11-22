@@ -7,7 +7,7 @@ import { HarnessWarning, PoolSettings, type HarnessDiscovery } from './PoolSetti
 import { SettingsSelect } from './SettingsSelect'
 import { AgentModelSettings, supportsModelSelection } from './AgentModelSettings'
 import { AgentIcon } from './AgentIcon'
-import { projectEnvironment, saveProjectEnvironment, worktreeSetupReview, type ProjectEnvironment, type WorktreeSetup } from './bridge'
+import { projectEnvironment, saveProjectEnvironment, type ProjectEnvironment, type WorktreeSetup } from './bridge'
 
 export const categories = ['Workspace', 'Projects', 'Agents', 'Appearance', 'Keyboard shortcuts'] as const
 
@@ -130,7 +130,6 @@ function WorktreeSetupSettings(props: {
   const [draft, setDraft] = createSignal('')
   const [failure, setFailure] = createSignal('')
   const [busy, setBusy] = createSignal(false)
-  const [review, { refetch }] = createResource(() => props.projectId, worktreeSetupReview)
   const formatted = () => JSON.stringify(props.value ?? {}, null, 2)
   createEffect(() => setDraft(formatted()))
 
@@ -140,22 +139,6 @@ function WorktreeSetupSettings(props: {
     try {
       const value = JSON.parse(draft())
       await props.onEdit('worktree.setup', value as WorktreeSetup, props.projectId)
-      await refetch()
-    } catch (error) {
-      setFailure(settingsError(error))
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  async function approve() {
-    const configuration = review.latest
-    if (!configuration || draft() !== formatted()) return
-    setBusy(true)
-    setFailure('')
-    try {
-      await props.onEdit('worktree.setup.approval', configuration.fingerprint, props.projectId)
-      await refetch()
     } catch (error) {
       setFailure(settingsError(error))
     } finally {
@@ -171,15 +154,9 @@ function WorktreeSetupSettings(props: {
     </label>
     <p class="empty">{props.localOverride ? 'Set in .config/shepherd/settings.json.' :
       'Use afterCheckout, readinessCheck, launchWrapper, and setupTerminal. Commands are arrays of arguments.'}</p>
-    <Show when={failure() || review.error}><p role="alert">{failure() || settingsError(review.error)}</p></Show>
+    <Show when={failure()}><p role="alert">{failure()}</p></Show>
     <Show when={!props.localOverride}>
       <button class="project-action" type="button" disabled={busy() || !props.editable || draft() === formatted()} onClick={() => void save()}>Save worktree commands</button>
-    </Show>
-    <Show when={review.latest}>
-      {(configuration) => <Show when={!configuration().approved} fallback={<p class="empty">Worktree commands approved.</p>}>
-        <button class="project-action" type="button" disabled={busy() || !props.editable || draft() !== formatted()}
-          onClick={() => void approve()}>Approve worktree commands</button>
-      </Show>}
     </Show>
   </section>
 }
@@ -210,20 +187,16 @@ function ProjectEnvironmentSettings(props: { projectId: string; useImportedSetup
       <p>The Codex environment changed. Updating replaces your Shepherd copy.</p>
       <button class="project-action" disabled={saving()} onClick={() => {
         const source = snapshot.latest?.source
-        const current = snapshot.latest?.current
-        if (source && current) void save({ ...source, approvedSetupHash: source.setup === current.setup ? current.approvedSetupHash : null })
+        if (source) void save(source)
       }}>Update from Codex</button>
     </Show>
-    <Show when={draft()} fallback={<><p class="empty">No Codex environment found in this project.</p><button class="project-action" disabled={saving() || snapshot.loading} onClick={() => void save({ sourceHash: '', setup: '', approvedSetupHash: null, actions: [] })}>Create project environment</button></>}>
+    <Show when={draft()} fallback={<><p class="empty">No Codex environment found in this project.</p><button class="project-action" disabled={saving() || snapshot.loading} onClick={() => void save({ sourceHash: '', setup: '', actions: [] })}>Create project environment</button></>}>
       {(environment) => <>
-        <label class="settings__row"><span>Worktree setup script</span><textarea value={environment().setup} onInput={(event) => setDraft({ ...environment(), setup: event.currentTarget.value, approvedSetupHash: null })} /></label>
+        <label class="settings__row"><span>Worktree setup script</span><textarea value={environment().setup} onInput={(event) => setDraft({ ...environment(), setup: event.currentTarget.value })} /></label>
         <Show when={environment().setup.trim()}>
-          <Show when={props.useImportedSetup === false} fallback={<>
-            <p class="empty">Runs once in each new task worktree before the agent starts.</p>
-            <Show when={environment().approvedSetupHash === snapshot.latest?.setupHash && environment().setup === snapshot.latest?.current?.setup} fallback={<p>Review and approve this script before starting a task.</p>}><p class="empty">Setup script approved.</p></Show>
-          </>}>
-            <p class="empty">This project uses its configured worktree setup.</p>
-          </Show>
+          <p class="empty">{props.useImportedSetup === false
+            ? 'This project uses its configured worktree setup.'
+            : 'Runs once in each new task worktree before the agent starts.'}</p>
         </Show>
         <For each={environment().actions}>{(action, index) => <div class="settings__project">
           <label class="settings__row"><span>Action name</span><input value={action.name} onInput={(event) => setDraft({ ...environment(), actions: environment().actions.map((item, position) => position === index() ? { ...item, name: event.currentTarget.value } : item) })} /></label>
@@ -232,9 +205,6 @@ function ProjectEnvironmentSettings(props: { projectId: string; useImportedSetup
         </div>}</For>
         <button class="project-action" onClick={() => setDraft({ ...environment(), actions: [...environment().actions, { name: '', icon: 'run', command: '' }] })}>Add action</button>
         <button class="project-action" disabled={saving() || JSON.stringify(environment()) === JSON.stringify(snapshot.latest?.current)} onClick={() => void save(environment())}>Save environment</button>
-        <Show when={environment().setup.trim() && !(props.useImportedSetup === false) && environment().setup === snapshot.latest?.current?.setup && environment().approvedSetupHash !== snapshot.latest?.setupHash}>
-          <button class="project-action" disabled={saving()} onClick={() => void save({ ...environment(), approvedSetupHash: snapshot.latest?.setupHash ?? null })}>Approve setup script</button>
-        </Show>
       </>}
     </Show>
   </section>
