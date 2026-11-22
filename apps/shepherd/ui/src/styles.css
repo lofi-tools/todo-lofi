@@ -511,7 +511,8 @@ textarea {
 }
 
 .picker__row > kbd,
-.settings__shortcut-row kbd {
+.settings__shortcut-row kbd,
+.settings__save kbd {
   flex: none;
   padding: 1px 4px;
   border: 1px solid var(--border);
@@ -3393,7 +3394,8 @@ button.pool__agent-label { padding: 0; border: 0; background: transparent; color
   color: var(--text-muted);
 }
 
-.error-toast {
+.error-toast,
+.settings-toast {
   position: fixed;
   z-index: 1000;
   inset-block-start: 52px;
@@ -3408,6 +3410,19 @@ button.pool__agent-label { padding: 0; border: 0; background: transparent; color
   background: var(--surface-raised);
   box-shadow: 0 6px 20px var(--menu-shadow);
   color: var(--text);
+}
+
+.settings-toast {
+  inset-block: auto 36px;
+  border-color: var(--border);
+}
+
+.settings__save {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-muted);
 }
 
 .error-history {

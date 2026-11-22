@@ -4,6 +4,7 @@ import {
   AGENT_LABELS, antigravityProjectOptions, codexProjectModels, opencodeProjectModels,
   type AgentModelFallback, type AgentModelPreferences, type AgentModelSelection, type ModelAgent,
 } from './bridge'
+import { createSettingsDraft, SettingsSave } from './SettingsDraft'
 import { SettingsSelect } from './SettingsSelect'
 import { ModelPicker, codexModelChoices, type ModelChoice } from './ModelPicker'
 
@@ -60,16 +61,23 @@ export function AgentModelSettings(props: {
   editable: boolean
   onSave: (value: AgentModelPreferences) => Promise<void>
 }) {
-  const [defaults, setDefaults] = createSignal<AgentModelSelection>({})
-  const [fallbacks, setFallbacks] = createSignal<AgentModelFallback[]>([])
-  const [saving, setSaving] = createSignal(false)
-  const [failure, setFailure] = createSignal('')
-  createEffect(on(() => [props.agent, props.saved], () => {
-    setDefaults({ model: props.saved?.model, effort: props.saved?.effort })
+  const savedSelection = () => ({ model: props.saved?.model ?? null, effort: props.saved?.effort ?? null })
+  const [defaults, setDefaults] = createSignal<AgentModelSelection>(savedSelection())
+  const [fallbacks, setFallbacks] = createSignal<AgentModelFallback[]>(props.saved?.fallbacks ?? [])
+  const saved = () => JSON.stringify([savedSelection(), props.saved?.fallbacks ?? []])
+  const serialized = () => JSON.stringify([defaults(), fallbacks()])
+  function reset() {
+    setDefaults(savedSelection())
     setFallbacks(props.saved?.fallbacks ?? [])
-    setFailure('')
-  }))
-  const disabled = () => saving() || !props.editable
+  }
+  createEffect(on(saved, (_, previous) => { if (serialized() === previous) reset() }))
+  const draft = createSettingsDraft({
+    dirty: () => serialized() !== saved(),
+    editable: () => props.editable,
+    discard: reset,
+    save,
+  })
+  const disabled = () => draft.saving() || !props.editable
   const agentOptions = modelAgents.map((agent) => ({ value: agent, label: AGENT_LABELS[agent] }))
 
   function updateFallback(index: number, patch: Partial<AgentModelFallback>) {
@@ -87,39 +95,28 @@ export function AgentModelSettings(props: {
     })
   }
 
-  async function save(event: SubmitEvent) {
-    event.preventDefault()
-    if (disabled()) return
+  async function save() {
     const entries = fallbacks().map((entry) => ({
       agent: entry.agent, model: entry.model.trim(), effort: entry.effort?.trim() || null,
     }))
     if (entries.some((entry) => !entry.model)) {
-      setFailure('Enter a model ID for every fallback.')
-      return
+      throw new Error('Enter a model ID for every fallback.')
     }
     const defaultModel = defaults().model?.trim() || null
     const piModels = entries.filter((entry) => entry.agent === 'pi').map((entry) => entry.model)
     if (props.agent === 'pi' && defaultModel) piModels.push(defaultModel)
     if (piModels.some((model) => !/^[^/]+\/.+/.test(model))) {
-      setFailure('Enter Pi models as provider/model-id.')
-      return
+      throw new Error('Enter Pi models as provider/model-id.')
     }
-    setSaving(true)
-    setFailure('')
-    try {
-      await props.onSave({
-        model: defaultModel,
-        effort: defaults().effort?.trim() || null,
-        fallbacks: entries,
-      })
-    } catch (error) {
-      setFailure(error instanceof Error ? error.message : (error as { message?: string })?.message ?? String(error))
-    } finally {
-      setSaving(false)
-    }
+    await props.onSave({
+      model: defaultModel,
+      effort: defaults().effort?.trim() || null,
+      fallbacks: entries,
+    })
+    reset()
   }
 
-  return <form class="settings__agent-models" onSubmit={(event) => void save(event)}>
+  return <section class="settings__agent-models" aria-label="Model settings" data-settings-draft onKeyDown={draft.onKeyDown}>
     <ModelFields projectId={props.projectId} agent={props.agent} value={defaults()} modelLabel="Default model"
       allowDefault disabled={disabled()} onChange={(patch) => setDefaults((current) => ({ ...current, ...patch }))} />
     <Show when={props.agent !== 'codex'}><p class="empty">This integration does not expose reasoning effort in Shepherd.</p></Show>
@@ -144,8 +141,7 @@ export function AgentModelSettings(props: {
     </ol>
     <div class="settings__fallback-actions">
       <button type="button" class="project-action" disabled={disabled()} onClick={() => setFallbacks((entries) => [...entries, { agent: props.agent, model: '' }])}>Add fallback</button>
-      <button type="submit" class="project-action" disabled={disabled()}>Save model settings</button>
     </div>
-    <Show when={failure()}><p role="alert">{failure()}</p></Show>
-  </form>
+    <SettingsSave draft={draft} label="Save model settings" />
+  </section>
 }

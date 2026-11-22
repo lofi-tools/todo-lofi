@@ -27,6 +27,8 @@ import { BranchIcon } from './BranchIcon'
 import { ReviewPane } from './ReviewPane'
 import { supportsModelSelection } from './AgentModelSettings'
 import { ModelPicker, codexModelChoices } from './ModelPicker'
+import { Modal, ModalActions } from './Modal'
+import { SettingsDraftContext, type SettingsDraft } from './SettingsDraft'
 import { SEND_ACCENTS, SettingsPane, type SettingsCategory } from './SettingsPane'
 import { agentPriority, createHarnessDiscovery } from './PoolSettings'
 import { FreebuffPane, TerminalPane, type TerminalCommands } from './TerminalPane'
@@ -37,6 +39,19 @@ import { ErrorNotifications } from './ErrorNotifications'
 import { SwitchHarnessDialog } from './SwitchHarnessDialog'
 import { recordDiagnostic, reportError } from './diagnostics'
 import { createSnapshotRows } from './snapshotRows'
+
+const autosavedSettingNames: Partial<Record<bridge.SettingKey, string>> = {
+  theme: 'Theme',
+  'appearance.density': 'Density',
+  'appearance.send_accent': 'Send button accent',
+  'tasks.show_archived': 'Show archived tasks',
+  'notifications.enabled': 'Notify when tasks need input',
+  'attachments.max_file_bytes': 'Attachment limit',
+  'terminal.scrollback_lines': 'Terminal scrollback',
+  'files.show_dotfiles': 'Show dotfiles',
+  'preview.url': 'Preview URL',
+  'agents.priority': 'Agent priority',
+}
 
 type CoreEvent = bridge.Event
 type TerminalBell = Extract<CoreEvent, { type: 'terminalBell' }>['data']
@@ -461,6 +476,58 @@ export function App() {
   const changeSidebarMenu = (id: string, open: boolean) => {
     setSidebarMenuId((current) => open ? id : current === id ? undefined : current)
   }
+  const settingsDrafts = new Set<SettingsDraft>()
+  const [settingsDeparture, setSettingsDeparture] = createSignal<{ action: () => void; drafts: SettingsDraft[] }>()
+  const [savingSettingsDrafts, setSavingSettingsDrafts] = createSignal(false)
+  const [settingsDepartureError, setSettingsDepartureError] = createSignal(false)
+  const [settingsToast, setSettingsToast] = createSignal('')
+  let settingsToastTimer: ReturnType<typeof setTimeout> | undefined
+  let keepEditingButton: HTMLButtonElement | undefined
+  onCleanup(() => clearTimeout(settingsToastTimer))
+
+  function afterSettingsDrafts(action: () => void) {
+    if (settingsDeparture()) return
+    const drafts = [...settingsDrafts].filter((draft) => draft.dirty() || draft.saving())
+    if (drafts.length) {
+      setSettingsDepartureError(false)
+      setSettingsDeparture({ action, drafts })
+    } else action()
+  }
+
+  async function finishSettingsDeparture(save: boolean) {
+    const departure = settingsDeparture()
+    if (!departure || savingSettingsDrafts()) return
+    if (save) {
+      setSavingSettingsDrafts(true)
+      try {
+        for (const draft of departure.drafts) {
+          if (!await draft.save()) {
+            setSettingsDepartureError(true)
+            return
+          }
+        }
+      } finally {
+        setSavingSettingsDrafts(false)
+      }
+    } else {
+      if (departure.drafts.some((draft) => draft.saving())) return
+      departure.drafts.forEach((draft) => draft.discard())
+    }
+    setSettingsDeparture(undefined)
+    departure.action()
+  }
+
+  function keepEditingSettings() {
+    if (!savingSettingsDrafts()) setSettingsDeparture(undefined)
+  }
+
+  function settingSaved(label: string, projectId: string | null = null) {
+    const project = projects().find((entry) => entry.id === projectId)
+    setSettingsToast(project ? `Saved ${label} for ${project.name}` : `Saved ${label}`)
+    clearTimeout(settingsToastTimer)
+    settingsToastTimer = setTimeout(() => setSettingsToast(''), 3500)
+  }
+
   const [settingsOpen, setSettingsOpenValue] = createSignal(false)
   const [settingsCategory, setSettingsCategory] = createSignal<SettingsCategory>('Workspace')
   const [settingsProjectId, setSettingsProjectId] = createSignal<string>()
@@ -507,7 +574,9 @@ export function App() {
   createEffect(() => { document.documentElement.dataset.density = density() })
   const [savingPreference, setSavingPreference] = createSignal(false)
   const [settingsConflicts, setSettingsConflicts] = createSignal<Omit<bridge.SettingsEdit, 'previous'>[]>([])
-  const preferencesEditable = () => !!preferences() && !preferences()?.warning && !savingPreference()
+  const [reloadingPreferences, setReloadingPreferences] = createSignal(false)
+  const preferencesEditable = () => !!preferences() && !preferences()?.warning && !reloadingPreferences()
+  let pendingPreferenceWrite = Promise.resolve()
   const notificationsEnabled = () => preferences()?.app['notifications.enabled'] ?? false
   const sendAccent = () => preferences()?.app['appearance.send_accent'] ?? 'Blue'
   const [projectSettingsRequest, setProjectSettingsRequest] = createSignal<{ id: string }>()
@@ -521,8 +590,13 @@ export function App() {
   const sidebarTasks = createMemo(() => newestChats(visibleTasks()))
 
   function openProjectSettings(projectId: string) {
-    setProjectSettingsRequest({ id: projectId })
-    setSettingsOpen(true)
+    afterSettingsDrafts(() => batch(() => {
+      recordCurrentScreen()
+      setSettingsCategory('Projects')
+      setSettingsProjectId(projectId)
+      setProjectSettingsRequest({ id: projectId })
+      setSettingsOpenValue(true)
+    }))
   }
   const [terminalListEvent, setTerminalListEvent] = createSignal<Extract<CoreEvent, { type: 'terminalListChanged' }>['data']>()
   const [startingTerminalTask, setStartingTerminalTask] = createSignal<{ projectId: string; taskId: string }>()
@@ -592,8 +666,13 @@ export function App() {
   }
   function setSettingsOpen(value: boolean | ((open: boolean) => boolean)) {
     const next = typeof value === 'function' ? value(settingsOpen()) : value
-    if (next !== settingsOpen()) recordCurrentScreen()
-    setSettingsOpenValue(next)
+    if (next === settingsOpen()) return
+    const apply = () => {
+      recordCurrentScreen()
+      setSettingsOpenValue(next)
+    }
+    if (next) apply()
+    else afterSettingsDrafts(apply)
   }
   function navigateHistory(direction: number) {
     if (restoringHistory) return
@@ -602,8 +681,16 @@ export function App() {
     const index = historyIndex() + direction
     const target = history()[index]
     if (!target) return
-    restoringHistory = true
-    void (async () => {
+    const restore = () => {
+      restoringHistory = true
+      void restoreScreen(target, index).finally(() => { restoringHistory = false })
+    }
+    if (settingsOpen() && !sameScreen(currentScreen(), target)) afterSettingsDrafts(restore)
+    else restore()
+  }
+
+  async function restoreScreen(target: ScreenPath, index: number) {
+    try {
       if (target.projectId && target.projectId !== selectedProjectId()) {
         const project = projects().find((entry) => entry.id === target.projectId)
         if (!project) throw new Error('This project is no longer available.')
@@ -621,10 +708,12 @@ export function App() {
         setProjectSettingsRequest(undefined)
         setSettingsCategory(target.category)
         setSettingsProjectId(target.settingsProjectId)
-        setSettingsOpen(target.settings)
+        setSettingsOpenValue(target.settings)
         setHistoryIndex(index)
       })
-    })().catch((failure) => setError(describe(failure))).finally(() => { restoringHistory = false })
+    } catch (failure) {
+      setError(describe(failure))
+    }
   }
 
   function openTaskFile(path: string) {
@@ -1141,9 +1230,9 @@ export function App() {
   })
 
   async function reloadPreferences() {
-    if (savingPreference()) return
+    if (savingPreference() || reloadingPreferences()) return
     setError(null)
-    setSavingPreference(true)
+    setReloadingPreferences(true)
     try {
       let snapshot = await bridge.reloadSettings()
       if (!snapshot.warning) {
@@ -1160,29 +1249,42 @@ export function App() {
       }
       setPreferences(snapshot)
     } finally {
-      setSavingPreference(false)
+      setReloadingPreferences(false)
     }
   }
 
   async function editPreference(key: bridge.SettingKey, value: bridge.SettingsEdit['value'], projectId: string | null = null) {
     if (!preferencesEditable()) throw new Error('Settings are unavailable for editing.')
-    const path = projectId ? projects().find((project) => project.id === projectId)?.path : undefined
-    const scope = path ? preferences()?.projects[path] : preferences()?.app
-    const edit = { key, projectId, value, previous: scope?.[key] ?? null }
+    const showSaved = settingsOpen()
     setSavingPreference(true)
-    setError(null)
-    try {
-      setPreferences(await bridge.setSetting(edit))
-      if (key === 'preview.url') setProjects((await bridge.projectList()).projects)
-      discardSettingsConflict(edit)
-    } catch (failure) {
-      if ((failure as bridge.BridgeError | null)?.code === 'settings_conflict') {
+    const operation = pendingPreferenceWrite.then(async () => {
+      const path = projectId ? projects().find((project) => project.id === projectId)?.path : undefined
+      const scope = path ? preferences()?.projects[path] : preferences()?.app
+      const edit = { key, projectId, value, previous: scope?.[key] ?? null }
+      setError(null)
+      try {
+        setPreferences(await bridge.setSetting(edit))
+        if (key === 'preview.url') {
+          try { setProjects((await bridge.projectList()).projects) }
+          catch (failure) { reportError('reload_projects', failure) }
+        }
         discardSettingsConflict(edit)
-        setSettingsConflicts((current) => [...current, { key, projectId, value }])
+        const name = autosavedSettingNames[key]
+        if (name && showSaved) settingSaved(name, projectId)
+      } catch (failure) {
+        if (autosavedSettingNames[key] && (failure as bridge.BridgeError | null)?.code === 'settings_conflict') {
+          discardSettingsConflict(edit)
+          setSettingsConflicts((current) => [...current, { key, projectId, value }])
+        }
+        throw failure
       }
-      throw failure
+    })
+    const settled = operation.then(() => {}, () => {})
+    pendingPreferenceWrite = settled
+    try {
+      await operation
     } finally {
-      setSavingPreference(false)
+      if (pendingPreferenceWrite === settled) setSavingPreference(false)
     }
   }
 
@@ -1547,9 +1649,11 @@ export function App() {
         }
         break
       case 'diagnostics':
-        setSettingsOpen(false)
-        setDiagnosticsOpen(true)
-        queueMicrotask(() => diagnosticsClose?.focus())
+        afterSettingsDrafts(() => {
+          setSettingsOpen(false)
+          setDiagnosticsOpen(true)
+          queueMicrotask(() => diagnosticsClose?.focus())
+        })
         break
       case 'checkAgents':
         void bridge.agentAvailability().then((available) => {
@@ -1566,6 +1670,8 @@ export function App() {
 
   function onWorkspaceKeyDown(event: KeyboardEvent) {
     if (event.defaultPrevented || (event.target instanceof HTMLElement && event.target.hasAttribute('data-shortcut-capture'))) return
+    if (settingsDeparture() || (settingsOpen() && !event.isComposing && event.key === 'Enter' &&
+      (mac ? event.metaKey : event.ctrlKey) && event.target instanceof HTMLElement && event.target.closest('[data-settings-draft]'))) return
     const chord = normalizeChord(event)
     if (!chord) return
     const key = event.code || event.key
@@ -1788,8 +1894,11 @@ export function App() {
   }
 
   function openProject(project: bridge.ProjectSnapshot, useReviewFilter = reviewOnly()) {
+    if (settingsOpen()) {
+      afterSettingsDrafts(() => { setSettingsOpen(false); openProject(project, useReviewFilter) })
+      return
+    }
     recordCurrentScreen()
-    setSettingsOpen(false)
     const target = useReviewFilter ? filteredReviewTasks(project.id)[0] : undefined
     if (selectedProjectId() === project.id && loadedTasksFor() === project.id) {
       const cachedTarget = target ?? sidebarTasks()[0]
@@ -1819,8 +1928,11 @@ export function App() {
   }
 
   function openTaskRow(task: bridge.TaskSummary) {
+    if (settingsOpen()) {
+      afterSettingsDrafts(() => { setSettingsOpen(false); openTaskRow(task) })
+      return
+    }
     recordCurrentScreen()
-    setSettingsOpen(false)
     setFreebuffProjectId(undefined)
     if (task.projectId === selectedProjectId() && isOpenTask(task.id)) {
       setSearchJump(undefined)
@@ -1848,9 +1960,12 @@ export function App() {
   }
 
   function openSearchHit(hit: bridge.TaskSearchHit) {
+    if (settingsOpen()) {
+      afterSettingsDrafts(() => { setSettingsOpen(false); openSearchHit(hit) })
+      return
+    }
     recordCurrentScreen()
     closeTaskSearch(false)
-    setSettingsOpen(false)
     setFreebuffProjectId(undefined)
     void run(async () => {
       const project = projects().find((candidate) => candidate.id === hit.projectId)
@@ -2276,17 +2391,25 @@ export function App() {
       try { await reloadPreferences() } catch (failure) { errors.push(describe(failure)) }
     }
     if (target && (selectAdded || !selectedProjectId())) {
-      if (selectAdded) setSettingsOpen(false)
-      await selectProject(target)
+      const added = target
+      if (selectAdded && settingsOpen()) {
+        afterSettingsDrafts(() => {
+          setSettingsOpen(false)
+          void run(() => selectProject(added))
+        })
+      } else await selectProject(added)
     }
     if (errors.length) setError(errors.join(' · '))
   }
 
   function newTask(projectId: string) {
+    if (settingsOpen()) {
+      afterSettingsDrafts(() => { setSettingsOpen(false); newTask(projectId) })
+      return
+    }
     recordCurrentScreen()
     setDraftAgentManuallySelected(false)
     setFreebuffProjectId(undefined)
-    setSettingsOpen(false)
     setComposingProjectId(projectId)
     void run(async () => {
       batch(() => {
@@ -2701,6 +2824,10 @@ export function App() {
   }
 
   function quit() {
+    afterSettingsDrafts(quitAfterSettings)
+  }
+
+  function quitAfterSettings() {
     void run(async () => {
       try {
         await pendingInspectorTabSave
@@ -2966,7 +3093,12 @@ export function App() {
         </aside>
 
         <Show when={settingsOpen()}>
+          <SettingsDraftContext.Provider value={{ mac, register(draft) {
+            settingsDrafts.add(draft)
+            return () => settingsDrafts.delete(draft)
+          } }}>
           <SettingsPane
+            onNavigate={afterSettingsDrafts}
             category={settingsCategory()} onCategoryChange={(category) => { recordCurrentScreen(); setSettingsCategory(category) }}
             settingsProjectId={settingsProjectId()} onSettingsProjectChange={(projectId) => { recordCurrentScreen(); setSettingsProjectId(projectId) }}
             onBack={() => { setSettingsOpen(false) }}
@@ -2978,7 +3110,7 @@ export function App() {
             agentAvailability={configuredAvailability()}
             preferences={preferences()}
             preferencesEditable={preferencesEditable()}
-            preferenceBusy={savingPreference()}
+            preferenceBusy={savingPreference() || reloadingPreferences()}
             onEditPreference={editPreference}
             onReloadPreferences={() => void reloadPreferences().catch((failure) => setError(describe(failure)))}
             settingsConflicts={settingsConflicts()}
@@ -2999,14 +3131,8 @@ export function App() {
             approvalChange={approvalChange()}
             showProjectArchived={showsArchived}
             onShowProjectArchived={(projectId, visible) => requestPreference('tasks.show_archived', visible, projectId)}
-            onSavePreviewUrl={async (projectId, url) => {
-              const { projects: updated } = await bridge.setProjectPreviewUrl(projectId, url)
-              const project = updated.find((entry) => entry.id === projectId)
-              if (project) setProjects((current) => current.map((entry) => entry.id === projectId
-                ? { ...entry, previewUrl: project.previewUrl }
-                : entry))
-            }}
           />
+          </SettingsDraftContext.Provider>
         </Show>
 
         <section class="chat" aria-label="Task chat" data-task-state={workspace()?.task.state} hidden={settingsOpen()}>
@@ -3505,6 +3631,21 @@ export function App() {
           await editPreference('onboarding.completed', true)
         }} /></Show>
       </WorkspaceFrame>
+
+      <div role="status" classList={{ 'settings-toast': !!settingsToast() }}>{settingsToast()}</div>
+      <Show when={settingsDeparture()} keyed>
+        {(departure) => <Modal label="Unsaved edits" title="Unsaved edits" onClose={keepEditingSettings} initialFocus={() => keepEditingButton}>
+          <p>Save or discard your changes before leaving this screen.</p>
+          <Show when={settingsDepartureError()}><p role="alert">Some edits could not be saved. Keep editing to review the error.</p></Show>
+          <ModalActions>
+            <button type="button" class="project-action" ref={keepEditingButton} disabled={savingSettingsDrafts()} onClick={keepEditingSettings}>Keep editing</button>
+            <button type="button" class="project-action" disabled={savingSettingsDrafts() || departure.drafts.some((draft) => draft.saving())}
+              onClick={() => void finishSettingsDeparture(false)}>Discard</button>
+            <button type="button" class="project-action" disabled={savingSettingsDrafts()}
+              onClick={() => void finishSettingsDeparture(true)}>{savingSettingsDrafts() ? 'Saving…' : 'Save'}</button>
+          </ModalActions>
+        </Modal>}
+      </Show>
 
       <Show when={processDialog()} keyed>
         {(selection) => <div class="picker-backdrop" onClick={() => setProcessDialog(undefined)}>

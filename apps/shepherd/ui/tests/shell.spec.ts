@@ -123,8 +123,19 @@ test.beforeEach(async ({ context }) => {
       }
       const stored = JSON.parse(localStorage.getItem('fixture.settings') ?? '{}')
       const projects = stored.projects ?? (options.has('attachment-cap') ? { '/tmp/demo': { 'attachments.max_file_bytes': 8 } } : {})
+      const projectLocal = options.has('repo-settings') ? {
+        '/tmp/demo': {
+          'preview.url': 'http://localhost:3400/',
+          'tasks.show_archived': false,
+          'worktree.setup': { useImportedSetup: false },
+          'attachments.max_file_bytes': 900,
+        },
+      } : {}
+      for (const [path, scope] of Object.entries(projectLocal)) {
+        projects[path] = { ...projects[path], ...scope }
+      }
       return {
-        defaults, app: stored.app ?? {}, projects,
+        defaults, app: stored.app ?? {}, projects, projectLocal,
         warning: options.has('invalid-settings') ? 'Could not use /tmp/settings.json. A copy was saved to /tmp/settings.json.bak.' : null,
       }
     }
@@ -2495,6 +2506,76 @@ test('configures multiple preview servers in project settings', async ({ page })
   await expect(page.getByRole('button', { name: 'Save servers' })).toBeDisabled()
 })
 
+test('saves only the focused settings section and protects drafts when leaving', async ({ page }) => {
+  await page.addInitScript(() => Object.defineProperty(navigator, 'platform', { value: 'MacIntel' }))
+  await page.goto('/?two-projects')
+  await page.getByRole('button', { name: 'Settings', exact: true }).click()
+  await page.getByRole('button', { name: 'Projects', exact: true }).click()
+  await selectProjectSettings(page)
+
+  const commands = page.getByLabel('Setup configuration')
+  const servers = page.getByRole('region', { name: 'Preview servers and background commands' })
+  const navigation = page.getByRole('navigation', { name: 'Settings categories' })
+  const dialog = page.getByRole('dialog', { name: 'Unsaved edits' })
+  const stored = () => page.evaluate(() => JSON.parse(localStorage.getItem('fixture.settings') ?? '{}').projects?.['/tmp/demo'])
+  await commands.fill('{"useImportedSetup":false}')
+  await servers.getByRole('button', { name: 'Add server' }).click()
+  await servers.getByLabel('Server 1 name').fill('Web')
+  await servers.getByLabel('Server 1 command').fill('npm run dev')
+  expect(await stored()).toBeUndefined()
+  await commands.press('Meta+Enter')
+  await expect.poll(stored).toEqual({ 'worktree.setup': { useImportedSetup: false } })
+  await expect(servers.getByText('Unsaved edits')).toBeVisible()
+
+  await page.getByRole('button', { name: 'Previous', exact: true }).click()
+  await dialog.getByRole('button', { name: 'Keep editing' }).click()
+  await expect(servers.getByLabel('Server 1 command')).toHaveValue('npm run dev')
+
+  await servers.getByLabel('Server 1 command').fill('')
+  await page.getByRole('button', { name: 'Back to app' }).click()
+  await dialog.getByRole('button', { name: 'Save', exact: true }).click()
+  await expect(dialog.getByRole('alert')).toContainText('could not be saved')
+  await dialog.getByRole('button', { name: 'Keep editing' }).click()
+  await expect(servers.getByRole('alert')).toContainText('Enter a name and command')
+  await servers.getByLabel('Server 1 command').fill('npm run dev')
+
+  await selectProjectSettings(page, 'notes')
+  await dialog.getByRole('button', { name: 'Save', exact: true }).click()
+  await expect(dialog).toHaveCount(0)
+  await expect.poll(stored).toMatchObject({ 'preview.servers': [{ name: 'Web', command: 'npm run dev' }] })
+  await selectProjectSettings(page)
+  await commands.fill('{"useImportedSetup":true}')
+  await page.getByRole('button', { name: 'Back to app' }).click()
+  await dialog.getByRole('button', { name: 'Discard' }).click()
+  await expect(navigation).toHaveCount(0)
+  await page.getByRole('button', { name: 'Settings', exact: true }).click()
+  await expect(commands).toHaveValue(JSON.stringify({ useImportedSetup: false }, null, 2))
+})
+
+test('opens repository-managed settings in the editor and autosaves editable values', async ({ page }) => {
+  await page.goto('/?repo-settings')
+  await page.getByRole('button', { name: 'Settings', exact: true }).click()
+  await page.getByRole('button', { name: 'Projects', exact: true }).click()
+  await selectProjectSettings(page)
+  await expect(page.getByRole('checkbox', { name: 'Show archived tasks' })).toBeDisabled()
+  await expect(page.getByRole('textbox', { name: 'Preview URL' })).toHaveAttribute('readonly', '')
+  await expect(page.getByRole('textbox', { name: 'Preview URL' })).toHaveValue('http://localhost:3400/')
+  await expect(page.getByLabel('Setup configuration')).toHaveAttribute('readonly', '')
+  await expect(page.getByRole('spinbutton', { name: 'Attachment limit (bytes)' })).toHaveValue('900')
+  await page.getByRole('button', { name: 'Open config file' }).click()
+  await expect.poll(() => page.evaluate(() => window.__fileActions)).toContainEqual({
+    projectId: 'project-1', taskId: null, path: '.config/shepherd/settings.json', action: 'edit',
+  })
+
+  const scrollback = page.getByRole('spinbutton', { name: 'Terminal scrollback (lines)' })
+  await scrollback.fill('8000')
+  await scrollback.press('Tab')
+  await expect(page.getByText('Saved Terminal scrollback for demo', { exact: true })).toBeVisible()
+  await page.getByRole('button', { name: 'Appearance', exact: true }).click()
+  await page.getByRole('combobox', { name: 'Theme' }).selectOption('light')
+  await expect(page.getByText('Saved Theme', { exact: true })).toBeVisible()
+})
+
 test('saves a project preview URL and loads and reloads a sandboxed page', async ({ page }) => {
   const url = 'http://localhost:1431/preview-fixture'
   let loads = 0
@@ -2517,13 +2598,12 @@ test('saves a project preview URL and loads and reloads a sandboxed page', async
   await tab.click()
   await page.getByRole('button', { name: 'Project settings', exact: true }).click()
   const setting = page.getByRole('textbox', { name: 'Preview URL' })
-  const save = page.getByRole('button', { name: 'Save preview URL' })
   await setting.fill('https://example.com')
-  await save.click()
-  await expect(page.locator('.error-toast')).toContainText('Enter a loopback HTTP or HTTPS URL')
+  await setting.press('Enter')
+  await expect(page.getByRole('region', { name: 'Projects' }).getByRole('alert')).toContainText('Enter a loopback HTTP or HTTPS URL')
   await setting.fill(url)
-  await save.click()
-  await expect(save).toBeDisabled()
+  await setting.press('Tab')
+  await expect(page.getByText('Saved Preview URL for demo', { exact: true })).toBeVisible()
   await page.getByRole('button', { name: 'Back to app' }).click()
   const frame = page.frameLocator('iframe[title="Project website"]')
   await expect(frame.getByRole('heading')).toHaveText('Load 1')
@@ -2537,19 +2617,22 @@ test('saves a project preview URL and loads and reloads a sandboxed page', async
   await expect.poll(() => page.evaluate(() => window.__annotationWrapperOpens)).toEqual(['project-1'])
   await page.getByRole('button', { name: 'Settings', exact: true }).click()
   await setting.fill('http://localhost:1431/preview-redirect')
-  await save.click()
   const deniedFrame = page.waitForEvent('requestfailed', (request) => request.url() === shellUrl && request.isNavigationRequest())
+  await setting.press('Enter')
+  await expect(page.getByText('Saved Preview URL for demo', { exact: true })).toBeVisible()
   await page.getByRole('button', { name: 'Back to app' }).click()
   await deniedFrame
   await page.getByRole('button', { name: 'Settings', exact: true }).click()
   await setting.fill(shellUrl)
-  await save.click()
+  await setting.press('Enter')
+  await expect(page.getByText('Saved Preview URL for demo', { exact: true })).toBeVisible()
   await page.getByRole('button', { name: 'Back to app' }).click()
   await expect(page.getByRole('region', { name: 'Project preview' }).getByRole('alert')).toContainText('Choose a preview URL on a different origin from Shepherd')
   await expect(page.getByTitle('Project website')).toHaveCount(0)
   await page.getByRole('button', { name: 'Settings', exact: true }).click()
   await setting.clear()
-  await save.click()
+  await setting.press('Enter')
+  await expect(page.getByText('Saved Preview URL for demo', { exact: true })).toBeVisible()
   await page.getByRole('button', { name: 'Back to app' }).click()
   await expect(page.getByText('Set a preview URL for this project.')).toBeVisible()
   await expect(page.getByTitle('Project website')).toHaveCount(0)
@@ -2566,7 +2649,8 @@ test('selects a preview element without activating it and adds an editable note 
   await preview.click()
   await page.getByRole('button', { name: 'Project settings', exact: true }).click()
   await page.getByRole('textbox', { name: 'Preview URL' }).fill(url)
-  await page.getByRole('button', { name: 'Save preview URL' }).click()
+  await page.getByRole('textbox', { name: 'Preview URL' }).press('Enter')
+  await expect(page.getByText('Saved Preview URL for demo', { exact: true })).toBeVisible()
   await page.getByRole('button', { name: 'Settings', exact: true }).click()
   const prompt = page.getByRole('textbox', { name: 'Prompt', exact: true })
   await prompt.fill('Review the checkout screen.')
@@ -2671,9 +2755,10 @@ test('adds a screenshot note with image coordinates when the page blocks framing
   await page.getByRole('button', { name: 'Project settings', exact: true }).click()
   await page.getByRole('textbox', { name: 'Preview URL' }).fill(url)
   const blockedFrame = page.waitForEvent('requestfailed', (request) => request.url() === url && request.isNavigationRequest())
-  await page.getByRole('button', { name: 'Save preview URL' }).click()
-  await blockedFrame
+  await page.getByRole('textbox', { name: 'Preview URL' }).press('Enter')
+  await expect(page.getByText('Saved Preview URL for demo', { exact: true })).toBeVisible()
   await page.getByRole('button', { name: 'Settings', exact: true }).click()
+  await blockedFrame
   await page.getByRole('button', { name: 'Annotate', exact: true }).click()
   await expect(page.getByRole('alert')).toContainText('Element selection is unavailable for this page.')
   const screenshot = fileURLToPath(new URL('../../src-tauri/icons/128x128.png', import.meta.url))
@@ -5584,22 +5669,21 @@ test('applies per-project limits and preserves a pending settings edit across re
   await page.goto('/')
   await page.getByRole('button', { name: 'Settings', exact: true }).click()
   const limit = page.getByRole('spinbutton', { name: 'Attachment limit (bytes)' })
-  const save = page.getByRole('button', { name: 'Save attachment limit (bytes)' })
   await expect(limit).toHaveValue('50000000')
   await limit.fill('900')
   await page.evaluate(() => localStorage.setItem('fixture.settings', JSON.stringify({ app: { 'attachments.max_file_bytes': 350 } })))
-  await save.click()
-  await expect(page.getByRole('alert')).toContainText('changed on disk')
+  await limit.press('Enter')
+  await expect(page.getByRole('region', { name: 'Workspace' }).getByRole('alert')).toContainText('changed on disk')
   await page.getByRole('button', { name: 'Reload settings' }).click()
   await expect(limit).toHaveValue('900')
   await page.getByRole('button', { name: 'Retry setting change' }).click()
-  await expect(save).toBeDisabled()
+  await expect(page.getByText('Saved Attachment limit', { exact: true })).toBeVisible()
 
   await page.getByRole('navigation', { name: 'Settings categories' }).getByRole('button', { name: 'Projects' }).click()
   await selectProjectSettings(page)
   await expect(limit).toHaveValue('900')
   await limit.fill('8')
-  await save.click()
+  await limit.press('Enter')
   await expect(page.getByRole('button', { name: 'Reset attachment limit (bytes)' })).toBeVisible()
   await page.getByRole('button', { name: 'Settings', exact: true }).click()
   await page.getByLabel('Local attachments').setInputFiles({ name: 'oversized.txt', mimeType: 'text/plain', buffer: Buffer.from('nine-byte') })
@@ -6308,7 +6392,7 @@ test('does not reload the attachment limit on streaming project snapshots', asyn
   expect(await requests()).toEqual(before)
   await page.getByRole('button', { name: 'Settings', exact: true }).click()
   await page.getByRole('spinbutton', { name: 'Attachment limit (bytes)' }).fill('900')
-  await page.getByRole('button', { name: 'Save attachment limit (bytes)' }).click()
+  await page.getByRole('spinbutton', { name: 'Attachment limit (bytes)' }).press('Enter')
   await expect.poll(async () => (await requests()).length).toBe(before.length + 1)
 })
 

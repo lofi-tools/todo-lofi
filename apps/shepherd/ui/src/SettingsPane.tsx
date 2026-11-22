@@ -1,3 +1,4 @@
+import { createSettingsDraft, SettingsSave } from './SettingsDraft'
 import { For, Index, Show, createEffect, createMemo, createResource, createSignal, on, type JSX } from 'solid-js'
 
 import { AGENT_LABELS, harnessVersionStatus, projectApprovals, resetApprovalGrant, type PoolAgent, type CommandBinding, type CommandRegistry, type KeybindingEdit, type ProjectApproval, type ProjectSnapshot, type PreviewService, type SessionApproval, type SettingsSnapshot, type SettingsEdit, type SettingKey } from './bridge'
@@ -7,7 +8,7 @@ import { HarnessWarning, PoolSettings, type HarnessDiscovery } from './PoolSetti
 import { SettingsSelect } from './SettingsSelect'
 import { AgentModelSettings, supportsModelSelection } from './AgentModelSettings'
 import { AgentIcon } from './AgentIcon'
-import { projectEnvironment, saveProjectEnvironment, type ProjectEnvironment, type WorktreeSetup } from './bridge'
+import { actOnWorkspaceFile, projectEnvironment, saveProjectEnvironment, type ProjectEnvironment, type WorktreeSetup } from './bridge'
 
 export const categories = ['Workspace', 'Projects', 'Agents', 'Appearance', 'Keyboard shortcuts'] as const
 
@@ -26,6 +27,7 @@ interface SettingsPaneProps {
   settingsProjectId?: string
   onSettingsProjectChange: (projectId?: string) => void
   onBack: () => void
+  onNavigate: (action: () => void) => void
   discovery: HarnessDiscovery
   agentAvailability?: Record<import('./bridge').Agent, boolean>
   preferences?: SettingsSnapshot
@@ -55,69 +57,94 @@ interface SettingsPaneProps {
   approvalChange?: { projectId?: string }
   showProjectArchived: (projectId: string) => boolean
   onShowProjectArchived: (projectId: string, visible: boolean | null) => void
-  onSavePreviewUrl: (projectId: string, url: string) => Promise<void>
 }
 
-function ProjectPreviewSetting(props: { url?: string | null; localOverride: boolean; onSave: (url: string) => Promise<void> }) {
-  const [url, setUrl] = createSignal(props.url ?? '')
+function createSimpleEdit<Value>(value: () => string, onSave: (value: Value) => Promise<void>) {
+  const [draft, setDraft] = createSignal(value())
   const [saving, setSaving] = createSignal(false)
-  createEffect(on(() => props.url, (saved) => setUrl(saved ?? '')))
-
-  async function save(event: SubmitEvent) {
-    event.preventDefault()
-    if (saving()) return
+  const [error, setError] = createSignal('')
+  let attempted: Value | undefined
+  createEffect(on(value, (saved, previous) => {
+    if (draft() === previous) setDraft(saved)
+    if (draft() === saved) setError('')
+  }))
+  function edit(value: string) {
+    attempted = undefined
+    setDraft(value)
+    setError('')
+  }
+  async function save(next: Value, retry = false) {
+    if (saving() || (!retry && attempted === next)) return
+    attempted = next
     setSaving(true)
+    setError('')
     try {
-      await props.onSave(url())
-      setUrl(props.url ?? '')
+      await onSave(next)
+      setDraft(value())
     } catch (failure) {
-      reportError('save_preview_url', failure)
+      setError(settingsError(failure))
     } finally {
       setSaving(false)
     }
   }
+  return { draft, edit, save, saving, error }
+}
+
+function ProjectPreviewSetting(props: { url?: string | null; localOverride: boolean; editable: boolean; onSave: (url: string) => Promise<void> }) {
+  const saved = () => props.url ?? ''
+  const field = createSimpleEdit(saved, props.onSave)
+  function save(retry = false) {
+    if (props.editable && !props.localOverride && field.draft().trim() !== saved()) void field.save(field.draft().trim(), retry)
+  }
 
   return (
-    <form class="settings__project" onSubmit={save}>
+    <form class="settings__project" onSubmit={(event) => { event.preventDefault(); save(true) }}>
       <label class="settings__row settings__preview-url">
         <span>Preview URL</span>
-        <input type="text" inputmode="url" value={url()} onInput={(event) => setUrl(event.currentTarget.value)}
-          disabled={saving() || props.localOverride} placeholder="http://localhost:3000" />
+        <input type="text" inputmode="url" value={field.draft()} onInput={(event) => field.edit(event.currentTarget.value)}
+          onBlur={() => save()} disabled={!props.editable} readOnly={field.saving() || props.localOverride} placeholder="http://localhost:3000" />
       </label>
-      <Show when={props.localOverride}><p class="empty">Set in .config/shepherd/settings.json. Edit that file to change it.</p></Show>
-      <button type="submit" class="project-action" disabled={saving() || props.localOverride || url() === (props.url ?? '')}>Save preview URL</button>
+      <Show when={props.localOverride}><p class="empty">Set in .config/shepherd/settings.json.</p></Show>
+      <Show when={field.error()}><p role="alert">{field.error()}</p></Show>
     </form>
   )
 }
 
 function ProjectPreviewServers(props: { value: PreviewService[]; localOverride: boolean; editable: boolean; onSave: (value: PreviewService[] | null) => Promise<void> }) {
   const [servers, setServers] = createSignal<PreviewService[]>(structuredClone(props.value))
-  const [saving, setSaving] = createSignal(false)
-  createEffect(on(() => props.value, (value) => setServers(structuredClone(value))))
-  const valid = () => servers().every((server) => server.name.trim() && server.command.trim() && (!server.portVariable || /^(PORT|[A-Z][A-Z0-9_]*_PORT)$/.test(server.portVariable)))
-  async function save(event: SubmitEvent) {
-    event.preventDefault()
-    if (saving() || !valid()) return
-    setSaving(true)
-    try { await props.onSave(servers().length ? servers() : null) }
-    catch (failure) { reportError('save_preview_servers', failure) }
-    finally { setSaving(false) }
-  }
+  const saved = () => JSON.stringify(props.value)
+  const serialized = () => JSON.stringify(servers())
+  const reset = () => setServers(structuredClone(props.value))
+  createEffect(on(saved, (_, previous) => { if (serialized() === previous) reset() }))
+  const draft = createSettingsDraft({
+    dirty: () => !props.localOverride && serialized() !== saved(),
+    editable: () => props.editable && !props.localOverride,
+    discard: reset,
+    async save() {
+      if (!servers().every((server) => server.name.trim() && server.command.trim() &&
+        (!server.portVariable || /^(PORT|[A-Z][A-Z0-9_]*_PORT)$/.test(server.portVariable)))) {
+        throw new Error('Enter a name and command for every server. Port variables must be PORT or end in _PORT.')
+      }
+      await props.onSave(servers().length ? servers() : null)
+      reset()
+    },
+  })
+  const disabled = () => draft.saving() || !draft.editable()
   function update(index: number, patch: Partial<PreviewService>) {
     setServers((current) => current.map((server, position) => position === index ? { ...server, ...patch } : server))
   }
-  return <form class="settings__project" onSubmit={save}>
+  return <section class="settings__project" aria-label="Preview servers and background commands" data-settings-draft onKeyDown={draft.onKeyDown}>
     <h4>Preview servers and background commands</h4>
     <Index each={servers()}>{(server, index) => <div class="settings__project">
-      <label class="settings__row"><span>Name</span><input aria-label={`Server ${index + 1} name`} value={server().name} disabled={saving() || !props.editable || props.localOverride} onInput={(event) => update(index, { name: event.currentTarget.value })} /></label>
-      <label class="settings__row"><span>Command</span><input aria-label={`Server ${index + 1} command`} value={server().command} disabled={saving() || !props.editable || props.localOverride} onInput={(event) => update(index, { command: event.currentTarget.value })} /></label>
-      <label class="settings__row"><span>Port variable</span><input aria-label={`Server ${index + 1} port variable`} value={server().portVariable ?? ''} disabled={saving() || !props.editable || props.localOverride} onInput={(event) => update(index, { portVariable: event.currentTarget.value || null })} placeholder="PORT" /></label>
-      <button type="button" class="project-action" disabled={saving() || !props.editable || props.localOverride} onClick={() => setServers((current) => current.filter((_, position) => position !== index))}>Remove</button>
+      <label class="settings__row"><span>Name</span><input aria-label={`Server ${index + 1} name`} value={server().name} disabled={disabled()} onInput={(event) => update(index, { name: event.currentTarget.value })} /></label>
+      <label class="settings__row"><span>Command</span><input aria-label={`Server ${index + 1} command`} value={server().command} disabled={disabled()} onInput={(event) => update(index, { command: event.currentTarget.value })} /></label>
+      <label class="settings__row"><span>Port variable</span><input aria-label={`Server ${index + 1} port variable`} value={server().portVariable ?? ''} disabled={disabled()} onInput={(event) => update(index, { portVariable: event.currentTarget.value || null })} placeholder="PORT" /></label>
+      <button type="button" class="project-action" disabled={disabled()} onClick={() => setServers((current) => current.filter((_, position) => position !== index))}>Remove</button>
     </div>}</Index>
     <Show when={props.localOverride}><p class="empty">Set in .config/shepherd/settings.json. Edit that file to change it.</p></Show>
-    <button type="button" class="project-action" disabled={saving() || !props.editable || props.localOverride} onClick={() => setServers((current) => [...current, { name: '', command: '', portVariable: null }])}>Add server</button>
-    <button type="submit" class="project-action" disabled={saving() || !props.editable || props.localOverride || !valid() || JSON.stringify(servers()) === JSON.stringify(props.value)}>Save servers</button>
-  </form>
+    <button type="button" class="project-action" disabled={disabled()} onClick={() => setServers((current) => [...current, { name: '', command: '', portVariable: null }])}>Add server</button>
+    <Show when={!props.localOverride}><SettingsSave draft={draft} label="Save servers" /></Show>
+  </section>
 }
 
 function WorktreeSetupSettings(props: {
@@ -127,84 +154,96 @@ function WorktreeSetupSettings(props: {
   editable: boolean
   onEdit: SettingsPaneProps['onEditPreference']
 }) {
-  const [draft, setDraft] = createSignal('')
-  const [failure, setFailure] = createSignal('')
-  const [busy, setBusy] = createSignal(false)
   const formatted = () => JSON.stringify(props.value ?? {}, null, 2)
-  createEffect(() => setDraft(formatted()))
-
-  async function save() {
-    setBusy(true)
-    setFailure('')
-    try {
-      const value = JSON.parse(draft())
+  const [configuration, setConfiguration] = createSignal(formatted())
+  createEffect(on(formatted, (value, previous) => {
+    if (configuration() === previous) setConfiguration(value)
+  }))
+  const draft = createSettingsDraft({
+    dirty: () => !props.localOverride && configuration() !== formatted(),
+    editable: () => props.editable && !props.localOverride,
+    discard: () => setConfiguration(formatted()),
+    async save() {
+      const value: unknown = JSON.parse(configuration())
+      if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Enter a JSON object for worktree commands.')
       await props.onEdit('worktree.setup', value as WorktreeSetup, props.projectId)
-    } catch (error) {
-      setFailure(settingsError(error))
-    } finally {
-      setBusy(false)
-    }
-  }
+      setConfiguration(formatted())
+    },
+  })
 
-  return <section class="settings__project" aria-label="Worktree commands">
+  return <section class="settings__project" aria-label="Worktree commands" data-settings-draft onKeyDown={draft.onKeyDown}>
     <h4>Worktree commands</h4>
     <label class="settings__row"><span>Setup configuration</span>
-      <textarea value={draft()} rows={8} readOnly={props.localOverride || !props.editable}
-        onInput={(event) => setDraft(event.currentTarget.value)} />
+      <textarea value={configuration()} rows={8} readOnly={!draft.editable() || draft.saving()}
+        onInput={(event) => setConfiguration(event.currentTarget.value)} />
     </label>
     <p class="empty">{props.localOverride ? 'Set in .config/shepherd/settings.json.' :
       'Use afterCheckout, readinessCheck, launchWrapper, and setupTerminal. Commands are arrays of arguments.'}</p>
-    <Show when={failure()}><p role="alert">{failure()}</p></Show>
-    <Show when={!props.localOverride}>
-      <button class="project-action" type="button" disabled={busy() || !props.editable || draft() === formatted()} onClick={() => void save()}>Save worktree commands</button>
-    </Show>
+    <Show when={!props.localOverride}><SettingsSave draft={draft} label="Save worktree commands" /></Show>
   </section>
 }
 
-function ProjectEnvironmentSettings(props: { projectId: string; useImportedSetup?: boolean }) {
+function ProjectEnvironmentSettings(props: { projectId: string; useImportedSetup?: boolean; localOverride: boolean; editable: boolean }) {
   const [snapshot, { mutate, refetch }] = createResource(() => props.projectId, projectEnvironment)
   const [draft, setDraft] = createSignal<ProjectEnvironment>()
   const [error, setError] = createSignal('')
-  const [saving, setSaving] = createSignal(false)
-  createEffect(on(() => snapshot.latest, (value) => setDraft(value?.current ? structuredClone(value.current) : undefined)))
+  const [updating, setUpdating] = createSignal(false)
+  const saved = () => snapshot.latest?.current
+  function reset() {
+    const environment = saved()
+    setDraft(environment ? structuredClone(environment) : undefined)
+  }
+  createEffect(on(saved, (value) => setDraft(value ? structuredClone(value) : undefined)))
+  const section = createSettingsDraft({
+    dirty: () => !props.localOverride && !!draft() && JSON.stringify(draft()) !== JSON.stringify(saved()),
+    editable: () => props.editable && !props.localOverride && !updating(),
+    discard: reset,
+    async save() {
+      const environment = draft()
+      if (environment) mutate(await saveProjectEnvironment(props.projectId, saved() ?? null, environment))
+    },
+  })
+  const disabled = () => !section.editable() || section.saving()
 
   async function save(environment: ProjectEnvironment) {
     const current = snapshot.latest?.current
-    if (saving()) return
-    setSaving(true)
+    if (disabled() || section.dirty()) return
+    setUpdating(true)
     setError('')
     try { mutate(await saveProjectEnvironment(props.projectId, current ?? null, environment)) }
     catch (failure) { setError(settingsError(failure)); reportError('project_environment', failure) }
-    finally { setSaving(false) }
+    finally { setUpdating(false) }
   }
 
-  return <section class="settings__project" aria-label="Project environment">
+  return <section class="settings__project" aria-label="Project environment" data-settings-draft onKeyDown={section.onKeyDown}>
     <h4>Worktree setup and project actions</h4>
     <Show when={snapshot.error}><p class="empty">Could not load the project environment: {settingsError(snapshot.error)}</p><button class="project-action" onClick={() => void refetch()}>Retry</button></Show>
     <Show when={error()}><p role="alert">{error()}</p></Show>
     <Show when={snapshot.latest?.warning}>{(warning) => <p role="alert">Could not read the Codex environment: {warning()}</p>}</Show>
-    <Show when={snapshot.latest?.source && snapshot.latest?.current && snapshot.latest!.source!.sourceHash !== snapshot.latest!.current!.sourceHash}>
+    <Show when={!props.localOverride && snapshot.latest?.source && saved() && snapshot.latest.source.sourceHash !== saved()?.sourceHash}>
       <p>The Codex environment changed. Updating replaces your Shepherd copy.</p>
-      <button class="project-action" disabled={saving()} onClick={() => {
+      <button class="project-action" disabled={disabled() || section.dirty()} onClick={() => {
         const source = snapshot.latest?.source
         if (source) void save(source)
       }}>Update from Codex</button>
     </Show>
-    <Show when={draft()} fallback={<><p class="empty">No Codex environment found in this project.</p><button class="project-action" disabled={saving() || snapshot.loading} onClick={() => void save({ sourceHash: '', setup: '', actions: [] })}>Create project environment</button></>}>
+    <Show when={draft()} fallback={<><p class="empty">No Codex environment found in this project.</p><Show when={!props.localOverride}><button class="project-action" disabled={disabled() || snapshot.loading} onClick={() => void save({ sourceHash: '', setup: '', actions: [] })}>Create project environment</button></Show></>}>
       {(environment) => <>
-        <label class="settings__row"><span>Worktree setup script</span><textarea value={environment().setup} onInput={(event) => setDraft({ ...environment(), setup: event.currentTarget.value })} /></label>
+        <label class="settings__row"><span>Worktree setup script</span><textarea value={environment().setup} readOnly={disabled()} onInput={(event) => setDraft({ ...environment(), setup: event.currentTarget.value })} /></label>
         <Show when={environment().setup.trim()}>
           <p class="empty">{props.useImportedSetup === false
             ? 'This project uses its configured worktree setup.'
             : 'Runs once in each new task worktree before the agent starts.'}</p>
         </Show>
-        <For each={environment().actions}>{(action, index) => <div class="settings__project">
-          <label class="settings__row"><span>Action name</span><input value={action.name} onInput={(event) => setDraft({ ...environment(), actions: environment().actions.map((item, position) => position === index() ? { ...item, name: event.currentTarget.value } : item) })} /></label>
-          <label class="settings__row"><span>Action command</span><input value={action.command} onInput={(event) => setDraft({ ...environment(), actions: environment().actions.map((item, position) => position === index() ? { ...item, command: event.currentTarget.value } : item) })} /></label>
-          <button class="project-action" onClick={() => setDraft({ ...environment(), actions: environment().actions.filter((_, position) => position !== index()) })}>Remove action</button>
-        </div>}</For>
-        <button class="project-action" onClick={() => setDraft({ ...environment(), actions: [...environment().actions, { name: '', icon: 'run', command: '' }] })}>Add action</button>
-        <button class="project-action" disabled={saving() || JSON.stringify(environment()) === JSON.stringify(snapshot.latest?.current)} onClick={() => void save(environment())}>Save environment</button>
+        <Index each={environment().actions}>{(action, index) => <div class="settings__project">
+          <label class="settings__row"><span>Action name</span><input value={action().name} readOnly={disabled()} onInput={(event) => setDraft({ ...environment(), actions: environment().actions.map((item, position) => position === index ? { ...item, name: event.currentTarget.value } : item) })} /></label>
+          <label class="settings__row"><span>Action command</span><input value={action().command} readOnly={disabled()} onInput={(event) => setDraft({ ...environment(), actions: environment().actions.map((item, position) => position === index ? { ...item, command: event.currentTarget.value } : item) })} /></label>
+          <Show when={!props.localOverride}><button class="project-action" disabled={disabled()} onClick={() => setDraft({ ...environment(), actions: environment().actions.filter((_, position) => position !== index) })}>Remove action</button></Show>
+        </div>}</Index>
+        <Show when={!props.localOverride} fallback={<p class="empty">Set in .config/shepherd/settings.json.</p>}>
+          <button class="project-action" disabled={disabled()} onClick={() => setDraft({ ...environment(), actions: [...environment().actions, { name: '', icon: 'run', command: '' }] })}>Add action</button>
+          <SettingsSave draft={section} label="Save environment" />
+        </Show>
       </>}
     </Show>
   </section>
@@ -311,6 +350,7 @@ function settingsError(error: unknown): string {
 
 function NumberPreference(props: {
   label: string
+  localOverride: boolean
   value: number
   inherited: number
   overridden: boolean
@@ -320,41 +360,29 @@ function NumberPreference(props: {
   editable: boolean
   onSave: (value: number | null) => Promise<void>
 }) {
-  const [draft, setDraft] = createSignal(String(props.value))
-  createEffect(on(() => props.value, (value, previous) => {
-    if (previous === undefined || draft() === String(previous)) setDraft(String(value))
-  }))
-  const number = () => draft().trim() ? Number(draft()) : NaN
-  const valid = () => Number.isSafeInteger(number()) && number() >= props.minimum && number() <= props.maximum
-
-  async function save(value: number | null) {
-    try {
-      await props.onSave(value)
-      setDraft(String(props.value))
-    } catch (failure) {
-      reportError('save_preference', failure)
-    }
+  const field = createSimpleEdit(() => String(props.value), props.onSave)
+  const number = () => field.draft().trim() ? Number(field.draft()) : NaN
+  function save(retry = false) {
+    const value = number()
+    if (props.editable && !props.localOverride && Number.isSafeInteger(value) &&
+      value >= props.minimum && value <= props.maximum && value !== props.value) void field.save(value, retry)
   }
 
   return (
-    <form class="settings__project" onSubmit={(event) => {
-      event.preventDefault()
-      if (props.editable && valid()) void save(number())
-    }}>
+    <form class="settings__project" onSubmit={(event) => { event.preventDefault(); save(true) }}>
       <label class="settings__row settings__preview-url">
         <span>{props.label}</span>
-        <input type="number" min={props.minimum} max={props.maximum} step="1" value={draft()}
-          disabled={!props.editable} onInput={(event) => setDraft(event.currentTarget.value)} />
+        <input type="number" min={props.minimum} max={props.maximum} step="1" value={field.draft()}
+          disabled={!props.editable} readOnly={props.localOverride || field.saving()}
+          onInput={(event) => field.edit(event.currentTarget.value)} onBlur={() => save()} />
       </label>
-      <p class="empty">{props.project ? 'Workspace value' : 'Built-in default'} {props.inherited}</p>
-      <div class="settings__shortcut-row">
-        <button type="submit" class="project-action"
-          disabled={!props.editable || !valid() || number() === props.value}>Save {props.label.toLowerCase()}</button>
-        <Show when={props.overridden}>
-          <button type="button" class="project-action" disabled={!props.editable}
-            onClick={() => void save(null)}>Reset {props.label.toLowerCase()}</button>
-        </Show>
-      </div>
+      <p class="empty">{props.localOverride ? 'Set in .config/shepherd/settings.json.' :
+        `${props.project ? 'Workspace value' : 'Built-in default'} ${props.inherited}`}</p>
+      <Show when={field.error()}><p role="alert">{field.error()}</p></Show>
+      <Show when={props.overridden && !props.localOverride}>
+        <button type="button" class="project-action" disabled={!props.editable || field.saving()}
+          onClick={() => void field.save(null, true)}>Reset {props.label.toLowerCase()}</button>
+      </Show>
     </form>
   )
 }
@@ -376,7 +404,7 @@ function NumberPreferences(props: {
       {({ key, label, minimum, maximum }) => {
         const scope = () => props.project ? props.preferences.projects[props.project.path] : props.preferences.app
         const inherited = () => (props.project ? props.preferences.app[key] : undefined) ?? props.preferences.defaults[key]
-        return <NumberPreference label={label} minimum={minimum} maximum={maximum} editable={props.editable}
+        return <NumberPreference label={label} localOverride={props.project ? Object.hasOwn(props.preferences.projectLocal?.[props.project.path] ?? {}, key) : false} minimum={minimum} maximum={maximum} editable={props.editable}
           value={scope()?.[key] ?? inherited()} inherited={inherited()} overridden={scope()?.[key] !== undefined}
           project={!!props.project} onSave={(value) => props.onEdit(key, value, props.project?.id)} />
       }}
@@ -585,6 +613,14 @@ export function SettingsPane(props: SettingsPaneProps) {
   }))
   const showSetting = (description: string) => matchesSearch(`${activeCategory() ?? ''} ${description}`, query()) || matchesSearch(activeCategory() ?? '', query())
   const narrowedQuery = () => matchesSearch(activeCategory() ?? '', query()) ? '' : query()
+  const local = () => props.preferences?.projectLocal?.[settingsProject()?.path ?? ''] ?? {}
+  const repoManaged = (key: SettingKey) => Object.hasOwn(local(), key)
+  const repoConfig = '.config/shepherd/settings.json'
+
+  function chooseHarness(agent?: PoolAgent) {
+    if (agent !== selectedHarness()) props.onNavigate(() => setSelectedHarness(agent))
+  }
+
   const theme = () => props.preferences?.app.theme ?? 'system'
   const density = () => props.preferences?.app['appearance.density'] ?? 'compact'
 
@@ -600,7 +636,7 @@ export function SettingsPane(props: SettingsPaneProps) {
     }
   }
   createEffect(on(() => props.projectSettingsRequest, (request) => {
-    if (request) { setSettingsProjectId(request.id); setSearch(''); setCategory('Projects') }
+    if (request) setSearch('')
   }))
 
   return (
@@ -611,7 +647,12 @@ export function SettingsPane(props: SettingsPaneProps) {
           <header class="settings__header"><h2 id="settings-title">Settings</h2></header>
           <div class="settings__search">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5" /><path d="m15.5 15.5 5 5" /></svg>
-            <input class="task-search__input" type="search" aria-label="Search settings" placeholder="Search settings" value={search()} onInput={(event) => setSearch(event.currentTarget.value)} />
+            <input class="task-search__input" type="search" aria-label="Search settings" placeholder="Search settings" value={search()} onInput={(event) => {
+              const input = event.currentTarget
+              const value = input.value
+              props.onNavigate(() => setSearch(value))
+              if (value !== search()) input.value = search()
+            }} />
           </div>
           <For each={matchingCategories()}>
             {(name) => (
@@ -620,7 +661,13 @@ export function SettingsPane(props: SettingsPaneProps) {
                   type="button"
                   class="nav-item"
                   aria-current={activeCategory() === name && (name !== 'Projects' || !settingsProjectId()) ? 'true' : undefined}
-                  onClick={() => { if (name === 'Projects') setSettingsProjectId(undefined); setCategory(name) }}
+                  onClick={() => {
+                    if (name === category() && (name !== 'Projects' || !settingsProjectId())) return
+                    props.onNavigate(() => {
+                      if (name === 'Projects') setSettingsProjectId(undefined)
+                      setCategory(name)
+                    })
+                  }}
                 >
                   {name}
                 </button>
@@ -629,7 +676,7 @@ export function SettingsPane(props: SettingsPaneProps) {
                     <For each={props.projects}>{(project) => (
                       <button type="button" class="nav-item settings__project-link" title={project.path}
                         aria-current={settingsProjectId() === project.id ? 'true' : undefined}
-                        onClick={() => setSettingsProjectId(project.id)}>{project.name}</button>
+                        onClick={() => { if (project.id !== settingsProjectId()) props.onNavigate(() => setSettingsProjectId(project.id)) }}>{project.name}</button>
                     )}</For>
                   </div>
                 </Show>
@@ -688,39 +735,50 @@ export function SettingsPane(props: SettingsPaneProps) {
                   <h4>Project settings</h4>
                   <p>{project().name}</p>
                   <p class="empty settings__project-path">{project().path}</p>
+                  <Show when={Object.keys(local()).length > 0}>
+                    <div class="settings__save">
+                      <button type="button" class="project-action" onClick={() =>
+                        void actOnWorkspaceFile(project().id, null, repoConfig, 'edit').catch((failure) => reportError('open_project_config', failure))
+                      }>Open config file</button>
+                      <code>{repoConfig}</code>
+                    </div>
+                  </Show>
                   <Show when={showSetting('show archived tasks')}><label class="settings__row settings__row--checkbox"><span>Show archived tasks</span>
                     <input
                       type="checkbox"
                       checked={props.showProjectArchived(project().id)}
-                      disabled={!props.preferencesEditable}
+                      disabled={!props.preferencesEditable || repoManaged('tasks.show_archived')}
                       onChange={(event) => {
                         const visible = event.currentTarget.checked
                         event.currentTarget.checked = props.showProjectArchived(project().id)
                         props.onShowProjectArchived(project().id, visible)
                       }}
                     />
-                  </label></Show>
-                  <Show when={showSetting('show archived tasks') && props.preferences?.projects[project().path]?.['tasks.show_archived'] !== undefined}>
+                  </label>
+                    <Show when={repoManaged('tasks.show_archived')}><p class="empty">Set in {repoConfig}.</p></Show>
+                  </Show>
+                  <Show when={showSetting('show archived tasks') && !repoManaged('tasks.show_archived') && props.preferences?.projects[project().path]?.['tasks.show_archived'] !== undefined}>
                     <button type="button" class="project-action" disabled={!props.preferencesEditable}
                       onClick={() => props.onShowProjectArchived(project().id, null)}>Use workspace archive visibility</button>
                   </Show>
                   <Show when={project().id} keyed>
                     {(projectId) => <>
-                      <Show when={showSetting('preview url')}><ProjectPreviewSetting url={props.preferences?.projects[project().path]?.['preview.url'] ?? project().previewUrl}
-                        localOverride={typeof props.preferences?.projectLocal?.[project().path]?.['preview.url'] === 'string'}
+                      <Show when={showSetting('preview url')}><ProjectPreviewSetting url={repoManaged('preview.url') ? local()['preview.url'] : props.preferences?.projects[project().path]?.['preview.url'] ?? project().previewUrl}
+                        localOverride={repoManaged('preview.url')} editable={props.preferencesEditable}
                         onSave={(url) => props.onEditPreference('preview.url', url.trim() || null, projectId)} /></Show>
                       <Show when={showSetting('preview server command background')}><ProjectPreviewServers
                         value={props.preferences?.projects[project().path]?.['preview.servers'] ?? []}
-                        localOverride={Array.isArray(props.preferences?.projectLocal?.[project().path]?.['preview.servers'])}
+                        localOverride={repoManaged('preview.servers')}
                         editable={props.preferencesEditable}
                         onSave={(value) => props.onEditPreference('preview.servers', value, projectId)} /></Show>
                       <Show when={showSetting('worktree setup launch wrapper environment commands')}>
                         <WorktreeSetupSettings projectId={projectId}
                           value={props.preferences?.projects[project().path]?.['worktree.setup']}
-                          localOverride={!!props.preferences?.projectLocal?.[project().path]?.['worktree.setup']}
+                          localOverride={repoManaged('worktree.setup')}
                           editable={props.preferencesEditable} onEdit={props.onEditPreference} />
                       </Show>
                       <Show when={showSetting('worktree setup project actions codex environment')}><ProjectEnvironmentSettings projectId={projectId}
+                        localOverride={repoManaged('environment')} editable={props.preferencesEditable}
                         useImportedSetup={props.preferences?.projects[project().path]?.['worktree.setup']?.useImportedSetup} /></Show>
                       <Show when={props.preferences}>
                         {(snapshot) => <NumberPreferences preferences={snapshot()} project={project()}
@@ -739,7 +797,7 @@ export function SettingsPane(props: SettingsPaneProps) {
             </Show>
           </Show>
           <Show when={activeCategory() === 'Agents'}>
-            <PoolSettings discovery={props.discovery} availability={props.agentAvailability} priority={props.preferences?.app['agents.priority']} selected={selectedHarness()} onSelect={(agent) => setSelectedHarness((current) => current === agent ? undefined : agent)} editable={props.preferencesEditable && !props.preferenceBusy} onChange={(priority) => props.onEditPreference('agents.priority', priority)} />
+            <PoolSettings discovery={props.discovery} availability={props.agentAvailability} priority={props.preferences?.app['agents.priority']} selected={selectedHarness()} onSelect={(agent) => chooseHarness(selectedHarness() === agent ? undefined : agent)} editable={props.preferencesEditable && !props.preferenceBusy} onChange={(priority) => props.onEditPreference('agents.priority', priority)} />
           </Show>
           <Show when={activeCategory() === 'Appearance'}>
             <Show when={showSetting('theme system light dark')}><label class="settings__row">
@@ -785,7 +843,7 @@ export function SettingsPane(props: SettingsPaneProps) {
           </Show>
         </section>
         <Show when={activeCategory() === 'Agents' && selectedHarness()}>{(agent) => <aside class="settings__detail" aria-label={`${AGENT_LABELS[agent()]} harness settings`}>
-          <header class="settings__detail-header"><h3>{AGENT_LABELS[agent()]} settings</h3><button type="button" class="project-action project-action--icon" aria-label="Close harness settings" title="Close" onClick={() => setSelectedHarness(undefined)}><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18" /></svg></button></header>
+          <header class="settings__detail-header"><h3>{AGENT_LABELS[agent()]} settings</h3><button type="button" class="project-action project-action--icon" aria-label="Close harness settings" title="Close" onClick={() => chooseHarness()}><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18" /></svg></button></header>
           <Show when={agent() === 'kilocode'} fallback={<p class="empty">Configure the executable path with <code>agents.{agent()}.executable</code> in settings.json.</p>}><p class="empty">This harness is not yet implemented in Shepherd.</p></Show>
           <Show when={agent() === 'codex'}><p class="empty">Codex environment overrides: <code>agents.codex.environment</code>.</p></Show>
           <Show when={agent() === 'opencode'}><p class="empty">OpenCode configuration file: <code>agents.opencode.config_file</code>.</p></Show>

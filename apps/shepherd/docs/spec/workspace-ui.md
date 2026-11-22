@@ -180,6 +180,14 @@ current layout and give future changes a point of comparison.
   show the error. The user can resend after correcting the script. Project
   actions run in task terminals. Platform-specific commands use the current
   platform.
+- Settings save toggles and pickers when changed, and valid single-line fields
+  on Enter or when focus leaves the field. A toast names the setting after
+  saving. Scripts, command lists, and model preferences stay as drafts until
+  the section's Save button or `⌘↵` (`Ctrl+Enter` outside macOS) is used.
+  Leaving with edits opens **Unsaved edits** with **Save**, **Discard**, and
+  **Keep editing**. Save writes the pending sections and leaves only after
+  they succeed. Project settings supplied by the repository are read-only in
+  Shepherd and offer **Open config file** for `.config/shepherd/settings.json`.
 - A project can configure `worktree.setup` in Project settings or
   `.config/shepherd/settings.json`. Create the checkout and run its configured
   commands on Send, with a composer notice only if something fails.
