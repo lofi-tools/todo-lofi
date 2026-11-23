@@ -776,21 +776,19 @@ impl crate::Core {
         if !matches!(
             task.state,
             crate::TaskState::Ready | crate::TaskState::Review
-        ) || self.turn_baselines.contains_key(task_id)
-            || self
-                .queued_prompts
-                .get(task_id)
-                .is_some_and(|queue| !queue.is_empty())
+        ) || self
+            .queued_prompts
+            .get(task_id)
+            .is_some_and(|queue| !queue.is_empty())
         {
             return Err(CoreError::TaskNotReady {
                 id: task_id.as_str().to_owned(),
                 state: task.state.as_str(),
             });
         }
-        let worktree = task
-            .worktree_path
-            .as_ref()
-            .ok_or_else(|| HarnessError::Protocol("terminal task has no worktree".into()))?;
+        if task.worktree_path.is_none() {
+            return Err(HarnessError::Protocol("terminal task has no worktree".into()).into());
+        }
         let record = self.session_records.get(task_id).cloned().ok_or_else(|| {
             CoreError::SessionMissing {
                 id: task_id.as_str().to_owned(),
@@ -801,7 +799,6 @@ impl crate::Core {
         }
         self.task_workspace(task_id)?;
         self.task_list(&task.project_id)?;
-        let baseline = crate::git::GitService.turn_baseline(worktree)?;
         task.set_state(crate::TaskState::Working)?;
         task.error = None;
         let session = self
@@ -814,7 +811,6 @@ impl crate::Core {
             .persist_terminal_prompt(&*self.store, &record, &task, item_id, text)
             .await?;
         self.tasks.insert(task_id.clone(), task);
-        self.turn_baselines.insert(task_id.clone(), baseline);
         if let Err(error) = self.publish_task(task_id) {
             tracing::error!(%error, "could not publish admitted terminal turn");
         }
@@ -822,7 +818,6 @@ impl crate::Core {
     }
 
     async fn fail_terminal_turn(&mut self, task_id: &crate::TaskId) -> Result<(), CoreError> {
-        self.turn_baselines.remove(task_id);
         let message = "Terminal input could not be delivered; the turn may have started.";
         if let Some(session) = self.sessions.get_mut(task_id) {
             session.push_failure(FailureKind::Protocol, message, None);
@@ -1979,7 +1974,7 @@ mod tests {
 
     #[cfg(feature = "git")]
     #[tokio::test]
-    async fn terminal_turn_admission_records_baseline_before_changes()
+    async fn terminal_turn_records_prompt_and_reviews_changes()
     -> Result<(), Box<dyn std::error::Error>> {
         use crate::test_support::TestRepository;
         let repository = TestRepository::new()?;
@@ -1990,7 +1985,20 @@ mod tests {
         core.projects.insert(project.id.clone(), project.clone());
         let mut task = Task::draft(project.id.clone(), "task", repository.path());
         task.state = crate::TaskState::Ready;
-        task.worktree_path = Some(repository.path().to_path_buf());
+        let base_branch = &repository.repository().default_branch;
+        let worktree = repository
+            .repository()
+            .git_dir
+            .join("shepherd/worktrees/task");
+        crate::git::GitService.create_worktree(
+            repository.repository(),
+            &worktree,
+            "task",
+            base_branch,
+        )?;
+        task.worktree_path = Some(worktree.clone());
+        task.base_branch = Some(base_branch.clone());
+        task.branch = Some("task".into());
         core.store.save_task(&task).await?;
         let id = task.id.clone();
         core.tasks.insert(id.clone(), task);
@@ -2015,8 +2023,7 @@ mod tests {
                     submitting_core.lock().await.task(&submitting_id)?.state,
                     crate::TaskState::Working
                 );
-                repository
-                    .write_file("README.md", "changed\n")
+                std::fs::write(worktree.join("README.md"), "changed\n")
                     .map_err(|error| HarnessError::Protocol(error.to_string()))?;
                 Ok(())
             },

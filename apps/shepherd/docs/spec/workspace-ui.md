@@ -520,7 +520,9 @@ current layout and give future changes a point of comparison.
   on the project row when that row stands in for a project's single
   conversation. Keep an attention dot on the selected task's composer. Review
   rows have a ring and **Needs review** badge. Keep the composer enabled for
-  follow-up prompts while a task is in review.
+  follow-up prompts while a task is in review. After a turn, request review
+  only when the task has file changes against its base branch, including
+  uncommitted changes. Recheck an existing review when its chat is opened.
 - Keep the task state out of the conversation header; the sidebar row, review
   badge and status bar carry it, so the header stays usable for chatting. The
   header has no bottom border.

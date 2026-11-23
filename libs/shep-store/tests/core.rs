@@ -3746,8 +3746,7 @@ async fn cancelling_keeps_the_worktree_and_the_session() -> Result<(), Box<dyn s
 }
 
 #[tokio::test]
-async fn later_turns_compare_content_in_an_already_dirty_worktree()
--> Result<(), Box<dyn std::error::Error>> {
+async fn review_tracks_changes_against_the_base_branch() -> Result<(), Box<dyn std::error::Error>> {
     let repository = TestRepository::new()?;
     let edit = |contents: &str| {
         FakeTurn::new(vec![FakeStep::WriteFile {
@@ -3770,7 +3769,7 @@ async fn later_turns_compare_content_in_an_already_dirty_worktree()
             ]),
             edit("first edit\n"),
             FakeTurn::new(vec![]),
-            edit("second edit\n"),
+            edit("initial\n"),
         ]])),
     );
     let project_id = add_project(&mut core, repository.path().to_path_buf()).await?;
@@ -3786,8 +3785,8 @@ async fn later_turns_compare_content_in_an_already_dirty_worktree()
     for (text, expected) in [
         ("Try an edit and restore it", TaskState::Ready),
         ("Edit", TaskState::Review),
-        ("Explain", TaskState::Ready),
-        ("Edit again", TaskState::Review),
+        ("Explain", TaskState::Review),
+        ("Undo the edit", TaskState::Ready),
     ] {
         let workspace = workspace_of(
             core.execute(Command::SendPrompt {
@@ -3798,6 +3797,9 @@ async fn later_turns_compare_content_in_an_already_dirty_worktree()
         );
         assert_eq!(workspace.task.state, expected, "{text}");
     }
+    core.tasks.get_mut(&task_id).ok_or("missing task")?.state = TaskState::Review;
+    let reopened = core.open_task_workspace(&task_id).await?;
+    assert_eq!(reopened.task.state, TaskState::Ready);
     Ok(())
 }
 

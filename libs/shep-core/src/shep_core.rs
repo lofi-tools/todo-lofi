@@ -46,7 +46,7 @@ pub use snapshots::{
 };
 pub use tasks::{Agent, AgentTier, Task, TaskDetail, TaskId, TaskState, TaskSummary};
 
-use crate::git::{GitError, GitService, TurnBaseline};
+use crate::git::{GitError, GitService};
 use crate::harness::{HarnessFactory, HarnessSession, ProjectApprovals, UnavailableHarnessFactory};
 use crate::session::SessionRecord;
 use crate::snapshots::TaskApproval;
@@ -254,7 +254,6 @@ pub struct Core {
     #[doc(hidden)]
     pub sessions: BTreeMap<TaskId, HarnessSession>,
     detached_transcripts: BTreeMap<TaskId, Transcript>,
-    turn_baselines: BTreeMap<TaskId, TurnBaseline>,
     review_notes: BTreeMap<TaskId, QueuedReviewNote>,
     queued_prompts: BTreeMap<TaskId, VecDeque<PromptInput>>,
     /// The newest durable session per task, kept across restarts so resume can
@@ -425,7 +424,6 @@ impl Core {
             workspace_layouts: BTreeMap::new(),
             sessions: BTreeMap::new(),
             detached_transcripts: BTreeMap::new(),
-            turn_baselines: BTreeMap::new(),
             review_notes: BTreeMap::new(),
             queued_prompts: BTreeMap::new(),
             session_records: BTreeMap::new(),
@@ -1843,6 +1841,17 @@ impl Core {
     ) -> Result<TaskWorkspace, CoreError> {
         self.touch_archived_worktree(task_id).await?;
         self.restore_task_transcript(task_id).await?;
+        if self.task(task_id)?.state == TaskState::Review {
+            match self.state_after_completed_turn(task_id) {
+                Ok(TaskState::Ready) => {
+                    self.set_task_state(task_id, TaskState::Ready)?;
+                    self.save_task(task_id).await?;
+                    return self.publish_task(task_id);
+                }
+                Ok(_) => {}
+                Err(error) => tracing::warn!(%task_id, %error, "could not recheck task review"),
+            }
+        }
         self.task_workspace(task_id)
     }
 
@@ -2349,7 +2358,6 @@ impl Core {
         }
         self.detached_transcripts.remove(task_id);
         self.session_records.remove(task_id);
-        self.turn_baselines.remove(task_id);
         self.review_notes.remove(task_id);
         self.queued_prompts.remove(task_id);
         self.terminals
@@ -2889,8 +2897,6 @@ impl Core {
                     metadata: None,
                 });
             }
-            let baseline = GitService.turn_baseline(path)?;
-            self.turn_baselines.insert(task_id.clone(), baseline);
         }
         self.set_task_state(task_id, TaskState::Working)?;
         if let Some(task) = self.tasks.get_mut(task_id) {
@@ -2928,7 +2934,6 @@ impl Core {
             // A session that never started leaves the task ready to retry; the
             // failure row is already in its transcript.
             self.set_task_state(task_id, TaskState::Ready)?;
-            self.turn_baselines.remove(task_id);
             if let Some(task) = self.tasks.get_mut(task_id) {
                 task.error = Some(error.to_string());
             }
@@ -2951,7 +2956,6 @@ impl Core {
         let events = match outcome {
             Ok(events) => events,
             Err(error) => {
-                self.turn_baselines.remove(task_id);
                 let events = self
                     .sessions
                     .get_mut(task_id)
@@ -3997,7 +4001,8 @@ impl Core {
                         }
                         Err(error) => {
                             next_state = Some(TaskState::Failed);
-                            task_error = Some(format!("could not compare turn changes: {error}"));
+                            task_error =
+                                Some(format!("could not check changes for review: {error}"));
                         }
                     },
                     TurnFinishReason::Cancelled => next_state = Some(TaskState::Ready),
@@ -4062,9 +4067,6 @@ impl Core {
                 note.ready =
                     turn_completed && matches!(state, TaskState::Ready | TaskState::Review);
             }
-            if !state.is_live() {
-                self.turn_baselines.remove(task_id);
-            }
             let task = self
                 .tasks
                 .get_mut(task_id)
@@ -4094,18 +4096,15 @@ impl Core {
         Ok(())
     }
 
-    fn state_after_completed_turn(&mut self, task_id: &TaskId) -> Result<TaskState, CoreError> {
-        let Some(baseline) = self.turn_baselines.remove(task_id) else {
-            return Ok(TaskState::Ready);
-        };
+    fn state_after_completed_turn(&self, task_id: &TaskId) -> Result<TaskState, CoreError> {
         let task = self.task(task_id)?;
-        let Some(worktree_path) = task.worktree_path.as_ref() else {
+        if task.worktree_path.is_none() || task.base_branch.is_none() {
             return Ok(TaskState::Ready);
-        };
-        if GitService.turn_baseline(worktree_path)? != baseline {
-            Ok(TaskState::Review)
-        } else {
+        }
+        if self.review_snapshot(task_id)?.files.is_empty() {
             Ok(TaskState::Ready)
+        } else {
+            Ok(TaskState::Review)
         }
     }
 
