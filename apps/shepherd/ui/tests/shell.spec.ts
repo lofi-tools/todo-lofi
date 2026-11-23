@@ -1556,7 +1556,7 @@ test.beforeEach(async ({ context }) => {
             return [
               { id: 'terminal-setup', command: '', cwd: task.worktreePath, live: true, setupTitle: 'Development environment setup' },
               ...(sentPrompts.length ? [{
-                id: 'terminal-agent-launch', command: 'codex app-server',
+                id: 'terminal-agent-launch', agent: 'codex', command: 'codex app-server',
                 cwd: task.worktreePath, live: true,
               }] : []),
             ]
@@ -2465,7 +2465,10 @@ test('shows configured setup runs and the foreground agent terminal', async ({ p
   await page.evaluate(() => localStorage.setItem('fixture.setupReady', 'true'))
   await send.click()
   await expect.poll(() => page.evaluate(() => window.__sentPrompts)).toEqual([{ taskId: 'task-2', text: 'Use the dev shell' }])
-  const agent = page.getByRole('list', { name: 'Terminals' }).getByRole('button', { name: 'Agent launch' })
+  const tabs = page.getByRole('list', { name: 'Terminals' })
+  const agent = tabs.getByRole('button', { name: 'Agent launch' })
+  await expect(tabs.getByRole('button').first()).toHaveAccessibleName('Agent launch')
+  await expect(agent.locator('svg.agent-mark')).toBeVisible()
   await agent.click()
   const launch = page.getByRole('region', { name: 'Agent launch terminal' })
   await expect(launch).toContainText('codex app-server')

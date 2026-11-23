@@ -338,6 +338,7 @@ struct WorktreeSetupTerminal {
 struct AgentLaunch {
     id: String,
     task_id: String,
+    agent: Agent,
     command: String,
     cwd: PathBuf,
     live: Arc<AtomicBool>,
@@ -349,6 +350,8 @@ struct AgentLaunch {
 #[serde(rename_all = "camelCase")]
 pub struct AgentLaunchSnapshot {
     id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    agent: Option<Agent>,
     command: String,
     cwd: PathBuf,
     live: bool,
@@ -360,6 +363,7 @@ struct AgentProcessStore {
     terminal_host: Option<TerminalHost>,
     store: Arc<OnceLock<Arc<dyn Store>>>,
     task_id: String,
+    agent: Agent,
     leases: Option<Arc<crate::orphan_process::ProcessLeases>>,
     token: String,
     command: String,
@@ -377,7 +381,7 @@ impl agent_harness::AgentProcessTracker for AgentProcessStore {
             let Some(host) = &self.terminal_host else {
                 return Ok(None);
             };
-            host.open_agent_terminal(&self.task_id, &self.command, cwd)
+            host.open_agent_terminal(&self.task_id, self.agent, &self.command, cwd)
                 .await
                 .map(Some)
         }
@@ -462,6 +466,7 @@ impl TerminalHost {
     pub(crate) fn agent_process_tracker(
         &self,
         task_id: &TaskId,
+        agent: Agent,
         token: String,
         command: String,
     ) -> Arc<dyn agent_harness::AgentProcessTracker> {
@@ -469,6 +474,7 @@ impl TerminalHost {
             terminal_host: Some(self.clone()),
             store: self.process_store.clone(),
             task_id: task_id.to_string(),
+            agent,
             leases: self.process_leases.get().cloned(),
             token,
             command,
@@ -527,6 +533,7 @@ impl TerminalHost {
     async fn open_agent_terminal(
         &self,
         task_id: &str,
+        agent: Agent,
         command: &str,
         cwd: &Path,
     ) -> Result<agent_harness::ForegroundTerminal, String> {
@@ -595,6 +602,7 @@ impl TerminalHost {
         launches.push(AgentLaunch {
             id,
             task_id: task_id.into(),
+            agent,
             command: command.into(),
             cwd: cwd.into(),
             live: live.clone(),
@@ -647,6 +655,7 @@ impl TerminalHost {
         if let Some(setup) = self.worktree_setups.lock().await.get(&TaskId::new(task_id)) {
             launches.push(AgentLaunchSnapshot {
                 id: setup.id.as_str().into(),
+                agent: None,
                 command: String::new(),
                 cwd: setup.checkout.clone(),
                 live: self.setup_is_running(&setup.id).await,
@@ -661,6 +670,7 @@ impl TerminalHost {
                 .filter(|launch| launch.task_id == task_id)
                 .map(|launch| AgentLaunchSnapshot {
                     id: launch.id.clone(),
+                    agent: Some(launch.agent),
                     command: launch.command.clone(),
                     cwd: launch.cwd.clone(),
                     live: launch.live.load(Ordering::Acquire),
@@ -6166,7 +6176,7 @@ mod tests {
         let state = state_with(Core::new());
         let host = &state.terminals;
         let launch = host
-            .open_agent_terminal("test-task", "fixture", directory.path())
+            .open_agent_terminal("test-task", Agent::Codex, "fixture", directory.path())
             .await?;
         let mut command = tokio::process::Command::new("/bin/sh");
         command
@@ -6523,6 +6533,7 @@ mod tests {
                     .insert(agent_harness::PROCESS_TOKEN_ENV.into(), token.clone());
                 harness.set_process_tracker(self.host.agent_process_tracker(
                     task,
+                    agent,
                     token,
                     agent_harness::command_line(&spec),
                 ));
@@ -8556,6 +8567,7 @@ mod tests {
             .map_err(|_| "store already set")?;
         let tracker = AgentProcessStore {
             terminal_host: None,
+            agent: Agent::Codex,
             store: slot,
             task_id: "task-fixture".into(),
             token: String::new(),
@@ -8589,6 +8601,7 @@ mod tests {
             .map_err(|_| "store already set")?;
         let tracker = AgentProcessStore {
             terminal_host: None,
+            agent: Agent::Codex,
             store: slot,
             task_id: "task-fixture".into(),
             token: String::new(),
@@ -8700,6 +8713,7 @@ mod tests {
             .map_err(|_| "store already set")?;
         let tracker = Arc::new(AgentProcessStore {
             terminal_host: None,
+            agent: Agent::Codex,
             store: slot,
             task_id: "task-fixture".into(),
             token: String::new(),
@@ -8848,6 +8862,7 @@ mod tests {
                 .map_err(|_| "store already set")?;
             let tracker = Arc::new(AgentProcessStore {
                 terminal_host: None,
+                agent: Agent::Codex,
                 store: slot,
                 task_id: "crash-task".into(),
                 token: String::new(),

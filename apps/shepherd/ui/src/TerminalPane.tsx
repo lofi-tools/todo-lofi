@@ -10,6 +10,7 @@ import { isTauri } from '@tauri-apps/api/core'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 
 import * as bridge from './bridge'
+import { AgentIcon } from './AgentIcon'
 import { FreebuffMark } from './FreebuffMark'
 import { PickerMenu } from './PickerMenu'
 import { SegmentedControl } from './SegmentedControl'
@@ -641,6 +642,32 @@ export function TerminalPane(props: TerminalPaneProps) {
     onCleanup(() => { disposed = true })
   })
 
+  function launchTab(id: string) {
+    return <Show when={launchEntries().find((entry) => entry.id === id)}>
+      {(entry) => {
+        let tab!: HTMLButtonElement
+        const label = () => entry().setupTitle ?? 'Agent launch'
+        const agent = () => entry().agent ?? props.agent
+        const hint = () => {
+          const kind = agent()
+          return entry().setupTitle ?? (kind ? `${bridge.AGENT_LABELS[kind]} · Agent launch` : label())
+        }
+        return <li class="terminal-list__row">
+          <button ref={tab} type="button" class="terminal-list__item"
+            classList={{ 'terminal-list__item--agent': !entry().setupTitle }}
+            aria-current={id === visibleLaunch()?.id ? 'true' : undefined}
+            aria-label={label()} title={hint()}
+            onClick={() => { setSelectedLaunch(id); if (entry().live) setFocusRequest({ id }) }}>
+            <Show when={entry().setupTitle} fallback={<AgentIcon agent={agent() ?? ''} />}>
+              {(title) => <span>{title()}</span>}
+            </Show>
+          </button>
+          <TerminalActionsMenu title={label()} cwd={entry().cwd} disabled={pending()} contextOnly contextTarget={() => tab} />
+        </li>
+      }}
+    </Show>
+  }
+
   return (
     <div ref={terminalPane} class="terminal-pane" onPointerMove={dragMove}
       onPointerUp={(event) => { if (dragPointer?.id === event.pointerId) finishDrag(true) }}
@@ -667,6 +694,22 @@ export function TerminalPane(props: TerminalPaneProps) {
         </div>
       </Show>
         <ul class="terminal-list" aria-label="Terminals">
+        <For each={typeShown('task') ? launchEntries().filter((entry) => !entry.setupTitle).reverse().map(({ id }) => id) : []}>
+          {launchTab}
+        </For>
+        <For each={typeShown('task') ? liveAgentTerminals().filter((entry) => agentPaneVisible(entry.id)) : []}>
+          {(entry) => (
+            <li class="terminal-list__row">
+              <button type="button" class="terminal-list__item terminal-list__item--agent"
+                aria-label={`agent: ${entry.title}`} title={`agent: ${entry.title}`} onClick={() => {
+                setAgentPaneVisible(entry.id, true)
+                setFocusRequest({ id: entry.id })
+              }}>
+                <AgentIcon agent={props.agent ?? ''} />
+              </button>
+            </li>
+          )}
+        </For>
         <For each={listed()}>
           {(entry) => {
             let tab!: HTMLButtonElement
@@ -696,33 +739,8 @@ export function TerminalPane(props: TerminalPaneProps) {
             </button>
           </li>
         </Show>
-        <For each={typeShown('task') ? liveAgentTerminals().filter((entry) => agentPaneVisible(entry.id)) : []}>
-          {(entry) => (
-            <li>
-              <button type="button" class="terminal-list__item" onClick={() => {
-                setAgentPaneVisible(entry.id, true)
-                setFocusRequest({ id: entry.id })
-              }}>
-                <span>agent: {entry.title}</span>
-              </button>
-            </li>
-          )}
-        </For>
-        <For each={typeShown('task') ? launchEntries().map((entry) => entry.id) : []}>
-          {(id) => <Show when={launchEntries().find((entry) => entry.id === id)}>
-            {(entry) => {
-              let tab!: HTMLButtonElement
-              return <li class="terminal-list__row">
-                <button ref={tab} type="button" class="terminal-list__item"
-                  aria-current={id === visibleLaunch()?.id ? 'true' : undefined}
-                  onClick={() => { setSelectedLaunch(id); if (entry().live) setFocusRequest({ id }) }}>
-                  <span>{entry().setupTitle ?? 'Agent launch'}</span>
-                </button>
-                <TerminalActionsMenu title={entry().setupTitle ?? 'Agent launch'} cwd={entry().cwd}
-                  disabled={pending()} contextOnly contextTarget={() => tab} />
-              </li>
-            }}
-          </Show>}
+        <For each={typeShown('task') ? launchEntries().filter((entry) => !!entry.setupTitle).map(({ id }) => id) : []}>
+          {launchTab}
         </For>
         </ul>
       <Show when={typeShown('task') && props.shown && props.taskHasWorktree ? props.taskId : undefined} keyed>

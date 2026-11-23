@@ -3226,6 +3226,10 @@ button.pool__agent-label { padding: 0; border: 0; background: transparent; color
   white-space: nowrap;
 }
 
+.terminal-list__item--agent {
+  padding-inline: 6px;
+}
+
 .terminal-list__item[aria-current='true'] {
   border-color: var(--border);
   background: var(--surface-raised);

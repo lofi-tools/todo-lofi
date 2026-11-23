@@ -929,6 +929,7 @@ export interface SetupRun {
 }
 
 export interface AgentLaunch {
+  agent?: Agent
   setupTitle?: string
   id: string
   command: string

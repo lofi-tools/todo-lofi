@@ -149,6 +149,7 @@ impl HarnessFactory for DesktopHarnessFactory {
             .insert(agent_harness::PROCESS_TOKEN_ENV.into(), token.clone());
         harness.set_process_tracker(self.terminals.agent_process_tracker(
             task_id,
+            agent,
             token,
             agent_harness::command_line(&spec),
         ));
