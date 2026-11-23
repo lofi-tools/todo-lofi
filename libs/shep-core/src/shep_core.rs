@@ -521,13 +521,7 @@ impl Core {
             core.save_task(&task_id).await?;
         }
 
-        for mut terminal in core.store.load_terminals().await? {
-            // An old PTY is not attached to this instance, even if its process
-            // survived the previous instance.
-            if terminal.ended_at.is_none() {
-                terminal.ended_at = Some(crate::projects::now_millis());
-                core.store.save_terminal(&terminal).await?;
-            }
+        for terminal in core.store.load_terminals().await? {
             core.terminals.insert(terminal.id.clone(), terminal);
         }
 
@@ -536,6 +530,18 @@ impl Core {
                 core.terminal_layouts.insert(project, layout);
             } else {
                 tracing::warn!(%project, "ignored invalid terminal layout");
+            }
+        }
+        // The old PTYs cannot be reattached, and their scrollback is gone.
+        // Keep Freebuff's record for its dedicated conversation restart control.
+        for mut terminal in core.terminals.values().cloned().collect::<Vec<_>>() {
+            if terminal.scope != TerminalScope::Freebuff {
+                core.remove_terminal_record(&terminal.id, &terminal.project_id)
+                    .await?;
+            } else if terminal.ended_at.is_none() {
+                terminal.ended_at = Some(crate::projects::now_millis());
+                core.store.save_terminal(&terminal).await?;
+                core.terminals.insert(terminal.id.clone(), terminal);
             }
         }
         core.recover_worktree_deletions().await?;
@@ -877,8 +883,7 @@ impl Core {
         Ok(())
     }
 
-    /// Terminal records for one project, oldest first. An ended terminal stays
-    /// listed so the shell can show it as ended with its exit code.
+    /// Terminal records for one project, oldest first.
     pub fn terminals_for(&self, project_id: &ProjectId) -> Vec<TerminalSnapshot> {
         let mut terminals: Vec<&TerminalRecord> = self
             .terminals
@@ -1251,11 +1256,7 @@ impl Core {
             return Ok(());
         }
 
-        // A quit keeps its ended records so the next launch can show the saved
-        // layout with a restart. Freebuff and preview sessions also retain
-        // their records so their output remains available after exit.
-        if self.shutdown != ShutdownState::Running
-            || seen.scope == TerminalScope::Freebuff
+        if seen.scope == TerminalScope::Freebuff
             || seen.id.as_str().starts_with("shepherd-preview:")
         {
             let mut terminal = seen.clone();
@@ -1269,7 +1270,9 @@ impl Core {
         }
 
         let project_id = seen.project_id.clone();
-        self.remove_terminal_record(terminal_id, project_id).await
+        self.remove_terminal_record(terminal_id, &project_id).await?;
+        self.publish_terminal_list(&project_id);
+        Ok(())
     }
 
     pub async fn remove_ended_terminal(
@@ -1282,16 +1285,18 @@ impl Core {
                 id: terminal_id.as_str().to_string(),
             });
         }
-        self.remove_terminal_record(terminal_id, terminal.project_id)
-            .await
+        self.remove_terminal_record(terminal_id, &terminal.project_id)
+            .await?;
+        self.publish_terminal_list(&terminal.project_id);
+        Ok(())
     }
 
     async fn remove_terminal_record(
         &mut self,
         terminal_id: &TerminalId,
-        project_id: ProjectId,
+        project_id: &ProjectId,
     ) -> Result<(), CoreError> {
-        let mut layout = self.terminal_layout(&project_id)?;
+        let mut layout = self.terminal_layout(project_id)?;
         let previous = layout.root.clone();
         let removed = std::collections::BTreeSet::from([terminal_id.as_str().to_owned()]);
         layout.root = layout.root.and_then(|root| root.without(&removed));
@@ -1303,13 +1308,12 @@ impl Core {
                 .ok_or(CoreError::TerminalLayoutChanged)?;
         }
         self.store
-            .delete_terminal(terminal_id, changed.then_some((&project_id, &layout)))
+            .delete_terminal(terminal_id, changed.then_some((project_id, &layout)))
             .await?;
         self.terminals.remove(terminal_id);
         if changed {
             self.terminal_layouts.insert(project_id.clone(), layout);
         }
-        self.publish_terminal_list(&project_id);
         Ok(())
     }
 

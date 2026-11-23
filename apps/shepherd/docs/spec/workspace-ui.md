@@ -75,8 +75,10 @@ current layout and give future changes a point of comparison.
   while retaining its working directory. The header menu also offers **Copy
   working directory** for task and project terminals. Open the same menu with
   the ellipsis button or by right-clicking the terminal tab or header.
-  Terminal exit removes the record and updates its saved layout in one transaction;
-  terminal list updates carry the matching saved layout in one snapshot. If an
+  When a task or project shell exits, remove its tab and pane. Delete its record
+  and update the saved layout in one transaction. At startup, prune shells left
+  over from the previous app run and preserve the selected inspector tab.
+  Terminal list updates carry the matching saved layout in one snapshot. If an
   edit races a newer snapshot, reload it and automatically reapply safe actions
   without replacing concurrent pane changes.
   The segmented control is the reusable `SegmentedControl` component: a weak track
@@ -85,25 +87,24 @@ current layout and give future changes a point of comparison.
   another terminal moves it to that side, with a preview of the resulting space;
   Escape cancels the drag. Alt and the arrow keys move a focused handle toward a
   neighbouring terminal. Preset arrangements remain available from the command
-  palette. A close icon at the right of each terminal header terminates a live
-  process and removes its pane; on an ended terminal it removes the saved record
-  and pane. The icon follows Restart when both are shown.
+  palette. A close icon at the right of each terminal header terminates its
+  process and removes its pane.
   Split from the pane rather than the toolbar: a full-height **+** on the right
   edge splits right and a full-width **+** on the bottom edge splits down. Reveal
   them while the pane is hovered or focused, keep them out of the Tab order, and
   keep the palette commands as the keyboard path.
   Show ACP terminals for the selected task as interactive **agent: <title>**
   panes. Use the same terminal input and a close control that stops the process
-  and removes the pane. Released agent panes disappear when the turn settles.
+  and removes the pane. Agent panes also disappear when their processes exit.
   Terminal input focus accents the outer pane border, including its header.
   The terminal surface fills the card below its header with a small inset
   around the grid. When display scale changes, redraw the canvas at the new
   pixel density even if the terminal has no new output. Align the bitmap to
   physical pixels while preserving the terminal's grid and text size.
-  Show the project's standalone Freebuff session as one **Freebuff** row in the
-  Terms list with its live or ended state and an attention dot when it exits while
-  another agent is in front. An ended terminal has an icon-only **Restart**
-  control at the right end of its own header, with a menu-card tooltip.
+  Show the project's running standalone Freebuff session as one **Freebuff** row
+  in the Terminals list. The inspector tab shows an attention dot when the
+  session exits in the background. The Freebuff conversation surface keeps the
+  icon-only **Restart** control in its header, with a menu-card tooltip.
   Down from the Terminals tab focuses the first live pane's **Close terminal**
   button. Arrow keys on live pane header buttons move between adjacent live
   panes. Up from a pane with no live pane above it returns to the Terminals

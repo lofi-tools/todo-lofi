@@ -148,6 +148,8 @@ impl From<CoreError> for BridgeError {
         }
         let code = if matches!(error, CoreError::TerminalLayoutChanged) {
             "terminal_layout_changed"
+        } else if matches!(error, CoreError::InvalidTerminalLayout) {
+            "invalid_terminal_layout"
         } else if matches!(
             error,
             CoreError::ProjectSetup(_) | CoreError::StartTaskSetup { .. }

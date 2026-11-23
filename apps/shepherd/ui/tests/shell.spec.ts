@@ -493,6 +493,16 @@ test.beforeEach(async ({ context }) => {
         second: { type: 'pane', terminalId: 'terminal-2' },
       } }
     }
+    if (options.has('saved-ended-terminal')) {
+      terminals[1] = { ...terminals[1], exitCode: null }
+      terminalLayout = {
+        revision: 1, inspectorTab: 'terminals', root: {
+          type: 'split', axis: 'horizontal', ratio: 500,
+          first: { type: 'pane', terminalId: 'terminal-1' },
+          second: { type: 'pane', terminalId: 'terminal-2' },
+        },
+      }
+    }
     if (options.has('missing-terminal')) {
       terminalLayout = {
         ...terminalLayout,
@@ -1461,6 +1471,14 @@ test.beforeEach(async ({ context }) => {
               : { revision: 0, root: null, inspectorTab: otherInspectorTabs.get(args.projectId) ?? 'terminals' }
           case 'save_terminal_layout':
             terminalLayoutSaves++
+            if (options.has('exit-during-terminal-layout-save')) {
+              const index = terminals.findIndex((terminal) => terminal.id === 'terminal-early-exit')
+              if (index >= 0) {
+                terminals.splice(index, 1)
+                terminalRevision++
+                throw { code: 'invalid_terminal_layout', message: 'terminal layout references a missing terminal' }
+              }
+            }
             if (options.has('terminal-layout-race') && args.layout.revision !== terminalLayout.revision) {
               throw { code: 'terminal_layout_changed', message: 'the terminal layout changed; reload it before editing' }
             }
@@ -1515,17 +1533,17 @@ test.beforeEach(async ({ context }) => {
               return { projectId: project.id, revision: terminalRevision, terminals: [...terminals] }
             }
             if (options.has('early-terminal-exit')) {
-              const id = args.terminalId ?? 'terminal-early-exit'
-              const running = { ...terminals[0], id, title: 'Short-lived shell' }
-              const remaining = terminals.filter((terminal) => terminal.id !== id)
-              const live = { projectId: project.id, revision: 1, terminals: [...remaining, running] }
-              const ended = { ...running, endedAt: 1_760_000_300_000, exitCode: 23 }
+              const running = { ...terminals[0], id: 'terminal-early-exit', title: 'Short-lived shell' }
+              terminals.push(running)
+              const live = { projectId: project.id, revision: ++terminalRevision, terminals: [...terminals], layout: terminalLayout }
               window.__replayTerminalList = () => window.__emitCoreEvent({ type: 'terminalListChanged', data: live })
+              if (options.has('exit-during-terminal-layout-save')) return live
               return new Promise((resolve) => {
                 window.__finishTerminalLaunch = () => {
+                  terminals.pop()
                   window.__emitCoreEvent({
                     type: 'terminalListChanged',
-                    data: { projectId: project.id, revision: 2, terminals: [...remaining, ended] },
+                    data: { projectId: project.id, revision: ++terminalRevision, terminals: [...terminals], layout: terminalLayout },
                   })
                   resolve(live)
                 }
@@ -4842,10 +4860,13 @@ test('shows an ended Freebuff session instead of forwarding keys', async ({ page
   await terminalOption.click()
 
   const freebuff = page.getByRole('region', { name: 'Freebuff terminal' })
+  const tab = page.getByRole('list', { name: 'Terminals' }).getByRole('button', { name: 'Freebuff', exact: true })
   await expect(freebuff.getByRole('textbox', { name: 'Terminal', exact: true })).toBeVisible()
+  await expect(tab).toBeVisible()
   await page.evaluate(() => (window as unknown as { __endFreebuff: () => void }).__endFreebuff())
 
   await expect(freebuff).toContainText('Ended with exit code 130')
+  await expect(tab).toHaveCount(0)
   const restart = freebuff.getByRole('button', { name: 'Restart' })
   await expect(restart).toBeVisible()
   await expect(page.getByRole('list', { name: 'Terminals' }).getByRole('button', { name: 'Restart' })).toHaveCount(0)
@@ -6455,23 +6476,22 @@ test('keeps concurrently added panes while retrying a terminal open', async ({ p
   await expect(page.locator('.error-toast')).toHaveCount(0)
 })
 
-for (const restart of [false, true]) {
-  test(`keeps an immediate terminal exit after ${restart ? 'restart' : 'start'}`, async ({ page }) => {
-    await page.goto('/?early-terminal-exit')
-    if (restart) {
-      await page.getByRole('button', { name: 'Terminal 2', exact: true }).click()
-      await page.getByRole('button', { name: 'Restart' }).click()
-    } else {
-      await page.getByRole('button', { name: 'New terminal' }).click()
+for (const duringSave of [false, true]) {
+  test(`drops a short-lived shell ${duringSave ? 'while opening its pane' : 'before start returns'}`, async ({ page }) => {
+    await page.goto(duringSave ? '/?early-terminal-exit&exit-during-terminal-layout-save' : '/?early-terminal-exit')
+    const create = page.getByRole('button', { name: 'New terminal' })
+    await create.click()
+    if (!duringSave) {
+      await page.waitForFunction(() => typeof window.__finishTerminalLaunch === 'function')
+      await page.evaluate(() => window.__finishTerminalLaunch())
     }
-    await page.waitForFunction(() => typeof window.__finishTerminalLaunch === 'function')
-    await page.evaluate(() => window.__finishTerminalLaunch())
-    const pane = page.getByRole('region', { name: 'Short-lived shell' })
-    await expect(pane).toContainText('Ended with exit code 23')
-    await expect(pane.getByRole('button', { name: 'Restart' })).toBeEnabled()
+    await expect(create).toBeEnabled()
     await page.evaluate(() => window.__replayTerminalList())
-    await expect(pane).toContainText('Ended with exit code 23')
-    await expect(pane.getByRole('textbox')).toHaveCount(0)
+    await expect(page.getByRole('button', { name: 'Short-lived shell', exact: true })).toHaveCount(0)
+    await expect(page.getByRole('region', { name: 'Short-lived shell', exact: true })).toHaveCount(0)
+    await expect(page.getByRole('region', { name: 'Terminal 1', exact: true })).toBeVisible()
+    await expect(page.locator('.error-toast')).toHaveCount(0)
+    expect(await page.evaluate(() => (window as unknown as { __terminalLayoutSaves: () => number }).__terminalLayoutSaves())).toBe(duringSave ? 1 : 0)
   })
 }
 
@@ -6721,12 +6741,18 @@ test('shows an interactive ACP terminal only for its owning task', async ({ page
   await page.getByRole('button', { name: /Other task/ }).click()
   await expect(pane).toHaveCount(0)
   await expect(shared).toBeVisible()
-  await page.getByRole('button', { name: /Ship it/ }).click()
-  await pane.getByRole('button', { name: 'Close terminal' }).click()
-  await expect.poll(() => page.evaluate(() => window.__closedTerminals)).toContain(terminal.id)
+  await page.getByRole('button', { name: 'Ship it', exact: true }).click()
+  await expect(pane).toBeVisible()
+  await publish([{ ...terminal, live: false }])
   await expect(pane).toHaveCount(0)
   await expect(page.getByRole('button', { name: 'agent: Run tests' })).toHaveCount(0)
-  await publish([{ ...terminal, live: false, exitCode: 7 }])
+  const another = { ...terminal, id: 'agent-fixture-2' }
+  await publish([another])
+  await pane.getByRole('button', { name: 'Close terminal' }).click()
+  await expect.poll(() => page.evaluate(() => window.__closedTerminals)).toContain(another.id)
+  await expect(pane).toHaveCount(0)
+  await expect(page.getByRole('button', { name: 'agent: Run tests' })).toHaveCount(0)
+  await publish([{ ...another, live: false, exitCode: 7 }])
   await expect(pane).toHaveCount(0)
   await publish([])
   await expect(pane).toHaveCount(0)
@@ -6891,16 +6917,13 @@ test('closes a running terminal and removes its pane and tab', async ({ page }) 
   expect(await page.evaluate(() => (window as unknown as { __terminalLayout: () => TerminalLayout }).__terminalLayout().root)).toEqual({ type: 'pane', terminalId: 'terminal-1' })
 })
 
-test('shows the ended terminal status and closes its pane', async ({ page }) => {
-  await page.goto('/')
-  await page.getByRole('button', { name: 'Terminal 2', exact: true }).click()
-  const pane = page.getByRole('region', { name: 'Terminal 2', exact: true })
-  await expect(pane).toContainText(/ended with exit code 0/i)
-  await expect(pane.getByRole('button', { name: 'Restart' })).toBeVisible()
-  await pane.getByRole('button', { name: 'Close terminal' }).click()
-  await expect(pane).toHaveCount(0)
-  await expect(page.getByRole('button', { name: 'Terminal 2', exact: true })).toHaveCount(0)
-  await expect.poll(() => page.evaluate(() => window.__closedTerminals)).toContain('terminal-2')
+test('skips an ended terminal still referenced by the saved layout', async ({ page }) => {
+  await page.goto('/?saved-ended-terminal')
+  const terminals = page.getByRole('tabpanel', { name: 'Terminals' })
+  await expect(terminals.getByRole('region', { name: 'Terminal 1', exact: true }).getByRole('textbox')).toBeVisible()
+  await expect(terminals.getByRole('button', { name: 'Terminal 2', exact: true })).toHaveCount(0)
+  await expect(terminals.getByRole('region', { name: 'Terminal 2', exact: true })).toHaveCount(0)
+  await expect(terminals.getByRole('region', { name: 'Unavailable terminal' })).toHaveCount(0)
 })
 
 test('rearranges terminals with a preview of the final drop area', async ({ page }) => {

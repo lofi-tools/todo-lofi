@@ -788,6 +788,7 @@ async function exerciseTaskSwitch(project: bridge.ProjectSnapshot, shared: bridg
     await openInspectorTab('terminals')
     const start = await newTerminal('Task')
     start.click()
+    ;(await enabledButton('Both')).click()
   }
   await waitFor('three terminal canvases', () => document.querySelectorAll('.terminal-view__canvas').length === 3)
   const scoped = (await bridge.terminalList(project.id)).terminals.find((entry) => entry.taskId === task.id)
@@ -1089,18 +1090,20 @@ time.sleep(60)`
 
 async function exerciseStopProcess(terminal: bridge.TerminalSnapshot) {
   await startHangupResistantJobs(terminal, 'stop')
-  const paneButton = (label: string) => waitFor(`${label} in the task terminal`, () =>
-    Array.from(terminalPane(terminal.title)?.querySelectorAll('button') ?? [])
-      .find((entry) => entry.textContent === label && !entry.disabled))
-  const stop = await paneButton('Stop process')
-  stop.click()
-  const restart = await paneButton('Restart')
-  restart.click()
-  await typeIntoTerminal(terminal, "printf 'S4_%s\\n' STOP_RESTARTED")
-  await waitFor('fresh output after stopping and restarting the task terminal', () => {
-    const pane = terminalPane(terminal.title)
-    return pane && terminalOutput(pane).split('\n').some((line) => line.trim() === 'S4_STOP_RESTARTED')
+  const close = await waitFor('close in the task terminal', () =>
+    terminalPane(terminal.title)?.querySelector<HTMLButtonElement>('button[aria-label="Close terminal"]:enabled'))
+  close.click()
+  await waitFor('stopped terminal removed from the pane and terminal list', async () =>
+    !terminalPane(terminal.title) && !(await bridge.terminalList(terminal.projectId)).terminals.some((entry) => entry.id === terminal.id))
+  ;(await newTerminal('Task')).click()
+  const replacement = await waitFor('a new task terminal', async () =>
+    (await bridge.terminalList(terminal.projectId)).terminals.find((entry) => entry.taskId === terminal.taskId && entry.id !== terminal.id))
+  await typeIntoTerminal(replacement, "printf 'S4_%s\\n' STOP_REPLACED")
+  await waitFor('fresh output in the replacement terminal', () => {
+    const pane = terminalPane(replacement.title)
+    return pane && terminalOutput(pane).split('\n').some((line) => line.trim() === 'S4_STOP_REPLACED')
   })
+  ;(await enabledButton('Both')).click()
 }
 
 async function quitDuringCodexTurn() {
@@ -1266,51 +1269,33 @@ async function restore() {
   if ((await bridge.attachmentLimit(project.id)).bytes !== 20_000) {
     throw new Error('The project attachment limit was not restored')
   }
-  const terminals = (await bridge.terminalList(project.id)).terminals.filter((entry) => entry.scope === 'project')
-  const [first] = terminals
-  if (!first || terminals.length !== 2 || terminals.some((entry) => entry.endedAt === null)) {
-    throw new Error('Both terminal records should be restored as ended')
-  }
+  const { terminals } = await bridge.terminalList(project.id)
+  if (terminals.length) throw new Error('Terminals from the previous app run should be removed')
   const layout = await bridge.terminalLayout(project.id)
-  if (layout.root?.type !== 'split') throw new Error('The split layout was not restored')
-  await waitFor('Git tab selected after relaunch', () =>
+  if (layout.root) throw new Error('The saved split should no longer reference stopped terminals')
+  await waitFor('Files tab selected after relaunch', () =>
     document.querySelector('#inspector-tab-files[aria-selected="true"]'))
   await openInspectorTab('terminals')
 
-  const restart = await waitFor('restored terminal restart action', () => {
-    const pane = terminalPane(first.title)
-    return pane && Array.from(pane.querySelectorAll('button')).find((entry) => entry.textContent === 'Restart' && !entry.disabled)
-  })
-  restart.click()
-  if (windowChecks) {
-    await waitFor('restarted terminal frame', () => terminalPane(first.title)?.querySelector<HTMLCanvasElement>('canvas')?.style.height)
-  }
-  await typeIntoTerminal(first, 'echo S4_RESTORED')
-  const { terminals: reopened } = await bridge.terminalList(project.id)
-  if (!reopened.some((entry) => entry.id === first.id && entry.endedAt === null)) {
-    throw new Error('Restart should reuse the restored terminal ID')
-  }
+  ;(await newTerminal('Project')).click()
+  const shared = await waitFor('a new project terminal', async () =>
+    (await bridge.terminalList(project.id)).terminals.find((entry) => entry.scope === 'project'))
+  await typeIntoTerminal(shared, 'echo S4_RESTORED')
   await waitFor('fresh PTY output after restore', () => {
-    const pane = terminalPane(first.title)
+    const pane = terminalPane(shared.title)
     return pane && terminalOutput(pane).split('\n').some((line) => line.trim() === 'S4_RESTORED')
   })
-  const scoped = (await bridge.terminalList(project.id)).terminals.find((entry) => entry.scope === 'task')
-  const task = (await bridge.taskList(project.id)).tasks.find((entry) => entry.id === scoped?.taskId)
-  if (!task?.worktreePath || !scoped || scoped.cwd !== task.worktreePath || scoped.endedAt === null) {
-    throw new Error('The task terminal should restore as ended with its worktree')
-  }
+
+  const task = (await bridge.taskList(project.id)).tasks.find((entry) => entry.title !== INTERRUPTED_TASK && entry.worktreePath)
+  if (!task?.worktreePath) throw new Error('The original task worktree should survive relaunch')
   await selectTask(task.title)
-  const restartTask = await waitFor('restored task terminal restart action', () => {
-    const pane = terminalPane(scoped.title)
-    return pane && Array.from(pane.querySelectorAll('button')).find((entry) => entry.textContent === 'Restart' && !entry.disabled)
-  })
-  restartTask.click()
-  if (windowChecks) {
-    await waitFor('restarted task terminal frame', () => terminalPane(scoped.title)?.querySelector<HTMLCanvasElement>('canvas')?.style.height)
-  }
+  ;(await newTerminal('Task')).click()
+  const scoped = await waitFor('a new terminal in the restored task', async () =>
+    (await bridge.terminalList(project.id)).terminals.find((entry) => entry.taskId === task.id))
+  if (scoped.cwd !== task.worktreePath) throw new Error('The task terminal should start in the restored worktree')
   await typeIntoTerminal(scoped, "printf 'S4_%s:%s\\n' TASK_RESTORED \"${PWD##*/}\"")
   const marker = 'S4_TASK_RESTORED:' + task.worktreePath.split('/').at(-1)
-  await waitFor('worktree output after task terminal restart', () => {
+  await waitFor('worktree output after starting a new task terminal', () => {
     const pane = terminalPane(scoped.title)
     return pane && terminalOutput(pane).includes(marker)
   })
@@ -1331,7 +1316,7 @@ async function restore() {
     return entry && document.activeElement === entry && entry.querySelector('mark')?.textContent === 'disposable'
       && entry.textContent?.includes(WORKTREE_PROMPT)
   })
-  return { ok: true, restoredLayout: true, restartedTerminal: true, restartedTaskTerminal: true,
+  return { ok: true, clearedOldTerminals: true, openedProjectTerminal: true, openedTaskTerminal: true,
     resumedInterruptedTask: true, restoredTaskSearch: true }
 }
 

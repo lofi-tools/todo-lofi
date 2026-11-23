@@ -249,9 +249,8 @@ detailed treatment of its controls as the rest of the shell is built.
 - On quit, confirmed or not: cancel turns where supported, close agent stdin,
   send `SIGTERM` to each agent process group, wait up to 2 s, then `SIGKILL`;
   close PTYs; mark working tasks **interrupted**; flush the database.
-- Next launch: task workspaces and tasks restore, interrupted tasks offer **Resume**,
-  terminals appear as **ended** with their last cwd and command and a restart
-  action. Nothing claims to have survived that did not.
+- Next launch: task workspaces and tasks restore, interrupted tasks offer
+  **Resume**, and old shell records and their panes are removed.
 - If the app crashes instead of quitting, the same interrupted state is applied on
   next launch, and leftover agent PIDs recorded with their start time are offered
   for termination. A reused PID is not killed.
@@ -1231,7 +1230,7 @@ is bounded (scrollback, stderr, search results, per-task event queue).
 | Milestone | Deliverable | Acceptance |
 | --- | --- | --- |
 | **M0** | Task-workspace shell, project registry, schema, palette, status bar, settings files, quit flow | Add two projects and restart to verify both persist with their last task workspaces and trees. Compose opens a draft in the chosen project. Its menu can reveal archived tasks. The selected project shows a flat list and switching projects collapses the previous list. A missing last task opens a draft. Settings and keybindings survive restart in the config directory. A malformed file falls back to defaults with a banner. The palette lists commands with their bindings and disabled reasons. Quitting with nothing running is instant. A missing path is flagged. |
-| **M1** | Fixed task workspace, terminal service, project terminal layout, worktree per task | Split the Terminals tab and resize it; switch tasks and keep a shared terminal mounted; a task terminal disappears with its task and returns on reselect; the terminal layout is saved per project; chat and inspector cannot be torn apart; closing a terminal view keeps it running; quitting with a working agent warns and stops it within 2 s; restart shows ended terminals in their task workspaces and restarts them; the first send creates a worktree under the Git directory |
+| **M1** | Fixed task workspace, terminal service, project terminal layout, worktree per task | Split the Terminals tab and resize it; switch tasks and keep a shared terminal mounted; a task terminal disappears with its task and returns on reselect; the terminal layout is saved per project; chat and inspector cannot be torn apart; closing a terminal view keeps it running; quitting with a working agent warns and stops it within 2 s; restart clears ended shell records and panes; the first send creates a worktree under the Git directory |
 | **M2** | Codex native adapter end to end | A prompt streams into the transcript with tool rows; approvals follow the agent's review mode; cancel stops the turn; resume works by thread ID; a finished turn with changes lands in **needs review**, a chat-only turn returns to **ready**, and both archive and review-note actions work; approval cards show a diff when the adapter or worktree provides one and say when they cannot; adapter item IDs map to canonical entries and ordering holds after reconnect; an archived worktree unused for 30 days is removed and reopens from its branch or tip; quitting mid-turn marks the task interrupted |
 | **M3** | OpenCode adapter, ACP path (Claude Code), standalone Freebuff terminal | OpenCode and ACP produce a correct transcript. A fixture verifies that Freebuff opens a plain terminal in the conversation region. |
 | **M4** | Files, Git and preview panes | Tree respects ignore rules; badges update; stage, unstage, commit with hooks and signing, history and branch checkout work; a failing hook preserves the message; squash-merge is disabled on a dirty or off-base root and lists conflict paths with a terminal action; preview loads the project URL and element annotations add structured context, with screenshot fallback when injection is blocked |

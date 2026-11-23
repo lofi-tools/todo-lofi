@@ -5596,15 +5596,7 @@ async fn terminal_layout_round_trips_and_rejects_stale_or_foreign_panes()
         .await,
         Err(CoreError::InvalidTerminalLayout)
     ));
-    drop(core);
-
-    let store = TursoStore::open_at(&database).await?;
-    let reopened = Core::load(Box::new(store), Box::new(UnavailableHarnessFactory)).await?;
-    assert_eq!(reopened.terminal_layout(&project)?, saved);
-    assert_eq!(
-        reopened.terminal_layout(&foreign)?,
-        TerminalLayout::default()
-    );
+    assert_eq!(core.store.load_terminal_layouts().await?, vec![(project, saved)]);
     Ok(())
 }
 
@@ -5618,10 +5610,9 @@ async fn restoring_a_missing_terminal_keeps_the_other_panes()
     let store = TursoStore::open_at(&database).await?;
     let mut core = Core::with_services(Box::new(store), Box::new(UnavailableHarnessFactory));
     let project = add_project(&mut core, directory.path().to_path_buf()).await?;
-    core.record_terminal(&TerminalRecord::project_shared(
+    core.record_terminal(&TerminalRecord::freebuff(
         TerminalId::new("kept"),
         project.clone(),
-        "Kept",
         directory.path().to_path_buf(),
         "/bin/sh",
         1,
@@ -5686,30 +5677,56 @@ async fn restoring_a_missing_terminal_keeps_the_other_panes()
 }
 
 #[tokio::test]
-async fn a_terminal_record_is_ended_after_a_restart() -> Result<(), Box<dyn std::error::Error>> {
+async fn restart_removes_old_shell_records_and_panes() -> Result<(), Box<dyn std::error::Error>> {
     let directory = TestDirectory::new()?;
     let database = directory.join("shepherd.db");
-    let store = shep_store::TursoStore::open_at(&database).await?;
+    let store = TursoStore::open_at(&database).await?;
     let mut core = Core::with_services(Box::new(store), Box::new(UnavailableHarnessFactory));
     let project_id = add_project(&mut core, directory.path().to_path_buf()).await?;
 
-    let terminal = TerminalRecord::project_shared(
-        TerminalId::new("terminal-1"),
-        project_id.clone(),
-        "Terminal 1".to_string(),
-        directory.path().to_path_buf(),
-        "/bin/zsh".to_string(),
-        1_000,
-    );
-    core.record_terminal(&terminal).await?;
+    for (name, ended_at) in [("running", None), ("legacy-ended", Some(2))] {
+        let mut terminal = TerminalRecord::project_shared(
+            TerminalId::new(name),
+            project_id.clone(),
+            name,
+            directory.path().to_path_buf(),
+            "/bin/sh",
+            1,
+        );
+        terminal.ended_at = ended_at;
+        core.record_terminal(&terminal).await?;
+    }
+    let pane = |name: &str| Box::new(TerminalSplit::Pane { terminal_id: name.into() });
+    core.save_inspector_tab(&project_id, InspectorTab::Review)
+        .await?;
+    let saved = core
+        .save_terminal_layout(
+            &project_id,
+            TerminalLayout {
+                root: Some(TerminalSplit::Split {
+                    axis: SplitAxis::Horizontal,
+                    ratio: 500,
+                    first: pane("running"),
+                    second: pane("legacy-ended"),
+                }),
+                ..TerminalLayout::default()
+            },
+        )
+        .await?;
     drop(core);
 
-    let store = shep_store::TursoStore::open_at(&database).await?;
+    let store = TursoStore::open_at(&database).await?;
     let reloaded = Core::load(Box::new(store), Box::new(UnavailableHarnessFactory)).await?;
-    let terminals = reloaded.terminals_for(&project_id);
-    assert_eq!(terminals.len(), 1);
-    assert!(terminals[0].ended_at.is_some());
-    assert_eq!(terminals[0].exit_code, None);
+    assert!(reloaded.terminal_list(&project_id).terminals.is_empty());
+    let layout = reloaded.terminal_layout(&project_id)?;
+    assert!(layout.root.is_none());
+    assert!(layout.revision > saved.revision);
+    assert_eq!(layout.inspector_tab, InspectorTab::Review);
+    assert!(reloaded.store.load_terminals().await?.is_empty());
+    assert_eq!(
+        reloaded.store.load_terminal_layouts().await?,
+        vec![(project_id, layout)]
+    );
     Ok(())
 }
 

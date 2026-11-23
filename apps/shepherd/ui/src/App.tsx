@@ -742,7 +742,8 @@ export function App() {
   const [terminalAttention, setTerminalAttention] = createSignal<TerminalBell[]>([])
   const [focusedTerminal, setFocusedTerminal] = createSignal<string | null>(null)
   const projectAttention = () => terminalAttention().filter((bell) => bell.projectId === selectedProjectId())
-  const tabAttention = () => projectAttention().some((bell) => bell.taskId === null || bell.taskId === selectedTaskId())
+  const tabAttention = () => freebuffAttention()
+    || projectAttention().some((bell) => bell.taskId === null || bell.taskId === selectedTaskId())
 
   function focusTerminal(id: string | null) {
     setFocusedTerminal(id)
@@ -3548,7 +3549,7 @@ export function App() {
                   transcript={workspace()?.transcript}
                   agentTerminals={workspace()?.task.id === selectedTaskId() && workspace()?.capabilities?.agentTerminals ? workspace()?.agentTerminals : undefined}
                   listEvent={terminalListEvent()} setupTerminalRequest={setupTerminalRequest()} shown={!settingsOpen() && inspectorTab() === 'terminals'}
-                  freebuffFront={!!freebuffProjectId()} freebuffAttention={freebuffAttention()}
+                  freebuffFront={!!freebuffProjectId()}
                   onOpenFreebuff={() => {
                     const projectId = selectedProjectId()
                     if (projectId) void openFreebuff(projectId)

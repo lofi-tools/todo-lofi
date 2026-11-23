@@ -106,8 +106,9 @@ direnv exec . ./scripts/smoke-shepherd-terminal.sh
 On macOS the default smoke and the `--codex-*` modes launch a hidden window
 without activating Shepherd. The terminal smoke checks shell input and output,
 bracketed paste, and terminal continuity while switching tasks or projects.
-The second launch checks the saved split and inspector tab,
-restarts shared and task terminals, and resumes the interrupted task.
+The second launch checks that the inspector tab restores and old terminal
+panes are removed, opens new shared and task terminals, and checks recovery of
+the interrupted task.
 
 Use the macOS window tests when the change affects the behavior they exercise.
 
