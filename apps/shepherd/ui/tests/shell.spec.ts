@@ -1044,6 +1044,9 @@ test.beforeEach(async ({ context }) => {
               throw { code: 'archive_confirmation_required', archiveToken: 'fixture-tip',
                 message: 'This conversation has commits that are not merged into main.' }
             }
+            if (options.has('archive-delayed') && task.id === 'task-second' && args.action.type === 'archiveConversation') {
+              await new Promise<void>((resolve) => window.addEventListener('release-conversation-archive', () => resolve(), { once: true }))
+            }
             const state = args.action.type === 'archiveConversation' ? 'done' : 'ready'
             if (options.has('archive-warning')) localStorage.setItem('fixture.archiveDone', String(state === 'done'))
             tasks[index] = { ...task, state }
@@ -5077,15 +5080,31 @@ test('keeps sidebar context gestures separate from navigation', async ({ page })
 })
 
 test('archives conversations from the sidebar and header and reopens a hidden chat', async ({ page }) => {
-  await page.goto('/?two-tasks')
+  await page.addInitScript(() => {
+    document.addEventListener('mousedown', (event) => {
+      if (event.target instanceof Element && event.target.closest('.project-menu [role="menuitem"]')?.textContent?.includes('Archive conversation')
+        && document.activeElement instanceof HTMLElement) {
+        document.activeElement.blur()
+      }
+    }, true)
+  })
+  await page.goto('/?two-tasks&archive-delayed')
   const chat = page.getByRole('region', { name: 'Task chat' })
   const ship = page.getByRole('button', { name: 'Ship it', exact: true })
   const second = page.getByRole('button', { name: 'Second chat', exact: true })
   await expect(chat.getByText('ready to go')).toBeVisible()
 
+  await ship.click({ button: 'right' })
+  await expect(ship).toHaveAttribute('aria-current', 'true')
+  await page.getByRole('menu', { name: 'Ship it' }).getByRole('menuitem', { name: 'Copy details' }).press('Escape')
+
   await second.click({ button: 'right' })
+  await expect(ship).toHaveAttribute('aria-current', 'true')
   await page.getByRole('menu', { name: 'Second chat' }).getByRole('menuitem', { name: 'Archive conversation' }).click()
+  await expect(page.getByRole('status').filter({ hasText: 'Archiving conversation' })).toBeVisible()
+  await page.evaluate(() => window.dispatchEvent(new Event('release-conversation-archive')))
   await expect(second).toHaveCount(0)
+  await expect(page.getByRole('status').filter({ hasText: 'Archiving conversation' })).toHaveCount(0)
   await expect(chat.getByText('ready to go')).toBeVisible()
 
   const actions = chat.getByRole('button', { name: 'Task actions' })

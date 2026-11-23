@@ -13,6 +13,7 @@ export function TaskRows(props: {
   currentTaskId: string | null
   selection: () => Set<string> | undefined
   disabled?: boolean
+  archivePending?: boolean
   mac: boolean
   needsTerminalAttention: (taskId: string) => boolean
   processCount: (taskId: string) => number
@@ -45,7 +46,7 @@ export function TaskRows(props: {
               <li ref={row} class="task-list__row"
                 on:contextmenu={(event) => openMenu(event, { x: event.clientX, y: event.clientY })}
                 onFocusOut={(event) => {
-                  if (!(event.relatedTarget instanceof Node && row.contains(event.relatedTarget))) closeMenu(false)
+                  if (event.relatedTarget instanceof Node && !row.contains(event.relatedTarget)) closeMenu(false)
                 }}>
                 <Show when={props.selection()}>
                   {(selection) => (
@@ -55,6 +56,7 @@ export function TaskRows(props: {
                 </Show>
                 <button ref={button} type="button" class={`task task--${task.state}`}
                   aria-current={task.id === props.currentTaskId ? 'true' : undefined}
+                  data-context-target={props.isMenuOpen(task.id) && !!menuCursor() && task.id !== props.currentTaskId ? '' : undefined}
                   aria-haspopup="menu"
                   aria-keyshortcuts="Shift+F10"
                   onKeyDown={(event) => { if (isSidebarMenuKey(event)) openMenu(event) }}
@@ -90,8 +92,11 @@ export function TaskRows(props: {
                 <Show when={props.isMenuOpen(task.id)}>
                   <SidebarMenu row={row} cursor={menuCursor()} label={task.title} onClose={closeMenu}
                     copyDetails={() => sidebarDetails(props.project, task, 'task')}>
-                    <ConversationArchiveItem state={task.state} pending={props.disabled}
-                      onClick={() => { closeMenu(true); props.onArchiveChange(task) }} />
+                    <ConversationArchiveItem state={task.state} pending={props.archivePending}
+                      onClick={() => {
+                        props.onArchiveChange(task)
+                        closeMenu(true)
+                      }} />
                   </SidebarMenu>
                 </Show>
               </li>

@@ -430,6 +430,7 @@ export function App() {
     })
   }
   const [archiveConfirmation, setArchiveConfirmation] = createSignal<string[]>()
+  const [archiveActivity, setArchiveActivity] = createSignal<'Archiving conversation…' | 'Reopening conversation…'>()
   const [conversationArchivePrompt, setConversationArchivePrompt] = createSignal<{
     task: Pick<bridge.TaskSummary, 'id' | 'projectId' | 'state'>
     token: string
@@ -1805,17 +1806,14 @@ export function App() {
     })
   }
 
-  function changeConversationArchive(task: Pick<bridge.TaskSummary, 'id' | 'projectId' | 'state'>, confirmationToken?: string) {
-    if (pending()) return
-    void run(async () => {
-      const reopening = task.state === 'done'
-      let updated: bridge.TaskWorkspace
-      try {
-        updated = await bridge.reviewTask(task.id, reopening ? { type: 'reopen' } : { type: 'archiveConversation', confirmationToken })
-      } catch (failure) {
-        const error = failure as bridge.BridgeError | null
-        if (error?.code !== 'archive_confirmation_required' || !error.archiveToken) throw failure
-        setConversationArchivePrompt({ task, token: error.archiveToken, message: error.message })
+  async function changeConversationArchive(task: Pick<bridge.TaskSummary, 'id' | 'projectId' | 'state'>, confirmationToken?: string) {
+    if (archiveActivity()) return
+    const reopening = task.state === 'done'
+    setArchiveActivity(reopening ? 'Reopening conversation…' : 'Archiving conversation…')
+    try {
+      const updated = await bridge.reviewTask(task.id, reopening ? { type: 'reopen' } : { type: 'archiveConversation', confirmationToken })
+      if (updated.task.id !== task.id || (updated.task.state === 'done') === reopening) {
+        setError(reopening ? 'Shepherd could not reopen this conversation.' : 'Shepherd could not archive this conversation.')
         return
       }
       const wasOpen = selectedProjectId() === task.projectId && selectedTaskId() === task.id
@@ -1840,7 +1838,16 @@ export function App() {
       const next = newestChats(listed.filter((entry) =>
         reviewOnly() ? entry.state === 'review' : entry.state !== 'done'))[0]
       if (next) await selectTask(next.id)
-    })
+    } catch (failure) {
+      const error = failure as bridge.BridgeError | null
+      if (error?.code === 'archive_confirmation_required' && error.archiveToken) {
+        setConversationArchivePrompt({ task, token: error.archiveToken, message: error.message })
+      } else {
+        setError(describe(failure))
+      }
+    } finally {
+      setArchiveActivity(undefined)
+    }
   }
 
   function abbreviateHome(path: string) {
@@ -2087,7 +2094,7 @@ export function App() {
   })
 
   createEffect(() => {
-    if (pending() || composingProjectId() === selectedProjectId() || searchJump()?.taskId === selectedTaskId()) return
+    if (pending() || archiveActivity() || composingProjectId() === selectedProjectId() || searchJump()?.taskId === selectedTaskId()) return
     const visible = visibleTasks()
     const [only] = visible
     if (visible.length === 1 && only && only.state !== 'done' && only.id !== selectedTaskId()) {
@@ -3104,6 +3111,7 @@ export function App() {
 
                     <Show when={listed().length}>
                       <TaskRows tasks={listed()} project={project} currentTaskId={selectedTaskId()} mac={mac} disabled={pending()}
+                        archivePending={!!archiveActivity()}
                         isMenuOpen={(taskId) => sidebarMenuId() === `task:${taskId}`}
                         onMenuOpenChange={(taskId, open) => changeSidebarMenu(`task:${taskId}`, open)}
                         processCount={(id) => runningProcesses(project.id, id).length}
@@ -3220,8 +3228,11 @@ export function App() {
                         onClick={() => { setHeaderMenu(undefined); setDiagnosticsOpen((open) => !open) }}>
                         Show diagnostics
                       </button>
-                      <ConversationArchiveItem state={current().task.state} pending={pending()}
-                        onClick={() => { setHeaderMenu(undefined); changeConversationArchive(current().task) }} />
+                      <ConversationArchiveItem state={current().task.state} pending={!!archiveActivity()}
+                        onClick={() => {
+                          void changeConversationArchive(current().task)
+                          setHeaderMenu(undefined)
+                        }} />
                       <button type="button" class="nav-item" role="menuitem"
                         disabled={pending() || LIVE_STATES.includes(current().task.state)}
                         onClick={() => { setHeaderMenu(undefined); setDeleteRequest(current().task) }}>
@@ -3665,7 +3676,9 @@ export function App() {
         }} /></Show>
       </WorkspaceFrame>
 
-      <div role="status" classList={{ 'settings-toast': !!settingsToast() }}>{settingsToast()}</div>
+      <div role="status" classList={{ 'workspace-toast': !!(archiveActivity() || settingsToast()) }}>
+        {archiveActivity() ?? settingsToast()}
+      </div>
       <Show when={settingsDeparture()} keyed>
         {(departure) => <Modal label="Unsaved edits" title="Unsaved edits" onClose={keepEditingSettings} initialFocus={() => keepEditingButton}>
           <p>Save or discard your changes before leaving this screen.</p>
@@ -3713,7 +3726,7 @@ export function App() {
               <button ref={cancel} type="button" class="project-action" onClick={() => setConversationArchivePrompt(undefined)}>Cancel</button>
               <button type="button" class="project-action" onClick={() => {
                 setConversationArchivePrompt(undefined)
-                changeConversationArchive(request.task, request.token)
+                void changeConversationArchive(request.task, request.token)
               }}>Archive conversation</button>
             </ModalActions>
           </Modal>

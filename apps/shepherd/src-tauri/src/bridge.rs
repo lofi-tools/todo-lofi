@@ -1744,14 +1744,42 @@ impl ShellState {
         }
     }
 
-    async fn close_archived_task_terminals(&self, workspace: TaskWorkspace) -> TaskWorkspace {
-        let task_id = TaskId::new(&workspace.task.id);
-        let project_id = ProjectId::new(&workspace.task.project_id);
-        let terminals = self
-            .core
-            .lock()
-            .await
-            .terminals_for(&project_id)
+    async fn review_task(
+        &self,
+        task_id: TaskId,
+        mut action: shep_core::ReviewAction,
+    ) -> Result<TaskWorkspace, BridgeError> {
+        let _terminal_guard = if matches!(
+            action,
+            shep_core::ReviewAction::ArchiveConversation { .. } | shep_core::ReviewAction::Reopen
+        ) {
+            Some(self.terminal_lifecycle.lock().await)
+        } else {
+            None
+        };
+        #[cfg(unix)]
+        if let shep_core::ReviewAction::ArchiveConversation { keep_worktree, .. } = &mut action
+            && let Some(setup) = self.terminals.worktree_setups.lock().await.get(&task_id)
+        {
+            *keep_worktree = self.terminals.setup_is_running(&setup.id).await;
+        }
+        #[cfg(not(unix))]
+        if let shep_core::ReviewAction::ArchiveConversation { keep_worktree, .. } = &mut action {
+            *keep_worktree = false;
+        }
+        self.workspace(Command::ReviewTask { task_id, action }).await
+    }
+
+    async fn close_archived_task_terminals(&self, task_id: TaskId) {
+        let _terminal_guard = self.terminal_lifecycle.lock().await;
+        let terminals = {
+            let core = self.core.lock().await;
+            let Ok(task) = core.task(&task_id) else { return };
+            if task.state != TaskState::Done {
+                return;
+            }
+            core.terminals_for(&task.project_id)
+        }
             .into_iter()
             .filter(|terminal| {
                 terminal.ended_at.is_none() && terminal.task_id.as_deref() == Some(task_id.as_str())
@@ -1788,17 +1816,11 @@ impl ShellState {
             }
         }
         let mut core = self.core.lock().await;
-        let result = if stopped && failure.is_none() {
-            match core.finish_archived_conversation_worktree(&task_id).await {
-                Ok(updated) => updated,
-                Err(error) => {
-                    failure = Some(error.to_string());
-                    workspace
-                }
-            }
-        } else {
-            workspace
-        };
+        if stopped && failure.is_none()
+            && let Err(error) = core.finish_archived_conversation_worktree(&task_id).await
+        {
+            failure = Some(error.to_string());
+        }
         Self::broadcast_core_events(&mut core, &self.events);
         if let Some(error) = failure {
             if let Err(error) = self.events.send(Event::Error {
@@ -1810,7 +1832,6 @@ impl ShellState {
                 tracing::warn!(%error, "could not publish the archive cleanup failure");
             }
         }
-        result
     }
 
     async fn git_read<T: Send + 'static>(
@@ -4794,7 +4815,7 @@ fn now_millis() -> u64 {
 /// The invoke commands. Each one delegates to [`ShellState`] so the behaviour is
 /// testable without a webview.
 pub mod commands {
-    use tauri::State;
+    use tauri::{AppHandle, Manager, State};
 
     use super::*;
 
@@ -5745,33 +5766,18 @@ pub mod commands {
 
     #[tauri::command]
     pub async fn review_task(
+        app: AppHandle,
         state: State<'_, ShellState>,
         task_id: String,
-        mut action: shep_core::ReviewAction,
+        action: shep_core::ReviewAction,
     ) -> Result<TaskWorkspace, BridgeError> {
         let task_id = TaskId::new(task_id);
-        let _terminal_guard =
-            if let shep_core::ReviewAction::ArchiveConversation { keep_worktree, .. } = &mut action
-            {
-                let guard = state.terminal_lifecycle.lock().await;
-                #[cfg(unix)]
-                if let Some(setup) = state.terminals.worktree_setups.lock().await.get(&task_id) {
-                    *keep_worktree = state.terminals.setup_is_running(&setup.id).await;
-                }
-                #[cfg(not(unix))]
-                {
-                    *keep_worktree = false;
-                }
-                Some(guard)
-            } else {
-                None
-            };
         let archiving = matches!(action, shep_core::ReviewAction::ArchiveConversation { .. });
-        let workspace = state
-            .workspace(Command::ReviewTask { task_id, action })
-            .await?;
+        let workspace = state.review_task(task_id.clone(), action).await?;
         if archiving {
-            return Ok(state.close_archived_task_terminals(workspace).await);
+            tauri::async_runtime::spawn(async move {
+                app.state::<ShellState>().close_archived_task_terminals(task_id).await;
+            });
         }
         Ok(workspace)
     }

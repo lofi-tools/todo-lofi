@@ -86,6 +86,11 @@ export function SidebarMenu(props: {
       classList={{ 'project-menu--at-cursor': !!props.cursor }}
       style={{ '--project-menu-left': `${position().left}px`, top: `${position().top}px` }}
       on:contextmenu={(event) => event.preventDefault()}
+      onMouseDown={(event) => {
+        if (event.button === 0 && event.target instanceof Element && event.target.closest(menuItems)) {
+          event.preventDefault()
+        }
+      }}
       onKeyDown={(event) => {
         if (event.key === 'Escape') {
           event.preventDefault()

@@ -982,6 +982,10 @@ textarea {
   font-weight: 600;
 }
 
+.task[data-context-target] {
+  background: color-mix(in srgb, var(--prompt-card) 52%, transparent);
+}
+
 .task__title {
   flex: 1;
   overflow: hidden;
@@ -3554,7 +3558,7 @@ button.pool__agent-label { padding: 0; border: 0; background: transparent; color
 }
 
 .error-toast,
-.settings-toast {
+.workspace-toast {
   position: fixed;
   z-index: 1000;
   inset-block-start: 52px;
@@ -3571,7 +3575,7 @@ button.pool__agent-label { padding: 0; border: 0; background: transparent; color
   color: var(--text);
 }
 
-.settings-toast {
+.workspace-toast {
   inset-block: auto 36px;
   border-color: var(--border);
 }
