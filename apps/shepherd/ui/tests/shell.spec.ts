@@ -1620,6 +1620,8 @@ test.beforeEach(async ({ context }) => {
               0, 0, 1, 0, 2, 0, 1, 234, 230, 230, 0, 22, 19, 19, 0, 1, 0, 0, 0, 66,
               2, 0, 0, 0, 2, 0, 0, 0,
             ])
+            if (args.terminalId === 'terminal-agent-launch') update[update.length - 9] = 'G'.charCodeAt(0)
+            if (args.terminalId === 'terminal-setup') update[update.length - 9] = 'S'.charCodeAt(0)
             if (options.has('kitty-terminal')) {
               new DataView(update.buffer).setUint32(14, (31 << 18) | 1025, true)
             }
@@ -2397,6 +2399,8 @@ test('shows configured setup runs and the foreground agent terminal', async ({ p
   await expect(page.getByRole('tab', { name: 'Terminals' })).toHaveAttribute('aria-selected', 'true')
   const setup = page.getByRole('region', { name: 'Development environment setup' })
   await expect(setup).toBeVisible()
+  await expect(setup.getByRole('textbox', { name: 'Terminal' })).toBeEditable()
+  await expect(setup.getByRole('region', { name: 'Terminal output' })).toHaveText('SS')
   await expect(page.getByRole('list', { name: 'Terminals' }).getByRole('button', { name: 'Development environment setup Running' })).toBeVisible()
   const runs = page.locator('.terminal-setup-runs')
   await expect(runs).toContainText('Waiting for the project configuration')
@@ -2405,9 +2409,17 @@ test('shows configured setup runs and the foreground agent terminal', async ({ p
   await expect.poll(() => page.evaluate(() => window.__sentPrompts)).toEqual([{ taskId: 'task-2', text: 'Use the dev shell' }])
   const agent = page.getByRole('list', { name: 'Terminals' }).getByRole('button', { name: 'Agent launch Running' })
   await agent.click()
-  await expect(page.getByRole('region', { name: 'Agent launch terminal' })).toContainText('codex app-server')
+  const launch = page.getByRole('region', { name: 'Agent launch terminal' })
+  await expect(launch).toContainText('codex app-server')
+  await expect(launch.getByRole('region', { name: 'Terminal output' })).toHaveText('GG')
+  await expect(launch.getByRole('textbox')).toHaveCount(0)
+  const writes = await page.evaluate(() => window.__writes.slice())
+  await launch.getByRole('region', { name: 'Agent logs' }).press('x')
+  expect(await page.evaluate(() => window.__writes)).toEqual(writes)
   await page.getByRole('list', { name: 'Terminals' }).getByRole('button', { name: 'Development environment setup Running' }).click()
   await expect(setup).toBeVisible()
+  await expect(setup.getByRole('region', { name: 'Terminal output' })).toHaveText('SS')
+  await expect(setup.getByRole('textbox', { name: 'Terminal' })).toBeEditable()
 })
 
 test('cancels stale task searches and focuses an archived hit across projects', async ({ page }) => {

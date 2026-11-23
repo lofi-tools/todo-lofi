@@ -230,8 +230,9 @@ current layout and give future changes a point of comparison.
   In this case, the saved setup script is read-only and project actions remain
   editable unless the repository also manages the environment setting.
 - Show foreground agent launches in the Terminals list from process startup.
-  Keep protocol streams separate from the interactive terminals, and keep
-  ended launch scrollback available during the current app session. Show
+  Show the agent's output in a read-only log pane. Keep protocol streams
+  separate and keep ended launch scrollback available during the current app
+  session. The development environment setup terminal stays interactive. Show
   historical captured output for imported setup commands in **Setup runs**.
 - In Preview, offer **Project settings** when the selected project has no
   preview URL. A valid `preview.url` in the project's `.config/shepherd/settings.json`

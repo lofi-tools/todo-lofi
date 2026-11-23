@@ -740,8 +740,10 @@ export function TerminalPane(props: TerminalPaneProps) {
               </div>
             </div>
             <Show when={entry().command}><code class="terminal-agent-launch__command" title={entry().cwd}>{entry().command}</code></Show>
-            <TerminalCanvas terminalId={entry().id} shown={props.shown} readOnly={!entry().live}
-              focusRequest={focusRequest()} onFocus={props.onTerminalFocus} />
+            <Show when={entry().id} keyed>
+              {(id) => <TerminalCanvas terminalId={id} shown={props.shown} readOnly={!entry().live}
+                outputOnly={!entry().setupTitle} focusRequest={focusRequest()} onFocus={props.onTerminalFocus} />}
+            </Show>
           </section>
         }}
       </Show>
@@ -1111,13 +1113,13 @@ function terminalPaintColors() {
   }
 }
 
-function TerminalCanvas(props: { terminalId: string; shown: boolean; readOnly?: boolean; focusRequest: { id: string } | undefined; onFocus?: (id: string | null) => void; onMeasure?: (size: TerminalSize) => void }) {
+function TerminalCanvas(props: { terminalId: string; shown: boolean; readOnly?: boolean; outputOnly?: boolean; focusRequest: { id: string } | undefined; onFocus?: (id: string | null) => void; onMeasure?: (size: TerminalSize) => void }) {
   const mac = navigator.platform.startsWith('Mac')
   const linux = navigator.platform.startsWith('Linux')
   function setError(message: string | null) {
     if (message) reportError('terminal', message)
   }
-  let input: HTMLTextAreaElement | undefined
+  let input: HTMLTextAreaElement | HTMLDivElement | undefined
   const [finding, setFinding] = createSignal(false)
   const [copyText, setCopyText] = createSignal<string | null>(null)
   const [visibleText, setVisibleText] = createSignal('')
@@ -1229,7 +1231,7 @@ function TerminalCanvas(props: { terminalId: string; shown: boolean; readOnly?: 
         input.style.left = `${left}px`
         input.style.top = `${top}px`
       }
-      if (linux && moved && !composing && !input.value && document.activeElement === input) {
+      if (linux && moved && !composing && input instanceof HTMLTextAreaElement && !input.value && document.activeElement === input) {
         // WebKitGTK reports the previous IME caret after CSS-only moves.
         input.value = ' '
         input.value = ''
@@ -1276,7 +1278,7 @@ function TerminalCanvas(props: { terminalId: string; shown: boolean; readOnly?: 
         if (cell.linked || cell.underline) context.fillRect(x, y + LINE_HEIGHT - 2, width, 1)
         if (cell.strikeout) context.fillRect(x, y + Math.floor(LINE_HEIGHT / 2), width, 1)
       }
-      if (current.cursorVisible && row === current.cursorRow) {
+      if (!props.outputOnly && current.cursorVisible && row === current.cursorRow) {
         const x = current.cursorColumn * cellWidth
         context.fillStyle = paintColors.cursor
         if (current.cursorStyle === 1) context.fillRect(x, y + LINE_HEIGHT - 2, cellWidth, 2)
@@ -1305,7 +1307,7 @@ function TerminalCanvas(props: { terminalId: string; shown: boolean; readOnly?: 
   function reportMouse(event: MouseEvent, button: number, action: 'press' | 'release' | 'move', repeat = 1, cell = cellAt(event)): boolean | undefined {
     // Only unhandled events fall through to local selection or scrolling.
     const current = frame
-    if (!current || !cell || !(current.modes & MOUSE_REPORTING)) return
+    if (props.outputOnly || !current || !cell || !(current.modes & MOUSE_REPORTING)) return
     if (action !== 'release' && (current.displayOffset || event.shiftKey)) return
     const position = `${cell.column},${cell.row}`
     if (action === 'move') {
@@ -1474,7 +1476,7 @@ function TerminalCanvas(props: { terminalId: string; shown: boolean; readOnly?: 
   }
 
   function queueInput(send: () => Promise<void>, bytes = 0, reservesRelease = false): boolean {
-    if (props.readOnly) return false
+    if (props.readOnly || props.outputOnly) return false
     // A press accepted before the queue fills still needs room for its release.
     const reservedReleases = reportedKeys.size + Number(!!mouseCapture) + Number(reservesRelease)
     if (pendingInputWrites + reservedReleases >= MAX_PENDING_INPUT_WRITES ||
@@ -1598,6 +1600,7 @@ function TerminalCanvas(props: { terminalId: string; shown: boolean; readOnly?: 
         return
       }
     }
+    if (props.outputOnly) return
     const modes = frame?.modes ?? 0
     if (event.metaKey && ['c', 'v'].includes(event.key.toLowerCase())) return
     if (event.ctrlKey && event.shiftKey && event.key.toLowerCase() === 'v') return
@@ -1782,7 +1785,7 @@ function TerminalCanvas(props: { terminalId: string; shown: boolean; readOnly?: 
       const count = Math.min(120, Math.abs(steps))
       if (!count) return
       if (reportMouse(event, steps < 0 ? 64 : 65, 'press', count) !== undefined) return
-      if (!event.shiftKey && (frame.modes & (ALT_SCREEN | ALTERNATE_SCROLL)) === (ALT_SCREEN | ALTERNATE_SCROLL)) {
+      if (!props.outputOnly && !event.shiftKey && (frame.modes & (ALT_SCREEN | ALTERNATE_SCROLL)) === (ALT_SCREEN | ALTERNATE_SCROLL)) {
         const prefix = frame.modes & APP_CURSOR ? '\x1bO' : '\x1b['
         write((prefix + (steps < 0 ? 'A' : 'B')).repeat(count))
       } else {
@@ -1824,8 +1827,14 @@ function TerminalCanvas(props: { terminalId: string; shown: boolean; readOnly?: 
         }}
         onLostPointerCapture={releaseMouse}
       />
+      <Show when={!props.outputOnly} fallback={
+        <div ref={(element) => { input = element }} class="terminal-view__input" role="region" aria-label="Agent logs"
+          aria-describedby={instructionsId} aria-keyshortcuts={mac ? 'Meta+Shift+X' : 'Control+Shift+X'}
+          tabIndex={copyText() === null ? 0 : -1} onKeyDown={onKeyDown} onCopy={onCopy}
+          onFocus={() => props.onFocus?.(props.terminalId)} onBlur={() => props.onFocus?.(null)} />
+      }>
       <textarea
-        ref={input}
+        ref={(element) => { input = element }}
         class="terminal-view__input"
         aria-label="Terminal"
         aria-describedby={instructionsId}
@@ -1872,6 +1881,7 @@ function TerminalCanvas(props: { terminalId: string; shown: boolean; readOnly?: 
           write(encodeTerminalText(value, frame?.modes ?? 0))
         }}
       />
+      </Show>
       <span id={instructionsId} class="terminal-view__instructions">
         Press {copyShortcut} for copy mode. From copy mode, Tab or Shift+Tab moves to another control.
       </span>

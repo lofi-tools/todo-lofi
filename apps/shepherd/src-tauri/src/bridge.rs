@@ -4400,20 +4400,8 @@ impl ShellState {
     ) -> Result<(), BridgeError> {
         let slot = self.screen_slot(&terminal_id).await?;
         #[cfg(unix)]
-        if let Some(launch) = self.terminals.agent_launch(&terminal_id).await {
-            use std::io::Write as _;
-            if !launch.live.load(Ordering::Acquire) {
-                return Ok(());
-            }
-            let bytes = data.into_bytes();
-            tokio::task::spawn_blocking(move || (&*launch.master).write_all(&bytes))
-                .await
-                .map_err(|error| BridgeError::new("terminal", error.to_string()))?
-                .map_err(|error| BridgeError::new("terminal", error.to_string()))?;
-            if follow_output {
-                slot.lock().await.follow_output();
-            }
-            return Ok(());
+        if self.terminals.agent_launch(&terminal_id).await.is_some() {
+            return Err(BridgeError::new("terminal", "Agent launch logs are read-only."));
         }
         let task_id = {
             let slot = slot.lock().await;
@@ -6068,19 +6056,19 @@ async fn pause_attachment_deletion_fixture(
 mod tests {
     #[cfg(unix)]
     #[tokio::test]
-    async fn agent_launch_terminal_has_a_tty_separate_from_the_protocol_pipes()
+    async fn agent_launch_logs_are_read_only_and_separate_from_the_protocol_pipes()
     -> Result<(), Box<dyn std::error::Error>> {
-        use std::io::Write as _;
         use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
         let directory = tempfile::tempdir()?;
-        let host = TerminalHost::default();
+        let state = state_with(Core::new());
+        let host = &state.terminals;
         let launch = host
             .open_agent_terminal("test-task", "fixture", directory.path())
             .await?;
         let mut command = tokio::process::Command::new("/bin/sh");
         command
-            .args(["-c", r#"test -t 2 || exit 4; printf 'wrapper ready\n' >/dev/tty; IFS= read -r typed </dev/tty; IFS= read -r message; printf '%s:%s\n' "$typed" "$message""#])
+            .args(["-c", r#"test -t 2 || exit 4; printf 'wrapper ready\n' >&2; IFS= read -r message; printf '%s\n' "$message""#])
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .current_dir(directory.path())
@@ -6093,20 +6081,22 @@ mod tests {
         let mut terminal_output = launch.output;
         let entries = host.agent_launches("test-task").await;
         let entry = entries.first().ok_or("launch terminal missing")?;
-        let terminal = host
-            .agent_launch(&entry.id)
-            .await
-            .ok_or("terminal disappeared")?;
+        let slot = state.screen_slot(&entry.id).await?;
 
         tokio::time::timeout(Duration::from_secs(5), async {
             let mut startup = [0; 14];
             terminal_output.read_exact(&mut startup).await?;
             assert!(String::from_utf8_lossy(&startup).contains("wrapper ready"));
-            (&*terminal.master).write_all(b"typed in terminal\n")?;
+            let screen = slot.lock().await.screen.frame();
+            let first_row = screen.cells.iter().take(screen.columns)
+                .map(|cell| cell.text.as_str()).collect::<String>();
+            assert!(first_row.starts_with("wrapper ready"));
+            let rejected = state.terminal_write(entry.id.clone(), TerminalInput::Text("unexpected".into()), true).await;
+            assert!(matches!(rejected, Err(error) if error.message == "Agent launch logs are read-only."));
             protocol_input.write_all(b"protocol request\n").await?;
             let mut response = String::new();
             protocol_output.read_to_string(&mut response).await?;
-            assert_eq!(response, "typed in terminal:protocol request\n");
+            assert_eq!(response, "protocol request\n");
             assert!(child.wait().await?.success());
             Ok::<_, std::io::Error>(())
         })
