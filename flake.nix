@@ -261,6 +261,7 @@
                   --watch apps/shepherd/src-tauri/tauri.conf.json \
                   --watch apps/shepherd/src-tauri/capabilities \
                   --watch libs/shep-core \
+                  --watch libs/shep-store \
                   --watch libs/agent-harness \
                   --watch libs/shep-harness-core \
                   --watch libs/shep-harness-acp \

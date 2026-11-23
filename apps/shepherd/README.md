@@ -78,7 +78,8 @@ and Ctrl-Shift-K on Linux. Search by command name or category. The palette
 shows each shortcut and explains unavailable actions.
 
 `shep` restarts the development process group when the shell or its local Rust
-dependencies change, so the previous app releases its database before the next
+dependencies change, including storage code and SQL migrations in
+`libs/shep-store`. The previous app releases its database before the next
 launch. Vite handles frontend changes; it also restarts with the app after a
 backend change. Non-interactive runners can use `direnv exec . shep` or
 `direnv exec . shep --test`.
