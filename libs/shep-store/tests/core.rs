@@ -3261,7 +3261,7 @@ async fn a_fake_task_runs_through_approval_quit_and_resume()
             })
             .await?,
     );
-    assert_eq!(workspace.task.state, TaskState::Review);
+    assert_eq!(workspace.task.state, TaskState::Ready);
     assert_eq!(scenario.core().waiting_task_title(&task_id)?, None);
     assert_eq!(
         summaries(&workspace),
