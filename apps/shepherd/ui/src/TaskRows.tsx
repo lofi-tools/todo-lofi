@@ -117,7 +117,7 @@ export function ConversationArchiveItem(props: { state: TaskState; pending?: boo
       <rect x="2" y="2" width="12" height="3.5" rx="1" />
       <path d="M3.5 5.5v7A1.5 1.5 0 0 0 5 14h6a1.5 1.5 0 0 0 1.5-1.5v-7M6 8.5h4" />
     </svg>
-    {archived() ? 'Reopen conversation' : 'Archive conversation'}
+    {archived() ? 'Reopen conversation' : 'Archive chat'}
   </button>
 }
 

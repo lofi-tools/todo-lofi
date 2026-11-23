@@ -431,6 +431,7 @@ export function App() {
   }
   const [archiveConfirmation, setArchiveConfirmation] = createSignal<string[]>()
   const [archiveActivity, setArchiveActivity] = createSignal<'Archiving conversation…' | 'Reopening conversation…'>()
+  const [optimisticallyArchivedChatId, setOptimisticallyArchivedChatId] = createSignal<string>()
   const [conversationArchivePrompt, setConversationArchivePrompt] = createSignal<{
     task: Pick<bridge.TaskSummary, 'id' | 'projectId' | 'state'>
     token: string
@@ -592,7 +593,8 @@ export function App() {
     return (path ? preferences()?.projects[path]?.['tasks.show_archived'] : undefined)
       ?? preferences()?.app['tasks.show_archived'] ?? false
   }
-  const visibleTasks = () => tasks().filter((task) => showsArchived(selectedProjectId()) || task.state !== 'done')
+  const visibleTasks = () => tasks().filter((task) =>
+    task.id !== optimisticallyArchivedChatId() && (showsArchived(selectedProjectId()) || task.state !== 'done'))
   const sidebarTasks = createMemo(() => newestChats(visibleTasks()))
 
   function openProjectSettings(projectId: string) {
@@ -1353,7 +1355,8 @@ export function App() {
     })
   })
   const reviewCount = createMemo(() => projects().reduce((count, project) => count + (project.reviewTaskCount ?? 0), 0))
-  const filteredReviewTasks = (projectId: string) => newestChats(reviewLists().get(projectId) ?? [])
+  const filteredReviewTasks = (projectId: string) => newestChats(
+    (reviewLists().get(projectId) ?? []).filter((task) => task.id !== optimisticallyArchivedChatId()))
   const reviewRows = () => projects().flatMap((project) => filteredReviewTasks(project.id))
   const selectedReviewIds = () => reviewRows().filter((task) => reviewSelection().has(task.id)).map((task) => task.id)
   const sidebarSelection = () => reviewOnly() ? reviewSelection() : undefined
@@ -1809,36 +1812,61 @@ export function App() {
   async function changeConversationArchive(task: Pick<bridge.TaskSummary, 'id' | 'projectId' | 'state'>, confirmationToken?: string) {
     if (archiveActivity()) return
     const reopening = task.state === 'done'
-    setArchiveActivity(reopening ? 'Reopening conversation…' : 'Archiving conversation…')
+    const hidingOpenChat = !reopening && selectedProjectId() === task.projectId && selectedTaskId() === task.id
+    const previousWorkspace = hidingOpenChat ? workspace() : undefined
+    const previousJump = hidingOpenChat ? searchJump() : undefined
+    const composingProject = composingProjectId()
+    const nextChat = hidingOpenChat ? newestChats(tasks().filter((entry) =>
+      entry.id !== task.id && (reviewOnly() ? entry.state === 'review' : entry.state !== 'done')))[0] : undefined
+    let saved = false
+
+    batch(() => {
+      setArchiveActivity(reopening ? 'Reopening conversation…' : 'Archiving conversation…')
+      if (reopening) return
+      setOptimisticallyArchivedChatId(task.id)
+      if (!hidingOpenChat) return
+      if (nextChat) {
+        void selectTask(nextChat.id)
+      } else {
+        setSelectedTaskId(null)
+        setWorkspace(null)
+        setOpeningTaskId(null)
+        setSearchJump(undefined)
+      }
+    })
     try {
       const updated = await bridge.reviewTask(task.id, reopening ? { type: 'reopen' } : { type: 'archiveConversation', confirmationToken })
       if (updated.task.id !== task.id || (updated.task.state === 'done') === reopening) {
-        setError(reopening ? 'Shepherd could not reopen this conversation.' : 'Shepherd could not archive this conversation.')
-        return
+        throw new Error(reopening ? 'Shepherd could not reopen this conversation.' : 'Shepherd could not archive this conversation.')
       }
-      const wasOpen = selectedProjectId() === task.projectId && selectedTaskId() === task.id
-      if (wasOpen) {
-        if (reopening) {
-          setWorkspace(updated)
-        } else {
-          batch(() => {
-            setSelectedTaskId(null)
-            setWorkspace(null)
-            setSearchJump(undefined)
-          })
-        }
-      }
+      saved = true
       if (selectedProjectId() === task.projectId) {
+        if (reopening && selectedTaskId() === task.id) setWorkspace(updated)
         setTasks((current) => current.map((entry) =>
           entry.id === task.id ? { ...entry, state: updated.task.state, branch: updated.task.branch,
             worktreePath: updated.task.worktreePath, archiveUnmerged: updated.task.archiveUnmerged } : entry))
       }
-      const listed = await loadTasks(task.projectId)
-      if (reopening || !wasOpen || selectedProjectId() !== task.projectId || selectedTaskId() !== null) return
-      const next = newestChats(listed.filter((entry) =>
-        reviewOnly() ? entry.state === 'review' : entry.state !== 'done'))[0]
-      if (next) await selectTask(next.id)
+      if (!reopening) {
+        setReviewLists((lists) => new Map(lists).set(task.projectId,
+          (lists.get(task.projectId) ?? []).filter((entry) => entry.id !== task.id)))
+      }
+      await loadTasks(task.projectId)
     } catch (failure) {
+      if (!saved && hidingOpenChat && selectedProjectId() === task.projectId
+        && selectedTaskId() === (nextChat?.id ?? null) && composingProjectId() === composingProject) {
+        if (previousWorkspace) {
+          batch(() => {
+            setSelectedTaskId(task.id)
+            setWorkspace(previousWorkspace)
+            setOpeningTaskId(null)
+            setTaskOpenFailure(null)
+            setSearchJump(previousJump)
+          })
+        } else {
+          setOptimisticallyArchivedChatId(undefined)
+          void selectTask(task.id)
+        }
+      }
       const error = failure as bridge.BridgeError | null
       if (error?.code === 'archive_confirmation_required' && error.archiveToken) {
         setConversationArchivePrompt({ task, token: error.archiveToken, message: error.message })
@@ -1846,7 +1874,10 @@ export function App() {
         setError(describe(failure))
       }
     } finally {
-      setArchiveActivity(undefined)
+      batch(() => {
+        setOptimisticallyArchivedChatId(undefined)
+        setArchiveActivity(undefined)
+      })
     }
   }
 
@@ -1872,6 +1903,7 @@ export function App() {
   }
 
   async function selectTask(taskId: string) {
+    if (taskId === optimisticallyArchivedChatId()) return
     setSearchJump(undefined)
     setSelectedTaskId(taskId)
     setTaskUnread(taskId, false)
@@ -1919,7 +1951,8 @@ export function App() {
       await selectTask(taskId)
       return
     }
-    const visible = listed.filter((task) => task.state !== 'done' || (preferNewest && showsArchived(project.id)))
+    const visible = listed.filter((task) =>
+      task.id !== optimisticallyArchivedChatId() && (task.state !== 'done' || (preferNewest && showsArchived(project.id))))
     const task = preferNewest
       ? newestChats(visible)[0]
       : project.lastTaskId
@@ -3719,7 +3752,7 @@ export function App() {
       <Show when={conversationArchivePrompt()} keyed>
         {(request) => {
           let cancel!: HTMLButtonElement
-          return <Modal label="Archive conversation" title="Archive conversation?" onClose={() => setConversationArchivePrompt(undefined)}
+          return <Modal label="Archive chat" title="Archive chat?" onClose={() => setConversationArchivePrompt(undefined)}
             initialFocus={() => cancel}>
             <p>{request.message}</p>
             <ModalActions>
@@ -3727,7 +3760,7 @@ export function App() {
               <button type="button" class="project-action" onClick={() => {
                 setConversationArchivePrompt(undefined)
                 void changeConversationArchive(request.task, request.token)
-              }}>Archive conversation</button>
+              }}>Archive chat</button>
             </ModalActions>
           </Modal>
         }}

@@ -444,13 +444,14 @@ current layout and give future changes a point of comparison.
   checkout paths, chat ID and title when present, checkout type, and current
   branch or detached state. For a project row, use the open chat in that
   project, or its remembered or sole visible chat when the project is inactive.
-- **Archive conversation** is available after **Copy details** in a chat row's
+- **Archive chat** is available after **Copy details** in a chat row's
   context card and from **Task actions** in the conversation header. A chat
   with an active turn cannot be archived. Archiving hides the chat from the
   default project list and preserves its transcript and branch. If the chat
   was open, select the newest remaining chat or show the project's composer.
-  Show progress while the archive request is pending. Close the chat once
-  its archived state is saved, then finish terminal cleanup in the background.
+  Hide the chat immediately and show progress while the archive request is
+  pending. Restore it if confirmation is needed or archiving fails. Finish
+  terminal cleanup in the background after the archive state is saved.
   **Show archived** reveals the chat again. It stays closed until explicitly
   opened. **Reopen conversation** restores its prior state.
   Ask for confirmation when changes need committing or commits are unmerged.

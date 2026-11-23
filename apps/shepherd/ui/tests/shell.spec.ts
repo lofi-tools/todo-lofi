@@ -1044,8 +1044,14 @@ test.beforeEach(async ({ context }) => {
               throw { code: 'archive_confirmation_required', archiveToken: 'fixture-tip',
                 message: 'This conversation has commits that are not merged into main.' }
             }
-            if (options.has('archive-delayed') && task.id === 'task-second' && args.action.type === 'archiveConversation') {
-              await new Promise<void>((resolve) => window.addEventListener('release-conversation-archive', () => resolve(), { once: true }))
+            if (options.has('archive-delayed') && args.action.type === 'archiveConversation') {
+              await new Promise<void>((resolve, reject) => window.addEventListener('release-conversation-archive', (event) => {
+                if (event instanceof CustomEvent && event.detail === 'fail') {
+                  reject(new Error('Could not save the archive.'))
+                } else {
+                  resolve()
+                }
+              }, { once: true }))
             }
             const state = args.action.type === 'archiveConversation' ? 'done' : 'ready'
             if (options.has('archive-warning')) localStorage.setItem('fixture.archiveDone', String(state === 'done'))
@@ -5082,7 +5088,7 @@ test('keeps sidebar context gestures separate from navigation', async ({ page })
 test('archives conversations from the sidebar and header and reopens a hidden chat', async ({ page }) => {
   await page.addInitScript(() => {
     document.addEventListener('mousedown', (event) => {
-      if (event.target instanceof Element && event.target.closest('.project-menu [role="menuitem"]')?.textContent?.includes('Archive conversation')
+      if (event.target instanceof Element && event.target.closest('.project-menu [role="menuitem"]')?.textContent?.includes('Archive chat')
         && document.activeElement instanceof HTMLElement) {
         document.activeElement.blur()
       }
@@ -5100,18 +5106,26 @@ test('archives conversations from the sidebar and header and reopens a hidden ch
 
   await second.click({ button: 'right' })
   await expect(ship).toHaveAttribute('aria-current', 'true')
-  await page.getByRole('menu', { name: 'Second chat' }).getByRole('menuitem', { name: 'Archive conversation' }).click()
+  await page.getByRole('menu', { name: 'Second chat' }).getByRole('menuitem', { name: 'Archive chat' }).click()
   await expect(page.getByRole('status').filter({ hasText: 'Archiving conversation' })).toBeVisible()
-  await page.evaluate(() => window.dispatchEvent(new Event('release-conversation-archive')))
   await expect(second).toHaveCount(0)
+  await page.evaluate(() => window.dispatchEvent(new Event('release-conversation-archive')))
   await expect(page.getByRole('status').filter({ hasText: 'Archiving conversation' })).toHaveCount(0)
   await expect(chat.getByText('ready to go')).toBeVisible()
 
   const actions = chat.getByRole('button', { name: 'Task actions' })
   await actions.click()
-  await chat.getByRole('menuitem', { name: 'Archive conversation' }).click()
+  await chat.getByRole('menuitem', { name: 'Archive chat' }).click()
+  await expect(chat.getByText('ready to go')).toHaveCount(0)
+  await page.evaluate(() => window.dispatchEvent(new CustomEvent('release-conversation-archive', { detail: 'fail' })))
+  await expect(chat.getByText('ready to go')).toBeVisible()
+
+  await actions.click()
+  await chat.getByRole('menuitem', { name: 'Archive chat' }).click()
   await expect(actions).toHaveCount(0)
+  await page.evaluate(() => window.dispatchEvent(new Event('release-conversation-archive')))
   await expect(chat.getByLabel('Prompt')).toBeEnabled()
+  await expect(page.getByRole('status').filter({ hasText: 'Archiving conversation' })).toHaveCount(0)
 
   const project = page.getByRole('button', { name: 'demo', exact: true })
   await project.click({ button: 'right' })
@@ -5134,14 +5148,15 @@ test('closes the last archived chat even when archived chats are visible', async
   const chat = page.getByRole('region', { name: 'Task chat' })
   await expect(chat.getByText('ready to go')).toBeVisible()
   await chat.getByRole('button', { name: 'Task actions' }).click()
-  await chat.getByRole('menuitem', { name: 'Archive conversation' }).click()
-  const warning = page.getByRole('dialog', { name: 'Archive conversation' })
+  await chat.getByRole('menuitem', { name: 'Archive chat' }).click()
+  const warning = page.getByRole('dialog', { name: 'Archive chat' })
   await expect(warning).toContainText('not merged into main')
+  await expect(chat.getByText('ready to go')).toBeVisible()
   await warning.getByRole('button', { name: 'Cancel' }).click()
   await expect(chat.getByText('ready to go')).toBeVisible()
   await chat.getByRole('button', { name: 'Task actions' }).click()
-  await chat.getByRole('menuitem', { name: 'Archive conversation' }).click()
-  await warning.getByRole('button', { name: 'Archive conversation' }).click()
+  await chat.getByRole('menuitem', { name: 'Archive chat' }).click()
+  await warning.getByRole('button', { name: 'Archive chat' }).click()
   await expect(chat.getByLabel('Prompt')).toBeEditable()
   await expect(chat.getByText('ready to go')).toHaveCount(0)
   await page.reload()
