@@ -1327,13 +1327,14 @@ test.beforeEach(async ({ context }) => {
             if (args.mode) sessionModes.set(id, args.mode)
             if (args.model) sessionModels.set(id, args.model)
             sentPrompts.push({ taskId: id, text: args.text, ...(args.model ? { model: args.model } : {}), ...(args.mode ? { mode: args.mode } : {}) })
+            const user = entry(`entry-${id}-1`, 1, { type: 'userMessage', data: { text: args.text } })
             if (options.has('hold-agent-startup')) {
               await new Promise<void>((resolve) => window.addEventListener('release-agent-startup', () => resolve(), { once: true }))
+              task.state = 'working'
+              transcripts[id] = [user]
+            } else {
+              transcripts[id] = [user, entry(`entry-${id}-2`, 2, { type: 'agentText', data: { text: 'working on it' } })]
             }
-            transcripts[id] = [
-              entry(`entry-${id}-1`, 1, { type: 'userMessage', data: { text: args.text } }),
-              entry(`entry-${id}-2`, 2, { type: 'agentText', data: { text: 'working on it' } }),
-            ]
             return workspace(id)
           }
           case 'set_task_options': {
@@ -2376,7 +2377,7 @@ test('keeps the new task and prompt when worktree setup fails', async ({ page })
   await expect(page.getByRole('region', { name: 'Task chat' })).toContainText('keep this prompt')
 })
 
-test('shows the outgoing prompt while Codex starts in the background', async ({ page }) => {
+test('shows Thinking from Send through the first agent output', async ({ page }) => {
   await page.addInitScript(() => localStorage.setItem('fixture.settings', JSON.stringify({
     projects: { '/tmp/demo': {
       environment: { sourceHash: 'fixture', setup: 'prepare worktree', actions: [] },
@@ -2391,15 +2392,26 @@ test('shows the outgoing prompt while Codex starts in the background', async ({ 
   await expect(composer.locator('.composer__setup-notice')).toHaveCount(0)
   await composer.getByRole('button', { name: 'Send', exact: true }).click()
   const transcript = page.getByRole('region', { name: 'Transcript' })
-  const starting = transcript.getByRole('status').filter({ hasText: 'Starting Codex' })
+  const thinking = transcript.getByRole('status').filter({ hasText: 'Thinking…' })
   await expect(transcript.getByRole('listitem')).toHaveText([
-    'Start with the configured environment', 'Starting Codex…',
+    'Start with the configured environment', 'Thinking…',
   ])
   await expect.poll(() => page.evaluate(() => window.__sentPrompts))
     .toEqual([{ taskId: 'task-2', text: 'Start with the configured environment' }])
   await page.evaluate(() => window.dispatchEvent(new Event('release-agent-startup')))
+  await expect(prompt).toHaveValue('')
+  await expect(thinking).toBeVisible()
+  await expect(transcript.getByText('Start with the configured environment', { exact: true })).toHaveCount(1)
+
+  await page.evaluate(() => {
+    const fixture = window as unknown as { __setTranscript: (taskId: string, entries: Entry[]) => void }
+    fixture.__setTranscript('task-2', [
+      { id: 'entry-task-2-1', sequence: 1, kind: { type: 'userMessage', data: { text: 'Start with the configured environment' } } },
+      { id: 'entry-task-2-2', sequence: 2, kind: { type: 'agentText', data: { text: 'working on it' } } },
+    ])
+  })
   await expect(transcript.getByRole('listitem')).toHaveText(['Start with the configured environment', 'working on it'])
-  await expect(starting).toHaveCount(0)
+  await expect(thinking).toHaveCount(0)
   await expect(composer.locator('.composer__setup-notice')).toHaveCount(0)
 })
 

@@ -609,24 +609,35 @@ export function App() {
   }
   const [terminalListEvent, setTerminalListEvent] = createSignal<Extract<CoreEvent, { type: 'terminalListChanged' }>['data']>()
   const [startingTerminalTask, setStartingTerminalTask] = createSignal<{ projectId: string; taskId: string }>()
-  const [startingPrompt, setStartingPrompt] = createSignal<{
+  const [submittingPrompt, setSubmittingPrompt] = createSignal<{
     projectId: string
     taskId: string | null
     lastSequence: number
     text: string
-    agent: bridge.Agent
   }>()
-  const visibleStartingPrompt = createMemo(() => {
-    const submission = startingPrompt()
+  const visibleSubmittingPrompt = createMemo(() => {
+    const submission = submittingPrompt()
     if (!submission || submission.projectId !== selectedProjectId()) return
     const taskId = submission.taskId ?? startingTerminalTask()?.taskId
     const selected = selectedTaskId()
     if (submission.taskId ? selected !== taskId : selected && selected !== taskId) return
-    // The agent is ready when the core records the outgoing prompt.
+    // Replace the temporary prompt once the transcript has the recorded one.
     const current = workspace()
     if (current && current.task.id === taskId && current.transcript.some((entry) =>
       entry.sequence > submission.lastSequence && entry.kind.type === 'userMessage' && !entry.sourceId)) return
     return submission
+  })
+  const awaitingAgentResponse = createMemo(() => {
+    if (visibleSubmittingPrompt()) return true
+    const current = workspace()
+    if (current?.task.state !== 'working') return false
+    for (let index = current.transcript.length - 1; index >= 0; index--) {
+      const { kind } = current.transcript[index]
+      if (kind.type === 'usage' || (kind.type === 'notice' && !kind.data.isError)) continue
+      if ((kind.type === 'agentText' || kind.type === 'thought') && !kind.data.text.trim()) continue
+      return kind.type === 'userMessage'
+    }
+    return false
   })
   const [setupTerminalRequest, setSetupTerminalRequest] = createSignal<{ id: string }>()
   const [inspectorTabs, setInspectorTabs] = createSignal(new Map<string | null, bridge.InspectorTab>())
@@ -2163,8 +2174,8 @@ export function App() {
 
   createEffect(() => {
     // Read the entries so streamed text and new rows keep the view at the bottom.
-    const starting = visibleStartingPrompt()
-    if ((!workspace()?.transcript && !starting) || !transcript || searchJump() || !followTranscript) return
+    const awaitingResponse = awaitingAgentResponse()
+    if ((!workspace()?.transcript && !awaitingResponse) || !transcript || searchJump() || !followTranscript) return
     transcript.scrollTop = transcript.scrollHeight
   })
 
@@ -2665,12 +2676,11 @@ export function App() {
     if ((!current && !agentAvailability()?.[newTaskAgent()]) || !projectId || (!text && !files.length && !selectedSkills.length) || (!canCompose() && !canQueuePrompt()) || pending()) return
     const projectScope = `project:${projectId}`
     if (!canQueuePrompt()) {
-      setStartingPrompt({
+      setSubmittingPrompt({
         projectId,
         taskId: current?.task.id ?? null,
         lastSequence: current?.transcript.at(-1)?.sequence ?? -1,
         text: message || 'Attached files',
-        agent: currentAgent(),
       })
     }
     void run(async () => {
@@ -2767,10 +2777,10 @@ export function App() {
         setSelectedTaskId(updated.task.id)
         setWorkspace(updated)
       }
-      setStartingPrompt(undefined)
+      setSubmittingPrompt(undefined)
       await loadTasks(projectId)
     }).finally(() => batch(() => {
-      setStartingPrompt(undefined)
+      setSubmittingPrompt(undefined)
       setStartingTerminalTask(undefined)
     }))
   }
@@ -3420,7 +3430,7 @@ export function App() {
               {(error) => <p class="entry__failure-text" role="alert">{error()}</p>}
             </Show>
             <Show
-              when={workspace() || visibleStartingPrompt()}
+              when={workspace() || visibleSubmittingPrompt()}
               fallback={
                 <Show when={canStartTask() && selectedProject()} fallback={
                   <Show when={selectedTaskOpenFailure()} fallback={
@@ -3494,7 +3504,7 @@ export function App() {
                 }
                 return (
                   <Show
-                    when={entries().length > 0 || visibleStartingPrompt()}
+                    when={entries().length > 0 || visibleSubmittingPrompt()}
                     fallback={<p class="empty">Send a prompt to start this task.</p>}
                   >
                     <ol class="transcript">
@@ -3515,8 +3525,11 @@ export function App() {
                           </Show>
                         }}
                       </For>
-                      <Show when={visibleStartingPrompt()}>
-                        {(submission) => <PromptStartup text={submission().text} agent={submission().agent} />}
+                      <Show when={visibleSubmittingPrompt()}>
+                        {(submission) => <li class="entry"><UserPromptCard>{submission().text}</UserPromptCard></li>}
+                      </Show>
+                      <Show when={awaitingAgentResponse()}>
+                        <li class="entry"><p class="entry__notice" role="status">Thinking…</p></li>
                       </Show>
                     </ol>
                   </Show>
@@ -4561,13 +4574,6 @@ function TerminalCommandRow(props: { toolCall: bridge.ToolCallEntry; context: En
 
 function UserPromptCard(props: { children: JSX.Element }) {
   return <div class="entry__user-card"><p class="entry__user">{props.children}</p></div>
-}
-
-function PromptStartup(props: { text: string; agent: bridge.Agent }) {
-  return <>
-    <li class="entry"><UserPromptCard>{props.text}</UserPromptCard></li>
-    <li class="entry"><p class="entry__notice" role="status">Starting {bridge.AGENT_LABELS[props.agent]}…</p></li>
-  </>
 }
 
 function entryBody(entry: bridge.Entry, context: EntryContext, match: () => string | undefined) {
