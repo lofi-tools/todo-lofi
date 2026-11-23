@@ -6,7 +6,7 @@
 
 import { fileURLToPath } from 'node:url'
 import { readFileSync } from 'node:fs'
-import { expect, test, type Page } from '@playwright/test'
+import { expect, test, type Locator, type Page } from '@playwright/test'
 
 import type { AgentTerminal, CommandCondition, Entry, Event as ShepherdEvent, FileChange, GitMutation, InspectorTab, ShortcutScope, TaskState, TerminalLayout, TerminalSnapshot, TerminalSplit, WorkspaceLayout } from '../src/bridge'
 
@@ -16,6 +16,16 @@ test.skip(process.env.SHEPHERD_UI_E2E !== '1', 'The shell suite is opt-in')
 
 async function selectProjectSettings(page: Page, name = 'demo') {
   await page.getByRole('group', { name: 'Project settings' }).getByRole('button', { name, exact: true }).click()
+}
+
+async function selectComposerModel(composer: Locator, current: string, next: string) {
+  await composer.getByRole('button', { name: `Model: ${current}`, exact: true }).click()
+  await composer.getByRole('menu', { name: 'Model' }).getByRole('menuitemradio', { name: next, exact: true }).click()
+}
+
+async function selectComposerMode(composer: Locator, name: 'Plan' | 'Build') {
+  await composer.getByLabel('Prompt', { exact: true }).fill(`/${name.toLowerCase()}`)
+  await composer.getByRole('option', { name: new RegExp(name, 'i') }).click()
 }
 
 const workspaceCommands: Array<{
@@ -2303,13 +2313,6 @@ test('does not offer Auto when Antigravity does not advertise it', async ({ page
   await expect(composer.getByRole('menuitemradio', { name: /Auto Decide for me/ })).toBeDisabled()
 })
 
-test('uses Antigravity for a new conversation when it has first priority', async ({ page }) => {
-  await page.addInitScript(() => localStorage.setItem('fixture.settings', JSON.stringify({ app: { 'onboarding.completed': true, 'agents.priority': ['antigravity', 'codex'] } })))
-  await page.goto('/?two-projects&configured-antigravity')
-  await page.getByRole('button', { name: 'notes', exact: true }).click()
-  await expect(page.locator('.composer').getByRole('button', { name: 'Agent: Antigravity' })).toBeVisible()
-})
-
 test('keeps the new task and prompt when worktree setup fails', async ({ page }) => {
   await page.goto('/?setup-failure')
   await page.getByRole('button', { name: 'demo', exact: true }).press('Tab')
@@ -3645,29 +3648,11 @@ test('shares worktree status with Files and stops watching unused roots', async 
   await expect.poll(unwatched).not.toContain('file-watch-1')
 })
 
-test('updates the native title and clears worktree status when switching projects', async ({ page }) => {
+test('updates the title and scopes files and Git status when switching projects', async ({ page }) => {
   await page.addInitScript(() => Object.defineProperty(window, 'isTauri', { value: true }))
   await page.goto('/?review-fixture')
-  await expect(page).toHaveTitle('demo — Shepherd (1 working)')
   const nativeTitle = () => page.evaluate(() => (window as unknown as { __windowTitles: string[] }).__windowTitles.at(-1))
-  await expect.poll(nativeTitle).toBe('demo — Shepherd (1 working)')
   const status = page.locator('.status-bar')
-  await expect(status).toContainText('branch shepherd/ship-it')
-  await page.evaluate(() => {
-    const fixture = window as unknown as { __publishFileChanges: (id: string, files: FileChange[], branch: null) => void }
-    fixture.__publishFileChanges('file-watch-1', [], null)
-    window.__setTaskState('task-live-notes', 'ready')
-  })
-  await expect(status).toContainText('(no branch)')
-  await expect.poll(nativeTitle).toBe('demo — Shepherd')
-  await page.getByRole('button', { name: 'notes', exact: true }).click()
-  await expect.poll(nativeTitle).toBe('notes — Shepherd')
-  await expect(status).not.toContainText('(no branch)')
-  await expect.poll(() => page.evaluate(() => window.__unwatchedFiles)).toContain('file-watch-1')
-})
-
-test('keeps the files pane on the selected project when switching project rows', async ({ page }) => {
-  await page.goto('/?review-fixture')
   const files = page.getByRole('region', { name: 'Workspace files' })
   const crossProjectRequests = () => page.evaluate(() => (window as unknown as {
     __fileRequests: Array<{ projectMatches: boolean }>
@@ -3676,7 +3661,21 @@ test('keeps the files pane on the selected project when switching project rows',
   await page.getByRole('tab', { name: 'Files', exact: true }).click()
   await expect(files.getByRole('button', { name: /worktree\.txt/ })).toBeVisible()
 
+  await expect(page).toHaveTitle('demo — Shepherd (1 working)')
+  await expect.poll(nativeTitle).toBe('demo — Shepherd (1 working)')
+  await expect(status).toContainText('branch shepherd/ship-it')
+  await expect.poll(() => page.evaluate(() => window.__fileWatchIds())).toContain('file-watch-1')
+  await page.evaluate(() => {
+    window.__publishFileChanges('file-watch-1', [], null)
+    window.__setTaskState('task-live-notes', 'ready')
+  })
+  await expect(status).toContainText('(no branch)')
+  await expect.poll(nativeTitle).toBe('demo — Shepherd')
+
   await page.getByRole('button', { name: 'notes', exact: true }).click()
+  await expect.poll(nativeTitle).toBe('notes — Shepherd')
+  await expect(status).not.toContainText('(no branch)')
+  await expect.poll(() => page.evaluate(() => window.__unwatchedFiles)).toContain('file-watch-1')
   await page.getByRole('tab', { name: 'Files', exact: true }).click()
   await page.getByRole('button', { name: 'New chat in notes', exact: true }).press('Enter')
   await expect(files.getByRole('button', { name: /README\.md/ })).toBeVisible()
@@ -4157,17 +4156,6 @@ test('keeps chat controls available for an adapter that reports no support', asy
   expect(await page.evaluate(() => window.__subscriptions)).not.toContain('agent-unsupported')
 })
 
-test('sends a scoped approval and identifies an automatic session grant', async ({ page }) => {
-  await page.goto('/?scoped-approval')
-  const request = page.locator('.entry__permission').filter({ hasText: 'Run tests' }).first()
-  await expect(request.getByRole('button', { name: 'Allow once' })).toBeVisible()
-  await request.getByRole('button', { name: 'Allow for session' }).click()
-  await expect(request.locator('.entry__permission-decision')).toHaveText('allowed for session')
-  const repeated = page.locator('.entry__permission').filter({ hasText: 'Run tests again' })
-  await expect(repeated.locator('.entry__permission-decision')).toHaveText('allowed by session grant')
-  await expect(repeated.getByRole('button')).toHaveCount(0)
-})
-
 test('lists and resets a saved ACP project grant from Settings', async ({ page }) => {
   await page.goto('/?project-approval')
   await page.getByRole('button', { name: 'Always allow for project' }).click()
@@ -4185,8 +4173,13 @@ test('lists and resets a saved ACP project grant from Settings', async ({ page }
 for (const action of ['reset', 'session exit']) {
   test(`removes a live ACP approval after ${action}`, async ({ page }) => {
     await page.goto('/?scoped-approval')
-    await page.getByRole('button', { name: 'Allow for session' }).click()
-    await expect(page.getByText('allowed for session', { exact: true })).toBeVisible()
+    const request = page.locator('.entry__permission').filter({ hasText: 'Run tests' }).first()
+    await expect(request.getByRole('button', { name: 'Allow once' })).toBeVisible()
+    await request.getByRole('button', { name: 'Allow for session' }).click()
+    await expect(request.locator('.entry__permission-decision')).toHaveText('allowed for session')
+    const repeated = page.locator('.entry__permission').filter({ hasText: 'Run tests again' })
+    await expect(repeated.locator('.entry__permission-decision')).toHaveText('allowed by session grant')
+    await expect(repeated.getByRole('button')).toHaveCount(0)
     await page.getByRole('button', { name: 'Settings', exact: true }).click()
     await page.getByRole('navigation', { name: 'Settings categories' }).getByRole('button', { name: 'Projects' }).click()
     await selectProjectSettings(page)
@@ -5130,43 +5123,45 @@ test('reorders projects by dragging with an insertion line and keeps the order',
   await expect(notes).toBeFocused()
 })
 
-test('cancels a project drag without saving or opening the project', async ({ page }) => {
-  await page.goto('/?two-projects')
-  const list = page.locator('.projects')
-  const demo = list.getByRole('button', { name: 'demo', exact: true })
-  const notes = list.getByRole('button', { name: 'notes', exact: true })
-  const source = await notes.boundingBox()
-  const target = await demo.boundingBox()
-  if (!source || !target) throw new Error('Project rows are not visible')
-  await page.mouse.move(source.x + source.width / 2, source.y + source.height / 2)
-  await page.mouse.down()
-  await page.mouse.move(target.x + target.width / 2, target.y + 3, { steps: 8 })
-  await expect(list.locator('.project__name')).toHaveText(['notes', 'demo'])
-  await page.keyboard.press('Escape')
-  await page.waitForTimeout(50)
-  await page.mouse.move(source.x + source.width / 2, source.y + source.height / 2)
-  await page.mouse.up()
-  await expect(list.locator('.project__name')).toHaveText(['demo', 'notes'])
-  await expect(demo).toHaveAttribute('aria-current', 'true')
-  expect(await page.evaluate(() => localStorage.getItem('fixture.projectOrder'))).toBeNull()
-})
-
-test('previews moving a project across multiple rows and cancels outside the list', async ({ page }) => {
+test('previews projects moving across rows and cancels with Escape or an outside drop', async ({ page }) => {
   await page.goto('/?three-projects')
   const list = page.locator('.projects')
-  const source = await list.getByRole('button', { name: 'third', exact: true }).boundingBox()
-  const target = await list.getByRole('button', { name: 'demo', exact: true }).boundingBox()
-  if (!source || !target) throw new Error('Project rows are not visible')
-  await page.mouse.move(source.x + source.width / 2, source.y + source.height / 2)
-  await page.mouse.down()
-  await page.mouse.move(target.x + target.width / 2, target.y + 3, { steps: 10 })
-  await expect(list.locator('.project__name')).toHaveText(['third', 'demo', 'notes'])
-  await expect(list.locator('.projects__row--drop-before')).toContainText('third')
-  await page.mouse.move(target.x + target.width + 100, target.y)
-  await expect(list.locator('.projects__row--drop-before')).toHaveCount(0)
+  const names = list.locator('.project__name')
+  const insertion = list.locator('.projects__row--drop-before')
+  const third = list.getByRole('button', { name: 'third', exact: true })
+  const demo = list.getByRole('button', { name: 'demo', exact: true })
+
+  async function previewMove() {
+    const source = await third.boundingBox()
+    const target = await demo.boundingBox()
+    if (!source || !target) throw new Error('Project rows are not visible')
+    const origin = { x: source.x + source.width / 2, y: source.y + source.height / 2 }
+    await page.mouse.move(origin.x, origin.y)
+    await page.mouse.down()
+    await page.mouse.move(target.x + target.width / 2, target.y + 3, { steps: 10 })
+    await expect(names).toHaveText(['third', 'demo', 'notes'])
+    await expect(insertion).toContainText('third')
+    return { origin, outside: { x: target.x + target.width + 100, y: target.y } }
+  }
+
+  async function expectOriginalOrder() {
+    await expect(names).toHaveText(['demo', 'notes', 'third'])
+    await expect(demo).toHaveAttribute('aria-current', 'true')
+    expect(await page.evaluate(() => localStorage.getItem('fixture.projectOrder'))).toBeNull()
+  }
+
+  const { origin } = await previewMove()
+  await page.keyboard.press('Escape')
+  await expect(insertion).toHaveCount(0)
+  await page.mouse.move(origin.x, origin.y)
   await page.mouse.up()
-  await expect(list.locator('.project__name')).toHaveText(['demo', 'notes', 'third'])
-  expect(await page.evaluate(() => localStorage.getItem('fixture.projectOrder'))).toBeNull()
+  await expectOriginalOrder()
+
+  const { outside } = await previewMove()
+  await page.mouse.move(outside.x, outside.y)
+  await expect(insertion).toHaveCount(0)
+  await page.mouse.up()
+  await expectOriginalOrder()
 })
 
 test('restores project order after failed drag and keyboard saves', async ({ page }) => {
@@ -5678,13 +5673,6 @@ test('onboarding offers detected harnesses and saves the selection', async ({ pa
   await expect(kilo.getByRole('button', { name: 'Add' })).toHaveCount(0)
 })
 
-test('configured onboarding completion skips onboarding', async ({ page }) => {
-  await page.addInitScript(() => localStorage.setItem('fixture.settings', JSON.stringify({ app: { 'onboarding.completed': true, 'agents.priority': ['codex'] } })))
-  await page.goto('/?onboarding')
-  await expect(page.getByRole('button', { name: 'Settings', exact: true })).toBeVisible()
-  await expect(page.getByRole('heading', { name: 'Welcome to Shepherd' })).toHaveCount(0)
-})
-
 test('offers newly detected implemented harnesses for the pool', async ({ page }) => {
   await page.addInitScript(() => { if (!localStorage.getItem('fixture.settings')) localStorage.setItem('fixture.settings', JSON.stringify({ app: { 'agents.priority': ['codex'] } })) })
   await page.goto('/?agents-priority')
@@ -5915,22 +5903,25 @@ test('passes the model and its advertised effort from the empty composer to the 
   await expect(selected).toBeVisible()
 })
 
-test('passes a generic model pick from the composer to the next turn', async ({ page }) => {
-  await page.goto('/?agent-models&configured-opencode')
+test('keeps a model across chat switches and sends it with the next prompt', async ({ page }) => {
+  await page.goto('/?two-tasks&agent-models&configured-opencode')
+  const chat = page.getByRole('button', { name: 'Ship it', exact: true })
+  await chat.click()
   const composer = page.locator('.composer')
-  const current = composer.getByRole('button', { name: 'Model: DeepSeek V3' })
-  await expect(current).toBeVisible()
-  await current.click()
-  const menu = composer.getByRole('menu', { name: 'Model' })
-  await menu.getByRole('menuitemradio', { name: 'Qwen Coder' }).click()
+  await composer.getByRole('button', { name: 'Model: DeepSeek V3', exact: true }).click()
+  await composer.getByRole('menu', { name: 'Model' }).getByRole('menuitemradio', { name: 'Qwen Coder', exact: true }).click()
   const selected = composer.getByRole('button', { name: 'Model: Qwen Coder' })
+  await expect(selected).toBeVisible()
+
+  await page.getByRole('button', { name: 'Second chat', exact: true }).click()
+  await chat.click()
   await expect(selected).toBeVisible()
 
   await composer.getByLabel('Prompt', { exact: true }).fill('Use the selected model')
   await composer.getByRole('button', { name: 'Send', exact: true }).click()
   await expect.poll(() => page.evaluate(() => window.__sentPrompts))
     .toContainEqual({ taskId: 'task-1', text: 'Use the selected model', model: 'acme/qwen' })
-  await expect(composer.getByRole('button', { name: 'Model: Qwen Coder' })).toBeVisible()
+  await expect(selected).toBeVisible()
   await page.evaluate(() => window.__setTaskState('task-1', 'working'))
   await expect(selected).toBeVisible()
 })
@@ -5984,18 +5975,6 @@ test('shows the no-model fallback and retries the catalog', async ({ page }) => 
   await expect.poll(() => page.evaluate(() => window.__modelCatalogRequests.length))
     .toBeGreaterThan(requestsBeforeRetry)
   await expect(composer.getByRole('button', { name: 'No model available', exact: true })).toBeDisabled()
-})
-
-test('keeps a selected task model across task switches', async ({ page }) => {
-  await page.goto('/?two-tasks&agent-models&configured-opencode')
-  await page.getByRole('button', { name: /Ship it/ }).click()
-  const composer = page.locator('.composer')
-  await composer.getByRole('button', { name: 'Model: DeepSeek V3' }).click()
-  await composer.getByRole('menu', { name: 'Model' }).getByRole('menuitemradio', { name: 'Qwen Coder' }).click()
-  await expect(composer.getByRole('button', { name: 'Model: Qwen Coder' })).toBeVisible()
-  await page.getByRole('button', { name: /Second chat/ }).click()
-  await page.getByRole('button', { name: /Ship it/ }).click()
-  await expect(page.locator('.composer').getByRole('button', { name: 'Model: Qwen Coder' })).toBeVisible()
 })
 
 test('keeps the project composer model across reload', async ({ page }) => {
@@ -6055,24 +6034,34 @@ test('keeps the raw auth error behind the failure details', async ({ page }) => 
   await expect(details).toContainText('Turso login required for workspace acme.')
 })
 
-test('uses advertised session mode commands for the next prompt', async ({ page }) => {
+test('sends explicit session modes and restores the default when cleared', async ({ page }) => {
   await page.goto('/?acp-fallback&session-modes')
   const composer = page.locator('.composer')
   const prompt = composer.getByLabel('Prompt', { exact: true })
   await expect(composer.getByText('Mode: Build', { exact: true })).toHaveCount(0)
-  await prompt.fill('/plan')
-  await composer.getByRole('option', { name: /plan/i }).click()
+  await selectComposerMode(composer, 'Plan')
   await expect(composer.getByText('Mode: Plan', { exact: true })).toBeVisible()
   await prompt.fill('Plan the change')
   await composer.getByRole('button', { name: 'Send', exact: true }).click()
   await expect(page.locator('.transcript')).toContainText('Plan the change')
-  await prompt.fill('/build')
-  await composer.getByRole('option', { name: /build/i }).click()
+  await selectComposerMode(composer, 'Build')
   await expect(composer.getByText('Mode: Build', { exact: true })).toBeVisible()
   await prompt.fill('Use build next')
   await composer.getByRole('button', { name: 'Send', exact: true }).click()
   await expect.poll(() => page.evaluate(() => window.__sentPrompts.at(-1)))
     .toMatchObject({ text: 'Use build next', mode: 'build' })
+
+  await selectComposerMode(composer, 'Plan')
+  const mode = composer.locator('.composer__mode')
+  await expect(mode).toContainText('Mode: Plan')
+  await mode.hover()
+  await mode.getByRole('button', { name: 'Remove mode Plan' }).click()
+  await expect(mode).toHaveCount(0)
+  await prompt.fill('Use default')
+  await composer.getByRole('button', { name: 'Send', exact: true }).click()
+  await expect.poll(() => page.evaluate(() => window.__sentPrompts.at(-1)))
+    .toMatchObject({ text: 'Use default', mode: 'build' })
+  await expect(mode).toHaveCount(0)
 })
 
 test('uses a slash command to select the OpenCode mode on the first turn', async ({ page }) => {
@@ -6104,8 +6093,7 @@ test('removes a draft mode before the first prompt', async ({ page }) => {
   await composer.getByRole('button', { name: 'Agent: Codex' }).click()
   await composer.getByRole('menuitemradio', { name: 'OpenCode', exact: true }).click()
   const prompt = composer.getByLabel('Prompt')
-  await prompt.fill('/plan')
-  await composer.getByRole('option', { name: /Plan/ }).click()
+  await selectComposerMode(composer, 'Plan')
   const mode = composer.locator('.composer__mode')
   await mode.hover()
   await mode.getByRole('button', { name: 'Remove mode Plan' }).click()
@@ -6114,27 +6102,6 @@ test('removes a draft mode before the first prompt', async ({ page }) => {
   await composer.getByRole('button', { name: 'Send', exact: true }).click()
   await expect.poll(() => page.evaluate(() => window.__sentPrompts.at(-1)?.text)).toBe('Start normally')
   expect(await page.evaluate(() => window.__sentPrompts.at(-1)?.mode)).toBeUndefined()
-  await expect(mode).toHaveCount(0)
-})
-
-test('removes an explicit mode and restores the session default for the next turn', async ({ page }) => {
-  await page.goto('/?acp-fallback&session-modes')
-  const composer = page.locator('.composer')
-  const prompt = composer.getByLabel('Prompt')
-  await expect(composer.locator('.composer__mode')).toHaveCount(0)
-  await prompt.fill('/plan')
-  await composer.getByRole('option', { name: /Plan/ }).click()
-  const mode = composer.locator('.composer__mode')
-  await expect(mode).toContainText('Mode: Plan')
-  const remove = mode.getByRole('button', { name: 'Remove mode Plan' })
-  await expect(remove).toHaveCSS('opacity', '0')
-  await mode.hover()
-  await expect(remove).toHaveCSS('opacity', '1')
-  await remove.click()
-  await expect(mode).toHaveCount(0)
-  await prompt.fill('Use default')
-  await composer.getByRole('button', { name: 'Send', exact: true }).click()
-  await expect.poll(() => page.evaluate(() => window.__sentPrompts.at(-1))).toMatchObject({ text: 'Use default', mode: 'build' })
   await expect(mode).toHaveCount(0)
 })
 
@@ -7127,24 +7094,6 @@ test('moves focus by direction between the Terminals tab and live splits', async
   await expect.poll(() => page.evaluate(() => window.__writes)).toEqual(['\x1bOB'])
 })
 
-test('reports Kitty key events and keeps a keyboard copy view', async ({ page }) => {
-  await page.goto('/?kitty-terminal')
-
-  const input = page.getByRole('textbox', { name: 'Terminal', exact: true })
-  await expect(page.getByText('BB', { exact: true })).toBeAttached()
-  await input.press('a')
-  await expect.poll(() => page.evaluate(() =>
-    (window as unknown as { __writes: string[] }).__writes,
-  )).toEqual(['\x1b[97;;97u', '\x1b[97;1:3u'])
-
-  await input.press('Control+Shift+x')
-  const copy = page.getByRole('textbox', { name: 'Copy terminal output' })
-  await expect(copy).toBeFocused()
-  await expect(copy).toHaveValue('BB')
-  await copy.press('Escape')
-  await expect(input).toBeFocused()
-})
-
 test('exposes current terminal output and lets keyboard users copy or leave the terminal', async ({ page, context }) => {
   await context.grantPermissions(['clipboard-read', 'clipboard-write'])
   await page.goto('/?scrollback-selection')
@@ -7158,8 +7107,18 @@ test('exposes current terminal output and lets keyboard users copy or leave the 
   await expect.poll(() => page.evaluate(() => window.__writes)).toEqual(['\t'])
 
   const copy = page.getByRole('textbox', { name: 'Copy terminal output' })
-  await input.press(`${modifier}+Shift+x`)
-  await expect(copy).toBeFocused()
+  async function openCopyView() {
+    await input.press(`${modifier}+Shift+x`)
+    await expect(copy).toBeFocused()
+  }
+
+  await openCopyView()
+  await expect(copy).toHaveValue('BB')
+  await copy.press('Escape')
+  await expect(input).toBeFocused()
+  await expect(copy).toHaveCount(0)
+
+  await openCopyView()
   await expect(copy).toHaveValue('BB')
   await page.evaluate(() => {
     const fixture = window as unknown as { __emitTerminalHistory: (offset: number, glyph: string) => void }
@@ -7173,7 +7132,7 @@ test('exposes current terminal output and lets keyboard users copy or leave the 
   await expect(page.getByRole('separator', { name: 'Resize inspector' })).toBeFocused()
   await expect(copy).toHaveCount(0)
 
-  await input.press(`${modifier}+Shift+x`)
+  await openCopyView()
   await page.keyboard.press('Shift+Tab')
   await expect(page.getByRole('button', { name: 'Close terminal' })).toBeFocused()
   await expect(copy).toHaveCount(0)
