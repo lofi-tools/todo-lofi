@@ -519,7 +519,8 @@ current layout and give future changes a point of comparison.
 - Show a mustard chat-bubble-with-question-mark icon on a waiting task row, and
   on the project row when that row stands in for a project's single
   conversation. Keep an attention dot on the selected task's composer. Review
-  rows have a ring and **Needs review** badge.
+  rows have a ring and **Needs review** badge. Keep the composer enabled for
+  follow-up prompts while a task is in review.
 - Keep the task state out of the conversation header; the sidebar row, review
   badge and status bar carry it, so the header stays usable for chatting. The
   header has no bottom border.

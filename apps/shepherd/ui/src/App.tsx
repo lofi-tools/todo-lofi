@@ -1379,7 +1379,7 @@ export function App() {
   const canCompose = () => {
     if (selectedProject()?.missing) return false
     const state = workspace()?.task.state
-    return state === 'draft' || state === 'ready' || state === 'failed' || state === 'interrupted' || canStartTask()
+    return state === 'draft' || state === 'ready' || state === 'review' || state === 'failed' || state === 'interrupted' || canStartTask()
   }
   const [setupFailure, setSetupFailure] = createSignal<{ taskId: string; message: string; setupTerminal: boolean; runs?: boolean }>()
   const setupNotice = () => {

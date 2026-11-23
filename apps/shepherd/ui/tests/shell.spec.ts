@@ -3927,6 +3927,15 @@ test('continues an interrupted task from the prompt, not a recovery button', asy
   await expect(chat.getByText('working on it')).toBeVisible()
 })
 
+test('sends a follow-up to a task in review', async ({ page }) => {
+  await page.goto('/?review-fixture')
+  const chat = page.getByRole('region', { name: 'Task chat' })
+  await chat.getByLabel('Prompt').fill('Please revise the changes')
+  await chat.getByRole('button', { name: 'Send', exact: true }).click()
+  await expect.poll(() => page.evaluate(() => window.__sentPrompts.at(-1)))
+    .toMatchObject({ taskId: 'task-1', text: 'Please revise the changes' })
+})
+
 test('cancels an active turn and waits for the settled workspace', async ({ page }) => {
   await page.goto('/?cancel-approval')
   const chat = page.getByRole('region', { name: 'Task chat' })
