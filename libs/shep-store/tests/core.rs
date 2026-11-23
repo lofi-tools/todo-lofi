@@ -5677,6 +5677,45 @@ async fn restoring_a_missing_terminal_keeps_the_other_panes()
 }
 
 #[tokio::test]
+async fn conversation_archive_restores_the_previous_state_after_restart()
+-> Result<(), Box<dyn std::error::Error>> {
+    let directory = TestDirectory::new()?;
+    let database = directory.join("shepherd.db");
+    let store = TursoStore::open_at(&database).await?;
+    let mut core = Core::with_services(Box::new(store), Box::new(UnavailableHarnessFactory));
+    let project_id = add_project(&mut core, directory.path().to_path_buf()).await?;
+    let task_id = workspace_of(core.execute(Command::CreateDraft {
+        project_id,
+        title: "Conversation".into(),
+        agent: Agent::Codex,
+    }).await?).task.id;
+    let task_id = TaskId::new(task_id);
+    let mut task = core.task(&task_id)?.clone();
+    task.state = TaskState::Ready;
+    core.store.save_task(&task).await?;
+    drop(core);
+
+    let store = TursoStore::open_at(&database).await?;
+    let mut core = Core::load(Box::new(store), Box::new(UnavailableHarnessFactory)).await?;
+    let archived = workspace_of(core.execute(Command::ReviewTask {
+        task_id: task_id.clone(),
+        action: ReviewAction::ArchiveConversation,
+    }).await?);
+    assert_eq!(archived.task.state, TaskState::Done);
+    drop(core);
+
+    let store = TursoStore::open_at(&database).await?;
+    let mut core = Core::load(Box::new(store), Box::new(UnavailableHarnessFactory)).await?;
+    let reopened = workspace_of(core.execute(Command::ReviewTask {
+        task_id: task_id.clone(),
+        action: ReviewAction::Reopen,
+    }).await?);
+    assert_eq!(reopened.task.state, TaskState::Ready);
+    assert_eq!(core.task(&task_id)?.archived_from_state, None);
+    Ok(())
+}
+
+#[tokio::test]
 async fn restart_removes_old_shell_records_and_panes() -> Result<(), Box<dyn std::error::Error>> {
     let directory = TestDirectory::new()?;
     let database = directory.join("shepherd.db");

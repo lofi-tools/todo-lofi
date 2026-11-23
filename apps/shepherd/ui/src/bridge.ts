@@ -1334,6 +1334,7 @@ export function mutateGit(taskId: string, mutation: GitMutation): Promise<GitSna
 export type ReviewAction =
   | { type: 'approve' }
   | { type: 'archive' }
+  | { type: 'archiveConversation' }
   | { type: 'reopen' }
   | { type: 'sendNote'; text: string }
   | { type: 'sendQueuedNote' }

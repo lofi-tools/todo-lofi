@@ -92,6 +92,7 @@ pub enum Command {
 pub enum ReviewAction {
     Approve,
     Archive,
+    ArchiveConversation,
     Reopen,
     SendNote { text: String },
     SendQueuedNote,

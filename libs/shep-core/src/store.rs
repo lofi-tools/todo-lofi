@@ -1206,7 +1206,9 @@ impl Store for MemoryStore {
             !seen.insert(task.id.clone())
                 || tasks
                     .get(task.id.as_str())
-                    .is_none_or(|stored| stored.state != TaskState::Review)
+                    .is_none_or(|stored| {
+                        stored.state != task.archived_from_state.unwrap_or(TaskState::Review)
+                    })
         }) {
             return Err(StoreError::ReviewStateChanged {
                 task_id: task.id.clone(),
@@ -1215,6 +1217,7 @@ impl Store for MemoryStore {
         for task in archived {
             if let Some(stored) = tasks.get_mut(task.id.as_str()) {
                 stored.state = TaskState::Done;
+                stored.archived_from_state = task.archived_from_state;
                 stored.approved_tip_sha = None;
                 stored.updated_at = task.updated_at;
             }

@@ -34,7 +34,7 @@ import { agentPriority, createHarnessDiscovery } from './PoolSettings'
 import { FreebuffPane, TerminalPane, type TerminalCommands } from './TerminalPane'
 import { AgentIcon } from './AgentIcon'
 import { TaskSearch } from './TaskSearch'
-import { DeleteTaskDialog, ReviewArchiveDialog, TaskRows } from './TaskRows'
+import { ConversationArchiveItem, DeleteTaskDialog, ReviewArchiveDialog, TaskRows } from './TaskRows'
 import { ErrorNotifications } from './ErrorNotifications'
 import { SwitchHarnessDialog } from './SwitchHarnessDialog'
 import { recordDiagnostic, reportError } from './diagnostics'
@@ -1800,6 +1800,31 @@ export function App() {
     })
   }
 
+  function changeConversationArchive(task: Pick<bridge.TaskSummary, 'id' | 'projectId' | 'state'>) {
+    if (pending()) return
+    void run(async () => {
+      const reopening = task.state === 'done'
+      const updated = await bridge.reviewTask(task.id, { type: reopening ? 'reopen' : 'archiveConversation' })
+      const listed = await loadTasks(task.projectId)
+      if (selectedProjectId() !== task.projectId || selectedTaskId() !== task.id) return
+      if (reopening) {
+        setWorkspace(updated)
+        return
+      }
+      const next = newestChats(listed.filter((entry) =>
+        reviewOnly() ? entry.state === 'review' : entry.state !== 'done'))[0]
+      if (next) {
+        await selectTask(next.id)
+      } else {
+        batch(() => {
+          setSelectedTaskId(null)
+          setWorkspace(null)
+          setSearchJump(undefined)
+        })
+      }
+    })
+  }
+
   function abbreviateHome(path: string) {
     const home = homeDirectory()?.replace(/[\\/]+$/, '')
     if (!home) return path
@@ -1873,7 +1898,7 @@ export function App() {
     const task = preferNewest
       ? newestChats(visible)[0]
       : project.lastTaskId
-        ? visible.find((entry) => entry.id === project.lastTaskId)
+        ? visible.find((entry) => entry.id === project.lastTaskId) ?? newestChats(visible)[0]
         : visible.length === 1 ? visible[0] : undefined
     if (task) await selectTask(task.id)
   }
@@ -3068,7 +3093,7 @@ export function App() {
                         isOutputUnread={(id) => unreadTaskIds().has(id)}
                         selection={sidebarSelection}
                         needsTerminalAttention={(id) => terminalAttention().some((bell) => bell.taskId === id)}
-                        onOpen={openTaskRow} onSelect={selectReviewTask} />
+                        onOpen={openTaskRow} onSelect={selectReviewTask} onArchiveChange={changeConversationArchive} />
                     </Show>
                   </li>
                 )
@@ -3174,6 +3199,8 @@ export function App() {
                         onClick={() => { setHeaderMenu(undefined); setDiagnosticsOpen((open) => !open) }}>
                         Show diagnostics
                       </button>
+                      <ConversationArchiveItem state={current().task.state} pending={pending()}
+                        onClick={() => { setHeaderMenu(undefined); changeConversationArchive(current().task) }} />
                       <button type="button" class="nav-item" role="menuitem"
                         disabled={pending() || LIVE_STATES.includes(current().task.state)}
                         onClick={() => { setHeaderMenu(undefined); setDeleteRequest(current().task) }}>

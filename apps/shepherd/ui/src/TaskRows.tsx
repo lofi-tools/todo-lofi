@@ -1,6 +1,6 @@
 import { For, Show, createSignal, onCleanup, onMount } from 'solid-js'
 
-import type { ProjectSnapshot, TaskSummary } from './bridge'
+import type { ProjectSnapshot, TaskState, TaskSummary } from './bridge'
 import { createSnapshotRows } from './snapshotRows'
 import { WaitingIcon } from './ProjectRow'
 import { focusSidebarMenu, isSidebarMenuKey, isSidebarSelection, sidebarDetails, SidebarMenu, type SidebarMenuPoint } from './SidebarMenu'
@@ -20,6 +20,7 @@ export function TaskRows(props: {
   isOutputUnread: (taskId: string) => boolean
   onOpen: (task: TaskSummary) => void
   onSelect: (taskId: string, extend: boolean) => void
+  onArchiveChange: (task: TaskSummary) => void
 }) {
   const rows = createSnapshotRows(() => props.tasks)
   return (
@@ -85,7 +86,10 @@ export function TaskRows(props: {
                 </Show>
                 <Show when={props.isMenuOpen(task.id)}>
                   <SidebarMenu row={row} cursor={menuCursor()} label={task.title} onClose={closeMenu}
-                    copyDetails={() => sidebarDetails(props.project, task, 'task')} />
+                    copyDetails={() => sidebarDetails(props.project, task, 'task')}>
+                    <ConversationArchiveItem state={task.state} pending={props.disabled}
+                      onClick={() => { closeMenu(true); props.onArchiveChange(task) }} />
+                  </SidebarMenu>
                 </Show>
               </li>
             )
@@ -94,6 +98,19 @@ export function TaskRows(props: {
       </ul>
     </div>
   )
+}
+
+export function ConversationArchiveItem(props: { state: TaskState; pending?: boolean; onClick: () => void }) {
+  const archived = () => props.state === 'done'
+  return <button type="button" role="menuitem" class="nav-item"
+    disabled={props.pending || !['ready', 'review', 'failed', 'interrupted', 'cancelled', 'done'].includes(props.state)}
+    onClick={props.onClick}>
+    <svg class="project-menu__icon" width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" aria-hidden="true">
+      <rect x="2" y="2" width="12" height="3.5" rx="1" />
+      <path d="M3.5 5.5v7A1.5 1.5 0 0 0 5 14h6a1.5 1.5 0 0 0 1.5-1.5v-7M6 8.5h4" />
+    </svg>
+    {archived() ? 'Reopen conversation' : 'Archive conversation'}
+  </button>
 }
 
 export function ReviewArchiveDialog(props: { count: number; onCancel: () => void; onConfirm: () => void }) {

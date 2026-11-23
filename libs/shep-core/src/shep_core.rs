@@ -2403,6 +2403,14 @@ impl Core {
                 self.archive_reviewed(vec![task_id.clone()]).await?;
                 return Ok(CommandResult::TaskWorkspace(self.task_workspace(task_id)?));
             }
+            ReviewAction::ArchiveConversation => {
+                if task.state != TaskState::Done {
+                    task.archived_from_state = Some(task.state);
+                    task.set_state(TaskState::Done)?;
+                    self.archive_tasks(vec![task]).await?;
+                }
+                return Ok(CommandResult::TaskWorkspace(self.task_workspace(task_id)?));
+            }
             ReviewAction::Reopen => {
                 if task.state != TaskState::Done {
                     return Err(CoreError::TaskNotArchived {
@@ -2410,7 +2418,8 @@ impl Core {
                         state: task.state.as_str(),
                     });
                 }
-                task.set_state(TaskState::Review)?;
+                let previous_state = task.archived_from_state.take().unwrap_or(TaskState::Review);
+                task.set_state(previous_state)?;
                 if task.worktree_path.is_none() && task.branch.is_some() {
                     task.worktree_path = Some(task.proposed_worktree_path.clone());
                 }
@@ -2461,10 +2470,17 @@ impl Core {
             .into_iter()
             .map(|task_id| {
                 let mut task = self.task(&task_id)?.clone();
+                if task.state != TaskState::Review {
+                    return Err(StoreError::ReviewStateChanged { task_id }.into());
+                }
                 task.set_state(TaskState::Done)?;
                 Ok(task)
             })
             .collect::<Result<Vec<_>, CoreError>>()?;
+        self.archive_tasks(archived).await
+    }
+
+    async fn archive_tasks(&mut self, archived: Vec<Task>) -> Result<CommandResult, CoreError> {
         if archived.is_empty() {
             return Ok(CommandResult::Ack);
         }
@@ -2491,7 +2507,9 @@ impl Core {
             self.tasks.insert(task.id.clone(), task);
         }
         for task_id in task_ids {
-            self.release_worktree_to_pool(&task_id).await?;
+            if self.task(&task_id)?.archived_from_state.is_none() {
+                self.release_worktree_to_pool(&task_id).await?;
+            }
             self.emit(Event::TaskChanged(TaskSummary::from(self.task(&task_id)?)));
             self.emit(Event::TaskWorkspaceChanged(self.task_workspace(&task_id)?));
         }

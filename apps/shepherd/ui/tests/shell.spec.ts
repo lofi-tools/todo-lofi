@@ -1032,6 +1032,17 @@ test.beforeEach(async ({ context }) => {
             return projects.map(({ id }) => ({
               projectId: id, tasks: taskList(id).tasks.filter((task) => task.state === 'review'),
             }))
+          case 'review_task': {
+            const index = tasks.findIndex((task) => task.id === args.taskId)
+            const task = tasks[index]
+            if (!task) throw new Error('Conversation missing')
+            const state = args.action.type === 'archiveConversation' ? 'done' : 'ready'
+            tasks[index] = { ...task, state }
+            const updated = workspace(task.id)
+            window.__emitCoreEvent({ type: 'taskWorkspaceChanged', data: updated })
+            window.__emitCoreEvent({ type: 'taskListChanged', data: taskList(task.projectId) })
+            return updated
+          }
           case 'archive_reviewed': {
             archiveRequests.push(args.taskIds)
             if (options.has('archive-fails-once') && archiveRequests.length === 1) {
@@ -5042,6 +5053,37 @@ test('keeps sidebar context gestures separate from navigation', async ({ page })
   await expect(chat).toHaveAttribute('aria-current', 'true')
   await expect(page.getByRole('menu', { name: 'Ship it', exact: true })).toBeVisible()
   expect(await reads.jsonValue()).toEqual(['project_remote'])
+})
+
+test('archives conversations from the sidebar and header and reopens a hidden chat', async ({ page }) => {
+  await page.goto('/?two-tasks')
+  const chat = page.getByRole('region', { name: 'Task chat' })
+  const ship = page.getByRole('button', { name: 'Ship it', exact: true })
+  const second = page.getByRole('button', { name: 'Second chat', exact: true })
+  await expect(chat.getByText('ready to go')).toBeVisible()
+
+  await second.click({ button: 'right' })
+  await page.getByRole('menu', { name: 'Second chat' }).getByRole('menuitem', { name: 'Archive conversation' }).click()
+  await expect(second).toHaveCount(0)
+  await expect(chat.getByText('ready to go')).toBeVisible()
+
+  const actions = chat.getByRole('button', { name: 'Task actions' })
+  await actions.click()
+  await chat.getByRole('menuitem', { name: 'Archive conversation' }).click()
+  await expect(actions).toHaveCount(0)
+  await expect(chat.getByLabel('Prompt')).toBeEnabled()
+
+  const project = page.getByRole('button', { name: 'demo', exact: true })
+  await project.click({ button: 'right' })
+  const showArchived = page.getByRole('menuitemcheckbox', { name: 'Show archived' })
+  await showArchived.click()
+  await showArchived.press('Escape')
+  await expect(ship).toBeVisible()
+  await ship.click()
+  await expect(chat.getByText('ready to go')).toBeVisible()
+  await actions.click()
+  await chat.getByRole('menuitem', { name: 'Reopen conversation' }).click()
+  await expect(chat).toHaveAttribute('data-task-state', 'ready')
 })
 
 test('copies project and subtask details from the sidebar context menu', async ({ page, context }) => {

@@ -442,6 +442,13 @@ current layout and give future changes a point of comparison.
   checkout paths, chat ID and title when present, checkout type, and current
   branch or detached state. For a project row, use the open chat in that
   project, or its remembered or sole visible chat when the project is inactive.
+- **Archive conversation** is available after **Copy details** in a chat row's
+  context card and from **Task actions** in the conversation header. A chat
+  with an active turn cannot be archived. Archiving hides the chat from the
+  default project list and preserves its transcript and branch. If the chat
+  was open, select the newest remaining chat or show the project's composer.
+  **Show archived** reveals the chat again. **Reopen conversation** restores
+  its prior state.
 - Follow **Copy details** in the project card with the read-only local path,
   Git remote when available, **Show archived**, and **Project settings**. Use matching row heights, text
   sizes, and padding, with icons and text vertically centred. Show a folder
