@@ -79,6 +79,7 @@ current layout and give future changes a point of comparison.
   while retaining its working directory. The header menu also offers **Copy
   working directory** for task and project terminals. Open the same menu with
   the ellipsis button or by right-clicking the terminal tab or header.
+  Terminal tabs omit the process lifecycle badge.
   When a task or project shell exits, remove its tab and pane. Delete its record
   and update the saved layout in one transaction. At startup, prune shells left
   over from the previous app run and preserve the selected inspector tab.

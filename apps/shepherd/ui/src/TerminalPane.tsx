@@ -717,7 +717,6 @@ export function TerminalPane(props: TerminalPaneProps) {
                   aria-current={id === visibleLaunch()?.id ? 'true' : undefined}
                   onClick={() => { setSelectedLaunch(id); if (entry().live) setFocusRequest({ id }) }}>
                   <span>{entry().setupTitle ?? 'Agent launch'}</span>
-                  <span class="terminal-list__state">{entry().live ? 'Running' : 'Ended'}</span>
                 </button>
                 <TerminalActionsMenu title={entry().setupTitle ?? 'Agent launch'} cwd={entry().cwd}
                   disabled={pending()} contextOnly contextTarget={() => tab} />
