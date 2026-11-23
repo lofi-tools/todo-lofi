@@ -46,6 +46,10 @@ test.beforeEach(async ({ context }) => {
       },
       __TAURI_EVENT_PLUGIN_INTERNALS__: { unregisterListener: (_event: string, id: number) => callbacks.delete(id) },
     })
+    const terminalCommandStates: Record<string, 'ready' | 'running' | 'failed'> = {}
+    Object.assign(window, {
+      __setTerminalCommandState: (id: string, state: 'ready' | 'running' | 'failed') => { terminalCommandStates[id] = state },
+    })
     let nextCallbackId = 1
     let nextTask = 2
     let desktopProjectReads = 0
@@ -1538,6 +1542,10 @@ test.beforeEach(async ({ context }) => {
             if (args.projectId === project.id) terminalLayout = { ...terminalLayout, inspectorTab: args.tab }
             else otherInspectorTabs.set(args.projectId, args.tab)
             return null
+          case 'terminal_command_states':
+            return Object.fromEntries(args.terminalIds
+              .filter((id: string) => id in terminalCommandStates)
+              .map((id: string) => [id, terminalCommandStates[id]]))
           case 'terminal_list':
             if (failNextTerminalList) {
               failNextTerminalList = false
@@ -7097,6 +7105,16 @@ test('preserves the other terminal when a saved pane is missing', async ({ page 
 test('closes a running terminal and removes its pane and tab', async ({ page }) => {
   await page.goto('/?scoped-terminals')
   const pane = page.getByRole('region', { name: 'Task shell', exact: true })
+  const tab = page.getByRole('button', { name: 'Task shell', exact: true })
+  for (const [state, description] of [
+    ['ready', 'Ready'], ['running', 'Command running'], ['failed', 'Last command failed'], ['ready', 'Ready'],
+  ] as const) {
+    await page.evaluate((value) => {
+      const fixture = window as unknown as { __setTerminalCommandState: (id: string, state: typeof value) => void }
+      fixture.__setTerminalCommandState('terminal-task', value)
+    }, state)
+    await expect(tab).toHaveAccessibleDescription(description)
+  }
   await pane.getByRole('button', { name: 'Close terminal' }).click()
   await expect.poll(() => page.evaluate(() => window.__closedTerminals)).toContain('terminal-task')
   await expect(pane).toHaveCount(0)

@@ -551,6 +551,12 @@ export interface QuitConfirmation {
   liveTerminals: number
 }
 
+export type TerminalCommandState = 'ready' | 'running' | 'failed'
+
+export function terminalCommandStates(terminalIds: string[]): Promise<Partial<Record<string, TerminalCommandState>>> {
+  return invoke('terminal_command_states', { terminalIds })
+}
+
 export interface TerminalSnapshot {
   id: string
   projectId: string

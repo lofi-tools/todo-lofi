@@ -3714,6 +3714,7 @@ export function App() {
               <Show when={selectedProjectId()} keyed fallback={<p class="empty">No terminals yet.</p>}>
                 {(projectId) => <TerminalPane
                   projectId={projectId} taskId={selectedTaskId()} agent={workspace()?.task.agent}
+                  agentState={workspace()?.task.state} agentFailed={!!workspace()?.task.error}
                   launchingTaskId={startingTerminalTask()?.projectId === projectId ? startingTerminalTask()?.taskId : undefined}
                   taskHasWorktree={!!workspace()?.task.worktreePath}
                   transcript={workspace()?.transcript}

@@ -167,6 +167,8 @@ interface TerminalPaneProps {
   listEvent: bridge.TerminalList | undefined
   setupTerminalRequest?: { id: string }
   launchingTaskId?: string
+  agentState?: bridge.TaskState
+  agentFailed?: boolean
   freebuffFront: boolean
   onOpenFreebuff: () => void
 }
@@ -202,6 +204,19 @@ function SetupRuns(props: { taskId: string }) {
       </For>
     </details>
   </Show>
+}
+
+function terminalStateLabel(state?: bridge.TerminalCommandState) {
+  switch (state) {
+    case 'ready': return 'Ready'
+    case 'running': return 'Command running'
+    case 'failed': return 'Last command failed'
+    default: return 'Command status unavailable'
+  }
+}
+
+function TerminalCommandDot(props: { state?: bridge.TerminalCommandState }) {
+  return <span class="terminal-command-dot" data-state={props.state} aria-hidden="true" />
 }
 
 export function TerminalPane(props: TerminalPaneProps) {
@@ -642,6 +657,32 @@ export function TerminalPane(props: TerminalPaneProps) {
     onCleanup(() => { disposed = true })
   })
 
+  const commandStateIds = createMemo(() => props.shown ? [
+    ...listed().map(({ id }) => id),
+    ...(typeShown('task') ? [...agentTerminalIds(), ...launchEntries().filter((entry) => entry.setupTitle && entry.live).map(({ id }) => id)] : []),
+  ] : [])
+  const [commandStates, { refetch: refreshCommandStates }] = createResource(
+    () => commandStateIds().length ? commandStateIds() : false,
+    (ids) => bridge.terminalCommandStates(ids).catch(() => undefined),
+  )
+  createEffect(() => {
+    if (!commandStateIds().length) return
+    const timer = window.setInterval(() => {
+      if (!document.hidden && !commandStates.loading) void refreshCommandStates()
+    }, 250)
+    onCleanup(() => window.clearInterval(timer))
+  })
+  const commandState = (id: string): bridge.TerminalCommandState | undefined => commandStates.latest?.[id]
+  const newestAgentLaunch = createMemo(() => launchEntries().filter((entry) => !entry.setupTitle).at(-1)?.id)
+
+  function launchState(entry: bridge.AgentLaunch): bridge.TerminalCommandState | undefined {
+    if (entry.setupTitle) return entry.live ? commandState(entry.id) : 'ready'
+    if (entry.id !== newestAgentLaunch()) return 'ready'
+    if (props.agentFailed || props.agentState === 'failed') return 'failed'
+    return entry.live && (props.launchingTaskId || props.agentState === 'working' || props.agentState === 'starting')
+      ? 'running' : 'ready'
+  }
+
   function launchTab(id: string) {
     return <Show when={launchEntries().find((entry) => entry.id === id)}>
       {(entry) => {
@@ -656,11 +697,12 @@ export function TerminalPane(props: TerminalPaneProps) {
           <button ref={tab} type="button" class="terminal-list__item"
             classList={{ 'terminal-list__item--agent': !entry().setupTitle }}
             aria-current={id === visibleLaunch()?.id ? 'true' : undefined}
-            aria-label={label()} title={hint()}
+            aria-label={label()} aria-description={terminalStateLabel(launchState(entry()))} title={hint()}
             onClick={() => { setSelectedLaunch(id); if (entry().live) setFocusRequest({ id }) }}>
             <Show when={entry().setupTitle} fallback={<AgentIcon agent={agent() ?? ''} />}>
               {(title) => <span>{title()}</span>}
             </Show>
+            <TerminalCommandDot state={launchState(entry())} />
           </button>
           <TerminalActionsMenu title={label()} cwd={entry().cwd} disabled={pending()} contextOnly contextTarget={() => tab} />
         </li>
@@ -701,11 +743,14 @@ export function TerminalPane(props: TerminalPaneProps) {
           {(entry) => (
             <li class="terminal-list__row">
               <button type="button" class="terminal-list__item terminal-list__item--agent"
-                aria-label={`agent: ${entry.title}`} title={`agent: ${entry.title}`} onClick={() => {
+                aria-label={`agent: ${entry.title}`}
+                aria-description={terminalStateLabel(commandState(entry.id) ?? 'running')}
+                title={`agent: ${entry.title}`} onClick={() => {
                 setAgentPaneVisible(entry.id, true)
                 setFocusRequest({ id: entry.id })
               }}>
                 <AgentIcon agent={props.agent ?? ''} />
+                <TerminalCommandDot state={commandState(entry.id) ?? 'running'} />
               </button>
             </li>
           )}
@@ -716,10 +761,12 @@ export function TerminalPane(props: TerminalPaneProps) {
             return <li class="terminal-list__row">
               <button ref={tab} type="button" class="terminal-list__item"
                 aria-current={entry.id === active() ? 'true' : undefined}
+                aria-description={terminalStateLabel(commandState(entry.id))}
                 title={`${entry.scope === 'project' ? 'Project shared' : 'Task'} terminal · ${entry.endedAt === null ? 'live' : 'ended'}${contains(root(), entry.id) ? '' : ' · view closed'}`}
                 disabled={pending()} onClick={() => void run(() => show(entry.id))}>
                 <Show when={entry.scope === 'project'}><ProjectTerminalIcon /></Show>
                 <span>{entry.title}</span>
+                <TerminalCommandDot state={commandState(entry.id)} />
                 <Show when={props.attention.includes(entry.id)}>
                   <span class="terminal-attention" role="img" aria-label="Terminal needs attention" />
                 </Show>
@@ -732,10 +779,12 @@ export function TerminalPane(props: TerminalPaneProps) {
         <Show when={typeShown('freebuff') && freebuff()}>
           <li class="terminal-list__row">
             <button type="button" class="terminal-list__item" aria-current={props.freebuffFront ? 'true' : undefined}
+              aria-description={terminalStateLabel(freebuff()?.endedAt === null ? 'running' : 'ready')}
               title={`Freebuff · live${props.freebuffFront ? ' · in front' : ''}`}
               onClick={props.onOpenFreebuff}>
               <FreebuffMark size={13} />
               <span>Freebuff</span>
+              <TerminalCommandDot state={freebuff()?.endedAt === null ? 'running' : 'ready'} />
             </button>
           </li>
         </Show>

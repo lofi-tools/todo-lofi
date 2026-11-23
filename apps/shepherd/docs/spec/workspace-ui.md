@@ -80,7 +80,10 @@ current layout and give future changes a point of comparison.
   working directory** for task and project terminals. Open the same menu with
   the ellipsis button or by right-clicking the terminal tab or header.
   Terminal tabs omit the process lifecycle badge. Put agent tabs first and
-  use the running agent’s icon in place of visible tab text.
+  use the running agent’s icon in place of visible tab text. A subtle gray dot
+  marks the idle prompt. Pulse a yellow glow while a command runs and show a
+  red dot after a nonzero exit. Use shell-reported command boundaries and exit
+  codes. A shell without command reporting has a neutral dot.
   When a task or project shell exits, remove its tab and pane. Delete its record
   and update the saved layout in one transaction. At startup, prune shells left
   over from the previous app run and preserve the selected inspector tab.

@@ -3236,6 +3236,35 @@ button.pool__agent-label { padding: 0; border: 0; background: transparent; color
   color: var(--text);
 }
 
+.terminal-command-dot {
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  color: var(--text-disabled);
+  background: currentColor;
+}
+
+.terminal-command-dot[data-state='running'] {
+  color: var(--attention);
+  box-shadow: 0 0 5px currentColor;
+  animation: terminal-command-glow 1.6s ease-in-out infinite alternate;
+}
+
+.terminal-command-dot[data-state='failed'] {
+  color: var(--error-text);
+  box-shadow: 0 0 4px color-mix(in srgb, currentColor 60%, transparent);
+}
+
+@keyframes terminal-command-glow {
+  from { box-shadow: 0 0 2px currentColor; }
+  to { box-shadow: 0 0 7px currentColor; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .terminal-command-dot[data-state='running'] { animation: none; }
+}
+
 .terminal-attention {
   display: inline-block;
   flex: none;

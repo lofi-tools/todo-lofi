@@ -313,6 +313,8 @@ pub(crate) struct TerminalHost {
     engine: Arc<Mutex<PtyTerminals>>,
     foreground_agents: Arc<Mutex<Vec<AgentLaunch>>>,
     #[cfg(unix)]
+    shell_integration: Arc<crate::shell_integration::ShellIntegration>,
+    #[cfg(unix)]
     worktree_setups: Arc<Mutex<BTreeMap<TaskId, WorktreeSetupTerminal>>>,
     screens: Arc<Mutex<BTreeMap<String, Arc<Mutex<ScreenSlot>>>>>,
     appearance: Arc<Mutex<TerminalAppearance>>,
@@ -498,6 +500,8 @@ impl TerminalHost {
             preferences,
             engine: Arc::new(Mutex::new(PtyTerminals::new())),
             foreground_agents: Arc::new(Mutex::new(Vec::new())),
+            #[cfg(unix)]
+            shell_integration: Arc::default(),
             #[cfg(unix)]
             worktree_setups: Arc::new(Mutex::new(BTreeMap::new())),
             screens: Arc::new(Mutex::new(BTreeMap::new())),
@@ -4280,6 +4284,16 @@ impl ShellState {
         let mut command = record.command.clone();
         let mut args = Vec::new();
         let mut environment = BTreeMap::new();
+        #[cfg(unix)]
+        if record.scope != TerminalScope::Freebuff {
+            match self.terminals.shell_integration.launch(&command).await {
+                Ok((program, shell_args)) => {
+                    command = program;
+                    args = shell_args;
+                }
+                Err(error) => tracing::warn!(%error, "could not initialize terminal command status"),
+            }
+        }
         if let Some(task_id) = &record.task_id {
             let (project, agent) = {
                 let mut core = self.core.lock().await;
@@ -4317,8 +4331,7 @@ impl ShellState {
                 let wrapper = setup.launch_wrapper;
                 let mut wrapper = wrapper.into_iter();
                 if let Some(program) = wrapper.next() {
-                    args = wrapper.collect();
-                    args.push(command);
+                    args = wrapper.chain(std::iter::once(command)).chain(args).collect();
                     command = program;
                 }
             }
@@ -5906,6 +5919,27 @@ pub mod commands {
         project_id: String,
     ) -> Result<TerminalList, BridgeError> {
         Ok(state.inner().terminal_list(project_id).await)
+    }
+
+    #[tauri::command]
+    pub async fn terminal_command_states(
+        state: State<'_, ShellState>,
+        terminal_ids: Vec<String>,
+    ) -> Result<BTreeMap<String, crate::terminal_screen::CommandState>, BridgeError> {
+        let slots: Vec<_> = {
+            let screens = state.terminals.screens.lock().await;
+            terminal_ids
+                .into_iter()
+                .filter_map(|id| screens.get(&id).map(|slot| (id, Arc::clone(slot))))
+                .collect()
+        };
+        let mut statuses = BTreeMap::new();
+        for (id, slot) in slots {
+            if let Some(status) = slot.lock().await.screen.command_state() {
+                statuses.insert(id, status);
+            }
+        }
+        Ok(statuses)
     }
 
     #[tauri::command]

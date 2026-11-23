@@ -64,6 +64,14 @@ impl TerminalAppearance {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum CommandState {
+    Ready,
+    Running,
+    Failed,
+}
+
 #[derive(Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TerminalFrame {
@@ -235,7 +243,7 @@ struct KeyboardModes {
     stack: VecDeque<u16>,
 }
 
-enum KeyboardCommand {
+enum TerminalControl {
     Query,
     Set { flags: u16, operation: u16 },
     Push(u16),
@@ -243,12 +251,15 @@ enum KeyboardCommand {
     AlternateScreen(bool),
     Reset,
     ColorQuery,
+    CommandPrompt,
+    CommandStarted,
+    CommandFinished(i32),
 }
 
 #[derive(Default)]
-struct KeyboardSequence(Option<KeyboardCommand>);
+struct TerminalSequence(Option<TerminalControl>);
 
-impl Perform for KeyboardSequence {
+impl Perform for TerminalSequence {
     fn csi_dispatch(&mut self, params: &Params, intermediates: &[u8], ignore: bool, action: char) {
         if ignore {
             return;
@@ -258,20 +269,20 @@ impl Perform for KeyboardSequence {
             && intermediates == b"?"
             && params.any(|mode| mode == NamedPrivateMode::SwapScreenAndSetRestoreCursor as u16)
         {
-            self.0 = Some(KeyboardCommand::AlternateScreen(action == 'h'));
+            self.0 = Some(TerminalControl::AlternateScreen(action == 'h'));
         }
         if action != 'u' {
             return;
         }
         let first = params.next().unwrap_or(0);
         self.0 = match intermediates {
-            b"?" => Some(KeyboardCommand::Query),
-            b"=" => Some(KeyboardCommand::Set {
+            b"?" => Some(TerminalControl::Query),
+            b"=" => Some(TerminalControl::Set {
                 flags: first & KITTY_FLAGS,
                 operation: params.next().unwrap_or(1),
             }),
-            b">" => Some(KeyboardCommand::Push(first & KITTY_FLAGS)),
-            b"<" => Some(KeyboardCommand::Pop(first.max(1))),
+            b">" => Some(TerminalControl::Push(first & KITTY_FLAGS)),
+            b"<" => Some(TerminalControl::Pop(first.max(1))),
             _ => None,
         };
     }
@@ -281,13 +292,24 @@ impl Perform for KeyboardSequence {
             && matches!(*command, b"4" | b"10" | b"11" | b"12")
             && rest.contains(&b"?".as_slice())
         {
-            self.0 = Some(KeyboardCommand::ColorQuery);
+            self.0 = Some(TerminalControl::ColorQuery);
+        }
+        if let [b"133", marker, rest @ ..] = params {
+            self.0 = match (*marker, rest) {
+                (b"A", _) => Some(TerminalControl::CommandPrompt),
+                (b"C", _) => Some(TerminalControl::CommandStarted),
+                (b"D", [status, ..]) => std::str::from_utf8(status)
+                    .ok()
+                    .and_then(|status| status.parse().ok())
+                    .map(TerminalControl::CommandFinished),
+                _ => None,
+            };
         }
     }
 
     fn esc_dispatch(&mut self, intermediates: &[u8], ignore: bool, byte: u8) {
         if !ignore && intermediates.is_empty() && byte == b'c' {
-            self.0 = Some(KeyboardCommand::Reset);
+            self.0 = Some(TerminalControl::Reset);
         }
     }
 
@@ -302,7 +324,8 @@ pub struct Screen {
     replies: PtyReplies,
     ready_replies: Vec<u8>,
     parser: Processor,
-    keyboard_parser: Parser,
+    control_parser: Parser,
+    command_state: Option<CommandState>,
     keyboards: [KeyboardModes; 2],
     keyboard_alternate_screen: bool,
     search_id: u32,
@@ -333,7 +356,8 @@ impl Screen {
             replies,
             ready_replies: Vec::new(),
             parser: Processor::new(),
-            keyboard_parser: Parser::new(),
+            control_parser: Parser::new(),
+            command_state: None,
             keyboards: Default::default(),
             keyboard_alternate_screen: false,
             search_id: 0,
@@ -353,21 +377,25 @@ impl Screen {
     }
 
     pub fn process(&mut self, mut bytes: &[u8]) {
-        // Alacritty 0.26 can panic when its keyboard stack fills. Parse just
-        // these commands separately until a release includes the upstream fix.
+        // Alacritty ignores shell markers and 0.26 can panic when its keyboard
+        // stack fills. Inspect those sequences before passing bytes through.
         while !bytes.is_empty() {
-            let mut sequence = KeyboardSequence::default();
+            let mut sequence = TerminalSequence::default();
             let consumed = self
-                .keyboard_parser
+                .control_parser
                 .advance_until_terminated(&mut sequence, bytes);
             let (parsed, remaining) = bytes.split_at(consumed);
             self.parser.advance(&mut self.term, parsed);
             if let Some(command) = sequence.0 {
-                self.apply_keyboard_command(command);
+                self.apply_control(command);
             }
             bytes = remaining;
         }
         self.discard_replaced_search();
+    }
+
+    pub fn command_state(&self) -> Option<CommandState> {
+        self.command_state
     }
 
     pub fn sync_deadline(&self) -> Option<Instant> {
@@ -379,30 +407,30 @@ impl Screen {
         self.discard_replaced_search();
     }
 
-    fn apply_keyboard_command(&mut self, command: KeyboardCommand) {
+    fn apply_control(&mut self, command: TerminalControl) {
         // VTE can defer applying a screen switch during synchronized output.
         // Keyboard commands still need the screen selected by the byte stream.
         let keyboard = &mut self.keyboards[usize::from(self.keyboard_alternate_screen)];
         match command {
-            KeyboardCommand::Query => {
+            TerminalControl::Query => {
                 self.replies
                     .send_event(Event::PtyWrite(format!("\x1b[?{}u", keyboard.flags)));
             }
-            KeyboardCommand::Set { flags, operation } => {
+            TerminalControl::Set { flags, operation } => {
                 keyboard.flags = match operation {
                     2 => keyboard.flags | flags,
                     3 => keyboard.flags & !flags,
                     _ => flags,
                 };
             }
-            KeyboardCommand::Push(flags) => {
+            TerminalControl::Push(flags) => {
                 if keyboard.stack.len() == KITTY_STACK_LIMIT {
                     keyboard.stack.pop_front();
                 }
                 keyboard.stack.push_back(keyboard.flags);
                 keyboard.flags = flags;
             }
-            KeyboardCommand::Pop(count) => {
+            TerminalControl::Pop(count) => {
                 for _ in 0..count {
                     keyboard.flags = keyboard.stack.pop_back().unwrap_or(0);
                     if keyboard.stack.is_empty() {
@@ -411,14 +439,27 @@ impl Screen {
                     }
                 }
             }
-            KeyboardCommand::AlternateScreen(alternate) => {
+            TerminalControl::AlternateScreen(alternate) => {
                 self.keyboard_alternate_screen = alternate
             }
-            KeyboardCommand::Reset => {
+            TerminalControl::Reset => {
                 self.keyboard_alternate_screen = false;
                 self.keyboards = Default::default();
             }
-            KeyboardCommand::ColorQuery => self.resolve_replies(),
+            TerminalControl::ColorQuery => self.resolve_replies(),
+            TerminalControl::CommandPrompt => {
+                if self.command_state != Some(CommandState::Failed) {
+                    self.command_state = Some(CommandState::Ready);
+                }
+            }
+            TerminalControl::CommandStarted => self.command_state = Some(CommandState::Running),
+            TerminalControl::CommandFinished(status) => {
+                self.command_state = Some(if status == 0 {
+                    CommandState::Ready
+                } else {
+                    CommandState::Failed
+                });
+            }
         }
     }
 
@@ -735,6 +776,21 @@ mod tests {
             .iter()
             .map(|cell| cell.text.as_str())
             .collect()
+    }
+
+    #[test]
+    fn command_markers_track_exit_status_across_split_pty_reads() {
+        let mut screen = Screen::new(20, 2);
+        assert_eq!(screen.command_state(), None);
+        screen.process(b"\x1b]133;A\x07$ ");
+        assert_eq!(screen.command_state(), Some(CommandState::Ready));
+        screen.process(b"\x1b]13");
+        screen.process(b"3;C\x1b\\");
+        assert_eq!(screen.command_state(), Some(CommandState::Running));
+        screen.process(b"\x1b]133;D;37\x07\x1b]133;A\x07");
+        assert_eq!(screen.command_state(), Some(CommandState::Failed));
+        screen.process(b"\x1b]133;C\x07\x1b]133;D;0\x07");
+        assert_eq!(screen.command_state(), Some(CommandState::Ready));
     }
 
     #[test]
