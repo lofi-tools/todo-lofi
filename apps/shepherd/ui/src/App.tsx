@@ -608,6 +608,25 @@ export function App() {
   }
   const [terminalListEvent, setTerminalListEvent] = createSignal<Extract<CoreEvent, { type: 'terminalListChanged' }>['data']>()
   const [startingTerminalTask, setStartingTerminalTask] = createSignal<{ projectId: string; taskId: string }>()
+  const [startingPrompt, setStartingPrompt] = createSignal<{
+    projectId: string
+    taskId: string | null
+    lastSequence: number
+    text: string
+    agent: bridge.Agent
+  }>()
+  const visibleStartingPrompt = createMemo(() => {
+    const submission = startingPrompt()
+    if (!submission || submission.projectId !== selectedProjectId()) return
+    const taskId = submission.taskId ?? startingTerminalTask()?.taskId
+    const selected = selectedTaskId()
+    if (submission.taskId ? selected !== taskId : selected && selected !== taskId) return
+    // The agent is ready when the core records the outgoing prompt.
+    const current = workspace()
+    if (current && current.task.id === taskId && current.transcript.some((entry) =>
+      entry.sequence > submission.lastSequence && entry.kind.type === 'userMessage' && !entry.sourceId)) return
+    return submission
+  })
   const [setupTerminalRequest, setSetupTerminalRequest] = createSignal<{ id: string }>()
   const [inspectorTabs, setInspectorTabs] = createSignal(new Map<string | null, bridge.InspectorTab>())
   const [explorerMode, setExplorerMode] = createSignal<'files' | 'changes'>('files')
@@ -2143,7 +2162,8 @@ export function App() {
 
   createEffect(() => {
     // Read the entries so streamed text and new rows keep the view at the bottom.
-    if (!workspace()?.transcript || !transcript || searchJump() || !followTranscript) return
+    const starting = visibleStartingPrompt()
+    if ((!workspace()?.transcript && !starting) || !transcript || searchJump() || !followTranscript) return
     transcript.scrollTop = transcript.scrollHeight
   })
 
@@ -2643,6 +2663,15 @@ export function App() {
       : undefined
     if ((!current && !agentAvailability()?.[newTaskAgent()]) || !projectId || (!text && !files.length && !selectedSkills.length) || (!canCompose() && !canQueuePrompt()) || pending()) return
     const projectScope = `project:${projectId}`
+    if (!canQueuePrompt()) {
+      setStartingPrompt({
+        projectId,
+        taskId: current?.task.id ?? null,
+        lastSequence: current?.transcript.at(-1)?.sequence ?? -1,
+        text: message || 'Attached files',
+        agent: currentAgent(),
+      })
+    }
     void run(async () => {
       setSetupFailure(undefined)
       async function keepTaskForSetup(taskId: string, error: bridge.BridgeError) {
@@ -2737,8 +2766,12 @@ export function App() {
         setSelectedTaskId(updated.task.id)
         setWorkspace(updated)
       }
+      setStartingPrompt(undefined)
       await loadTasks(projectId)
-    }).finally(() => setStartingTerminalTask(undefined))
+    }).finally(() => batch(() => {
+      setStartingPrompt(undefined)
+      setStartingTerminalTask(undefined)
+    }))
   }
 
   function storedDefaultMode(taskId: string): string | undefined {
@@ -3386,7 +3419,7 @@ export function App() {
               {(error) => <p class="entry__failure-text" role="alert">{error()}</p>}
             </Show>
             <Show
-              when={workspace()}
+              when={workspace() || visibleStartingPrompt()}
               fallback={
                 <Show when={canStartTask() && selectedProject()} fallback={
                   <Show when={selectedTaskOpenFailure()} fallback={
@@ -3423,7 +3456,7 @@ export function App() {
                 </Show>
               }
             >
-              {(current) => {
+              {(_visible) => {
                 const entries = transcriptRows
                 const readCalls = createMemo(() => {
                   const calls = new Set<string>()
@@ -3447,9 +3480,9 @@ export function App() {
                   answerQuestion,
                   cancelling: cancellingTurn,
                   canApprove,
-                  canAnswer: () => current().task.state === 'waiting' && !pending() && !cancellingTurn(),
-                  awaitingAnswer: (questionId) => answeringQuestions().has(JSON.stringify([current().task.id, questionId])),
-                  agentLabel: () => bridge.AGENT_LABELS[current().task.agent],
+                  canAnswer: () => workspace()?.task.state === 'waiting' && !pending() && !cancellingTurn(),
+                  awaitingAnswer: (questionId) => answeringQuestions().has(JSON.stringify([selectedTaskId(), questionId])),
+                  agentLabel: currentAgentName,
                   thoughtOpen: (entryId) => !collapsedThoughts().has(entryId),
                   toggleThought,
                   collapseThought,
@@ -3460,7 +3493,7 @@ export function App() {
                 }
                 return (
                   <Show
-                    when={entries().length > 0}
+                    when={entries().length > 0 || visibleStartingPrompt()}
                     fallback={<p class="empty">Send a prompt to start this task.</p>}
                   >
                     <ol class="transcript">
@@ -3481,6 +3514,9 @@ export function App() {
                           </Show>
                         }}
                       </For>
+                      <Show when={visibleStartingPrompt()}>
+                        {(submission) => <PromptStartup text={submission().text} agent={submission().agent} />}
+                      </Show>
                     </ol>
                   </Show>
                 )
@@ -4522,6 +4558,17 @@ function TerminalCommandRow(props: { toolCall: bridge.ToolCallEntry; context: En
   </div>
 }
 
+function UserPromptCard(props: { children: JSX.Element }) {
+  return <div class="entry__user-card"><p class="entry__user">{props.children}</p></div>
+}
+
+function PromptStartup(props: { text: string; agent: bridge.Agent }) {
+  return <>
+    <li class="entry"><UserPromptCard>{props.text}</UserPromptCard></li>
+    <li class="entry"><p class="entry__notice" role="status">Starting {bridge.AGENT_LABELS[props.agent]}…</p></li>
+  </>
+}
+
 function entryBody(entry: bridge.Entry, context: EntryContext, match: () => string | undefined) {
   const kind = entry.kind
   const text = (value: string) => <SearchMark text={value} match={match()} />
@@ -4539,7 +4586,7 @@ function entryBody(entry: bridge.Entry, context: EntryContext, match: () => stri
       // user wrote in the composer, so only composer prompts become cards.
       return entry.sourceId
         ? <p class="entry__user">{text(kind.data.text)}</p>
-        : <div class="entry__user-card"><p class="entry__user">{text(kind.data.text)}</p></div>
+        : <UserPromptCard>{text(kind.data.text)}</UserPromptCard>
     case 'agentText':
       return <div class="entry__agent"><Markdown source={kind.data.text} renderText={text} /></div>
     case 'thought':

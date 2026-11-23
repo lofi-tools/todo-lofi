@@ -600,6 +600,9 @@ current layout and give future changes a point of comparison.
   slightly more contrasting than the raised surface, in regular weight text,
   aligned to the trailing edge and no wider than 80% of the pane. Text
   typed into the agent's terminal keeps the plain transcript row.
+- While a sent prompt waits for worktree setup or agent startup, show the
+  outgoing prompt immediately with a temporary **Starting {agent}…** line
+  below it. Remove the line when the prompt reaches the agent or startup fails.
 - Reads, searches and listings share one row with a file-and-magnifier icon. It
   carries the tool's title and, while an approval is open, its allow choices in
   place of a separate approval card. Once answered, it reports the decision, the

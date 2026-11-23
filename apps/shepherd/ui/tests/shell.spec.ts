@@ -1327,6 +1327,9 @@ test.beforeEach(async ({ context }) => {
             if (args.mode) sessionModes.set(id, args.mode)
             if (args.model) sessionModels.set(id, args.model)
             sentPrompts.push({ taskId: id, text: args.text, ...(args.model ? { model: args.model } : {}), ...(args.mode ? { mode: args.mode } : {}) })
+            if (options.has('hold-agent-startup')) {
+              await new Promise<void>((resolve) => window.addEventListener('release-agent-startup', () => resolve(), { once: true }))
+            }
             transcripts[id] = [
               entry(`entry-${id}-1`, 1, { type: 'userMessage', data: { text: args.text } }),
               entry(`entry-${id}-2`, 2, { type: 'agentText', data: { text: 'working on it' } }),
@@ -2373,23 +2376,31 @@ test('keeps the new task and prompt when worktree setup fails', async ({ page })
   await expect(page.getByRole('region', { name: 'Task chat' })).toContainText('keep this prompt')
 })
 
-test('starts the first Codex prompt without a setup notice', async ({ page }) => {
+test('shows the outgoing prompt while Codex starts in the background', async ({ page }) => {
   await page.addInitScript(() => localStorage.setItem('fixture.settings', JSON.stringify({
     projects: { '/tmp/demo': {
       environment: { sourceHash: 'fixture', setup: 'prepare worktree', actions: [] },
       'worktree.setup': { launchWrapper: ['project-wrapper'] },
     } },
   })))
-  await page.goto('/')
+  await page.goto('/?hold-agent-startup')
   await page.getByRole('button', { name: 'New chat in demo' }).press('Enter')
   const composer = page.locator('.composer')
   const prompt = composer.getByLabel('Prompt')
   await prompt.fill('Start with the configured environment')
   await expect(composer.locator('.composer__setup-notice')).toHaveCount(0)
   await composer.getByRole('button', { name: 'Send', exact: true }).click()
-  await expect(page.getByRole('region', { name: 'Transcript' })).toContainText('working on it')
+  const transcript = page.getByRole('region', { name: 'Transcript' })
+  const starting = transcript.getByRole('status').filter({ hasText: 'Starting Codex' })
+  await expect(transcript.getByRole('listitem')).toHaveText([
+    'Start with the configured environment', 'Starting Codex…',
+  ])
+  await expect.poll(() => page.evaluate(() => window.__sentPrompts))
+    .toEqual([{ taskId: 'task-2', text: 'Start with the configured environment' }])
+  await page.evaluate(() => window.dispatchEvent(new Event('release-agent-startup')))
+  await expect(transcript.getByRole('listitem')).toHaveText(['Start with the configured environment', 'working on it'])
+  await expect(starting).toHaveCount(0)
   await expect(composer.locator('.composer__setup-notice')).toHaveCount(0)
-  expect(await page.evaluate(() => window.__sentPrompts)).toEqual([{ taskId: 'task-2', text: 'Start with the configured environment' }])
 })
 
 test('shows configured setup runs and the foreground agent terminal', async ({ page }) => {
