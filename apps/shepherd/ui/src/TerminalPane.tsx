@@ -12,6 +12,7 @@ import { PickerMenu } from './PickerMenu'
 import { SegmentedControl } from './SegmentedControl'
 import { KITTY_REPORT_EVENTS, encodeKittyKey, encodeLegacyKey, encodeTerminalText } from './terminal_keys'
 import { reportError } from './diagnostics'
+import { plainTextInput } from './textInput'
 
 const TERMINAL_TYPES: { value: 'both' | 'project' | 'task'; label: string }[] = [
   { value: 'both', label: 'Both' },
@@ -1833,7 +1834,7 @@ function TerminalCanvas(props: { terminalId: string; shown: boolean; readOnly?: 
           tabIndex={copyText() === null ? 0 : -1} onKeyDown={onKeyDown} onCopy={onCopy}
           onFocus={() => props.onFocus?.(props.terminalId)} onBlur={() => props.onFocus?.(null)} />
       }>
-      <textarea
+      <textarea {...plainTextInput}
         ref={(element) => { input = element }}
         class="terminal-view__input"
         aria-label="Terminal"
@@ -1842,7 +1843,6 @@ function TerminalCanvas(props: { terminalId: string; shown: boolean; readOnly?: 
         tabIndex={copyText() === null ? 0 : -1}
         autocapitalize="off"
         autocomplete="off"
-        spellcheck={false}
         readOnly={props.readOnly}
         onKeyDown={onKeyDown}
         onKeyUp={onKeyUp}
@@ -1887,7 +1887,7 @@ function TerminalCanvas(props: { terminalId: string; shown: boolean; readOnly?: 
       </span>
       <pre class="terminal-view__text" role="region" aria-label="Terminal output">{visibleText()}</pre>
       <Show when={copyText() !== null}>
-        <textarea
+        <textarea {...plainTextInput}
           ref={copyInput}
           class="terminal-view__copy"
           aria-label="Copy terminal output"
@@ -1912,7 +1912,7 @@ function TerminalCanvas(props: { terminalId: string; shown: boolean; readOnly?: 
           event.preventDefault()
           closeSearch()
         }}>
-          <input ref={searchInput} type="search" aria-label="Find in terminal" placeholder="Find in terminal" onInput={resetSearch} />
+          <input {...plainTextInput} ref={searchInput} type="search" aria-label="Find in terminal" placeholder="Find in terminal" onInput={resetSearch} />
           <button type="submit" value="previous" disabled={searching()}>Find previous</button>
           <button type="submit" value="next" disabled={searching()}>Find next</button>
           <button type="button" onClick={closeSearch}>Close find</button>

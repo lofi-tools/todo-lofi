@@ -1,6 +1,7 @@
 import { For, Show, createEffect, createMemo, createSignal, createUniqueId } from 'solid-js'
 
 import type { ProjectNode, ProjectScan } from './bridge'
+import { plainTextInput } from './textInput'
 
 const upcomingImportSources = ['OpenCode', 'Pi', 'Claude Code', 'Freebuff']
 
@@ -153,7 +154,7 @@ export function ProjectPicker(props: ProjectPickerProps) {
         </header>
 
         <p class="picker__root">{props.scan?.root ?? 'Home'}</p>
-        <input
+        <input {...plainTextInput}
           class="picker__filter"
           ref={input}
           role="combobox"

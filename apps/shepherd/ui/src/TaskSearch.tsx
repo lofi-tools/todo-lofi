@@ -3,6 +3,7 @@ import { For, Show, createEffect, createSignal, createUniqueId, on, onCleanup } 
 import { cancelTaskSearch, reserveTaskSearch, searchTasks, type TaskSearchHit } from './bridge'
 import { displayChord } from './keybindings'
 import { reportError } from './diagnostics'
+import { plainTextInput } from './textInput'
 
 export function TaskSearch(props: {
   open: boolean
@@ -90,7 +91,7 @@ export function TaskSearch(props: {
         <circle cx="10.5" cy="10.5" r="5.5" />
         <path d="m15 15 4 4" />
       </svg>
-      <input class="task-search__input" ref={props.inputRef} role="combobox" aria-label="Search across tasks"
+      <input {...plainTextInput} class="task-search__input" ref={props.inputRef} role="combobox" aria-label="Search across tasks"
         aria-keyshortcuts={props.shortcut} aria-controls={popupOpen() ? listId : undefined} aria-expanded={popupOpen()}
         aria-activedescendant={popupOpen() && hits().length ? rowId(active()) : undefined} aria-autocomplete="list"
         title={props.shortcut ? `Search tasks (${shortcutLabel()})` : 'Search tasks'}

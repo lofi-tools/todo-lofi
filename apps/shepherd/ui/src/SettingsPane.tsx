@@ -10,6 +10,7 @@ import { SettingsSelect } from './SettingsSelect'
 import { AgentModelSettings, supportsModelSelection } from './AgentModelSettings'
 import { AgentIcon } from './AgentIcon'
 import { actOnWorkspaceFile, projectEnvironment, saveProjectEnvironment, type ProjectEnvironment, type WorktreeSetup } from './bridge'
+import { plainTextInput } from './textInput'
 
 export const categories = ['Workspace', 'Projects', 'Agents', 'Appearance', 'Keyboard shortcuts'] as const
 
@@ -102,7 +103,7 @@ function ProjectPreviewSetting(props: { url?: string | null; localOverride: bool
     <form class="settings__project" onSubmit={(event) => { event.preventDefault(); save(true) }}>
       <label class="settings__row settings__preview-url">
         <span>Preview URL</span>
-        <input type="text" inputmode="url" value={field.draft()} onInput={(event) => field.edit(event.currentTarget.value)}
+        <input {...plainTextInput} type="text" inputmode="url" value={field.draft()} onInput={(event) => field.edit(event.currentTarget.value)}
           onBlur={() => save()} disabled={!props.editable} readOnly={field.saving() || props.localOverride} placeholder="http://localhost:3000" />
       </label>
       <Show when={props.localOverride}><p class="empty settings__field-note">From repository</p></Show>
@@ -137,9 +138,9 @@ function ProjectPreviewServers(props: { value: PreviewService[]; localOverride: 
   return <section class="settings__project" aria-label="Preview servers and background commands" data-settings-draft onKeyDown={draft.onKeyDown}>
     <h5>Background commands</h5>
     <Index each={servers()}>{(server, index) => <div class="settings__project settings__item">
-      <label class="settings__row"><span>Name</span><input aria-label={`Server ${index + 1} name`} value={server().name} readOnly={disabled()} onInput={(event) => update(index, { name: event.currentTarget.value })} /></label>
-      <label class="settings__row"><span>Command</span><input aria-label={`Server ${index + 1} command`} value={server().command} readOnly={disabled()} onInput={(event) => update(index, { command: event.currentTarget.value })} /></label>
-      <label class="settings__row"><span>Port variable</span><input aria-label={`Server ${index + 1} port variable`} value={server().portVariable ?? ''} readOnly={disabled()} onInput={(event) => update(index, { portVariable: event.currentTarget.value || null })} placeholder="PORT" /></label>
+      <label class="settings__row"><span>Name</span><input {...plainTextInput} aria-label={`Server ${index + 1} name`} value={server().name} readOnly={disabled()} onInput={(event) => update(index, { name: event.currentTarget.value })} /></label>
+      <label class="settings__row"><span>Command</span><input {...plainTextInput} aria-label={`Server ${index + 1} command`} value={server().command} readOnly={disabled()} onInput={(event) => update(index, { command: event.currentTarget.value })} /></label>
+      <label class="settings__row"><span>Port variable</span><input {...plainTextInput} aria-label={`Server ${index + 1} port variable`} value={server().portVariable ?? ''} readOnly={disabled()} onInput={(event) => update(index, { portVariable: event.currentTarget.value || null })} placeholder="PORT" /></label>
       <Show when={!props.localOverride}><button type="button" class="project-action settings__field-action" disabled={disabled()}
         onClick={() => setServers((current) => current.filter((_, position) => position !== index))}>Remove</button></Show>
     </div>}</Index>
@@ -195,8 +196,8 @@ function WorktreeCommandInput(props: {
   placeholder?: string
   onChange: (line: string) => void
 }) {
-  return <input class="settings__worktree-command" aria-label={props.label} value={props.line}
-    readOnly={props.readOnly} placeholder={props.placeholder} spellcheck={false}
+  return <input {...plainTextInput} class="settings__worktree-command" aria-label={props.label} value={props.line}
+    readOnly={props.readOnly} placeholder={props.placeholder}
     onInput={(event) => props.onChange(event.currentTarget.value)} />
 }
 
@@ -313,7 +314,7 @@ function WorktreeSetupSettings(props: {
             onClick={() => update({ readinessCheck: { name: '', command: '' } })}>Add readiness check</button>
         </Show>
       }>{(check) => <>
-        <label class="settings__row"><span>Name</span><input value={check().name} readOnly={readOnly()}
+        <label class="settings__row"><span>Name</span><input {...plainTextInput} value={check().name} readOnly={readOnly()}
           onInput={(event) => update({ readinessCheck: { ...check(), name: event.currentTarget.value } })} /></label>
         <label class="settings__row"><span>Command</span>
           <WorktreeCommandInput label="Readiness check command" line={check().command} readOnly={readOnly()}
@@ -338,7 +339,7 @@ function WorktreeSetupSettings(props: {
         </Show>
       }>{(terminal) => <>
         <label class="settings__row"><span>Recovery instructions</span>
-          <textarea value={terminal().instructions ?? ''} readOnly={readOnly()}
+          <textarea {...plainTextInput} value={terminal().instructions ?? ''} readOnly={readOnly()}
             onInput={(event) => update({ setupTerminal: { ...terminal(), instructions: event.currentTarget.value } })} />
         </label>
         <label class="settings__row"><span>Shell command</span>
@@ -400,7 +401,7 @@ function ProjectSetupScript(props: { editor: ReturnType<typeof createProjectEnvi
   return <Show when={props.editor.loaded()}>
     <label class="settings__row"><span>Worktree setup script</span>
       <div class="settings__setup-script" data-sizing-text={sizingText()}>
-        <textarea rows={2} value={script()} readOnly={props.readOnly} aria-describedby={descriptionId}
+        <textarea {...plainTextInput} rows={2} value={script()} readOnly={props.readOnly} aria-describedby={descriptionId}
           onInput={(event) => props.editor.setScript(event.currentTarget.value)} />
       </div>
     </label>
@@ -467,9 +468,9 @@ function ProjectActionsSettings(props: {
       </div>
       <Show when={!editor.actions().length}><p class="empty">No project actions configured.</p></Show>
       <Index each={editor.actions()}>{(action, index) => <div class="settings__project settings__item">
-        <label class="settings__row"><span>Action name</span><input value={action().name} readOnly={disabled()}
+        <label class="settings__row"><span>Action name</span><input {...plainTextInput} value={action().name} readOnly={disabled()}
           onInput={(event) => updateAction(index, 'name', event.currentTarget.value)} /></label>
-        <label class="settings__row"><span>Action command</span><input value={action().command} readOnly={disabled()}
+        <label class="settings__row"><span>Action command</span><input {...plainTextInput} value={action().command} readOnly={disabled()}
           onInput={(event) => updateAction(index, 'command', event.currentTarget.value)} /></label>
         <Show when={!props.localOverride}><button type="button" class="project-action settings__field-action" disabled={disabled()}
           onClick={() => editor.setActions((actions) => actions.filter((_, position) => position !== index))}>Remove action</button></Show>
@@ -771,7 +772,7 @@ function KeyboardShortcuts(props: {
                       const edit = editing()
                       if (edit && chord()) void apply({ command: edit.id, previous: edit.previous, chord: chord() })
                     }}>
-                      <input data-shortcut-capture ref={recorder} aria-label={`Record shortcut for ${binding().label}`}
+                      <input {...plainTextInput} data-shortcut-capture ref={recorder} aria-label={`Record shortcut for ${binding().label}`}
                         placeholder="Press a shortcut" value={chord() ? format(chord()) : ''} readonly disabled={pending()} onKeyDown={record} />
                       <button type="submit" class="project-action" disabled={!editable() || !chord()}>Save shortcut</button>
                       <button type="button" class="project-action" disabled={pending()} onClick={() => { setError(''); finish() }}>Cancel</button>
@@ -997,7 +998,7 @@ export function SettingsPane(props: SettingsPaneProps) {
           <header class="settings__header"><h2 id="settings-title">Settings</h2></header>
           <div class="settings__search">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5" /><path d="m15.5 15.5 5 5" /></svg>
-            <input class="task-search__input" type="search" aria-label="Search settings" placeholder="Search settings" value={search()} onInput={(event) => {
+            <input {...plainTextInput} class="task-search__input" type="search" aria-label="Search settings" placeholder="Search settings" value={search()} onInput={(event) => {
               const input = event.currentTarget
               const value = input.value
               props.onNavigate(() => setSearch(value))

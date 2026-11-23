@@ -2,6 +2,7 @@ import { For, Show, createEffect, createSignal, on, onCleanup } from 'solid-js'
 
 import { openProjectAnnotationWrapper, openProjectPreview, startPreviewServers, type AttachmentLimit, type PreviewService } from './bridge'
 import { reportError } from './diagnostics'
+import { plainTextInput } from './textInput'
 
 interface PreviewPaneProps {
   projectId: string
@@ -243,7 +244,7 @@ function ProjectPreview(props: PreviewPaneProps & { url: string }) {
           <p><code>{selectionLabel(selected())}</code></p>
           <label>
             Annotation note
-            <textarea ref={noteInput} rows={2} maxLength={4000} value={note()} onInput={(event) => setNote(event.currentTarget.value)} />
+            <textarea {...plainTextInput} ref={noteInput} rows={2} maxLength={4000} value={note()} onInput={(event) => setNote(event.currentTarget.value)} />
           </label>
           <div class="terminal-pane__bar">
             <button type="submit" disabled={!note().trim()}>Queue annotation</button>

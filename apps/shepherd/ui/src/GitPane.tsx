@@ -9,6 +9,7 @@ import { reportError } from './diagnostics'
 import { PickerCaret, PickerMenu } from './PickerMenu'
 import { SegmentedControl } from './SegmentedControl'
 import type { SendAccent } from './SettingsPane'
+import { plainTextInput } from './textInput'
 
 interface GitRequest {
   taskId: string
@@ -296,7 +297,7 @@ export function GitPane(props: {
               void apply({ type: 'commit', message: message(), expected: current.stagedRevision })
             }
           }}>
-            <textarea ref={commitMessage} aria-label="Commit message" placeholder="Enter commit message..." value={message()} onInput={(event) => setMessage(event.currentTarget.value)} />
+            <textarea {...plainTextInput} ref={commitMessage} aria-label="Commit message" placeholder="Enter commit message..." value={message()} onInput={(event) => setMessage(event.currentTarget.value)} />
             <div class="explorer__commit-footer">
               <Show when={commitMethod() === 'amend' && amendRequested() !== null && amendRequested() === fresh()?.stagedRevision} fallback={
                 <div class="explorer__commit-actions explorer__compact-action" role="group" aria-label="Commit controls" data-send-accent={props.sendAccent}>

@@ -3,6 +3,7 @@ import { For, Show, createEffect, createMemo, createResource, createSignal, on, 
 import { actOnWorkspaceFile, cancelFileSearch, listFiles, readWorkspaceFile, reserveFileSearch, searchWorkspaceFiles, watchWorkspaceFiles, type DirectoryListing, type FileAction, type FileChange, type FileSearchResult, type WorkspaceFileEntry } from './bridge'
 import iconTheme from './charmed-icons.json'
 import { reportError } from './diagnostics'
+import { plainTextInput } from './textInput'
 
 interface FileLocation {
   projectId: string
@@ -57,7 +58,7 @@ export function FilesPane(props: { projectId: string; worktreeTaskId: string | n
   return (
     <section class="files-pane" aria-label="Workspace files">
       <div class="terminal-pane__bar files-pane__toolbar files-pane__topbar">
-        <input type="search" aria-label="Find files" placeholder="Filter by name" value={query()}
+        <input {...plainTextInput} type="search" aria-label="Find files" placeholder="Filter by name" value={query()}
           onInput={(event) => setQuery(event.currentTarget.value)} />
         <button ref={settingsButton} type="button" class="files-settings-button" aria-label="File explorer settings" title="File explorer settings"
           aria-haspopup="menu" aria-expanded={settingsOpen()} onClick={toggleSettings}>

@@ -1,5 +1,6 @@
 import { For, Show, createEffect, createMemo, createSignal, createUniqueId, on, onCleanup, type JSX } from 'solid-js'
 import { fuzzyScore } from './fuzzy'
+import { plainTextInput } from './textInput'
 
 export interface PickerOption {
   id: string
@@ -255,7 +256,7 @@ export function PickerMenu(props: PickerMenuProps & {
       >
         <Show when={props.filterable}>
           <span class="picker-menu__search">
-            <input
+            <input {...plainTextInput}
               ref={filter}
               class="picker-menu__filter"
               type="text"
@@ -263,7 +264,6 @@ export function PickerMenu(props: PickerMenuProps & {
               aria-label={`Filter ${props.label.toLowerCase()}`}
               aria-controls={menuId}
               autocomplete="off"
-              spellcheck={false}
               placeholder="Filter models"
               value={filterQuery()}
               onInput={(event) => {

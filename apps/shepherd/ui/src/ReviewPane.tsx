@@ -3,6 +3,7 @@ import { For, Show, createMemo, createResource, createSignal } from 'solid-js'
 import { reviewFileDiff, type ReviewAction, type ReviewSnapshot, type TaskDetail } from './bridge'
 import { GitDiffFile, GitDiffText } from './GitDiff'
 import { reportError } from './diagnostics'
+import { plainTextInput } from './textInput'
 
 export function ReviewPane(props: {
   task: TaskDetail
@@ -74,7 +75,7 @@ export function ReviewPane(props: {
           event.preventDefault()
           if (note().trim()) void apply({ type: 'sendNote', text: note() })
         }}>
-          <textarea class="composer__input" aria-label="Review note" placeholder="Review note" value={note()} onInput={(event) => setNote(event.currentTarget.value)} />
+          <textarea {...plainTextInput} class="composer__input" aria-label="Review note" placeholder="Review note" value={note()} onInput={(event) => setNote(event.currentTarget.value)} />
           <button class="composer__send" type="submit" disabled={pending() || !note().trim()}>{running() ? 'Queue review note' : 'Send review note'}</button>
         </form>
       </Show>

@@ -48,6 +48,8 @@ current layout and give future changes a point of comparison.
   workspace share columns through CSS subgrid. The navigation, conversation,
   and inspector sections of the header share the window background. Short
   vertical dividers in the header align with the internal pane boundaries.
+- Disable automatic spelling correction, spellcheck, and inline writing
+  predictions in Shepherd's own text fields, including the composer.
 - Keep the inspector on the right. Left-align its four icon tabs in the header
   above it in this order: **Terminals**, **Preview**, **Review**, and **Files**.
   Give each icon an accessible name and tooltip. Use Left and Right to switch

@@ -39,6 +39,7 @@ import { ErrorNotifications } from './ErrorNotifications'
 import { SwitchHarnessDialog } from './SwitchHarnessDialog'
 import { recordDiagnostic, reportError } from './diagnostics'
 import { createSnapshotRows } from './snapshotRows'
+import { plainTextInput } from './textInput'
 
 const autosavedSettingNames: Partial<Record<bridge.SettingKey, string>> = {
   theme: 'Theme',
@@ -4328,7 +4329,7 @@ function QuestionCard(props: {
         if (disabled() || !answer().trim() || tooLong()) return
         props.onAnswer(props.question.questionId, answer())
       }}>
-        <textarea aria-label="Answer question" value={answer()} disabled={disabled()}
+        <textarea {...plainTextInput} aria-label="Answer question" value={answer()} disabled={disabled()}
           onInput={(event) => setAnswer(event.currentTarget.value)} />
         <div class="entry__actions">
           <button type="submit" disabled={disabled() || !answer().trim() || tooLong()}>Send answer</button>

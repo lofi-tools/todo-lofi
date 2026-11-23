@@ -4,6 +4,7 @@ import { cancelFileSearch, reserveFileSearch, searchWorkspaceFiles } from './bri
 import { reportError } from './diagnostics'
 import { fuzzyScore } from './fuzzy'
 import type { AgentModes, AgentSkill } from './bridge'
+import { plainTextInput } from './textInput'
 
 interface ComposerCommand {
   id: string
@@ -260,7 +261,7 @@ export function ComposerInput(props: ComposerInputProps) {
           </Show>
         </div>
       </Show>
-      <textarea
+      <textarea {...plainTextInput}
         ref={(element) => { input = element; props.inputRef(element) }}
         class="composer__input"
         aria-label="Prompt"

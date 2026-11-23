@@ -1,4 +1,5 @@
 import { For, Show, createMemo, createSignal, createUniqueId, onCleanup, onMount } from 'solid-js'
+import { plainTextInput } from './textInput'
 
 export interface PaletteEntry {
   id: string
@@ -93,7 +94,7 @@ export function CommandPalette(props: {
         <h3>{props.title}</h3>
         <button type="button" onClick={props.onClose}>Close</button>
       </header>
-      <input ref={input} class="picker__filter" role="combobox" aria-label={`Filter ${props.title.toLowerCase()}`}
+      <input {...plainTextInput} ref={input} class="picker__filter" role="combobox" aria-label={`Filter ${props.title.toLowerCase()}`}
         aria-controls={listId} aria-expanded={entries().length > 0} aria-autocomplete="list"
         aria-activedescendant={entries()[active()] ? rowId(active()) : undefined}
         value={query()} placeholder="Type to filter"
