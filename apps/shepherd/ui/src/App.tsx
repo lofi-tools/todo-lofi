@@ -612,7 +612,11 @@ export function App() {
   const [inspectorTabs, setInspectorTabs] = createSignal(new Map<string | null, bridge.InspectorTab>())
   const [explorerMode, setExplorerMode] = createSignal<'files' | 'changes'>('files')
   const [fileRequest, setFileRequest] = createSignal<{ taskId: string; path: string }>()
-  const inspectorTab = () => inspectorTabs().get(selectedProjectId()) ?? 'terminals'
+  const preferredInspectorTab = () => inspectorTabs().get(selectedProjectId()) ?? 'terminals'
+  const inspectorTab = () => {
+    const tab = preferredInspectorTab()
+    return tab === 'review' && !reviewAvailable() ? 'terminals' : tab
+  }
   let pendingInspectorTabSave = Promise.resolve()
   let inspector: HTMLElement | undefined
   let inspectorTabList: HTMLDivElement | undefined
@@ -644,7 +648,7 @@ export function App() {
   const [historyIndex, setHistoryIndex] = createSignal(-1)
   let restoringHistory = false
   let historyTimer: ReturnType<typeof setTimeout> | undefined
-  const currentScreen = (): ScreenPath => ({ settings: settingsOpen(), projectId: selectedProjectId(), taskId: selectedTaskId(), inspector: inspectorTab(), category: settingsCategory(), settingsProjectId: settingsProjectId() })
+  const currentScreen = (): ScreenPath => ({ settings: settingsOpen(), projectId: selectedProjectId(), taskId: selectedTaskId(), inspector: preferredInspectorTab(), category: settingsCategory(), settingsProjectId: settingsProjectId() })
   function sameScreen(left: ScreenPath, right: ScreenPath) {
     if (left.settings !== right.settings) return false
     return left.settings ? left.category === right.category && (left.category !== 'Projects' || left.settingsProjectId === right.settingsProjectId)
@@ -1354,6 +1358,29 @@ export function App() {
         .catch((failure) => console.warn('Could not stop the worktree status watcher', failure))
     })
   })
+  const reviewBaseBranch = createMemo(() => workspace()?.task.baseBranch)
+  const reviewCheckout = createMemo(() => {
+    const checkout = gitPaneCheckout()
+    const baseBranch = reviewBaseBranch()
+    return checkout && baseBranch ? { checkout, baseBranch } : undefined
+  })
+  const reviewRevision = createMemo(() => workspace()?.task.updatedAt)
+  const [review, { refetch: refreshReview }] = createResource(
+    () => {
+      const target = reviewCheckout()
+      return target && [target, reviewRevision(), worktreeFileRevision()] as const
+    },
+    ([target], { value }): Promise<{ target: typeof target; snapshot: bridge.ReviewSnapshot } | undefined> =>
+      bridge.reviewSnapshot(target.checkout.taskId).then(
+        (snapshot) => ({ target, snapshot }),
+        () => value?.target === target ? value : undefined,
+      ),
+  )
+  const currentReview = () => {
+    const result = review()
+    return result?.target === reviewCheckout() ? result?.snapshot : undefined
+  }
+  const reviewAvailable = createMemo(() => !!currentReview()?.files.length)
   const reviewCount = createMemo(() => projects().reduce((count, project) => count + (project.reviewTaskCount ?? 0), 0))
   const filteredReviewTasks = (projectId: string) => newestChats(
     (reviewLists().get(projectId) ?? []).filter((task) => task.id !== optimisticallyArchivedChatId()))
@@ -1506,6 +1533,7 @@ export function App() {
   }
 
   function disabledReason(binding: bridge.CommandBinding, conditions: ReturnType<typeof commandConditions>) {
+    if (binding.id === 'review' && !reviewAvailable()) return 'No changes to review'
     return binding.requirements.find(({ condition }) => !conditions[condition])?.reason
   }
 
@@ -2925,7 +2953,7 @@ export function App() {
     })
   }
 
-  const needsReview = () => workspace()?.task.state === 'review'
+  const needsReview = () => reviewAvailable() && workspace()?.task.state === 'review'
   const terminalAttentionId = createUniqueId()
   const reviewAttentionId = createUniqueId()
   const inspectorTabsHeader = (
@@ -2951,10 +2979,10 @@ export function App() {
             aria-selected={tab.id === inspectorTab()}
             tabIndex={tab.id === inspectorTab() ? 0 : -1}
             onClick={() => { recordCurrentScreen(); setInspectorTab(tab.id) }}
-            aria-disabled={!tab.enabled}
+            aria-disabled={!tab.enabled || (tab.id === 'review' && !reviewAvailable())}
             aria-controls={`inspector-panel-${tab.id}`}
-            disabled={!tab.enabled}
-            title={tab.enabled ? tab.label : `${tab.label} arrives in a later slice`}
+            disabled={!tab.enabled || (tab.id === 'review' && !reviewAvailable())}
+            title={tab.label}
           >
             <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
               <path d={tab.icon} />
@@ -3668,6 +3696,10 @@ export function App() {
               <Show when={workspace()?.task.id} keyed fallback={<p class="empty">Select a task to review.</p>}>
                 {(taskId) => <ReviewPane
                   task={workspace()!.task}
+                  snapshot={currentReview()}
+                  loading={review.loading}
+                  refresh={refreshReview}
+                  fileRevision={worktreeFileRevision()}
                   queuedNote={workspace()?.queuedReviewNote}
                   openFile={openTaskFile}
                   onAction={async (action) => {

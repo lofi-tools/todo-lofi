@@ -3455,14 +3455,13 @@ test('reports Git failures in the toast while keeping retry controls', async ({ 
   await expect(page.getByRole('dialog', { name: 'Error history' })).toContainText('Git hook rejected this change')
 })
 
-test('reports Review loading failures and permits refresh', async ({ page }) => {
+test('reports Review loading failures and retries on a worktree update', async ({ page }) => {
   await page.goto('/?review-load-error')
-  await page.getByRole('tab', { name: 'Review', exact: true }).click()
-  const review = page.getByRole('region', { name: 'Task changes' })
   await expect(page.getByRole('alert')).toContainText('Could not load review diff')
-  await expect(review.getByRole('alert')).toHaveCount(0)
-  await review.getByRole('button', { name: 'Refresh' }).click()
-  await expect(review.getByText('src/main.rs')).toBeVisible()
+  await expect.poll(() => page.evaluate(() => window.__fileWatchIds())).toContain('file-watch-1')
+  await page.evaluate(() => window.__publishFileChanges('file-watch-1', []))
+  await page.getByRole('tab', { name: 'Review', exact: true }).click()
+  await expect(page.getByRole('region', { name: 'Task changes' }).getByText('src/main.rs')).toBeVisible()
 })
 
 test('confirms saved task deletion and keeps its worktree by default', async ({ page }) => {
@@ -7001,22 +7000,28 @@ test('tabs from the sidebar through chat and into the selected inspector panel',
   expect(await chat.evaluate((pane) => pane.contains(document.activeElement))).toBe(true)
 })
 
-test('gives each inspector tab a named panel and announces review attention', async ({ page }) => {
-  await page.goto('/?review-fixture')
-  const tablist = page.getByRole('tablist', { name: 'Inspector tabs' })
-  await expect(tablist.getByRole('tab', { name: 'Review', exact: true })).toHaveAccessibleDescription('Needs review')
-  await tablist.getByRole('tab', { name: 'Terminals' }).focus()
-  for (const name of ['Terminals', 'Preview', 'Review', 'Git', 'Files']) {
-    const tab = tablist.getByRole('tab', { name, exact: true })
-    await expect(tab).toBeFocused()
-    await expect(tab).toHaveAttribute('aria-selected', 'true')
-    const panel = page.getByRole('tabpanel', { name, exact: true })
-    await expect(panel).toHaveAttribute('id', `inspector-panel-${name.toLowerCase()}`)
-    await expect(tab).toHaveAttribute('aria-controls', `inspector-panel-${name.toLowerCase()}`)
-    await expect(page.getByRole('tabpanel')).toHaveCount(1)
-    await page.keyboard.press('ArrowRight')
-  }
-  await expect(tablist.getByRole('tab', { name: 'Terminals' })).toBeFocused()
+test('enables Review only while the worktree has changes', async ({ page }) => {
+  await page.goto('/?review-fixture&watch-git')
+  const tabs = page.getByRole('tablist', { name: 'Inspector tabs' })
+  const review = tabs.getByRole('tab', { name: 'Review', exact: true })
+  const preview = tabs.getByRole('tab', { name: 'Preview', exact: true })
+  const files = tabs.getByRole('tab', { name: 'Files', exact: true })
+  await expect(review).toBeDisabled()
+  await preview.click()
+  await page.keyboard.press('ArrowRight')
+  await expect(files).toBeFocused()
+  await expect.poll(() => page.evaluate(() => window.__fileWatchIds())).toContain('file-watch-1')
+
+  await page.evaluate(() => window.__publishFileChanges('file-watch-1', [
+    { path: 'src/main.rs', kind: 'modified', originalPath: null },
+  ]))
+  await expect(review).toHaveAccessibleDescription('Needs review')
+  await review.click()
+  await expect(page.getByRole('tabpanel', { name: 'Review', exact: true })).toBeVisible()
+
+  await page.evaluate(() => window.__publishFileChanges('file-watch-1', []))
+  await expect(review).toBeDisabled()
+  await expect(page.getByRole('tabpanel', { name: 'Terminals', exact: true })).toBeVisible()
 })
 
 test('preserves the other terminal when a saved pane is missing', async ({ page }) => {

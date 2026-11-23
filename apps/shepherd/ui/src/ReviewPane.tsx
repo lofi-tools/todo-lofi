@@ -1,23 +1,27 @@
 import { For, Show, createMemo, createResource, createSignal } from 'solid-js'
 
-import { reviewFileDiff, reviewSnapshot, type ReviewAction, type TaskDetail } from './bridge'
+import { reviewFileDiff, type ReviewAction, type ReviewSnapshot, type TaskDetail } from './bridge'
 import { GitDiffFile, GitDiffText } from './GitDiff'
 import { reportError } from './diagnostics'
 
-export function ReviewPane(props: { task: TaskDetail; queuedNote?: string; openFile: (path: string) => void; onAction: (action: ReviewAction) => Promise<void> }) {
+export function ReviewPane(props: {
+  task: TaskDetail
+  snapshot?: ReviewSnapshot
+  loading: boolean
+  refresh: () => void
+  fileRevision: number
+  queuedNote?: string
+  openFile: (path: string) => void
+  onAction: (action: ReviewAction) => Promise<void>
+}) {
   const taskId = createMemo(() => props.task.id)
   const revision = createMemo(() => props.task.updatedAt)
   const worktreePath = createMemo(() => props.task.worktreePath)
-  const [review, { refetch }] = createResource(
-    () => worktreePath() ? [taskId(), revision()] as const : false,
-    ([taskId]) => reviewSnapshot(taskId),
-  )
-
   const [selectedFile, setSelectedFile] = createSignal<string | null>(null)
   const [diff, { refetch: refetchDiff }] = createResource(
     () => {
       const path = selectedFile()
-      return path && worktreePath() ? [taskId(), revision(), path] as const : false
+      return path && worktreePath() ? [taskId(), revision(), path, props.fileRevision] as const : false
     },
     ([taskId, , path]) => reviewFileDiff(taskId, path),
   )
@@ -44,7 +48,7 @@ export function ReviewPane(props: { task: TaskDetail; queuedNote?: string; openF
   return (
     <section class="git-pane" aria-label="Task changes">
       <div class="terminal-pane__bar">
-        <button type="button" onClick={() => { void refetch(); if (selectedFile()) void refetchDiff() }} disabled={review.loading || !props.task.worktreePath}>Refresh</button>
+        <button type="button" onClick={() => { props.refresh(); if (selectedFile()) void refetchDiff() }} disabled={props.loading || !props.task.worktreePath}>Refresh</button>
       </div>
       <Show when={props.task.state === 'done'}>
         <div class="terminal-pane__bar">
@@ -81,8 +85,8 @@ export function ReviewPane(props: { task: TaskDetail; queuedNote?: string; openF
         </div>
       </Show>
       <Show when={approvalNotice()}>{(notice) => <p class="empty" role="status">{notice()}</p>}</Show>
-      <Show when={review.loading}><p class="empty" role="status">Loading changes…</p></Show>
-      <Show when={!review.error && review()}>
+      <Show when={props.loading}><p class="empty" role="status">Loading changes…</p></Show>
+      <Show when={props.snapshot}>
         {(snapshot) => (
           <>
             <Show when={snapshot().files.length} fallback={<p class="empty">No changed files.</p>}>
