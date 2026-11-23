@@ -544,6 +544,34 @@ async function ptyColumns(terminalId: string, title: string, marker: string): Pr
   return Number(match[2])
 }
 
+function canvasMatchesDisplay(canvas: HTMLCanvasElement) {
+  const { left, top, width, height } = canvas.getBoundingClientRect()
+  const scale = window.devicePixelRatio
+  const close = (left: number, right: number) => Math.abs(left - right) < 0.05
+  return canvas.getContext('2d')?.getTransform().a === scale
+    && close(left * scale, Math.round(left * scale)) && close(top * scale, Math.round(top * scale))
+    && close(width * scale, canvas.width) && close(height * scale, canvas.height)
+}
+
+async function exerciseIdleCanvasMove(terminal: bridge.TerminalSnapshot) {
+  const canvas = await waitFor('pixel-aligned terminal frame', () => {
+    const canvas = terminalPane(terminal.title)?.querySelector('canvas')
+    return canvas && canvasMatchesDisplay(canvas) ? canvas : undefined
+  })
+  const view = canvas.parentElement
+  if (!view) throw new Error('The terminal canvas has no view')
+  const initialTop = view.getBoundingClientRect().top
+  const previousTop = view.style.top
+  try {
+    view.style.top = '0.3px'
+    await waitFor('pixel-aligned idle terminal after a position-only move', () =>
+      view.getBoundingClientRect().top !== initialTop && canvasMatchesDisplay(canvas))
+  } finally {
+    view.style.top = previousTop
+  }
+  await waitFor('pixel-aligned idle terminal after restoring its position', () => canvasMatchesDisplay(canvas))
+}
+
 async function exerciseInspectorResize(terminal: bridge.TerminalSnapshot) {
   const divider = await waitFor('inspector resize control', () =>
     document.querySelector<HTMLElement>('[aria-label="Resize inspector"]'))
@@ -556,7 +584,8 @@ async function exerciseInspectorResize(terminal: bridge.TerminalSnapshot) {
     const available = view.clientWidth - parseFloat(padding.paddingLeft) - parseFloat(padding.paddingRight)
     const cellWidth = Math.max(6, context.measureText('M').width)
     const columns = Math.floor(available / cellWidth)
-    if (columns >= 2 && parseFloat(canvas.style.width) === Math.ceil(columns * cellWidth)) return columns
+    if (columns >= 2 && canvas.width === Math.ceil(columns * cellWidth * devicePixelRatio)
+      && canvasMatchesDisplay(canvas)) return columns
   }
   const initialFit = await waitFor('terminal frame fitted to the inspector', fittedColumns)
   const initialColumns = await ptyColumns(terminal.id, terminal.title, 'INSPECTOR_BEFORE')
@@ -1216,6 +1245,7 @@ async function smoke() {
   await exerciseAppearance(terminal.id)
   if (windowChecks) {
     await waitFor('terminal canvas frame', () => document.querySelector<HTMLCanvasElement>('.terminal-view__canvas')?.style.height)
+    await exerciseIdleCanvasMove(terminal)
     await exerciseInspectorResize(terminal)
     input.focus()
   }

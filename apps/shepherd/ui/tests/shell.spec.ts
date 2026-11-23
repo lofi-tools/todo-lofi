@@ -35,6 +35,17 @@ const workspaceCommands: Array<{
 test.beforeEach(async ({ context }) => {
   await context.addInitScript((registry) => {
     const callbacks = new Map()
+    const nativeListeners = new Map<number, string>()
+    Object.assign(window, {
+      __emitWindowScale: (scaleFactor: number) => {
+        for (const [id, event] of nativeListeners) {
+          if (event === 'tauri://scale-change') {
+            callbacks.get(id)?.({ id, event, payload: { scaleFactor, size: { width: 1100, height: 780 } } })
+          }
+        }
+      },
+      __TAURI_EVENT_PLUGIN_INTERNALS__: { unregisterListener: (_event: string, id: number) => callbacks.delete(id) },
+    })
     let nextCallbackId = 1
     let nextTask = 2
     let desktopProjectReads = 0
@@ -908,6 +919,12 @@ test.beforeEach(async ({ context }) => {
             return null
           case 'set_terminal_appearance':
             terminalAppearances.push(args.appearance)
+            return null
+          case 'plugin:event|listen':
+            nativeListeners.set(args.handler, args.event)
+            return args.handler
+          case 'plugin:event|unlisten':
+            nativeListeners.delete(args.eventId)
             return null
           case 'plugin:window|set_badge_count':
             dockCounts.push(args.value)
@@ -6646,8 +6663,9 @@ for (const duringSave of [false, true]) {
   })
 }
 
-test('redraws an idle terminal when display scaling changes', async ({ page }) => {
+test('keeps an idle terminal aligned across scale changes and pane moves', async ({ page }) => {
   await page.addInitScript(() => {
+    Object.defineProperty(window, 'isTauri', { value: true })
     const queries = new Set<MediaQueryList>()
     const matchMedia = window.matchMedia.bind(window)
     window.matchMedia = (query) => {
@@ -6690,7 +6708,7 @@ test('redraws an idle terminal when display scaling changes', async ({ page }) =
     await scaleDisplay(scale)
     await expect.poll(() => page.evaluate(() => window.devicePixelRatio)).toBe(scale)
     if (scale === 1.25) {
-      await page.evaluate(() => window.dispatchEvent(new Event('resize')))
+      await page.evaluate((ratio) => (window as unknown as { __emitWindowScale: (ratio: number) => void }).__emitWindowScale(ratio), scale)
     } else {
       await page.evaluate(() => (window as unknown as { notifyResolutionChange: () => void }).notifyResolutionChange())
     }
@@ -6703,6 +6721,16 @@ test('redraws an idle terminal when display scaling changes', async ({ page }) =
     expect(Math.abs(bitmap.left * scale - Math.round(bitmap.left * scale))).toBeLessThan(0.025)
     expect(Math.abs(bitmap.top * scale - Math.round(bitmap.top * scale))).toBeLessThan(0.025)
   }
+  const beforeMove = await rendering()
+  await canvas.evaluate((element) => { element.parentElement!.style.top = '0.8px' })
+  await expect.poll(async () => (await rendering()).top).toBeCloseTo(beforeMove.top + 0.8, 1)
+  await canvas.evaluate((element) => { element.parentElement!.style.top = '0.3px' })
+  await expect.poll(async () => {
+    const bitmap = await rendering()
+    const topPixels = bitmap.top * bitmap.scale!
+    return Math.abs(topPixels - Math.round(topPixels))
+  }).toBeLessThan(0.025)
+  expect(await rendering()).toMatchObject({ pixelWidth: beforeMove.pixelWidth, pixelHeight: beforeMove.pixelHeight })
   await session.detach()
 })
 

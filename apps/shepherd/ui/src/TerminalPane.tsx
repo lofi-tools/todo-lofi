@@ -6,6 +6,9 @@
 
 import { For, Show, batch, createEffect, createMemo, createResource, createSignal, createUniqueId, onCleanup, onMount } from 'solid-js'
 
+import { isTauri } from '@tauri-apps/api/core'
+import { getCurrentWindow } from '@tauri-apps/api/window'
+
 import * as bridge from './bridge'
 import { FreebuffMark } from './FreebuffMark'
 import { PickerMenu } from './PickerMenu'
@@ -1140,6 +1143,7 @@ function TerminalCanvas(props: { terminalId: string; shown: boolean; readOnly?: 
   let container: HTMLDivElement | undefined
   let frame: bridge.TerminalFrame | null = null
   let paintedFrame: bridge.TerminalFrame | null = null
+  let paintedScale: number | undefined
   let paintRequest: number | undefined
   let dirtyRows: Set<number> | null = null
   let cellWidth = 7.8
@@ -1211,6 +1215,8 @@ function TerminalCanvas(props: { terminalId: string; shown: boolean; readOnly?: 
       canvas.height = pixelHeight
       changedRows = null
     }
+
+    if (paintedScale !== ratio) changedRows = null
 
     // Match the bitmap to the CSS size and align its origin to the display grid
     // so a fractional scale or split position doesn't resample the entire image.
@@ -1294,6 +1300,7 @@ function TerminalCanvas(props: { terminalId: string; shown: boolean; readOnly?: 
       }
     }
     paintedFrame = current
+    paintedScale = ratio
   }
 
   function cellAt(event: MouseEvent, current = frame) {
@@ -1527,6 +1534,7 @@ function TerminalCanvas(props: { terminalId: string; shown: boolean; readOnly?: 
   }
 
   function onWindowFocus() {
+    scheduleDraw([])
     if (props.shown && input === document.activeElement) props.onFocus?.(props.terminalId)
     updateWindowFocus()
   }
@@ -1684,9 +1692,28 @@ function TerminalCanvas(props: { terminalId: string; shown: boolean; readOnly?: 
     }
     resolution.addEventListener('change', onResolutionChange)
     window.addEventListener('resize', onResolutionChange)
+    window.visualViewport?.addEventListener('resize', onResolutionChange)
+    if (isTauri()) {
+      const nativeScale = getCurrentWindow().onScaleChanged(onResolutionChange)
+      void nativeScale.catch((failure) => reportError('watch terminal display scale', failure))
+      onCleanup(() => {
+        void nativeScale.then((unlisten) => unlisten(), () => undefined).catch(console.error)
+      })
+    }
+
+    const onPositionChange = () => scheduleDraw([])
+    // Split flex and workspace grid styles can move a pane without resizing it.
+    const position = new MutationObserver(onPositionChange)
+    for (let element: HTMLElement | null | undefined = container; element; element = element.parentElement) {
+      position.observe(element, { attributes: true, attributeFilter: ['class', 'style', 'hidden'] })
+    }
+    window.addEventListener('scroll', onPositionChange, { capture: true, passive: true })
     onCleanup(() => {
       resolution.removeEventListener('change', onResolutionChange)
       window.removeEventListener('resize', onResolutionChange)
+      window.visualViewport?.removeEventListener('resize', onResolutionChange)
+      window.removeEventListener('scroll', onPositionChange, true)
+      position.disconnect()
     })
     paintColors = terminalPaintColors()
     const context = canvas?.getContext('2d')

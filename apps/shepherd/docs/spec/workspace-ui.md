@@ -103,8 +103,9 @@ current layout and give future changes a point of comparison.
   Terminal input focus accents the outer pane border, including its header.
   The terminal surface fills the card below its header with a small inset
   around the grid. When display scale changes, redraw the canvas at the new
-  pixel density even if the terminal has no new output. Align the bitmap to
-  physical pixels while preserving the terminal's grid and text size.
+  pixel density even if the terminal has no new output. Realign the bitmap
+  whenever an idle pane moves or becomes visible. Keep the bitmap size and
+  origin aligned to physical pixels while preserving the grid and text size.
   Show the project's running standalone Freebuff session as one **Freebuff** row
   in the Terminals list. The inspector tab shows an attention dot when the
   session exits in the background. The Freebuff conversation surface keeps the
