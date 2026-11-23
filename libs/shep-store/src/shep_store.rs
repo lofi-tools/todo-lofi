@@ -176,6 +176,10 @@ const MIGRATIONS: &[Migration] = &[
         name: "0030_conversation_archive.sql",
         sql: include_str!("../toasty/migrations/0030_conversation_archive.sql"),
     },
+    Migration {
+        name: "0031_archive_unmerged.sql",
+        sql: include_str!("../toasty/migrations/0031_archive_unmerged.sql"),
+    },
 ];
 
 /// The durable store used by the application. The database handle is guarded
@@ -735,11 +739,11 @@ async fn write_task(
                 id, project_id, title, state, tier, proposed_worktree_path, \
                 proposed_branch, worktree_path, branch, base_branch, error, \
                 created_at, updated_at, branch_tip_sha, agent, worktree_last_used_at, collection_pending, \
-                model, mode, branch_error, approved_tip_sha, archived_from_state\
+                model, mode, branch_error, approved_tip_sha, archived_from_state, archive_unmerged\
              ) SELECT \
                 ?1, ?2, ?3, ?4, ?5, ?6, ?7, \
                 NULLIF(?8, ''), NULLIF(?9, ''), NULLIF(?10, ''), NULLIF(?11, ''), ?12, ?13, NULLIF(?14, ''), ?15, ?16, ?17, \
-                NULLIF(?18, ''), NULLIF(?19, ''), NULLIF(?20, ''), NULLIF(?21, ''), NULLIF(?22, '')\
+                NULLIF(?18, ''), NULLIF(?19, ''), NULLIF(?20, ''), NULLIF(?21, ''), NULLIF(?22, ''), ?23\
              FROM projects WHERE id = ?2 \
              ON CONFLICT (id) DO UPDATE SET \
                 title = excluded.title, \
@@ -761,7 +765,8 @@ async fn write_task(
                 mode = excluded.mode, \
                 branch_error = excluded.branch_error, \
                 approved_tip_sha = excluded.approved_tip_sha, \
-                archived_from_state = excluded.archived_from_state \
+                archived_from_state = excluded.archived_from_state, \
+                archive_unmerged = excluded.archive_unmerged \
              WHERE tasks.project_id = excluded.project_id",
         )
         .bind(task.id.as_str())
@@ -786,6 +791,7 @@ async fn write_task(
         .bind(task.branch_error.as_deref().unwrap_or_default())
         .bind(task.approved_tip_sha.as_deref().unwrap_or_default())
         .bind(task.archived_from_state.map_or("", TaskState::as_str))
+        .bind(i64::from(task.archive_unmerged))
         .exec(&mut *executor)
         .await.map_err(StoreError::database)?;
     if updated != 1 {
@@ -1979,7 +1985,7 @@ impl Store for TursoStore {
             "SELECT id, project_id, title, state, tier, proposed_worktree_path, \
                     proposed_branch, worktree_path, branch, base_branch, error, \
                     created_at, updated_at, branch_tip_sha, agent, worktree_last_used_at, collection_pending, \
-                    model, mode, branch_error, approved_tip_sha, archived_from_state \
+                    model, mode, branch_error, approved_tip_sha, archived_from_state, archive_unmerged \
              FROM tasks ORDER BY created_at, id",
         )
         .column_types([
@@ -2005,6 +2011,7 @@ impl Store for TursoStore {
             Type::String,
             Type::String,
             Type::String,
+            Type::I64,
         ])
         .exec(&mut *db)
         .await.map_err(StoreError::database)?;
@@ -2022,11 +2029,17 @@ impl Store for TursoStore {
         for task in tasks {
             let result = toasty::sql::statement(
                 "UPDATE tasks SET state = 'done', updated_at = ?2, approved_tip_sha = NULL, \
-                 archived_from_state = NULLIF(?3, '') WHERE id = ?1 AND state = COALESCE(NULLIF(?3, ''), 'review')",
+                 archived_from_state = NULLIF(?3, ''), archive_unmerged = ?4, \
+                 branch = CASE WHEN ?3 = '' THEN branch ELSE NULLIF(?5, '') END, \
+                 branch_tip_sha = CASE WHEN ?3 = '' THEN branch_tip_sha ELSE NULLIF(?6, '') END \
+                 WHERE id = ?1 AND state = COALESCE(NULLIF(?3, ''), 'review')",
             )
             .bind(task.id.as_str())
             .bind(task.updated_at as i64)
             .bind(task.archived_from_state.map_or("", TaskState::as_str))
+            .bind(i64::from(task.archive_unmerged))
+            .bind(task.branch.as_deref().unwrap_or_default())
+            .bind(task.branch_tip_sha.as_deref().unwrap_or_default())
             .exec(&mut transaction)
             .await;
             let updated = match result {
@@ -2709,6 +2722,7 @@ fn parse_task(value: Value) -> Result<Task, StoreError> {
         archived_from_state: optional_string(record.get(21))?
             .as_deref()
             .and_then(TaskState::parse),
+        archive_unmerged: required_u64(record.get(22))? != 0,
         agent,
         tier,
         proposed_worktree_path: PathBuf::from(required_string(record.get(5))?),

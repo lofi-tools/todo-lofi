@@ -78,6 +78,8 @@ pub struct BridgeError {
     quit_confirmation: Option<QuitConfirmation>,
     #[serde(rename = "taskId", skip_serializing_if = "Option::is_none")]
     task_id: Option<String>,
+    #[serde(rename = "archiveToken", skip_serializing_if = "Option::is_none")]
+    archive_token: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -108,6 +110,7 @@ impl BridgeError {
             causes: Vec::new(),
             quit_confirmation: None,
             task_id: None,
+            archive_token: None,
         }
     }
 }
@@ -124,6 +127,11 @@ fn error_causes(error: &(dyn std::error::Error + 'static)) -> Vec<String> {
 
 impl From<CoreError> for BridgeError {
     fn from(error: CoreError) -> Self {
+        if let CoreError::ArchiveConfirmationRequired { token, message } = error {
+            let mut error = Self::new("archive_confirmation_required", message);
+            error.archive_token = Some(token);
+            return error;
+        }
         if let CoreError::WorktreeSetupPending { task_id } = error {
             let mut error = Self::new("worktree_setup_pending", "Worktree setup is still running.");
             error.task_id = Some(task_id);
@@ -1734,6 +1742,75 @@ impl ShellState {
             CommandResult::TaskWorkspace(workspace) => Ok(workspace),
             other => Err(unexpected(&other)),
         }
+    }
+
+    async fn close_archived_task_terminals(&self, workspace: TaskWorkspace) -> TaskWorkspace {
+        let task_id = TaskId::new(&workspace.task.id);
+        let project_id = ProjectId::new(&workspace.task.project_id);
+        let terminals = self
+            .core
+            .lock()
+            .await
+            .terminals_for(&project_id)
+            .into_iter()
+            .filter(|terminal| {
+                terminal.ended_at.is_none() && terminal.task_id.as_deref() == Some(task_id.as_str())
+            })
+            .map(|terminal| TerminalId::new(terminal.id))
+            .collect::<Vec<_>>();
+        let mut stopped = false;
+        let mut failure = None;
+        for terminal in terminals {
+            if let Err(error) = self.terminals.stop_terminal_process(terminal.clone()).await {
+                failure = Some(error.to_string());
+                break;
+            }
+            let mut core = self.core.lock().await;
+            if let Err(error) = core.end_terminal(&terminal, None).await
+                && !matches!(error, CoreError::TerminalNotFound { .. })
+            {
+                failure = Some(error.to_string());
+                break;
+            }
+            stopped = true;
+        }
+        #[cfg(unix)]
+        if failure.is_none() {
+            let mut setups = self.terminals.worktree_setups.lock().await;
+            if let Some(setup) = setups.get(&task_id) {
+                match self.terminals.stop_terminal_process(setup.id.clone()).await {
+                    Ok(()) => {
+                        setups.remove(&task_id);
+                        stopped = true;
+                    }
+                    Err(error) => failure = Some(error.to_string()),
+                }
+            }
+        }
+        let mut core = self.core.lock().await;
+        let result = if stopped && failure.is_none() {
+            match core.finish_archived_conversation_worktree(&task_id).await {
+                Ok(updated) => updated,
+                Err(error) => {
+                    failure = Some(error.to_string());
+                    workspace
+                }
+            }
+        } else {
+            workspace
+        };
+        Self::broadcast_core_events(&mut core, &self.events);
+        if let Some(error) = failure {
+            if let Err(error) = self.events.send(Event::Error {
+                task_id: Some(task_id.to_string()),
+                message: format!(
+                    "Conversation archived. Could not finish worktree cleanup. {error}"
+                ),
+            }) {
+                tracing::warn!(%error, "could not publish the archive cleanup failure");
+            }
+        }
+        result
     }
 
     async fn git_read<T: Send + 'static>(
@@ -5670,14 +5747,33 @@ pub mod commands {
     pub async fn review_task(
         state: State<'_, ShellState>,
         task_id: String,
-        action: shep_core::ReviewAction,
+        mut action: shep_core::ReviewAction,
     ) -> Result<TaskWorkspace, BridgeError> {
-        state
-            .workspace(Command::ReviewTask {
-                task_id: TaskId::new(task_id),
-                action,
-            })
-            .await
+        let task_id = TaskId::new(task_id);
+        let _terminal_guard =
+            if let shep_core::ReviewAction::ArchiveConversation { keep_worktree, .. } = &mut action
+            {
+                let guard = state.terminal_lifecycle.lock().await;
+                #[cfg(unix)]
+                if let Some(setup) = state.terminals.worktree_setups.lock().await.get(&task_id) {
+                    *keep_worktree = state.terminals.setup_is_running(&setup.id).await;
+                }
+                #[cfg(not(unix))]
+                {
+                    *keep_worktree = false;
+                }
+                Some(guard)
+            } else {
+                None
+            };
+        let archiving = matches!(action, shep_core::ReviewAction::ArchiveConversation { .. });
+        let workspace = state
+            .workspace(Command::ReviewTask { task_id, action })
+            .await?;
+        if archiving {
+            return Ok(state.close_archived_task_terminals(workspace).await);
+        }
+        Ok(workspace)
     }
 
     #[tauri::command]
@@ -7578,6 +7674,7 @@ mod tests {
                 project_id: "project-1".to_string(),
                 title: "Bridge".to_string(),
                 state: TaskState::Waiting,
+                archive_unmerged: false,
                 agent: Agent::OpenCode,
                 tier: shep_core::AgentTier::Native,
                 branch: Some("shepherd/bridge".to_string()),

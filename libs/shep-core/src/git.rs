@@ -185,7 +185,16 @@ impl GitService {
                 path: path.to_path_buf(),
             });
         }
-        run_git(path, &["switch", "--detach", "--no-guess", base_branch])?;
+        run_git(
+            path,
+            &[
+                "switch",
+                "--detach",
+                "--no-guess",
+                "--no-overwrite-ignore",
+                base_branch,
+            ],
+        )?;
         Ok(())
     }
 
@@ -232,7 +241,17 @@ impl GitService {
                             path: path.to_path_buf(),
                         });
                     }
-                    run_git(path, &["switch", branch])?;
+                    let reference = format!("refs/heads/{branch}");
+                    if optional_git_ref(path, &reference)?.is_none()
+                        && let Some(tip) = recorded_tip
+                    {
+                        run_git(
+                            path,
+                            &["switch", "--no-overwrite-ignore", "-c", branch, tip],
+                        )?;
+                    } else {
+                        run_git(path, &["switch", "--no-overwrite-ignore", "--", branch])?;
+                    }
                 }
                 return Ok(());
             }
@@ -832,21 +851,7 @@ impl GitService {
                 }
                 run_remote_git(path, &["fetch", "--", remote, target])
             }
-            GitSyncAction::Push => {
-                if status.ahead == 0 || status.behind != 0 {
-                    return Err(GitError::SyncUnavailable {
-                        reason: "there are no commits ready to push; fetch or pull first",
-                    });
-                }
-                if status.tracked {
-                    run_remote_git(path, &["push", "--", remote, &branch_refspec])
-                } else {
-                    run_remote_git(
-                        path,
-                        &["push", "--set-upstream", "--", remote, &branch_refspec],
-                    )
-                }
-            }
+            GitSyncAction::Push => run_remote_git(path, &push_arguments(&status, &branch_refspec)?),
             GitSyncAction::ForcePush => {
                 let expected = request
                     .remote_tip
@@ -1123,6 +1128,133 @@ impl GitService {
         run_git(path, &["rev-parse", "--verify", "HEAD"])
     }
 
+    pub fn archive_branch(
+        &self,
+        path: &Path,
+        conversation_id: &str,
+        tip: &str,
+    ) -> Result<String, GitError> {
+        let preferred = format!("shepherd/archive/{conversation_id}");
+        let preferred_ref = format!("refs/heads/{preferred}");
+        let branch =
+            if optional_git_ref(path, &preferred_ref)?.is_some_and(|current| current != tip) {
+                let short_tip = run_git(path, &["rev-parse", "--short", tip])?;
+                format!("{preferred}-{short_tip}")
+            } else {
+                preferred
+            };
+        let reference = format!("refs/heads/{branch}");
+        if optional_git_ref(path, &reference)?.as_deref() != Some(tip) {
+            let missing = "0".repeat(tip.len());
+            run_git(path, &["update-ref", &reference, tip, &missing])?;
+        }
+        Ok(branch)
+    }
+
+    pub fn archive_confirmation_token(&self, path: &Path) -> Result<String, GitError> {
+        use std::hash::{DefaultHasher, Hash, Hasher};
+
+        let mut digest = DefaultHasher::new();
+        self.turn_baseline(path)?.hash(&mut digest);
+        Ok(format!("{:016x}", digest.finish()))
+    }
+
+    pub fn commit_archive_changes(&self, path: &Path) -> Result<(), GitError> {
+        for operation in [
+            "MERGE_HEAD",
+            "CHERRY_PICK_HEAD",
+            "REVERT_HEAD",
+            "rebase-merge",
+            "rebase-apply",
+            "sequencer",
+        ] {
+            let state = run_git(
+                path,
+                &[
+                    "rev-parse",
+                    "--path-format=absolute",
+                    "--git-path",
+                    operation,
+                ],
+            )?;
+            if Path::new(&state)
+                .try_exists()
+                .map_err(|source| GitError::Io { source })?
+            {
+                return Err(GitError::MergeUnavailable {
+                    reason: "finish the Git operation in this worktree before archiving".into(),
+                });
+            }
+        }
+        self.stage(path, None)?;
+        self.commit(
+            path,
+            "Save conversation work on archive",
+            &self.staged_revision(path)?,
+        )
+    }
+
+    pub async fn push_archive_branch(
+        &self,
+        path: &Path,
+        branch: &str,
+        base: &str,
+    ) -> Result<(), GitError> {
+        let Some(status) = self.sync_status(path, branch, Some(base))? else {
+            return Ok(());
+        };
+        let branch_refspec = format!("refs/heads/{branch}:{}", status.target);
+        let arguments = push_arguments(&status, &branch_refspec)?;
+        let mut command = tokio::process::Command::new("git");
+        command
+            .current_dir(path)
+            .args(&arguments)
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .stdin(Stdio::null())
+            .kill_on_drop(true);
+        let output = tokio::time::timeout(std::time::Duration::from_secs(15), command.output())
+            .await
+            .map_err(|_| GitError::SyncUnavailable {
+                reason: "the push timed out",
+            })?
+            .map_err(|source| GitError::Io { source })?;
+        if !output.status.success() {
+            return Err(GitError::CommandFailed {
+                command: format!("git {}", arguments.join(" ")),
+                status: output.status,
+                stderr: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+            });
+        }
+        Ok(())
+    }
+
+    pub fn tip_is_on_base(
+        &self,
+        path: &Path,
+        tip: &str,
+        base: &str,
+    ) -> Result<Option<bool>, GitError> {
+        let reference = format!("refs/heads/{base}");
+        let Some(base_tip) = optional_git_ref(path, &reference)? else {
+            return Ok(None);
+        };
+        match run_git(path, &["merge-base", "--is-ancestor", tip, &base_tip]) {
+            Ok(_) => return Ok(Some(true)),
+            Err(GitError::CommandFailed { status, .. }) if status.code() == Some(1) => {}
+            Err(error) => return Err(error),
+        }
+        match run_git(
+            path,
+            &["diff", "--quiet", "--no-ext-diff", &base_tip, tip, "--"],
+        ) {
+            Ok(_) => Ok(Some(true)),
+            Err(GitError::CommandFailed { status, .. }) if status.code() == Some(1) => {
+                Ok(Some(false))
+            }
+            Err(error) => Err(error),
+        }
+    }
+
     pub fn squash_merge(
         &self,
         root: &Path,
@@ -1235,7 +1367,15 @@ impl GitService {
 
     /// True when the worktree has staged, unstaged or untracked changes.
     pub fn has_changes(&self, worktree_path: &Path) -> Result<bool, GitError> {
-        let status = run_git(worktree_path, &["status", "--porcelain"])?;
+        let status = run_git(
+            worktree_path,
+            &[
+                "status",
+                "--porcelain",
+                "--untracked-files=normal",
+                "--ignore-submodules=none",
+            ],
+        )?;
         Ok(!status.is_empty())
     }
 }
@@ -1507,7 +1647,7 @@ fn git_paths(bytes: &[u8]) -> impl Iterator<Item = String> + '_ {
         .map(|name| String::from_utf8_lossy(name).into_owned())
 }
 
-#[derive(PartialEq, Eq)]
+#[derive(PartialEq, Eq, Hash)]
 pub struct TurnBaseline {
     head: String,
     branch: String,
@@ -1655,6 +1795,23 @@ fn run_remote_git(path: &Path, args: &[&str]) -> Result<(), GitError> {
         });
     }
     Ok(())
+}
+
+fn push_arguments<'a>(
+    status: &'a GitSyncStatus,
+    branch_refspec: &'a str,
+) -> Result<Vec<&'a str>, GitError> {
+    if status.ahead == 0 || status.behind != 0 {
+        return Err(GitError::SyncUnavailable {
+            reason: "there are no commits ready to push; fetch or pull first",
+        });
+    }
+    let mut arguments = vec!["push"];
+    if !status.tracked {
+        arguments.push("--set-upstream");
+    }
+    arguments.extend(["--", &status.remote, branch_refspec]);
+    Ok(arguments)
 }
 
 pub fn run_git(cwd: &Path, args: &[&str]) -> Result<String, GitError> {

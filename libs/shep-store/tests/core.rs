@@ -5677,41 +5677,143 @@ async fn restoring_a_missing_terminal_keeps_the_other_panes()
 }
 
 #[tokio::test]
-async fn conversation_archive_restores_the_previous_state_after_restart()
+async fn conversation_archive_commits_pushes_and_releases_its_worktree()
 -> Result<(), Box<dyn std::error::Error>> {
-    let directory = TestDirectory::new()?;
-    let database = directory.join("shepherd.db");
+    use shep_core::git::run_git;
+
+    let repository = TestRepository::new()?;
+    let remote = TestDirectory::new()?;
+    run_git(remote.path(), &["init", "--bare"])?;
+    run_git(
+        repository.path(),
+        &[
+            "remote",
+            "add",
+            "origin",
+            remote.path().to_str().ok_or("remote path")?,
+        ],
+    )?;
+    let database = TestDirectory::new()?;
+    let database = database.join("shepherd.db");
     let store = TursoStore::open_at(&database).await?;
     let mut core = Core::with_services(Box::new(store), Box::new(UnavailableHarnessFactory));
-    let project_id = add_project(&mut core, directory.path().to_path_buf()).await?;
-    let task_id = workspace_of(core.execute(Command::CreateDraft {
-        project_id,
-        title: "Conversation".into(),
-        agent: Agent::Codex,
-    }).await?).task.id;
-    let task_id = TaskId::new(task_id);
+    let project_id = add_project(&mut core, repository.path().to_path_buf()).await?;
+    let draft = workspace_of(
+        core.execute(Command::CreateDraft {
+            project_id: project_id.clone(),
+            title: "Conversation".into(),
+            agent: Agent::Codex,
+        })
+        .await?,
+    );
+    let task_id = TaskId::new(draft.task.id);
+    let path = repository
+        .repository()
+        .git_dir
+        .join("shepherd/worktrees/pool-1");
+    GitService.create_detached_worktree(repository.repository(), &path, "main")?;
+    GitService.create_task_branch(&path, "shepherd/conversation")?;
     let mut task = core.task(&task_id)?.clone();
     task.state = TaskState::Ready;
+    task.branch = Some("shepherd/conversation".into());
+    task.base_branch = Some("main".into());
+    task.worktree_path = Some(path.clone());
     core.store.save_task(&task).await?;
+    let mut slot = WorktreePoolRecord::new(project_id, path.clone());
+    slot.state = WorktreePoolState::Leased;
+    slot.task_id = Some(task_id.clone());
+    core.store.save_worktree_pool(&slot).await?;
+    std::fs::write(path.join("pending.txt"), "saved\n")?;
     drop(core);
 
     let store = TursoStore::open_at(&database).await?;
     let mut core = Core::load(Box::new(store), Box::new(UnavailableHarnessFactory)).await?;
-    let archived = workspace_of(core.execute(Command::ReviewTask {
+    let archive = |confirmation_token| Command::ReviewTask {
         task_id: task_id.clone(),
-        action: ReviewAction::ArchiveConversation,
-    }).await?);
+        action: ReviewAction::ArchiveConversation {
+            confirmation_token,
+            keep_worktree: false,
+        },
+    };
+    let Err(CoreError::ArchiveConfirmationRequired { token, .. }) =
+        core.execute(archive(None)).await
+    else {
+        return Err("uncommitted work should require confirmation".into());
+    };
+    assert_eq!(core.task(&task_id)?.state, TaskState::Ready);
+    assert!(GitService.has_changes(&path)?);
+    std::fs::write(path.join("pending.txt"), "changed after warning\n")?;
+    let Err(CoreError::ArchiveConfirmationRequired {
+        token: updated_token,
+        ..
+    }) = core.execute(archive(Some(token))).await
+    else {
+        return Err("a changed worktree should require a fresh confirmation".into());
+    };
+    let archived = workspace_of(core.execute(archive(Some(updated_token))).await?);
     assert_eq!(archived.task.state, TaskState::Done);
+    assert!(archived.task.archive_unmerged);
+    assert!(archived.task.worktree_path.is_none());
+    let branch = archived
+        .task
+        .branch
+        .as_deref()
+        .ok_or("missing saved branch")?;
+    let reference = format!("refs/heads/{branch}");
+    assert_eq!(
+        run_git(
+            remote.path(),
+            &["show", &format!("{reference}:pending.txt")]
+        )?,
+        "changed after warning"
+    );
+    assert!(
+        core.store
+            .load_worktree_pool()
+            .await?
+            .iter()
+            .any(|saved| saved.id == slot.id
+                && saved.state == WorktreePoolState::Idle
+                && saved.task_id.is_none())
+    );
+    assert!(!GitService.has_changes(&path)?);
     drop(core);
 
     let store = TursoStore::open_at(&database).await?;
     let mut core = Core::load(Box::new(store), Box::new(UnavailableHarnessFactory)).await?;
+    assert!(core.task(&task_id)?.archive_unmerged);
     let reopened = workspace_of(core.execute(Command::ReviewTask {
         task_id: task_id.clone(),
         action: ReviewAction::Reopen,
     }).await?);
     assert_eq!(reopened.task.state, TaskState::Ready);
-    assert_eq!(core.task(&task_id)?.archived_from_state, None);
+    assert!(!reopened.task.archive_unmerged);
+    assert_eq!(reopened.task.worktree_path.as_deref(), path.to_str());
+    assert_eq!(
+        std::fs::read_to_string(path.join("pending.txt"))?,
+        "changed after warning\n"
+    );
+
+    run_git(repository.path(), &["remote", "remove", "origin"])?;
+    let Err(CoreError::ArchiveConfirmationRequired { token, .. }) =
+        core.execute(archive(None)).await
+    else {
+        return Err("unmerged local commits should still require confirmation".into());
+    };
+    let local_archive = workspace_of(core.execute(archive(Some(token))).await?);
+    let saved_branch = format!("shepherd/archive/{}", task_id.as_str());
+    assert_eq!(
+        local_archive.task.branch.as_deref(),
+        Some(saved_branch.as_str())
+    );
+    assert!(local_archive.task.worktree_path.is_none());
+    assert_eq!(
+        run_git(
+            repository.path(),
+            &["show", &format!("{saved_branch}:pending.txt")]
+        )?,
+        "changed after warning"
+    );
     Ok(())
 }
 

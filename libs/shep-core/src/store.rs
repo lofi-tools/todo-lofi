@@ -1218,6 +1218,11 @@ impl Store for MemoryStore {
             if let Some(stored) = tasks.get_mut(task.id.as_str()) {
                 stored.state = TaskState::Done;
                 stored.archived_from_state = task.archived_from_state;
+                stored.archive_unmerged = task.archive_unmerged;
+                if task.archived_from_state.is_some() {
+                    stored.branch.clone_from(&task.branch);
+                    stored.branch_tip_sha.clone_from(&task.branch_tip_sha);
+                }
                 stored.approved_tip_sha = None;
                 stored.updated_at = task.updated_at;
             }

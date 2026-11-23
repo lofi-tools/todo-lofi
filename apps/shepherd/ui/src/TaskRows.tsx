@@ -69,6 +69,9 @@ export function TaskRows(props: {
                   }}>
                   <span class="task__state" aria-hidden="true" />
                   <span class="task__title">{task.title}</span>
+                  <Show when={task.state === 'done' && task.archiveUnmerged}>
+                    <span class="task__attention-badge">Unmerged</span>
+                  </Show>
                   <Show when={props.needsTerminalAttention(task.id)}>
                     <span class="terminal-attention" role="img" aria-label="Terminal needs attention" />
                   </Show>

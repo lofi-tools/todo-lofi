@@ -92,7 +92,12 @@ pub enum Command {
 pub enum ReviewAction {
     Approve,
     Archive,
-    ArchiveConversation,
+    ArchiveConversation {
+        #[serde(default, rename = "confirmationToken")]
+        confirmation_token: Option<String>,
+        #[serde(skip)]
+        keep_worktree: bool,
+    },
     Reopen,
     SendNote { text: String },
     SendQueuedNote,

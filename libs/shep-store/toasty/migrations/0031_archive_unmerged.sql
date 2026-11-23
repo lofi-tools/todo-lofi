@@ -1,0 +1,1 @@
+ALTER TABLE tasks ADD COLUMN archive_unmerged INTEGER NOT NULL DEFAULT 0;

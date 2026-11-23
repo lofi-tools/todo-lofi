@@ -448,8 +448,14 @@ current layout and give future changes a point of comparison.
   with an active turn cannot be archived. Archiving hides the chat from the
   default project list and preserves its transcript and branch. If the chat
   was open, select the newest remaining chat or show the project's composer.
-  **Show archived** reveals the chat again. **Reopen conversation** restores
-  its prior state.
+  **Show archived** reveals the chat again. It stays closed until explicitly
+  opened. **Reopen conversation** restores its prior state.
+  Ask for confirmation when changes need committing or commits are unmerged.
+  Save pending changes on the conversation branch and try a normal push
+  when a remote is configured. Keep a local branch with the conversation ID
+  when the commit is otherwise unpublished. Return a clean worktree to the
+  pool after its task terminals stop. Show **Unmerged** on archived chats
+  whose changes still need review against the base branch.
 - Follow **Copy details** in the project card with the read-only local path,
   Git remote when available, **Show archived**, and **Project settings**. Use matching row heights, text
   sizes, and padding, with icons and text vertically centred. Show a folder

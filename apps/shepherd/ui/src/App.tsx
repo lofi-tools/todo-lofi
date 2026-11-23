@@ -430,6 +430,11 @@ export function App() {
     })
   }
   const [archiveConfirmation, setArchiveConfirmation] = createSignal<string[]>()
+  const [conversationArchivePrompt, setConversationArchivePrompt] = createSignal<{
+    task: Pick<bridge.TaskSummary, 'id' | 'projectId' | 'state'>
+    token: string
+    message: string
+  }>()
   let reviewLoad: Map<string, bridge.TaskSummary[]> | undefined
   let reviewAnchor: string | undefined
   let archiveSelectedButton: HTMLButtonElement | undefined
@@ -1522,7 +1527,7 @@ export function App() {
   })
 
   function openPalette(kind: PaletteKind) {
-    if (freebuffProjectId() || pickerOpen() || searchOpen() || quitRequired() || archiveConfirmation()) return
+    if (freebuffProjectId() || pickerOpen() || searchOpen() || quitRequired() || archiveConfirmation() || conversationArchivePrompt()) return
     if (!palette()) paletteOpener = document.activeElement instanceof HTMLElement ? document.activeElement : undefined
     setPalette(kind)
   }
@@ -1669,7 +1674,7 @@ export function App() {
         return
       }
     }
-    if (freebuffProjectId() || pickerOpen() || searchOpen() || quitRequired() || archiveConfirmation()) return
+    if (freebuffProjectId() || pickerOpen() || searchOpen() || quitRequired() || archiveConfirmation() || conversationArchivePrompt()) return
     if (palette()) {
       if (chord === chordFor('commandPalette')) {
         event.preventDefault()
@@ -1800,28 +1805,41 @@ export function App() {
     })
   }
 
-  function changeConversationArchive(task: Pick<bridge.TaskSummary, 'id' | 'projectId' | 'state'>) {
+  function changeConversationArchive(task: Pick<bridge.TaskSummary, 'id' | 'projectId' | 'state'>, confirmationToken?: string) {
     if (pending()) return
     void run(async () => {
       const reopening = task.state === 'done'
-      const updated = await bridge.reviewTask(task.id, { type: reopening ? 'reopen' : 'archiveConversation' })
-      const listed = await loadTasks(task.projectId)
-      if (selectedProjectId() !== task.projectId || selectedTaskId() !== task.id) return
-      if (reopening) {
-        setWorkspace(updated)
+      let updated: bridge.TaskWorkspace
+      try {
+        updated = await bridge.reviewTask(task.id, reopening ? { type: 'reopen' } : { type: 'archiveConversation', confirmationToken })
+      } catch (failure) {
+        const error = failure as bridge.BridgeError | null
+        if (error?.code !== 'archive_confirmation_required' || !error.archiveToken) throw failure
+        setConversationArchivePrompt({ task, token: error.archiveToken, message: error.message })
         return
       }
+      const wasOpen = selectedProjectId() === task.projectId && selectedTaskId() === task.id
+      if (wasOpen) {
+        if (reopening) {
+          setWorkspace(updated)
+        } else {
+          batch(() => {
+            setSelectedTaskId(null)
+            setWorkspace(null)
+            setSearchJump(undefined)
+          })
+        }
+      }
+      if (selectedProjectId() === task.projectId) {
+        setTasks((current) => current.map((entry) =>
+          entry.id === task.id ? { ...entry, state: updated.task.state, branch: updated.task.branch,
+            worktreePath: updated.task.worktreePath, archiveUnmerged: updated.task.archiveUnmerged } : entry))
+      }
+      const listed = await loadTasks(task.projectId)
+      if (reopening || !wasOpen || selectedProjectId() !== task.projectId || selectedTaskId() !== null) return
       const next = newestChats(listed.filter((entry) =>
         reviewOnly() ? entry.state === 'review' : entry.state !== 'done'))[0]
-      if (next) {
-        await selectTask(next.id)
-      } else {
-        batch(() => {
-          setSelectedTaskId(null)
-          setWorkspace(null)
-          setSearchJump(undefined)
-        })
-      }
+      if (next) await selectTask(next.id)
     })
   }
 
@@ -1894,7 +1912,7 @@ export function App() {
       await selectTask(taskId)
       return
     }
-    const visible = listed.filter((task) => showsArchived(project.id) || task.state !== 'done')
+    const visible = listed.filter((task) => task.state !== 'done' || (preferNewest && showsArchived(project.id)))
     const task = preferNewest
       ? newestChats(visible)[0]
       : project.lastTaskId
@@ -2072,7 +2090,7 @@ export function App() {
     if (pending() || composingProjectId() === selectedProjectId() || searchJump()?.taskId === selectedTaskId()) return
     const visible = visibleTasks()
     const [only] = visible
-    if (visible.length === 1 && only && only.id !== selectedTaskId()) {
+    if (visible.length === 1 && only && only.state !== 'done' && only.id !== selectedTaskId()) {
       void run(() => selectTask(only.id))
     }
   })
@@ -3158,6 +3176,9 @@ export function App() {
                 <Show when={current().capabilities?.unreviewedTools}>
                   <span class="chat__adapter" title="Pi's tools run under Pi's configuration; Shepherd cannot approve them">unreviewed tools</span>
                 </Show>
+                <Show when={current().task.state === 'done' && current().task.archiveUnmerged}>
+                  <span class="chat__adapter">Unmerged</span>
+                </Show>
                 <Show when={current().task.branchError}>
                   {(error) => <button type="button" class="branch-error" title={error()}
                     aria-label="Branch creation failed. Retry" disabled={pending()} onClick={retryBranch}>
@@ -3681,6 +3702,22 @@ export function App() {
       <Show when={archiveConfirmation()}>
         {(selection) => <ReviewArchiveDialog count={selection().length}
           onCancel={dismissArchiveConfirmation} onConfirm={archiveSelectedTasks} />}
+      </Show>
+      <Show when={conversationArchivePrompt()} keyed>
+        {(request) => {
+          let cancel!: HTMLButtonElement
+          return <Modal label="Archive conversation" title="Archive conversation?" onClose={() => setConversationArchivePrompt(undefined)}
+            initialFocus={() => cancel}>
+            <p>{request.message}</p>
+            <ModalActions>
+              <button ref={cancel} type="button" class="project-action" onClick={() => setConversationArchivePrompt(undefined)}>Cancel</button>
+              <button type="button" class="project-action" onClick={() => {
+                setConversationArchivePrompt(undefined)
+                changeConversationArchive(request.task, request.token)
+              }}>Archive conversation</button>
+            </ModalActions>
+          </Modal>
+        }}
       </Show>
       <Show when={deleteRequest()} keyed>
         {(task) => <DeleteTaskDialog title={task.title} worktreePath={task.worktreePath} pending={pending()}

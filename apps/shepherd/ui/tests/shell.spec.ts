@@ -311,6 +311,9 @@ test.beforeEach(async ({ context }) => {
         createdAt: 1_760_000_000_000,
       },
     ]
+    if (options.has('archive-warning') && localStorage.getItem('fixture.archiveDone') === 'true') {
+      tasks[0] = { ...tasks[0], state: 'done' }
+    }
     if (options.has('two-projects')) {
       tasks.push({ ...tasks[0], id: 'task-archived', title: 'Old chat', state: 'done' })
     }
@@ -1036,7 +1039,13 @@ test.beforeEach(async ({ context }) => {
             const index = tasks.findIndex((task) => task.id === args.taskId)
             const task = tasks[index]
             if (!task) throw new Error('Conversation missing')
+            if (options.has('archive-warning') && args.action.type === 'archiveConversation'
+              && args.action.confirmationToken !== 'fixture-tip') {
+              throw { code: 'archive_confirmation_required', archiveToken: 'fixture-tip',
+                message: 'This conversation has commits that are not merged into main.' }
+            }
             const state = args.action.type === 'archiveConversation' ? 'done' : 'ready'
+            if (options.has('archive-warning')) localStorage.setItem('fixture.archiveDone', String(state === 'done'))
             tasks[index] = { ...task, state }
             const updated = workspace(task.id)
             window.__emitCoreEvent({ type: 'taskWorkspaceChanged', data: updated })
@@ -5096,6 +5105,29 @@ test('archives conversations from the sidebar and header and reopens a hidden ch
   await actions.click()
   await chat.getByRole('menuitem', { name: 'Reopen conversation' }).click()
   await expect(chat).toHaveAttribute('data-task-state', 'ready')
+})
+
+test('closes the last archived chat even when archived chats are visible', async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem('fixture.settings', JSON.stringify({
+    app: { 'tasks.show_archived': true },
+  })))
+  await page.goto('/?archive-warning')
+  const chat = page.getByRole('region', { name: 'Task chat' })
+  await expect(chat.getByText('ready to go')).toBeVisible()
+  await chat.getByRole('button', { name: 'Task actions' }).click()
+  await chat.getByRole('menuitem', { name: 'Archive conversation' }).click()
+  const warning = page.getByRole('dialog', { name: 'Archive conversation' })
+  await expect(warning).toContainText('not merged into main')
+  await warning.getByRole('button', { name: 'Cancel' }).click()
+  await expect(chat.getByText('ready to go')).toBeVisible()
+  await chat.getByRole('button', { name: 'Task actions' }).click()
+  await chat.getByRole('menuitem', { name: 'Archive conversation' }).click()
+  await warning.getByRole('button', { name: 'Archive conversation' }).click()
+  await expect(chat.getByLabel('Prompt')).toBeEditable()
+  await expect(chat.getByText('ready to go')).toHaveCount(0)
+  await page.reload()
+  await expect(chat.getByLabel('Prompt')).toBeEditable()
+  await expect(chat.getByText('ready to go')).toHaveCount(0)
 })
 
 test('copies project and subtask details from the sidebar context menu', async ({ page, context }) => {

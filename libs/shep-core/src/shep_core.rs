@@ -143,6 +143,10 @@ pub enum CoreError {
     TaskNotReady { id: String, state: &'static str },
     #[error("task {id} is {state}; only archived tasks can be reopened")]
     TaskNotArchived { id: String, state: &'static str },
+    #[error("{message}")]
+    ArchiveConfirmationRequired { token: String, message: String },
+    #[error("{reason}")]
+    ArchiveWorktreeInUse { reason: &'static str },
     #[error("task {id} has no recorded branch for worktree collection")]
     CollectionBranchMissing { id: String },
     #[error("task {id} is {state}; it cannot be cancelled")]
@@ -2403,11 +2407,19 @@ impl Core {
                 self.archive_reviewed(vec![task_id.clone()]).await?;
                 return Ok(CommandResult::TaskWorkspace(self.task_workspace(task_id)?));
             }
-            ReviewAction::ArchiveConversation => {
+            ReviewAction::ArchiveConversation {
+                confirmation_token,
+                keep_worktree,
+            } => {
                 if task.state != TaskState::Done {
                     task.archived_from_state = Some(task.state);
                     task.set_state(TaskState::Done)?;
-                    self.archive_tasks(vec![task]).await?;
+                    let release_tip = self
+                        .prepare_conversation_archive(&mut task, confirmation_token.as_deref())
+                        .await?;
+                    let release_tip = if keep_worktree { None } else { release_tip };
+                    self.archive_tasks(vec![task], release_tip.as_deref())
+                        .await?;
                 }
                 return Ok(CommandResult::TaskWorkspace(self.task_workspace(task_id)?));
             }
@@ -2418,10 +2430,18 @@ impl Core {
                         state: task.state.as_str(),
                     });
                 }
-                let previous_state = task.archived_from_state.take().unwrap_or(TaskState::Review);
-                task.set_state(previous_state)?;
+                let previous_state = task.archived_from_state.take();
+                task.set_state(previous_state.unwrap_or(TaskState::Review))?;
+                task.archive_unmerged = false;
                 if task.worktree_path.is_none() && task.branch.is_some() {
-                    task.worktree_path = Some(task.proposed_worktree_path.clone());
+                    let path = if previous_state.is_some() {
+                        let repository =
+                            GitService::discover(&self.project_path(&task.project_id)?)?;
+                        self.lease_pool_worktree(&task, &repository).await?
+                    } else {
+                        task.proposed_worktree_path.clone()
+                    };
+                    task.worktree_path = Some(path);
                 }
                 self.restore_task_worktree(&task)?;
                 task.collection_pending = false;
@@ -2477,10 +2497,86 @@ impl Core {
                 Ok(task)
             })
             .collect::<Result<Vec<_>, CoreError>>()?;
-        self.archive_tasks(archived).await
+        self.archive_tasks(archived, None).await
     }
 
-    async fn archive_tasks(&mut self, archived: Vec<Task>) -> Result<CommandResult, CoreError> {
+    async fn prepare_conversation_archive(
+        &mut self,
+        task: &mut Task,
+        confirmation_token: Option<&str>,
+    ) -> Result<Option<String>, CoreError> {
+        let Some(path) = task.worktree_path.clone() else {
+            return Ok(None);
+        };
+        let (_, repository, _) = self.task_git_worktree(&task.id)?;
+        let mut tip = git::run_git(&path, &["rev-parse", "--verify", "HEAD"])?;
+        let base = task
+            .base_branch
+            .clone()
+            .unwrap_or(repository.default_branch);
+        let clean = !GitService.has_changes(&path)?;
+        let merged = GitService.tip_is_on_base(&path, &tip, &base)?;
+        if !clean || merged != Some(true) {
+            let token = GitService.archive_confirmation_token(&path)?;
+            if confirmation_token != Some(token.as_str()) {
+                let message = if !clean {
+                    format!(
+                        "Archiving commits your pending changes to the conversation’s branch and tries to push it. The changes will be recorded as unmerged into {base}."
+                    )
+                } else if merged.is_none() {
+                    format!(
+                        "Shepherd could not find {base} to verify the merge. Archiving keeps the commits on a branch."
+                    )
+                } else {
+                    format!(
+                        "This conversation has commits that are not merged into {base}. Archiving keeps them on a branch."
+                    )
+                };
+                return Err(CoreError::ArchiveConfirmationRequired { token, message });
+            }
+        }
+        task.archive_unmerged = !clean || merged != Some(true);
+        if !clean {
+            let branch = match GitService.checkout_status(&path)?.branch {
+                Some(branch)
+                    if task.branch.as_deref() == Some(branch.as_str()) && branch != base =>
+                {
+                    branch
+                }
+                _ => {
+                    let branch = GitService.archive_branch(&path, task.id.as_str(), &tip)?;
+                    git::run_git(
+                        &path,
+                        &[
+                            "switch",
+                            "--no-guess",
+                            "--no-overwrite-ignore",
+                            "--",
+                            &branch,
+                        ],
+                    )?;
+                    branch
+                }
+            };
+            GitService.commit_archive_changes(&path)?;
+            tip = GitService.checked_out_tip(&path, &branch)?;
+            task.branch = Some(branch.clone());
+            if let Err(error) = GitService.push_archive_branch(&path, &branch, &base).await {
+                self.emit(Event::Error {
+                    task_id: Some(task.id.to_string()),
+                    message: format!("Saved on local branch {branch}. Could not push it. {error}"),
+                });
+            }
+        }
+        task.branch_tip_sha = Some(tip.clone());
+        Ok(Some(tip))
+    }
+
+    async fn archive_tasks(
+        &mut self,
+        archived: Vec<Task>,
+        conversation_release_tip: Option<&str>,
+    ) -> Result<CommandResult, CoreError> {
         if archived.is_empty() {
             return Ok(CommandResult::Ack);
         }
@@ -2509,6 +2605,17 @@ impl Core {
         for task_id in task_ids {
             if self.task(&task_id)?.archived_from_state.is_none() {
                 self.release_worktree_to_pool(&task_id).await?;
+            } else if let Some(tip) = conversation_release_tip
+                && let Err(error) = self
+                    .release_archived_conversation_worktree(&task_id, tip)
+                    .await
+            {
+                self.emit(Event::Error {
+                    task_id: Some(task_id.to_string()),
+                    message: format!(
+                        "Conversation archived. Could not return its worktree to the pool. {error}"
+                    ),
+                });
             }
             self.emit(Event::TaskChanged(TaskSummary::from(self.task(&task_id)?)));
             self.emit(Event::TaskWorkspaceChanged(self.task_workspace(&task_id)?));
@@ -3420,6 +3527,122 @@ impl Core {
         self.store.save_task(&task).await?;
         self.tasks.insert(task_id.clone(), task);
         Ok(())
+    }
+
+    async fn release_archived_conversation_worktree(
+        &mut self,
+        task_id: &TaskId,
+        expected_tip: &str,
+    ) -> Result<(), CoreError> {
+        let (task, repository, path) = self.task_git_worktree(task_id)?;
+        let mut task = task.clone();
+        let path = path.to_path_buf();
+        let Some(mut slot) = self
+            .store
+            .load_worktree_pool()
+            .await?
+            .into_iter()
+            .find(|slot| {
+                slot.path == path
+                    && slot.project_id == task.project_id
+                    && slot.task_id.as_ref() == Some(task_id)
+            })
+        else {
+            return Ok(());
+        };
+        let mut task_terminal_live = false;
+        for terminal in self.terminals.values() {
+            if terminal.ended_at.is_none() && terminal.cwd.starts_with(&path) {
+                if terminal.task_id.as_ref() != Some(task_id) {
+                    return Err(CoreError::ArchiveWorktreeInUse {
+                        reason: "A shared terminal still uses the checkout.",
+                    });
+                }
+                task_terminal_live = true;
+            }
+        }
+        if task_terminal_live {
+            return Ok(());
+        }
+        if self
+            .store
+            .load_processes()
+            .await?
+            .iter()
+            .any(|process| process.kind == "agent" && process.owner_id == task_id.as_str())
+        {
+            return Err(CoreError::ArchiveWorktreeInUse {
+                reason: "An agent process still uses the checkout.",
+            });
+        }
+        if GitService.has_changes(&path)? {
+            return Err(GitError::DirtyWorktree { path }.into());
+        }
+        let tip = git::run_git(&path, &["rev-parse", "--verify", "HEAD"])?;
+        if tip != expected_tip {
+            return Err(GitError::MergeUnavailable {
+                reason: "the checkout changed while archiving".into(),
+            }
+            .into());
+        }
+        let checkout = GitService.checkout_status(&path)?;
+        let pushed_branch = match checkout.branch {
+            Some(branch)
+                if GitService
+                    .sync_status(&path, &branch, task.base_branch.as_deref())?
+                    .is_some_and(|status| status.remote_tip.is_some() && status.ahead == 0) =>
+            {
+                Some(branch)
+            }
+            _ => None,
+        };
+        task.branch = Some(match pushed_branch {
+            Some(branch) => branch,
+            None => GitService.archive_branch(&path, task_id.as_str(), &tip)?,
+        });
+        GitService.retain_task_tip(&repository, task_id.as_str(), &tip)?;
+        task.branch_tip_sha = Some(tip);
+        // Save the restore target before the checkout stops pointing at it.
+        self.store.save_task(&task).await?;
+        self.tasks.insert(task_id.clone(), task.clone());
+        GitService.detach_worktree(&path, &repository.default_branch)?;
+
+        task.worktree_path = None;
+        self.store.save_task(&task).await?;
+        self.tasks.insert(task_id.clone(), task);
+        slot.state = WorktreePoolState::Idle;
+        slot.task_id = None;
+        slot.leased_at = None;
+        slot.updated_at = projects::now_millis();
+        self.store.save_worktree_pool(&slot).await?;
+        Ok(())
+    }
+
+    #[doc(hidden)]
+    pub async fn finish_archived_conversation_worktree(
+        &mut self,
+        task_id: &TaskId,
+    ) -> Result<TaskWorkspace, CoreError> {
+        let task = self.task(task_id)?;
+        if task.state == TaskState::Done
+            && task.archived_from_state.is_some()
+            && task.worktree_path.is_some()
+            && let Some(tip) = task.branch_tip_sha.clone()
+        {
+            if let Err(error) = self
+                .release_archived_conversation_worktree(task_id, &tip)
+                .await
+            {
+                self.emit(Event::Error {
+                    task_id: Some(task_id.to_string()),
+                    message: format!(
+                        "Conversation archived. Could not return its worktree to the pool. {error}"
+                    ),
+                });
+            }
+            return self.publish_task(task_id);
+        }
+        self.task_workspace(task_id)
     }
 
     /// Open an adapter session and record it durably. A resume that the adapter

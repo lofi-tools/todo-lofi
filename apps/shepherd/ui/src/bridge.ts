@@ -5,7 +5,8 @@ async function invoke<T>(command: string, args?: InvokeArgs, options?: InvokeOpt
   try {
     return await nativeInvoke<T>(command, args, options)
   } catch (failure) {
-    if ((failure as BridgeError | null)?.code !== 'setup_terminal_required') reportError(command, failure)
+    const code = (failure as BridgeError | null)?.code
+    if (code !== 'setup_terminal_required' && code !== 'archive_confirmation_required') reportError(command, failure)
     throw failure
   }
 }
@@ -372,6 +373,7 @@ export interface TaskSummary {
   projectId: string
   title: string
   state: TaskState
+  archiveUnmerged?: boolean
   agent: Agent
   tier: AgentTier
   branch: string | null
@@ -390,6 +392,7 @@ export interface TaskDetail {
   projectId: string
   title: string
   state: TaskState
+  archiveUnmerged?: boolean
   agent: Agent
   tier: AgentTier
   proposedBranch: string
@@ -613,6 +616,7 @@ export interface BridgeError {
   code: string
   message: string
   quitConfirmation?: QuitConfirmation
+  archiveToken?: string
 }
 
 export function addProject(path: string): Promise<ProjectList> {
@@ -1334,7 +1338,7 @@ export function mutateGit(taskId: string, mutation: GitMutation): Promise<GitSna
 export type ReviewAction =
   | { type: 'approve' }
   | { type: 'archive' }
-  | { type: 'archiveConversation' }
+  | { type: 'archiveConversation'; confirmationToken?: string }
   | { type: 'reopen' }
   | { type: 'sendNote'; text: string }
   | { type: 'sendQueuedNote' }
